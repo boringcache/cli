@@ -105,9 +105,25 @@ install_binary() {
             elif [ -f /etc/debian_version ]; then
                 # Check if it's Debian or Ubuntu
                 if grep -q "Ubuntu" /etc/os-release 2>/dev/null; then
-                    binary_name="boringcache-ubuntu-22.04-amd64"
+                    # Ubuntu detection - try to get specific version
+                    if grep -q "22.04" /etc/os-release 2>/dev/null; then
+                        binary_name="boringcache-ubuntu-22.04-amd64"
+                    elif grep -q "24.04" /etc/os-release 2>/dev/null; then
+                        binary_name="boringcache-ubuntu-24.04-amd64"
+                    else
+                        # Default to 22.04 for other Ubuntu versions
+                        binary_name="boringcache-ubuntu-22.04-amd64"
+                    fi
                 else
-                    binary_name="boringcache-debian-bookworm-amd64"
+                    # Debian detection - check specific version
+                    if grep -q "bullseye" /etc/os-release 2>/dev/null || grep -q "11" /etc/debian_version 2>/dev/null; then
+                        binary_name="boringcache-debian-bullseye-amd64"
+                    elif grep -q "bookworm" /etc/os-release 2>/dev/null || grep -q "12" /etc/debian_version 2>/dev/null; then
+                        binary_name="boringcache-debian-bookworm-amd64"
+                    else
+                        # Default to bookworm for newer Debian versions
+                        binary_name="boringcache-debian-bookworm-amd64"
+                    fi
                 fi
             else
                 # Default fallback to generic Linux (Ubuntu 22.04 base)
@@ -121,9 +137,25 @@ install_binary() {
             elif [ -f /etc/debian_version ]; then
                 # Check if it's Debian or Ubuntu
                 if grep -q "Ubuntu" /etc/os-release 2>/dev/null; then
-                    binary_name="boringcache-ubuntu-22.04-arm64"
+                    # Ubuntu detection - try to get specific version
+                    if grep -q "22.04" /etc/os-release 2>/dev/null; then
+                        binary_name="boringcache-ubuntu-22.04-arm64"
+                    elif grep -q "24.04" /etc/os-release 2>/dev/null; then
+                        binary_name="boringcache-ubuntu-24.04-arm64"
+                    else
+                        # Default to 22.04 for other Ubuntu versions
+                        binary_name="boringcache-ubuntu-22.04-arm64"
+                    fi
                 else
-                    binary_name="boringcache-debian-bookworm-arm64"
+                    # Debian detection - check specific version
+                    if grep -q "bullseye" /etc/os-release 2>/dev/null || grep -q "11" /etc/debian_version 2>/dev/null; then
+                        binary_name="boringcache-debian-bullseye-arm64"
+                    elif grep -q "bookworm" /etc/os-release 2>/dev/null || grep -q "12" /etc/debian_version 2>/dev/null; then
+                        binary_name="boringcache-debian-bookworm-arm64"
+                    else
+                        # Default to bookworm for newer Debian versions
+                        binary_name="boringcache-debian-bookworm-arm64"
+                    fi
                 fi
             else
                 # Default fallback to generic Linux (Ubuntu 22.04 base)
