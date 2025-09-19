@@ -441,6 +441,10 @@ jobs:
           - boringcache-debian-bullseye-amd64
           - boringcache-debian-bullseye-arm64
           - boringcache-alpine-amd64
+          - boringcache-arch-amd64
+          - boringcache-arch-arm64
+          - boringcache-linux-amd64
+          - boringcache-linux-arm64
           - boringcache-macos-13-amd64
           - boringcache-macos-14-arm64
           - boringcache-macos-15-arm64
