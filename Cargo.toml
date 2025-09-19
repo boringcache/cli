@@ -1,0 +1,109 @@
+[package]
+name = "boring_cache_cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["BoringCache Team"]
+description = "High-performance cache management CLI for CI/CD workflows"
+license = "MIT"
+
+[[bin]]
+name = "boringcache"
+path = "src/main.rs"
+
+[lib]
+name = "boring_cache_cli"
+path = "src/lib.rs"
+
+[dependencies]
+# CLI parsing - minimal features
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Async runtime - optimized features only (removes ~50-70KB by avoiding unused features)
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time", "fs", "io-util", "process"] }
+
+# HTTP client - minimal features (removes TLS backends, cookies, gzip)
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+
+# Serialization - core features only
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", default-features = false }
+# Removed deprecated serde_yaml - not used in active code
+
+# Error handling
+anyhow = "1.0"
+
+# Progress indicators - removed (unused)
+
+# Archive handling
+tar = "0.4"
+
+# Compression backends - disable unused features
+zstd = { version = "0.13", default-features = false }
+lz4_flex = { version = "0.11", default-features = false, features = ["frame"] }
+
+# System utilities
+dirs = "5.0"
+
+# Crypto - minimal features for content hashing
+sha2 = { version = "0.10", default-features = false, features = ["std"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+# Async utilities - minimal features
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+
+# Logging - removed tracing (unused), kept tracing-subscriber for main.rs
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], default-features = false }
+
+# Time handling - minimal features (clock only, no timezone/locale data)
+chrono = { version = "0.4", features = ["clock", "serde"], default-features = false }
+
+# File system utilities
+walkdir = "2.5"
+tempfile = "3.10"
+
+# URL handling - minimal
+urlencoding = { version = "2.1", default-features = false }
+
+# System info - lightweight
+num_cpus = "1.16"
+
+# UUID - minimal features only (v4 generation only)
+uuid = { version = "1.10", features = ["v4"], default-features = false }
+md5 = "0.8.0"
+base64 = "0.22.1"
+
+
+# Parallel processing - removed (unused)
+
+# Unix system calls for disk space checking
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Windows system calls for disk space checking
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["fileapi", "winbase"] }
+
+[dev-dependencies]
+mockito = "1.4"
+tempfile = "3.10"
+pretty_assertions = "1.4"
+
+[profile.release]
+lto = "fat"           # Maximum link-time optimization
+codegen-units = 1     # Single codegen unit for better optimization
+strip = true          # Strip symbols for smaller binary
+panic = "abort"       # Abort on panic for smaller binary and better performance
+opt-level = 3         # Maximum optimization level
+
+[profile.release-static]
+inherits = "release"
+
+# Optimized build profile for minimal binary size
+[profile.min-size]
+inherits = "release"
+opt-level = "z"       # Optimize for size over speed
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"     # Strip all unnecessary symbols
+
