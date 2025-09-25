@@ -1,0 +1,179 @@
+name: CLI CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  RUST_VERSION: "1.89"
+
+jobs:
+  test:
+    name: Test CLI
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy, rustfmt
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+  build:
+    name: Build CLI - ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          # Ubuntu builds (GitHub-hosted native)
+          - runner: ubuntu-22.04
+            name: ubuntu-22.04-amd64
+            target: x86_64-unknown-linux-gnu
+            binary_name: boringcache-ubuntu-22.04-amd64
+            use_docker: false
+          
+          - runner: ubuntu-24.04
+            name: ubuntu-24.04-amd64
+            target: x86_64-unknown-linux-gnu
+            binary_name: boringcache-ubuntu-24.04-amd64
+            use_docker: false
+          
+          # Debian build sample (Docker on GitHub-hosted)
+          - runner: ubuntu-latest
+            name: debian-bookworm-amd64
+            container: rust:1.89-bookworm
+            target: x86_64-unknown-linux-gnu
+            binary_name: boringcache-debian-bookworm-amd64
+            use_docker: true
+          
+          # Alpine build sample (Docker on GitHub-hosted)
+          - runner: ubuntu-latest
+            name: alpine-amd64
+            container: rust:1.89-alpine
+            target: x86_64-unknown-linux-musl
+            binary_name: boringcache-alpine-amd64
+            use_docker: true
+            musl: true
+          
+          # macOS builds (GitHub-hosted native)
+          - runner: macos-13
+            name: macos-13-amd64
+            target: x86_64-apple-darwin
+            binary_name: boringcache-macos-13-amd64
+            use_docker: false
+          
+          - runner: macos-15
+            name: macos-15-arm64
+            target: aarch64-apple-darwin
+            binary_name: boringcache-macos-15-arm64
+            use_docker: false
+          
+          # Windows builds (GitHub-hosted native)
+          - runner: windows-2022
+            name: windows-2022-amd64
+            target: x86_64-pc-windows-msvc
+            binary_name: boringcache-windows-2022-amd64.exe
+            use_docker: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Docker builds for Debian/Alpine
+      - name: Build in Docker container
+        if: matrix.use_docker == true
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e CARGO_TARGET_DIR=/workspace/target \
+            ${{ matrix.container }} \
+            sh -c '
+              set -e
+              
+              # Install build dependencies based on container type
+              if [ -f /etc/alpine-release ]; then
+                # Alpine packages
+                apk add --no-cache build-base musl-dev pkgconfig openssl-dev openssl-libs-static
+              elif [ -f /etc/debian_version ]; then
+                # Debian packages
+                apt-get update
+                apt-get install -y build-essential pkg-config libssl-dev
+              fi
+              
+              # Add target
+              rustup target add ${{ matrix.target }}
+              
+              # Build with appropriate flags
+              if [ "${{ matrix.musl }}" = "true" ]; then
+                RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target ${{ matrix.target }}
+              else
+                cargo build --release --target ${{ matrix.target }}
+              fi
+              
+              # Copy binary
+              cp target/${{ matrix.target }}/release/boringcache /workspace/${{ matrix.binary_name }}
+              chmod +x /workspace/${{ matrix.binary_name }}
+            '
+
+      # Native builds for Ubuntu/macOS/Windows
+      - name: Setup Rust (Native builds)
+        if: matrix.use_docker != true
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      - name: Cache Rust dependencies (Native builds)
+        if: matrix.use_docker != true
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build CLI (Native builds)
+        if: matrix.use_docker != true
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary (Native builds)
+        if: matrix.use_docker != true
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp target/${{ matrix.target }}/release/boringcache.exe ${{ matrix.binary_name }}
+          else
+            cp target/${{ matrix.target }}/release/boringcache ${{ matrix.binary_name }}
+            chmod +x ${{ matrix.binary_name }}
+          fi
