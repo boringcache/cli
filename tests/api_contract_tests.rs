@@ -151,11 +151,11 @@ mod api_contract_tests {
         "#;
 
         let entry: api::CacheResolutionEntry = serde_json::from_str(json_response).unwrap();
-        assert_eq!(entry.identifier, "ruby-3.2.0");
+        assert_eq!(entry.identifier, Some("ruby-3.2.0".to_string()));
         assert_eq!(entry.tag, Some("ruby-3.2.0".to_string()));
         assert_eq!(entry.key, Some("abcf6b6b1cec2b84".to_string()));
-        assert_eq!(entry.path, "/tmp/ruby");
-        assert_eq!(entry.status, "hit");
+        assert_eq!(entry.path, Some("/tmp/ruby".to_string()));
+        assert_eq!(entry.status, Some("hit".to_string()));
         assert!(entry.url.is_some());
         assert_eq!(entry.source, Some("workspace".to_string()));
         assert!(entry.cache_tag.is_some());

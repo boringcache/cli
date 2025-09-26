@@ -1,15 +1,14 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use std::time::Instant;
 
 use crate::api::ApiClient;
 use crate::compression::CompressionBackend;
+use crate::platform::SystemResources;
 use crate::progress::format_bytes;
 use crate::retry_resume::{ResumeInfo, RetryConfig};
 use crate::transfer::{
     calculate_chunks, calculate_chunks_with_size, download_chunk_with_range, should_use_multipart,
 };
-use crate::ui::CleanUI;
 
 /// Streaming hasher that computes SHA-256 while downloading data
 struct StreamingHasher {
@@ -66,7 +65,6 @@ pub struct DownloadOperation {
     pub api_client: ApiClient,
     pub workspace: String,
     pub verbose: bool,
-    pub silent: bool, // Suppress progress UI when true
 }
 
 impl DownloadOperation {
@@ -75,16 +73,6 @@ impl DownloadOperation {
             api_client,
             workspace,
             verbose,
-            silent: false,
-        }
-    }
-
-    pub fn new_silent(api_client: ApiClient, workspace: String, verbose: bool) -> Self {
-        Self {
-            api_client,
-            workspace,
-            verbose,
-            silent: true,
         }
     }
 
@@ -102,8 +90,6 @@ impl DownloadOperation {
         let expanded_path = crate::commands::utils::expand_tilde_path(target_path);
         let target_path_obj = Path::new(&expanded_path);
 
-        let download_start = Instant::now();
-
         let actual_size = if expected_size == 0 {
             get_content_length(download_url, &self.api_client)
                 .await
@@ -112,16 +98,18 @@ impl DownloadOperation {
             expected_size
         };
 
+        let use_multipart = should_use_multipart(actual_size);
+
+        let _detail = if use_multipart {
+            format!("multipart, {}", format_bytes(actual_size))
+        } else {
+            format_bytes(actual_size)
+        };
+
+        // Download progress is handled by command-level progress system
+
         // Download with streaming hash verification for optimal performance
-        let (downloaded_data, actual_hash) = if should_use_multipart(actual_size) {
-            let spinner = if self.silent {
-                None
-            } else {
-                Some(CleanUI::step_start_with_spinner(
-                    "Downloading",
-                    Some(&format!("multipart, {}", format_bytes(actual_size))),
-                ))
-            };
+        let (downloaded_data, actual_hash) = if use_multipart {
             let result = match self
                 .download_resumable_with_streaming_hash(download_url, target_path_obj, actual_size)
                 .await
@@ -129,7 +117,7 @@ impl DownloadOperation {
                 Ok(result) => result,
                 Err(_e) => {
                     if self.verbose {
-                        CleanUI::info("resumable download failed, using parallel");
+                        // Fallback: resumable -> parallel download
                     }
                     match self
                         .download_parallel_with_streaming_hash(download_url, actual_size)
@@ -138,7 +126,7 @@ impl DownloadOperation {
                         Ok(result) => result,
                         Err(_e) => {
                             if self.verbose {
-                                CleanUI::info("parallel download failed, using sequential");
+                                // Fallback: parallel -> sequential download
                             }
                             self.download_sequential_with_streaming_hash_sized(
                                 download_url,
@@ -149,60 +137,39 @@ impl DownloadOperation {
                     }
                 }
             };
-            if let Some(spinner) = spinner {
-                spinner.stop();
-            }
             result
         } else {
-            let spinner = if self.silent {
-                None
-            } else {
-                Some(CleanUI::step_start_with_spinner(
-                    "Downloading",
-                    Some(&format_bytes(actual_size)),
-                ))
-            };
             let result = self
                 .download_sequential_with_streaming_hash_sized(download_url, Some(actual_size))
                 .await?;
-            if let Some(spinner) = spinner {
-                spinner.stop();
-            }
             result
         };
-        if !self.silent {
-            CleanUI::step_success(Some(download_start.elapsed().as_millis() as u64));
-        }
+        // Download phase completion handled by command-level progress system
 
         // Security: Verify content hash to prevent cache poisoning
         if let Some(expected_hash) = expected_content_hash {
             if actual_hash != expected_hash {
                 // Changed from error to warning - continue with restore
                 eprintln!(
-                    "⚠️  Cache integrity verification failed!\n\n\
+                    "warning: Cache integrity verification failed!\n\n\
                     Expected hash: {}\n\
                     Actual hash:   {}\n\n\
                     This could indicate:\n\
                     1. Cache corruption during storage/transmission\n\
                     2. Different build environments or non-deterministic builds\n\
                     3. Network/storage error\n\n\
-                    WARNING: Continuing with restore despite hash mismatch.",
+                    Continuing with restore despite hash mismatch.",
                     expected_hash, actual_hash
                 );
-                CleanUI::warning("Hash mismatch detected - continuing with restore");
+                // Hash mismatch warning shown above
             } else if self.verbose {
-                CleanUI::info("Cache integrity verified");
+                // Cache integrity verified (verbose mode)
             }
         } else if self.verbose {
-            CleanUI::info("No hash provided - skipping integrity verification");
+            // No hash provided - skipping integrity verification (verbose mode)
         }
 
-        let extract_start = Instant::now();
-        let extract_spinner = if self.silent {
-            None
-        } else {
-            Some(CleanUI::item_extracting_start())
-        };
+        // Extract progress is handled by command-level progress system
 
         let backend = compression.and_then(|algo| match algo {
             "lz4" => Some(CompressionBackend::Lz4),
@@ -211,10 +178,8 @@ impl DownloadOperation {
         });
 
         if target_path_obj.exists() {
-            if let Err(e) = tokio::fs::remove_dir_all(target_path_obj).await {
-                if self.verbose {
-                    CleanUI::info(&format!("Failed to clear existing directory: {e}"));
-                }
+            if let Err(_e) = tokio::fs::remove_dir_all(target_path_obj).await {
+                // Failed to clear existing directory (verbose mode): ignore error
             }
         }
 
@@ -231,10 +196,7 @@ impl DownloadOperation {
         .await
         .with_context(|| format!("Failed to extract archive (algorithm: {backend:?})"))?;
 
-        if let Some(extract_spinner) = extract_spinner {
-            let extract_duration = extract_start.elapsed().as_millis() as u64;
-            CleanUI::item_extracting_complete(extract_spinner, extract_duration);
-        }
+        // Extract phase completion handled by command-level progress system
 
         Ok(())
     }
@@ -285,9 +247,7 @@ impl DownloadOperation {
         use tokio::sync::Mutex;
 
         let chunks = calculate_chunks(total_size);
-        let mut futures = FuturesUnordered::new();
 
-        // Pre-allocate output buffer for direct chunk writes
         let buffer_size = match usize::try_from(total_size) {
             Ok(size) => size,
             Err(_) => {
@@ -299,33 +259,37 @@ impl DownloadOperation {
         };
         let output_buffer = Arc::new(Mutex::new(vec![0u8; buffer_size]));
 
-        for (start_byte, end_byte) in chunks.iter() {
+        let concurrency = SystemResources::detect().max_parallel_chunks.max(1);
+        let mut futures = FuturesUnordered::new();
+        let mut chunk_iter = chunks.into_iter();
+
+        let make_future = |start: u64, end: u64| {
             let client = self.api_client.get_client().clone();
             let url = download_url.to_string();
-            let start = *start_byte;
-            let end = *end_byte;
             let buffer_clone = Arc::clone(&output_buffer);
-
-            let future = async move {
+            async move {
                 let chunk_data = download_chunk_with_range(&client, &url, start, end).await?;
 
-                // Write directly to output buffer at correct position
-                {
-                    let mut buffer = buffer_clone.lock().await;
-                    let start_pos = start as usize;
-                    let end_pos = start_pos + chunk_data.len();
-                    buffer[start_pos..end_pos].copy_from_slice(&chunk_data);
-                }
+                let mut buffer = buffer_clone.lock().await;
+                let start_pos = start as usize;
+                let end_pos = start_pos + chunk_data.len();
+                buffer[start_pos..end_pos].copy_from_slice(&chunk_data);
 
                 Ok::<(), anyhow::Error>(())
-            };
+            }
+        };
 
-            futures.push(future);
+        for _ in 0..concurrency {
+            if let Some((start_byte, end_byte)) = chunk_iter.next() {
+                futures.push(make_future(start_byte, end_byte));
+            }
         }
 
-        // Wait for all chunks to complete
         while let Some(result) = futures.next().await {
             result?;
+            if let Some((start_byte, end_byte)) = chunk_iter.next() {
+                futures.push(make_future(start_byte, end_byte));
+            }
         }
 
         // Hash the final buffer in correct byte order
@@ -400,10 +364,7 @@ impl DownloadOperation {
         }
 
         if self.verbose && resume_info.downloaded_size > 0 {
-            CleanUI::info(&format!(
-                "Resuming download: {:.1}% complete",
-                resume_info.progress_percentage()
-            ));
+            // Resuming download: {progress}% complete (verbose mode)
         }
 
         // Create temp file with correct size for streaming writes and resumable reads
@@ -418,22 +379,28 @@ impl DownloadOperation {
         // Pre-allocate file size for efficient random access
         file.set_len(total_size).await?;
 
+        let concurrency = SystemResources::detect().max_parallel_chunks.max(1);
+        let pending_chunks: Vec<(usize, u64, u64)> = chunks
+            .iter()
+            .enumerate()
+            .filter_map(|(chunk_index, (start_byte, end_byte))| {
+                if resume_info.chunks_completed[chunk_index] {
+                    None
+                } else {
+                    Some((chunk_index, *start_byte, *end_byte))
+                }
+            })
+            .collect();
+
+        let mut chunk_iter = pending_chunks.into_iter();
         let mut futures = FuturesUnordered::new();
 
-        for (chunk_index, (start_byte, end_byte)) in chunks.iter().enumerate() {
-            if resume_info.chunks_completed[chunk_index] {
-                // Skip already completed chunks - we'll hash them from the final file
-                continue;
-            }
-
+        let make_future = |chunk_index: usize, start: u64, end: u64| {
             let client = self.api_client.get_client().clone();
             let url = download_url.to_string();
-            let start = *start_byte;
-            let end = *end_byte;
             let chunk_size = end - start + 1;
             let verbose = self.verbose;
-
-            let future = async move {
+            async move {
                 let retry_config = RetryConfig::new(verbose);
                 retry_config
                     .retry_with_backoff(&format!("Download chunk {chunk_index}"), || async {
@@ -447,16 +414,19 @@ impl DownloadOperation {
                         ))
                     })
                     .await
-            };
+            }
+        };
 
-            futures.push(future);
+        for _ in 0..concurrency {
+            if let Some((chunk_index, start, end)) = chunk_iter.next() {
+                futures.push(make_future(chunk_index, start, end));
+            }
         }
 
         // Stream chunks directly to file (hash computed later from final file)
         while let Some(result) = futures.next().await {
             let (chunk_index, start_byte, chunk_size, chunk_data) = result?;
 
-            // Write chunk directly to temp file
             file.seek(std::io::SeekFrom::Start(start_byte)).await?;
             file.write_all(&chunk_data).await?;
 
@@ -464,6 +434,10 @@ impl DownloadOperation {
 
             if chunk_index % 10 == 0 {
                 resume_info.save().await?;
+            }
+
+            if let Some((next_index, next_start, next_end)) = chunk_iter.next() {
+                futures.push(make_future(next_index, next_start, next_end));
             }
         }
 
@@ -485,7 +459,7 @@ mod tests {
     #[test]
     fn test_32bit_buffer_size_overflow() {
         // Test buffer size conversion logic without network calls
-        
+
         #[cfg(target_pointer_width = "32")]
         {
             // On 32-bit systems, test that oversized buffers are rejected
@@ -493,15 +467,18 @@ mod tests {
             let result = usize::try_from(oversized);
             assert!(result.is_err(), "Expected overflow on 32-bit system");
         }
-        
+
         #[cfg(target_pointer_width = "64")]
         {
             // On 64-bit systems, reasonable sizes should be accepted
             let reasonable_size = 1_000_000u64; // 1MB
             let result = usize::try_from(reasonable_size);
-            assert!(result.is_ok(), "Expected success on 64-bit system for reasonable size");
+            assert!(
+                result.is_ok(),
+                "Expected success on 64-bit system for reasonable size"
+            );
             assert_eq!(result.unwrap(), 1_000_000usize);
-            
+
             // But truly massive sizes should still fail gracefully
             let massive_size = u64::MAX;
             let result = usize::try_from(massive_size);
@@ -514,7 +491,7 @@ mod tests {
     async fn test_temp_file_permissions_for_resume() {
         let temp_dir = TempDir::new().unwrap();
         let temp_file = temp_dir.path().join("test_resume_file.tmp");
-        
+
         // Create a temp file with read+write permissions like our download code does
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
@@ -524,17 +501,17 @@ mod tests {
             .open(&temp_file)
             .await
             .unwrap();
-            
+
         // Write some test data
-        use tokio::io::{AsyncWriteExt, AsyncSeekExt, AsyncReadExt};
+        use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
         file.write_all(b"test data for resume").await.unwrap();
         file.sync_all().await.unwrap();
-        
+
         // Now try to read it back (this would fail with EBADF if we only had write permissions)
         file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
         let mut buffer = vec![0u8; 4];
         file.read_exact(&mut buffer).await.unwrap();
-        
+
         assert_eq!(&buffer, b"test");
     }
 }

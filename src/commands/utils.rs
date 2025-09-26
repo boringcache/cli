@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::ui::CleanUI;
+use crate::ui;
 use anyhow::Result;
 
 pub fn expand_tilde_path(path: &str) -> String {
@@ -67,8 +67,8 @@ pub fn parse_save_format(tag_path_string: &str) -> ParsedIdentifier {
             };
         }
 
-        CleanUI::error(&format!("Invalid tag:path format: '{tag_path_string}'"));
-        CleanUI::error("Expected format: tag:path (e.g., ruby-deps:vendor/bundle)");
+        ui::error(&format!("Invalid tag:path format: '{tag_path_string}'"));
+        ui::error("Expected format: tag:path (e.g., ruby-deps:vendor/bundle)");
         std::process::exit(1);
     }
 
@@ -147,8 +147,8 @@ pub fn get_optimal_concurrency(operation_count: usize, operation_type: &str) -> 
 }
 
 pub fn display_concurrency_info(max_concurrent: usize, operation_type: &str) {
-    CleanUI::info(&format!(
-        "INFO: Using {max_concurrent} concurrent {operation_type} operations"
+    ui::info(&format!(
+        "Using {max_concurrent} concurrent {operation_type} operations"
     ));
 }
 

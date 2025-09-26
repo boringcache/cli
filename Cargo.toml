@@ -32,13 +32,15 @@ serde_json = { version = "1.0", default-features = false }
 # Error handling
 anyhow = "1.0"
 
-# Progress indicators - removed (unused)
+# Progress reporting
+crossbeam-channel = "0.5"
+humansize = "2"
 
 # Archive handling
 tar = "0.4"
 
 # Compression backends - disable unused features
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.13", default-features = false, features = ["zstdmt"] }
 lz4_flex = { version = "0.11", default-features = false, features = ["frame"] }
 
 # System utilities
@@ -59,6 +61,7 @@ chrono = { version = "0.4", features = ["clock", "serde"], default-features = fa
 
 # File system utilities
 walkdir = "2.5"
+ignore = "0.4"  # Fast parallel directory traversal
 tempfile = "3.10"
 
 # URL handling - minimal
@@ -107,4 +110,3 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"     # Strip all unnecessary symbols
-

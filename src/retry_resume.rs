@@ -1,4 +1,4 @@
-use crate::ui::CleanUI;
+use crate::ui;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -51,7 +51,7 @@ impl RetryConfig {
                 Err(e) => {
                     if attempts < self.max_retries {
                         if self.verbose {
-                            CleanUI::info(&format!(
+                            ui::info(&format!(
                                 "{} failed, retrying... ({}/{}): {}",
                                 operation_name, attempts, self.max_retries, e
                             ));

@@ -1,6 +1,6 @@
 use crate::api::ApiClient;
 use crate::progress::format_bytes;
-use crate::ui::CleanUI;
+use crate::ui;
 use anyhow::Result;
 
 pub async fn execute() -> Result<()> {
@@ -8,16 +8,16 @@ pub async fn execute() -> Result<()> {
     let workspaces = api_client.list_workspaces().await?;
 
     if workspaces.is_empty() {
-        CleanUI::info("No workspaces found");
+        ui::info("No workspaces found");
         return Ok(());
     }
 
-    CleanUI::section_break();
-    CleanUI::info(&format!(
+    ui::blank_line();
+    ui::info(&format!(
         "{:<15} {:<20} {:<10} {:<15}",
         "ID", "NAME", "ENTRIES", "SIZE"
     ));
-    CleanUI::info(&"-".repeat(60));
+    ui::info(&"-".repeat(60));
 
     let mut sorted_workspaces = workspaces;
     sorted_workspaces.sort_by(|a, b| a.name.cmp(&b.name));
@@ -40,13 +40,13 @@ pub async fn execute() -> Result<()> {
         let entries = workspace.cache_entries_count.to_string();
         let size = format_bytes(workspace.total_cache_size);
 
-        CleanUI::info(&format!(
+        ui::info(&format!(
             "{id_display:<15} {name:<20} {entries:<10} {size:<15}"
         ));
     }
 
-    CleanUI::section_break();
-    CleanUI::info(&format!("Total: {} workspaces", sorted_workspaces.len()));
+    ui::blank_line();
+    ui::info(&format!("Total: {} workspaces", sorted_workspaces.len()));
 
     Ok(())
 }

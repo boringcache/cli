@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::config::Config;
-use crate::ui::CleanUI;
+use crate::ui;
 
 pub async fn execute(action: ConfigAction) -> Result<()> {
     match action {
@@ -44,9 +44,9 @@ fn set_config_value(key: String, value: String) -> Result<()> {
     if std::env::var("BORINGCACHE_API_TOKEN").is_ok() {
         match key.as_str() {
             "default_workspace" | "default-workspace" => {
-                CleanUI::info("Warning: You are using environment variables for authentication.");
-                CleanUI::info(&format!("   To set default_workspace, use: export BORINGCACHE_DEFAULT_WORKSPACE=\"{value}\""));
-                CleanUI::info("   Or remove BORINGCACHE_API_TOKEN to use config file mode.");
+                ui::info("Warning: You are using environment variables for authentication.");
+                ui::info(&format!("   To set default_workspace, use: export BORINGCACHE_DEFAULT_WORKSPACE=\"{value}\""));
+                ui::info("   Or remove BORINGCACHE_API_TOKEN to use config file mode.");
                 return Ok(());
             }
             _ => {}

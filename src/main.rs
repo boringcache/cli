@@ -1,5 +1,5 @@
 use anyhow::Result;
-use boring_cache_cli::{cli, commands, ui::CleanUI};
+use boring_cache_cli::{cli, commands, ui};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -14,8 +14,8 @@ fn resolve_effective_workspace(workspace: &str) -> Option<String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     std::panic::set_hook(Box::new(|panic_info| {
-        CleanUI::error(&format!("Fatal error: {panic_info}"));
-        CleanUI::error("Please check your system resources and try again.");
+        ui::error(&format!("Fatal error: {panic_info}"));
+        ui::error("Please check your system resources and try again.");
         std::process::exit(1);
     }));
 
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
                     std::process::exit(0);
                 }
                 _ => {
-                    CleanUI::error(&e.to_string());
+                    ui::error(&e.to_string());
                     std::process::exit(1);
                 }
             }
@@ -145,30 +145,6 @@ async fn main() -> Result<()> {
             commands::ls::execute(effective_workspace, Some(limit), Some(page), cli.verbose).await
         }
         cli::Commands::Workspaces => commands::workspaces::execute().await,
-        cli::Commands::Tag { action } => {
-            use cli::TagSubcommand;
-
-            match action {
-                TagSubcommand::List {
-                    workspace,
-                    filter,
-                    verbose,
-                } => commands::tag::execute_list(Some(workspace), filter, verbose).await,
-                TagSubcommand::Move {
-                    workspace,
-                    source_tag,
-                    dest_tag,
-                } => commands::tag::execute_move(Some(workspace), source_tag, dest_tag).await,
-                TagSubcommand::Copy {
-                    workspace,
-                    source_tag,
-                    dest_tag,
-                } => commands::tag::execute_copy(Some(workspace), source_tag, dest_tag).await,
-                TagSubcommand::Info { workspace, tag } => {
-                    commands::tag::execute_info(Some(workspace), tag).await
-                }
-            }
-        }
     };
 
     handle_result(result)
@@ -181,22 +157,27 @@ fn handle_result(result: Result<()>) -> Result<()> {
             if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
                 match io_err.kind() {
                     std::io::ErrorKind::BrokenPipe => {
-                        CleanUI::error("Connection interrupted");
+                        ui::error("Connection interrupted");
                         std::process::exit(141);
                     }
                     std::io::ErrorKind::OutOfMemory => {
-                        CleanUI::error(
-                            "Out of memory - try reducing cache size or using --compression",
-                        );
+                        ui::error("Out of memory - try reducing cache size or using --compression");
                         std::process::exit(1);
                     }
                     _ => {
-                        CleanUI::error(&format!("IO Error: {e}"));
+                        ui::error(&format!("IO Error: {e}"));
                         std::process::exit(1);
                     }
                 }
             } else {
-                CleanUI::error(&format!("Error: {e}"));
+                // Show full error chain for better debugging
+                let error_msg = format!("{:?}", e); // This shows the full error chain
+                if error_msg.contains("Caused by:") {
+                    // anyhow already formats the chain nicely
+                    ui::error(&error_msg);
+                } else {
+                    ui::error(&format!("Error: {e}"));
+                }
                 std::process::exit(1);
             }
         }

@@ -1,10 +1,11 @@
-use anyhow::Result;
-use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::Semaphore;
-
+use crate::api::CacheResolutionEntry;
 use crate::commands::utils::ParsedIdentifier;
-use crate::ui::CleanUI;
+use crate::progress::{Summary, System as ProgressSystem};
+use crate::ui; // Keep for static table/summary operations only
+use anyhow::Result;
+use std::io::Write;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 struct RestorePreflightCheck {
@@ -15,12 +16,7 @@ struct RestorePreflightCheck {
 
 fn run_restore_preflight_checks(
     parsed_pairs: &[ParsedIdentifier],
-    verbose: bool,
 ) -> Result<RestorePreflightCheck> {
-    if verbose {
-        CleanUI::info("Running preflight checks...");
-    }
-
     let mut valid_pairs = Vec::new();
     let mut unwritable_targets = Vec::new();
     let mut invalid_targets = Vec::new();
@@ -69,9 +65,10 @@ fn run_restore_preflight_checks(
 
 fn test_path_writability(path: &Path) -> Result<bool> {
     use std::fs::OpenOptions;
-    use std::io::Write;
+    use uuid::Uuid;
 
-    let test_file = path.join(format!(".boringcache_write_test_{}", std::process::id()));
+    let test_file_name = format!(".boringcache_test_{}", Uuid::new_v4());
+    let test_file = path.join(test_file_name);
 
     match OpenOptions::new()
         .write(true)
@@ -90,13 +87,13 @@ fn test_path_writability(path: &Path) -> Result<bool> {
 
 pub async fn execute_batch_restore(
     workspace_option: Option<String>,
-    tag_path_pairs: Vec<String>, // Raw "tag:path" strings
+    tag_path_pairs: Vec<String>,
     verbose: bool,
 ) -> Result<()> {
     let workspace = crate::commands::utils::get_workspace_name(workspace_option)?;
 
     if tag_path_pairs.is_empty() {
-        CleanUI::info("No tag:path pairs specified for restore");
+        eprintln!("info: No tag:path pairs specified for restore");
         return Ok(());
     }
 
@@ -105,210 +102,328 @@ pub async fn execute_batch_restore(
         .map(|tag_path| crate::commands::utils::parse_restore_format(tag_path))
         .collect();
 
-    // Run preflight checks early
-    let preflight_result = run_restore_preflight_checks(&parsed_identifiers, verbose)?;
+    // Run preflight checks
+    let preflight_result = run_restore_preflight_checks(&parsed_identifiers)?;
+
+    // Set up progress system
+    let progress_system = ProgressSystem::new();
+    let reporter = progress_system.reporter();
 
     // Report any issues found during preflight
     if !preflight_result.invalid_targets.is_empty() {
         for target in &preflight_result.invalid_targets {
-            CleanUI::warning(&format!("Skipping: invalid target path '{}'", target));
+            reporter.warning(format!("Skipping: invalid target path '{}'", target))?;
         }
     }
 
     if !preflight_result.unwritable_targets.is_empty() {
         for target in &preflight_result.unwritable_targets {
-            CleanUI::warning(&format!("Permission issue: cannot write to '{}'", target));
-            CleanUI::info("Run with sudo or choose a writable location");
+            reporter.warning(format!("Permission issue: cannot write to '{}'", target))?;
         }
     }
 
     if preflight_result.valid_pairs.is_empty() {
-        CleanUI::warning("No valid restore targets found");
+        reporter.warning("No valid restore targets found".to_string())?;
+        progress_system.shutdown()?;
         return Ok(());
     }
 
-    if verbose && !preflight_result.valid_pairs.is_empty() {
-        CleanUI::info(&format!(
-            "Preflight complete: {} valid targets",
-            preflight_result.valid_pairs.len()
-        ));
-    }
-
-    let tags: Vec<String> = preflight_result
+    // For restore, construct TAG:PATH entries as expected by the API
+    let entries: Vec<String> = preflight_result
         .valid_pairs
         .iter()
-        .filter_map(|parsed| parsed.tag.clone())
+        .map(|p| {
+            let tag = p.tag.as_ref().unwrap();
+            let default_path = ".".to_string();
+            let path = p.path.as_ref().unwrap_or(&default_path);
+            format!("{}:{}", tag, path)
+        })
         .collect();
 
-    CleanUI::batch_start("Resolving", tags.len(), &workspace);
-
-    // Now create cache operations after showing UI feedback
+    // Create cache operations
     let cache_ops = crate::cache_operations::CacheOperation::new(workspace.clone(), verbose)?;
-    let _platform_info = crate::platform::Platform::detect()?;
 
-    // Transform tags to platform-aware versions using validated pairs
-    let mut platform_aware_tag_paths = Vec::new();
-    for parsed in &preflight_result.valid_pairs {
-        if let Some(tag) = &parsed.tag {
-            let platform_tag = tag.clone();
-            if let Some(path) = &parsed.path {
-                platform_aware_tag_paths.push(format!("{}:{}", platform_tag, path));
-            } else {
-                platform_aware_tag_paths.push(format!("{}:.", platform_tag));
+    // Resolve tags to cache entries
+    let session_id = format!("resolve:{}", workspace);
+    let tags_display: Vec<String> = preflight_result
+        .valid_pairs
+        .iter()
+        .map(|p| p.tag.as_ref().unwrap().clone())
+        .collect();
+
+    reporter.session_start(
+        session_id.clone(),
+        format!("Resolving cache [{}]", tags_display.join(", ")),
+        1,
+    )?;
+
+    let step_start = Instant::now();
+    reporter.step_start(session_id.clone(), 1, "Resolving entries".to_string(), None)?;
+
+    let resolution_result = cache_ops
+        .api_client
+        .batch_restore_caches(&workspace, &entries)
+        .await?;
+
+    let mut hits: Vec<CacheResolutionEntry> = Vec::new();
+    let mut misses: Vec<String> = Vec::new();
+
+    for entry in resolution_result.into_iter() {
+        match entry.status.as_deref() {
+            Some("hit") => hits.push(entry),
+            _ => {
+                let identifier = entry
+                    .identifier
+                    .clone()
+                    .or(entry.tag.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                reporter.warning(format!("Cache miss for {}", identifier))?;
+                misses.push(identifier);
             }
         }
     }
 
-    let resolved_entries = match cache_ops
-        .api_client
-        .batch_restore_caches(&workspace, &platform_aware_tag_paths)
-        .await
-    {
-        Ok(entries) => entries,
-        Err(e) => {
-            CleanUI::section_break();
-            CleanUI::batch_summary("found", 0, tags.len(), &workspace);
-            return Err(e);
-        }
-    };
-
-    let mut hits = Vec::new();
-    let mut misses = Vec::new();
-
-    for resolved in resolved_entries.iter() {
-        if resolved.status == "hit" {
-            hits.push((&resolved.identifier, resolved));
-        } else {
-            misses.push(&resolved.identifier);
-        }
-    }
-
-    for (identifier, resolved) in hits.iter() {
-        let size_bytes = resolved.size.unwrap_or(0) as f64;
-        println!(
-            "{}: found ({})",
-            identifier,
-            crate::ui::format_size(size_bytes)
-        );
-    }
-
-    for tag in &misses {
-        CleanUI::item_not_found(tag);
-    }
+    reporter.step_complete(session_id.clone(), 1, step_start.elapsed())?;
 
     if hits.is_empty() {
-        CleanUI::section_break();
-        CleanUI::batch_summary("found", 0, tags.len(), &workspace);
+        reporter.session_error(
+            session_id,
+            "No cache entries found for the specified tags".to_string(),
+        )?;
+        progress_system.shutdown()?;
+
+        // Show static summary table
+        ui::blank_line();
+        ui::workflow_summary("found", 0, tags_display.len(), &workspace);
+        if !misses.is_empty() {
+            ui::warn(&format!("Not found: {}", misses.join(", ")));
+        }
         return Ok(());
     }
 
-    let semaphore = Arc::new(Semaphore::new(1));
+    let summary = Summary {
+        size_bytes: hits.iter().map(|h| h.size.unwrap_or(0)).sum(),
+        file_count: hits.len() as u32,
+        digest: None,
+        path: None,
+    };
+    reporter.session_complete(session_id, step_start.elapsed(), summary)?;
 
-    let mut restore_tasks = Vec::new();
+    // Process each restore with progress tracking
+    let mut handles = Vec::new();
 
-    for resolved in resolved_entries.iter() {
-        if resolved.status != "hit" {
-            continue;
-        }
-
-        let parsed = parsed_identifiers
+    for hit in &hits {
+        // Find the corresponding parsed identifier for target path
+        let parsed = preflight_result
+            .valid_pairs
             .iter()
             .find(|p| {
-                p.tag
-                    .as_ref()
-                    .map(|t| t == &resolved.identifier)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(&parsed_identifiers[0]); // Fallback to first if not found
-
-        let target_path = if let Some(path) = &parsed.path {
-            path.clone()
-        } else {
-            anyhow::bail!(
-                "Missing path for tag '{}'. Use format: tag:path (e.g., 'node-deps:node_modules')",
-                resolved.identifier
-            );
-        };
-
-        if let Some(download_url) = &resolved.url {
-            let size_bytes = resolved.size.unwrap_or(0) as f64;
-            println!(
-                "=> Restoring '{}' ({}) → {}",
-                resolved.identifier,
-                crate::ui::format_size(size_bytes),
-                target_path
-            );
-
-            let tag_name = resolved.identifier.clone();
-            let download_url = download_url.clone();
-            let target_path = target_path.clone();
-            let api_client = cache_ops.api_client.clone();
-            let workspace = workspace.clone();
-            let size = resolved.size.unwrap_or(0);
-            let compression = resolved.compression_algorithm.clone();
-            let content_hash = resolved.content_hash.clone();
-            let semaphore = semaphore.clone();
-
-            let task = tokio::spawn(async move {
-                let _permit = semaphore.acquire().await.unwrap();
-
-                let download_spinner = CleanUI::item_downloading_start(size as f64);
-                let download_start = std::time::Instant::now();
-
-                let download_op = crate::cache_operations::DownloadOperation::new_silent(
-                    api_client.clone(),
-                    workspace.clone(),
-                    false,
-                );
-
-                let download_result = download_op
-                    .download_and_extract(
-                        &download_url,
-                        &target_path,
-                        size,
-                        compression.as_deref(),
-                        content_hash.as_deref(),
-                    )
-                    .await;
-
-                let download_duration = download_start.elapsed().as_millis() as u64;
-
-                match download_result {
-                    Ok(_) => {
-                        CleanUI::item_downloading_complete(download_spinner, download_duration);
-
-                        Ok(tag_name)
-                    }
-                    Err(e) => {
-                        download_spinner.stop();
-                        CleanUI::item_error(&tag_name, &format!("download failed - {e}"));
-                        Err(e)
-                    }
+                if let (Some(p_tag), Some(hit_tag)) = (p.tag.as_ref(), hit.tag.as_ref()) {
+                    p_tag == hit_tag
+                } else {
+                    false
                 }
-            });
+            })
+            .expect("Should find matching parsed identifier");
 
-            restore_tasks.push(task);
+        let default_path = ".".to_string();
+        let path = parsed.path.as_ref().unwrap_or(&default_path);
+        let expanded_target_path = crate::commands::utils::expand_tilde_path(path);
+
+        let session_id = format!(
+            "restore:{}:{}",
+            workspace,
+            hit.tag.as_ref().unwrap_or(&"unknown".to_string())
+        );
+        let title = format!(
+            "Restoring cache [{}]",
+            hit.tag.as_ref().unwrap_or(&"unknown".to_string())
+        );
+
+        let reporter_clone = reporter.clone();
+        let workspace_clone = workspace.clone();
+        let cache_ops_clone = cache_ops.clone();
+        let hit_clone = hit.clone();
+
+        let handle = tokio::spawn(async move {
+            process_single_restore(
+                reporter_clone,
+                session_id,
+                title,
+                workspace_clone,
+                cache_ops_clone,
+                hit_clone,
+                expanded_target_path,
+                verbose,
+            )
+            .await
+        });
+
+        handles.push(handle);
+    }
+
+    // Wait for all restores to complete
+    let mut restored_tags = Vec::new();
+
+    for handle in handles {
+        if let Ok(tag) = handle.await? {
+            restored_tags.push(tag);
         }
     }
 
-    let mut successfully_restored = Vec::new();
+    progress_system.shutdown()?;
 
-    for task in restore_tasks {
-        match task.await {
-            Ok(Ok(tag)) => {
-                successfully_restored.push(tag);
-            }
-            Ok(Err(_)) => { /* handled in task already */ }
-            Err(e) => {
-                CleanUI::item_error("task", &e.to_string());
-            }
-        }
+    // Show final summary using static UI
+    ui::blank_line();
+    ui::workflow_summary(
+        "restored",
+        restored_tags.len(),
+        tags_display.len(),
+        &workspace,
+    );
+
+    if !restored_tags.is_empty() {
+        ui::restore_summary(&restored_tags, &workspace);
     }
 
-    if !successfully_restored.is_empty() {
-        let restored_list = successfully_restored.join(",");
-        CleanUI::batch_summary_restore(&restored_list, &workspace);
+    if !misses.is_empty() {
+        ui::warn(&format!("Missing cache entries: {}", misses.join(", ")));
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_single_restore(
+    reporter: crate::progress::Reporter,
+    session_id: String,
+    title: String,
+    _workspace: String,
+    cache_ops: crate::cache_operations::CacheOperation,
+    hit: CacheResolutionEntry,
+    target_path: String,
+    _verbose: bool,
+) -> Result<String> {
+    let session_start = Instant::now();
+
+    // Start session with 4 steps: [1/4] Resolving, [2/4] Downloading, [3/4] Extracting, [4/4] Finalizing
+    reporter.session_start(session_id.clone(), title, 4)?;
+
+    // Step 1: Resolving entry (already done, show briefly)
+    let step_start = Instant::now();
+    reporter.step_start(session_id.clone(), 1, "Resolving entry".to_string(), None)?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    reporter.step_complete(session_id.clone(), 1, step_start.elapsed())?;
+
+    // Step 2: Downloading
+    let step_start = Instant::now();
+    let download_detail = if let Some(size) = hit.size {
+        format!("[{}]", crate::progress::format_bytes(size))
+    } else {
+        String::new()
+    };
+
+    reporter.step_start(
+        session_id.clone(),
+        2,
+        "Downloading".to_string(),
+        if download_detail.is_empty() {
+            None
+        } else {
+            Some(download_detail.clone())
+        },
+    )?;
+
+    // Start download with progress simulation like save command
+    let reporter_clone = reporter.clone();
+    let session_id_clone = session_id.clone();
+    let download_size = hit.size.unwrap_or(0);
+
+    // Spawn progress updater task for downloads
+    let progress_task = tokio::spawn(async move {
+        let mut progress: f64 = 0.0;
+        let increment: f64 = 3.0;
+        let start_time = Instant::now();
+
+        while progress < 95.0 {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            progress = (progress + increment).min(95.0);
+
+            let elapsed = start_time.elapsed().as_secs_f64().max(0.001);
+            let percent = progress.max(0.0);
+            let speed_mbps = if download_size > 0 {
+                let downloaded = (percent / 100.0) * download_size as f64;
+                (downloaded / (1024.0 * 1024.0)) / elapsed
+            } else {
+                0.0
+            };
+
+            let detail = if download_size > 0 {
+                format!(
+                    "[{}] {:>3.0}% @ {:.1} MB/s",
+                    crate::progress::format_bytes(download_size),
+                    percent,
+                    speed_mbps
+                )
+            } else {
+                format!("{:>3.0}%", percent)
+            };
+
+            let _ =
+                reporter_clone.step_progress(session_id_clone.clone(), 2, percent, Some(detail));
+        }
+    });
+
+    let download_result = cache_ops
+        .download_and_extract(
+            hit.url
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Cache entry missing download URL"))?,
+            &target_path,
+            hit.size.unwrap_or(0),
+            hit.compression_algorithm.as_deref(),
+            hit.content_hash.as_deref(),
+        )
+        .await;
+
+    // Stop progress updates
+    progress_task.abort();
+    let _ = progress_task.await;
+
+    match download_result {
+        Ok(()) => {
+            reporter.step_complete(session_id.clone(), 2, step_start.elapsed())?;
+
+            // Step 3: Extracting (done as part of download, show briefly)
+            let step_start = Instant::now();
+            reporter.step_start(session_id.clone(), 3, "Extracting files".to_string(), None)?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            reporter.step_complete(session_id.clone(), 3, step_start.elapsed())?;
+
+            // Step 4: Finalizing
+            let step_start = Instant::now();
+            reporter.step_start(
+                session_id.clone(),
+                4,
+                "Finalizing restore".to_string(),
+                None,
+            )?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            reporter.step_complete(session_id.clone(), 4, step_start.elapsed())?;
+
+            let summary = Summary {
+                size_bytes: hit.size.unwrap_or(0),
+                file_count: 1, // We don't track individual file count in cache entries
+                digest: hit.content_hash.clone(),
+                path: Some(target_path),
+            };
+
+            reporter.session_complete(session_id, session_start.elapsed(), summary)?;
+            Ok(hit.tag.clone().unwrap_or_else(|| "unknown".to_string()))
+        }
+        Err(e) => {
+            reporter.session_error(session_id, e.to_string())?;
+            Err(e)
+        }
+    }
 }

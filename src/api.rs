@@ -6,7 +6,7 @@ use tokio::time::sleep;
 
 use crate::config::Config;
 use crate::error::BoringCacheError;
-use crate::ui::CleanUI;
+use crate::ui;
 
 pub fn parse_workspace_slug(workspace: &str) -> Result<(String, String)> {
     let parts: Vec<&str> = workspace.split('/').collect();
@@ -71,7 +71,7 @@ pub struct SaveCacheResponse {
     pub part_urls: Option<Vec<PartUpload>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PartUpload {
     pub part_number: u32,
     pub upload_url: String,
@@ -329,7 +329,7 @@ impl ApiClient {
                     let delay_secs = BASE_DELAY_SECS * (attempt as u64);
 
                     if attempt == 1 {
-                        CleanUI::info(&format!(
+                        ui::info(&format!(
                             "Warning: {operation_name} failed. Connection issue detected."
                         ));
                     }
@@ -345,7 +345,7 @@ impl ApiClient {
                             sleep(Duration::from_secs(1)).await;
                         }
                     }
-                    CleanUI::info(&format!(" (attempt {attempt}/{MAX_RETRIES})"));
+                    ui::info(&format!(" (attempt {attempt}/{MAX_RETRIES})"));
                 }
             }
         }
@@ -690,26 +690,6 @@ impl ApiClient {
         .await
     }
 
-    async fn put<T: Serialize>(&self, path: &str, body: &T) -> Result<Response> {
-        let url = format!("{}{}", self.base_url, path);
-        let token = self.token.as_ref().ok_or(BoringCacheError::TokenNotFound)?;
-        let body_json = serde_json::to_value(body).context("Failed to serialize request body")?;
-
-        let token_clone = token.clone();
-        let url_clone = url.clone();
-        let client = self.client.clone();
-
-        self.execute_with_retry("PUT request", move || {
-            let req = client
-                .put(&url_clone)
-                .header("Authorization", format!("Bearer {token_clone}"))
-                .json(&body_json);
-
-            req.send()
-        })
-        .await
-    }
-
     async fn parse_response<T: for<'de> Deserialize<'de>>(&self, response: Response) -> Result<T> {
         let status = response.status();
         let text = response
@@ -829,43 +809,6 @@ impl ApiClient {
         }
     }
 
-    pub async fn update_workspace_config(
-        &self,
-        workspace_slug: &str,
-        config: &serde_json::Value,
-    ) -> Result<()> {
-        let url = self.build_workspace_url(workspace_slug, "/config")?;
-        let response = self.put(&url, config).await?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            Err(BoringCacheError::ApiError(format!("HTTP {status}: {error_text}")).into())
-        }
-    }
-
-    pub async fn get_workspace_config(&self, workspace_slug: &str) -> Result<serde_json::Value> {
-        let url = self.build_workspace_url(workspace_slug, "/config")?;
-        let response = self.get(&url).await?;
-
-        if response.status().is_success() {
-            let config: serde_json::Value = response.json().await?;
-            Ok(config)
-        } else {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            Err(BoringCacheError::ApiError(format!("HTTP {status}: {error_text}")).into())
-        }
-    }
-
     pub async fn submit_metrics(
         &self,
         workspace_slug: &str,
@@ -883,7 +826,7 @@ impl ApiClient {
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             if std::env::var("BORINGCACHE_DEBUG_TELEMETRY").is_ok() {
-                CleanUI::info(&format!(
+                ui::info(&format!(
                     "Telemetry submission failed ({status}): {error_text}"
                 ));
             }
@@ -893,79 +836,21 @@ impl ApiClient {
             )
         }
     }
-
-    pub async fn resolve_cache_keys(
-        &self,
-        workspace_slug: &str,
-        keys: &[String],
-    ) -> Result<Vec<CacheResolutionEntry>> {
-        self.get_cache_entries_with_keys(workspace_slug, keys, "restore")
-            .await
-    }
-
-    pub async fn get_cache_entries_with_keys(
-        &self,
-        workspace_slug: &str,
-        keys: &[String],
-        mode: &str,
-    ) -> Result<Vec<CacheResolutionEntry>> {
-        let mut url = self.build_workspace_url(workspace_slug, "/caches")?;
-
-        let mut query_params = Vec::new();
-        if !keys.is_empty() {
-            query_params.push(format!("keys={}", urlencoding::encode(&keys.join(","))));
-        }
-        if mode != "ls" {
-            query_params.push(format!("mode={}", urlencoding::encode(mode)));
-        }
-
-        if !query_params.is_empty() {
-            url.push('?');
-            url.push_str(&query_params.join("&"));
-        }
-
-        let response = self.get(&url).await?;
-
-        if response.status().is_success() {
-            let entries: Vec<CacheResolutionEntry> = response
-                .json()
-                .await
-                .context("Failed to parse cache entries response")?;
-            Ok(entries)
-        } else {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-
-            match status {
-                StatusCode::NOT_FOUND => {
-                    Err(BoringCacheError::WorkspaceNotFound(workspace_slug.to_string()).into())
-                }
-                StatusCode::UNAUTHORIZED => Err(BoringCacheError::AuthenticationFailed.into()),
-                _ => Err(BoringCacheError::ApiError(format!(
-                    "Cache entries request failed ({status}): {error_text}"
-                ))
-                .into()),
-            }
-        }
-    }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct CacheTag {
     pub name: String,
     pub id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct CacheResolutionEntry {
-    pub identifier: String,
+    pub identifier: Option<String>,
     pub tag: Option<String>,
     pub key: Option<String>,
-    pub path: String,
-    pub status: String, // "hit" or "miss"
+    pub path: Option<String>,
+    pub status: Option<String>, // "hit" or "miss"
     pub url: Option<String>,
     pub source: Option<String>, // "workspace", "system", or null
     pub cache_tag: Option<CacheTag>,

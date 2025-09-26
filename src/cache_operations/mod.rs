@@ -26,4 +26,29 @@ impl CacheOperation {
             verbose,
         })
     }
+
+    pub async fn download_and_extract(
+        &self,
+        download_url: &str,
+        target_path: &str,
+        expected_size: u64,
+        compression: Option<&str>,
+        expected_content_hash: Option<&str>,
+    ) -> Result<()> {
+        let download_op = DownloadOperation::new(
+            self.api_client.clone(),
+            self.workspace.clone(),
+            self.verbose,
+        );
+
+        download_op
+            .download_and_extract(
+                download_url,
+                target_path,
+                expected_size,
+                compression,
+                expected_content_hash,
+            )
+            .await
+    }
 }

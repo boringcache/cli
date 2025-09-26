@@ -4,8 +4,7 @@ use std::time::Instant;
 
 use crate::api::ApiClient;
 use crate::progress::format_bytes;
-use crate::tag_utils::Tag;
-use crate::ui::CleanUI;
+use crate::ui;
 
 pub async fn execute(
     workspace_option: Option<String>,
@@ -18,13 +17,13 @@ pub async fn execute(
     let api_client = ApiClient::new(None)?;
 
     if verbose {
-        CleanUI::info(&format!("Listing cache entries for: {workspace}"));
+        ui::info(&format!("Listing cache entries for: {workspace}"));
     }
 
     let response = api_client.list_caches(&workspace, limit, page).await?;
 
     if response.entries.is_empty() {
-        CleanUI::info(&format!(
+        ui::info(&format!(
             "No cache entries found for workspace: {workspace}"
         ));
         return Ok(());
@@ -50,22 +49,13 @@ pub async fn execute(
 
     for entry in &entries {
         let (user_tag, platform) = if let Some(tag) = &entry.tag {
-            let parsed = Tag::from_existing(tag);
-            let platform_suffix = parsed.platform_suffix();
-
-            let display_user_tag = if parsed.user_tag.len() > 18 {
-                format!("{}...", &parsed.user_tag[..15.min(parsed.user_tag.len())])
+            let display_tag = if tag.len() > 18 {
+                format!("{}...", &tag[..15.min(tag.len())])
             } else {
-                parsed.user_tag
+                tag.clone()
             };
-
-            let display_platform = if platform_suffix.len() > 15 {
-                format!("{}...", &platform_suffix[..12.min(platform_suffix.len())])
-            } else {
-                platform_suffix
-            };
-
-            (display_user_tag, display_platform)
+            // Simplified: no platform parsing since we removed tag command
+            (display_tag, "-".to_string())
         } else {
             ("-".to_string(), "-".to_string())
         };

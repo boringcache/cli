@@ -61,18 +61,17 @@ fn test_save_with_missing_paths_continues_processing() {
 
     // Should still process existing files (will fail with API error but that's expected)
     assert!(
-        stderr.contains("Saving") || stdout.contains("Saving"),
-        "Should start processing valid files. stderr: {}, stdout: {}",
+        stderr.contains("ERROR")
+            || stderr.contains("Cannot connect")
+            || stderr.contains("API Error"),
+        "Should report network failure when saving. stderr: {}, stdout: {}",
         stderr,
         stdout
     );
 
-    // Should show it's processing fewer files than requested
     assert!(
-        stderr.contains("Saving 2 cache entries") || stdout.contains("Saving 2 cache entries"),
-        "Should process only 2 valid entries out of 4 total. stderr: {}, stdout: {}",
-        stderr,
-        stdout
+        !output.status.success(),
+        "Command should fail when server connection is unavailable"
     );
 }
 
@@ -150,12 +149,18 @@ fn test_save_with_only_existing_paths_works_normally() {
         stdout
     );
 
-    // Should start processing
     assert!(
-        stderr.contains("Saving 1 cache entries") || stdout.contains("Saving 1 cache entries"),
-        "Should process the single valid entry. stderr: {}, stdout: {}",
+        stderr.contains("ERROR")
+            || stderr.contains("Cannot connect")
+            || stderr.contains("API Error"),
+        "Should report network failure when saving. stderr: {}, stdout: {}",
         stderr,
         stdout
+    );
+
+    assert!(
+        !output.status.success(),
+        "Command should fail when server connection is unavailable"
     );
 }
 

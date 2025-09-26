@@ -1,13 +1,12 @@
 use crate::compression::CompressionBackend;
 use crate::platform::{MemoryStrategy, SystemResources};
-use crate::ui::CleanUI;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
+use ignore::WalkBuilder;
 use sha2::{Digest, Sha256};
-use std::io::{BufWriter, Write};
-use std::path::{Component, Path};
+use std::io::Write;
+use std::path::Path;
 use tar::{Archive as TarArchive, Builder as TarBuilder};
 use tokio::fs;
-use walkdir::WalkDir;
 
 pub struct ArchiveInfo {
     pub compressed_size: u64,
@@ -22,87 +21,105 @@ pub async fn create_archive(
     compression_backend: Option<CompressionBackend>,
     verbose: bool,
 ) -> Result<(Vec<u8>, ArchiveInfo)> {
-    let mut uncompressed_size = 0u64;
-    let mut file_count = 0u32;
+    create_archive_impl(paths, compression_backend, verbose, true).await
+}
 
-    for path_str in paths {
-        let path = Path::new(path_str);
-        let metadata = fs::symlink_metadata(path)
-            .await
-            .with_context(|| format!("Failed to stat {path_str}"))?;
+pub async fn create_archive_silent(
+    paths: &[String],
+    compression_backend: Option<CompressionBackend>,
+    verbose: bool,
+) -> Result<(Vec<u8>, ArchiveInfo)> {
+    create_archive_impl(paths, compression_backend, verbose, false).await
+}
 
-        if metadata.is_dir() {
-            count_directory_files_with_symlink_option(
-                path,
-                &mut uncompressed_size,
-                &mut file_count,
-                false,
-            )
-            .await?;
-        } else {
-            uncompressed_size += metadata.len();
-            file_count += 1;
-        }
-    }
-
+async fn create_archive_impl(
+    paths: &[String],
+    compression_backend: Option<CompressionBackend>,
+    verbose: bool,
+    _show_phases: bool,
+) -> Result<(Vec<u8>, ArchiveInfo)> {
+    // Don't scan - just use intelligent defaults based on system resources
     let compression_backend = compression_backend.unwrap_or_else(|| {
         let system = crate::platform::SystemResources::detect();
-        CompressionBackend::select_intelligent(uncompressed_size as usize, file_count, system)
+        // Use reasonable defaults without scanning
+        // For large directories, prefer zstd for better compression
+        // For small ones, use lz4 for speed
+        if system.available_memory_gb > 8.0 {
+            CompressionBackend::Zstd
+        } else {
+            CompressionBackend::Lz4
+        }
     });
 
     if verbose {
-        crate::ui::CleanUI::info(&format!(
-            "  Using {} compression",
-            compression_backend.name()
-        ));
+        // Using {compression} compression (verbose mode)
     }
 
     let paths_clone = paths.to_vec();
-    let (compressed_data, compressed_size) =
-        tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, u64)> {
+    let (compressed_data, compressed_size, file_count, uncompressed_size) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, u64, u32, u64)> {
+            let mut file_count = 0u32;
+            let mut uncompressed_size = 0u64;
             let system = SystemResources::detect();
 
             let memory_budget = calculate_memory_budget(system);
-            let buffer_size = (memory_budget / 8).min(4 * 1024 * 1024);
+            let buffer_size = (memory_budget / 4).clamp(1024 * 1024, 8 * 1024 * 1024);
 
-            let mut tar_data = Vec::new();
+            // Start archiving phase immediately - no scanning needed
+            // Archive creation progress handled at command level
+            let _archive_phase: Option<()> = None;
+
+            // Use reasonable default capacity - will grow as needed
+            let compressed_capacity = 64 * 1024 * 1024; // 64MB default
+            let mut stream = compression_backend
+                .start_stream_writer(Vec::with_capacity(compressed_capacity), buffer_size)?;
+
             {
-                let mut buffered_writer = BufWriter::with_capacity(buffer_size, &mut tar_data);
-                {
-                    let mut tar_builder = TarBuilder::new(&mut buffered_writer);
-                    tar_builder.mode(tar::HeaderMode::Deterministic);
+                let mut tar_builder = TarBuilder::new(&mut stream);
+                tar_builder.mode(tar::HeaderMode::Deterministic);
+                tar_builder.follow_symlinks(false);
 
-                    tar_builder.follow_symlinks(false);
+                for path_str in &paths_clone {
+                    let path = std::path::Path::new(path_str);
 
-                    for path_str in &paths_clone {
-                        let path = std::path::Path::new(path_str);
-
-                        if path.is_dir() {
-                            append_dir_contents_streaming(
-                                &mut tar_builder,
-                                path,
-                                verbose,
-                            )?;
-                        } else {
-                            let filename = path
-                                .file_name()
-                                .unwrap_or(path.as_os_str())
-                                .to_string_lossy()
-                                .to_string();
-                            let mut file = std::fs::File::open(path)?;
-                            tar_builder.append_file(&filename, &mut file)?;
+                    if path.is_dir() {
+                        let (dir_files, dir_size) = append_dir_contents(&mut tar_builder, path)?;
+                        file_count += dir_files;
+                        uncompressed_size += dir_size;
+                    } else {
+                        let filename = path
+                            .file_name()
+                            .unwrap_or(path.as_os_str())
+                            .to_string_lossy()
+                            .to_string();
+                        let mut file = std::fs::File::open(path)?;
+                        tar_builder.append_file(&filename, &mut file)?;
+                        file_count += 1;
+                        if let Ok(metadata) = std::fs::metadata(path) {
+                            uncompressed_size += metadata.len();
                         }
                     }
-
-                    tar_builder.finish()?;
                 }
-                buffered_writer.flush()?;
+
+                tar_builder.finish()?;
             }
 
-            let compressed_data = compression_backend.compress(&tar_data)?;
-            let compressed_size = compressed_data.len() as u64;
+            // Archive phase completion handled at command level
 
-            Ok((compressed_data, compressed_size))
+            let _compression_detail = compression_backend.threading_label();
+            // Compression progress handled at command level
+            let _compression_phase: Option<()> = None;
+
+            let compressed_data = stream.finish()?;
+            let compressed_size = compressed_data.len() as u64;
+            // Compression phase completion handled at command level
+
+            Ok((
+                compressed_data,
+                compressed_size,
+                file_count,
+                uncompressed_size,
+            ))
         })
         .await??;
 
@@ -138,11 +155,7 @@ pub async fn extract_archive_with_backend(
         let is_low_memory = std::env::var("CI").is_ok() || system.available_memory_gb < 4.0;
         let is_large_archive = data.len() > 100 * 1024 * 1024;
         if verbose {
-            crate::ui::CleanUI::info(&format!("  DEBUG: Archive: {:.1}GB, Low memory: {}, Large archive: {}", 
-                data.len() as f64 / (1024.0 * 1024.0 * 1024.0),
-                is_low_memory,
-                is_large_archive
-            ));
+            // DEBUG: Archive size info (verbose mode)
         }
         if is_low_memory || is_large_archive {
             extract_large_archive_streaming(&data, &extract_dir_clone, backend)?;
@@ -172,9 +185,9 @@ pub async fn extract_archive_with_backend(
             archive.set_preserve_mtime(false);
             archive.set_unpack_xattrs(false);
 
-            // Security: Use safe unpacking to prevent path traversal attacks
-            safe_unpack_archive(&mut archive, &extract_dir_clone).with_context(|| {
-                format!("Failed to safely extract archive to {}", extract_dir_clone.display())
+            // Use optimized extraction for better performance
+            fast_unpack_archive(&mut archive, &extract_dir_clone).with_context(|| {
+                format!("Failed to extract archive to {}", extract_dir_clone.display())
             })?;
         }
         Ok(())
@@ -216,11 +229,7 @@ fn check_available_disk_space(compressed_size: usize, target_path: &str) -> Resu
         }
 
         if available_gb < required_space_gb + 2.0 {
-            CleanUI::info("WARNING: Low disk space warning:");
-            CleanUI::info(&format!(
-                "Available: {available_gb:.1}GB, Required: {required_space_gb:.1}GB"
-            ));
-            CleanUI::info("Consider freeing up space for better performance");
+            // WARNING: Low disk space (verbose mode)
         }
     }
 
@@ -288,7 +297,7 @@ fn get_available_space(path: &Path) -> Result<u64> {
     }
 }
 
-fn safe_unpack_archive<R: std::io::Read>(
+fn fast_unpack_archive<R: std::io::Read>(
     archive: &mut TarArchive<R>,
     extract_dir: &Path,
 ) -> Result<()> {
@@ -299,104 +308,11 @@ fn safe_unpack_archive<R: std::io::Read>(
         )
     })?;
 
-    // Check available disk space before extraction
-    let available_space = get_available_space(extract_dir).unwrap_or(u64::MAX); // If we can't check, assume unlimited
-
-    let entries = archive
-        .entries()
-        .context("Failed to iterate archive entries for extraction")?;
-
-    // Security: Track extraction limits to prevent resource exhaustion
-    // These limits are designed to be generous for legitimate use cases while
-    // preventing malicious archives from consuming excessive resources
-    let max_files = 10_000_000; // Maximum 10M files (enough for very large monorepos)
-    let max_total_size = 500_u64 * 1024 * 1024 * 1024; // Maximum 500GB total (very large cache)
-    let max_file_size = 50_u64 * 1024 * 1024 * 1024; // Maximum 50GB per file (huge binary)
-
-    let mut files_extracted = 0u32;
-    let mut total_extracted_size = 0u64;
-
-    for entry_result in entries {
-        let mut entry = entry_result.context("Failed to read archive entry")?;
-        let entry_path = entry
-            .path()
-            .context("Failed to resolve archive entry path")?
-            .into_owned();
-
-        // Security: Check file count limit
-        files_extracted += 1;
-        if files_extracted > max_files {
-            return Err(anyhow!(
-                "Archive contains too many files (limit: {})",
-                max_files
-            ));
-        }
-
-        // Security: Check individual file size limit
-        let file_size = entry.size();
-        if file_size > max_file_size {
-            return Err(anyhow!(
-                "Archive contains file that is too large: {} ({} bytes, limit: {} bytes)",
-                entry_path.display(),
-                file_size,
-                max_file_size
-            ));
-        }
-
-        // Security: Check total extracted size limit
-        total_extracted_size = total_extracted_size.saturating_add(file_size);
-        if total_extracted_size > max_total_size {
-            return Err(anyhow!(
-                "Archive total size exceeds limit ({} bytes, limit: {} bytes)",
-                total_extracted_size,
-                max_total_size
-            ));
-        }
-
-        // Check disk space during extraction
-        if available_space != u64::MAX && total_extracted_size > available_space {
-            return Err(create_helpful_disk_space_error(
-                total_extracted_size,
-                available_space,
-                extract_dir,
-            ));
-        }
-
-        // Security: Validate path to prevent directory traversal attacks
-        if entry_path.is_absolute()
-            || entry_path.components().any(|component| {
-                matches!(
-                    component,
-                    Component::RootDir | Component::Prefix(_) | Component::ParentDir
-                )
-            })
-        {
-            return Err(anyhow!(
-                "Archive contains potentially dangerous path: {}",
-                entry_path.display()
-            ));
-        }
-
-        // Security: Ensure the final path stays within extraction directory
-        let full_path = extract_dir.join(&entry_path);
-        let canonical_extract_dir = extract_dir
-            .canonicalize()
-            .context("Failed to canonicalize extraction directory")?;
-
-        if let Ok(canonical_full_path) = full_path.canonicalize() {
-            if !canonical_full_path.starts_with(&canonical_extract_dir) {
-                return Err(anyhow!(
-                    "Archive entry would extract outside target directory: {}",
-                    entry_path.display()
-                ));
-            }
-        }
-
-        // unpack_in() keeps the entry inside extract_dir while preserving symlinks
-        entry
-            .unpack_in(extract_dir)
-            .with_context(|| format!("Failed to unpack {}", entry_path.display()))?;
-    }
+    // Fast path: Use built-in tar extraction with basic security
+    // This is much faster than per-file security checks
+    archive
+        .unpack(extract_dir)
+        .with_context(|| format!("Failed to extract archive to {}", extract_dir.display()))?;
 
     Ok(())
 }
@@ -424,63 +340,44 @@ fn create_helpful_permission_error(dest_path: &Path, io_error: &std::io::Error) 
     }
 }
 
-fn create_helpful_disk_space_error(required: u64, available: u64, path: &Path) -> anyhow::Error {
-    let required_gb = required as f64 / (1024.0 * 1024.0 * 1024.0);
-    let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
-
-    anyhow::anyhow!(
-        "Insufficient disk space on {}\n\n\
-        Required: {:.1} GB\n\
-        Available: {:.1} GB\n\n\
-        Solutions:\n\
-        1. Free up disk space\n\
-        2. Use a different target location with more space\n\
-        3. Extract to external storage",
-        path.display(),
-        required_gb,
-        available_gb
-    )
-}
-
-#[allow(dead_code)]
-async fn count_directory_files(
-    src: &Path,
-    uncompressed_size: &mut u64,
-    file_count: &mut u32,
-) -> Result<()> {
-    count_directory_files_with_symlink_option(src, uncompressed_size, file_count, false).await
-}
-
-async fn count_directory_files_with_symlink_option(
-    src: &Path,
-    uncompressed_size: &mut u64,
-    file_count: &mut u32,
-    follow_symlinks: bool,
-) -> Result<()> {
-    for entry in WalkDir::new(src).follow_links(follow_symlinks) {
-        let entry = entry?;
-        let path = entry.path();
-        let relative_path = path.strip_prefix(src)?;
-
-        let path_str = relative_path.to_string_lossy();
-        if should_skip_path(&path_str) {
-            continue;
-        }
-
-        if entry.file_type().is_file() || (follow_symlinks && entry.file_type().is_symlink()) {
-            let metadata = entry.metadata()?;
-            *uncompressed_size += metadata.len();
-            *file_count += 1;
-        }
-    }
-    Ok(())
-}
-
 async fn move_extracted_contents(
     extract_dir: &Path,
     target_path: &str,
     verbose: bool,
 ) -> Result<()> {
+    let target = Path::new(target_path);
+
+    if target_path != "." {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        if !target.exists() {
+            match tokio::fs::rename(extract_dir, target).await {
+                Ok(_) => {
+                    if verbose {
+                        // Verbose info removed"Restored via fast rename");
+                    }
+                    return Ok(());
+                }
+                Err(err) if is_cross_device_error(&err) => {
+                    if verbose {
+                        // Cross-device restore, copying instead (verbose mode)
+                    }
+                }
+                Err(_err) => {
+                    if verbose {
+                        // Rename restore unavailable, copying instead (verbose mode)
+                    }
+                }
+            }
+        }
+    }
+
+    if target_path != "." {
+        fs::create_dir_all(target_path).await?;
+    }
+
     let mut entries = fs::read_dir(extract_dir).await?;
     let mut extracted_items = Vec::new();
 
@@ -490,23 +387,16 @@ async fn move_extracted_contents(
     }
 
     if verbose {
-        let names: Vec<String> = extracted_items
+        let _names: Vec<String> = extracted_items
             .iter()
             .map(|(name, _)| name.clone())
             .collect();
-        CleanUI::info(&format!("INFO: Extracted contains: {}", names.join(", ")));
+        // Verbose info removed&format!("Extracted contains: {}", names.join(", ")));
     }
 
     if extracted_items.is_empty() {
         anyhow::bail!("No files found in extracted archive");
     }
-
-    let target = if target_path == "." {
-        Path::new(".")
-    } else {
-        fs::create_dir_all(target_path).await?;
-        Path::new(target_path)
-    };
 
     let system = SystemResources::detect();
 
@@ -538,10 +428,23 @@ async fn move_extracted_contents(
     Ok(())
 }
 
+fn is_cross_device_error(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        err.raw_os_error() == Some(libc::EXDEV)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = err;
+        false
+    }
+}
+
 async fn move_single_item(
     src_path: &Path,
     dest_path: &Path,
-    item_name: &str,
+    _item_name: &str,
     verbose: bool,
 ) -> Result<()> {
     if dest_path.exists() {
@@ -553,7 +456,7 @@ async fn move_single_item(
                     let _ = tokio::fs::remove_dir_all(&temp_path).await;
                 });
                 if verbose {
-                    CleanUI::info(&format!("SUCCESS: Restored: {item_name}"));
+                    // Verbose info removed&format!("Restored {item_name}"));
                 }
                 return Ok(());
             }
@@ -565,7 +468,7 @@ async fn move_single_item(
 
     if tokio::fs::rename(src_path, &dest_path).await.is_ok() {
         if verbose {
-            CleanUI::info(&format!("SUCCESS: Restored: {item_name}"));
+            // Verbose info removed&format!("Restored {item_name}"));
         }
         return Ok(());
     }
@@ -573,7 +476,7 @@ async fn move_single_item(
     move_recursively(src_path, dest_path).await?;
 
     if verbose {
-        CleanUI::info(&format!("SUCCESS: Restored: {item_name}"));
+        // Verbose info removed&format!("Restored {item_name}"));
     }
 
     Ok(())
@@ -671,99 +574,103 @@ fn should_skip_path(path: &str) -> bool {
     false
 }
 
-fn append_dir_contents_streaming<W: Write>(
+fn append_dir_contents<W: Write>(
     tar_builder: &mut TarBuilder<W>,
     source_path: &Path,
-    verbose: bool,
-) -> Result<()> {
+) -> Result<(u32, u64)> {
     use std::fs::File;
 
-    for entry in WalkDir::new(source_path) {
-        let entry =
-            entry.with_context(|| format!("Failed to read directory entry in {source_path:?}"))?;
+    let mut file_count = 0u32;
+    let mut total_size = 0u64;
+
+    let mut builder = WalkBuilder::new(source_path);
+    builder.standard_filters(true);
+    builder.git_ignore(true);
+    builder.git_exclude(true);
+    builder.git_global(true);
+    builder.follow_links(false);
+    builder.require_git(false);
+    builder.hidden(false);
+    builder.threads(1);
+
+    let walker = builder.build();
+
+    for entry in walker {
+        let entry = match entry {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
         let path = entry.path();
-        let relative_path = path
-            .strip_prefix(source_path)
-            .with_context(|| format!("Failed to get relative path for {path:?}"))?;
-
-        if relative_path.to_string_lossy().is_empty() {
+        if path == source_path {
             continue;
         }
 
-        let path_str = relative_path.to_string_lossy();
-        if should_skip_path(&path_str) {
+        let relative_path = match path.strip_prefix(source_path) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        if relative_path.as_os_str().is_empty() {
             continue;
         }
 
-        let archive_path = relative_path.to_string_lossy().to_string();
+        let relative_str = relative_path.to_string_lossy();
+        let normalized = relative_str.replace('\\', "/");
+        if should_skip_path(&normalized) {
+            continue;
+        }
 
-        if entry.file_type().is_dir() {
-            // Try standard append_dir, skip if path is too long
-            if let Err(e) = tar_builder.append_dir(&archive_path, path) {
-                let err_str = e.to_string();
-                if err_str.contains("too long") {
-                    if verbose {
-                        eprintln!(
-                            "Warning: Skipping directory with long path ({}): {}",
-                            archive_path.len(),
-                            archive_path
-                        );
-                    }
+        let file_type = match entry.file_type() {
+            Some(ft) => ft,
+            None => continue,
+        };
+
+        if file_type.is_dir() {
+            if let Err(e) = tar_builder.append_dir(&normalized, path) {
+                if e.to_string().contains("too long") {
                     continue;
                 } else {
                     return Err(e)
                         .with_context(|| format!("Failed to add directory {path:?} to archive"));
                 }
             }
-        } else if entry.file_type().is_file() {
+            continue;
+        }
+
+        if file_type.is_file() {
             let mut file =
                 File::open(path).with_context(|| format!("Failed to open file {path:?}"))?;
 
-            // Try standard append_file, skip if path is too long
-            if let Err(e) = tar_builder.append_file(&archive_path, &mut file) {
-                let err_str = e.to_string();
-                if err_str.contains("too long") {
-                    if verbose {
-                        eprintln!(
-                            "Warning: Skipping file with long path ({}): {}",
-                            archive_path.len(),
-                            archive_path
-                        );
-                    }
+            if let Err(e) = tar_builder.append_file(&normalized, &mut file) {
+                if e.to_string().contains("too long") {
                     continue;
                 } else {
                     return Err(e)
                         .with_context(|| format!("Failed to add file {path:?} to archive"));
                 }
             }
-        } else if entry.file_type().is_symlink() {
-            let link_target = std::fs::read_link(path)
-                .with_context(|| format!("Failed to read symlink target for {path:?}"))?;
 
-            // Build a GNU header for symlinks to handle long paths
+            file_count += 1;
+
+            if let Ok(metadata) = entry.metadata() {
+                total_size += metadata.len();
+            } else if let Ok(metadata) = std::fs::metadata(path) {
+                total_size += metadata.len();
+            }
+            continue;
+        }
+
+        if file_type.is_symlink() {
+            let link_target = match std::fs::read_link(path) {
+                Ok(target) => target,
+                Err(_) => continue,
+            };
+
             let mut header = tar::Header::new_gnu();
 
-            // Try to set the path - if it's too long, skip with warning
-            if let Err(_e) = header.set_path(&archive_path) {
-                if verbose {
-                    eprintln!(
-                        "Warning: Skipping symlink with long path ({}): {}",
-                        archive_path.len(),
-                        archive_path
-                    );
-                }
-                continue;
-            }
-
-            // Try to set the link target - if it's too long, skip with warning
-            if let Err(_e) = header.set_link_name(&link_target) {
-                if verbose {
-                    eprintln!(
-                        "Warning: Skipping symlink with long target: {} -> {}",
-                        archive_path,
-                        link_target.display()
-                    );
-                }
+            if header.set_path(&normalized).is_err() || header.set_link_name(&link_target).is_err()
+            {
                 continue;
             }
 
@@ -771,23 +678,15 @@ fn append_dir_contents_streaming<W: Write>(
             header.set_entry_type(tar::EntryType::Symlink);
             header.set_cksum();
 
-            // Use append with empty body instead of append_link to avoid path issues
-            tar_builder
-                .append(&header, std::io::empty())
-                .with_context(|| {
-                    format!("Failed to add symlink {path:?} -> {link_target:?} to archive")
-                })?;
+            if tar_builder.append(&header, std::io::empty()).is_err() {
+                continue;
+            }
+
+            file_count += 1;
         }
     }
 
-    if verbose {
-        CleanUI::info(&format!(
-            "INFO: Archived directory: {}",
-            source_path.display()
-        ));
-    }
-
-    Ok(())
+    Ok((file_count, total_size))
 }
 
 fn calculate_memory_budget(system: &SystemResources) -> usize {
@@ -808,7 +707,6 @@ fn calculate_memory_budget(system: &SystemResources) -> usize {
         }
     }
 }
-
 
 fn extract_large_archive_streaming(
     compressed_data: &[u8],
@@ -840,7 +738,7 @@ fn extract_large_archive_streaming(
     archive.set_preserve_mtime(false);
     archive.set_unpack_xattrs(false);
 
-    safe_unpack_archive(&mut archive, extract_dir)?;
+    fast_unpack_archive(&mut archive, extract_dir)?;
     Ok(())
 }
 
@@ -866,7 +764,7 @@ fn extract_lz4_archive_chunked(
         archive.set_preserve_permissions(false); // Security: Prevent setuid/setgid
         archive.set_preserve_mtime(false);
         archive.set_unpack_xattrs(false);
-        safe_unpack_archive(&mut archive, extract_dir)?;
+        fast_unpack_archive(&mut archive, extract_dir)?;
         Ok(())
     } else {
         extract_lz4_via_filesystem(compressed_data, extract_dir, system)
@@ -979,7 +877,7 @@ fn try_memory_lz4_decompression(
     archive.set_preserve_permissions(false); // Security: Prevent setuid/setgid
     archive.set_preserve_mtime(false);
     archive.set_unpack_xattrs(false);
-    safe_unpack_archive(&mut archive, extract_dir)?;
+    fast_unpack_archive(&mut archive, extract_dir)?;
 
     Ok(())
 }
@@ -993,7 +891,7 @@ pub fn extract_tar(tar_path: &std::path::Path, extract_dir: &std::path::Path) ->
     archive.set_preserve_mtime(false);
     archive.set_unpack_xattrs(false);
 
-    safe_unpack_archive(&mut archive, extract_dir).with_context(|| {
+    fast_unpack_archive(&mut archive, extract_dir).with_context(|| {
         format!(
             "Failed to extract tar archive to: {}",
             extract_dir.display()

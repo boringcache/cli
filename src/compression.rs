@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::env;
+use std::io::{self, Write};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CompressionBackend {
@@ -201,28 +202,10 @@ impl CompressionBackend {
     }
 
     pub fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        match self {
-            CompressionBackend::Lz4 => {
-                use std::io::Write;
-                let mut output = Vec::new();
-                let mut encoder = lz4_flex::frame::FrameEncoder::new(&mut output);
-                encoder.write_all(data)?;
-                encoder.finish()?;
-                Ok(output)
-            }
-            CompressionBackend::Zstd => {
-                let compression_level = Self::adaptive_compression_level();
-                let mut encoder = zstd::stream::Encoder::new(
-                    Vec::with_capacity(data.len() / 2),
-                    compression_level,
-                )?;
-                encoder.include_checksum(false)?;
-                encoder.window_log(20)?;
-                let mut reader = data;
-                std::io::copy(&mut reader, &mut encoder)?;
-                encoder.finish().context("Failed to compress with zstd")
-            }
-        }
+        let mut sink =
+            self.start_stream_writer(Vec::with_capacity(data.len() / 2 + 1), 4 * 1024 * 1024)?;
+        sink.write_all(data)?;
+        sink.finish()
     }
 
     fn adaptive_compression_level() -> i32 {
@@ -265,6 +248,144 @@ impl CompressionBackend {
                 Ok(decompressed)
             }
         }
+    }
+
+    pub(crate) fn zstd_thread_count() -> Option<u32> {
+        if let Ok(threads) = env::var("BORINGCACHE_ZSTD_THREADS") {
+            if let Ok(value) = threads.parse::<u32>() {
+                return Some(value.clamp(1, 32));
+            }
+        }
+
+        let system = crate::platform::SystemResources::detect();
+        let available = system.cpu_cores.saturating_sub(1);
+
+        if available < 2 {
+            return None;
+        }
+
+        let max_threads = match system.memory_strategy {
+            crate::platform::MemoryStrategy::Balanced => available.min(4),
+            crate::platform::MemoryStrategy::Aggressive => available.min(8),
+            crate::platform::MemoryStrategy::UltraAggressive => available.min(16),
+        };
+
+        if max_threads >= 2 {
+            Some(max_threads as u32)
+        } else {
+            None
+        }
+    }
+
+    pub fn start_stream_writer<W: Write>(
+        &self,
+        writer: W,
+        buffer_size: usize,
+    ) -> Result<CompressionSink<W>> {
+        CompressionSink::new(*self, writer, buffer_size)
+    }
+
+    pub fn threading_label(&self) -> Option<String> {
+        match self {
+            CompressionBackend::Lz4 => Some("lz4".to_string()),
+            CompressionBackend::Zstd => {
+                let threads = Self::zstd_thread_count().unwrap_or(1);
+                if threads == 1 {
+                    Some("zstd (1 thread)".to_string())
+                } else {
+                    Some(format!("zstd ({} threads)", threads))
+                }
+            }
+        }
+    }
+}
+
+struct CompressionStream<W: Write> {
+    inner: CompressionStreamInner<W>,
+}
+
+enum CompressionStreamInner<W: Write> {
+    Lz4(lz4_flex::frame::FrameEncoder<W>),
+    Zstd(zstd::stream::Encoder<'static, W>),
+}
+
+impl<W: Write> CompressionStream<W> {
+    fn new(backend: CompressionBackend, writer: W) -> Result<Self> {
+        let inner = match backend {
+            CompressionBackend::Lz4 => {
+                CompressionStreamInner::Lz4(lz4_flex::frame::FrameEncoder::new(writer))
+            }
+            CompressionBackend::Zstd => {
+                let compression_level = CompressionBackend::adaptive_compression_level();
+                let mut encoder = zstd::stream::Encoder::new(writer, compression_level)?;
+                if let Some(threads) = CompressionBackend::zstd_thread_count() {
+                    let _ = encoder.multithread(threads);
+                }
+                encoder.include_checksum(false)?;
+                encoder.window_log(20)?;
+                CompressionStreamInner::Zstd(encoder)
+            }
+        };
+
+        Ok(Self { inner })
+    }
+
+    fn finish(self) -> Result<W> {
+        match self.inner {
+            CompressionStreamInner::Lz4(encoder) => encoder
+                .finish()
+                .map_err(|e| anyhow::anyhow!("Failed to finish lz4 compression: {e}")),
+            CompressionStreamInner::Zstd(encoder) => encoder
+                .finish()
+                .context("Failed to finish zstd compression"),
+        }
+    }
+}
+
+impl<W: Write> Write for CompressionStream<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match &mut self.inner {
+            CompressionStreamInner::Lz4(encoder) => encoder.write(buf),
+            CompressionStreamInner::Zstd(encoder) => encoder.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.inner {
+            CompressionStreamInner::Lz4(encoder) => encoder.flush(),
+            CompressionStreamInner::Zstd(encoder) => encoder.flush(),
+        }
+    }
+}
+
+pub struct CompressionSink<W: Write> {
+    inner: std::io::BufWriter<CompressionStream<W>>,
+}
+
+impl<W: Write> CompressionSink<W> {
+    fn new(backend: CompressionBackend, writer: W, buffer_size: usize) -> Result<Self> {
+        let stream = CompressionStream::new(backend, writer)?;
+        Ok(Self {
+            inner: std::io::BufWriter::with_capacity(buffer_size, stream),
+        })
+    }
+
+    pub fn finish(self) -> Result<W> {
+        let buf = self
+            .inner
+            .into_inner()
+            .map_err(|e| anyhow::anyhow!("Failed to flush compression buffer: {}", e.error()))?;
+        buf.finish()
+    }
+}
+
+impl<W: Write> Write for CompressionSink<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
     }
 }
 

@@ -44,10 +44,7 @@ pub async fn http_request_with_validation(
     Ok(response)
 }
 
-pub async fn download_file(
-    url: &str,
-    file_path: &std::path::Path,
-) -> Result<()> {
+pub async fn download_file(url: &str, file_path: &std::path::Path) -> Result<()> {
     let client = Client::new();
     let response = http_request_with_validation(client.get(url), "Download file").await?;
 

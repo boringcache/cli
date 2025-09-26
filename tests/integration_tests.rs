@@ -208,14 +208,17 @@ fn test_workspaces_command_without_auth() {
             || stderr.contains("No configuration found")
             || stderr.contains("API Error")
             || stdout.contains("error");
-        
+
         if !error_messages_found {
             eprintln!("Test failed - Expected auth/network error but got:");
             eprintln!("Exit code: {:?}", output.status.code());
             eprintln!("STDOUT: {}", stdout);
             eprintln!("STDERR: {}", stderr);
         }
-        assert!(error_messages_found, "Expected auth/network error but got different error");
+        assert!(
+            error_messages_found,
+            "Expected auth/network error but got different error"
+        );
     }
 }
 

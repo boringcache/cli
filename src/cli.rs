@@ -78,11 +78,6 @@ pub enum Commands {
     },
 
     Workspaces,
-
-    Tag {
-        #[command(subcommand)]
-        action: TagSubcommand,
-    },
 }
 
 #[derive(Subcommand)]
@@ -92,50 +87,6 @@ pub enum ConfigSubcommand {
     Set { key: String, value: String },
 
     List,
-}
-
-#[derive(Subcommand)]
-pub enum TagSubcommand {
-    List {
-        #[arg(help = "Workspace name (org/project or user/project)")]
-        workspace: String,
-
-        #[arg(help = "Filter tags by user tag name")]
-        filter: Option<String>,
-
-        #[arg(long, help = "Show detailed information including content hashes")]
-        verbose: bool,
-    },
-
-    Move {
-        #[arg(help = "Workspace name (org/project or user/project)")]
-        workspace: String,
-
-        #[arg(help = "Source tag to move (e.g., ruby-3.4.4-linux-x64 or ruby-3.4.4)")]
-        source_tag: String,
-
-        #[arg(help = "Destination tag (e.g., ruby-legacy or ruby-3.4.4-backup)")]
-        dest_tag: String,
-    },
-
-    Copy {
-        #[arg(help = "Workspace name (org/project or user/project)")]
-        workspace: String,
-
-        #[arg(help = "Source tag to copy")]
-        source_tag: String,
-
-        #[arg(help = "Destination tag")]
-        dest_tag: String,
-    },
-
-    Info {
-        #[arg(help = "Workspace name (org/project or user/project)")]
-        workspace: String,
-
-        #[arg(help = "Tag name to show info for")]
-        tag: String,
-    },
 }
 
 #[derive(ValueEnum, Clone, Copy)]

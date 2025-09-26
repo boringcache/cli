@@ -4,6 +4,5 @@ pub mod delete;
 pub mod ls;
 pub mod restore;
 pub mod save;
-pub mod tag;
 pub mod utils;
 pub mod workspaces;
