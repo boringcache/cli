@@ -1,6 +1,6 @@
 [package]
 name = "boring_cache_cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["BoringCache Team"]
 description = "High-performance cache management CLI for CI/CD workflows"
@@ -48,7 +48,6 @@ dirs = "5.0"
 
 # Crypto - minimal features for content hashing
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
-hex = { version = "0.4", default-features = false, features = ["alloc"] }
 
 # Async utilities - minimal features
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
@@ -61,7 +60,6 @@ chrono = { version = "0.4", features = ["clock", "serde"], default-features = fa
 
 # File system utilities
 walkdir = "2.5"
-ignore = "0.4"  # Fast parallel directory traversal
 tempfile = "3.10"
 
 # URL handling - minimal
@@ -75,10 +73,6 @@ uuid = { version = "1.10", features = ["v4"], default-features = false }
 md5 = "0.8.0"
 base64 = "0.22.1"
 bytes = "1.10.1"
-
-
-# Parallel processing
-rayon = "1.10"
 
 # Unix system calls for disk space checking
 [target.'cfg(unix)'.dependencies]

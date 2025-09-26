@@ -1,12 +1,9 @@
 use crate::compression::CompressionBackend;
 use crate::platform::{MemoryStrategy, SystemResources};
 use anyhow::{Context, Result};
-use rayon::prelude::*;
 use sha2::{Digest, Sha256};
-use std::fs::FileType;
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::path::Path;
 use tar::{Archive as TarArchive, Builder as TarBuilder};
 use tokio::fs;
 
@@ -86,7 +83,8 @@ async fn create_archive_impl(
                     let path = std::path::Path::new(path_str);
 
                     if path.is_dir() {
-                        let (dir_files, dir_size) = append_dir_all_contents(&mut tar_builder, path)?;
+                        let (dir_files, dir_size) =
+                            append_dir_all_contents(&mut tar_builder, path)?;
                         file_count += dir_files;
                         uncompressed_size += dir_size;
                     } else {
@@ -577,52 +575,6 @@ fn should_skip_path(path: &str) -> bool {
     false
 }
 
-#[derive(Debug, Clone)]
-struct EntryInfo {
-    full_path: PathBuf,
-    relative_path: String,
-    file_type: FileType,
-}
-
-fn collect_entries_recursive(
-    path: &Path,
-    base_path: &Path,
-    sender: &mpsc::Sender<EntryInfo>,
-) -> Result<()> {
-    use walkdir::WalkDir;
-
-    let walker = WalkDir::new(path)
-        .min_depth(0)
-        .max_open(100)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            let path_str = e.path().to_string_lossy();
-            !should_skip_path(&path_str)
-        });
-
-    for entry in walker {
-        let entry = entry?;
-        let full_path = entry.path().to_path_buf();
-        let relative_path = full_path
-            .strip_prefix(base_path)
-            .unwrap_or(&full_path)
-            .to_string_lossy()
-            .to_string();
-
-        if let Ok(metadata) = entry.metadata() {
-            let file_type = metadata.file_type();
-            let _ = sender.send(EntryInfo {
-                full_path,
-                relative_path,
-                file_type,
-            });
-        }
-    }
-
-    Ok(())
-}
-
 fn append_dir_all_contents<W: Write>(
     tar_builder: &mut TarBuilder<W>,
     source_path: &Path,
@@ -632,7 +584,7 @@ fn append_dir_all_contents<W: Write>(
 
     let mut file_count = 0u32;
     let mut total_size = 0u64;
-    
+
     for entry in WalkDir::new(source_path)
         .min_depth(1)
         .follow_links(false)
@@ -645,29 +597,32 @@ fn append_dir_all_contents<W: Write>(
             .unwrap_or(full_path)
             .to_string_lossy()
             .to_string();
-        
+
         if should_skip_path(&relative_path) {
             continue;
         }
-        
+
         let metadata = match entry.metadata() {
             Ok(m) => m,
             Err(_) => continue,
         };
-        
+
         let file_type = metadata.file_type();
-        
+
         if file_type.is_dir() {
             if let Err(e) = tar_builder.append_dir(&relative_path, full_path) {
                 if !e.to_string().contains("too long") {
-                    return Err(e).with_context(|| format!("Failed to add directory {:?} to archive", full_path));
+                    return Err(e).with_context(|| {
+                        format!("Failed to add directory {:?} to archive", full_path)
+                    });
                 }
             }
         } else if file_type.is_file() {
             let mut file = File::open(full_path)?;
             if let Err(e) = tar_builder.append_file(&relative_path, &mut file) {
                 if !e.to_string().contains("too long") {
-                    return Err(e).with_context(|| format!("Failed to add file {:?} to archive", full_path));
+                    return Err(e)
+                        .with_context(|| format!("Failed to add file {:?} to archive", full_path));
                 }
             }
             file_count += 1;
@@ -677,166 +632,13 @@ fn append_dir_all_contents<W: Write>(
                 Ok(target) => target,
                 Err(_) => continue,
             };
-            
+
             let mut header = tar::Header::new_gnu();
             if header.set_path(&relative_path).is_err()
                 || header.set_link_name(&link_target).is_err()
             {
                 continue;
             }
-            
-            header.set_size(0);
-            header.set_entry_type(tar::EntryType::Symlink);
-            header.set_cksum();
-            
-            if tar_builder.append(&header, std::io::empty()).is_err() {
-                continue;
-            }
-            file_count += 1;
-        }
-    }
-    
-    Ok((file_count, total_size))
-}
-
-fn append_dir_contents<W: Write>(
-    tar_builder: &mut TarBuilder<W>,
-    source_path: &Path,
-) -> Result<(u32, u64)> {
-    use std::fs::File;
-    use walkdir::WalkDir;
-
-    let mut file_count = 0u32;
-    let mut total_size = 0u64;
-
-    let system = SystemResources::detect();
-    let parallelism = if system.cpu_cores > 4 && system.available_memory_gb > 4.0 {
-        (system.cpu_cores / 2).max(2)
-    } else {
-        1
-    };
-
-    let entries: Vec<_> = if parallelism > 1 {
-        use rayon::iter::IntoParallelIterator;
-
-        let walker = WalkDir::new(source_path)
-            .min_depth(0)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .collect::<Vec<_>>();
-
-        walker
-            .into_par_iter()
-            .filter_map(|entry| {
-                let full_path = entry.path().to_path_buf();
-                let relative_path = full_path
-                    .strip_prefix(source_path)
-                    .unwrap_or(&full_path)
-                    .to_string_lossy()
-                    .to_string();
-
-                if should_skip_path(&relative_path) {
-                    return None;
-                }
-
-                entry.metadata().ok().map(|metadata| EntryInfo {
-                    full_path,
-                    relative_path,
-                    file_type: metadata.file_type(),
-                })
-            })
-            .collect()
-    } else {
-        let (result_tx, result_rx) = mpsc::channel();
-        let source_path_clone = source_path.to_path_buf();
-        let handle = std::thread::spawn(move || {
-            collect_entries_recursive(&source_path_clone, &source_path_clone, &result_tx)
-        });
-
-        let mut entries = Vec::new();
-        while let Ok(entry) = result_rx.recv() {
-            entries.push(entry);
-        }
-        handle.join().unwrap()?;
-        entries
-    };
-
-    let mut sorted_entries = entries;
-    sorted_entries.par_sort_unstable_by(|a, b| a.relative_path.cmp(&b.relative_path));
-
-    let io_buffer_size = calculate_optimal_io_buffer(system);
-
-    for entry_info in sorted_entries {
-        let path = &entry_info.full_path;
-        let relative_path = &entry_info.relative_path;
-        let file_type = &entry_info.file_type;
-
-        if file_type.is_dir() {
-            if let Err(e) = tar_builder.append_dir(relative_path, path) {
-                if e.to_string().contains("too long") {
-                    continue;
-                } else {
-                    return Err(e)
-                        .with_context(|| format!("Failed to add directory {path:?} to archive"));
-                }
-            }
-            continue;
-        }
-
-        if file_type.is_file() {
-            use std::io::BufReader;
-
-            let file = File::open(path).with_context(|| format!("Failed to open file {path:?}"))?;
-            let metadata = file.metadata()?;
-            let file_size = metadata.len();
-
-            let mut buffered_file = if file_size > 1024 * 1024 {
-                BufReader::with_capacity(io_buffer_size, file)
-            } else {
-                BufReader::with_capacity(8192, file)
-            };
-
-            let mut header = tar::Header::new_gnu();
-            header.set_path(relative_path)?;
-            header.set_size(file_size);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                header.set_mode(metadata.permissions().mode());
-            }
-            #[cfg(not(unix))]
-            {
-                header.set_mode(0o644);
-            }
-            header.set_mtime(
-                metadata
-                    .modified()?
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs(),
-            );
-            header.set_cksum();
-
-            tar_builder.append(&header, &mut buffered_file)?;
-
-            file_count += 1;
-            total_size += file_size;
-            continue;
-        }
-
-        if file_type.is_symlink() {
-            let link_target = match std::fs::read_link(path) {
-                Ok(target) => target,
-                Err(_) => continue,
-            };
-
-            let mut header = tar::Header::new_gnu();
-
-            if header.set_path(relative_path).is_err()
-                || header.set_link_name(&link_target).is_err()
-            {
-                continue;
-            }
 
             header.set_size(0);
             header.set_entry_type(tar::EntryType::Symlink);
@@ -845,31 +647,11 @@ fn append_dir_contents<W: Write>(
             if tar_builder.append(&header, std::io::empty()).is_err() {
                 continue;
             }
-
             file_count += 1;
         }
     }
 
     Ok((file_count, total_size))
-}
-
-fn calculate_optimal_io_buffer(system: &SystemResources) -> usize {
-    const MIN_BUFFER: usize = 64 * 1024;
-    const MAX_BUFFER: usize = 4 * 1024 * 1024;
-
-    let available_mb = (system.available_memory_gb * 1024.0) as usize;
-
-    if available_mb > 8192 {
-        MAX_BUFFER
-    } else if available_mb > 4096 {
-        2 * 1024 * 1024
-    } else if available_mb > 2048 {
-        1024 * 1024
-    } else if available_mb > 1024 {
-        512 * 1024
-    } else {
-        MIN_BUFFER
-    }
 }
 
 fn calculate_memory_budget(system: &SystemResources) -> usize {
