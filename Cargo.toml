@@ -77,7 +77,8 @@ base64 = "0.22.1"
 bytes = "1.10.1"
 
 
-# Parallel processing - removed (unused)
+# Parallel processing
+rayon = "1.10"
 
 # Unix system calls for disk space checking
 [target.'cfg(unix)'.dependencies]

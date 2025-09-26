@@ -267,35 +267,18 @@ async fn process_single_save(
 
     reporter.session_start(session_id.clone(), title, 4)?;
 
-    // Step 1: Archiving files (stream + hash)
+    // Step 1: Creating archive
     reporter.step_start(
         session_id.clone(),
         1,
-        "Archiving files".to_string(),
+        "Creating archive".to_string(),
         Some(format!("from {}", expanded_path)),
-    )?;
-    reporter.step_progress(
-        session_id.clone(),
-        1,
-        5.0,
-        Some("scanning filesystem...".to_string()),
     )?;
     let arch_start = Instant::now();
 
     let paths = vec![expanded_path.clone()];
     let (archive_bytes, archive_info) =
         archive::create_archive_silent(&paths, compression, verbose).await?;
-
-    reporter.step_progress(
-        session_id.clone(),
-        1,
-        95.0,
-        Some(format!(
-            "{} files, {} archived",
-            archive_info.file_count,
-            format_bytes(archive_info.uncompressed_size)
-        )),
-    )?;
 
     reporter.step_complete(session_id.clone(), 1, arch_start.elapsed())?;
 
