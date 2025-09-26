@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::cache_operations::upload::{UploadOperation, UploadProgressHandle};
 use crate::commands::utils::ParsedIdentifier;
-use crate::progress::{Summary, System as ProgressSystem};
+use crate::progress::{format_bytes, Summary, System as ProgressSystem};
 use crate::ui;
 
 #[derive(Debug)]
@@ -109,21 +109,91 @@ pub async fn execute_batch_save(
         return Ok(());
     }
 
+    // Prepare entry metadata and run a batch existence check to skip
+    // uploads that the server already has.
+    #[derive(Clone)]
+    struct EntryWork {
+        tag: String,
+        raw_path: String,
+        expanded_path: String,
+        exists: bool,
+    }
+
+    let mut entries: Vec<EntryWork> = preflight_result
+        .valid_pairs
+        .iter()
+        .map(|parsed| EntryWork {
+            tag: parsed.tag.as_ref().unwrap().clone(),
+            raw_path: parsed.path.as_ref().unwrap().clone(),
+            expanded_path: crate::commands::utils::expand_tilde_path(parsed.path.as_ref().unwrap()),
+            exists: false,
+        })
+        .collect();
+
+    if !entries.is_empty() {
+        let entries_for_check: Vec<String> = entries
+            .iter()
+            .map(|entry| format!("{}:{}", entry.raw_path, entry.tag))
+            .collect();
+
+        let cache_ops = crate::cache_operations::CacheOperation::new(workspace.clone(), verbose)?;
+        match cache_ops
+            .api_client
+            .batch_check_existence(&workspace, &entries_for_check)
+            .await
+        {
+            Ok(response) => {
+                if let Some(results) = response.get("results").and_then(|r| r.as_array()) {
+                    for (entry, result) in entries.iter_mut().zip(results.iter()) {
+                        entry.exists = result
+                            .get("exists")
+                            .and_then(|e| e.as_bool())
+                            .unwrap_or(false);
+                    }
+                } else if let Some(exists) = response.get("exists").and_then(|v| v.as_bool()) {
+                    if let Some(first) = entries.first_mut() {
+                        first.exists = exists;
+                    }
+                } else if verbose {
+                    ui::warn(
+                        "Cache existence check returned an unexpected format; proceeding with uploads",
+                    );
+                }
+            }
+            Err(err) => {
+                if verbose {
+                    ui::warn(&format!(
+                        "Cache existence check unavailable, processing all entries ({err})",
+                    ));
+                }
+            }
+        }
+    }
+
     // Process each entry with progress tracking
     let mut handles = Vec::new();
+    let mut skipped = 0usize;
 
-    for parsed in &preflight_result.valid_pairs {
-        let tag = parsed.tag.as_ref().unwrap().clone();
-        let path = parsed.path.as_ref().unwrap().clone();
-        let expanded_path = crate::commands::utils::expand_tilde_path(&path);
+    for entry in entries {
+        if entry.exists {
+            ui::info(&format!(
+                "Cache entry '{}' already exists on the server; skipping save",
+                entry.tag
+            ));
+            skipped += 1;
+            continue;
+        }
 
-        let session_id = format!("{}:{}", workspace.as_str(), tag);
-        let title = format!("Saving cache [{}: {}]", workspace.as_str(), tag);
+        let session_id = format!("{}:{}", workspace.as_str(), entry.tag);
+        let title = format!("Saving cache [{}: {}]", workspace.as_str(), entry.tag);
 
         let reporter_clone = reporter.clone();
         let workspace_clone = workspace.clone();
         let compression_choice_clone = compression_choice;
         let description_clone = description.clone();
+        let tag_clone = entry.tag.clone();
+        let raw_path_clone = entry.raw_path.clone();
+        let expanded_path_clone = entry.expanded_path.clone();
 
         let handle = tokio::spawn(async move {
             process_single_save(
@@ -131,8 +201,9 @@ pub async fn execute_batch_save(
                 session_id,
                 title,
                 workspace_clone,
-                tag,
-                expanded_path,
+                tag_clone,
+                raw_path_clone,
+                expanded_path_clone,
                 compression_choice_clone,
                 description_clone,
                 verbose,
@@ -153,6 +224,9 @@ pub async fn execute_batch_save(
 
     // Show summary if verbose
     if verbose {
+        if skipped > 0 {
+            reporter.info(format!("Skipped {} existing entries", skipped))?;
+        }
         reporter.info(format!(
             "Successfully saved {}/{} entries",
             successful,
@@ -171,6 +245,7 @@ async fn process_single_save(
     title: String,
     workspace: String,
     tag: String,
+    original_path: String,
     expanded_path: String,
     compression_choice: Option<crate::cli::CompressionChoice>,
     description: Option<String>,
@@ -181,36 +256,6 @@ async fn process_single_save(
     crate::tag_utils::validate_tag_basic(&tag)?;
 
     let cache_ops = crate::cache_operations::CacheOperation::new(workspace.clone(), verbose)?;
-
-    reporter.info(format!("Checking existing cache entry for tag '{}'", tag))?;
-
-    // Check if the cache already exists before starting the session UI
-    let entry_identifier = format!("{}:{}", expanded_path, tag);
-    let check_result = cache_ops
-        .api_client
-        .batch_check_existence(&workspace, &[entry_identifier])
-        .await?;
-
-    let already_exists = check_result
-        .get("results")
-        .and_then(|r| r.as_array())
-        .map(|results| {
-            results.iter().any(|result| {
-                result
-                    .get("exists")
-                    .and_then(|e| e.as_bool())
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
-
-    if already_exists {
-        ui::info(&format!(
-            "Cache entry '{}' already exists on the server; skipping save",
-            tag
-        ));
-        return Ok(true);
-    }
 
     use crate::archive;
     use crate::compression::CompressionBackend;
@@ -223,12 +268,34 @@ async fn process_single_save(
     reporter.session_start(session_id.clone(), title, 4)?;
 
     // Step 1: Archiving files (stream + hash)
-    reporter.step_start(session_id.clone(), 1, "Archiving files".to_string(), None)?;
+    reporter.step_start(
+        session_id.clone(),
+        1,
+        "Archiving files".to_string(),
+        Some(format!("from {}", expanded_path)),
+    )?;
+    reporter.step_progress(
+        session_id.clone(),
+        1,
+        5.0,
+        Some("scanning filesystem...".to_string()),
+    )?;
     let arch_start = Instant::now();
 
     let paths = vec![expanded_path.clone()];
     let (archive_bytes, archive_info) =
         archive::create_archive_silent(&paths, compression, verbose).await?;
+
+    reporter.step_progress(
+        session_id.clone(),
+        1,
+        95.0,
+        Some(format!(
+            "{} files, {} archived",
+            archive_info.file_count,
+            format_bytes(archive_info.uncompressed_size)
+        )),
+    )?;
 
     reporter.step_complete(session_id.clone(), 1, arch_start.elapsed())?;
 
@@ -241,7 +308,15 @@ async fn process_single_save(
         Some(format!("({})", compression_name)),
     )?;
     let compress_start = Instant::now();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    reporter.step_progress(
+        session_id.clone(),
+        2,
+        95.0,
+        Some(format!(
+            "{} compressed",
+            format_bytes(archive_info.compressed_size)
+        )),
+    )?;
     reporter.step_complete(session_id.clone(), 2, compress_start.elapsed())?;
 
     // Prepare metadata for upload
@@ -264,7 +339,7 @@ async fn process_single_save(
         crate::cli::CompressionChoice::Zstd => "zstd",
     });
 
-    let cache_key = format!("{}:{}", expanded_path, tag);
+    let cache_key = format!("{}:{}", original_path, tag);
 
     let response = cache_ops
         .api_client

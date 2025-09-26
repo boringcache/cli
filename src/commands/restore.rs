@@ -298,7 +298,7 @@ async fn process_single_restore(
     reporter: crate::progress::Reporter,
     session_id: String,
     title: String,
-    _workspace: String,
+    workspace: String,
     cache_ops: crate::cache_operations::CacheOperation,
     hit: CacheResolutionEntry,
     target_path: String,
@@ -374,17 +374,44 @@ async fn process_single_restore(
         }
     });
 
-    let download_result = cache_ops
-        .download_and_extract(
-            hit.url
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Cache entry missing download URL"))?,
-            &target_path,
-            hit.size.unwrap_or(0),
-            hit.compression_algorithm.as_deref(),
-            hit.content_hash.as_deref(),
-        )
-        .await;
+    let mut attempts = 0;
+    let mut current_hit = hit.clone();
+    let download_result = loop {
+        attempts += 1;
+        let download_res = cache_ops
+            .download_and_extract(
+                current_hit
+                    .url
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Cache entry missing download URL"))?,
+                &target_path,
+                current_hit.size.unwrap_or(0),
+                current_hit.compression_algorithm.as_deref(),
+                current_hit.content_hash.as_deref(),
+            )
+            .await;
+
+        match download_res {
+            Ok(_) => break Ok(()),
+            Err(e) => {
+                let message = e.to_string();
+                if attempts == 1 && message.contains("HTTP 404") {
+                    reporter.warning(
+                        "Download link returned 404, refreshing cache metadata and retrying"
+                            .to_string(),
+                    )?;
+                    if let Some(refreshed) =
+                        refresh_cache_entry(&cache_ops, &workspace, &current_hit, &target_path)
+                            .await?
+                    {
+                        current_hit = refreshed;
+                        continue;
+                    }
+                }
+                break Err(e);
+            }
+        }
+    };
 
     // Stop progress updates
     progress_task.abort();
@@ -426,4 +453,27 @@ async fn process_single_restore(
             Err(e)
         }
     }
+}
+
+async fn refresh_cache_entry(
+    cache_ops: &crate::cache_operations::CacheOperation,
+    workspace: &str,
+    current_hit: &CacheResolutionEntry,
+    target_path: &str,
+) -> Result<Option<CacheResolutionEntry>> {
+    let tag = current_hit
+        .tag
+        .as_ref()
+        .or(current_hit.identifier.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("Cache entry missing tag"))?;
+
+    let entry_spec = format!("{}:{}", tag, target_path);
+    let refreshed = cache_ops
+        .api_client
+        .batch_restore_caches(workspace, &[entry_spec])
+        .await?;
+
+    Ok(refreshed
+        .into_iter()
+        .find(|entry| entry.status.as_deref() == Some("hit") && entry.tag == current_hit.tag))
 }
