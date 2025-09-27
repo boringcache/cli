@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::api::ApiClient;
 
 pub use delete::DeleteOperation;
-pub use download::DownloadOperation;
+pub use download::{DownloadOperation, DownloadedArchive};
 pub use upload::UploadOperation;
 
 #[derive(Clone)]
@@ -50,5 +50,38 @@ impl CacheOperation {
                 expected_content_hash,
             )
             .await
+    }
+
+    pub async fn download(
+        &self,
+        download_url: &str,
+        expected_size: u64,
+        expected_content_hash: Option<&str>,
+        progress: Option<std::sync::Arc<crate::commands::utils::TransferProgress>>,
+    ) -> Result<DownloadedArchive> {
+        let download_op = DownloadOperation::new(
+            self.api_client.clone(),
+            self.workspace.clone(),
+            self.verbose,
+        );
+
+        download_op
+            .download(download_url, expected_size, expected_content_hash, progress)
+            .await
+    }
+
+    pub async fn extract(
+        &self,
+        data: Vec<u8>,
+        target_path: &str,
+        compression: Option<&str>,
+    ) -> Result<std::time::Duration> {
+        let download_op = DownloadOperation::new(
+            self.api_client.clone(),
+            self.workspace.clone(),
+            self.verbose,
+        );
+
+        download_op.extract(data, target_path, compression).await
     }
 }

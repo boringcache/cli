@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::api::ApiClient;
+use crate::commands::utils::TransferProgress;
 use crate::compression::CompressionBackend;
 use crate::platform::SystemResources;
 use crate::progress::format_bytes;
@@ -9,6 +12,13 @@ use crate::retry_resume::{ResumeInfo, RetryConfig};
 use crate::transfer::{
     calculate_chunks, calculate_chunks_with_size, download_chunk_with_range, should_use_multipart,
 };
+
+/// Result from download containing data and hash for later extraction
+pub struct DownloadedArchive {
+    pub data: Vec<u8>,
+    pub hash: String,
+    pub duration: Duration,
+}
 
 /// Streaming hasher that computes SHA-256 while downloading data
 struct StreamingHasher {
@@ -68,6 +78,128 @@ pub struct DownloadOperation {
 }
 
 impl DownloadOperation {
+    /// Download archive with optional progress tracking
+    pub async fn download(
+        &self,
+        download_url: &str,
+        expected_size: u64,
+        expected_content_hash: Option<&str>,
+        progress: Option<Arc<TransferProgress>>,
+    ) -> Result<DownloadedArchive> {
+        let actual_size = if expected_size == 0 {
+            get_content_length(download_url, &self.api_client)
+                .await
+                .unwrap_or_default()
+        } else {
+            expected_size
+        };
+
+        let use_multipart = should_use_multipart(actual_size);
+        let download_start = std::time::Instant::now();
+
+        let (downloaded_data, actual_hash) = if use_multipart {
+            let temp_path = std::path::PathBuf::from("/tmp/boringcache-download-temp");
+            let result = match self
+                .download_resumable_with_streaming_hash(
+                    download_url,
+                    &temp_path,
+                    actual_size,
+                    progress.clone(),
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(_e) => {
+                    match self
+                        .download_parallel_with_streaming_hash(
+                            download_url,
+                            actual_size,
+                            progress.clone(),
+                        )
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(_e) => {
+                            self.download_sequential_with_streaming_hash_sized(
+                                download_url,
+                                Some(actual_size),
+                                progress.clone(),
+                            )
+                            .await?
+                        }
+                    }
+                }
+            };
+            result
+        } else {
+            self.download_sequential_with_streaming_hash_sized(
+                download_url,
+                Some(actual_size),
+                progress.clone(),
+            )
+            .await?
+        };
+
+        let _download_duration = download_start.elapsed();
+
+        // Verify hash if provided
+        if let Some(expected_hash) = expected_content_hash {
+            if actual_hash != expected_hash {
+                eprintln!(
+                    "warning: Cache integrity verification failed!\n\n\
+                    Expected hash: {}\n\
+                    Actual hash:   {}\n\n\
+                    Continuing with restore despite hash mismatch.",
+                    expected_hash, actual_hash
+                );
+            }
+        }
+
+        Ok(DownloadedArchive {
+            data: downloaded_data,
+            hash: actual_hash,
+            duration: _download_duration,
+        })
+    }
+
+    /// Extract archive to target path - takes ownership to avoid copy
+    pub async fn extract(
+        &self,
+        data: Vec<u8>, // Keep owned data to avoid extra copy in caller
+        target_path: &str,
+        compression: Option<&str>,
+    ) -> Result<Duration> {
+        use std::fs;
+        use std::path::Path;
+
+        let expanded_path = crate::commands::utils::expand_tilde_path(target_path);
+        let target_path_obj = Path::new(&expanded_path);
+
+        let backend = compression.and_then(|algo| match algo {
+            "lz4" => Some(CompressionBackend::Lz4),
+            "zstd" => Some(CompressionBackend::Zstd),
+            _ => None,
+        });
+
+        if target_path_obj.exists() {
+            if let Err(_e) = tokio::fs::remove_dir_all(target_path_obj).await {
+                // Ignore error
+            }
+        }
+
+        if let Some(parent) = target_path_obj.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let extraction_start = std::time::Instant::now();
+        crate::archive::extract_archive_with_backend(data, &expanded_path, false, backend)
+            .await
+            .with_context(|| format!("Failed to extract archive (algorithm: {backend:?})"))?;
+        let extraction_duration = extraction_start.elapsed();
+
+        Ok(extraction_duration)
+    }
+
     pub fn new(api_client: ApiClient, workspace: String, verbose: bool) -> Self {
         Self {
             api_client,
@@ -109,9 +241,15 @@ impl DownloadOperation {
         // Download progress is handled by command-level progress system
 
         // Download with streaming hash verification for optimal performance
+        let download_start = std::time::Instant::now();
         let (downloaded_data, actual_hash) = if use_multipart {
             let result = match self
-                .download_resumable_with_streaming_hash(download_url, target_path_obj, actual_size)
+                .download_resumable_with_streaming_hash(
+                    download_url,
+                    target_path_obj,
+                    actual_size,
+                    None,
+                )
                 .await
             {
                 Ok(result) => result,
@@ -120,7 +258,7 @@ impl DownloadOperation {
                         // Fallback: resumable -> parallel download
                     }
                     match self
-                        .download_parallel_with_streaming_hash(download_url, actual_size)
+                        .download_parallel_with_streaming_hash(download_url, actual_size, None)
                         .await
                     {
                         Ok(result) => result,
@@ -131,6 +269,7 @@ impl DownloadOperation {
                             self.download_sequential_with_streaming_hash_sized(
                                 download_url,
                                 Some(actual_size),
+                                None,
                             )
                             .await?
                         }
@@ -140,10 +279,15 @@ impl DownloadOperation {
             result
         } else {
             let result = self
-                .download_sequential_with_streaming_hash_sized(download_url, Some(actual_size))
+                .download_sequential_with_streaming_hash_sized(
+                    download_url,
+                    Some(actual_size),
+                    None,
+                )
                 .await?;
             result
         };
+        let _download_duration = download_start.elapsed();
         // Download phase completion handled by command-level progress system
 
         // Security: Verify content hash to prevent cache poisoning
@@ -187,6 +331,7 @@ impl DownloadOperation {
             fs::create_dir_all(parent)?;
         }
 
+        // Extract phase timing tracked by caller
         crate::archive::extract_archive_with_backend(
             downloaded_data,
             &expanded_path,
@@ -196,8 +341,6 @@ impl DownloadOperation {
         .await
         .with_context(|| format!("Failed to extract archive (algorithm: {backend:?})"))?;
 
-        // Extract phase completion handled by command-level progress system
-
         Ok(())
     }
 
@@ -206,6 +349,7 @@ impl DownloadOperation {
         &self,
         download_url: &str,
         expected_size: Option<u64>,
+        progress: Option<Arc<TransferProgress>>,
     ) -> Result<(Vec<u8>, String)> {
         use futures_util::StreamExt;
 
@@ -225,10 +369,16 @@ impl DownloadOperation {
                     StreamingHasher::new()
                 };
                 let mut stream = response.bytes_stream();
+                let mut total_downloaded = 0u64;
 
                 while let Some(chunk_result) = stream.next().await {
                     let chunk = chunk_result.context("Failed to download chunk")?;
                     hasher.update(&chunk);
+
+                    total_downloaded += chunk.len() as u64;
+                    if let Some(ref p) = progress {
+                        p.update(total_downloaded);
+                    }
                 }
 
                 Ok(hasher.finalize())
@@ -241,6 +391,7 @@ impl DownloadOperation {
         &self,
         download_url: &str,
         total_size: u64,
+        progress: Option<Arc<TransferProgress>>,
     ) -> Result<(Vec<u8>, String)> {
         use futures_util::stream::{FuturesUnordered, StreamExt};
         use std::sync::Arc;
@@ -267,6 +418,7 @@ impl DownloadOperation {
             let client = self.api_client.get_client().clone();
             let url = download_url.to_string();
             let buffer_clone = Arc::clone(&output_buffer);
+            let progress_clone = progress.clone();
             async move {
                 let chunk_data = download_chunk_with_range(&client, &url, start, end).await?;
 
@@ -274,6 +426,10 @@ impl DownloadOperation {
                 let start_pos = start as usize;
                 let end_pos = start_pos + chunk_data.len();
                 buffer[start_pos..end_pos].copy_from_slice(&chunk_data);
+
+                if let Some(ref p) = progress_clone {
+                    p.add(chunk_data.len() as u64);
+                }
 
                 Ok::<(), anyhow::Error>(())
             }
@@ -304,6 +460,7 @@ impl DownloadOperation {
         download_url: &str,
         target_path: &std::path::Path,
         total_size: u64,
+        progress: Option<Arc<TransferProgress>>,
     ) -> Result<(Vec<u8>, String)> {
         use futures_util::stream::{FuturesUnordered, StreamExt};
         use tokio::fs::OpenOptions;
@@ -400,17 +557,22 @@ impl DownloadOperation {
             let url = download_url.to_string();
             let chunk_size = end - start + 1;
             let verbose = self.verbose;
+            let progress_clone = progress.clone();
             async move {
                 let retry_config = RetryConfig::new(verbose);
                 retry_config
                     .retry_with_backoff(&format!("Download chunk {chunk_index}"), || async {
                         let chunk_data =
                             download_chunk_with_range(&client, &url, start, end).await?;
-                        Ok::<(usize, u64, u64, Vec<u8>), anyhow::Error>((
+                        Ok::<
+                            (usize, u64, u64, Vec<u8>, Option<Arc<TransferProgress>>),
+                            anyhow::Error,
+                        >((
                             chunk_index,
                             start,
                             chunk_size,
                             chunk_data,
+                            progress_clone.clone(),
                         ))
                     })
                     .await
@@ -425,12 +587,16 @@ impl DownloadOperation {
 
         // Stream chunks directly to file (hash computed later from final file)
         while let Some(result) = futures.next().await {
-            let (chunk_index, start_byte, chunk_size, chunk_data) = result?;
+            let (chunk_index, start_byte, chunk_size, chunk_data, progress_clone) = result?;
 
             file.seek(std::io::SeekFrom::Start(start_byte)).await?;
             file.write_all(&chunk_data).await?;
 
             resume_info.mark_chunk_complete(chunk_index, chunk_size);
+
+            if let Some(ref p) = progress_clone {
+                p.add(chunk_size);
+            }
 
             if chunk_index % 10 == 0 {
                 resume_info.save().await?;

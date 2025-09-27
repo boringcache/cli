@@ -316,7 +316,6 @@ async fn process_single_restore(
     reporter.step_complete(session_id.clone(), 1, step_start.elapsed())?;
 
     // Step 2: Downloading
-    let step_start = Instant::now();
     let download_detail = if let Some(size) = hit.size {
         format!("[{}]", crate::progress::format_bytes(size))
     } else {
@@ -330,69 +329,48 @@ async fn process_single_restore(
         if download_detail.is_empty() {
             None
         } else {
-            Some(download_detail.clone())
+            Some(download_detail)
         },
     )?;
 
-    // Start download with progress simulation like save command
-    let reporter_clone = reporter.clone();
-    let session_id_clone = session_id.clone();
-    let download_size = hit.size.unwrap_or(0);
-
-    // Spawn progress updater task for downloads
-    let progress_task = tokio::spawn(async move {
-        let mut progress: f64 = 0.0;
-        let increment: f64 = 3.0;
-        let start_time = Instant::now();
-
-        while progress < 95.0 {
-            tokio::time::sleep(Duration::from_millis(400)).await;
-            progress = (progress + increment).min(95.0);
-
-            let elapsed = start_time.elapsed().as_secs_f64().max(0.001);
-            let percent = progress.max(0.0);
-            let speed_mbps = if download_size > 0 {
-                let downloaded = (percent / 100.0) * download_size as f64;
-                (downloaded / (1024.0 * 1024.0)) / elapsed
-            } else {
-                0.0
-            };
-
-            let detail = if download_size > 0 {
-                format!(
-                    "[{}] {:>3.0}% @ {:.1} MB/s",
-                    crate::progress::format_bytes(download_size),
-                    percent,
-                    speed_mbps
-                )
-            } else {
-                format!("{:>3.0}%", percent)
-            };
-
-            let _ =
-                reporter_clone.step_progress(session_id_clone.clone(), 2, percent, Some(detail));
-        }
-    });
-
     let mut attempts = 0;
     let mut current_hit = hit.clone();
+
+    // Create progress tracker for download
+    let download_size = current_hit.size.unwrap_or(0);
+    let progress = if download_size > 0 {
+        Some(std::sync::Arc::new(
+            crate::commands::utils::TransferProgress::new(
+                reporter.clone(),
+                session_id.clone(),
+                2, // Step 2 is downloading
+                download_size,
+            ),
+        ))
+    } else {
+        None
+    };
+
+    // Download phase - separate from extraction for proper UI updates
     let download_result = loop {
         attempts += 1;
+
+        let download_url = current_hit
+            .url
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Cache entry missing download URL"))?;
+
         let download_res = cache_ops
-            .download_and_extract(
-                current_hit
-                    .url
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Cache entry missing download URL"))?,
-                &target_path,
+            .download(
+                download_url,
                 current_hit.size.unwrap_or(0),
-                current_hit.compression_algorithm.as_deref(),
                 current_hit.content_hash.as_deref(),
+                progress.clone(),
             )
             .await;
 
         match download_res {
-            Ok(_) => break Ok(()),
+            Ok(archive) => break Ok(archive),
             Err(e) => {
                 let message = e.to_string();
                 if attempts == 1 && message.contains("HTTP 404") {
@@ -413,19 +391,23 @@ async fn process_single_restore(
         }
     };
 
-    // Stop progress updates
-    progress_task.abort();
-    let _ = progress_task.await;
-
     match download_result {
-        Ok(()) => {
-            reporter.step_complete(session_id.clone(), 2, step_start.elapsed())?;
+        Ok(archive) => {
+            // Complete the download step with actual duration
+            reporter.step_complete(session_id.clone(), 2, archive.duration)?;
 
-            // Step 3: Extracting (done as part of download, show briefly)
-            let step_start = Instant::now();
+            // Step 3: Extracting files - now separate from download
             reporter.step_start(session_id.clone(), 3, "Extracting files".to_string(), None)?;
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            reporter.step_complete(session_id.clone(), 3, step_start.elapsed())?;
+
+            let extraction_duration = cache_ops
+                .extract(
+                    archive.data,
+                    &target_path,
+                    current_hit.compression_algorithm.as_deref(),
+                )
+                .await?;
+
+            reporter.step_complete(session_id.clone(), 3, extraction_duration)?;
 
             // Step 4: Finalizing
             let step_start = Instant::now();

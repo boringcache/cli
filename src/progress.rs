@@ -185,6 +185,13 @@ impl Renderer {
     }
 
     fn handle_session_start(&mut self, id: String, title: String, total_steps: u8) -> Result<()> {
+        // Ensure all current progress lines are finalized before starting new session
+        self.flush_all_lines()?;
+
+        // Explicitly flush stdout before session start to prevent overlap
+        use std::io::Write;
+        io::stdout().flush()?;
+
         println!("⇒ {}", title);
         let state = SessionState {
             title,

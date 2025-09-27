@@ -146,57 +146,141 @@ pub async fn extract_archive_with_backend(
 ) -> Result<()> {
     check_available_disk_space(data.len(), target_path)?;
 
+    let archive_size = data.len();
+
+    // Use direct extraction for better performance when possible
+    // Only use temp directory for very large archives or special cases
+    let use_direct_extraction = archive_size < 2 * 1024 * 1024 * 1024  // 2GB threshold
+        && !Path::new(target_path).exists()
+        && target_path != ".";
+
+    if use_direct_extraction {
+        // Try direct extraction to avoid double I/O
+        if extract_archive_direct(&data, target_path, verbose, backend)
+            .await
+            .is_err()
+        {
+            // Fallback to temp directory approach
+            extract_archive_via_temp(&data, target_path, verbose, backend).await?;
+        }
+    } else {
+        extract_archive_via_temp(&data, target_path, verbose, backend).await?;
+    }
+
+    Ok(())
+}
+
+async fn extract_archive_direct(
+    data: &[u8],
+    target_path: &str,
+    _verbose: bool,
+    backend: Option<CompressionBackend>,
+) -> Result<()> {
+    let target_path_str = target_path.to_string();
+    let data = data.to_vec();
+
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let system = SystemResources::detect();
+        std::fs::create_dir_all(&target_path_str)?;
+
+        let is_large_archive = data.len() > 100 * 1024 * 1024;
+
+        if is_large_archive {
+            extract_large_archive_streaming(&data, Path::new(&target_path_str), backend)?;
+        } else {
+            let decompressed_data = decompress_archive_data(&data, backend)?;
+            let buffer_size = calculate_extraction_buffer_size(system, data.len());
+
+            let cursor = std::io::Cursor::new(decompressed_data);
+            let buffered = std::io::BufReader::with_capacity(buffer_size, cursor);
+            let mut archive = TarArchive::new(buffered);
+
+            configure_archive_security(&mut archive);
+            fast_unpack_archive(&mut archive, Path::new(&target_path_str))?;
+        }
+        Ok(())
+    })
+    .await
+    .with_context(|| "Direct extraction failed")??;
+
+    Ok(())
+}
+
+async fn extract_archive_via_temp(
+    data: &[u8],
+    target_path: &str,
+    verbose: bool,
+    backend: Option<CompressionBackend>,
+) -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let extract_dir = temp_dir.path().join("extracted");
 
     let extract_dir_clone = extract_dir.clone();
+    let data = data.to_vec();
+
     tokio::task::spawn_blocking(move || -> Result<()> {
         let system = SystemResources::detect();
         std::fs::create_dir_all(&extract_dir_clone)?;
-        let is_low_memory = std::env::var("CI").is_ok() || system.available_memory_gb < 4.0;
+
         let is_large_archive = data.len() > 100 * 1024 * 1024;
-        if verbose {
-            // DEBUG: Archive size info (verbose mode)
-        }
-        if is_low_memory || is_large_archive {
+
+        if is_large_archive {
             extract_large_archive_streaming(&data, &extract_dir_clone, backend)?;
         } else {
-            let decompressed_data = match if let Some(backend) = backend {
-                backend.decompress(&data)
-            } else {
-                CompressionBackend::Zstd.decompress(&data)
-                    .or_else(|_| CompressionBackend::Lz4.decompress(&data))
-            } {
-                Ok(data) => data,
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "Failed to decompress archive: {}. Archive may be corrupted or incompatible.", e
-                    ));
-                }
-            };
-            let buffer_size = if is_low_memory || is_large_archive {
-                4 * 1024 * 1024
-            } else {
-                system.extraction_buffer_size()
-            };
+            let decompressed_data = decompress_archive_data(&data, backend)?;
+            let buffer_size = calculate_extraction_buffer_size(system, data.len());
+
             let cursor = std::io::Cursor::new(decompressed_data);
             let buffered = std::io::BufReader::with_capacity(buffer_size, cursor);
             let mut archive = TarArchive::new(buffered);
-            archive.set_preserve_permissions(false); // Security: Prevent setuid/setgid
-            archive.set_preserve_mtime(false);
-            archive.set_unpack_xattrs(false);
 
-            // Use optimized extraction for better performance
+            configure_archive_security(&mut archive);
             fast_unpack_archive(&mut archive, &extract_dir_clone).with_context(|| {
-                format!("Failed to extract archive to {}", extract_dir_clone.display())
+                format!(
+                    "Failed to extract archive to {}",
+                    extract_dir_clone.display()
+                )
             })?;
         }
         Ok(())
-    }).await.with_context(|| "Archive extraction task failed")??;
+    })
+    .await
+    .with_context(|| "Archive extraction task failed")??;
 
     move_extracted_contents(&extract_dir, target_path, verbose).await?;
-
     Ok(())
+}
+
+fn decompress_archive_data(data: &[u8], backend: Option<CompressionBackend>) -> Result<Vec<u8>> {
+    match if let Some(backend) = backend {
+        backend.decompress(data)
+    } else {
+        CompressionBackend::Zstd
+            .decompress(data)
+            .or_else(|_| CompressionBackend::Lz4.decompress(data))
+    } {
+        Ok(data) => Ok(data),
+        Err(e) => Err(anyhow::anyhow!(
+            "Failed to decompress archive: {}. Archive may be corrupted or incompatible.",
+            e
+        )),
+    }
+}
+
+fn calculate_extraction_buffer_size(system: &SystemResources, archive_size: usize) -> usize {
+    let is_low_memory = std::env::var("CI").is_ok() || system.available_memory_gb < 4.0;
+
+    if is_low_memory || archive_size > 100 * 1024 * 1024 {
+        4 * 1024 * 1024
+    } else {
+        system.extraction_buffer_size()
+    }
+}
+
+fn configure_archive_security<R: std::io::Read>(archive: &mut TarArchive<R>) {
+    archive.set_preserve_permissions(false);
+    archive.set_preserve_mtime(false);
+    archive.set_unpack_xattrs(false);
 }
 
 fn check_available_disk_space(compressed_size: usize, target_path: &str) -> Result<()> {
@@ -354,6 +438,7 @@ async fn move_extracted_contents(
         }
 
         if !target.exists() {
+            // Try atomic rename first (fastest)
             match tokio::fs::rename(extract_dir, target).await {
                 Ok(_) => {
                     if verbose {
@@ -370,6 +455,28 @@ async fn move_extracted_contents(
                     if verbose {
                         // Rename restore unavailable, copying instead (verbose mode)
                     }
+                }
+            }
+        } else {
+            // Target exists - need to replace it efficiently
+            let temp_backup =
+                target.with_extension(format!("boringcache_backup_{}", std::process::id()));
+
+            // Try atomic swap: old -> backup, new -> target
+            if tokio::fs::rename(target, &temp_backup).await.is_ok() {
+                if tokio::fs::rename(extract_dir, target).await.is_ok() {
+                    // Success - cleanup backup in background
+                    let temp_backup_clone = temp_backup.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::fs::remove_dir_all(temp_backup_clone).await;
+                    });
+                    if verbose {
+                        // Verbose info removed"Restored via atomic swap");
+                    }
+                    return Ok(());
+                } else {
+                    // Restore failed - restore backup
+                    let _ = tokio::fs::rename(&temp_backup, target).await;
                 }
             }
         }
@@ -401,22 +508,31 @@ async fn move_extracted_contents(
 
     let system = SystemResources::detect();
 
-    if system.should_use_parallel_extraction() && extracted_items.len() > 1 {
-        use futures_util::stream::FuturesUnordered;
+    // Use parallel moves for better performance with many files
+    if system.should_use_parallel_extraction() && extracted_items.len() > 10 {
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        // Limit concurrent file operations to avoid exhausting resources
+        let max_concurrent = (system.cpu_cores * 2).min(32);
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
         let mut futures = FuturesUnordered::new();
 
         for (item_name, src_path) in extracted_items.into_iter() {
             let dest_path = target.join(&item_name);
             let src_path_clone = src_path.clone();
             let item_name_clone = item_name.clone();
+            let sem_clone = semaphore.clone();
 
             let future = async move {
+                let _permit = sem_clone.acquire().await.unwrap();
                 move_single_item(&src_path_clone, &dest_path, &item_name_clone, verbose).await
             };
             futures.push(future);
         }
 
-        while let Some(result) = futures_util::StreamExt::next(&mut futures).await {
+        while let Some(result) = futures.next().await {
             result?;
         }
     } else {
