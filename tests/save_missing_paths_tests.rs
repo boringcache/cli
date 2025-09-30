@@ -40,10 +40,10 @@ fn test_save_with_missing_paths_continues_processing() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Should fail during preflight with missing-path error
+    // Should show warnings for missing paths and continue processing
     assert!(
-        stderr.contains("Save preflight failed") || stdout.contains("Save preflight failed"),
-        "Should explain preflight failure. stderr: {}, stdout: {}",
+        stderr.contains("Skipping") && stderr.contains("path not found"),
+        "Should show warnings for missing paths. stderr: {}, stdout: {}",
         stderr,
         stdout
     );
@@ -96,8 +96,8 @@ fn test_save_with_all_missing_paths_exits_gracefully() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
-        stderr.contains("Save preflight failed") || stdout.contains("Save preflight failed"),
-        "Should explain preflight failure. stderr: {}, stdout: {}",
+        stderr.contains("No valid paths found to save"),
+        "Should show no valid paths message. stderr: {}, stdout: {}",
         stderr,
         stdout
     );
@@ -196,8 +196,8 @@ fn test_save_path_expansion_with_missing_tilde_path() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
-        stderr.contains("Save preflight failed") || stdout.contains("Save preflight failed"),
-        "Should explain preflight failure. stderr: {}, stdout: {}",
+        stderr.contains("No valid paths found to save"),
+        "Should show no valid paths message. stderr: {}, stdout: {}",
         stderr,
         stdout
     );

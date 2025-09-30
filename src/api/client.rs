@@ -306,55 +306,108 @@ impl ApiClient {
         self.parse_json_response(response).await
     }
 
-    pub async fn batch_check_existence(
+    /// Unified batch cache check supporting tags, content fingerprints, and content hashes
+    pub async fn batch_check_cache(
         &self,
         workspace: &str,
-        entries: &[String],
-    ) -> Result<serde_json::Value> {
+        tags: Option<&[String]>,
+        content_fingerprints: Option<&[String]>,
+        content_hashes: Option<&[String]>,
+    ) -> Result<super::models::cache::BatchCacheCheckResponse> {
+        ensure!(
+            tags.is_some() || content_fingerprints.is_some() || content_hashes.is_some(),
+            "At least one type of identifier must be provided"
+        );
+
         let url = self.workspace_endpoint(workspace, "caches/check")?;
-        let request_body = serde_json::json!({
-            "entries": entries.join(",")
-        });
+        let mut request_body = serde_json::Map::new();
+
+        if let Some(tag_list) = tags {
+            if !tag_list.is_empty() {
+                request_body.insert(
+                    "tags".to_string(),
+                    serde_json::Value::Array(
+                        tag_list
+                            .iter()
+                            .map(|s| serde_json::Value::String(s.clone()))
+                            .collect(),
+                    ),
+                );
+            }
+        }
+
+        if let Some(fingerprint_list) = content_fingerprints {
+            if !fingerprint_list.is_empty() {
+                request_body.insert(
+                    "content_fingerprints".to_string(),
+                    serde_json::Value::Array(
+                        fingerprint_list
+                            .iter()
+                            .map(|s| serde_json::Value::String(s.clone()))
+                            .collect(),
+                    ),
+                );
+            }
+        }
+
+        if let Some(hash_list) = content_hashes {
+            if !hash_list.is_empty() {
+                request_body.insert(
+                    "content_hashes".to_string(),
+                    serde_json::Value::Array(
+                        hash_list
+                            .iter()
+                            .map(|s| serde_json::Value::String(s.clone()))
+                            .collect(),
+                    ),
+                );
+            }
+        }
+
+        let request_body = serde_json::Value::Object(request_body);
 
         match self.post(&url, &request_body).await {
             Ok(result) => Ok(result),
             Err(_) => {
-                // Fallback silently - old servers won't have this endpoint
-                Ok(serde_json::json!({ "results": [] }))
+                // Fallback for servers that don't support the unified endpoint
+                // Return empty results to indicate no cache hits
+                Ok(super::models::cache::BatchCacheCheckResponse {
+                    results: Vec::new(),
+                })
             }
         }
     }
 
-    pub async fn check_content_identifier(
+    /// Convenience method for checking content fingerprints only
+    pub async fn batch_check_content_fingerprints(
         &self,
         workspace: &str,
-        content_hash: Option<&str>,
-        content_fingerprint: Option<&str>,
-    ) -> Result<super::models::cache::CacheCheckHashResponse> {
-        ensure!(
-            content_hash.is_some() || content_fingerprint.is_some(),
-            "content_hash or content_fingerprint must be provided"
-        );
-
-        let url = self.workspace_endpoint(workspace, "caches/check")?;
-        let mut payload = serde_json::Map::new();
-        if let Some(hash) = content_hash {
-            payload.insert(
-                "content_hash".to_string(),
-                serde_json::Value::String(hash.to_string()),
-            );
-        }
-        if let Some(fingerprint) = content_fingerprint {
-            payload.insert(
-                "content_fingerprint".to_string(),
-                serde_json::Value::String(fingerprint.to_string()),
-            );
-        }
-
-        let request_body = serde_json::Value::Object(payload);
-
-        self.post(&url, &request_body).await
+        fingerprints: &[String],
+    ) -> Result<super::models::cache::BatchCacheCheckResponse> {
+        self.batch_check_cache(workspace, None, Some(fingerprints), None)
+            .await
     }
+
+    /// Convenience method for checking tags only  
+    pub async fn batch_check_tags(
+        &self,
+        workspace: &str,
+        tags: &[String],
+    ) -> Result<super::models::cache::BatchCacheCheckResponse> {
+        self.batch_check_cache(workspace, Some(tags), None, None)
+            .await
+    }
+
+    /// Convenience method for checking content hashes only
+    pub async fn batch_check_content_hashes(
+        &self,
+        workspace: &str,
+        hashes: &[String],
+    ) -> Result<super::models::cache::BatchCacheCheckResponse> {
+        self.batch_check_cache(workspace, None, None, Some(hashes))
+            .await
+    }
+
 
     pub async fn batch_save_with_metadata(
         &self,
@@ -714,7 +767,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_content_identifier_with_fingerprint_only() {
+    async fn test_batch_check_content_fingerprints() {
         let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
 
         let mut server = mockito::Server::new_async().await;
@@ -723,11 +776,11 @@ mod tests {
             .match_header("authorization", "Bearer test-token")
             .match_header("content-type", "application/json")
             .match_body(Matcher::PartialJson(json!({
-                "content_fingerprint": "abc123def456"
+                "content_fingerprints": ["abc123def456"]
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"exists":true,"content_fingerprint":"abc123def456"}"#)
+            .with_body(r#"{"results":[{"identifier":"abc123def456","identifier_type":"content_fingerprint","exists":true,"content_fingerprint":"abc123def456"}]}"#)
             .create_async()
             .await;
 
@@ -737,37 +790,17 @@ mod tests {
             .expect("client should initialize");
 
         let response = client
-            .check_content_identifier("ns/ws", None, Some("abc123def456"))
+            .batch_check_content_fingerprints("ns/ws", &["abc123def456".to_string()])
             .await
             .expect("fingerprint lookup should succeed");
 
-        assert!(response.exists);
-        assert_eq!(
-            response.content_fingerprint.as_deref(),
-            Some("abc123def456")
-        );
-        assert!(response.content_hash.is_none());
+        assert_eq!(response.results.len(), 1);
+        let result = &response.results[0];
+        assert!(result.exists);
+        assert_eq!(result.identifier, "abc123def456");
+        assert_eq!(result.identifier_type, "content_fingerprint");
 
         mock.assert_async().await;
         std::env::remove_var("BORINGCACHE_API_URL");
-    }
-
-    #[tokio::test]
-    async fn test_check_content_identifier_requires_identifier() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-
-        std::env::remove_var("BORINGCACHE_API_URL");
-
-        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
-            .expect("client should initialize");
-
-        let error = client
-            .check_content_identifier("ns/ws", None, None)
-            .await
-            .expect_err("missing identifiers should error");
-
-        assert!(error
-            .to_string()
-            .contains("content_hash or content_fingerprint must be provided"));
     }
 }

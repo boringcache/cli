@@ -16,19 +16,19 @@ fn run_restore_preflight_checks(
     parsed_pairs: &[ParsedIdentifier],
 ) -> Result<RestorePreflightCheck> {
     let mut valid_pairs = Vec::new();
-    let mut issues = Vec::new();
+    let mut warnings = Vec::new();
 
     for parsed in parsed_pairs {
         let tag = match parsed.tag.as_ref() {
             Some(tag) => tag,
             None => {
-                issues.push("Missing tag for restore request".to_string());
+                warnings.push("Skipping entry with missing tag".to_string());
                 continue;
             }
         };
 
         if let Err(error) = crate::commands::utils::validate_tag_name(tag) {
-            issues.push(format!("Invalid tag '{}': {}", tag, error));
+            warnings.push(format!("Skipping invalid tag '{}': {}", tag, error));
             continue;
         }
 
@@ -41,17 +41,17 @@ fn run_restore_preflight_checks(
             match std::fs::metadata(target_path) {
                 Ok(metadata) => {
                     if !metadata.is_dir() {
-                        issues.push(format!(
-                            "Target '{}' exists but is not a directory",
-                            expanded_path
+                        warnings.push(format!(
+                            "Skipping '{}': target '{}' exists but is not a directory",
+                            tag, expanded_path
                         ));
                         continue;
                     }
                 }
                 Err(error) => {
-                    issues.push(format!(
-                        "Cannot inspect existing target '{}': {}",
-                        expanded_path, error
+                    warnings.push(format!(
+                        "Skipping '{}': cannot inspect target '{}': {}",
+                        tag, expanded_path, error
                     ));
                     continue;
                 }
@@ -63,24 +63,22 @@ fn run_restore_preflight_checks(
                 valid_pairs.push(parsed.clone());
             }
             Err(error) => {
-                issues.push(format!(
-                    "Cannot prepare target '{}': {}",
-                    expanded_path, error
+                warnings.push(format!(
+                    "Skipping '{}': cannot prepare target '{}': {}",
+                    tag, expanded_path, error
                 ));
             }
         }
     }
 
-    if !issues.is_empty() {
-        let mut message = String::from("Restore preflight failed:\n");
-        for issue in &issues {
-            message.push_str("  - ");
-            message.push_str(issue);
-            message.push('\n');
+    if !warnings.is_empty() {
+        for warning in &warnings {
+            eprintln!("warning: {}", warning);
         }
-
-        return Err(anyhow::anyhow!(message.trim_end().to_string()));
     }
+
+    // Allow empty results for batch operations where all entries are skipped
+    // This is non-invasive behavior - we continue with whatever is valid
 
     Ok(RestorePreflightCheck { valid_pairs })
 }
@@ -120,7 +118,7 @@ mod tests {
     use crate::commands::utils::ParsedIdentifier;
 
     #[test]
-    fn preflight_rejects_file_target() {
+    fn preflight_skips_file_target() {
         let temp = tempfile::tempdir().unwrap();
         let file_path = temp.path().join("existing_file");
         std::fs::write(&file_path, b"data").unwrap();
@@ -131,10 +129,8 @@ mod tests {
             tag: Some("valid-tag".to_string()),
         };
 
-        let result = run_restore_preflight_checks(&[parsed]);
-        assert!(result.is_err());
-        let message = format!("{}", result.unwrap_err());
-        assert!(message.contains("not a directory"));
+        let result = run_restore_preflight_checks(&[parsed]).unwrap();
+        assert_eq!(result.valid_pairs.len(), 0);
     }
 
     #[test]
@@ -152,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_rejects_invalid_tag() {
+    fn preflight_skips_invalid_tag() {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("dir");
         let parsed = ParsedIdentifier {
@@ -161,10 +157,39 @@ mod tests {
             tag: Some("invalid tag".to_string()),
         };
 
-        let result = run_restore_preflight_checks(&[parsed]);
-        assert!(result.is_err());
-        let message = format!("{}", result.unwrap_err());
-        assert!(message.contains("Invalid tag"));
+        let result = run_restore_preflight_checks(&[parsed]).unwrap();
+        assert_eq!(result.valid_pairs.len(), 0);
+    }
+
+    #[test]
+    fn preflight_continues_batch_with_valid_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let file_path = temp.path().join("existing_file");
+        std::fs::write(&file_path, b"data").unwrap();
+
+        let valid_dir = temp.path().join("valid_dir");
+
+        let parsed_entries = vec![
+            ParsedIdentifier {
+                key: String::new(),
+                path: Some(file_path.to_string_lossy().to_string()),
+                tag: Some("tag1".to_string()),
+            },
+            ParsedIdentifier {
+                key: String::new(),
+                path: Some(valid_dir.to_string_lossy().to_string()),
+                tag: Some("tag2".to_string()),
+            },
+            ParsedIdentifier {
+                key: String::new(),
+                path: Some("/nonexistent/path".to_string()),
+                tag: Some("tag3".to_string()),
+            },
+        ];
+
+        let result = run_restore_preflight_checks(&parsed_entries).unwrap();
+        assert_eq!(result.valid_pairs.len(), 1);
+        assert_eq!(result.valid_pairs[0].tag.as_ref().unwrap(), "tag2");
     }
 }
 

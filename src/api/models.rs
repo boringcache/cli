@@ -101,6 +101,26 @@ pub mod cache {
         pub size: Option<u64>,
     }
 
+    #[derive(Debug, Deserialize)]
+    pub struct BatchCacheCheckResponse {
+        pub results: Vec<CacheCheckResult>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct CacheCheckResult {
+        pub identifier: String,
+        pub identifier_type: String, // "tag", "content_fingerprint", or "content_hash"
+        pub exists: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub cache_entry_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub content_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub content_fingerprint: Option<String>,
+    }
+
     #[derive(Debug, Serialize, Clone)]
     pub struct PartInfo {
         pub part_number: u32,

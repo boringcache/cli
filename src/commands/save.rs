@@ -21,16 +21,16 @@ fn run_save_preflight_checks(
     parsed_pairs: &[ParsedIdentifier],
     _verbose: bool,
 ) -> Result<SavePreflightCheck> {
-    // Preflight checks are now silent - progress is shown via the progress system
+    // Preflight checks are now non-invasive - continues with valid entries
 
     let mut valid_pairs = Vec::new();
-    let mut issues = Vec::new();
+    let mut warnings = Vec::new();
 
     for parsed in parsed_pairs {
         let path = match parsed.path.as_ref() {
             Some(path) => path,
             None => {
-                issues.push("Missing path for save request".to_string());
+                warnings.push("Skipping entry with missing path".to_string());
                 continue;
             }
         };
@@ -38,13 +38,13 @@ fn run_save_preflight_checks(
         let tag = match parsed.tag.as_ref() {
             Some(tag) => tag,
             None => {
-                issues.push(format!("Missing tag for path '{}'", path));
+                warnings.push(format!("Skipping path '{}': missing tag", path));
                 continue;
             }
         };
 
         if let Err(error) = crate::commands::utils::validate_tag_name(tag) {
-            issues.push(format!("Invalid tag '{}': {}", tag, error));
+            warnings.push(format!("Skipping invalid tag '{}': {}", tag, error));
             continue;
         }
 
@@ -57,7 +57,10 @@ fn run_save_preflight_checks(
             } else {
                 expanded_path.clone()
             };
-            issues.push(format!("Path not found: {}", description));
+            warnings.push(format!(
+                "Skipping '{}': path not found: {}",
+                tag, description
+            ));
             continue;
         }
 
@@ -65,21 +68,24 @@ fn run_save_preflight_checks(
             Ok(metadata) => {
                 if metadata.is_dir() {
                     if let Err(error) = std::fs::read_dir(&expanded_path) {
-                        issues.push(format!(
-                            "Cannot read directory '{}': {}",
-                            expanded_path, error
+                        warnings.push(format!(
+                            "Skipping '{}': cannot read directory '{}': {}",
+                            tag, expanded_path, error
                         ));
                         continue;
                     }
                 } else if metadata.is_file() {
                     if let Err(error) = std::fs::File::open(&expanded_path) {
-                        issues.push(format!("Cannot read file '{}': {}", expanded_path, error));
+                        warnings.push(format!(
+                            "Skipping '{}': cannot read file '{}': {}",
+                            tag, expanded_path, error
+                        ));
                         continue;
                     }
                 } else {
-                    issues.push(format!(
-                        "Unsupported filesystem entry for '{}': not a file or directory",
-                        expanded_path
+                    warnings.push(format!(
+                        "Skipping '{}': unsupported filesystem entry for '{}': not a file or directory",
+                        tag, expanded_path
                     ));
                     continue;
                 }
@@ -87,21 +93,22 @@ fn run_save_preflight_checks(
                 valid_pairs.push(parsed.clone());
             }
             Err(error) => {
-                issues.push(format!("Cannot access '{}': {}", expanded_path, error));
+                warnings.push(format!(
+                    "Skipping '{}': cannot access '{}': {}",
+                    tag, expanded_path, error
+                ));
             }
         }
     }
 
-    if !issues.is_empty() {
-        let mut message = String::from("Save preflight failed:\n");
-        for issue in &issues {
-            message.push_str("  - ");
-            message.push_str(issue);
-            message.push('\n');
+    if !warnings.is_empty() {
+        for warning in &warnings {
+            eprintln!("warning: {}", warning);
         }
-
-        return Err(anyhow::anyhow!(message.trim_end().to_string()));
     }
+
+    // Allow empty results for batch operations where all entries are skipped
+    // This is non-invasive behavior - we continue with whatever is valid
 
     Ok(SavePreflightCheck { valid_pairs })
 }
@@ -112,21 +119,19 @@ mod tests {
     use crate::commands::utils::ParsedIdentifier;
 
     #[test]
-    fn preflight_rejects_missing_path() {
+    fn preflight_skips_missing_path() {
         let parsed = ParsedIdentifier {
             key: String::new(),
             path: Some("/path/does/not/exist".to_string()),
             tag: Some("valid-tag".to_string()),
         };
 
-        let result = run_save_preflight_checks(&[parsed], false);
-        assert!(result.is_err());
-        let message = format!("{}", result.unwrap_err());
-        assert!(message.contains("Path not found"));
+        let result = run_save_preflight_checks(&[parsed], false).unwrap();
+        assert_eq!(result.valid_pairs.len(), 0);
     }
 
     #[test]
-    fn preflight_rejects_invalid_tag() {
+    fn preflight_skips_invalid_tag() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().to_string_lossy().to_string();
         let parsed = ParsedIdentifier {
@@ -135,10 +140,8 @@ mod tests {
             tag: Some("invalid tag".to_string()),
         };
 
-        let result = run_save_preflight_checks(&[parsed], false);
-        assert!(result.is_err());
-        let message = format!("{}", result.unwrap_err());
-        assert!(message.contains("Invalid tag"));
+        let result = run_save_preflight_checks(&[parsed], false).unwrap();
+        assert_eq!(result.valid_pairs.len(), 0);
     }
 
     #[test]
@@ -153,6 +156,34 @@ mod tests {
 
         let result = run_save_preflight_checks(&[parsed], false).unwrap();
         assert_eq!(result.valid_pairs.len(), 1);
+    }
+
+    #[test]
+    fn preflight_continues_batch_with_valid_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let valid_path = temp.path().to_string_lossy().to_string();
+
+        let parsed_entries = vec![
+            ParsedIdentifier {
+                key: String::new(),
+                path: Some("/nonexistent/path".to_string()),
+                tag: Some("tag1".to_string()),
+            },
+            ParsedIdentifier {
+                key: String::new(),
+                path: Some(valid_path),
+                tag: Some("tag2".to_string()),
+            },
+            ParsedIdentifier {
+                key: String::new(),
+                path: Some("/another/nonexistent".to_string()),
+                tag: Some("tag3".to_string()),
+            },
+        ];
+
+        let result = run_save_preflight_checks(&parsed_entries, false).unwrap();
+        assert_eq!(result.valid_pairs.len(), 1);
+        assert_eq!(result.valid_pairs[0].tag.as_ref().unwrap(), "tag2");
     }
 }
 
@@ -236,43 +267,84 @@ pub async fn execute_batch_save(
     let mut entries_to_save = Vec::new();
     let mut reused_tags = Vec::new();
 
+    // Compute fingerprints for all candidates first
+    let mut candidate_fingerprints = Vec::new();
+    let mut fingerprint_to_candidate = std::collections::HashMap::new();
+
     for candidate in candidates {
         let fingerprint = compute_content_fingerprint(Path::new(&candidate.expanded_path))?;
+        candidate_fingerprints.push(fingerprint.clone());
+        fingerprint_to_candidate.insert(fingerprint.clone(), candidate);
+    }
 
-        let mut should_save = true;
-        if !force {
-            match cache_ops
-                .api_client
-                .check_content_identifier(&workspace, None, Some(&fingerprint))
-                .await
-            {
-                Ok(response) => {
-                    if response.exists {
-                        reporter.info(format!(
-                            "Cache hit for '{}' (fingerprint {}) — skipping upload",
-                            candidate.tag,
-                            &fingerprint[..std::cmp::min(12, fingerprint.len())]
-                        ))?;
-                        reused_tags.push(candidate.tag.clone());
-                        should_save = false;
+    if !force && !candidate_fingerprints.is_empty() {
+        // Use unified batch check for fast path cache existence check
+        match cache_ops
+            .api_client
+            .batch_check_content_fingerprints(&workspace, &candidate_fingerprints)
+            .await
+        {
+            Ok(batch_response) => {
+                // Create a set of existing fingerprints for fast lookup
+                let existing_fingerprints: std::collections::HashSet<String> = batch_response
+                    .results
+                    .iter()
+                    .filter(|result| result.exists)
+                    .map(|result| result.identifier.clone())
+                    .collect();
+
+                // Process each candidate based on batch results
+                for fingerprint in candidate_fingerprints {
+                    if let Some(candidate) = fingerprint_to_candidate.remove(&fingerprint) {
+                        if existing_fingerprints.contains(&fingerprint) {
+                            reporter.info(format!(
+                                "Cache hit for '{}' (fingerprint {}) — skipping upload",
+                                candidate.tag,
+                                &fingerprint[..std::cmp::min(12, fingerprint.len())]
+                            ))?;
+                            reused_tags.push(candidate.tag);
+                        } else {
+                            entries_to_save.push(EntryWork {
+                                tag: candidate.tag,
+                                raw_path: candidate.raw_path,
+                                expanded_path: candidate.expanded_path,
+                                fingerprint,
+                            });
+                        }
                     }
                 }
-                Err(err) => {
-                    reporter.warning(format!(
-                        "Preflight cache check failed for '{}': {} (continuing with upload)",
-                        candidate.tag, err
-                    ))?;
+            }
+            Err(err) => {
+                reporter.warning(format!(
+                    "Batch preflight cache check failed: {} (proceeding with all uploads)",
+                    err
+                ))?;
+
+                // On error, proceed with all uploads rather than individual checks
+                // This is safer and faster than doing N individual API calls
+                for fingerprint in candidate_fingerprints {
+                    if let Some(candidate) = fingerprint_to_candidate.remove(&fingerprint) {
+                        entries_to_save.push(EntryWork {
+                            tag: candidate.tag,
+                            raw_path: candidate.raw_path,
+                            expanded_path: candidate.expanded_path,
+                            fingerprint,
+                        });
+                    }
                 }
             }
         }
-
-        if should_save {
-            entries_to_save.push(EntryWork {
-                tag: candidate.tag,
-                raw_path: candidate.raw_path,
-                expanded_path: candidate.expanded_path,
-                fingerprint,
-            });
+    } else {
+        // Force mode or no candidates - add all entries to save
+        for fingerprint in candidate_fingerprints {
+            if let Some(candidate) = fingerprint_to_candidate.remove(&fingerprint) {
+                entries_to_save.push(EntryWork {
+                    tag: candidate.tag,
+                    raw_path: candidate.raw_path,
+                    expanded_path: candidate.expanded_path,
+                    fingerprint,
+                });
+            }
         }
     }
 
