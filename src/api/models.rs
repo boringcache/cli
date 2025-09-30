@@ -94,6 +94,8 @@ pub mod cache {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub content_hash: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        pub content_fingerprint: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub cache_entry_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub size: Option<u64>,

@@ -243,7 +243,7 @@ pub async fn execute_batch_save(
         if !force {
             match cache_ops
                 .api_client
-                .check_content_hash(&workspace, &fingerprint)
+                .check_content_identifier(&workspace, None, Some(&fingerprint))
                 .await
             {
                 Ok(response) => {

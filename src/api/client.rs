@@ -5,7 +5,7 @@
 use crate::config::Config;
 use crate::error::BoringCacheError;
 use crate::types::{Result, WorkspaceId};
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -306,8 +306,6 @@ impl ApiClient {
         self.parse_json_response(response).await
     }
 
-    // === Cache Operations ===
-
     pub async fn batch_check_existence(
         &self,
         workspace: &str,
@@ -327,15 +325,33 @@ impl ApiClient {
         }
     }
 
-    pub async fn check_content_hash(
+    pub async fn check_content_identifier(
         &self,
         workspace: &str,
-        content_hash: &str,
+        content_hash: Option<&str>,
+        content_fingerprint: Option<&str>,
     ) -> Result<super::models::cache::CacheCheckHashResponse> {
+        ensure!(
+            content_hash.is_some() || content_fingerprint.is_some(),
+            "content_hash or content_fingerprint must be provided"
+        );
+
         let url = self.workspace_endpoint(workspace, "caches/check")?;
-        let request_body = serde_json::json!({
-            "content_hash": content_hash
-        });
+        let mut payload = serde_json::Map::new();
+        if let Some(hash) = content_hash {
+            payload.insert(
+                "content_hash".to_string(),
+                serde_json::Value::String(hash.to_string()),
+            );
+        }
+        if let Some(fingerprint) = content_fingerprint {
+            payload.insert(
+                "content_fingerprint".to_string(),
+                serde_json::Value::String(fingerprint.to_string()),
+            );
+        }
+
+        let request_body = serde_json::Value::Object(payload);
 
         self.post(&url, &request_body).await
     }
@@ -612,6 +628,11 @@ pub mod patterns {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::Matcher;
+    use serde_json::json;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn test_url_building() {
@@ -690,5 +711,63 @@ mod tests {
         let url = reqwest::Url::parse("https://api.boringcache.com/v1/test").unwrap();
         let message = format_error_message(StatusCode::BAD_REQUEST, &url, None, "plain error body");
         assert!(message.contains("plain error body"));
+    }
+
+    #[tokio::test]
+    async fn test_check_content_identifier_with_fingerprint_only() {
+        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/workspaces/ns/ws/caches/check")
+            .match_header("authorization", "Bearer test-token")
+            .match_header("content-type", "application/json")
+            .match_body(Matcher::PartialJson(json!({
+                "content_fingerprint": "abc123def456"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"exists":true,"content_fingerprint":"abc123def456"}"#)
+            .create_async()
+            .await;
+
+        std::env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize");
+
+        let response = client
+            .check_content_identifier("ns/ws", None, Some("abc123def456"))
+            .await
+            .expect("fingerprint lookup should succeed");
+
+        assert!(response.exists);
+        assert_eq!(
+            response.content_fingerprint.as_deref(),
+            Some("abc123def456")
+        );
+        assert!(response.content_hash.is_none());
+
+        mock.assert_async().await;
+        std::env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    async fn test_check_content_identifier_requires_identifier() {
+        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        std::env::remove_var("BORINGCACHE_API_URL");
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize");
+
+        let error = client
+            .check_content_identifier("ns/ws", None, None)
+            .await
+            .expect_err("missing identifiers should error");
+
+        assert!(error
+            .to_string()
+            .contains("content_hash or content_fingerprint must be provided"));
     }
 }
