@@ -4,6 +4,7 @@
 /// and error handling patterns for API communication.
 use crate::config::Config;
 use crate::error::BoringCacheError;
+use crate::retry_resume::RetryConfig;
 use crate::types::Result;
 use anyhow::{ensure, Context};
 use log::debug;
@@ -62,7 +63,8 @@ impl ApiClient {
             }
         }
 
-        let base_url = base_url.unwrap_or_else(|| "http://localhost:3000".to_string());
+        let base_url =
+            base_url.unwrap_or_else(|| crate::config::Config::default_api_url_value().to_string());
 
         let client = Self {
             client,
@@ -173,28 +175,51 @@ impl ApiClient {
         self.parse_json_response(response).await
     }
 
-    /// Send a request with authentication headers
+    /// Send a request with authentication headers and retry logic
     pub async fn send_authenticated_request(
         &self,
-        mut request: reqwest::RequestBuilder,
+        request: reqwest::RequestBuilder,
     ) -> Result<Response> {
         let token = self
             .auth_token
             .as_ref()
             .ok_or(BoringCacheError::TokenNotFound)?;
-        request = request.header("Authorization", format!("Bearer {}", token));
 
-        match request.send().await {
-            Ok(response) => Ok(response),
-            Err(err) if err.is_connect() => Err(BoringCacheError::ConnectionError(
-                "ERROR: Cannot connect to BoringCache server. Please check:\n\
-                     • Is the API URL correct? (Check with: boringcache config)\n\
-                     • Is there a firewall blocking the connection?"
-                    .to_string(),
-            )
-            .into()),
-            Err(err) => Err(err.into()),
-        }
+        let retry_config = RetryConfig::new(false);
+        let token_clone = token.clone();
+
+        retry_config
+            .retry_with_backoff("API request", || {
+                let request = request.try_clone().expect("Request must be cloneable");
+                let token = token_clone.clone();
+                async move {
+                    let request = request.header("Authorization", format!("Bearer {}", token));
+                    match request.send().await {
+                        Ok(response) => {
+                            // Retry on transient errors
+                            if response.status() == StatusCode::TOO_MANY_REQUESTS
+                                || response.status() == StatusCode::SERVICE_UNAVAILABLE
+                                || response.status() == StatusCode::GATEWAY_TIMEOUT
+                            {
+                                anyhow::bail!("Transient error: {}", response.status());
+                            }
+                            Ok(response)
+                        }
+                        Err(err) if err.is_connect() => Err(BoringCacheError::ConnectionError(
+                            "ERROR: Cannot connect to BoringCache server. Please check:\n\
+                                 • Is the API URL correct? (Check with: boringcache config)\n\
+                                 • Is there a firewall blocking the connection?"
+                                .to_string(),
+                        )
+                        .into()),
+                        Err(err) if err.is_timeout() => {
+                            anyhow::bail!("Request timeout: {}", err)
+                        }
+                        Err(err) => Err(err.into()),
+                    }
+                }
+            })
+            .await
     }
 
     /// Parse a JSON response, handling errors appropriately
@@ -346,11 +371,8 @@ impl ApiClient {
         let endpoint = self.workspace_endpoint(workspace, "caches")?;
         let payload = Payload { cache: entry };
         debug!(
-            "save_entry workspace={} tag={} chunks={} base_endpoint={}",
-            workspace,
-            entry.tag,
-            entry.chunk_digests.len(),
-            endpoint
+            "save_entry workspace={} tag={} base_endpoint={}",
+            workspace, entry.tag, endpoint
         );
         if let Ok(body) = serde_json::to_string(&payload) {
             debug!("POST {} body={}", endpoint, body);
@@ -453,18 +475,39 @@ impl ApiClient {
         self.patch(&endpoint, &Payload { cache: request }).await
     }
 
+    pub async fn complete_multipart(
+        &self,
+        workspace: &str,
+        cache_entry_id: &str,
+        request: &super::models::cache::CompleteMultipartRequest,
+    ) -> Result<super::models::cache::CompleteMultipartResponse> {
+        let endpoint = format!(
+            "{}/{}/multipart/complete",
+            self.workspace_endpoint(workspace, "caches")?,
+            cache_entry_id
+        );
+        debug!(
+            "complete_multipart workspace={} cache_entry_id={} upload_id={} parts={}",
+            workspace,
+            cache_entry_id,
+            request.upload_id,
+            request.parts.len()
+        );
+
+        #[derive(Serialize)]
+        struct Payload<'a> {
+            multipart: &'a super::models::cache::CompleteMultipartRequest,
+        }
+
+        self.post(&endpoint, &Payload { multipart: request }).await
+    }
+
     fn map_restore_result(
         item: super::models::cache::RestoreResult,
     ) -> super::models::cache::CacheResolutionEntry {
         use crate::api::models::cache::{CacheResolutionEntry, RestoreResult};
 
         fn entry_from_result(item: RestoreResult) -> CacheResolutionEntry {
-            let chunk_digests: Vec<String> = item
-                .chunks
-                .iter()
-                .map(|chunk| chunk.digest.clone())
-                .collect();
-
             CacheResolutionEntry {
                 tag: item.tag.clone(),
                 status: item.status.clone(),
@@ -481,15 +524,7 @@ impl ApiClient {
                         .as_ref()
                         .and_then(|m| m.compression_algorithm.clone())
                 }),
-                chunk_count: item.chunk_count.or({
-                    if item.chunks.is_empty() {
-                        None
-                    } else {
-                        Some(item.chunks.len() as u32)
-                    }
-                }),
-                chunks: item.chunks.clone(),
-                chunk_digests,
+                archive_url: item.archive_url.clone(),
                 size: item.metadata.as_ref().and_then(|m| m.total_size_bytes),
                 uncompressed_size: item.metadata.as_ref().and_then(|m| m.total_size_bytes),
                 compressed_size: None,
@@ -743,6 +778,21 @@ mod tests {
     }
 
     #[test]
+    fn test_default_base_url_matches_config() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+        std::env::remove_var("BORINGCACHE_API_URL");
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize without BORINGCACHE_API_URL or config file");
+
+        assert_eq!(
+            client.base_url(),
+            crate::config::Config::default_api_url_value()
+        );
+    }
+
+    #[test]
     fn test_parse_error_payload_with_details() {
         let body = r#"{
             "success": false,
@@ -832,7 +882,6 @@ mod tests {
                 &[cache::ManifestCheckRequest {
                     tag: "abc123def456".to_string(),
                     manifest_root_digest: "blake3:abc".to_string(),
-                    chunk_digests: None,
                 }],
             )
             .await

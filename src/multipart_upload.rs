@@ -1,0 +1,185 @@
+use crate::api::models::cache::MultipartPart;
+use crate::progress::TransferProgress;
+use anyhow::{Context, Result};
+use futures_util::StreamExt;
+use reqwest::Client;
+use std::path::Path;
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::io::ReaderStream;
+
+const STREAM_CHUNK_SIZE: usize = 2 * 1024 * 1024;
+
+pub async fn upload_via_single_url(
+    archive_path: &Path,
+    upload_url: &str,
+    progress: &TransferProgress,
+    client: &Client,
+) -> Result<Option<String>> {
+    let file = File::open(archive_path)
+        .await
+        .with_context(|| format!("Failed to open archive {}", archive_path.display()))?;
+    let file_size = file.metadata().await?.len();
+
+    let reader = ReaderStream::with_capacity(file, STREAM_CHUNK_SIZE);
+    let progress_clone = progress.clone();
+    let stream = reader.map(move |chunk_result| match chunk_result {
+        Ok(chunk) => {
+            if let Err(err) = progress_clone.record_bytes(chunk.len() as u64) {
+                log::warn!("Failed to update upload progress: {err}");
+            }
+            Ok(chunk)
+        }
+        Err(err) => Err(err),
+    });
+
+    let response = client
+        .put(upload_url)
+        .header("content-type", "application/octet-stream")
+        .header("content-length", file_size.to_string())
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await
+        .context("Failed to upload archive")?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error = response.text().await.unwrap_or_default();
+        anyhow::bail!("Failed to upload archive: HTTP {} - {}", status, error);
+    }
+
+    Ok(extract_etag(&response))
+}
+
+pub async fn upload_via_part_urls(
+    archive_path: &Path,
+    part_urls: &[String],
+    progress: &TransferProgress,
+    client: &Client,
+) -> Result<Vec<MultipartPart>> {
+    anyhow::ensure!(!part_urls.is_empty(), "multipart upload URLs missing");
+
+    let file_size = tokio::fs::metadata(archive_path).await?.len();
+    let part_size = file_size.div_ceil(part_urls.len() as u64);
+
+    let mut uploaded_parts = Vec::with_capacity(part_urls.len());
+
+    for (idx, url) in part_urls.iter().enumerate() {
+        let part_number = idx + 1;
+        let offset = idx as u64 * part_size;
+        let remaining = file_size.saturating_sub(offset);
+        if remaining == 0 {
+            break;
+        }
+        let size = remaining.min(part_size);
+
+        let etag = upload_single_part(
+            archive_path,
+            url,
+            part_number,
+            offset,
+            size,
+            progress,
+            client,
+        )
+        .await
+        .with_context(|| format!("Failed to upload part {part_number}/{:?}", part_urls.len()))?;
+
+        uploaded_parts.push(MultipartPart { part_number, etag });
+    }
+
+    Ok(uploaded_parts)
+}
+
+async fn upload_single_part(
+    archive_path: &Path,
+    url: &str,
+    part_number: usize,
+    offset: u64,
+    size: u64,
+    progress: &TransferProgress,
+    client: &Client,
+) -> Result<String> {
+    log::info!(
+        "Uploading part {} offset {} ({} bytes)",
+        part_number,
+        offset,
+        size
+    );
+
+    let chunk_size = chunk_size_for_system();
+    let file = File::open(archive_path)
+        .await
+        .with_context(|| format!("Failed to open archive {}", archive_path.display()))?;
+    let mut reader = tokio::io::BufReader::with_capacity(chunk_size, file);
+    reader
+        .seek(tokio::io::SeekFrom::Start(offset))
+        .await
+        .context("Failed to seek archive for multipart upload")?;
+
+    let bytes_to_stream = size;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(4);
+    let progress_clone = progress.clone();
+
+    let send_task = tokio::spawn(async move {
+        let mut reader = reader;
+        let mut remaining = bytes_to_stream;
+        while remaining > 0 {
+            let to_read = remaining.min(chunk_size as u64) as usize;
+            let mut buffer = vec![0u8; to_read];
+            if let Err(err) = reader.read_exact(&mut buffer).await {
+                let _ = tx.send(Err(err)).await;
+                return;
+            }
+            remaining -= to_read as u64;
+            if tx.send(Ok(buffer)).await.is_err() {
+                return;
+            }
+            if let Err(err) = progress_clone.record_bytes(to_read as u64) {
+                log::warn!("Failed to update multipart progress: {err}");
+            }
+        }
+    });
+
+    let response = client
+        .put(url)
+        .header("content-type", "application/octet-stream")
+        .header("content-length", size.to_string())
+        .body(reqwest::Body::wrap_stream(ReceiverStream::new(rx)))
+        .send()
+        .await
+        .with_context(|| format!("Failed to upload part {}", part_number))?;
+
+    let _ = send_task.await;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_body = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "Failed to upload part {}: HTTP {} - {}",
+            part_number,
+            status,
+            error_body
+        );
+    }
+
+    extract_etag(&response)
+        .ok_or_else(|| anyhow::anyhow!("Upload response missing ETag for part {}", part_number))
+}
+
+fn extract_etag(response: &reqwest::Response) -> Option<String> {
+    response
+        .headers()
+        .get("etag")
+        .and_then(|header| header.to_str().ok())
+        .map(|etag| etag.trim_matches('"').to_string())
+}
+
+fn chunk_size_for_system() -> usize {
+    match crate::platform::resources::SystemResources::detect().memory_strategy {
+        crate::platform::resources::MemoryStrategy::Balanced => 2 * 1024 * 1024,
+        crate::platform::resources::MemoryStrategy::Aggressive => 4 * 1024 * 1024,
+        crate::platform::resources::MemoryStrategy::UltraAggressive => 8 * 1024 * 1024,
+    }
+}

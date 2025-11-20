@@ -5,7 +5,7 @@ mod api_contract_tests {
     /// Test that save requests send tag metadata for a single cache entry
     #[test]
     fn test_save_request_payload_structure() {
-        use boring_cache_cli::api::models::cache::{SaveChunkMetadata, SaveRequest};
+        use boring_cache_cli::api::models::cache::SaveRequest;
 
         let request = SaveRequest {
             tag: "ruby-cache".to_string(),
@@ -16,29 +16,20 @@ mod api_contract_tests {
             uncompressed_size: Some(2048),
             compressed_size: Some(1024),
             file_count: Some(5),
-            chunk_digests: vec!["blake3:def456".to_string()],
-            chunk_metadata: Some(vec![SaveChunkMetadata {
-                digest: "blake3:def456".to_string(),
-                uncompressed_size: Some(2048),
-                compressed_size: Some(1024),
-                compression_algorithm: Some("zstd".to_string()),
-                size: Some(1024),
-                file_path: None,
-                offset: Some(0),
-            }]),
             expected_manifest_digest: Some(
                 "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                     .to_string(),
             ),
             expected_manifest_size: Some(8545),
             force: None,
+            use_multipart: None,
         };
 
         let json = serde_json::to_value(&request).unwrap();
 
         assert_eq!(json["tag"].as_str().unwrap(), "ruby-cache");
         assert!(json.get("entries").is_none());
-        assert!(json["chunk_digests"].is_array());
+        assert!(json.get("chunk_digests").is_none());
     }
 
     /// Test that CLI uses entries query parameter for restore operations
@@ -106,7 +97,7 @@ mod api_contract_tests {
     /// Test contract compliance for restore response structures
     #[test]
     fn test_restore_response_structure() {
-        use boring_cache_cli::api::models::cache::{RestoreChunk, RestoreMetadata, RestoreResult};
+        use boring_cache_cli::api::models::cache::{RestoreMetadata, RestoreResult};
 
         let response = RestoreResult {
             tag: "ruby-cache".to_string(),
@@ -116,15 +107,7 @@ mod api_contract_tests {
             manifest_digest: None,
             manifest_url: Some("https://example.com/manifest".to_string()),
             compression_algorithm: Some("zstd".to_string()),
-            chunk_count: Some(1),
-            chunks: vec![RestoreChunk {
-                digest: "blake3:abc".to_string(),
-                url: "https://example.com/chunk".to_string(),
-                sequence_index: 0,
-                compression_algorithm: Some("zstd".to_string()),
-                uncompressed_size: Some(2048),
-                compressed_size: Some(1024),
-            }],
+            archive_url: Some("https://example.com/archive.tar.zst".to_string()),
             metadata: Some(RestoreMetadata {
                 manifest_root_digest: Some("blake3:abc".to_string()),
                 total_size_bytes: Some(1024),
@@ -137,7 +120,7 @@ mod api_contract_tests {
         let parsed: RestoreResult = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tag, "ruby-cache");
         assert!(parsed.manifest_url.is_some());
-        assert_eq!(parsed.chunks.len(), 1);
+        assert!(parsed.archive_url.is_some());
         assert_eq!(
             parsed.metadata.unwrap().compression_algorithm,
             Some("zstd".to_string())

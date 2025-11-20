@@ -1,7 +1,6 @@
 #![allow(clippy::items_after_test_module)]
 
 use crate::api::CacheResolutionEntry;
-use crate::chunks::store::ChunkStore;
 use crate::commands::utils::RestoreSpec;
 use crate::manifest::diff::compute_root_digest_from_entries;
 use crate::progress::{ProgressSession, Summary, System as ProgressSystem};
@@ -11,7 +10,9 @@ use std::collections::HashMap;
 use std::io::{ErrorKind, Write};
 use std::path::Path;
 use std::time::Instant;
+use tempfile::tempdir;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug)]
 struct RestorePreflightCheck {
@@ -545,7 +546,7 @@ async fn enrich_hits_with_manifest_data(
             if hit.manifest_url.is_some() {
                 return None;
             }
-            Some((idx, hit.tag.clone(), digest, hit.chunk_digests.clone()))
+            Some((idx, hit.tag.clone(), digest, vec![])) // No chunk digests in tar+zstd approach
         })
         .collect();
 
@@ -555,14 +556,9 @@ async fn enrich_hits_with_manifest_data(
 
     let manifest_checks: Vec<ManifestCheckRequest> = missing_manifest
         .iter()
-        .map(|(_, tag, digest, digests)| ManifestCheckRequest {
+        .map(|(_, tag, digest, _)| ManifestCheckRequest {
             tag: tag.clone(),
             manifest_root_digest: digest.clone(),
-            chunk_digests: if digests.is_empty() {
-                None
-            } else {
-                Some(digests.clone())
-            },
         })
         .collect();
 
@@ -594,14 +590,8 @@ async fn enrich_hits_with_manifest_data(
             if hit.manifest_url.is_none() {
                 hit.manifest_url = extra.manifest_url.clone();
             }
-            if hit.chunks.is_empty() {
-                if let Some(new_chunks) = extra.chunk_urls.clone() {
-                    hit.chunks = new_chunks;
-                    hit.chunk_digests = hit.chunks.iter().map(|c| c.digest.clone()).collect();
-                }
-            }
-            if hit.chunk_count.is_none() {
-                hit.chunk_count = extra.chunk_count;
+            if hit.archive_url.is_none() {
+                hit.archive_url = extra.archive_url.clone();
             }
             if hit.size.is_none() {
                 hit.size = extra.size;
@@ -644,10 +634,10 @@ async fn process_single_restore(
         }
     }
 
-    if hit.chunks.is_empty() {
-        anyhow::bail!("No chunk metadata in response");
+    if hit.archive_url.is_none() {
+        anyhow::bail!("No archive URL in response");
     }
-    let chunk_descriptors = hit.chunks.clone();
+    let archive_url = hit.archive_url.as_ref().unwrap().clone();
 
     let manifest_url = hit
         .manifest_url
@@ -694,24 +684,23 @@ async fn process_single_restore(
         );
     }
 
-    let total_compressed: u64 = manifest.chunks.iter().map(|m| m.compressed_size).sum();
-    let total_uncompressed: u64 = manifest.chunks.iter().map(|m| m.uncompressed_size).sum();
-    let chunk_count = manifest.chunks.len() as u32;
+    // Get archive size from the manifest summary
+    let total_uncompressed = manifest.summary.raw_size;
+    let expected_compressed = hit.size.unwrap_or(total_uncompressed);
 
     let download_detail = Some(format!(
-        "[{} chunks, {}]",
-        chunk_count,
-        crate::progress::format_bytes(total_compressed)
+        "[archive, {}]",
+        crate::progress::format_bytes(expected_compressed)
     ));
-    let download_step = session.start_step("Download chunks".to_string(), download_detail)?;
+    let download_step = session.start_step("Download archive".to_string(), download_detail)?;
     let download_step_number = download_step.step_number();
 
-    let progress = if total_compressed > 0 {
+    let progress = if expected_compressed > 0 {
         Some(crate::progress::TransferProgress::new(
             reporter.clone(),
             session_id.clone(),
             download_step_number,
-            total_compressed,
+            expected_compressed,
         ))
     } else {
         None
@@ -719,80 +708,83 @@ async fn process_single_restore(
 
     let stage_start = Instant::now();
 
-    let downloader =
-        crate::chunks::ChunkDownloader::new(client, reporter.clone(), session_id.clone());
+    // Download the archive
+    let mut response = client
+        .get(&archive_url)
+        .send()
+        .await?
+        .error_for_status()
+        .context("Archive download request failed")?;
 
-    let mut store = Some(crate::chunks::store::AnyStore::new_for(total_uncompressed).await?);
-
-    if let Err(e) = downloader
-        .download_chunks(
-            &manifest,
-            store.as_ref().unwrap(),
-            &chunk_descriptors,
-            download_step_number,
-            progress,
-            _verbose,
-        )
+    let temp_dir = tempdir().context("Failed to create temporary directory for restore")?;
+    let archive_file_path = temp_dir
+        .path()
+        .join(format!("boringcache-{}.tar.zst", hit.tag));
+    let mut archive_file = tokio::fs::File::create(&archive_file_path)
         .await
-    {
-        session.error(e.to_string())?;
-        if let Some(store) = store.take() {
-            let _ = Box::new(store).finalize().await;
+        .context("Failed to create temporary archive file")?;
+    let mut bytes_downloaded = 0u64;
+
+    while let Some(chunk) = response.chunk().await? {
+        archive_file
+            .write_all(&chunk)
+            .await
+            .context("Failed to write archive to disk")?;
+        bytes_downloaded += chunk.len() as u64;
+
+        if let Some(ref progress) = progress {
+            progress.record_bytes(chunk.len() as u64)?;
         }
-        return Err(e);
     }
+    archive_file
+        .flush()
+        .await
+        .context("Failed to flush archive to disk")?;
 
     let download_elapsed = stage_start.elapsed();
     download_step.complete()?;
 
     let extract_step = session.start_step(
-        "Extract files".to_string(),
+        "Extract archive".to_string(),
         Some(format!("{} files", manifest.files.len())),
     )?;
     let extract_start = Instant::now();
 
-    let reassemble_result = downloader
-        .reassemble_and_verify(
-            &manifest,
-            store.as_ref().unwrap(),
-            Path::new(&target_path),
-            hit.content_hash.as_deref(),
-            _verbose,
-        )
-        .await;
+    // Extract the tar archive
+    let extraction_result =
+        crate::archive::extract_tar_archive(&archive_file_path, Path::new(&target_path), _verbose)
+            .await;
 
-    match reassemble_result {
+    match extraction_result {
         Ok(()) => {
             extract_step.complete()?;
-            if let Some(store) = store.take() {
-                Box::new(store).finalize().await?;
-            }
-
-            // Integrity verification: generic verification is already covered by manifest digest
-            // and per-chunk hash checks in reassemble_and_verify().
+            drop(temp_dir);
 
             let total_duration = download_elapsed + extract_start.elapsed();
             let total_secs = total_duration.as_secs_f64().max(0.001);
-            let avg_speed = (total_compressed as f64 / 1_000_000.0) / total_secs;
-            let compression_pct = if total_uncompressed > 0 {
-                (total_compressed as f64 / total_uncompressed as f64) * 100.0
+            let avg_speed = if bytes_downloaded > 0 {
+                (bytes_downloaded as f64 / 1_000_000.0) / total_secs
+            } else {
+                0.0
+            };
+            let compression_pct = if total_uncompressed > 0 && bytes_downloaded > 0 {
+                (bytes_downloaded as f64 / total_uncompressed as f64) * 100.0
             } else {
                 100.0
             };
 
             let summary_line = format!(
-                "Restored {} → {} ({:.0}% of original) in {:.1}s across {} chunks @ {:.1} MB/s",
+                "Restored {} → {} ({:.0}% of original) in {:.1}s @ {:.1} MB/s",
                 crate::progress::format_bytes(total_uncompressed),
-                crate::progress::format_bytes(total_compressed),
+                crate::progress::format_bytes(bytes_downloaded),
                 compression_pct,
                 total_secs,
-                chunk_count,
                 avg_speed,
             );
             let _ = reporter.info(summary_line);
 
             let summary = Summary {
-                size_bytes: hit.size.unwrap_or(total_uncompressed),
+                size_bytes: bytes_downloaded,
                 file_count: manifest.files.len() as u32,
                 digest: hit.content_hash.clone(),
                 path: Some(target_path),
@@ -805,9 +797,6 @@ async fn process_single_restore(
         }
         Err(e) => {
             session.error(e.to_string())?;
-            if let Some(store) = store.take() {
-                let _ = Box::new(store).finalize().await;
-            }
             Err(e)
         }
     }

@@ -36,11 +36,9 @@ pub struct SystemMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
     pub buffer_size_mb: u32,
-    pub chunk_size_mb: u32,
     pub part_size_mb: u32,
     pub concurrency_level: u32,
     pub streaming_enabled: bool,
-    pub parallel_extraction: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,11 +117,9 @@ struct TimingData {
 #[derive(Default)]
 struct PerformanceData {
     buffer_size_mb: u32,
-    chunk_size_mb: u32,
     part_size_mb: u32,
     concurrency_level: u32,
     streaming_enabled: bool,
-    parallel_extraction: bool,
 }
 
 #[derive(Default)]
@@ -168,23 +164,6 @@ impl TelemetryCollector {
             network_data: NetworkData::default(),
             size_data: SizeData::default(),
         }
-    }
-
-    pub fn set_performance_settings(
-        &mut self,
-        buffer_mb: u32,
-        chunk_mb: u32,
-        part_mb: u32,
-        concurrency: u32,
-        streaming: bool,
-        parallel_extract: bool,
-    ) {
-        self.performance_data.buffer_size_mb = buffer_mb;
-        self.performance_data.chunk_size_mb = chunk_mb;
-        self.performance_data.part_size_mb = part_mb;
-        self.performance_data.concurrency_level = concurrency;
-        self.performance_data.streaming_enabled = streaming;
-        self.performance_data.parallel_extraction = parallel_extract;
     }
 
     pub fn set_compression_settings(&mut self, algorithm: String, level: u32, threads: u32) {
@@ -305,11 +284,9 @@ impl TelemetryCollector {
 
             performance_metrics: PerformanceMetrics {
                 buffer_size_mb: self.performance_data.buffer_size_mb,
-                chunk_size_mb: self.performance_data.chunk_size_mb,
                 part_size_mb: self.performance_data.part_size_mb,
                 concurrency_level: self.performance_data.concurrency_level,
                 streaming_enabled: self.performance_data.streaming_enabled,
-                parallel_extraction: self.performance_data.parallel_extraction,
             },
 
             compression_metrics: CompressionMetrics {
@@ -425,11 +402,9 @@ impl TelemetryCollector {
             concurrent_operations: Some(telemetry.system_metrics.concurrent_operations),
 
             buffer_size_mb: Some(telemetry.performance_metrics.buffer_size_mb),
-            chunk_size_mb: Some(telemetry.performance_metrics.chunk_size_mb),
             part_size_mb: Some(telemetry.performance_metrics.part_size_mb),
             concurrency_level: Some(telemetry.performance_metrics.concurrency_level),
             streaming_enabled: Some(telemetry.performance_metrics.streaming_enabled),
-            parallel_extraction: Some(telemetry.performance_metrics.parallel_extraction),
 
             compression_algorithm: Some(telemetry.compression_metrics.algorithm.clone()),
             compression_level: Some(telemetry.compression_metrics.level),

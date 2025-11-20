@@ -1,9 +1,6 @@
 use crate::config::Config;
-use crate::progress::{format_bytes, Reporter};
 use crate::ui;
 use anyhow::Result;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
 use thiserror::Error;
 
 pub fn expand_tilde_path(path: &str) -> String {
@@ -167,105 +164,6 @@ pub fn display_concurrency_info(max_concurrent: usize, operation_type: &str) {
     ));
 }
 
-/// Generic progress tracker for transfers (upload/download)
-pub struct TransferProgress {
-    reporter: Reporter,
-    session_id: String,
-    step: u8,
-    total_bytes: u64,
-    start: Instant,
-    transferred_bytes: AtomicU64,
-}
-
-impl TransferProgress {
-    pub fn new(reporter: Reporter, session_id: String, step: u8, total_bytes: u64) -> Self {
-        Self {
-            reporter,
-            session_id,
-            step,
-            total_bytes,
-            start: Instant::now(),
-            transferred_bytes: AtomicU64::new(0),
-        }
-    }
-
-    pub fn update(&self, bytes: u64) {
-        let transferred = bytes.min(self.total_bytes);
-        self.transferred_bytes.store(transferred, Ordering::Relaxed);
-        self.emit_progress(transferred);
-    }
-
-    pub fn add(&self, bytes: u64) {
-        let previous = self.transferred_bytes.fetch_add(bytes, Ordering::Relaxed);
-        let transferred = (previous + bytes).min(self.total_bytes);
-        self.emit_progress(transferred);
-    }
-
-    pub fn elapsed(&self) -> Duration {
-        self.start.elapsed()
-    }
-
-    pub fn speed_mbps(&self) -> f64 {
-        let bytes = self.transferred_bytes.load(Ordering::Relaxed);
-        let elapsed = self.start.elapsed().as_secs_f64().max(0.001);
-        calculate_speed_mbps(bytes, Duration::from_secs_f64(elapsed))
-    }
-
-    fn emit_progress(&self, transferred_bytes: u64) {
-        let percent = calculate_percent(transferred_bytes, self.total_bytes);
-        let speed_mbps = self.speed_mbps();
-
-        let detail = format!(
-            "[{}/{}] {:.0}% @ {:.1} MB/s",
-            format_bytes(transferred_bytes),
-            format_bytes(self.total_bytes),
-            percent,
-            speed_mbps
-        );
-
-        let _ =
-            self.reporter
-                .step_progress(self.session_id.clone(), self.step, percent, Some(detail));
-    }
-}
-
-/// Calculate percentage with bounds checking
-pub fn calculate_percent(current: u64, total: u64) -> f64 {
-    if total == 0 {
-        0.0
-    } else {
-        ((current as f64 / total as f64) * 100.0).clamp(0.0, 100.0)
-    }
-}
-
-/// Format duration in human-readable format
-pub fn format_duration(duration: Duration) -> String {
-    let total_secs = duration.as_secs();
-    let millis = duration.subsec_millis();
-
-    if total_secs == 0 {
-        format!("{}ms", millis)
-    } else if total_secs < 60 {
-        format!("{}.{}s", total_secs, millis / 100)
-    } else {
-        let mins = total_secs / 60;
-        let secs = total_secs % 60;
-        format!("{}m {}s", mins, secs)
-    }
-}
-
-/// Calculate transfer speed in MB/s using platform disk speed estimates
-pub fn calculate_speed_mbps(bytes: u64, duration: Duration) -> f64 {
-    let secs = duration.as_secs_f64().max(0.001);
-    let calculated_speed = (bytes as f64 / (1024.0 * 1024.0)) / secs;
-
-    // Use platform disk speed estimate as upper bound for realistic reporting
-    let platform_resources = crate::platform::SystemResources::detect();
-    let disk_speed_limit = platform_resources.disk_speed_estimate_mb_s;
-
-    calculated_speed.min(disk_speed_limit)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,12 +229,5 @@ mod tests {
     fn get_optimal_concurrency_respects_operation_count() {
         assert_eq!(get_optimal_concurrency(1, "save"), 1);
         assert!(get_optimal_concurrency(8, "restore") >= 2);
-    }
-
-    #[test]
-    fn calculate_percent_clamps_between_zero_and_hundred() {
-        assert_eq!(calculate_percent(0, 0), 0.0);
-        assert_eq!(calculate_percent(50, 100), 50.0);
-        assert_eq!(calculate_percent(200, 100), 100.0);
     }
 }
