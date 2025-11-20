@@ -2,6 +2,7 @@
 ///
 /// This module provides reusable utilities, result handling patterns,
 /// and common operations to reduce code duplication across the codebase.
+use anyhow::Context;
 use crate::types::Result;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -230,6 +231,108 @@ impl ValidationUtils {
 
         Ok(())
     }
+}
+
+pub struct DiskSpaceUtils;
+
+impl DiskSpaceUtils {
+    pub fn get_available_space<P: AsRef<Path>>(path: P) -> Result<u64> {
+        get_available_disk_space_impl(path.as_ref())
+    }
+
+    pub fn check_sufficient_space<P: AsRef<Path>>(
+        path: P,
+        required_bytes: u64,
+        buffer_factor: f64,
+    ) -> Result<()> {
+        let path = path.as_ref();
+        let available = Self::get_available_space(path)?;
+        let required_with_buffer = (required_bytes as f64 * buffer_factor) as u64;
+
+        if available < required_with_buffer {
+            anyhow::bail!(
+                "Insufficient disk space at {}: {} available, {} required ({}x buffer)",
+                path.display(),
+                format_bytes_human(available),
+                format_bytes_human(required_with_buffer),
+                buffer_factor
+            );
+        }
+
+        Ok(())
+    }
+}
+
+fn format_bytes_human(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    const TB: u64 = GB * 1024;
+
+    if bytes >= TB {
+        format!("{:.2} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+#[cfg(unix)]
+fn get_available_disk_space_impl(path: &Path) -> Result<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .context("Invalid path for disk space check")?;
+
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+
+    if result == 0 {
+        let available_bytes = stat.f_bavail as u64 * stat.f_frsize as u64;
+        Ok(available_bytes)
+    } else {
+        anyhow::bail!("Failed to get disk space for {}", path.display())
+    }
+}
+
+#[cfg(windows)]
+fn get_available_disk_space_impl(path: &Path) -> Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::fileapi::GetDiskFreeSpaceExW;
+
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut free_bytes_available: u64 = 0;
+
+    let result = unsafe {
+        GetDiskFreeSpaceExW(
+            wide_path.as_ptr(),
+            &mut free_bytes_available as *mut u64 as *mut _,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+
+    if result != 0 {
+        Ok(free_bytes_available)
+    } else {
+        anyhow::bail!("Failed to get disk space for {}", path.display())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn get_available_disk_space_impl(_path: &Path) -> Result<u64> {
+    Ok(u64::MAX)
 }
 
 #[cfg(test)]

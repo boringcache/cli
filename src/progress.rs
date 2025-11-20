@@ -2,49 +2,6 @@ pub mod common;
 
 pub use common::{ProgressFormat, ProgressSession, StepHandle, TransferProgress};
 
-pub struct UploadProgress {
-    pub parts_completed: u32,
-    pub total_parts: u32,
-    pub bytes_uploaded: u64,
-    pub total_bytes: u64,
-    pub speed_mbps: f64,
-}
-
-impl UploadProgress {
-    pub fn new(total_parts: u32, total_bytes: u64) -> Self {
-        Self {
-            parts_completed: 0,
-            total_parts,
-            bytes_uploaded: 0,
-            total_bytes,
-            speed_mbps: 0.0,
-        }
-    }
-
-    pub fn update(&mut self, parts_completed: u32, bytes_uploaded: u64, speed_mbps: f64) {
-        self.parts_completed = parts_completed;
-        self.bytes_uploaded = bytes_uploaded;
-        self.speed_mbps = speed_mbps;
-    }
-
-    pub fn to_detail_string(&self) -> String {
-        use humansize::{format_size, DECIMAL};
-        let percent = if self.total_bytes > 0 {
-            (self.bytes_uploaded as f64 / self.total_bytes as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        format!(
-            "[{} parts, {}] {:.0}% @ {:.0} MB/s",
-            self.total_parts,
-            format_size(self.total_bytes, DECIMAL),
-            percent,
-            self.speed_mbps
-        )
-    }
-}
-
 use anyhow::{self, Result};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use humansize::{format_size, DECIMAL};
@@ -585,11 +542,23 @@ impl System {
         }
     }
 
+    /// Get a clone of the progress reporter.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called after shutdown. Always call this immediately after new() and before shutdown().
     pub fn reporter(&self) -> Reporter {
         self.reporter
             .as_ref()
-            .expect("progress reporter missing")
+            .expect("progress reporter accessed after shutdown - this is a programming error")
             .clone()
+    }
+
+    /// Try to get a clone of the progress reporter.
+    ///
+    /// Returns None if shutdown has already been called.
+    pub fn try_reporter(&self) -> Option<Reporter> {
+        self.reporter.as_ref().cloned()
     }
 
     pub fn shutdown(mut self) -> Result<()> {
@@ -653,16 +622,6 @@ pub fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use std::time::Duration;
-
-    #[test]
-    fn test_upload_progress() {
-        let mut progress = UploadProgress::new(4, 1024 * 1024);
-        progress.update(2, 512 * 1024, 50.0);
-
-        let detail = progress.to_detail_string();
-        assert!(detail.contains("4 parts"));
-        assert!(detail.contains("50% @ 50 MB/s"));
-    }
 
     #[test]
     fn test_format_number() {

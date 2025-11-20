@@ -1,6 +1,6 @@
 pub mod api;
+pub mod archive;
 pub mod auth;
-pub mod chunks;
 pub mod ci_detection;
 pub mod cli;
 pub mod commands;
@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub mod http_client;
 pub mod manifest;
+pub mod multipart_upload;
 pub mod platform;
 pub mod progress;
 pub mod retry_resume;

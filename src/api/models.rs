@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 /// Cache operation models
 pub mod cache {
     use super::*;
-    use std::collections::HashMap;
 
     #[derive(Debug, Serialize, Clone)]
     pub struct SaveRequest {
@@ -19,32 +18,14 @@ pub mod cache {
         pub compressed_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub file_count: Option<u32>,
-        pub chunk_digests: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub chunk_metadata: Option<Vec<SaveChunkMetadata>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub expected_manifest_digest: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub expected_manifest_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub force: Option<bool>,
-    }
-
-    #[derive(Debug, Serialize, Clone)]
-    pub struct SaveChunkMetadata {
-        pub digest: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub uncompressed_size: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub compressed_size: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub compression_algorithm: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub size: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub file_path: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub offset: Option<u64>,
+        pub use_multipart: Option<bool>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -55,10 +36,12 @@ pub mod cache {
         pub manifest_root_digest: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub manifest_upload_url: Option<String>,
-        #[serde(default)]
-        pub missing_chunk_digests: Vec<String>,
-        #[serde(default)]
-        pub chunk_upload_urls: HashMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub archive_upload_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub archive_urls: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub multipart_upload_id: Option<String>,
         #[serde(default)]
         pub exists: bool,
         #[serde(default)]
@@ -89,8 +72,6 @@ pub mod cache {
         #[serde(default)]
         pub file_count: Option<u32>,
         pub compression_algorithm: String,
-        #[serde(default)]
-        pub chunk_count: Option<u32>,
         pub created_at: String,
         #[serde(default)]
         pub uploaded_at: Option<String>,
@@ -98,33 +79,37 @@ pub mod cache {
 
     #[derive(Debug, Serialize)]
     pub struct ConfirmRequest {
-        pub chunk_count: u32,
-        pub size: u64,
+        pub manifest_digest: String,
+        pub manifest_size: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub uncompressed_size: Option<u64>,
+        pub manifest_etag: Option<String>,
+        pub archive_digest: String,
+        pub archive_size: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub compressed_size: Option<u64>,
+        pub archive_etag: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub file_count: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub manifest_size: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub manifest_digest: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub manifest_etag: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize, Serialize, Clone)]
-    pub struct RestoreChunk {
-        pub digest: String,
-        pub url: String,
-        pub sequence_index: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub compression_algorithm: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         pub uncompressed_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub compressed_size: Option<u64>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct CompleteMultipartRequest {
+        pub upload_id: String,
+        pub parts: Vec<MultipartPart>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct MultipartPart {
+        pub part_number: usize,
+        pub etag: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct CompleteMultipartResponse {
+        pub archive_etag: String,
     }
 
     #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -154,9 +139,7 @@ pub mod cache {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub compression_algorithm: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub chunk_count: Option<u32>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        pub chunks: Vec<RestoreChunk>,
+        pub archive_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub metadata: Option<RestoreMetadata>,
     }
@@ -195,8 +178,6 @@ pub mod cache {
     pub struct ManifestCheckRequest {
         pub tag: String,
         pub manifest_root_digest: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub chunk_digests: Option<Vec<String>>,
     }
 
     #[derive(Debug, Serialize)]
@@ -221,9 +202,7 @@ pub mod cache {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub compression_algorithm: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub chunk_count: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub chunk_urls: Option<Vec<RestoreChunk>>,
+        pub archive_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -232,8 +211,6 @@ pub mod cache {
         pub compressed_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub uploaded_at: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub missing_chunk_digests: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub status: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -254,9 +231,7 @@ pub mod cache {
         pub manifest_root_digest: Option<String>,
         pub manifest_digest: Option<String>,
         pub compression_algorithm: Option<String>,
-        pub chunk_count: Option<u32>,
-        pub chunks: Vec<RestoreChunk>,
-        pub chunk_digests: Vec<String>,
+        pub archive_url: Option<String>,
         pub size: Option<u64>,
         pub uncompressed_size: Option<u64>,
         pub compressed_size: Option<u64>,
@@ -422,15 +397,11 @@ pub mod metrics {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub buffer_size_mb: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        pub chunk_size_mb: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         pub part_size_mb: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub concurrency_level: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub streaming_enabled: Option<bool>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub parallel_extraction: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub compression_level: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -517,6 +488,5 @@ mod tests {
         let result: cache::RestoreResult =
             serde_json::from_str(json).expect("Should deserialize cache restore hit");
         assert_eq!(result.status, "hit");
-        assert_eq!(result.chunks.len(), 1);
     }
 }

@@ -1,7 +1,9 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use super::model::EntryType;
@@ -32,19 +34,13 @@ impl<'a> ManifestBuilder<'a> {
     }
 
     pub fn build(&self) -> Result<ManifestDraft> {
-        let mut descriptors = Vec::new();
-        let mut raw_size = 0u64;
-
-        // Handle single file case
         let root_metadata = fs::symlink_metadata(self.root)
             .with_context(|| format!("Failed to inspect {}", self.root.display()))?;
 
         if root_metadata.is_file() {
-            // Root is a single file, not a directory
             let size = root_metadata.len();
             let mode = file_mode(&root_metadata, EntryType::File);
 
-            // Use filename as the relative path
             let filename = self
                 .root
                 .file_name()
@@ -52,23 +48,21 @@ impl<'a> ManifestBuilder<'a> {
                 .to_string_lossy()
                 .to_string();
 
-            descriptors.push(FileDescriptor {
-                path: filename,
-                entry_type: EntryType::File,
-                size,
-                mode,
-                target: None,
-            });
-
             return Ok(ManifestDraft {
-                descriptors,
+                descriptors: vec![FileDescriptor {
+                    path: filename,
+                    entry_type: EntryType::File,
+                    size,
+                    mode,
+                    target: None,
+                }],
                 raw_size: size,
                 entry_count: 1,
             });
         }
 
-        // Root is a directory, walk it
-        for entry in WalkDir::new(self.root)
+        let root = self.root;
+        let paths: Vec<PathBuf> = WalkDir::new(root)
             .follow_links(false)
             .into_iter()
             .filter_entry(|dir_entry| {
@@ -76,7 +70,7 @@ impl<'a> ManifestBuilder<'a> {
                     return true;
                 }
 
-                let rel = match dir_entry.path().strip_prefix(self.root) {
+                let rel = match dir_entry.path().strip_prefix(root) {
                     Ok(path) => path,
                     Err(_) => return false,
                 };
@@ -84,73 +78,87 @@ impl<'a> ManifestBuilder<'a> {
                 let rel_str = normalize_manifest_path(rel);
                 !should_skip_for_manifest(&rel_str)
             })
-        {
-            let dir_entry = entry.context("Failed to walk directory while building manifest")?;
-            if dir_entry.depth() == 0 {
-                continue;
-            }
+            .filter_map(|entry| {
+                let dir_entry = entry.ok()?;
+                if dir_entry.depth() == 0 {
+                    return None;
+                }
 
-            let absolute_path = dir_entry.path();
-            let relative = absolute_path
-                .strip_prefix(self.root)
-                .context("Failed to compute relative path for manifest entry")?;
+                let absolute_path = dir_entry.path();
+                let relative = absolute_path.strip_prefix(root).ok()?;
 
-            if relative.as_os_str().is_empty() {
-                continue;
-            }
+                if relative.as_os_str().is_empty() {
+                    return None;
+                }
 
-            let relative_path = normalize_manifest_path(relative);
-            if should_skip_for_manifest(&relative_path) {
-                continue;
-            }
+                let relative_path = normalize_manifest_path(relative);
+                if should_skip_for_manifest(&relative_path) {
+                    return None;
+                }
 
-            let metadata = fs::symlink_metadata(absolute_path).with_context(|| {
-                format!("Failed to inspect metadata for {}", absolute_path.display())
-            })?;
+                Some(absolute_path.to_path_buf())
+            })
+            .collect();
 
-            let entry_type = if metadata.file_type().is_dir() {
-                EntryType::Dir
-            } else if metadata.file_type().is_symlink() {
-                EntryType::Symlink
-            } else {
-                EntryType::File
-            };
+        let raw_size = AtomicU64::new(0);
 
-            let size = if entry_type == EntryType::File {
-                metadata.len()
-            } else {
-                0
-            };
+        let descriptors: Result<Vec<FileDescriptor>> = paths
+            .par_iter()
+            .map(|absolute_path| {
+                let relative = absolute_path
+                    .strip_prefix(root)
+                    .context("Failed to compute relative path for manifest entry")?;
 
-            let mode = file_mode(&metadata, entry_type);
-            let target = if entry_type == EntryType::Symlink {
-                let link_target = fs::read_link(absolute_path).with_context(|| {
-                    format!(
-                        "Failed to read symlink target for {}",
-                        absolute_path.display()
-                    )
+                let relative_path = normalize_manifest_path(relative);
+
+                let metadata = fs::symlink_metadata(absolute_path).with_context(|| {
+                    format!("Failed to inspect metadata for {}", absolute_path.display())
                 })?;
-                Some(link_target.to_string_lossy().to_string())
-            } else {
-                None
-            };
 
-            if entry_type == EntryType::File {
-                raw_size = raw_size.saturating_add(size);
-            }
+                let entry_type = if metadata.file_type().is_dir() {
+                    EntryType::Dir
+                } else if metadata.file_type().is_symlink() {
+                    EntryType::Symlink
+                } else {
+                    EntryType::File
+                };
 
-            descriptors.push(FileDescriptor {
-                path: relative_path,
-                entry_type,
-                size,
-                mode,
-                target,
-            });
-        }
+                let size = if entry_type == EntryType::File {
+                    let len = metadata.len();
+                    raw_size.fetch_add(len, Ordering::Relaxed);
+                    len
+                } else {
+                    0
+                };
 
+                let mode = file_mode(&metadata, entry_type);
+                let target = if entry_type == EntryType::Symlink {
+                    let link_target = fs::read_link(absolute_path).with_context(|| {
+                        format!(
+                            "Failed to read symlink target for {}",
+                            absolute_path.display()
+                        )
+                    })?;
+                    Some(link_target.to_string_lossy().to_string())
+                } else {
+                    None
+                };
+
+                Ok(FileDescriptor {
+                    path: relative_path,
+                    entry_type,
+                    size,
+                    mode,
+                    target,
+                })
+            })
+            .collect();
+
+        let mut descriptors = descriptors?;
         descriptors.sort_by(|a, b| a.path.cmp(&b.path));
 
         let entry_count = descriptors.len() as u64;
+        let raw_size = raw_size.load(Ordering::Relaxed);
 
         Ok(ManifestDraft {
             descriptors,

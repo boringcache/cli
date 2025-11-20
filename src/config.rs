@@ -10,7 +10,7 @@ use crate::error::BoringCacheError;
 
 const CONFIG_DIR_NAME: &str = ".boringcache";
 const CONFIG_FILE_NAME: &str = "config.json";
-const DEFAULT_API_URL: &str = "https://api.boringcache.com/v1";
+pub const DEFAULT_API_URL: &str = "https://api.boringcache.com/v1";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -26,6 +26,9 @@ fn default_api_url() -> String {
 }
 
 impl Config {
+    pub fn default_api_url_value() -> &'static str {
+        DEFAULT_API_URL
+    }
     pub fn load() -> Result<Self> {
         if let Ok(env_token) = std::env::var("BORINGCACHE_API_TOKEN") {
             let api_url = std::env::var("BORINGCACHE_API_URL")

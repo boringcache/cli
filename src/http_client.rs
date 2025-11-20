@@ -1,8 +1,8 @@
+use anyhow::{Context, Result};
 use reqwest::{header::HeaderMap, Client};
 use std::time::Duration;
 
-/// Build HTTP client for API requests with normal timeout
-pub fn build_api_client_with_headers(headers: Option<HeaderMap>) -> Client {
+pub fn build_api_client_with_headers(headers: Option<HeaderMap>) -> Result<Client> {
     let is_test_mode = std::env::var("BORINGCACHE_TEST_MODE")
         .map(|value| value == "1")
         .unwrap_or(false);
@@ -28,11 +28,10 @@ pub fn build_api_client_with_headers(headers: Option<HeaderMap>) -> Client {
         builder = builder.default_headers(headers);
     }
 
-    builder.build().expect("Failed to build reqwest client")
+    builder.build().context("Failed to build HTTP client")
 }
 
-/// Build a tuned HTTP client for uploads/downloads with optional custom headers
-pub fn build_transfer_client_with_headers(headers: Option<HeaderMap>) -> Client {
+pub fn build_transfer_client_with_headers(headers: Option<HeaderMap>) -> Result<Client> {
     let is_test_mode = std::env::var("BORINGCACHE_TEST_MODE")
         .map(|value| value == "1")
         .unwrap_or(false);
@@ -58,15 +57,13 @@ pub fn build_transfer_client_with_headers(headers: Option<HeaderMap>) -> Client 
         builder = builder.default_headers(headers);
     }
 
-    builder.build().expect("Failed to build reqwest client")
+    builder.build().context("Failed to build transfer HTTP client")
 }
 
-/// Build HTTP client for API requests
-pub fn build_api_client() -> Client {
+pub fn build_api_client() -> Result<Client> {
     build_api_client_with_headers(None)
 }
 
-/// Build a tuned HTTP client for uploads/downloads
-pub fn build_transfer_client() -> Client {
+pub fn build_transfer_client() -> Result<Client> {
     build_transfer_client_with_headers(None)
 }

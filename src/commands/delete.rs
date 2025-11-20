@@ -45,30 +45,29 @@ pub async fn execute(
         Ok(mut results) => {
             reporter.step_complete(session_id.clone(), 2, step_start.elapsed())?;
 
-            let summary = Summary {
-                size_bytes: 0,
-                file_count: 1,
-                digest: None,
-                path: None,
-            };
-
-            reporter.session_complete(session_id, session_start.elapsed(), summary)?;
-
-            drop(reporter);
-            progress_system.shutdown()?;
-
             let response = results
                 .drain(..)
                 .find(|item| item.tag == platform_tag)
-                .unwrap_or_else(|| crate::api::models::cache::TagDeleteResponse {
-                    tag: platform_tag.clone(),
-                    cache_entry_id: None,
-                    status: "missing".to_string(),
-                    error: Some("Tag not found".to_string()),
-                });
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Server did not return a response for tag '{}'. This is unexpected.",
+                        platform_tag
+                    )
+                })?;
 
             match response.status.as_str() {
                 "deleted" => {
+                    let summary = Summary {
+                        size_bytes: 0,
+                        file_count: 1,
+                        digest: None,
+                        path: None,
+                    };
+
+                    reporter.session_complete(session_id, session_start.elapsed(), summary)?;
+                    drop(reporter);
+                    progress_system.shutdown()?;
+
                     if verbose {
                         ui::info("Background cleanup scheduled for storage objects");
                     } else {
@@ -77,6 +76,9 @@ pub async fn execute(
                     Ok(())
                 }
                 "missing" => {
+                    drop(reporter);
+                    progress_system.shutdown()?;
+
                     ui::warn(&format!("No cache entry found for tag: {}", platform_tag));
                     if verbose {
                         if let Some(error) = response.error {
@@ -86,6 +88,9 @@ pub async fn execute(
                     Ok(())
                 }
                 _ => {
+                    drop(reporter);
+                    progress_system.shutdown()?;
+
                     let message = response
                         .error
                         .unwrap_or_else(|| "Unknown error while deleting cache".to_string());

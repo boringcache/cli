@@ -57,10 +57,8 @@ impl<'a> ManifestDiffer<'a> {
                 size: descriptor.size,
                 mode: descriptor.mode,
                 hash: None,
-                spans: None,
                 target: descriptor.target,
                 state: EntryState::Present,
-                storage: None,
             });
         }
 
@@ -72,10 +70,8 @@ impl<'a> ManifestDiffer<'a> {
                 size: 0,
                 mode: previous_entry.mode,
                 hash: None,
-                spans: None,
                 target: previous_entry.target,
                 state: EntryState::Removed,
-                storage: None,
             });
         }
 
@@ -99,8 +95,6 @@ impl<'a> ManifestDiffer<'a> {
             entry: None,
             archive: None,
             files: entries,
-            chunks: vec![],
-            packs: vec![],
         };
 
         Ok(DiffOutcome {
@@ -130,10 +124,8 @@ pub fn compute_digest_from_draft(draft: &ManifestDraft) -> String {
             size: desc.size,
             mode: desc.mode,
             hash: None,
-            spans: None,
             target: desc.target.clone(),
             state: EntryState::Present,
-            storage: None,
         })
         .collect();
 

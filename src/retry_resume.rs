@@ -160,7 +160,7 @@ impl ResumeInfo {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadResumeInfo {
     pub file_path: PathBuf,
     pub upload_id: String,
