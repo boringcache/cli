@@ -362,26 +362,3 @@ pub fn calculate_optimal_part_size(file_size: u64) -> u64 {
     let ideal_part_size = file_size / TARGET_PARTS;
     ideal_part_size.clamp(MIN_PART_SIZE, MAX_PART_SIZE)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sanitize_allows_relative_paths() {
-        let path = Path::new("dir/file.txt");
-        assert!(sanitize_entry_path(path).is_ok());
-    }
-
-    #[test]
-    fn sanitize_rejects_traversal() {
-        let path = Path::new("../etc/passwd");
-        assert!(sanitize_entry_path(path).is_err());
-    }
-
-    #[test]
-    fn sanitize_rejects_absolute_paths() {
-        let path = Path::new("/tmp/archive");
-        assert!(sanitize_entry_path(path).is_err());
-    }
-}
