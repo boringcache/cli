@@ -294,6 +294,7 @@ fn get_available_disk_space_impl(path: &Path) -> Result<u64> {
     let result = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
 
     if result == 0 {
+        #[allow(clippy::unnecessary_cast)]
         let available_bytes = stat.f_bavail as u64 * stat.f_frsize as u64;
         Ok(available_bytes)
     } else {
