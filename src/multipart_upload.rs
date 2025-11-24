@@ -112,9 +112,7 @@ pub async fn upload_via_part_urls(
 
     let mut uploaded_parts = Vec::with_capacity(tasks.len());
     for task in tasks {
-        let part = task
-            .await
-            .context("Upload task panicked")??;
+        let part = task.await.context("Upload task panicked")??;
         uploaded_parts.push(part);
     }
 

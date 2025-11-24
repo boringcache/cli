@@ -1,9 +1,9 @@
+use crate::types::Result;
 /// Utility functions and common patterns for BoringCache CLI
 ///
 /// This module provides reusable utilities, result handling patterns,
 /// and common operations to reduce code duplication across the codebase.
 use anyhow::Context;
-use crate::types::Result;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -287,8 +287,8 @@ fn get_available_disk_space_impl(path: &Path) -> Result<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .context("Invalid path for disk space check")?;
+    let c_path =
+        CString::new(path.as_os_str().as_bytes()).context("Invalid path for disk space check")?;
 
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
     let result = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };

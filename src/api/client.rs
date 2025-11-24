@@ -49,7 +49,8 @@ impl ApiClient {
         );
 
         let client = crate::http_client::build_api_client_with_headers(Some(headers.clone()))?;
-        let transfer_client = crate::http_client::build_transfer_client_with_headers(Some(headers))?;
+        let transfer_client =
+            crate::http_client::build_transfer_client_with_headers(Some(headers))?;
 
         let mut auth_token = token_override;
         let mut base_url = std::env::var("BORINGCACHE_API_URL").ok();

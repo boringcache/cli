@@ -294,7 +294,12 @@ pub async fn extract_tar_archive(
 
     tokio::fs::create_dir_all(&target_path_owned)
         .await
-        .with_context(|| format!("Failed to create target directory {}", target_path.display()))?;
+        .with_context(|| {
+            format!(
+                "Failed to create target directory {}",
+                target_path.display()
+            )
+        })?;
 
     if verbose {
         ui::info(&format!(

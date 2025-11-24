@@ -57,7 +57,9 @@ pub fn build_transfer_client_with_headers(headers: Option<HeaderMap>) -> Result<
         builder = builder.default_headers(headers);
     }
 
-    builder.build().context("Failed to build transfer HTTP client")
+    builder
+        .build()
+        .context("Failed to build transfer HTTP client")
 }
 
 pub fn build_api_client() -> Result<Client> {
