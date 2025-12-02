@@ -140,7 +140,7 @@ pub async fn execute_batch_save(
     if !errors.is_empty() {
         let message = errors
             .into_iter()
-            .map(|err| err.to_string())
+            .map(|err| format!("{:#}", err))
             .collect::<Vec<_>>()
             .join("\n");
         anyhow::bail!(message);

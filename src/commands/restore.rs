@@ -532,7 +532,7 @@ pub async fn execute_batch_restore(
 
     if !restore_errors.is_empty() {
         for err in restore_errors {
-            ui::error(&format!("Restore failed: {}", err));
+            ui::error(&format!("Restore failed: {:#}", err));
         }
     }
 
@@ -1060,8 +1060,25 @@ async fn download_range(
         .await
         .context("Range request failed")?;
 
-    if !response.status().is_success() {
-        anyhow::bail!("HTTP {}", response.status());
+    let status = response.status();
+    if !status.is_success() {
+        let error_body = response.text().await.unwrap_or_default();
+        log::error!(
+            "Download range {}-{} failed: HTTP {} - {}",
+            start,
+            end,
+            status,
+            error_body
+        );
+        anyhow::bail!(
+            "HTTP {} - {}",
+            status,
+            if error_body.is_empty() {
+                status.canonical_reason().unwrap_or("Unknown error")
+            } else {
+                &error_body
+            }
+        );
     }
 
     let file = tokio::fs::OpenOptions::new()

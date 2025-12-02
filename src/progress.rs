@@ -102,14 +102,18 @@ pub struct Renderer {
     event_rx: Receiver<Event>,
     sessions: HashMap<String, SessionState>,
     should_stop: Arc<AtomicBool>,
+    is_ci: bool,
 }
 
 impl Renderer {
     fn new(event_rx: Receiver<Event>) -> Self {
+        let ci_env = crate::ci_detection::detect_ci_environment();
+        let is_ci = ci_env != "local";
         Self {
             event_rx,
             sessions: HashMap::new(),
             should_stop: Arc::new(AtomicBool::new(false)),
+            is_ci,
         }
     }
 
@@ -249,12 +253,19 @@ impl Renderer {
                 &session.current_name,
                 session.current_detail.as_deref(),
             );
-            Self::render_inline(session, &line)?;
+            if self.is_ci {
+                println!(" {}", line);
+            } else {
+                Self::render_inline(session, &line)?;
+            }
         }
         Ok(())
     }
 
     fn handle_step_progress(&mut self, id: String, step: u8, detail: Option<String>) -> Result<()> {
+        if self.is_ci {
+            return Ok(());
+        }
         if let Some(session) = self.sessions.get_mut(&id) {
             session.current_step = step;
             if let Some(detail) = detail {
@@ -282,8 +293,12 @@ impl Renderer {
                 &session.current_name,
                 session.current_detail.as_deref(),
             );
-            Self::render_inline(session, &line)?;
-            Self::finalize_line(session)?;
+            if self.is_ci {
+                println!(" {}", line);
+            } else {
+                Self::render_inline(session, &line)?;
+                Self::finalize_line(session)?;
+            }
         }
         Ok(())
     }

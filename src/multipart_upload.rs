@@ -47,8 +47,17 @@ pub async fn upload_via_single_url(
 
     let status = response.status();
     if !status.is_success() {
-        let error = response.text().await.unwrap_or_default();
-        anyhow::bail!("Failed to upload archive: HTTP {} - {}", status, error);
+        let error_body = response.text().await.unwrap_or_default();
+        log::error!("Single upload failed: HTTP {} - {}", status, error_body);
+        anyhow::bail!(
+            "HTTP {} - {}",
+            status,
+            if error_body.is_empty() {
+                status.canonical_reason().unwrap_or("Unknown error")
+            } else {
+                &error_body
+            }
+        );
     }
 
     Ok(extract_etag(&response))
@@ -185,11 +194,20 @@ async fn upload_single_part(
     let status = response.status();
     if !status.is_success() {
         let error_body = response.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "Failed to upload part {}: HTTP {} - {}",
+        log::error!(
+            "Upload part {} failed: HTTP {} - {}",
             part_number,
             status,
             error_body
+        );
+        anyhow::bail!(
+            "HTTP {} - {}",
+            status,
+            if error_body.is_empty() {
+                status.canonical_reason().unwrap_or("Unknown error")
+            } else {
+                &error_body
+            }
         );
     }
 
