@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(rm:*)",
+      "Bash(cargo test)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo build:*)",
+      "Bash(tree:*)",
+      "Bash(for f in src/*.rs src/*/*.rs)",
+      "Bash(do if [ -f \"$f\" ])",
+      "Bash(then if ! grep -q \"#\\[cfg(test)\\]\" \"$f\")",
+      "Bash(then echo \"No tests: $f\")",
+      "Bash(fi)",
+      "Bash(done)"
+    ],
+    "deny": []
+  }
+}

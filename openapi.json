@@ -1,0 +1,2627 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "BoringCache API",
+    "description": "Simple, fast, and reliable cache management API for development workflows.\n\nThe BoringCache API provides endpoints for managing workspaces, cache entries,\nperformance metrics, and session information. Built for high performance with\nbuilt-in caching, rate limiting, and multipart upload support.\n\n## Authentication\nAll API endpoints require a valid API token passed in the Authorization header:\n```\nAuthorization: Bearer your-api-token-here\n```\n\n## CLI Format Support\nBoringCache API uses a simplified tag-only format:\n- **Save**: `TAG` format (e.g., \"ruby-3.4.4-darwin-arm64\")\n- **Restore**: `TAG` format (e.g., \"ruby-3.4.4-darwin-arm64\")\n- **Platform Tags**: Tags automatically include platform suffixes (darwin-arm64, linux-x64, windows-x64)\n",
+    "version": "1.0.0",
+    "contact": {
+      "name": "BoringCache Support",
+      "url": "https://github.com/boringcache/boringcache",
+      "email": "support@boringcache.com"
+    },
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://api.boringcache.com/api/v1",
+      "description": "Production API"
+    },
+    {
+      "url": "http://localhost:3000/api/v1",
+      "description": "Local development"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "API health check",
+        "description": "Check the overall health status of the API and its dependencies",
+        "operationId": "getHealth",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "API is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "API is degraded or unhealthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/database": {
+      "get": {
+        "summary": "Database health check",
+        "description": "Check database connectivity",
+        "operationId": "getDatabaseHealth",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Database is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResult"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Database is unhealthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/cache": {
+      "get": {
+        "summary": "Cache health check",
+        "description": "Check cache system functionality",
+        "operationId": "getCacheHealth",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Cache is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResult"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Cache is unhealthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/storage": {
+      "get": {
+        "summary": "Storage health check",
+        "description": "Check storage system availability",
+        "operationId": "getStorageHealth",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Storage is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResult"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Storage is unhealthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "Get OpenAPI specification (JSON)",
+        "description": "Retrieve the OpenAPI 3.0 specification in JSON format",
+        "operationId": "getOpenapiJson",
+        "tags": [
+          "Documentation"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI specification retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.yaml": {
+      "get": {
+        "summary": "Get OpenAPI specification (YAML)",
+        "description": "Retrieve the OpenAPI 3.0 specification in YAML format",
+        "operationId": "getOpenapiYaml",
+        "tags": [
+          "Documentation"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI specification retrieved successfully",
+            "content": {
+              "application/x-yaml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session": {
+      "get": {
+        "summary": "Get session information",
+        "description": "Validate current API token and retrieve session details",
+        "operationId": "getSession",
+        "tags": [
+          "Session"
+        ],
+        "responses": {
+          "200": {
+            "description": "Session information retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/workspaces": {
+      "get": {
+        "summary": "List workspaces",
+        "description": "Retrieve all workspaces accessible to the current API token",
+        "operationId": "listWorkspaces",
+        "tags": [
+          "Workspaces"
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspaces retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WorkspaceSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/workspaces/{slug}": {
+      "get": {
+        "summary": "Get workspace details",
+        "description": "Retrieve detailed information about a specific workspace",
+        "operationId": "getWorkspace",
+        "tags": [
+          "Workspaces"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace details retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches": {
+      "get": {
+        "summary": "List cache entries",
+        "description": "Retrieve cache entries for a workspace with pagination support.\nCan also be used to restore multiple cache entries by providing keys parameter.\n",
+        "operationId": "listCacheEntries",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlugRequired"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlugRequired"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Number of entries per page (1-100)",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 10
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            }
+          },
+          {
+            "name": "entries",
+            "in": "query",
+            "description": "Comma-separated list of restore entries in TAG format.\nExample: \"ruby-deps,node-deps\"\n",
+            "schema": {
+              "type": "string"
+            },
+            "example": "ruby-deps,node-deps"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cache entries retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/CacheEntriesListResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CacheRestoreResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create cache entry",
+        "description": "Create a new cache entry and get upload URL(s).\nAccepts a single cache entry per request. Files larger than 50MB will use multipart upload.\n",
+        "operationId": "createCacheEntry",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlugRequired"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlugRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "cache"
+                ],
+                "properties": {
+                  "cache": {
+                    "$ref": "#/components/schemas/CacheEntryCreate"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Cache entry created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SingleUploadResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Cache entry already exists; returning existing metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SingleUploadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete cache entries",
+        "description": "Delete one or more cache entries by tag name.",
+        "operationId": "deleteCacheEntries",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WorkspaceSlugRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "entries"
+                ],
+                "properties": {
+                  "entries": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Array of cache tags to delete",
+                    "example": [
+                      "ruby-cache",
+                      "node-cache"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Delete results returned for each tag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TagDeleteResponse"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches/check": {
+      "post": {
+        "summary": "Check manifest existence",
+        "description": "Fast preflight check to determine if cache manifests exist.\nChecks multiple manifests in a single request and returns download URLs for hits.\n",
+        "operationId": "checkManifests",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlugRequired"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlugRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManifestCheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Manifest check completed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManifestCheckResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/cache-manifests/{tag}": {
+      "get": {
+        "summary": "Get manifest metadata",
+        "description": "Retrieve manifest metadata for a cache entry without downloading the full manifest payload.\nSupports optional lookup by manifest root digest and CBOR streaming when requested via `Accept`.\n",
+        "operationId": "getManifestMetadata",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlugRequired"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlugRequired"
+          },
+          {
+            "name": "tag",
+            "in": "path",
+            "required": true,
+            "description": "Cache tag name",
+            "schema": {
+              "type": "string"
+            },
+            "example": "ruby-3.4.4-testing2-macos-15-arm64"
+          },
+          {
+            "name": "by_digest",
+            "in": "query",
+            "required": false,
+            "description": "Manifest root digest to look up first; falls back to tag lookup when not available",
+            "schema": {
+              "type": "string"
+            },
+            "example": "dad8..."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manifest metadata retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManifestMetadataResponse"
+                }
+              },
+              "application/cbor": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "410": {
+            "description": "Manifest is no longer available for this cache entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches/{tag}/preflight": {
+      "post": {
+        "summary": "Preflight cache upload",
+        "description": "Submit manifest metadata to determine if cache already exists before uploading data.\n",
+        "operationId": "preflightCacheUpload",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlugRequired"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlugRequired"
+          },
+          {
+            "name": "tag",
+            "in": "path",
+            "required": true,
+            "description": "Cache tag that will be written if the upload proceeds",
+            "schema": {
+              "type": "string"
+            },
+            "example": "ruby-3.4.4-testing2-macos-15-arm64"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CachePreflightRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Preflight completed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CachePreflightResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches/{id}": {
+      "get": {
+        "summary": "Restore cache entry",
+        "description": "Get download URL for a cache entry by key hash or tag.\nSupports both direct key lookup and tag-based lookup.\n",
+        "operationId": "restoreCacheEntry",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlugRequired"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlugRequired"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Cache key hash or cache entry ID",
+            "schema": {
+              "type": "string"
+            },
+            "example": "deps-20240115-abc123"
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Tag name for semantic lookup (alternative to key-based lookup)",
+            "schema": {
+              "type": "string"
+            },
+            "example": "latest-deps"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cache entry restore information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheRestoreSuccess"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Cache upload still in progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CachePending"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "410": {
+            "description": "Cache entry has expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "summary": "Confirm cache upload",
+        "description": "Confirm successful upload and update cache entry metadata.\nUsed for both single and multipart uploads.\n",
+        "operationId": "confirmCacheUpload",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlugRequired"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlugRequired"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Cache entry ID",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SingleUploadConfirm"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cache upload confirmed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheConfirmResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches/{cache_entry_id}/multipart/complete": {
+      "post": {
+        "summary": "Complete archive multipart upload",
+        "description": "Finalize a multipart archive upload by providing the upload ID and part ETags.",
+        "operationId": "completeMultipartUpload",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlugRequired"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlugRequired"
+          },
+          {
+            "name": "cache_entry_id",
+            "in": "path",
+            "required": true,
+            "description": "Cache entry ID associated with the multipart upload",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MultipartCompleteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Multipart upload completed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MultipartCompleteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "Upload ID mismatch or invalid state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/metrics": {
+      "post": {
+        "summary": "Submit performance metrics",
+        "description": "Submit performance and telemetry data from CLI operations",
+        "operationId": "submitMetrics",
+        "tags": [
+          "Metrics"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlugRequired"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlugRequired"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MetricSubmission"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Metrics submitted successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "API token in the format `bc_user_uuid:secret` or `bc_org_uuid:secret`"
+      }
+    },
+    "parameters": {
+      "WorkspaceSlug": {
+        "name": "slug",
+        "in": "path",
+        "required": true,
+        "description": "Workspace slug identifier",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]+$"
+        },
+        "example": "my-app"
+      },
+      "NamespaceSlugRequired": {
+        "name": "namespace_slug",
+        "in": "path",
+        "required": true,
+        "description": "Organization or user namespace slug",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]+$"
+        },
+        "example": "acme"
+      },
+      "WorkspaceSlugRequired": {
+        "name": "workspace_slug",
+        "in": "path",
+        "required": true,
+        "description": "Workspace slug identifier",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]+$"
+        },
+        "example": "my-app"
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Bad request - Invalid parameters",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Unauthorized - Invalid or missing API token",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": "Unauthorized",
+              "details": "Invalid or missing API token",
+              "code": "INVALID_TOKEN"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Not found - Resource does not exist",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": "Workspace not found",
+              "details": "No workspace found with slug: invalid-workspace",
+              "code": "WORKSPACE_NOT_FOUND"
+            }
+          }
+        }
+      },
+      "UnprocessableEntity": {
+        "description": "Unprocessable entity - Validation errors",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ValidationErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "error"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "description": "Indicates the request failed",
+            "enum": [
+              false
+            ]
+          },
+          "error": {
+            "type": "string",
+            "description": "Human-readable error message"
+          },
+          "details": {
+            "type": "array",
+            "description": "Additional error details",
+            "items": {
+              "type": "string"
+            }
+          },
+          "code": {
+            "type": "string",
+            "description": "Machine-readable error code"
+          }
+        },
+        "example": {
+          "success": false,
+          "error": "Resource not found",
+          "details": [
+            "No workspace found with slug: invalid-workspace"
+          ],
+          "code": "WORKSPACE_NOT_FOUND"
+        }
+      },
+      "ValidationErrorResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "error",
+          "details"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "enum": [
+              false
+            ],
+            "description": "Indicates the request failed validation"
+          },
+          "error": {
+            "type": "string",
+            "description": "General error message"
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of validation errors"
+          }
+        },
+        "example": {
+          "success": false,
+          "error": "Validation failed",
+          "details": [
+            "Name can't be blank",
+            "Size must be greater than 0"
+          ]
+        }
+      },
+      "TagDeleteResponse": {
+        "type": "object",
+        "required": [
+          "tag",
+          "status"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string",
+            "description": "Name of the tag that was processed"
+          },
+          "cache_entry_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Cache entry identifier when available"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "deleted",
+              "missing",
+              "error"
+            ],
+            "description": "Outcome for the tag"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Error message when the delete operation failed"
+          }
+        },
+        "example": {
+          "tag": "latest-build",
+          "cache_entry_id": "f9a57c79-6a5a-4d17-b2c6-6f0b9a33a5ce",
+          "status": "deleted",
+          "error": null
+        }
+      },
+      "SessionResponse": {
+        "type": "object",
+        "required": [
+          "valid",
+          "user",
+          "token"
+        ],
+        "properties": {
+          "valid": {
+            "type": "boolean",
+            "description": "Whether the current token is valid"
+          },
+          "user": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  }
+                }
+              }
+            ]
+          },
+          "organization": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          },
+          "workspace": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "slug": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          },
+          "token": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "scope_type": {
+                    "type": "string",
+                    "enum": [
+                      "user",
+                      "organization",
+                      "workspace"
+                    ]
+                  },
+                  "expires_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "date-time"
+                  },
+                  "expires_in_days": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "last_used_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "date-time"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "WorkspaceSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "cache_entries_count",
+          "total_cache_size",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Workspace slug (used as ID in API responses)"
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable workspace name"
+          },
+          "slug": {
+            "type": "string",
+            "description": "URL-safe workspace identifier"
+          },
+          "cache_entries_count": {
+            "type": "integer",
+            "description": "Number of active cache entries"
+          },
+          "total_cache_size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total size of all cache entries in bytes"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Workspace": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/WorkspaceSummary"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "organization": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "slug": {
+                    "type": "string"
+                  }
+                }
+              },
+              "description": {
+                "type": "string",
+                "nullable": true
+              },
+              "provisioned": {
+                "type": "boolean"
+              }
+            }
+          }
+        ]
+      },
+      "CacheEntriesListResponse": {
+        "type": "object",
+        "required": [
+          "entries",
+          "total",
+          "page",
+          "limit"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CacheEntry"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "description": "Total number of cache entries"
+          },
+          "page": {
+            "type": "integer",
+            "description": "Current page number"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Number of entries per page"
+          }
+        }
+      },
+      "CacheRestoreResponse": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/CacheRestoreResult"
+        }
+      },
+      "CacheRestoreResult": {
+        "type": "object",
+        "required": [
+          "tag",
+          "status"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string",
+            "description": "Tag name from the request"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "hit",
+              "miss",
+              "pending"
+            ],
+            "description": "Cache status - hit (found), miss (not found), pending (uploading)"
+          },
+          "cache_entry_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "Cache entry ID (for cache hits/pending)"
+          },
+          "manifest_root_digest": {
+            "type": "string",
+            "nullable": true,
+            "description": "Root digest of the manifest (for cache hits)"
+          },
+          "manifest_digest": {
+            "type": "string",
+            "nullable": true,
+            "description": "Digest of the manifest file (for cache hits)"
+          },
+          "manifest_url": {
+            "type": "string",
+            "format": "uri",
+            "nullable": true,
+            "description": "Presigned manifest download URL (for cache hits)"
+          },
+          "compression_algorithm": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "zstd",
+              "lz4"
+            ],
+            "description": "Compression algorithm used (for cache hits)"
+          },
+          "archive_urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Array of presigned download URLs for archive parts (empty for miss, 1..n for hit)"
+          },
+          "metadata": {
+            "type": "object",
+            "nullable": true,
+            "description": "Summary information for the cache entry",
+            "properties": {
+              "manifest_root_digest": {
+                "type": "string"
+              },
+              "total_size_bytes": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "file_count": {
+                "type": "integer"
+              },
+              "compression_algorithm": {
+                "type": "string",
+                "enum": [
+                  "zstd",
+                  "lz4"
+                ]
+              }
+            }
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "description": "Error message when cache lookup failed"
+          }
+        }
+      },
+      "CacheEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "manifest_root_digest",
+          "total_size_bytes",
+          "created_at",
+          "compression_algorithm"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "manifest_root_digest": {
+            "type": "string"
+          },
+          "tag": {
+            "type": "string",
+            "nullable": true,
+            "description": "Primary tag assigned to the entry"
+          },
+          "total_size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total cached size in bytes"
+          },
+          "uncompressed_size": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "compressed_size": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "file_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "compression_algorithm": {
+            "type": "string",
+            "enum": [
+              "zstd",
+              "lz4"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "uploaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "CacheEntryCreate": {
+        "type": "object",
+        "required": [
+          "tag",
+          "manifest_root_digest",
+          "compression_algorithm",
+          "total_size_bytes"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string",
+            "description": "Cache tag name (platform-specific tag recommended)",
+            "example": "ruby-3.4.4-macos-15-arm64"
+          },
+          "manifest_root_digest": {
+            "type": "string",
+            "description": "SHA-256 digest of the manifest root",
+            "example": "abc123..."
+          },
+          "compression_algorithm": {
+            "type": "string",
+            "enum": [
+              "zstd",
+              "lz4"
+            ],
+            "default": "zstd",
+            "description": "Compression algorithm used"
+          },
+          "manifest_format_version": {
+            "type": "integer",
+            "description": "Manifest format version",
+            "default": 1
+          },
+          "total_size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total size of archive in bytes (required for timeout calculation)",
+            "minimum": 1
+          },
+          "uncompressed_size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Aggregate uncompressed size of files in bytes",
+            "nullable": true
+          },
+          "compressed_size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Aggregate compressed size in bytes",
+            "nullable": true
+          },
+          "file_count": {
+            "type": "integer",
+            "description": "Number of files represented in the manifest",
+            "nullable": true
+          },
+          "expected_manifest_digest": {
+            "type": "string",
+            "description": "SHA-256 digest of the CBOR manifest payload expected to be uploaded"
+          },
+          "expected_manifest_size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size in bytes of the manifest payload expected to be uploaded"
+          }
+        }
+      },
+      "SingleUploadResponse": {
+        "type": "object",
+        "required": [
+          "tag",
+          "cache_entry_id",
+          "manifest_root_digest"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string",
+            "description": "Cache tag name"
+          },
+          "cache_entry_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Cache entry identifier"
+          },
+          "manifest_root_digest": {
+            "type": "string",
+            "description": "Manifest root digest"
+          },
+          "manifest_upload_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri",
+            "description": "Presigned manifest upload URL (absent when cache already exists)"
+          },
+          "archive_urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Array of presigned upload URLs. Always contains at least one URL. For single-part uploads, contains one URL. For multipart uploads, contains one URL per part. IMPORTANT - To determine if multipart is required, check multipart_upload_id, not array length."
+          },
+          "multipart_upload_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Identifier required to complete multipart uploads. Present (non-null) ONLY when multipart upload is required. Use this field (not archive_urls length) to detect multipart mode."
+          },
+          "manifest_etag": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Storage ETag for the manifest object when available"
+          },
+          "exists": {
+            "type": "boolean",
+            "description": "True if cache already exists"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "pending"
+            ],
+            "description": "Status if cache exists"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Error message when the save request fails"
+          }
+        }
+      },
+      "ManifestMetadataResponse": {
+        "type": "object",
+        "required": [
+          "manifest_root_digest",
+          "manifest_size",
+          "file_count"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string",
+            "nullable": true,
+            "description": "Primary tag associated with the manifest"
+          },
+          "cache_entry_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "Cache entry identifier when available"
+          },
+          "manifest_root_digest": {
+            "type": "string",
+            "description": "Root digest of the manifest"
+          },
+          "manifest_etag": {
+            "type": "string",
+            "nullable": true,
+            "description": "Storage ETag for the manifest object"
+          },
+          "manifest_size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Manifest payload size in bytes"
+          },
+          "file_count": {
+            "type": "integer",
+            "description": "Number of files represented in the manifest"
+          },
+          "manifest_url": {
+            "type": "string",
+            "format": "uri",
+            "nullable": true,
+            "description": "Presigned URL to download the manifest payload"
+          },
+          "last_uploaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Timestamp when the manifest was last uploaded"
+          }
+        }
+      },
+      "CachePreflightRequest": {
+        "type": "object",
+        "required": [
+          "manifest_root_digest",
+          "compression_algorithm",
+          "total_size_bytes"
+        ],
+        "properties": {
+          "manifest_root_digest": {
+            "type": "string",
+            "description": "Manifest root digest for the prospective upload"
+          },
+          "compression_algorithm": {
+            "type": "string",
+            "enum": [
+              "zstd",
+              "lz4"
+            ],
+            "description": "Compression algorithm that will be used for archive"
+          },
+          "manifest_format_version": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Manifest format version"
+          },
+          "total_size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total prospective size of the cache entry in bytes"
+          },
+          "file_count": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Number of files represented in the manifest"
+          },
+          "expected_manifest_digest": {
+            "type": "string",
+            "description": "SHA-256 digest of the CBOR manifest payload expected to be uploaded"
+          },
+          "expected_manifest_size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size in bytes of the manifest payload expected to be uploaded"
+          }
+        }
+      },
+      "CachePreflightResponse": {
+        "type": "object",
+        "required": [
+          "cache_entry_id",
+          "exists"
+        ],
+        "properties": {
+          "cache_entry_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Cache entry identifier reserved for this upload"
+          },
+          "tag": {
+            "type": "string",
+            "nullable": true,
+            "description": "Tag associated with the upload"
+          },
+          "manifest_root_digest": {
+            "type": "string",
+            "description": "Manifest root digest evaluated during preflight"
+          },
+          "exists": {
+            "type": "boolean",
+            "description": "Whether the cache entry already exists with this manifest"
+          },
+          "manifest_upload_url": {
+            "type": "string",
+            "format": "uri",
+            "nullable": true,
+            "description": "Presigned URL for uploading the manifest payload"
+          },
+          "manifest_etag": {
+            "type": "string",
+            "nullable": true,
+            "description": "Storage ETag for an existing manifest (when exists is true)"
+          }
+        }
+      },
+      "TagResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "key_hash",
+          "cache_entry_id",
+          "action",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "key_hash": {
+            "type": "string"
+          },
+          "cache_entry_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "created",
+              "updated"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CacheRestoreSuccess": {
+        "type": "object",
+        "required": [
+          "cache_entry_id",
+          "content_hash",
+          "manifest_root_digest",
+          "compression_algorithm",
+          "size"
+        ],
+        "properties": {
+          "cache_entry_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Cache entry identifier"
+          },
+          "content_hash": {
+            "type": "string",
+            "description": "Content hash for integrity verification",
+            "example": "967e88ac1db6e65660a8351ca749a4babc505c8c9dbca0591399128e6f9679c2"
+          },
+          "manifest_root_digest": {
+            "type": "string",
+            "description": "Root digest of the manifest"
+          },
+          "manifest_digest": {
+            "type": "string",
+            "nullable": true,
+            "description": "Digest of the manifest file"
+          },
+          "manifest_url": {
+            "type": "string",
+            "format": "uri",
+            "nullable": true,
+            "description": "Presigned manifest download URL"
+          },
+          "compression_algorithm": {
+            "type": "string",
+            "description": "Compression algorithm used",
+            "enum": [
+              "zstd",
+              "lz4"
+            ],
+            "example": "zstd"
+          },
+          "archive_urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Array of presigned download URLs for archive parts (1..n based on size)"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total cache size in bytes"
+          },
+          "uncompressed_size": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Original uncompressed size"
+          },
+          "compressed_size": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Compressed size"
+          },
+          "uploaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the cache was uploaded"
+          }
+        }
+      },
+      "TagInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "id",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CachePending": {
+        "type": "object",
+        "required": [
+          "error",
+          "status"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "SingleUploadConfirm": {
+        "type": "object",
+        "required": [
+          "cache"
+        ],
+        "properties": {
+          "cache": {
+            "type": "object",
+            "required": [
+              "manifest_digest",
+              "manifest_size",
+              "archive_digest",
+              "archive_size"
+            ],
+            "properties": {
+              "manifest_digest": {
+                "type": "string",
+                "description": "SHA-256 digest of the uploaded manifest payload"
+              },
+              "manifest_size": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Size of the uploaded manifest in bytes"
+              },
+              "manifest_etag": {
+                "type": "string",
+                "nullable": true,
+                "description": "Storage ETag of the uploaded manifest for verification"
+              },
+              "archive_digest": {
+                "type": "string",
+                "description": "SHA-256 digest of the uploaded archive payload"
+              },
+              "archive_size": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Size of the uploaded archive in bytes"
+              },
+              "archive_etag": {
+                "type": "string",
+                "nullable": true,
+                "description": "Storage ETag of the uploaded archive for verification"
+              },
+              "file_count": {
+                "type": "integer",
+                "nullable": true,
+                "description": "Number of files in the cache"
+              },
+              "uncompressed_size": {
+                "type": "integer",
+                "format": "int64",
+                "nullable": true,
+                "description": "Uncompressed size of all files"
+              }
+            }
+          }
+        }
+      },
+      "MultipartCompleteRequest": {
+        "type": "object",
+        "required": [
+          "multipart"
+        ],
+        "properties": {
+          "multipart": {
+            "type": "object",
+            "required": [
+              "upload_id",
+              "parts"
+            ],
+            "properties": {
+              "upload_id": {
+                "type": "string",
+                "description": "Identifier returned when presigned multipart URLs were issued"
+              },
+              "archive_size": {
+                "type": "integer",
+                "format": "int64",
+                "nullable": true,
+                "description": "Total compressed size of the archive in bytes"
+              },
+              "parts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "part_number",
+                    "etag"
+                  ],
+                  "properties": {
+                    "part_number": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "etag": {
+                      "type": "string",
+                      "description": "Storage ETag returned from the upload_part call"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "MultipartCompleteResponse": {
+        "type": "object",
+        "required": [
+          "archive_etag"
+        ],
+        "properties": {
+          "archive_etag": {
+            "type": "string",
+            "description": "Final storage ETag returned after completing the multipart upload"
+          }
+        }
+      },
+      "CacheConfirmResponse": {
+        "type": "object",
+        "required": [
+          "cache_entry_id",
+          "status"
+        ],
+        "properties": {
+          "cache_entry_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Cache entry identifier"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "ready"
+            ],
+            "description": "Cache entry status after confirmation"
+          },
+          "uploaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Timestamp when upload was confirmed"
+          }
+        }
+      },
+      "ManifestCheckRequest": {
+        "type": "object",
+        "required": [
+          "manifest_checks"
+        ],
+        "properties": {
+          "manifest_checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "tag",
+                "manifest_root_digest"
+              ],
+              "properties": {
+                "tag": {
+                  "type": "string",
+                  "description": "Cache tag name"
+                },
+                "manifest_root_digest": {
+                  "type": "string",
+                  "description": "Manifest root digest to check"
+                }
+              }
+            }
+          }
+        }
+      },
+      "ManifestCheckResponse": {
+        "type": "object",
+        "required": [
+          "results"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManifestCheckResult"
+            }
+          }
+        }
+      },
+      "ManifestCheckResult": {
+        "type": "object",
+        "required": [
+          "tag",
+          "exists"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string",
+            "description": "Cache tag name"
+          },
+          "exists": {
+            "type": "boolean",
+            "description": "Whether the manifest exists"
+          },
+          "manifest_root_digest": {
+            "type": "string",
+            "nullable": true,
+            "description": "The manifest root digest that was checked"
+          },
+          "cache_entry_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "Cache entry ID if exists"
+          },
+          "content_hash": {
+            "type": "string",
+            "nullable": true,
+            "description": "Content hash if exists"
+          },
+          "manifest_digest": {
+            "type": "string",
+            "nullable": true,
+            "description": "Manifest digest if exists"
+          },
+          "manifest_url": {
+            "type": "string",
+            "format": "uri",
+            "nullable": true,
+            "description": "Presigned manifest download URL if exists"
+          },
+          "compression_algorithm": {
+            "type": "string",
+            "enum": [
+              "zstd",
+              "lz4"
+            ],
+            "nullable": true,
+            "description": "Compression algorithm if exists"
+          },
+          "archive_urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Array of presigned download URLs for archive parts (empty for miss, 1..n for hit)"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Cache size in bytes if exists"
+          },
+          "uncompressed_size": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Uncompressed size if exists"
+          },
+          "compressed_size": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Compressed size if exists"
+          },
+          "uploaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When uploaded if exists"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "pending"
+            ],
+            "nullable": true,
+            "description": "Cache entry status if exists"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "description": "Error message if check failed"
+          }
+        }
+      },
+      "MetricSubmission": {
+        "type": "object",
+        "required": [
+          "operation_type"
+        ],
+        "properties": {
+          "operation_type": {
+            "type": "string",
+            "enum": [
+              "save",
+              "restore"
+            ],
+            "description": "Type of cache operation"
+          },
+          "content_hash": {
+            "type": "string",
+            "description": "SHA256/SHA512 hash for content integrity verification"
+          },
+          "total_duration": {
+            "type": "integer",
+            "description": "Total operation duration in milliseconds"
+          },
+          "archive_duration": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Time spent creating archive (ms)"
+          },
+          "upload_duration": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Time spent uploading (ms)"
+          },
+          "download_duration": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Time spent downloading (ms)"
+          },
+          "extract_duration": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Time spent extracting archive (ms)"
+          },
+          "confirm_duration": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Time spent confirming upload (ms)"
+          },
+          "uncompressed_size": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Size before compression"
+          },
+          "compressed_size": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true,
+            "description": "Size after compression"
+          },
+          "compression_ratio": {
+            "type": "number",
+            "format": "float",
+            "nullable": true,
+            "description": "Compression ratio achieved"
+          },
+          "file_count": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Number of files processed"
+          },
+          "upload_speed_mbps": {
+            "type": "number",
+            "format": "float",
+            "nullable": true,
+            "description": "Upload speed in MB/s"
+          },
+          "download_speed_mbps": {
+            "type": "number",
+            "format": "float",
+            "nullable": true,
+            "description": "Download speed in MB/s"
+          },
+          "cache_age_hours": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Age of cache when restored (hours)"
+          },
+          "error_message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Error message if operation failed"
+          },
+          "cpu_cores": {
+            "type": "integer",
+            "nullable": true
+          },
+          "cpu_load_percent": {
+            "type": "number",
+            "format": "float",
+            "nullable": true
+          },
+          "total_memory_gb": {
+            "type": "number",
+            "format": "float",
+            "nullable": true
+          },
+          "available_memory_gb": {
+            "type": "number",
+            "format": "float",
+            "nullable": true
+          },
+          "memory_strategy": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "streaming",
+              "in_memory"
+            ]
+          },
+          "disk_type": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "ssd",
+              "hdd",
+              "nvme"
+            ]
+          },
+          "disk_speed_estimate_mb_s": {
+            "type": "integer",
+            "nullable": true
+          },
+          "concurrent_operations": {
+            "type": "integer",
+            "nullable": true
+          },
+          "buffer_size_mb": {
+            "type": "integer",
+            "nullable": true
+          },
+          "archive_size_mb": {
+            "type": "integer",
+            "nullable": true
+          },
+          "part_size_mb": {
+            "type": "integer",
+            "nullable": true
+          },
+          "concurrency_level": {
+            "type": "integer",
+            "nullable": true
+          },
+          "streaming_enabled": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "parallel_extraction": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "compression_algorithm": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "zstd",
+              "lz4"
+            ]
+          },
+          "compression_level": {
+            "type": "integer",
+            "nullable": true
+          },
+          "compression_threads": {
+            "type": "integer",
+            "nullable": true
+          },
+          "benchmark_throughput_mb_s": {
+            "type": "number",
+            "format": "float",
+            "nullable": true
+          },
+          "benchmark_compression_ratio": {
+            "type": "number",
+            "format": "float",
+            "nullable": true
+          },
+          "compression_duration": {
+            "type": "integer",
+            "nullable": true
+          },
+          "predicted_time_ms": {
+            "type": "integer",
+            "nullable": true
+          },
+          "prediction_accuracy": {
+            "type": "number",
+            "format": "float",
+            "nullable": true
+          },
+          "bandwidth_probe_mb_s": {
+            "type": "number",
+            "format": "float",
+            "nullable": true
+          },
+          "multipart_threshold_mb": {
+            "type": "integer",
+            "nullable": true
+          },
+          "part_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "retry_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "transfer_size": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "cache_efficiency": {
+            "type": "number",
+            "format": "float",
+            "nullable": true,
+            "description": "Percentage of time saved by cache hit"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags associated with this operation"
+          }
+        }
+      },
+      "MetricResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "metric_id"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "success"
+            ]
+          },
+          "metric_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "timestamp",
+          "version",
+          "checks"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "unhealthy"
+            ],
+            "description": "Overall health status"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Timestamp when health check was performed"
+          },
+          "version": {
+            "type": "string",
+            "description": "API version"
+          },
+          "checks": {
+            "type": "object",
+            "properties": {
+              "database": {
+                "$ref": "#/components/schemas/HealthCheckResult"
+              },
+              "cache": {
+                "$ref": "#/components/schemas/HealthCheckResult"
+              },
+              "storage": {
+                "$ref": "#/components/schemas/HealthCheckResult"
+              }
+            }
+          }
+        }
+      },
+      "HealthCheckResult": {
+        "type": "object",
+        "required": [
+          "status",
+          "response_time_ms",
+          "message"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "unhealthy"
+            ]
+          },
+          "response_time_ms": {
+            "type": "number",
+            "format": "float",
+            "description": "Response time in milliseconds"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable status message"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Health",
+      "description": "API health checks and monitoring"
+    },
+    {
+      "name": "Documentation",
+      "description": "API documentation and specifications"
+    },
+    {
+      "name": "Session",
+      "description": "Authentication and session management"
+    },
+    {
+      "name": "Workspaces",
+      "description": "Workspace management"
+    },
+    {
+      "name": "Cache Entries",
+      "description": "Cache storage and retrieval operations"
+    },
+    {
+      "name": "Metrics",
+      "description": "Performance metrics and telemetry"
+    }
+  ]
+}
