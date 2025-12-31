@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(rm:*)",
+      "Bash(cargo test)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo build:*)",
+      "Bash(tree:*)",
+      "Bash(for f in src/*.rs src/*/*.rs)",
+      "Bash(do if [ -f \"$f\" ])",
+      "Bash(then if ! grep -q \"#\\[cfg(test)\\]\" \"$f\")",
+      "Bash(then echo \"No tests: $f\")",
+      "Bash(fi)",
+      "Bash(done)",
+      "Bash(time tar:*)",
+      "Bash(./target/release/boringcache delete:*)",
+      "Bash(/usr/bin/time:*)",
+      "Bash(export BORINGCACHE_API_TOKEN=\"bc_user_e49152c8d63b9a81:111e948f959029e30de4ef205f64508f63db3a3a52c6ae47fc11bee92f02bd22\")",
+      "Bash(export BORINGCACHE_DEFAULT_WORKSPACE=\"developer-organization/frontend-app\")",
+      "Bash(export BORINGCACHE_API_URL=\"http://localhost:3000/api/v1\")",
+      "Bash(tar:*)",
+      "Bash(zstd:*)",
+      "Bash(./target/release/boringcache:*)",
+      "Bash(cat:*)",
+      "Bash(xargs -I{} sh -c 'echo \"\"\"\"content {}\"\"\"\" > file_{}.txt')",
+      "Bash(ln:*)",
+      "Bash(cargo test:*)",
+      "Bash(/Users/gaurav/boringcache/cli/target/release/boringcache save:*)",
+      "Bash(cargo audit:*)",
+      "Bash(cargo tree:*)",
+      "Bash(timeout 10 cargo test:*)",
+      "Bash(echo:*)",
+      "Bash(HOME=/tmp cargo run:*)"
+    ],
+    "deny": []
+  }
+}
