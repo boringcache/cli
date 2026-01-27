@@ -35,45 +35,18 @@ boringcache restore "node-deps:node_modules"
 
 ## Commands
 
-### `save <WORKSPACE> <TAG:PATH,...> [OPTIONS]`
+### `save <WORKSPACE> <TAG:PATH,...>`
 Save cache entries using `tag:path` format.
 
 ```bash
 boringcache save my-org/ws "deps:node_modules"
 boringcache save my-org/ws "deps:node_modules,build:dist" --force
-
-# Exclude files from cache (useful for non-deterministic build artifacts)
-boringcache save my-org/ws "gems:vendor/bundle" --exclude "*.out,*.log"
-boringcache save my-org/ws "gems:vendor/bundle" --exclude "*.out" --exclude "*.log"
-```
-
-Options:
-- `--force` - Force save even if cache entry already exists
-- `--no-platform` - Disable platform suffix (for cross-platform caches)
-- `--no-git` - Disable git-aware tag suffixing (branch/sha detected from the repo of the path/cwd)
-- `--exclude <PATTERNS>` - Exclude files matching glob patterns (comma-separated, can be repeated)
-- `--recipient <PUBKEY>` - Enable encryption with the provided Age recipient (age1...)
-- `-v, --verbose` - Detailed output
-
-#### Exclude Patterns
-
-The `--exclude` option supports glob-like patterns:
-
-| Pattern | Matches |
-|---------|---------|
-| `*.out` | All files ending with `.out` |
-| `gem_*` | All files starting with `gem_` |
-| `gem*.out` | Files like `gem_make.out`, `gem.out` |
-| `*make*` | Files containing `make` |
-| `ruby/*.out` | `.out` files in the `ruby/` directory |
-
-Common use case: Ruby gem caches contain `gem_make.out` files with non-deterministic build paths. Exclude them for consistent cache hits:
-
-```bash
 boringcache save my-org/ws "gems:vendor/bundle" --exclude "*.out"
 ```
 
-### `restore <WORKSPACE> <TAG:PATH,...> [OPTIONS]`
+Use `--force` to overwrite existing entries. Use `--exclude` to skip files matching glob patterns.
+
+### `restore <WORKSPACE> <TAG:PATH,...>`
 Restore cache entries. Path controls local extraction directory.
 
 ```bash
@@ -81,20 +54,8 @@ boringcache restore my-org/ws "deps:node_modules"
 boringcache restore my-org/ws "deps:./node_modules,build:./dist"
 ```
 
-Options:
-- `--no-platform` - Disable platform suffix
-- `--no-git` - Disable git-aware tag suffixing (branch/sha detected from the repo of the path/cwd)
-- `--fail-on-cache-miss` - Warn on cache miss (non-fatal)
-- `--lookup-only` - Check if cache exists without downloading
-- `--identity <PATH>` - Path to Age identity file for decryption
-- `-v, --verbose` - Detailed output
-
-### `ls [WORKSPACE] [OPTIONS]`
+### `ls [WORKSPACE]`
 List cache entries.
-
-Options:
-- `-l, --limit` - Number of entries (default: 20)
-- `--page` - Page number
 
 ### `mount <WORKSPACE> <TAG:PATH>`
 Watch a directory and sync changes to remote cache in real-time.
@@ -103,47 +64,18 @@ Watch a directory and sync changes to remote cache in real-time.
 boringcache mount my-org/ws "dev-cache:./node_modules"
 ```
 
-- Restores from remote on start (if exists)
-- Syncs after 50 changes or 60s idle
-- Final sync on Ctrl+C
-- Platform-aware by default
+Restores from remote on start, syncs periodically, and performs a final sync on Ctrl+C.
 
-Options:
-- `--force` - Allow clearing root, home, or current directory on initial restore
-- `--recipient <PUBKEY>` - Enable encryption with the provided Age recipient (age1...)
-- `--identity <PATH>` - Path to Age identity file for decryption
-- `-v, --verbose` - Detailed output
-
-### `delete <WORKSPACE> <TAGS> [OPTIONS]`
+### `delete <WORKSPACE> <TAGS>`
 Delete cache entries by tag.
 
-### `check <WORKSPACE> <TAGS> [OPTIONS]`
-Check if cache entries exist on the server without downloading.
+### `check <WORKSPACE> <TAGS>`
+Check if cache entries exist without downloading.
 
 ```bash
-# Check single tag
 boringcache check my-org/ws "node-deps"
-
-# Check multiple tags
-boringcache check my-org/ws "node-deps,build-cache,test-artifacts"
-
-# JSON output for scripting
-boringcache check my-org/ws "node-deps" --json
-
-# Warn if any tag is missing (non-fatal)
-boringcache check my-org/ws "required-deps" --fail-on-miss
+boringcache check my-org/ws "node-deps,build-cache" --json
 ```
-
-Options:
-- `--no-platform` - Disable platform suffix
-- `--no-git` - Disable git-aware tag suffixing
-- `--fail-on-miss` - Warn if any tag is not found (non-fatal)
-- `-j, --json` - Output results in JSON format
-
-**Note:** The check command verifies tag existence only, not content integrity. A tag may exist but the underlying cache content could be incomplete or corrupted. Use `restore` for production workflows where you need the actual cached content. The check command is useful for:
-- CI/CD workflow decisions (conditional steps based on cache availability)
-- Debugging cache key issues
-- Quick verification scripts
 
 ### `workspaces`
 List available workspaces.
@@ -151,21 +83,12 @@ List available workspaces.
 ### `config <ACTION>`
 Manage configuration: `list`, `get <key>`, `set <key> <value>`
 
-### `setup-encryption [WORKSPACE] [OPTIONS]`
-Setup encryption for a workspace. Generates an Age keypair and configures auto-encryption.
+### `setup-encryption [WORKSPACE]`
+Generate an Age keypair and configure automatic encryption for a workspace.
 
 ```bash
-# Setup encryption for default workspace
-boringcache setup-encryption
-
-# Setup encryption for a specific workspace
 boringcache setup-encryption my-org/ws
-
-# Use custom identity file location
-boringcache setup-encryption my-org/ws --identity-output ~/.age/mykey.txt
 ```
-
-After setup, save/restore/mount commands for that workspace will automatically encrypt/decrypt.
 
 ## Environment Variables
 
@@ -204,18 +127,23 @@ jobs:
         if: success()
 ```
 
-## Platform-Aware Caching
+## When Not to Cache
 
-By default, platform suffixes are appended to tags for binary isolation:
+Not all directories benefit from caching. Avoid caching:
 
-```bash
-# On Ubuntu: deps-ubuntu-22.04-amd64
-# On macOS ARM: deps-macos-15-arm64
-boringcache save ws "deps:node_modules"
+- Highly non-deterministic outputs (timestamps, random IDs in filenames)
+- Directories with machine-specific absolute paths baked in
+- Temporary build artifacts that change on every run
 
-# Cross-platform cache (no suffix)
-boringcache save ws "config:settings" --no-platform
-```
+If a directory cannot be safely reused, it should not be cached.
+
+## Portability Rules
+
+- Same OS + architecture → safe by default
+- Cross-platform reuse requires `--no-platform`
+- Binary caches should remain platform-scoped
+
+When in doubt, keep platform scoping enabled.
 
 ## Security
 

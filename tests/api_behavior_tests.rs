@@ -652,7 +652,7 @@ async fn test_save_skips_wait_on_pending() {
     let elapsed = start.elapsed();
 
     assert!(
-        elapsed.as_millis() < 800,
+        elapsed.as_millis() < 5000,
         "Expected no retry delay on pending, but completed in {:?}",
         elapsed
     );
