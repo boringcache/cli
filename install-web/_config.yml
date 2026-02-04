@@ -1,0 +1,28 @@
+# GitHub Pages configuration for install.boringcache.com
+title: "BoringCache CLI Installation"
+description: "High-performance cache management CLI for CI/CD workflows"
+
+# Serve install.sh at root
+defaults:
+  - scope:
+      path: "install.sh"
+    values:
+      layout: null
+      content_type: "text/plain"
+
+# Plugins
+plugins:
+  - jekyll-redirect-from
+
+# Exclude files from processing
+exclude:
+  - README.md
+  - INSTALLATION.md
+  - Gemfile
+  - Gemfile.lock
+  - node_modules
+  - vendor
+  - .sass-cache
+  - .jekyll-cache
+  - gemfiles
+  - .gitignore

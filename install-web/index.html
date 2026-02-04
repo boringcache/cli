@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Install BoringCache CLI</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            line-height: 1.6;
+            background: #f8fafc;
+        }
+        .container {
+            background: white;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #1e293b;
+            margin-bottom: 1rem;
+        }
+        .install-command {
+            background: #1e293b;
+            color: #f8fafc;
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+            margin: 1.5rem 0;
+            position: relative;
+        }
+        .copy-button {
+            position: absolute;
+            top: 0.5rem;
+            right: 0.5rem;
+            background: #475569;
+            color: white;
+            border: none;
+            padding: 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+        .copy-button:hover {
+            background: #64748b;
+        }
+        .supported-platforms {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin: 2rem 0;
+        }
+        .platform {
+            background: #f1f5f9;
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .platform-icon {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+        .manual-downloads {
+            margin-top: 2rem;
+            padding-top: 2rem;
+            border-top: 1px solid #e2e8f0;
+        }
+        .download-links {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        .download-link {
+            display: block;
+            padding: 0.75rem 1rem;
+            background: #3b82f6;
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            text-align: center;
+            transition: background-color 0.2s;
+        }
+        .download-link:hover {
+            background: #2563eb;
+        }
+        .warning {
+            background: #fef3c7;
+            border: 1px solid #f59e0b;
+            color: #92400e;
+            padding: 1rem;
+            border-radius: 6px;
+            margin: 1rem 0;
+        }
+        .next-steps {
+            background: #ecfdf5;
+            border: 1px solid #10b981;
+            color: #047857;
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin-top: 2rem;
+        }
+        .next-steps h3 {
+            margin-top: 0;
+            color: #065f46;
+        }
+        code {
+            background: #f1f5f9;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Install BoringCache CLI</h1>
+        
+        <p>High-performance cache management CLI for CI/CD workflows. Install with a single command:</p>
+        
+        <div class="install-command">
+            <code id="install-cmd">curl -sSL -H "Cache-Control: no-cache" -H "Pragma: no-cache" https://install.boringcache.com/install.sh | sh</code>
+            <button class="copy-button" onclick="copyToClipboard('install-cmd')">Copy</button>
+        </div>
+
+        <div class="warning">
+            <strong>⚠️ Security Note:</strong> Always review scripts before running them with <code>curl | sh</code>. 
+            You can inspect the script first: <code>curl -sSL -H "Cache-Control: no-cache" -H "Pragma: no-cache" https://install.boringcache.com/install.sh</code>
+        </div>
+
+        <h2>Supported Platforms</h2>
+        <div class="supported-platforms">
+            <div class="platform">
+                <div class="platform-icon">🐧</div>
+                <strong>Linux</strong><br>
+                AMD64 & ARM64
+            </div>
+            <div class="platform">
+                <div class="platform-icon">🍎</div>
+                <strong>macOS</strong><br>
+                Apple Silicon (ARM64)
+            </div>
+            <div class="platform">
+                <div class="platform-icon">🪟</div>
+                <strong>Windows</strong><br>
+                AMD64 (experimental)
+            </div>
+        </div>
+
+        <div class="manual-downloads">
+            <h2>Manual Downloads</h2>
+            <p>Prefer to download binaries manually? Get the latest release from GitHub:</p>
+            
+            <div class="download-links">
+                <a href="https://github.com/boringcache/cli/releases/latest/download/boringcache-linux-amd64" class="download-link">
+                    🐧 Linux AMD64
+                </a>
+                <a href="https://github.com/boringcache/cli/releases/latest/download/boringcache-linux-arm64" class="download-link">
+                    🐧 Linux ARM64
+                </a>
+                <a href="https://github.com/boringcache/cli/releases/latest/download/boringcache-macos-14-arm64" class="download-link">
+                    🍎 macOS Apple Silicon (14+)
+                </a>
+                <a href="https://github.com/boringcache/cli/releases/latest/download/boringcache-macos-15-arm64" class="download-link">
+                    🍎 macOS Apple Silicon (15+)
+                </a>
+                <a href="https://github.com/boringcache/cli/releases/latest/download/boringcache-windows-2022-amd64.exe" class="download-link">
+                    🪟 Windows AMD64
+                </a>
+                <a href="https://github.com/boringcache/cli/releases" class="download-link" style="background: #6b7280;">
+                    📦 All Releases
+                </a>
+            </div>
+        </div>
+
+        <div class="next-steps">
+            <h3>🎯 Next Steps</h3>
+            <ol>
+                <li><strong>Authenticate:</strong> <code>boringcache auth --token YOUR_API_TOKEN</code></li>
+                <li><strong>Configure workspace:</strong> <code>boringcache config set default_workspace my-org/my-workspace</code></li>
+                <li><strong>Save cache:</strong> <code>boringcache save my-org/my-workspace "node-deps:node_modules,build-cache:target"</code></li>
+                <li><strong>Restore cache:</strong> <code>boringcache restore my-org/my-workspace "node-deps:node_modules,build-cache:target"</code></li>
+                <li><strong>List caches:</strong> <code>boringcache ls</code></li>
+            </ol>
+            <p>📖 <strong>Documentation:</strong> Visit <a href="https://github.com/boringcache/cli">GitHub Repository</a> for detailed usage instructions.</p>
+        </div>
+    </div>
+
+    <script>
+        function copyToClipboard(elementId) {
+            const element = document.getElementById(elementId);
+            const text = element.textContent;
+            
+            if (navigator.clipboard) {
+                navigator.clipboard.writeText(text).then(() => {
+                    showCopyFeedback();
+                });
+            } else {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                showCopyFeedback();
+            }
+        }
+
+        function showCopyFeedback() {
+            const button = document.querySelector('.copy-button');
+            const originalText = button.textContent;
+            button.textContent = 'Copied!';
+            button.style.background = '#10b981';
+            
+            setTimeout(() => {
+                button.textContent = originalText;
+                button.style.background = '#475569';
+            }, 2000);
+        }
+    </script>
+</body>
+</html>

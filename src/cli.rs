@@ -1,0 +1,186 @@
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "boringcache",
+    version,
+    about = "High-performance cache management CLI for CI/CD workflows",
+    long_about = None
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    Auth {
+        #[arg(short, long)]
+        token: String,
+    },
+
+    Mount {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: String,
+
+        #[arg(help = "tag:path pair for the mount")]
+        tag_path: String,
+
+        #[arg(short, long, help = "Enable verbose output")]
+        verbose: bool,
+
+        #[arg(
+            long,
+            help = "Allow clearing root, home, or current directory for restores"
+        )]
+        force: bool,
+
+        #[arg(long, help = "Age recipient public key for encryption (age1...)")]
+        recipient: Option<String>,
+
+        #[arg(long, help = "Path to Age identity file for decryption")]
+        identity: Option<String>,
+    },
+
+    Save {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: String,
+
+        #[arg(help = "One or more tag:path pairs (comma-separated)")]
+        path_tag_pairs: String,
+
+        #[arg(
+            long,
+            alias = "cross-os",
+            help = "Disable automatic platform suffix for tags"
+        )]
+        no_platform: bool,
+
+        #[arg(long, help = "Force save even if cache entry already exists on server")]
+        force: bool,
+
+        #[arg(
+            long,
+            help = "Disable automatic git-based tag suffixing and fallback restore logic"
+        )]
+        no_git: bool,
+
+        #[arg(
+            long,
+            help = "Exclude files matching patterns (comma-separated, can be repeated)",
+            value_delimiter = ','
+        )]
+        exclude: Vec<String>,
+
+        #[arg(long, help = "Age recipient public key for encryption (age1...)")]
+        recipient: Option<String>,
+    },
+
+    Restore {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: String,
+
+        #[arg(help = "One or more tag:path pairs (comma-separated)")]
+        tag_path_pairs: String,
+
+        #[arg(long, help = "Disable automatic platform suffix for tags")]
+        no_platform: bool,
+
+        #[arg(long, help = "Exit with error if cache entry is not found")]
+        fail_on_cache_miss: bool,
+
+        #[arg(long, help = "Check if a cache entry exists without downloading")]
+        lookup_only: bool,
+
+        #[arg(
+            long,
+            help = "Disable automatic git-based tag suffixing and fallback restore logic"
+        )]
+        no_git: bool,
+
+        #[arg(long, help = "Path to Age identity file for decryption")]
+        identity: Option<String>,
+    },
+
+    Check {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: String,
+
+        #[arg(help = "Comma-separated tags to check")]
+        tags: String,
+
+        #[arg(long, help = "Disable automatic platform suffix for tags")]
+        no_platform: bool,
+
+        #[arg(
+            long,
+            help = "Disable automatic git-based tag suffixing and fallback resolution"
+        )]
+        no_git: bool,
+
+        #[arg(long, help = "Warn if any tag is not found (non-fatal)")]
+        fail_on_miss: bool,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
+    Delete {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: String,
+
+        #[arg(help = "Comma-separated tags to delete")]
+        tags: String,
+
+        #[arg(long, help = "Disable automatic platform suffix appending to tags")]
+        no_platform: bool,
+
+        #[arg(
+            long,
+            help = "Disable automatic git-based tag suffixing and fallback resolution"
+        )]
+        no_git: bool,
+    },
+
+    Ls {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(short, long, default_value = "20")]
+        limit: u32,
+
+        #[arg(long, default_value = "1")]
+        page: u32,
+    },
+
+    Config {
+        #[command(subcommand)]
+        action: ConfigSubcommand,
+    },
+
+    #[command(about = "Setup encryption for a workspace")]
+    SetupEncryption {
+        #[arg(help = "Workspace to enable encryption for (org/project)")]
+        workspace: Option<String>,
+
+        #[arg(
+            long,
+            help = "Output path for the identity file (default: ~/.boringcache/age-identity.txt)"
+        )]
+        identity_output: Option<String>,
+    },
+
+    Workspaces,
+}
+
+#[derive(Subcommand)]
+pub enum ConfigSubcommand {
+    Get { key: String },
+
+    Set { key: String, value: String },
+
+    List,
+}

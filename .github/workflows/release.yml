@@ -1,0 +1,636 @@
+name: Build and Release CLI
+
+on:
+  push:
+    tags: ["v*"]
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  RUST_VERSION: "1.89"
+  BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+
+jobs:
+  # Build CLI binaries for multiple platforms
+  build-cli:
+    name: Build CLI - ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          # Ubuntu builds (GitHub-hosted native)
+          - runner: ubuntu-22.04
+            name: ubuntu-22.04-amd64
+            target: x86_64-unknown-linux-gnu
+            binary_name: boringcache-ubuntu-22.04-amd64
+            use_docker: false
+          
+          - runner: ubuntu-22.04-arm
+            name: ubuntu-22.04-arm64
+            target: aarch64-unknown-linux-gnu
+            binary_name: boringcache-ubuntu-22.04-arm64
+            use_docker: false
+          
+          - runner: ubuntu-24.04
+            name: ubuntu-24.04-amd64
+            target: x86_64-unknown-linux-gnu
+            binary_name: boringcache-ubuntu-24.04-amd64
+            use_docker: false
+
+          - runner: ubuntu-24.04-arm
+            name: ubuntu-24.04-arm64
+            target: aarch64-unknown-linux-gnu
+            binary_name: boringcache-ubuntu-24.04-arm64
+            use_docker: false
+
+          # Ubuntu 25.04 builds (Docker on GitHub-hosted)
+          - runner: ubuntu-latest
+            name: ubuntu-25.04-amd64
+            container: ubuntu:25.04
+            target: x86_64-unknown-linux-gnu
+            binary_name: boringcache-ubuntu-25.04-amd64
+            use_docker: true
+
+          - runner: ubuntu-latest
+            name: ubuntu-25.04-arm64
+            container: ubuntu:25.04
+            target: aarch64-unknown-linux-gnu
+            binary_name: boringcache-ubuntu-25.04-arm64
+            use_docker: true
+
+          # Debian builds (Docker on GitHub-hosted)
+          - runner: ubuntu-latest
+            name: debian-bookworm-amd64
+            container: rust:1.89-bookworm
+            target: x86_64-unknown-linux-gnu
+            binary_name: boringcache-debian-bookworm-amd64
+            use_docker: true
+          
+          - runner: ubuntu-latest
+            name: debian-bookworm-arm64
+            container: rust:1.89-bookworm
+            target: aarch64-unknown-linux-gnu
+            binary_name: boringcache-debian-bookworm-arm64
+            use_docker: true
+          
+          - runner: ubuntu-latest
+            name: debian-bullseye-amd64
+            container: rust:1.89-bullseye
+            target: x86_64-unknown-linux-gnu
+            binary_name: boringcache-debian-bullseye-amd64
+            use_docker: true
+          
+          - runner: ubuntu-latest
+            name: debian-bullseye-arm64
+            container: rust:1.89-bullseye
+            target: aarch64-unknown-linux-gnu
+            binary_name: boringcache-debian-bullseye-arm64
+            use_docker: true
+          
+          # Alpine builds (Docker on GitHub-hosted)
+          - runner: ubuntu-latest
+            name: alpine-amd64
+            container: rust:1.89-alpine
+            target: x86_64-unknown-linux-musl
+            binary_name: boringcache-alpine-amd64
+            use_docker: true
+            musl: true
+          
+          # Arch Linux builds (Docker on GitHub-hosted)
+          - runner: ubuntu-latest
+            name: arch-amd64
+            container: archlinux:latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: boringcache-arch-amd64
+            use_docker: true
+          
+          - runner: ubuntu-latest
+            name: arch-arm64
+            container: archlinux:latest
+            target: aarch64-unknown-linux-gnu
+            binary_name: boringcache-arch-arm64
+            use_docker: true
+          
+          # macOS builds (GitHub-hosted native)
+          - runner: macos-14
+            name: macos-14-arm64
+            target: aarch64-apple-darwin
+            binary_name: boringcache-macos-14-arm64
+            use_docker: false
+          
+          - runner: macos-15
+            name: macos-15-arm64
+            target: aarch64-apple-darwin
+            binary_name: boringcache-macos-15-arm64
+            use_docker: false
+          
+          # Windows builds (GitHub-hosted native)
+          - runner: windows-2022
+            name: windows-2022-amd64
+            target: x86_64-pc-windows-msvc
+            binary_name: boringcache-windows-2022-amd64.exe
+            use_docker: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Docker builds for Debian/Alpine
+      - name: Build in Docker container
+        if: matrix.use_docker == true
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e CARGO_TARGET_DIR=/workspace/target \
+            -e BORINGCACHE_API_TOKEN=${{ secrets.BORINGCACHE_API_TOKEN }} \
+            ${{ matrix.container }} \
+            sh -c '
+              set -e
+
+              # Install build dependencies based on container type
+              if [ -f /etc/alpine-release ]; then
+                # Alpine packages (minimal - rustls is pure Rust, no OpenSSL needed)
+                apk add --no-cache build-base musl-dev curl
+              elif [ -f /etc/debian_version ]; then
+                # Debian/Ubuntu packages
+                apt-get update
+                apt-get install -y build-essential pkg-config libssl-dev curl
+                # Install Rust if not present (for bare Ubuntu images)
+                if ! command -v rustup >/dev/null 2>&1; then
+                  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ env.RUST_VERSION }}
+                  export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
+                fi
+                # ARM64 cross-compilation for Debian/Ubuntu
+                if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+                  apt-get install -y gcc-aarch64-linux-gnu
+                  export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+                  export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+                  export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+                fi
+              elif [ -f /etc/arch-release ]; then
+                # Arch Linux packages
+                pacman -Syu --noconfirm
+                pacman -S --noconfirm base-devel pkg-config openssl curl
+                # Install Rust via rustup
+                curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ env.RUST_VERSION }}
+                export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
+                # ARM64 cross-compilation for Arch Linux
+                if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+                  pacman -S --noconfirm aarch64-linux-gnu-gcc
+                  export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+                  export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+                  export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+                fi
+              fi
+
+              # Install boringcache CLI (optional - build continues if unavailable)
+              if curl -fsSL https://install.boringcache.com/install.sh | sh 2>/dev/null; then
+                export PATH="$HOME/.boringcache/bin:$PATH"
+                # Restore Cargo cache before build
+                boringcache restore ${{ github.repository }} \
+                  "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git,cargo-target-${{ matrix.name }}:/workspace/target" \
+                  || echo "Cache restore skipped (cache miss or error)"
+              else
+                echo "BoringCache CLI not available - continuing without cache"
+              fi
+
+              # Add target
+              rustup target add ${{ matrix.target }}
+
+              # Build with appropriate flags
+              if [ "${{ matrix.musl }}" = "true" ]; then
+                RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target ${{ matrix.target }}
+              else
+                cargo build --release --target ${{ matrix.target }}
+              fi
+
+              # Copy binary before saving cache
+              cp target/${{ matrix.target }}/release/boringcache /workspace/${{ matrix.binary_name }}
+              chmod +x /workspace/${{ matrix.binary_name }}
+
+              # Save Cargo cache after build (if CLI available)
+              if command -v boringcache >/dev/null 2>&1; then
+                boringcache save ${{ github.repository }} \
+                  "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git,cargo-target-${{ matrix.name }}:/workspace/target" \
+                  || echo "Cache save skipped (error)"
+              fi
+            '
+
+      # Native builds for Ubuntu/macOS/Windows
+      - name: Setup Rust (Native builds)
+        id: boringcache-rust-native
+        if: matrix.use_docker != true
+        continue-on-error: true
+        uses: boringcache/rust-action@v1
+        with:
+          workspace: ${{ github.repository }}
+          rust-version: ${{ env.RUST_VERSION }}
+
+      - name: Setup Rust (Native Fallback)
+        if: matrix.use_docker != true && steps.boringcache-rust-native.outcome == 'failure'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache cargo (Native Fallback)
+        if: matrix.use_docker != true && steps.boringcache-rust-native.outcome == 'failure'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.name }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.name }}-cargo-
+
+      - name: Install Rust target (Native builds)
+        if: matrix.use_docker != true
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build CLI (Native builds)
+        if: matrix.use_docker != true
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary (Native builds)
+        if: matrix.use_docker != true
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp target/${{ matrix.target }}/release/boringcache.exe ${{ matrix.binary_name }}
+          else
+            cp target/${{ matrix.target }}/release/boringcache ${{ matrix.binary_name }}
+            chmod +x ${{ matrix.binary_name }}
+          fi
+
+      - name: Create generic Linux binary (for Ubuntu 22.04 builds)
+        if: matrix.use_docker != true && matrix.name == 'ubuntu-22.04-amd64'
+        shell: bash
+        run: |
+          cp ${{ matrix.binary_name }} boringcache-linux-amd64
+          chmod +x boringcache-linux-amd64
+
+      - name: Create generic Linux ARM64 binary (for Ubuntu 22.04 ARM builds)
+        if: matrix.use_docker != true && matrix.name == 'ubuntu-22.04-arm64'
+        shell: bash
+        run: |
+          cp ${{ matrix.binary_name }} boringcache-linux-arm64
+          chmod +x boringcache-linux-arm64
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary_name }}
+          path: ${{ matrix.binary_name }}
+
+      - name: Upload generic Linux artifact (AMD64)
+        if: matrix.use_docker != true && matrix.name == 'ubuntu-22.04-amd64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: boringcache-linux-amd64
+          path: boringcache-linux-amd64
+
+      - name: Upload generic Linux artifact (ARM64)
+        if: matrix.use_docker != true && matrix.name == 'ubuntu-22.04-arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: boringcache-linux-arm64
+          path: boringcache-linux-arm64
+
+  # Create GitHub Release
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build-cli]
+    outputs:
+      tag: ${{ steps.get_tag.outputs.tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine release tag
+        id: get_tag
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "ERROR: Release workflow should only be triggered by tags or release events" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Create release (if not release event)
+        if: github.event_name != 'release'
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          name: "BoringCache CLI ${{ steps.get_tag.outputs.tag }}"
+          body: |
+            ## BoringCache CLI Release ${{ steps.get_tag.outputs.tag }}
+
+            ### 🚀 What's New
+            - Cross-platform support: Linux (AMD64/ARM64), macOS (Apple Silicon), Windows (AMD64)
+            - Zstd-compressed tar archives with optional age encryption
+            - Streaming I/O for large caches
+            - Server-signed manifests with warn-only verification
+
+            ### 📦 Downloads
+
+            #### CLI Binaries (GitHub-hosted runners)
+            **Generic Linux (Recommended for wide compatibility)**
+            - **Linux AMD64**: `boringcache-linux-amd64` (Ubuntu 22.04 base)
+            - **Linux ARM64**: `boringcache-linux-arm64` (Ubuntu 22.04 base)
+            
+            **Ubuntu (Native builds)**
+            - **Ubuntu 22.04 AMD64**: `boringcache-ubuntu-22.04-amd64`
+            - **Ubuntu 22.04 ARM64**: `boringcache-ubuntu-22.04-arm64`
+            - **Ubuntu 24.04 AMD64**: `boringcache-ubuntu-24.04-amd64`
+            - **Ubuntu 24.04 ARM64**: `boringcache-ubuntu-24.04-arm64`
+            - **Ubuntu 25.04 AMD64**: `boringcache-ubuntu-25.04-amd64`
+            - **Ubuntu 25.04 ARM64**: `boringcache-ubuntu-25.04-arm64`
+            
+            **Debian (Docker builds for precise compatibility)**
+            - **Debian Bookworm (12) AMD64**: `boringcache-debian-bookworm-amd64`
+            - **Debian Bookworm (12) ARM64**: `boringcache-debian-bookworm-arm64`
+            - **Debian Bullseye (11) AMD64**: `boringcache-debian-bullseye-amd64`
+            - **Debian Bullseye (11) ARM64**: `boringcache-debian-bullseye-arm64`
+            
+            **Alpine Linux (musl, statically linked)**
+            - **Alpine AMD64**: `boringcache-alpine-amd64`
+            
+            **Arch Linux (Latest rolling release)**
+            - **Arch AMD64**: `boringcache-arch-amd64`
+            - **Arch ARM64**: `boringcache-arch-arm64`
+            
+            **macOS (Native builds)**
+            - **macOS 14+ ARM64 (M1/M2/M3)**: `boringcache-macos-14-arm64`
+            - **macOS 15+ ARM64 (M1/M2/M3/M4)**: `boringcache-macos-15-arm64`
+            
+            **Windows (Native builds)**
+            - **Windows Server 2022 AMD64**: `boringcache-windows-2022-amd64.exe`
+
+            ### 🔧 Installation
+
+            #### Ubuntu 22.04
+            ```bash
+            # AMD64
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-ubuntu-22.04-amd64 -o boringcache
+            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
+            
+            # ARM64
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-ubuntu-22.04-arm64 -o boringcache
+            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
+            ```
+
+            #### Ubuntu 24.04
+            ```bash
+            # AMD64
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-ubuntu-24.04-amd64 -o boringcache
+            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
+
+            # ARM64
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-ubuntu-24.04-arm64 -o boringcache
+            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
+            ```
+
+            #### Ubuntu 25.04
+            ```bash
+            # AMD64
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-ubuntu-25.04-amd64 -o boringcache
+            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
+
+            # ARM64
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-ubuntu-25.04-arm64 -o boringcache
+            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
+            ```
+
+            #### macOS
+            ```bash
+            # Apple Silicon (macOS 14+)
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-macos-14-arm64 -o boringcache
+            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
+            
+            # Apple Silicon (macOS 15+ latest)
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-macos-15-arm64 -o boringcache
+            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
+            ```
+
+            #### Windows (PowerShell)
+            ```powershell
+            # Windows 10+ / Server 2019+
+            Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-windows-2022-amd64.exe" -OutFile "boringcache.exe"
+            # Add to PATH or move to desired location
+            ```
+
+            ### 🔐 Verify Downloads
+
+            Each release includes a `SHA256SUMS` file for integrity verification:
+
+            ```bash
+            # Download the binary and checksums
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-linux-amd64
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/SHA256SUMS
+
+            # Verify the binary
+            sha256sum -c SHA256SUMS --ignore-missing
+            ```
+
+            ### ⚡ Usage Examples
+            ```bash
+            # Authenticate
+            boringcache auth --token your-api-token
+
+            # Save cache (tag:path format)
+            boringcache save my-workspace "node-deps:node_modules,build-cache:target"
+
+            # Restore cache (tag:path format)
+            boringcache restore my-workspace "node-deps:node_modules,build-cache:target"
+
+            # List cache entries
+            boringcache ls my-workspace
+            ```
+
+            ---
+            **Full Changelog**: https://github.com/${{ github.repository }}/compare/v1.0.0...${{ steps.get_tag.outputs.tag }}
+          draft: false
+          prerelease: false
+
+
+  # Upload CLI binaries to release
+  upload-cli-assets:
+    name: Upload CLI Assets
+    runs-on: ubuntu-latest
+    needs: create-release
+    strategy:
+      matrix:
+        binary:
+          - boringcache-ubuntu-22.04-amd64
+          - boringcache-ubuntu-22.04-arm64
+          - boringcache-ubuntu-24.04-amd64
+          - boringcache-ubuntu-24.04-arm64
+          - boringcache-ubuntu-25.04-amd64
+          - boringcache-ubuntu-25.04-arm64
+          - boringcache-debian-bookworm-amd64
+          - boringcache-debian-bookworm-arm64
+          - boringcache-debian-bullseye-amd64
+          - boringcache-debian-bullseye-arm64
+          - boringcache-alpine-amd64
+          - boringcache-arch-amd64
+          - boringcache-arch-arm64
+          - boringcache-linux-amd64
+          - boringcache-linux-arm64
+          - boringcache-macos-14-arm64
+          - boringcache-macos-15-arm64
+          - boringcache-windows-2022-amd64.exe
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.binary }}
+          path: ./
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.create-release.outputs.tag }}
+          files: ./${{ matrix.binary }}
+
+  # Generate and upload SHA256 checksums
+  generate-checksums:
+    name: Generate Checksums
+    runs-on: ubuntu-latest
+    needs: [create-release, upload-cli-assets]
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd artifacts
+          # Generate checksums for all binaries
+          for dir in */; do
+            binary_name="${dir%/}"
+            if [ -f "$dir/$binary_name" ]; then
+              sha256sum "$dir/$binary_name" | sed "s|$dir/||" >> ../SHA256SUMS
+            elif [ -f "$dir/${binary_name}.exe" ]; then
+              sha256sum "$dir/${binary_name}.exe" | sed "s|$dir/||" >> ../SHA256SUMS
+            fi
+          done
+          cd ..
+          # Sort for consistent ordering
+          sort -k2 SHA256SUMS -o SHA256SUMS
+          echo "Generated SHA256SUMS:"
+          cat SHA256SUMS
+
+      - name: Upload SHA256SUMS
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.create-release.outputs.tag }}
+          files: ./SHA256SUMS
+
+  # Run tests
+  test-cli:
+    name: Test CLI
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (BoringCache)
+        id: boringcache-rust
+        continue-on-error: true
+        uses: boringcache/rust-action@v1
+        with:
+          workspace: ${{ github.repository }}
+          rust-version: ${{ env.RUST_VERSION }}
+
+      - name: Setup Rust (Fallback)
+        if: steps.boringcache-rust.outcome == 'failure'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache cargo (Fallback)
+        if: steps.boringcache-rust.outcome == 'failure'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install Rust components
+        run: rustup component add clippy rustfmt
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+  # Summary job
+  release-summary:
+    name: Release Summary
+    runs-on: ubuntu-latest
+    needs: [upload-cli-assets, generate-checksums, test-cli]
+    if: always()
+
+    steps:
+      - name: Generate release summary
+        run: |
+          echo "## 🎉 BoringCache CLI Release Complete!"
+          echo ""
+          echo "### ✅ Components Built and Released:"
+          echo "- **CLI Binaries**: Ubuntu 22.04/24.04/25.04 (AMD64/ARM64), macOS 14/15 (ARM64), Windows 2022 (AMD64)"
+          echo "- **SHA256SUMS**: Integrity verification checksums for all binaries"
+          echo "- **GitHub-hosted runners**: Free unlimited builds for public repository"
+          echo ""
+          echo "### 📦 Release Assets:"
+          echo "- CLI binaries for all major platforms and architectures"
+          echo "- SHA256SUMS file for integrity verification"
+          echo ""
+          if [[ "${{ needs.upload-cli-assets.result }}" == "success" && "${{ needs.generate-checksums.result }}" == "success" && "${{ needs.test-cli.result }}" == "success" ]]; then
+            echo "### 🚀 Status: SUCCESS"
+            echo "CLI built, tested, and released successfully!"
+            echo "✅ Ubuntu builds: Working"
+            echo "✅ macOS builds: Working"
+            echo "✅ Windows builds: Working"
+            echo "✅ SHA256SUMS: Generated"
+          else
+            echo "### ⚠️ Status: PARTIAL SUCCESS"
+            echo "Some components may have failed. Check individual job logs:"
+            echo "- Upload assets: ${{ needs.upload-cli-assets.result }}"
+            echo "- Generate checksums: ${{ needs.generate-checksums.result }}"
+            echo "- CLI tests: ${{ needs.test-cli.result }}"
+          fi

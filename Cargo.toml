@@ -1,0 +1,138 @@
+[package]
+name = "boring_cache_cli"
+version = "1.0.0"
+edition = "2021"
+authors = ["BoringCache Team"]
+description = "High-performance cache management CLI for CI/CD workflows"
+license-file = "LICENSE.md"
+
+[[bin]]
+name = "boringcache"
+path = "src/main.rs"
+
+[lib]
+name = "boring_cache_cli"
+path = "src/lib.rs"
+
+[dependencies]
+# CLI parsing - minimal features
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Async runtime - optimized features only (removes ~50-70KB by avoiding unused features)
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "fs", "io-util", "process", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# HTTP client - minimal features (removes TLS backends, cookies, gzip)
+# Using rustls with ring crypto provider (pure Rust, no glibc issues)
+reqwest = { version = "0.13", features = ["json", "stream", "rustls-no-provider"], default-features = false }
+
+# Rustls with ring crypto provider (avoids aws-lc-sys glibc cross-compilation issues)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+# Certificate roots for TLS verification
+webpki-roots = "0.26"
+
+# Serialization - core features only
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", default-features = false }
+ciborium = "0.2"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Progress reporting
+crossbeam-channel = "0.5"
+humansize = "2"
+
+# Compression backend
+zstd = { version = "0.13", default-features = false, features = ["zstdmt"] }
+
+# System utilities
+dirs = "6.0"
+rpassword = "7.3"
+
+# Crypto - minimal features for content hashing
+sha2 = "0.10"
+hex = "0.4"
+
+# Encryption - Age encryption for client-side encryption (optional feature)
+age = { version = "0.10", features = ["armor"] }
+
+# Signing - Ed25519 for artifact signing
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+base64 = "0.22"
+
+# Archive creation
+tar = "0.4"
+filetime = "0.2"
+
+# Async utilities - minimal features
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+tokio-util = { version = "0.7", features = ["io"] }
+
+# Logging - env-filter via tracing-subscriber, lightweight macros via log
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], default-features = false }
+log = "0.4"
+
+# Time handling - minimal features (clock only, no timezone/locale data)
+chrono = { version = "0.4", features = ["clock", "serde"], default-features = false }
+
+# File system utilities
+jwalk = "0.8"
+tempfile = "3.24"
+notify = "8.2"
+notify-debouncer-mini = "0.7"
+ctrlc = "3.5"
+
+# URL handling - minimal
+urlencoding = { version = "2.1", default-features = false }
+
+# System info - lightweight
+num_cpus = "1.17"
+
+# UUID - minimal features only (v4 generation only)
+uuid = { version = "1.19", features = ["v4"], default-features = false }
+
+# Parallel processing for maximum performance
+rayon = "1.11"
+
+# Memory-mapped file I/O for fast hashing
+memmap2 = "0.9"
+
+# High-performance hashing with SIMD
+blake3 = { version = "1.8", features = ["rayon"] }
+
+# Unix system calls for disk space checking
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Windows system calls for disk space checking
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["fileapi", "winbase"] }
+
+[dev-dependencies]
+mockito = "1.7"
+tempfile = "3.24"
+pretty_assertions = "1.4"
+
+
+[profile.release]
+lto = "fat"           # Maximum link-time optimization
+codegen-units = 1     # Single codegen unit for better optimization
+strip = true          # Strip symbols for smaller binary
+panic = "abort"       # Abort on panic for smaller binary and better performance
+opt-level = 3         # Maximum optimization level
+
+[profile.release-static]
+inherits = "release"
+
+# Optimized build profile for minimal binary size
+[profile.min-size]
+inherits = "release"
+opt-level = "z"       # Optimize for size over speed
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"     # Strip all unnecessary symbols
