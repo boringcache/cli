@@ -206,6 +206,7 @@ mod tests {
         std::fs::write(&file_path, b"data").unwrap();
 
         let valid_dir = temp.path().join("valid_dir");
+        let invalid_child = file_path.join("child");
 
         let parsed_entries = vec![
             RestoreSpec {
@@ -218,7 +219,7 @@ mod tests {
             },
             RestoreSpec {
                 tag: "tag3".to_string(),
-                path: Some("/nonexistent/path".to_string()),
+                path: Some(invalid_child.to_string_lossy().to_string()),
             },
         ];
 
