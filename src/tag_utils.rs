@@ -7,33 +7,6 @@ pub fn validate_tag(tag: &str) -> Result<()> {
         anyhow::bail!("Tag cannot be empty");
     }
 
-    if tag.len() > 128 {
-        anyhow::bail!("Tag '{}' is too long (max 128 characters)", tag);
-    }
-
-    let valid_chars = tag
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
-
-    if !valid_chars {
-        anyhow::bail!(
-            "Tag '{}' contains invalid characters. Only alphanumeric characters, dots (.), dashes (-), and underscores (_) are allowed",
-            tag
-        );
-    }
-
-    if tag.starts_with('.') || tag.starts_with('-') {
-        anyhow::bail!("Tag '{}' cannot start with '.' or '-'", tag);
-    }
-
-    if tag.ends_with('.') || tag.ends_with('-') {
-        anyhow::bail!("Tag '{}' cannot end with '.' or '-'", tag);
-    }
-
-    if tag.contains("..") {
-        anyhow::bail!("Tag '{}' cannot contain consecutive dots (..)", tag);
-    }
-
     Ok(())
 }
 
@@ -176,21 +149,16 @@ mod tests {
 
     #[test]
     fn test_tag_validation() {
+        // CLI only checks presence — all other rules are server-side
         assert!(validate_tag("ruby-3.4.4").is_ok());
         assert!(validate_tag("node_18.0.0").is_ok());
         assert!(validate_tag("deps.cache").is_ok());
         assert!(validate_tag("valid-tag_123.test").is_ok());
+        assert!(validate_tag(&"a".repeat(200)).is_ok());
+        assert!(validate_tag("tag with spaces").is_ok());
+        assert!(validate_tag(".starts-with-dot").is_ok());
 
         assert!(validate_tag("").is_err());
-        assert!(validate_tag("tag with spaces").is_err());
-        assert!(validate_tag("tag:with:colons").is_err());
-        assert!(validate_tag("tag@with@ats").is_err());
-        assert!(validate_tag(".starts-with-dot").is_err());
-        assert!(validate_tag("-starts-with-dash").is_err());
-        assert!(validate_tag("ends-with-dot.").is_err());
-        assert!(validate_tag("ends-with-dash-").is_err());
-        assert!(validate_tag("has..consecutive..dots").is_err());
-        assert!(validate_tag(&"a".repeat(129)).is_err());
     }
 
     fn make_platform() -> Platform {
@@ -467,8 +435,8 @@ mod tests {
     }
 
     #[test]
-    fn invalid_fallback_tag_is_skipped() {
-        let base_tag = "a".repeat(112);
+    fn long_tag_resolves_with_suffixes() {
+        let base_tag = "a".repeat(200);
         assert!(validate_tag(&base_tag).is_ok());
 
         let resolver = TagResolver::new(
@@ -483,7 +451,9 @@ mod tests {
         );
 
         let candidates = resolver.restore_tag_candidates(&base_tag);
-        assert_eq!(candidates, vec![base_tag]);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates[0].contains("-branch-feature-x"));
+        assert!(!candidates[1].contains("-branch-"));
     }
 
     #[test]

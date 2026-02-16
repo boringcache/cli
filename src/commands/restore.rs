@@ -171,11 +171,11 @@ mod tests {
     }
 
     #[test]
-    fn preflight_skips_invalid_tag() {
+    fn preflight_skips_empty_tag() {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("dir");
         let parsed = RestoreSpec {
-            tag: "invalid tag".to_string(),
+            tag: "".to_string(),
             path: Some(target.to_string_lossy().to_string()),
         };
 
