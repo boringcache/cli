@@ -1,5 +1,10 @@
+pub mod adapters;
 pub mod api;
 pub mod archive;
+pub mod cache_adapter;
+pub mod cas_file;
+pub mod cas_oci;
+pub mod cas_transport;
 pub mod ci_detection;
 pub mod cli;
 pub mod commands;

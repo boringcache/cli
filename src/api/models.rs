@@ -9,6 +9,14 @@ pub mod cache {
         pub manifest_root_digest: String,
         pub compression_algorithm: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        pub storage_mode: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub blob_count: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub blob_total_size_bytes: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub cas_layout: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub manifest_format_version: Option<u32>,
         pub total_size_bytes: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,12 +43,57 @@ pub mod cache {
         pub encryption_recipient_hint: Option<String>,
     }
 
+    #[derive(Debug, Serialize, Clone)]
+    pub struct PreflightRequest {
+        pub manifest_root_digest: String,
+        pub compression_algorithm: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub storage_mode: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub blob_count: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub blob_total_size_bytes: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub cas_layout: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub manifest_format_version: Option<u32>,
+        pub total_size_bytes: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub uncompressed_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub compressed_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub file_count: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub expected_manifest_digest: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub expected_manifest_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub force: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub ci_provider: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub encrypted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub encryption_algorithm: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub encryption_recipient_hint: Option<String>,
+    }
+
     #[derive(Debug, Deserialize)]
     pub struct SaveResponse {
         pub tag: String,
         pub cache_entry_id: String,
         #[serde(default)]
         pub exists: bool,
+        #[serde(default)]
+        pub storage_mode: Option<String>,
+        #[serde(default)]
+        pub blob_count: Option<u64>,
+        #[serde(default)]
+        pub blob_total_size_bytes: Option<u64>,
+        #[serde(default)]
+        pub cas_layout: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub manifest_upload_url: Option<String>,
         #[serde(default)]
@@ -119,9 +172,14 @@ pub mod cache {
         pub manifest_size: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub manifest_etag: Option<String>,
-        pub archive_size: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub archive_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub archive_etag: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub blob_count: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub blob_total_size_bytes: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub file_count: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -157,6 +215,14 @@ pub mod cache {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub total_size_bytes: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        pub storage_mode: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub blob_count: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub blob_total_size_bytes: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub cas_layout: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub uncompressed_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub compressed_size: Option<u64>,
@@ -180,6 +246,14 @@ pub mod cache {
         pub manifest_url: Option<String>,
         #[serde(default)]
         pub compression_algorithm: Option<String>,
+        #[serde(default)]
+        pub storage_mode: Option<String>,
+        #[serde(default)]
+        pub blob_count: Option<u64>,
+        #[serde(default)]
+        pub blob_total_size_bytes: Option<u64>,
+        #[serde(default)]
+        pub cas_layout: Option<String>,
         #[serde(default)]
         pub archive_urls: Vec<String>,
         #[serde(default)]
@@ -318,6 +392,70 @@ pub mod cache {
         pub results: Vec<ManifestCheckResult>,
     }
 
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    pub struct BlobDescriptor {
+        pub digest: String,
+        pub size_bytes: u64,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct BlobCheckRequest {
+        pub blobs: Vec<BlobDescriptor>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct BlobCheckResult {
+        pub digest: String,
+        pub exists: bool,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct BlobCheckResponse {
+        pub results: Vec<BlobCheckResult>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct BlobUploadUrlsRequest {
+        pub cache_entry_id: String,
+        pub blobs: Vec<BlobDescriptor>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct BlobUploadUrl {
+        pub digest: String,
+        pub url: String,
+        #[serde(default)]
+        pub headers: std::collections::HashMap<String, String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct BlobUploadUrlsResponse {
+        #[serde(default)]
+        pub upload_urls: Vec<BlobUploadUrl>,
+        #[serde(default)]
+        pub already_present: Vec<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct BlobDownloadUrlsRequest {
+        pub cache_entry_id: String,
+        pub blobs: Vec<BlobDescriptor>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct BlobDownloadUrl {
+        pub digest: String,
+        pub url: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct BlobDownloadUrlsResponse {
+        #[serde(default)]
+        pub download_urls: Vec<BlobDownloadUrl>,
+        #[serde(default)]
+        pub missing: Vec<String>,
+    }
+
     #[derive(Debug, Clone)]
     pub struct CacheResolutionEntry {
         pub tag: String,
@@ -327,6 +465,10 @@ pub mod cache {
         pub manifest_root_digest: Option<String>,
         pub manifest_digest: Option<String>,
         pub compression_algorithm: Option<String>,
+        pub storage_mode: Option<String>,
+        pub blob_count: Option<u64>,
+        pub blob_total_size_bytes: Option<u64>,
+        pub cas_layout: Option<String>,
         pub archive_urls: Vec<String>,
         pub size: Option<u64>,
         pub uncompressed_size: Option<u64>,

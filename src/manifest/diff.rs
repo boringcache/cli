@@ -5,6 +5,8 @@ use super::model::{EntryState, Manifest, ManifestEntry, ManifestRoot, ManifestSu
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
+const SHA256_PREFIX: &str = "sha256:";
+
 pub struct ManifestDiffer<'a> {
     tag: &'a str,
 }
@@ -156,10 +158,11 @@ pub fn compute_root_digest_from_entries(entries: &[ManifestEntry]) -> String {
     }
 
     let digest = hasher.finalize();
-    digest
+    let hex = digest
         .iter()
         .map(|b| format!("{:02x}", b))
-        .collect::<String>()
+        .collect::<String>();
+    format!("{SHA256_PREFIX}{hex}")
 }
 
 #[cfg(test)]

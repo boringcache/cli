@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::model::Manifest;
+const SHA256_PREFIX: &str = "sha256:";
 
 pub type ManifestIoError = anyhow::Error;
 
@@ -64,5 +65,5 @@ pub fn compute_manifest_digest(manifest_bytes: &[u8]) -> String {
         use std::fmt::Write;
         let _ = write!(output, "{:02x}", byte);
     }
-    output
+    format!("{SHA256_PREFIX}{output}")
 }

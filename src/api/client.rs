@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::sleep;
 
+const BLOB_CHECK_BATCH_MAX: usize = 1_000;
+const BLOB_URL_BATCH_MAX: usize = 500;
+const API_BATCH_CONCURRENCY: usize = 3;
+
 #[derive(Clone)]
 pub struct ApiClient {
     client: Client,
@@ -348,6 +352,153 @@ impl ApiClient {
         self.post(&endpoint, &body).await
     }
 
+    pub async fn check_blobs(
+        &self,
+        workspace: &str,
+        blobs: &[super::models::cache::BlobDescriptor],
+    ) -> Result<super::models::cache::BlobCheckResponse> {
+        ensure!(!blobs.is_empty(), "blobs cannot be empty");
+        let endpoint = self.workspace_endpoint(workspace, "caches/blobs/check")?;
+        if blobs.len() <= BLOB_CHECK_BATCH_MAX {
+            let body = super::models::cache::BlobCheckRequest {
+                blobs: blobs.to_vec(),
+            };
+            return self.post(&endpoint, &body).await;
+        }
+
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(API_BATCH_CONCURRENCY));
+        let mut tasks = Vec::new();
+        for chunk in blobs.chunks(BLOB_CHECK_BATCH_MAX) {
+            let client = self.clone();
+            let endpoint = endpoint.clone();
+            let chunk = chunk.to_vec();
+            let semaphore = semaphore.clone();
+            tasks.push(tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                let body = super::models::cache::BlobCheckRequest { blobs: chunk };
+                client
+                    .post::<_, super::models::cache::BlobCheckResponse>(&endpoint, &body)
+                    .await
+            }));
+        }
+
+        let mut results = Vec::with_capacity(blobs.len());
+        for task in tasks {
+            let response = task.await.map_err(|e| anyhow::anyhow!(e))??;
+            results.extend(response.results);
+        }
+
+        Ok(super::models::cache::BlobCheckResponse { results })
+    }
+
+    pub async fn blob_upload_urls(
+        &self,
+        workspace: &str,
+        cache_entry_id: &str,
+        blobs: &[super::models::cache::BlobDescriptor],
+    ) -> Result<super::models::cache::BlobUploadUrlsResponse> {
+        ensure!(
+            !cache_entry_id.trim().is_empty(),
+            "cache_entry_id must not be empty"
+        );
+        ensure!(!blobs.is_empty(), "blobs cannot be empty");
+        let endpoint = self.workspace_endpoint(workspace, "caches/blobs/upload-urls")?;
+        if blobs.len() <= BLOB_URL_BATCH_MAX {
+            let body = super::models::cache::BlobUploadUrlsRequest {
+                cache_entry_id: cache_entry_id.to_string(),
+                blobs: blobs.to_vec(),
+            };
+            return self.post(&endpoint, &body).await;
+        }
+
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(API_BATCH_CONCURRENCY));
+        let mut tasks = Vec::new();
+        for chunk in blobs.chunks(BLOB_URL_BATCH_MAX) {
+            let client = self.clone();
+            let endpoint = endpoint.clone();
+            let chunk = chunk.to_vec();
+            let cache_entry_id = cache_entry_id.to_string();
+            let semaphore = semaphore.clone();
+            tasks.push(tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                let body = super::models::cache::BlobUploadUrlsRequest {
+                    cache_entry_id,
+                    blobs: chunk,
+                };
+                client
+                    .post::<_, super::models::cache::BlobUploadUrlsResponse>(&endpoint, &body)
+                    .await
+            }));
+        }
+
+        let mut upload_urls = Vec::new();
+        let mut already_present = Vec::new();
+        for task in tasks {
+            let response = task.await.map_err(|e| anyhow::anyhow!(e))??;
+            upload_urls.extend(response.upload_urls);
+            already_present.extend(response.already_present);
+        }
+
+        Ok(super::models::cache::BlobUploadUrlsResponse {
+            upload_urls,
+            already_present: dedupe_strings(already_present),
+        })
+    }
+
+    pub async fn blob_download_urls(
+        &self,
+        workspace: &str,
+        cache_entry_id: &str,
+        blobs: &[super::models::cache::BlobDescriptor],
+    ) -> Result<super::models::cache::BlobDownloadUrlsResponse> {
+        ensure!(
+            !cache_entry_id.trim().is_empty(),
+            "cache_entry_id must not be empty"
+        );
+        ensure!(!blobs.is_empty(), "blobs cannot be empty");
+        let endpoint = self.workspace_endpoint(workspace, "caches/blobs/download-urls")?;
+        if blobs.len() <= BLOB_URL_BATCH_MAX {
+            let body = super::models::cache::BlobDownloadUrlsRequest {
+                cache_entry_id: cache_entry_id.to_string(),
+                blobs: blobs.to_vec(),
+            };
+            return self.post(&endpoint, &body).await;
+        }
+
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(API_BATCH_CONCURRENCY));
+        let mut tasks = Vec::new();
+        for chunk in blobs.chunks(BLOB_URL_BATCH_MAX) {
+            let client = self.clone();
+            let endpoint = endpoint.clone();
+            let chunk = chunk.to_vec();
+            let cache_entry_id = cache_entry_id.to_string();
+            let semaphore = semaphore.clone();
+            tasks.push(tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                let body = super::models::cache::BlobDownloadUrlsRequest {
+                    cache_entry_id,
+                    blobs: chunk,
+                };
+                client
+                    .post::<_, super::models::cache::BlobDownloadUrlsResponse>(&endpoint, &body)
+                    .await
+            }));
+        }
+
+        let mut download_urls = Vec::new();
+        let mut missing = Vec::new();
+        for task in tasks {
+            let response = task.await.map_err(|e| anyhow::anyhow!(e))??;
+            download_urls.extend(response.download_urls);
+            missing.extend(response.missing);
+        }
+
+        Ok(super::models::cache::BlobDownloadUrlsResponse {
+            download_urls,
+            missing: dedupe_strings(missing),
+        })
+    }
+
     pub async fn save_entry(
         &self,
         workspace: &str,
@@ -371,6 +522,28 @@ impl ApiClient {
         }
 
         self.post(&endpoint, &payload).await
+    }
+
+    pub async fn preflight_entry(
+        &self,
+        workspace: &str,
+        tag: &str,
+        entry: &super::models::cache::PreflightRequest,
+    ) -> Result<super::models::cache::SaveResponse> {
+        ensure!(!tag.trim().is_empty(), "Tag must not be empty");
+
+        let encoded_tag = urlencoding::encode(tag);
+        let endpoint =
+            self.workspace_endpoint(workspace, &format!("caches/{encoded_tag}/preflight"))?;
+        debug!(
+            "preflight_entry workspace={} tag={} endpoint={}",
+            workspace, tag, endpoint
+        );
+        if let Ok(body) = serde_json::to_string(entry) {
+            debug!("POST {} body={}", endpoint, body);
+        }
+
+        self.post(&endpoint, entry).await
     }
 
     pub async fn delete(
@@ -505,6 +678,20 @@ impl ApiClient {
             let uncompressed_size =
                 metadata.and_then(|m| m.uncompressed_size.or(m.total_size_bytes));
             let compressed_size = metadata.and_then(|m| m.compressed_size);
+            let storage_mode = item
+                .storage_mode
+                .clone()
+                .or_else(|| metadata.and_then(|m| m.storage_mode.clone()));
+            let blob_count = item
+                .blob_count
+                .or_else(|| metadata.and_then(|m| m.blob_count));
+            let blob_total_size_bytes = item
+                .blob_total_size_bytes
+                .or_else(|| metadata.and_then(|m| m.blob_total_size_bytes));
+            let cas_layout = item
+                .cas_layout
+                .clone()
+                .or_else(|| metadata.and_then(|m| m.cas_layout.clone()));
 
             CacheResolutionEntry {
                 tag: item.tag.clone(),
@@ -522,6 +709,10 @@ impl ApiClient {
                         .as_ref()
                         .and_then(|m| m.compression_algorithm.clone())
                 }),
+                storage_mode,
+                blob_count,
+                blob_total_size_bytes,
+                cas_layout,
                 archive_urls: item.archive_urls.clone(),
                 size: logical_size,
                 uncompressed_size,
@@ -731,6 +922,17 @@ fn format_error_message(
     }
 }
 
+fn dedupe_strings(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for value in values {
+        if seen.insert(value.clone()) {
+            deduped.push(value);
+        }
+    }
+    deduped
+}
+
 fn ensure_crypto_provider() {
     use std::sync::Once;
     static INIT: Once = Once::new();
@@ -750,7 +952,8 @@ fn build_api_client_with_headers(headers: Option<reqwest::header::HeaderMap>) ->
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .redirect(reqwest::redirect::Policy::limited(4))
-        .tls_backend_rustls();
+        .tls_backend_rustls()
+        .http2_adaptive_window(true);
 
     if is_test_mode {
         builder = builder
@@ -779,6 +982,7 @@ fn build_transfer_client_with_headers(
         .unwrap_or(false);
 
     let mut builder = reqwest::Client::builder()
+        .http1_only()
         .pool_max_idle_per_host(64)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Some(Duration::from_secs(30)))
@@ -826,6 +1030,10 @@ mod tests {
             }
             Err(_) => false,
         }
+    }
+
+    fn digest_for(index: usize) -> String {
+        format!("sha256:{index:064x}")
     }
 
     #[test]
@@ -988,5 +1196,428 @@ mod tests {
             std::env::set_var("HOME", home);
         }
         std::env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_blob_check_request_body() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let guard_result = mutex.lock();
+        let _guard = match guard_result {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if !networking_available() {
+            eprintln!("skipping test_blob_check_request_body: networking disabled in sandbox");
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_home.path());
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/workspaces/ns/ws/caches/blobs/check")
+            .match_header("authorization", "Bearer test-token")
+            .match_header("content-type", "application/json")
+            .match_body(Matcher::PartialJson(json!({
+                "blobs": [
+                    {
+                        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "size_bytes": 1234
+                    }
+                ]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"results":[{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","exists":true}]}"#)
+            .create_async()
+            .await;
+
+        std::env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize");
+
+        let response = client
+            .check_blobs(
+                "ns/ws",
+                &[cache::BlobDescriptor {
+                    digest:
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_string(),
+                    size_bytes: 1234,
+                }],
+            )
+            .await
+            .expect("blob check should succeed");
+
+        assert_eq!(response.results.len(), 1);
+        assert!(response.results[0].exists);
+
+        mock.assert_async().await;
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
+        std::env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_blob_check_batches_large_requests() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let guard_result = mutex.lock();
+        let _guard = match guard_result {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if !networking_available() {
+            eprintln!(
+                "skipping test_blob_check_batches_large_requests: networking disabled in sandbox"
+            );
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_home.path());
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/workspaces/ns/ws/caches/blobs/check")
+            .match_header("authorization", "Bearer test-token")
+            .match_header("content-type", "application/json")
+            .expect(2)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"results":[{"digest":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","exists":true}]}"#,
+            )
+            .create_async()
+            .await;
+
+        std::env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize");
+
+        let blobs = (0..(BLOB_CHECK_BATCH_MAX + 1))
+            .map(|index| cache::BlobDescriptor {
+                digest: digest_for(index),
+                size_bytes: 1,
+            })
+            .collect::<Vec<_>>();
+
+        let response = client
+            .check_blobs("ns/ws", &blobs)
+            .await
+            .expect("blob check should succeed");
+        assert_eq!(response.results.len(), 2);
+
+        mock.assert_async().await;
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
+        std::env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_blob_upload_urls_batches_large_requests() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let guard_result = mutex.lock();
+        let _guard = match guard_result {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if !networking_available() {
+            eprintln!("skipping test_blob_upload_urls_batches_large_requests: networking disabled in sandbox");
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_home.path());
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/workspaces/ns/ws/caches/blobs/upload-urls")
+            .match_header("authorization", "Bearer test-token")
+            .match_header("content-type", "application/json")
+            .expect(2)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"upload_urls":[{"digest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","url":"https://example.com/upload","headers":{}}],"already_present":[]}"#,
+            )
+            .create_async()
+            .await;
+
+        std::env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize");
+
+        let blobs = (0..(BLOB_URL_BATCH_MAX + 1))
+            .map(|index| cache::BlobDescriptor {
+                digest: digest_for(index),
+                size_bytes: 1,
+            })
+            .collect::<Vec<_>>();
+
+        let response = client
+            .blob_upload_urls("ns/ws", "entry-1", &blobs)
+            .await
+            .expect("blob upload urls should succeed");
+        assert_eq!(response.upload_urls.len(), 2);
+
+        mock.assert_async().await;
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
+        std::env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_blob_download_urls_batches_large_requests() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let guard_result = mutex.lock();
+        let _guard = match guard_result {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if !networking_available() {
+            eprintln!("skipping test_blob_download_urls_batches_large_requests: networking disabled in sandbox");
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_home.path());
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/workspaces/ns/ws/caches/blobs/download-urls")
+            .match_header("authorization", "Bearer test-token")
+            .match_header("content-type", "application/json")
+            .expect(2)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"download_urls":[{"digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","url":"https://example.com/download"}],"missing":[]}"#,
+            )
+            .create_async()
+            .await;
+
+        std::env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize");
+
+        let blobs = (0..(BLOB_URL_BATCH_MAX + 1))
+            .map(|index| cache::BlobDescriptor {
+                digest: digest_for(index),
+                size_bytes: 1,
+            })
+            .collect::<Vec<_>>();
+
+        let response = client
+            .blob_download_urls("ns/ws", "entry-1", &blobs)
+            .await
+            .expect("blob download urls should succeed");
+        assert_eq!(response.download_urls.len(), 2);
+
+        mock.assert_async().await;
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
+        std::env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_preflight_request_body() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let guard_result = mutex.lock();
+        let _guard = match guard_result {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if !networking_available() {
+            eprintln!("skipping test_preflight_request_body: networking disabled in sandbox");
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_home.path());
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/workspaces/ns/ws/caches/my-tag/preflight")
+            .match_header("authorization", "Bearer test-token")
+            .match_header("content-type", "application/json")
+            .match_body(Matcher::PartialJson(json!({
+                "manifest_root_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "compression_algorithm": "zstd",
+                "storage_mode": "cas",
+                "blob_count": 3,
+                "blob_total_size_bytes": 300
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"tag":"my-tag","cache_entry_id":"entry-1","exists":false,"storage_mode":"cas","blob_count":3,"blob_total_size_bytes":300,"cas_layout":"file-v1","manifest_upload_url":"https://example.com/upload","archive_urls":[],"upload_headers":{}}"#,
+            )
+            .create_async()
+            .await;
+
+        std::env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize");
+
+        let response = client
+            .preflight_entry(
+                "ns/ws",
+                "my-tag",
+                &cache::PreflightRequest {
+                    manifest_root_digest:
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_string(),
+                    compression_algorithm: "zstd".to_string(),
+                    storage_mode: Some("cas".to_string()),
+                    blob_count: Some(3),
+                    blob_total_size_bytes: Some(300),
+                    cas_layout: Some("file-v1".to_string()),
+                    manifest_format_version: Some(1),
+                    total_size_bytes: 300,
+                    uncompressed_size: None,
+                    compressed_size: None,
+                    file_count: Some(3),
+                    expected_manifest_digest: Some(
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .to_string(),
+                    ),
+                    expected_manifest_size: Some(1024),
+                    force: None,
+                    ci_provider: Some("github-actions".to_string()),
+                    encrypted: None,
+                    encryption_algorithm: None,
+                    encryption_recipient_hint: None,
+                },
+            )
+            .await
+            .expect("preflight should succeed");
+
+        assert!(!response.exists);
+        assert_eq!(response.storage_mode.as_deref(), Some("cas"));
+        assert_eq!(response.cas_layout.as_deref(), Some("file-v1"));
+
+        mock.assert_async().await;
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
+        std::env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[test]
+    fn test_map_restore_result_prefers_top_level_cas_fields() {
+        let mapped = ApiClient::map_restore_result(cache::RestoreResult {
+            tag: "cas-tag".to_string(),
+            status: "hit".to_string(),
+            cache_entry_id: Some("entry-1".to_string()),
+            manifest_root_digest: Some(
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                    .to_string(),
+            ),
+            manifest_digest: None,
+            manifest_url: Some("https://example.test/manifest".to_string()),
+            compression_algorithm: Some("zstd".to_string()),
+            storage_mode: Some("cas".to_string()),
+            blob_count: Some(9),
+            blob_total_size_bytes: Some(4096),
+            cas_layout: Some("oci-v1".to_string()),
+            archive_urls: vec![],
+            metadata: Some(cache::RestoreMetadata {
+                manifest_root_digest: None,
+                total_size_bytes: Some(99),
+                storage_mode: Some("archive".to_string()),
+                blob_count: Some(1),
+                blob_total_size_bytes: Some(1),
+                cas_layout: Some("file-v1".to_string()),
+                uncompressed_size: None,
+                compressed_size: None,
+                file_count: None,
+                compression_algorithm: None,
+            }),
+            error: None,
+            pending: false,
+            workspace_signing_public_key: None,
+            server_signature: None,
+            server_signed_at: None,
+            encrypted: false,
+        });
+
+        assert_eq!(mapped.storage_mode.as_deref(), Some("cas"));
+        assert_eq!(mapped.blob_count, Some(9));
+        assert_eq!(mapped.blob_total_size_bytes, Some(4096));
+        assert_eq!(mapped.cas_layout.as_deref(), Some("oci-v1"));
+    }
+
+    #[test]
+    fn test_map_restore_result_uses_metadata_cas_fields_as_fallback() {
+        let mapped = ApiClient::map_restore_result(cache::RestoreResult {
+            tag: "cas-tag".to_string(),
+            status: "hit".to_string(),
+            cache_entry_id: Some("entry-2".to_string()),
+            manifest_root_digest: None,
+            manifest_digest: None,
+            manifest_url: Some("https://example.test/manifest".to_string()),
+            compression_algorithm: Some("zstd".to_string()),
+            storage_mode: None,
+            blob_count: None,
+            blob_total_size_bytes: None,
+            cas_layout: None,
+            archive_urls: vec![],
+            metadata: Some(cache::RestoreMetadata {
+                manifest_root_digest: Some(
+                    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                        .to_string(),
+                ),
+                total_size_bytes: Some(100),
+                storage_mode: Some("cas".to_string()),
+                blob_count: Some(3),
+                blob_total_size_bytes: Some(2048),
+                cas_layout: Some("bazel-v2".to_string()),
+                uncompressed_size: None,
+                compressed_size: None,
+                file_count: None,
+                compression_algorithm: None,
+            }),
+            error: None,
+            pending: false,
+            workspace_signing_public_key: None,
+            server_signature: None,
+            server_signed_at: None,
+            encrypted: false,
+        });
+
+        assert_eq!(mapped.storage_mode.as_deref(), Some("cas"));
+        assert_eq!(mapped.blob_count, Some(3));
+        assert_eq!(mapped.blob_total_size_bytes, Some(2048));
+        assert_eq!(mapped.cas_layout.as_deref(), Some("bazel-v2"));
     }
 }

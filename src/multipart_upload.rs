@@ -44,10 +44,14 @@ pub async fn upload_via_single_url(
             Err(err) => Err(err),
         });
 
-        let mut request = client
-            .put(upload_url)
-            .header("content-type", "application/octet-stream")
-            .header("content-length", file_size.to_string());
+        let mut request = client.put(upload_url);
+
+        if !has_header(upload_headers, "content-type") {
+            request = request.header("content-type", "application/octet-stream");
+        }
+        if !has_header(upload_headers, "content-length") {
+            request = request.header("content-length", file_size.to_string());
+        }
 
         for (key, value) in upload_headers {
             request = request.header(key.as_str(), value.as_str());
@@ -215,10 +219,14 @@ async fn upload_single_part(
             }
         });
 
-        let mut request = client
-            .put(url)
-            .header("content-type", "application/octet-stream")
-            .header("content-length", size.to_string());
+        let mut request = client.put(url);
+
+        if !has_header(upload_headers, "content-type") {
+            request = request.header("content-type", "application/octet-stream");
+        }
+        if !has_header(upload_headers, "content-length") {
+            request = request.header("content-length", size.to_string());
+        }
 
         for (key, value) in upload_headers.iter() {
             request = request.header(key.as_str(), value.as_str());
@@ -278,6 +286,10 @@ fn chunk_size_for_system() -> usize {
         crate::platform::resources::MemoryStrategy::Aggressive => 4 * 1024 * 1024,
         crate::platform::resources::MemoryStrategy::UltraAggressive => 8 * 1024 * 1024,
     }
+}
+
+fn has_header(headers: &HashMap<String, String>, target: &str) -> bool {
+    headers.keys().any(|key| key.eq_ignore_ascii_case(target))
 }
 
 fn calculate_upload_concurrency() -> usize {

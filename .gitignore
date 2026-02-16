@@ -54,3 +54,4 @@ target
 .boringcache
 build/
 dist/
+.examples/

@@ -152,24 +152,26 @@ pub fn get_optimal_concurrency(operation_count: usize, operation_type: &str) -> 
         .unwrap_or(4);
 
     let base_concurrency = match operation_type {
-        "save" => std::cmp::max(2, cpu_count / 2),
-        "restore" => std::cmp::max(2, cpu_count),
-        _ => 3,
+        "save" => std::cmp::max(4, cpu_count),
+        "restore" => std::cmp::max(4, cpu_count),
+        _ => 4,
     };
 
     let platform_adjusted = if cfg!(target_os = "macos") {
-        if operation_type == "restore" {
-            base_concurrency + 2
-        } else {
-            base_concurrency
-        }
+        base_concurrency + 2
     } else if cfg!(target_os = "windows") {
         std::cmp::max(2, base_concurrency - 1)
     } else {
         base_concurrency
     };
 
-    std::cmp::min(std::cmp::min(platform_adjusted, 8), operation_count)
+    let hard_cap = match operation_type {
+        "save" => 16,
+        "restore" => 24,
+        _ => 16,
+    };
+
+    std::cmp::min(std::cmp::min(platform_adjusted, hard_cap), operation_count)
 }
 
 pub fn display_concurrency_info(max_concurrent: usize, operation_type: &str) {

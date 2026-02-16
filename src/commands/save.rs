@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Context, Error, Result};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::task;
 
 use crate::api::models::cache::{
-    CompleteMultipartRequest, ConfirmRequest, ManifestCheckRequest, SaveRequest,
+    BlobDescriptor, CompleteMultipartRequest, ConfirmRequest, ManifestCheckRequest, SaveRequest,
 };
 use crate::api::ApiClient;
 use crate::archive::{create_tar_archive, TarArchiveInfo};
@@ -16,7 +17,6 @@ use crate::progress::{
     format_bytes, ProgressSession, Summary, System as ProgressSystem, TransferProgress,
 };
 use crate::telemetry::{SaveMetrics, StorageMetrics};
-use crate::transfer::send_transfer_request_with_retry;
 use crate::ui;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +234,8 @@ async fn save_single_entry(
         tag,
         path
     ));
+
+    let adapter_detection = crate::cache_adapter::detect_layout(std::path::Path::new(&path));
     log::debug!(
         "Starting save {} of {} for tag={} path={} workspace={}",
         entry_index + 1,
@@ -242,7 +244,88 @@ async fn save_single_entry(
         path,
         workspace
     );
+    log::debug!(
+        "Save adapter selection tag={} path={} adapter={} reason={}",
+        tag,
+        path,
+        adapter_detection.kind.as_str(),
+        adapter_detection.reason
+    );
 
+    let adapter_selection =
+        crate::adapters::select_layout_adapter(adapter_detection.kind, encrypt)?;
+    if adapter_selection.used_encryption_fallback {
+        ui::warn(crate::adapters::CONTENT_ADDRESSED_ENCRYPTION_FALLBACK_WARNING);
+    }
+    let adapter = adapter_selection.adapter;
+    log::debug!(
+        "Save adapter dispatch tag={} adapter={}",
+        tag,
+        adapter.transport_kind().as_str()
+    );
+
+    match adapter {
+        crate::adapters::AdapterDispatchKind::Archive => {
+            save_single_archive_entry(
+                api_client,
+                workspace,
+                tag,
+                path,
+                verbose,
+                force,
+                entry_index,
+                total_entries,
+                exclude,
+                encrypt,
+                recipient,
+            )
+            .await
+        }
+        crate::adapters::AdapterDispatchKind::Oci => {
+            save_single_oci_entry(
+                api_client,
+                workspace,
+                tag,
+                path,
+                verbose,
+                force,
+                entry_index,
+                total_entries,
+            )
+            .await
+        }
+        crate::adapters::AdapterDispatchKind::File => {
+            save_single_file_entry(
+                api_client,
+                workspace,
+                tag,
+                path,
+                verbose,
+                force,
+                entry_index,
+                total_entries,
+                exclude,
+                adapter_detection.kind,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn save_single_archive_entry(
+    api_client: ApiClient,
+    workspace: String,
+    tag: String,
+    path: String,
+    verbose: bool,
+    force: bool,
+    _entry_index: usize,
+    _total_entries: usize,
+    exclude: Vec<String>,
+    encrypt: bool,
+    recipient: Option<String>,
+) -> Result<SaveStatus> {
     let progress_system = ProgressSystem::new();
     let reporter = progress_system.reporter();
     let session_id = format!("save-{}", tag);
@@ -350,17 +433,17 @@ async fn save_single_entry(
                 ui::warn(&format!("Cache unavailable, skipping save: {}", err));
                 return Ok(SaveStatus::AlreadyExists);
             }
-            ui::warn(&format!("  Check failed ({}); proceeding", err));
+            progress_warning(&reporter, format!("  Check failed ({}); proceeding", err));
         }
     }
     check_step.complete()?;
 
     if cache_exists && cache_pending && !force {
-        ui::info("  Cache upload in progress; skipping wait");
+        progress_info(&reporter, "  Cache upload in progress; skipping wait");
     }
 
     if cache_exists && !force {
-        ui::info("  Cache exists; skipping");
+        progress_info(&reporter, "  Cache exists; skipping");
         complete_skipped_step(&mut session, "Creating archive", "skipped — cache exists")?;
         complete_skipped_step(
             &mut session,
@@ -406,13 +489,15 @@ async fn save_single_entry(
 
                     if digest_exists {
                         if let Some(cache_entry_id) = result.cache_entry_id.as_deref() {
-                            ui::info("  Cache exists under another tag; binding");
+                            progress_info(&reporter, "  Cache exists under another tag; binding");
                             let confirm_request = ConfirmRequest {
                                 manifest_digest: expected_manifest_digest.clone(),
                                 manifest_size: expected_manifest_size,
                                 manifest_etag: None,
-                                archive_size: 0,
+                                archive_size: Some(0),
                                 archive_etag: None,
+                                blob_count: None,
+                                blob_total_size_bytes: None,
                                 file_count: Some(file_count),
                                 uncompressed_size: Some(total_size_bytes),
                                 compressed_size: None,
@@ -457,10 +542,13 @@ async fn save_single_entry(
                                     return Ok(SaveStatus::AlreadyExists);
                                 }
                                 Err(err) => {
-                                    ui::warn(&format!(
-                                        "  Failed to bind tag to existing cache ({}); proceeding",
-                                        err
-                                    ));
+                                    progress_warning(
+                                        &reporter,
+                                        format!(
+                                            "  Failed to bind tag to existing cache ({}); proceeding",
+                                            err
+                                        ),
+                                    );
                                 }
                             }
                         }
@@ -468,7 +556,10 @@ async fn save_single_entry(
                 }
             }
             Err(err) => {
-                ui::warn(&format!("  Digest check failed ({}); proceeding", err));
+                progress_warning(
+                    &reporter,
+                    format!("  Digest check failed ({}); proceeding", err),
+                );
             }
         }
     }
@@ -528,11 +619,14 @@ async fn save_single_entry(
             crate::archive::encrypt_archive(archive_info.archive_path.as_ref(), age_recipient)?;
         let encrypted_size = std::fs::metadata::<&std::path::Path>(encrypted_path.as_ref())?.len();
 
-        ui::info(&format!(
-            "  Encrypted archive: {} → {}",
-            crate::progress::format_bytes(archive_info.compressed_size),
-            crate::progress::format_bytes(encrypted_size)
-        ));
+        progress_info(
+            &reporter,
+            format!(
+                "  Encrypted archive: {} → {}",
+                crate::progress::format_bytes(archive_info.compressed_size),
+                crate::progress::format_bytes(encrypted_size)
+            ),
+        );
 
         encrypt_step.complete()?;
         (encrypted_path, encrypted_size)
@@ -550,6 +644,10 @@ async fn save_single_entry(
         tag: tag.clone(),
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
+        storage_mode: None,
+        blob_count: None,
+        blob_total_size_bytes: None,
+        cas_layout: None,
         manifest_format_version: Some(1),
         total_size_bytes,
         uncompressed_size: Some(total_uncompressed_size),
@@ -581,8 +679,11 @@ async fn save_single_entry(
 
             if let Some(crate::error::BoringCacheError::CacheConflict(message)) = bc_error {
                 create_step.complete()?;
-                ui::warn(&format!("  Conflict: {}", message));
-                ui::info("  Tag already exists with different content; skipping save");
+                progress_warning(&reporter, format!("  Conflict: {}", message));
+                progress_info(
+                    &reporter,
+                    "  Tag already exists with different content; skipping save",
+                );
                 complete_skipped_step(&mut session, "Uploading archive", "skipped — tag conflict")?;
                 complete_skipped_step(
                     &mut session,
@@ -605,7 +706,10 @@ async fn save_single_entry(
 
             if let Some(crate::error::BoringCacheError::CachePending) = bc_error {
                 create_step.complete()?;
-                ui::info("  Another job is uploading this cache; skipping wait");
+                progress_info(
+                    &reporter,
+                    "  Another job is uploading this cache; skipping wait",
+                );
                 complete_skipped_step(
                     &mut session,
                     "Uploading archive",
@@ -643,6 +747,29 @@ async fn save_single_entry(
     };
     create_step.complete()?;
 
+    let server_adapter = crate::cache_adapter::detect_restore_transport(
+        save_response.storage_mode.as_deref(),
+        save_response.cas_layout.as_deref(),
+    );
+    log::debug!(
+        "Save response transport tag={} adapter={} storage_mode={:?} cas_layout={:?}",
+        tag,
+        server_adapter.as_str(),
+        save_response.storage_mode.as_deref(),
+        save_response.cas_layout.as_deref()
+    );
+
+    if server_adapter != crate::cache_adapter::CacheAdapterKind::Archive {
+        let message = format!(
+            "Cache adapter '{}' is not supported by this CLI build",
+            server_adapter.as_str()
+        );
+        session.error(message.clone())?;
+        drop(reporter);
+        progress_system.shutdown()?;
+        anyhow::bail!(message);
+    }
+
     let archive_urls = save_response.get_archive_urls();
     let needs_upload = !archive_urls.is_empty();
 
@@ -670,9 +797,12 @@ async fn save_single_entry(
 
         if save_status_pending && archive_urls.is_empty() {
             if same_tag {
-                ui::info("  Cache upload in progress; skipping wait");
+                progress_info(&reporter, "  Cache upload in progress; skipping wait");
             } else {
-                ui::info("  Cache upload in progress; binding tag and exiting");
+                progress_info(
+                    &reporter,
+                    "  Cache upload in progress; binding tag and exiting",
+                );
             }
         }
 
@@ -688,8 +818,10 @@ async fn save_single_entry(
                 manifest_digest: expected_manifest_digest.clone(),
                 manifest_size: manifest_bytes.len() as u64,
                 manifest_etag: None,
-                archive_size: archive_info.compressed_size,
+                archive_size: Some(archive_info.compressed_size),
                 archive_etag: None,
+                blob_count: None,
+                blob_total_size_bytes: None,
                 file_count: Some(file_count),
                 uncompressed_size: Some(archive_info.uncompressed_size),
                 compressed_size: Some(archive_info.compressed_size),
@@ -711,7 +843,7 @@ async fn save_single_entry(
                 }
                 Some("pending") => {
                     log::debug!("Tag {} binding deferred until upload completes", tag);
-                    ui::info("  Tag will be bound when upload completes");
+                    progress_info(&reporter, "  Tag will be bound when upload completes");
                 }
                 Some(status) => {
                     log::debug!("Tag {} binding status: {}", tag, status);
@@ -743,12 +875,15 @@ async fn save_single_entry(
         return Ok(SaveStatus::AlreadyExists);
     }
 
-    ui::info(&format!(
-        "  Backend response: {} archive total, {} needs upload ({} exists)",
-        1,
-        if needs_upload { 1 } else { 0 },
-        if needs_upload { 0 } else { 1 },
-    ));
+    progress_info(
+        &reporter,
+        format!(
+            "  Backend response: {} archive total, {} needs upload ({} exists)",
+            1,
+            if needs_upload { 1 } else { 0 },
+            if needs_upload { 0 } else { 1 },
+        ),
+    );
 
     let cache_entry_id = &save_response.cache_entry_id;
     let mut archive_etag: Option<String> = None;
@@ -760,7 +895,10 @@ async fn save_single_entry(
             "Uploading archive",
             "skipped — archive already exists",
         )?;
-        ui::info("  Archive already present on server; skipping upload");
+        progress_info(
+            &reporter,
+            "  Archive already present on server; skipping upload",
+        );
     } else {
         let step6 = session.start_step(
             "Uploading archive".to_string(),
@@ -784,7 +922,10 @@ async fn save_single_entry(
         if verbose && !save_response.upload_headers.is_empty() {
             if let Some(regions) = save_response.upload_headers.get("x-tigris-regions") {
                 let count = regions.split(',').count();
-                ui::info(&format!("  Replication: {} regions ({})", count, regions));
+                progress_info(
+                    &reporter,
+                    format!("  Replication: {} regions ({})", count, regions),
+                );
             }
         }
 
@@ -799,10 +940,10 @@ async fn save_single_entry(
                 upload_id
             );
             if verbose {
-                ui::info(&format!(
-                    "  Using multipart upload with {} parts",
-                    archive_urls.len()
-                ));
+                progress_info(
+                    &reporter,
+                    format!("  Using multipart upload with {} parts", archive_urls.len()),
+                );
             }
 
             (archive_etag, upload_storage_metrics) = upload_archive_multipart(
@@ -844,13 +985,16 @@ async fn save_single_entry(
         let upload_secs = upload_elapsed.as_secs_f64().max(0.001);
         let upload_speed = (total_compressed_size as f64 / 1_000_000.0) / upload_secs;
 
-        ui::info(&format!(
-            "info: Uploaded {} → {} ({:.1}% of original) @ {:.1} MB/s",
-            crate::progress::format_bytes(total_uncompressed_size),
-            crate::progress::format_bytes(total_compressed_size),
-            compression_ratio_percent,
-            upload_speed
-        ));
+        progress_info(
+            &reporter,
+            format!(
+                "Uploaded {} → {} ({:.1}% of original) @ {:.1} MB/s",
+                crate::progress::format_bytes(total_uncompressed_size),
+                crate::progress::format_bytes(total_compressed_size),
+                compression_ratio_percent,
+                upload_speed
+            ),
+        );
     }
 
     let manifest_step = session.start_step("Uploading manifest".to_string(), None)?;
@@ -871,8 +1015,10 @@ async fn save_single_entry(
         manifest_digest: expected_manifest_digest.clone(),
         manifest_size: manifest_bytes.len() as u64,
         manifest_etag,
-        archive_size: final_compressed_size,
+        archive_size: Some(final_compressed_size),
         archive_etag,
+        blob_count: None,
+        blob_total_size_bytes: None,
         file_count: Some(file_count),
         uncompressed_size: Some(total_uncompressed_size),
         compressed_size: Some(final_compressed_size),
@@ -889,10 +1035,13 @@ async fn save_single_entry(
         .as_deref()
         .filter(|winner| *winner != cache_entry_id)
     {
-        ui::info(&format!(
-            "  Cache already confirmed as entry {}; using existing entry",
-            winner_id
-        ));
+        progress_info(
+            &reporter,
+            format!(
+                "  Cache already confirmed as entry {}; using existing entry",
+                winner_id
+            ),
+        );
     }
     confirm_step.complete()?;
 
@@ -959,10 +1108,762 @@ async fn save_single_entry(
     Ok(SaveStatus::Uploaded)
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn save_single_file_entry(
+    api_client: ApiClient,
+    workspace: String,
+    tag: String,
+    path: String,
+    _verbose: bool,
+    force: bool,
+    _entry_index: usize,
+    _total_entries: usize,
+    exclude: Vec<String>,
+    detected_kind: crate::cache_adapter::CacheAdapterKind,
+) -> Result<SaveStatus> {
+    let progress_system = ProgressSystem::new();
+    let reporter = progress_system.reporter();
+    let session_id = format!("save-{}", tag);
+    let mut session = ProgressSession::new(
+        reporter.clone(),
+        session_id.clone(),
+        format!("Saving {}", tag),
+        6,
+    )?;
+    let overall_started = Instant::now();
+
+    let scan_step = session.start_step("Scanning file layout".to_string(), None)?;
+    let scan_started = Instant::now();
+    let scan_path = PathBuf::from(&path);
+    let scan = task::spawn_blocking(move || crate::cas_file::scan_path(&scan_path, exclude))
+        .await
+        .context("File CAS scan task panicked")??;
+    let scan_duration = scan_started.elapsed();
+    scan_step.complete()?;
+
+    let pointer_bytes = crate::cas_file::build_pointer(&scan)?;
+    let manifest_root_digest = crate::cas_file::prefixed_sha256_digest(&pointer_bytes);
+    let expected_manifest_digest = manifest_root_digest.clone();
+    let expected_manifest_size = pointer_bytes.len() as u64;
+    let blob_count = scan.blobs.len() as u64;
+    let file_count = scan
+        .entries
+        .iter()
+        .filter(|entry| entry.entry_type == EntryType::File)
+        .count()
+        .min(u32::MAX as usize) as u32;
+    let blob_total_size_bytes = scan.total_blob_bytes;
+    let total_size_bytes = blob_total_size_bytes;
+    if total_size_bytes == 0 {
+        let message = format!(
+            "Cannot save {} -> {}: no file content to upload (0 bytes)",
+            tag, path
+        );
+        session.error(message.clone())?;
+        drop(reporter);
+        progress_system.shutdown()?;
+        anyhow::bail!(message);
+    }
+
+    let cas_layout =
+        crate::adapters::cas_layout_for(detected_kind, crate::adapters::AdapterDispatchKind::File)
+            .map(|layout| layout.to_string());
+
+    let blobs: Vec<BlobDescriptor> = scan
+        .blobs
+        .iter()
+        .map(|blob| BlobDescriptor {
+            digest: blob.digest.clone(),
+            size_bytes: blob.size_bytes,
+        })
+        .collect();
+    let blob_paths: HashMap<String, PathBuf> = scan
+        .blobs
+        .iter()
+        .map(|blob| (blob.digest.clone(), blob.path.clone()))
+        .collect();
+
+    let create_step = session.start_step("Creating cache entry".to_string(), None)?;
+    let ci_provider = detect_ci_environment();
+    let request = SaveRequest {
+        tag: tag.clone(),
+        manifest_root_digest: manifest_root_digest.clone(),
+        compression_algorithm: "zstd".to_string(),
+        storage_mode: Some("cas".to_string()),
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        cas_layout,
+        manifest_format_version: Some(1),
+        total_size_bytes,
+        uncompressed_size: None,
+        compressed_size: None,
+        file_count: Some(file_count),
+        expected_manifest_digest: Some(expected_manifest_digest.clone()),
+        expected_manifest_size: Some(expected_manifest_size),
+        force: if force { Some(true) } else { None },
+        use_multipart: None,
+        ci_provider: Some(ci_provider),
+        encrypted: None,
+        encryption_algorithm: None,
+        encryption_recipient_hint: None,
+    };
+
+    let save_response = api_client
+        .save_entry(&workspace, &request)
+        .await
+        .with_context(|| format!("Failed to create CAS entry for {}", tag))?;
+    create_step.complete()?;
+
+    let server_adapter = crate::cache_adapter::detect_restore_transport(
+        save_response.storage_mode.as_deref(),
+        save_response.cas_layout.as_deref(),
+    );
+    if !matches!(
+        server_adapter,
+        crate::cache_adapter::CacheAdapterKind::Cas
+            | crate::cache_adapter::CacheAdapterKind::CasBazel
+    ) {
+        let message = format!(
+            "Server did not negotiate file CAS mode for {} (adapter '{}')",
+            tag,
+            server_adapter.as_str()
+        );
+        session.error(message.clone())?;
+        drop(reporter);
+        progress_system.shutdown()?;
+        anyhow::bail!(message);
+    }
+
+    if save_response.exists {
+        complete_skipped_step(
+            &mut session,
+            "Checking remote blobs",
+            "skipped — server reports entry exists",
+        )?;
+        complete_skipped_step(
+            &mut session,
+            "Uploading blobs",
+            "skipped — server reports entry exists",
+        )?;
+        complete_skipped_step(
+            &mut session,
+            "Uploading CAS index",
+            "skipped — server reports entry exists",
+        )?;
+
+        let save_status_pending = save_response.status.as_deref() == Some("pending");
+        let same_tag = save_response.tag == tag;
+
+        if save_status_pending && same_tag {
+            complete_skipped_step(
+                &mut session,
+                "Confirming upload",
+                "skipped — another job is uploading",
+            )?;
+        } else {
+            let confirm_step = session.start_step("Confirming upload".to_string(), None)?;
+            let confirm_request = ConfirmRequest {
+                manifest_digest: expected_manifest_digest.clone(),
+                manifest_size: expected_manifest_size,
+                manifest_etag: None,
+                archive_size: None,
+                archive_etag: None,
+                blob_count: Some(blob_count),
+                blob_total_size_bytes: Some(blob_total_size_bytes),
+                file_count: Some(file_count),
+                uncompressed_size: None,
+                compressed_size: None,
+                tag: Some(tag.clone()),
+            };
+            api_client
+                .confirm(&workspace, &save_response.cache_entry_id, &confirm_request)
+                .await
+                .with_context(|| format!("Failed to confirm existing CAS entry for {}", tag))?;
+            confirm_step.complete()?;
+        }
+
+        let summary = Summary {
+            size_bytes: total_size_bytes,
+            file_count,
+            digest: Some(manifest_root_digest.clone()),
+            path: Some(path),
+        };
+        session.complete(summary)?;
+        drop(reporter);
+        progress_system.shutdown()?;
+        return Ok(SaveStatus::AlreadyExists);
+    }
+
+    let check_step = session.start_step(
+        "Checking remote blobs".to_string(),
+        Some(format!("{} blobs", blobs.len())),
+    )?;
+    let missing_blobs = if blobs.is_empty() {
+        Vec::new()
+    } else {
+        let check_response = api_client
+            .check_blobs(&workspace, &blobs)
+            .await
+            .context("Failed to check remote blob presence")?;
+        let existing: std::collections::HashSet<&str> = check_response
+            .results
+            .iter()
+            .filter_map(|result| result.exists.then_some(result.digest.as_str()))
+            .collect();
+        blobs
+            .iter()
+            .filter(|blob| !existing.contains(blob.digest.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    check_step.complete()?;
+
+    let mut upload_storage_metrics = StorageMetrics::default();
+    let upload_step = session.start_step(
+        "Uploading blobs".to_string(),
+        Some(format!("{} missing", missing_blobs.len())),
+    )?;
+    let upload_started = Instant::now();
+    if !missing_blobs.is_empty() {
+        let upload_plan = api_client
+            .blob_upload_urls(&workspace, &save_response.cache_entry_id, &missing_blobs)
+            .await
+            .context("Failed to request CAS blob upload URLs")?;
+
+        let already_present: std::collections::HashSet<&str> = upload_plan
+            .already_present
+            .iter()
+            .map(|digest| digest.as_str())
+            .collect();
+        let upload_by_digest: HashMap<&str, (&str, &HashMap<String, String>)> = upload_plan
+            .upload_urls
+            .iter()
+            .map(|upload| {
+                (
+                    upload.digest.as_str(),
+                    (
+                        upload.url.as_str(),
+                        &upload.headers as &HashMap<String, String>,
+                    ),
+                )
+            })
+            .collect();
+
+        let mut items = Vec::new();
+        for blob in &missing_blobs {
+            if already_present.contains(blob.digest.as_str()) {
+                continue;
+            }
+            let Some((url, headers)) = upload_by_digest.get(blob.digest.as_str()) else {
+                anyhow::bail!(
+                    "Server did not provide upload URL for missing blob {}",
+                    blob.digest
+                );
+            };
+            let blob_path = blob_paths
+                .get(&blob.digest)
+                .cloned()
+                .ok_or_else(|| anyhow!("Missing local file for blob {}", blob.digest))?;
+            items.push((
+                blob.digest.clone(),
+                blob_path,
+                (*url).to_string(),
+                (*headers).clone(),
+                blob.size_bytes,
+            ));
+        }
+
+        if !items.is_empty() {
+            let total_upload_bytes = items.iter().map(|item| item.4).sum::<u64>();
+            let progress = TransferProgress::new(
+                reporter.clone(),
+                session_id.clone(),
+                upload_step.step_number(),
+                total_upload_bytes,
+            );
+            let max_concurrent =
+                crate::commands::utils::get_optimal_concurrency(items.len(), "save");
+            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+            let transfer_client = api_client.transfer_client().clone();
+            let mut tasks = Vec::new();
+
+            for (_digest, blob_path, upload_url, headers, size_bytes) in items {
+                let semaphore = semaphore.clone();
+                let progress = progress.clone();
+                let transfer_client = transfer_client.clone();
+                let task = tokio::spawn(async move {
+                    let _permit = semaphore.acquire().await.unwrap();
+                    let (_etag, metrics) = upload_via_single_url(
+                        &blob_path,
+                        &upload_url,
+                        &progress,
+                        &transfer_client,
+                        &headers,
+                    )
+                    .await
+                    .with_context(|| format!("Failed to upload blob {}", blob_path.display()))?;
+                    Ok::<(u64, StorageMetrics), anyhow::Error>((size_bytes, metrics))
+                });
+                tasks.push(task);
+            }
+
+            for task in tasks {
+                let (_uploaded_bytes, metrics) =
+                    task.await.context("Blob upload task panicked")??;
+                if upload_storage_metrics.region.is_none() {
+                    upload_storage_metrics = metrics;
+                }
+            }
+        }
+    }
+    let upload_duration = upload_started.elapsed();
+    upload_step.complete()?;
+
+    let index_step = session.start_step("Uploading CAS index".to_string(), None)?;
+    let manifest_etag = upload_payload(
+        api_client.transfer_client(),
+        save_response
+            .manifest_upload_url
+            .as_ref()
+            .ok_or_else(|| anyhow!("Missing manifest_upload_url in response"))?,
+        &pointer_bytes,
+        "application/cbor",
+        &save_response.upload_headers,
+    )
+    .await?;
+    index_step.complete()?;
+
+    let confirm_step = session.start_step("Confirming upload".to_string(), None)?;
+    let confirm_request = ConfirmRequest {
+        manifest_digest: expected_manifest_digest.clone(),
+        manifest_size: expected_manifest_size,
+        manifest_etag,
+        archive_size: None,
+        archive_etag: None,
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        file_count: Some(file_count),
+        uncompressed_size: None,
+        compressed_size: None,
+        tag: Some(tag.clone()),
+    };
+    api_client
+        .confirm(&workspace, &save_response.cache_entry_id, &confirm_request)
+        .await
+        .with_context(|| format!("Failed to confirm CAS upload for {}", tag))?;
+    confirm_step.complete()?;
+
+    let summary = Summary {
+        size_bytes: total_size_bytes,
+        file_count,
+        digest: Some(manifest_root_digest.clone()),
+        path: Some(path.clone()),
+    };
+    session.complete(summary)?;
+    drop(reporter);
+    progress_system.shutdown()?;
+
+    let total_elapsed = overall_started.elapsed();
+
+    SaveMetrics {
+        tag,
+        manifest_root_digest,
+        total_duration_ms: total_elapsed.as_millis() as u64,
+        archive_duration_ms: scan_duration.as_millis() as u64,
+        upload_duration_ms: upload_duration.as_millis() as u64,
+        uncompressed_size: total_size_bytes,
+        compressed_size: blob_total_size_bytes,
+        file_count,
+        part_count: if blob_count > 0 {
+            Some(blob_count.min(u32::MAX as u64) as u32)
+        } else {
+            None
+        },
+        storage_metrics: upload_storage_metrics,
+    }
+    .send(&api_client, &workspace)
+    .await;
+
+    Ok(SaveStatus::Uploaded)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn save_single_oci_entry(
+    api_client: ApiClient,
+    workspace: String,
+    tag: String,
+    path: String,
+    _verbose: bool,
+    force: bool,
+    _entry_index: usize,
+    _total_entries: usize,
+) -> Result<SaveStatus> {
+    let progress_system = ProgressSystem::new();
+    let reporter = progress_system.reporter();
+    let session_id = format!("save-{}", tag);
+    let mut session = ProgressSession::new(
+        reporter.clone(),
+        session_id.clone(),
+        format!("Saving {}", tag),
+        6,
+    )?;
+    let overall_started = Instant::now();
+
+    let scan_step = session.start_step("Scanning OCI layout".to_string(), None)?;
+    let scan_started = Instant::now();
+    let scan_path = PathBuf::from(&path);
+    let scan = task::spawn_blocking(move || crate::cas_oci::scan_layout(&scan_path))
+        .await
+        .context("OCI scan task panicked")??;
+    let scan_duration = scan_started.elapsed();
+    scan_step.complete()?;
+
+    let pointer_bytes = crate::cas_oci::build_pointer(&scan)?;
+    let manifest_root_digest = crate::cas_oci::prefixed_sha256_digest(&pointer_bytes);
+    let expected_manifest_digest = manifest_root_digest.clone();
+    let expected_manifest_size = pointer_bytes.len() as u64;
+    let blob_count = scan.blobs.len() as u64;
+    let file_count = blob_count.min(u32::MAX as u64) as u32;
+    let blob_total_size_bytes = scan.total_blob_bytes;
+    let total_size_bytes =
+        blob_total_size_bytes + scan.index_json.len() as u64 + scan.oci_layout.len() as u64;
+
+    let blobs: Vec<BlobDescriptor> = scan
+        .blobs
+        .iter()
+        .map(|blob| BlobDescriptor {
+            digest: blob.digest.clone(),
+            size_bytes: blob.size_bytes,
+        })
+        .collect();
+    let blob_paths: HashMap<String, PathBuf> = scan
+        .blobs
+        .iter()
+        .map(|blob| (blob.digest.clone(), blob.path.clone()))
+        .collect();
+
+    let create_step = session.start_step("Creating cache entry".to_string(), None)?;
+    let ci_provider = detect_ci_environment();
+    let request = SaveRequest {
+        tag: tag.clone(),
+        manifest_root_digest: manifest_root_digest.clone(),
+        compression_algorithm: "zstd".to_string(),
+        storage_mode: Some("cas".to_string()),
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        cas_layout: Some("oci-v1".to_string()),
+        manifest_format_version: Some(1),
+        total_size_bytes,
+        uncompressed_size: None,
+        compressed_size: None,
+        file_count: Some(file_count),
+        expected_manifest_digest: Some(expected_manifest_digest.clone()),
+        expected_manifest_size: Some(expected_manifest_size),
+        force: if force { Some(true) } else { None },
+        use_multipart: None,
+        ci_provider: Some(ci_provider),
+        encrypted: None,
+        encryption_algorithm: None,
+        encryption_recipient_hint: None,
+    };
+
+    let save_response = api_client
+        .save_entry(&workspace, &request)
+        .await
+        .with_context(|| format!("Failed to create CAS entry for {}", tag))?;
+    create_step.complete()?;
+
+    let server_adapter = crate::cache_adapter::detect_restore_transport(
+        save_response.storage_mode.as_deref(),
+        save_response.cas_layout.as_deref(),
+    );
+    if !matches!(
+        server_adapter,
+        crate::cache_adapter::CacheAdapterKind::Cas
+            | crate::cache_adapter::CacheAdapterKind::CasOci
+    ) {
+        let message = format!(
+            "Server did not negotiate OCI CAS mode for {} (adapter '{}')",
+            tag,
+            server_adapter.as_str()
+        );
+        session.error(message.clone())?;
+        drop(reporter);
+        progress_system.shutdown()?;
+        anyhow::bail!(message);
+    }
+
+    if save_response.exists {
+        complete_skipped_step(
+            &mut session,
+            "Checking remote blobs",
+            "skipped — server reports entry exists",
+        )?;
+        complete_skipped_step(
+            &mut session,
+            "Uploading blobs",
+            "skipped — server reports entry exists",
+        )?;
+        complete_skipped_step(
+            &mut session,
+            "Uploading CAS index",
+            "skipped — server reports entry exists",
+        )?;
+
+        let save_status_pending = save_response.status.as_deref() == Some("pending");
+        let same_tag = save_response.tag == tag;
+
+        if save_status_pending && same_tag {
+            complete_skipped_step(
+                &mut session,
+                "Confirming upload",
+                "skipped — another job is uploading",
+            )?;
+        } else {
+            let confirm_step = session.start_step("Confirming upload".to_string(), None)?;
+            let confirm_request = ConfirmRequest {
+                manifest_digest: expected_manifest_digest.clone(),
+                manifest_size: expected_manifest_size,
+                manifest_etag: None,
+                archive_size: None,
+                archive_etag: None,
+                blob_count: Some(blob_count),
+                blob_total_size_bytes: Some(blob_total_size_bytes),
+                file_count: Some(file_count),
+                uncompressed_size: None,
+                compressed_size: None,
+                tag: Some(tag.clone()),
+            };
+            api_client
+                .confirm(&workspace, &save_response.cache_entry_id, &confirm_request)
+                .await
+                .with_context(|| format!("Failed to confirm existing CAS entry for {}", tag))?;
+            confirm_step.complete()?;
+        }
+
+        let summary = Summary {
+            size_bytes: total_size_bytes,
+            file_count,
+            digest: Some(manifest_root_digest.clone()),
+            path: Some(path),
+        };
+        session.complete(summary)?;
+        drop(reporter);
+        progress_system.shutdown()?;
+        return Ok(SaveStatus::AlreadyExists);
+    }
+
+    let check_step = session.start_step(
+        "Checking remote blobs".to_string(),
+        Some(format!("{} blobs", blobs.len())),
+    )?;
+    let missing_blobs = if blobs.is_empty() {
+        Vec::new()
+    } else {
+        let check_response = api_client
+            .check_blobs(&workspace, &blobs)
+            .await
+            .context("Failed to check remote blob presence")?;
+        let existing: std::collections::HashSet<&str> = check_response
+            .results
+            .iter()
+            .filter_map(|result| result.exists.then_some(result.digest.as_str()))
+            .collect();
+        blobs
+            .iter()
+            .filter(|blob| !existing.contains(blob.digest.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    check_step.complete()?;
+
+    let mut upload_storage_metrics = StorageMetrics::default();
+    let upload_step = session.start_step(
+        "Uploading blobs".to_string(),
+        Some(format!("{} missing", missing_blobs.len())),
+    )?;
+    let upload_started = Instant::now();
+    if !missing_blobs.is_empty() {
+        let upload_plan = api_client
+            .blob_upload_urls(&workspace, &save_response.cache_entry_id, &missing_blobs)
+            .await
+            .context("Failed to request CAS blob upload URLs")?;
+
+        let already_present: std::collections::HashSet<&str> = upload_plan
+            .already_present
+            .iter()
+            .map(|digest| digest.as_str())
+            .collect();
+        let upload_by_digest: HashMap<&str, (&str, &HashMap<String, String>)> = upload_plan
+            .upload_urls
+            .iter()
+            .map(|upload| {
+                (
+                    upload.digest.as_str(),
+                    (
+                        upload.url.as_str(),
+                        &upload.headers as &HashMap<String, String>,
+                    ),
+                )
+            })
+            .collect();
+
+        let mut items = Vec::new();
+        for blob in &missing_blobs {
+            if already_present.contains(blob.digest.as_str()) {
+                continue;
+            }
+            let Some((url, headers)) = upload_by_digest.get(blob.digest.as_str()) else {
+                anyhow::bail!(
+                    "Server did not provide upload URL for missing blob {}",
+                    blob.digest
+                );
+            };
+            let path = blob_paths
+                .get(&blob.digest)
+                .cloned()
+                .ok_or_else(|| anyhow!("Missing local file for blob {}", blob.digest))?;
+            items.push((
+                blob.digest.clone(),
+                path,
+                (*url).to_string(),
+                (*headers).clone(),
+                blob.size_bytes,
+            ));
+        }
+
+        if !items.is_empty() {
+            let total_upload_bytes = items.iter().map(|item| item.4).sum::<u64>();
+            let progress = TransferProgress::new(
+                reporter.clone(),
+                session_id.clone(),
+                upload_step.step_number(),
+                total_upload_bytes,
+            );
+            let max_concurrent =
+                crate::commands::utils::get_optimal_concurrency(items.len(), "save");
+            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+            let transfer_client = api_client.transfer_client().clone();
+            let mut tasks = Vec::new();
+
+            for (_digest, file_path, upload_url, headers, size_bytes) in items {
+                let semaphore = semaphore.clone();
+                let progress = progress.clone();
+                let transfer_client = transfer_client.clone();
+                let task = tokio::spawn(async move {
+                    let _permit = semaphore.acquire().await.unwrap();
+                    let (_etag, metrics) = upload_via_single_url(
+                        &file_path,
+                        &upload_url,
+                        &progress,
+                        &transfer_client,
+                        &headers,
+                    )
+                    .await
+                    .with_context(|| format!("Failed to upload blob {}", file_path.display()))?;
+                    Ok::<(u64, StorageMetrics), anyhow::Error>((size_bytes, metrics))
+                });
+                tasks.push(task);
+            }
+
+            for task in tasks {
+                let (_uploaded_bytes, metrics) =
+                    task.await.context("Blob upload task panicked")??;
+                if upload_storage_metrics.region.is_none() {
+                    upload_storage_metrics = metrics;
+                }
+            }
+        }
+    }
+    let upload_duration = upload_started.elapsed();
+    upload_step.complete()?;
+
+    let index_step = session.start_step("Uploading CAS index".to_string(), None)?;
+    let manifest_etag = upload_payload(
+        api_client.transfer_client(),
+        save_response
+            .manifest_upload_url
+            .as_ref()
+            .ok_or_else(|| anyhow!("Missing manifest_upload_url in response"))?,
+        &pointer_bytes,
+        "application/cbor",
+        &save_response.upload_headers,
+    )
+    .await?;
+    index_step.complete()?;
+
+    let confirm_step = session.start_step("Confirming upload".to_string(), None)?;
+    let confirm_request = ConfirmRequest {
+        manifest_digest: expected_manifest_digest.clone(),
+        manifest_size: expected_manifest_size,
+        manifest_etag,
+        archive_size: None,
+        archive_etag: None,
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        file_count: Some(file_count),
+        uncompressed_size: None,
+        compressed_size: None,
+        tag: Some(tag.clone()),
+    };
+    api_client
+        .confirm(&workspace, &save_response.cache_entry_id, &confirm_request)
+        .await
+        .with_context(|| format!("Failed to confirm CAS upload for {}", tag))?;
+    confirm_step.complete()?;
+
+    let summary = Summary {
+        size_bytes: total_size_bytes,
+        file_count,
+        digest: Some(manifest_root_digest.clone()),
+        path: Some(path.clone()),
+    };
+    session.complete(summary)?;
+    drop(reporter);
+    progress_system.shutdown()?;
+
+    let total_elapsed = overall_started.elapsed();
+
+    SaveMetrics {
+        tag,
+        manifest_root_digest,
+        total_duration_ms: total_elapsed.as_millis() as u64,
+        archive_duration_ms: scan_duration.as_millis() as u64,
+        upload_duration_ms: upload_duration.as_millis() as u64,
+        uncompressed_size: total_size_bytes,
+        compressed_size: blob_total_size_bytes,
+        file_count,
+        part_count: if blob_count > 0 {
+            Some(blob_count.min(u32::MAX as u64) as u32)
+        } else {
+            None
+        },
+        storage_metrics: upload_storage_metrics,
+    }
+    .send(&api_client, &workspace)
+    .await;
+
+    Ok(SaveStatus::Uploaded)
+}
+
 fn complete_skipped_step(session: &mut ProgressSession, title: &str, detail: &str) -> Result<()> {
     let step = session.start_step(title.to_string(), Some(detail.to_string()))?;
     step.complete()?;
     Ok(())
+}
+
+fn progress_info(reporter: &crate::progress::Reporter, message: impl Into<String>) {
+    let message = message.into();
+    if reporter.info(message.clone()).is_err() {
+        ui::info(&message);
+    }
+}
+
+fn progress_warning(reporter: &crate::progress::Reporter, message: impl Into<String>) {
+    let message = message.into();
+    if reporter.warning(message.clone()).is_err() {
+        ui::warn(&message);
+    }
 }
 
 fn manifest_files_from_draft(draft: &crate::manifest::ManifestDraft) -> Vec<ManifestFile> {
@@ -1033,40 +1934,19 @@ async fn upload_manifest(
     data: &[u8],
     upload_headers: &std::collections::HashMap<String, String>,
 ) -> Result<Option<String>> {
-    let response = send_transfer_request_with_retry("Manifest upload", || async {
-        let mut request = client
-            .put(url)
-            .header("Content-Type", "application/cbor")
-            .header("Content-Length", data.len().to_string())
-            .timeout(std::time::Duration::from_secs(300));
+    upload_payload(client, url, data, "application/cbor", upload_headers).await
+}
 
-        for (key, value) in upload_headers {
-            request = request.header(key.as_str(), value.as_str());
-        }
-
-        request
-            .body(data.to_vec())
-            .send()
-            .await
-            .with_context(|| format!("Failed to send manifest upload request (URL: {})", url))
-    })
-    .await?;
-
-    let status = response.status();
-    let headers = response.headers().clone();
-
-    if !status.is_success() {
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unable to read response body".to_string());
-        anyhow::bail!("Failed to upload manifest: HTTP {} - {}", status, body);
-    }
-
-    let etag = headers
-        .get("etag")
-        .and_then(|e| e.to_str().ok())
-        .map(|s| s.trim_matches('"').to_string());
+async fn upload_payload(
+    client: &reqwest::Client,
+    url: &str,
+    data: &[u8],
+    content_type: &str,
+    upload_headers: &std::collections::HashMap<String, String>,
+) -> Result<Option<String>> {
+    let etag =
+        crate::cas_transport::upload_payload(client, url, data, content_type, upload_headers)
+            .await?;
 
     if etag.is_some() {
         log::debug!("Manifest uploaded with ETag: {:?}", etag);

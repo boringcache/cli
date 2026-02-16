@@ -1,12 +1,16 @@
 use anyhow::{Context, Result};
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task;
 
-use crate::api::models::cache::{ConfirmRequest, ManifestCheckRequest, SaveRequest};
+use crate::api::models::cache::{
+    BlobDescriptor, ConfirmRequest, ManifestCheckRequest, SaveRequest,
+};
 use crate::api::ApiClient;
 use crate::archive::create_tar_archive;
 use crate::ci_detection::detect_ci_environment;
@@ -17,6 +21,7 @@ use crate::ui;
 const DEBOUNCE_TIMEOUT_SECS: u64 = 5;
 const MIN_CHANGES_TO_SYNC: usize = 50;
 const IDLE_SYNC_SECS: u64 = 60;
+const CAS_BLOB_WRITER_CAPACITY: usize = 512 * 1024;
 
 enum RestoreAction {
     Downloaded,
@@ -258,6 +263,27 @@ async fn initial_restore(
     }
 
     let hit = &hits[0];
+    let restore_adapter = crate::cache_adapter::detect_restore_transport(
+        hit.storage_mode.as_deref(),
+        hit.cas_layout.as_deref(),
+    );
+    let adapter = crate::adapters::select_transport_adapter(restore_adapter)?;
+    log::debug!(
+        "Mount restore adapter dispatch tag={} adapter={}",
+        hit.tag,
+        adapter.transport_kind().as_str()
+    );
+    match adapter {
+        crate::adapters::AdapterDispatchKind::Oci => {
+            return initial_restore_oci(api_client, workspace, hit, local_path, verbose, force)
+                .await;
+        }
+        crate::adapters::AdapterDispatchKind::File => {
+            return initial_restore_file(api_client, workspace, hit, local_path, verbose, force)
+                .await;
+        }
+        crate::adapters::AdapterDispatchKind::Archive => {}
+    }
 
     let remote_manifest_digest = hit
         .manifest_root_digest
@@ -565,6 +591,524 @@ async fn initial_restore(
     Ok(RestoreAction::Downloaded)
 }
 
+async fn initial_restore_oci(
+    api_client: &ApiClient,
+    workspace: &str,
+    hit: &crate::api::models::cache::CacheResolutionEntry,
+    local_path: &Path,
+    verbose: bool,
+    force: bool,
+) -> Result<RestoreAction> {
+    let remote_manifest_digest = hit
+        .manifest_root_digest
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No manifest root digest in response"))?;
+
+    if has_content(local_path)? {
+        let local_path_buf = local_path.to_path_buf();
+        let local_digest = task::spawn_blocking(move || local_oci_manifest_digest(&local_path_buf))
+            .await
+            .context("OCI digest task panicked")??;
+        if let Some(local_digest) = local_digest {
+            let local_hex = local_digest
+                .strip_prefix("sha256:")
+                .unwrap_or(local_digest.as_str());
+            if crate::cas_oci::digest_matches(remote_manifest_digest, local_hex) {
+                if verbose {
+                    ui::info("  Local OCI layout matches remote");
+                }
+                return Ok(RestoreAction::AlreadyInSync);
+            }
+        }
+
+        if verbose {
+            ui::info("  Local OCI layout differs from remote, will sync local changes");
+        }
+        return Ok(RestoreAction::LocalDiffers);
+    }
+
+    let manifest_url = hit
+        .manifest_url
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No manifest URL in response"))?;
+    let client = api_client.transfer_client();
+
+    if verbose {
+        ui::info("  Downloading CAS index...");
+    }
+
+    let response = send_transfer_request_with_retry("CAS index fetch", || async {
+        Ok(client.get(manifest_url).send().await?)
+    })
+    .await?
+    .error_for_status()
+    .context("CAS index request failed")?;
+    let pointer_bytes = response.bytes().await?.to_vec();
+    let actual_manifest_hex = crate::cas_oci::sha256_hex(&pointer_bytes);
+
+    if let Some(expected_digest) = hit.manifest_digest.as_ref() {
+        if !crate::cas_oci::digest_matches(expected_digest, &actual_manifest_hex) {
+            ui::warn(&format!(
+                "CAS index digest mismatch for {} (expected {}, got sha256:{})",
+                hit.tag, expected_digest, actual_manifest_hex
+            ));
+            return Ok(RestoreAction::NoRemoteCache);
+        }
+    }
+
+    if !crate::cas_oci::digest_matches(remote_manifest_digest, &actual_manifest_hex) {
+        ui::warn(&format!(
+            "CAS manifest root digest mismatch for {} (expected {}, got sha256:{})",
+            hit.tag, remote_manifest_digest, actual_manifest_hex
+        ));
+        return Ok(RestoreAction::NoRemoteCache);
+    }
+
+    let pointer = crate::cas_oci::parse_pointer(&pointer_bytes)?;
+
+    match (&hit.workspace_signing_public_key, &hit.server_signature) {
+        (Some(workspace_key), Some(server_sig)) => {
+            match crate::signing::parse_public_key(workspace_key)
+                .and_then(|pk| {
+                    crate::signing::signature_from_base64(server_sig).map(|sig| (pk, sig))
+                })
+                .and_then(|(pk, sig)| {
+                    let data = format!("{}:{}", hit.tag.as_str(), remote_manifest_digest);
+                    crate::signing::verify_signature(data.as_bytes(), &sig, &pk)
+                }) {
+                Ok(()) => {
+                    if verbose {
+                        ui::info("  Server signature verified");
+                    }
+                }
+                Err(e) => {
+                    ui::warn(&format!("Server signature verification failed: {}", e));
+                }
+            }
+        }
+        (Some(_), None) => {
+            ui::warn(&format!(
+                "Server signature missing for {}; authenticity not verified",
+                hit.tag.as_str()
+            ));
+        }
+        (None, Some(_)) => {
+            ui::warn(&format!(
+                "Workspace signing key missing for {}; cannot verify server signature",
+                hit.tag.as_str()
+            ));
+        }
+        (None, None) => {}
+    }
+
+    if local_path.exists() && force {
+        tokio::fs::remove_dir_all(local_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to clear existing directory: {}",
+                    local_path.display()
+                )
+            })?;
+    }
+    tokio::fs::create_dir_all(local_path)
+        .await
+        .with_context(|| format!("Failed to create {}", local_path.display()))?;
+
+    let blobs_dir = local_path.join("blobs").join("sha256");
+    tokio::fs::create_dir_all(&blobs_dir)
+        .await
+        .with_context(|| format!("Failed to create {}", blobs_dir.display()))?;
+
+    let mut missing = Vec::new();
+    let mut destination_by_digest: HashMap<String, PathBuf> = HashMap::new();
+    for blob in &pointer.blobs {
+        let Some(hex) = crate::cas_oci::digest_hex_component(&blob.digest) else {
+            anyhow::bail!("Invalid OCI digest {}", blob.digest);
+        };
+        let blob_path = blobs_dir.join(hex);
+        let is_ready = match tokio::fs::metadata(&blob_path).await {
+            Ok(metadata) => metadata.is_file() && metadata.len() == blob.size_bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(err) => {
+                return Err(err).with_context(|| format!("Failed to stat {}", blob_path.display()));
+            }
+        };
+        if !is_ready {
+            missing.push(BlobDescriptor {
+                digest: blob.digest.clone(),
+                size_bytes: blob.size_bytes,
+            });
+            destination_by_digest.insert(blob.digest.clone(), blob_path);
+        }
+    }
+
+    if !missing.is_empty() {
+        let cache_entry_id = hit
+            .cache_entry_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Missing cache_entry_id for CAS restore"))?;
+        let download_plan = api_client
+            .blob_download_urls(workspace, cache_entry_id, &missing)
+            .await
+            .context("Failed to request CAS blob download URLs")?;
+
+        if !download_plan.missing.is_empty() {
+            anyhow::bail!(
+                "Server reported missing blobs for CAS restore: {}",
+                download_plan.missing.join(", ")
+            );
+        }
+
+        let urls_by_digest: HashMap<&str, &str> = download_plan
+            .download_urls
+            .iter()
+            .map(|item| (item.digest.as_str(), item.url.as_str()))
+            .collect();
+        let max_concurrent =
+            crate::commands::utils::get_optimal_concurrency(missing.len(), "restore");
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+        let mut tasks = Vec::new();
+
+        for blob in missing {
+            let path = destination_by_digest
+                .get(&blob.digest)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Missing destination for blob {}", blob.digest))?;
+            let Some(url) = urls_by_digest.get(blob.digest.as_str()) else {
+                anyhow::bail!(
+                    "Server did not provide download URL for blob {}",
+                    blob.digest
+                );
+            };
+            let client = client.clone();
+            let semaphore = semaphore.clone();
+            let url = (*url).to_string();
+            let expected_size = blob.size_bytes;
+            let digest = blob.digest.clone();
+            let task = tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                crate::cas_transport::download_blob_file(
+                    &client,
+                    &url,
+                    &path,
+                    None,
+                    expected_size,
+                    CAS_BLOB_WRITER_CAPACITY,
+                    Some(&digest),
+                )
+                .await
+                .map(|_| ())
+            });
+            tasks.push(task);
+        }
+
+        for task in tasks {
+            task.await.context("Blob download task panicked")??;
+        }
+    }
+
+    tokio::fs::write(local_path.join("index.json"), pointer.index_json_bytes()?)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to write {}",
+                local_path.join("index.json").display()
+            )
+        })?;
+    tokio::fs::write(local_path.join("oci-layout"), pointer.oci_layout_bytes()?)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to write {}",
+                local_path.join("oci-layout").display()
+            )
+        })?;
+
+    Ok(RestoreAction::Downloaded)
+}
+
+async fn initial_restore_file(
+    api_client: &ApiClient,
+    workspace: &str,
+    hit: &crate::api::models::cache::CacheResolutionEntry,
+    local_path: &Path,
+    verbose: bool,
+    force: bool,
+) -> Result<RestoreAction> {
+    let remote_manifest_digest = hit
+        .manifest_root_digest
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No manifest root digest in response"))?;
+
+    if has_content(local_path)? {
+        let local_path_buf = local_path.to_path_buf();
+        let local_digest =
+            task::spawn_blocking(move || local_file_manifest_digest(&local_path_buf))
+                .await
+                .context("File CAS digest task panicked")??;
+        if let Some(local_digest) = local_digest {
+            let local_hex = local_digest
+                .strip_prefix("sha256:")
+                .unwrap_or(local_digest.as_str());
+            if crate::cas_file::digest_matches(remote_manifest_digest, local_hex) {
+                if verbose {
+                    ui::info("  Local file CAS layout matches remote");
+                }
+                return Ok(RestoreAction::AlreadyInSync);
+            }
+        }
+
+        if verbose {
+            ui::info("  Local file CAS layout differs from remote, will sync local changes");
+        }
+        return Ok(RestoreAction::LocalDiffers);
+    }
+
+    let manifest_url = hit
+        .manifest_url
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No manifest URL in response"))?;
+    let client = api_client.transfer_client();
+
+    if verbose {
+        ui::info("  Downloading CAS index...");
+    }
+
+    let response = send_transfer_request_with_retry("CAS index fetch", || async {
+        Ok(client.get(manifest_url).send().await?)
+    })
+    .await?
+    .error_for_status()
+    .context("CAS index request failed")?;
+    let pointer_bytes = response.bytes().await?.to_vec();
+    let actual_manifest_hex = crate::cas_file::sha256_hex(&pointer_bytes);
+
+    if let Some(expected_digest) = hit.manifest_digest.as_ref() {
+        if !crate::cas_file::digest_matches(expected_digest, &actual_manifest_hex) {
+            ui::warn(&format!(
+                "CAS index digest mismatch for {} (expected {}, got sha256:{})",
+                hit.tag, expected_digest, actual_manifest_hex
+            ));
+            return Ok(RestoreAction::NoRemoteCache);
+        }
+    }
+
+    if !crate::cas_file::digest_matches(remote_manifest_digest, &actual_manifest_hex) {
+        ui::warn(&format!(
+            "CAS manifest root digest mismatch for {} (expected {}, got sha256:{})",
+            hit.tag, remote_manifest_digest, actual_manifest_hex
+        ));
+        return Ok(RestoreAction::NoRemoteCache);
+    }
+
+    let pointer = crate::cas_file::parse_pointer(&pointer_bytes)?;
+
+    match (&hit.workspace_signing_public_key, &hit.server_signature) {
+        (Some(workspace_key), Some(server_sig)) => {
+            match crate::signing::parse_public_key(workspace_key)
+                .and_then(|pk| {
+                    crate::signing::signature_from_base64(server_sig).map(|sig| (pk, sig))
+                })
+                .and_then(|(pk, sig)| {
+                    let data = format!("{}:{}", hit.tag.as_str(), remote_manifest_digest);
+                    crate::signing::verify_signature(data.as_bytes(), &sig, &pk)
+                }) {
+                Ok(()) => {
+                    if verbose {
+                        ui::info("  Server signature verified");
+                    }
+                }
+                Err(e) => {
+                    ui::warn(&format!("Server signature verification failed: {}", e));
+                }
+            }
+        }
+        (Some(_), None) => {
+            ui::warn(&format!(
+                "Server signature missing for {}; authenticity not verified",
+                hit.tag.as_str()
+            ));
+        }
+        (None, Some(_)) => {
+            ui::warn(&format!(
+                "Workspace signing key missing for {}; cannot verify server signature",
+                hit.tag.as_str()
+            ));
+        }
+        (None, None) => {}
+    }
+
+    if local_path.exists() && force {
+        tokio::fs::remove_dir_all(local_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to clear existing directory: {}",
+                    local_path.display()
+                )
+            })?;
+    }
+    tokio::fs::create_dir_all(local_path)
+        .await
+        .with_context(|| format!("Failed to create {}", local_path.display()))?;
+
+    let temp_dir = tempfile::tempdir().context("Failed to create CAS temp directory")?;
+    let blobs_dir = temp_dir.path().join("blobs").join("sha256");
+    tokio::fs::create_dir_all(&blobs_dir)
+        .await
+        .with_context(|| format!("Failed to create {}", blobs_dir.display()))?;
+
+    let blobs: Vec<BlobDescriptor> = pointer
+        .blobs
+        .iter()
+        .map(|blob| BlobDescriptor {
+            digest: blob.digest.clone(),
+            size_bytes: blob.size_bytes,
+        })
+        .collect();
+
+    let mut destination_by_digest: HashMap<String, PathBuf> = HashMap::new();
+    for blob in &pointer.blobs {
+        let Some(hex) = crate::cas_oci::digest_hex_component(&blob.digest) else {
+            anyhow::bail!("Invalid digest {}", blob.digest);
+        };
+        destination_by_digest.insert(blob.digest.clone(), blobs_dir.join(hex));
+    }
+
+    if !blobs.is_empty() {
+        let cache_entry_id = hit
+            .cache_entry_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Missing cache_entry_id for CAS restore"))?;
+        let download_plan = api_client
+            .blob_download_urls(workspace, cache_entry_id, &blobs)
+            .await
+            .context("Failed to request CAS blob download URLs")?;
+
+        if !download_plan.missing.is_empty() {
+            anyhow::bail!(
+                "Server reported missing blobs for CAS restore: {}",
+                download_plan.missing.join(", ")
+            );
+        }
+
+        let urls_by_digest: HashMap<&str, &str> = download_plan
+            .download_urls
+            .iter()
+            .map(|item| (item.digest.as_str(), item.url.as_str()))
+            .collect();
+        let max_concurrent =
+            crate::commands::utils::get_optimal_concurrency(blobs.len(), "restore");
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+        let mut tasks = Vec::new();
+
+        for blob in blobs {
+            let path = destination_by_digest
+                .get(&blob.digest)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Missing destination for blob {}", blob.digest))?;
+            let Some(url) = urls_by_digest.get(blob.digest.as_str()) else {
+                anyhow::bail!(
+                    "Server did not provide download URL for blob {}",
+                    blob.digest
+                );
+            };
+            let client = client.clone();
+            let semaphore = semaphore.clone();
+            let url = (*url).to_string();
+            let expected_size = blob.size_bytes;
+            let digest = blob.digest.clone();
+            let task = tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                crate::cas_transport::download_blob_file(
+                    &client,
+                    &url,
+                    &path,
+                    None,
+                    expected_size,
+                    CAS_BLOB_WRITER_CAPACITY,
+                    Some(&digest),
+                )
+                .await
+                .map(|_| ())
+            });
+            tasks.push(task);
+        }
+
+        for task in tasks {
+            task.await.context("Blob download task panicked")??;
+        }
+    }
+
+    for entry in &pointer.entries {
+        if entry.entry_type != crate::manifest::EntryType::Dir {
+            continue;
+        }
+        let destination = crate::cas_file::safe_join(local_path, &entry.path)?;
+        remove_path_if_exists(&destination).await?;
+        tokio::fs::create_dir_all(&destination)
+            .await
+            .with_context(|| format!("Failed to create {}", destination.display()))?;
+    }
+
+    for entry in &pointer.entries {
+        match entry.entry_type {
+            crate::manifest::EntryType::Dir => {}
+            crate::manifest::EntryType::File => {
+                let destination = crate::cas_file::safe_join(local_path, &entry.path)?;
+                if let Some(parent) = destination.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .with_context(|| format!("Failed to create {}", parent.display()))?;
+                }
+                remove_path_if_exists(&destination).await?;
+                let digest = entry
+                    .digest
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Missing file digest for {}", entry.path))?;
+                let source_blob = destination_by_digest
+                    .get(digest)
+                    .ok_or_else(|| anyhow::anyhow!("Missing blob for digest {}", digest))?;
+                tokio::fs::copy(source_blob, &destination)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to materialize {} from {}",
+                            destination.display(),
+                            source_blob.display()
+                        )
+                    })?;
+
+                #[cfg(unix)]
+                if entry.executable == Some(true) {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = tokio::fs::metadata(&destination).await?.permissions();
+                    perms.set_mode(perms.mode() | 0o111);
+                    tokio::fs::set_permissions(&destination, perms).await?;
+                }
+            }
+            crate::manifest::EntryType::Symlink => {
+                let destination = crate::cas_file::safe_join(local_path, &entry.path)?;
+                if let Some(parent) = destination.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .with_context(|| format!("Failed to create {}", parent.display()))?;
+                }
+                remove_path_if_exists(&destination).await?;
+                let link_target = entry
+                    .target
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Missing symlink target for {}", entry.path))?
+                    .clone();
+                create_symlink(&destination, link_target).await?;
+            }
+        }
+    }
+
+    Ok(RestoreAction::Downloaded)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn watch_and_sync(
     api_client: &ApiClient,
@@ -696,8 +1240,75 @@ async fn sync_to_remote(
     encrypt: bool,
     recipient: Option<String>,
 ) -> Result<()> {
-    use tokio::task;
+    let adapter_detection = crate::cache_adapter::detect_layout(local_path);
+    log::debug!(
+        "Mount sync adapter selection tag={} adapter={} reason={}",
+        resolved_tag,
+        adapter_detection.kind.as_str(),
+        adapter_detection.reason
+    );
+    let adapter_selection =
+        crate::adapters::select_layout_adapter(adapter_detection.kind, encrypt)?;
+    if adapter_selection.used_encryption_fallback {
+        ui::warn(crate::adapters::CONTENT_ADDRESSED_ENCRYPTION_FALLBACK_WARNING);
+    }
+    let adapter = adapter_selection.adapter;
+    log::debug!(
+        "Mount sync adapter dispatch tag={} adapter={}",
+        resolved_tag,
+        adapter.transport_kind().as_str()
+    );
+    match adapter {
+        crate::adapters::AdapterDispatchKind::Archive => {
+            sync_to_remote_archive(
+                api_client,
+                workspace,
+                base_tag,
+                resolved_tag,
+                local_path,
+                verbose,
+                encrypt,
+                recipient,
+            )
+            .await
+        }
+        crate::adapters::AdapterDispatchKind::Oci => {
+            sync_to_remote_oci(
+                api_client,
+                workspace,
+                base_tag,
+                resolved_tag,
+                local_path,
+                verbose,
+            )
+            .await
+        }
+        crate::adapters::AdapterDispatchKind::File => {
+            sync_to_remote_file(
+                api_client,
+                workspace,
+                base_tag,
+                resolved_tag,
+                local_path,
+                verbose,
+                adapter_detection.kind,
+            )
+            .await
+        }
+    }
+}
 
+#[allow(clippy::too_many_arguments)]
+async fn sync_to_remote_archive(
+    api_client: &ApiClient,
+    workspace: &str,
+    base_tag: &str,
+    resolved_tag: &str,
+    local_path: &Path,
+    verbose: bool,
+    encrypt: bool,
+    recipient: Option<String>,
+) -> Result<()> {
     let path_buf = local_path.to_path_buf();
     let draft = task::spawn_blocking(move || {
         let builder = ManifestBuilder::new(&path_buf);
@@ -846,6 +1457,10 @@ async fn sync_to_remote(
         tag: resolved_tag.to_string(),
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
+        storage_mode: None,
+        blob_count: None,
+        blob_total_size_bytes: None,
+        cas_layout: None,
         manifest_format_version: Some(1),
         total_size_bytes,
         uncompressed_size: Some(archive_info.uncompressed_size),
@@ -977,8 +1592,10 @@ async fn sync_to_remote(
         manifest_digest: expected_manifest_digest,
         manifest_size: manifest_bytes.len() as u64,
         manifest_etag,
-        archive_size: final_compressed_size,
+        archive_size: Some(final_compressed_size),
         archive_etag,
+        blob_count: None,
+        blob_total_size_bytes: None,
         file_count: Some(file_count),
         uncompressed_size: Some(archive_info.uncompressed_size),
         compressed_size: Some(final_compressed_size),
@@ -999,4 +1616,676 @@ async fn sync_to_remote(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn sync_to_remote_oci(
+    api_client: &ApiClient,
+    workspace: &str,
+    base_tag: &str,
+    resolved_tag: &str,
+    local_path: &Path,
+    verbose: bool,
+) -> Result<()> {
+    let scan_path = local_path.to_path_buf();
+    let scan = task::spawn_blocking(move || crate::cas_oci::scan_layout(&scan_path))
+        .await
+        .context("OCI scan task panicked")??;
+
+    let pointer_bytes = crate::cas_oci::build_pointer(&scan)?;
+    let manifest_root_digest = crate::cas_oci::prefixed_sha256_digest(&pointer_bytes);
+    let expected_manifest_digest = manifest_root_digest.clone();
+    let expected_manifest_size = pointer_bytes.len() as u64;
+    let blob_count = scan.blobs.len() as u64;
+    let file_count = blob_count.min(u32::MAX as u64) as u32;
+    let blob_total_size_bytes = scan.total_blob_bytes;
+    let total_size_bytes =
+        blob_total_size_bytes + scan.index_json.len() as u64 + scan.oci_layout.len() as u64;
+
+    let check_response = api_client
+        .check_manifests(
+            workspace,
+            &[ManifestCheckRequest {
+                tag: resolved_tag.to_string(),
+                manifest_root_digest: manifest_root_digest.clone(),
+                lookup: None,
+            }],
+        )
+        .await;
+
+    if let Ok(response) = check_response {
+        if let Some(result) = response.results.first() {
+            if result.exists {
+                if verbose {
+                    ui::info("  Cache already up to date");
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    let blobs: Vec<BlobDescriptor> = scan
+        .blobs
+        .iter()
+        .map(|blob| BlobDescriptor {
+            digest: blob.digest.clone(),
+            size_bytes: blob.size_bytes,
+        })
+        .collect();
+    let blob_paths: HashMap<String, PathBuf> = scan
+        .blobs
+        .iter()
+        .map(|blob| (blob.digest.clone(), blob.path.clone()))
+        .collect();
+
+    let ci_provider = detect_ci_environment();
+    let request = SaveRequest {
+        tag: resolved_tag.to_string(),
+        manifest_root_digest: manifest_root_digest.clone(),
+        compression_algorithm: "zstd".to_string(),
+        storage_mode: Some("cas".to_string()),
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        cas_layout: Some("oci-v1".to_string()),
+        manifest_format_version: Some(1),
+        total_size_bytes,
+        uncompressed_size: None,
+        compressed_size: None,
+        file_count: Some(file_count),
+        expected_manifest_digest: Some(expected_manifest_digest.clone()),
+        expected_manifest_size: Some(expected_manifest_size),
+        force: None,
+        use_multipart: None,
+        ci_provider: Some(ci_provider),
+        encrypted: None,
+        encryption_algorithm: None,
+        encryption_recipient_hint: None,
+    };
+
+    if verbose {
+        ui::info("  Requesting CAS upload plan...");
+    }
+
+    let save_response = api_client
+        .save_entry(workspace, &request)
+        .await
+        .with_context(|| format!("Failed to create CAS entry for {}", resolved_tag))?;
+
+    let server_adapter = crate::cache_adapter::detect_restore_transport(
+        save_response.storage_mode.as_deref(),
+        save_response.cas_layout.as_deref(),
+    );
+    if !matches!(
+        server_adapter,
+        crate::cache_adapter::CacheAdapterKind::Cas
+            | crate::cache_adapter::CacheAdapterKind::CasOci
+    ) {
+        anyhow::bail!(
+            "Server did not negotiate OCI CAS mode for {} (adapter '{}')",
+            resolved_tag,
+            server_adapter.as_str()
+        );
+    }
+
+    if save_response.exists {
+        if verbose {
+            ui::info("  Cache already exists on server");
+        }
+        return Ok(());
+    }
+
+    let missing_blobs = if blobs.is_empty() {
+        Vec::new()
+    } else {
+        let check_response = api_client
+            .check_blobs(workspace, &blobs)
+            .await
+            .context("Failed to check remote blob presence")?;
+        let existing: std::collections::HashSet<&str> = check_response
+            .results
+            .iter()
+            .filter_map(|result| result.exists.then_some(result.digest.as_str()))
+            .collect();
+        blobs
+            .iter()
+            .filter(|blob| !existing.contains(blob.digest.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    if verbose {
+        ui::info(&format!(
+            "  Uploading {} missing blob(s)...",
+            missing_blobs.len()
+        ));
+    }
+
+    if !missing_blobs.is_empty() {
+        let upload_plan = api_client
+            .blob_upload_urls(workspace, &save_response.cache_entry_id, &missing_blobs)
+            .await
+            .context("Failed to request CAS blob upload URLs")?;
+
+        let already_present: std::collections::HashSet<&str> = upload_plan
+            .already_present
+            .iter()
+            .map(|digest| digest.as_str())
+            .collect();
+        let upload_by_digest: HashMap<&str, (&str, &HashMap<String, String>)> = upload_plan
+            .upload_urls
+            .iter()
+            .map(|upload| {
+                (
+                    upload.digest.as_str(),
+                    (
+                        upload.url.as_str(),
+                        &upload.headers as &HashMap<String, String>,
+                    ),
+                )
+            })
+            .collect();
+
+        let mut upload_items = Vec::new();
+        for blob in &missing_blobs {
+            if already_present.contains(blob.digest.as_str()) {
+                continue;
+            }
+
+            let Some((url, headers)) = upload_by_digest.get(blob.digest.as_str()) else {
+                anyhow::bail!(
+                    "Server did not provide upload URL for missing blob {}",
+                    blob.digest
+                );
+            };
+            let blob_path = blob_paths
+                .get(&blob.digest)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Missing local file for blob {}", blob.digest))?;
+            upload_items.push((blob_path, (*url).to_string(), (*headers).clone()));
+        }
+
+        if !upload_items.is_empty() {
+            let transfer_client = api_client.transfer_client().clone();
+            let progress = crate::progress::TransferProgress::new_noop();
+            let max_concurrent =
+                crate::commands::utils::get_optimal_concurrency(upload_items.len(), "save");
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+            let mut tasks = Vec::new();
+
+            for (blob_path, upload_url, headers) in upload_items {
+                let transfer_client = transfer_client.clone();
+                let semaphore = semaphore.clone();
+                let progress = progress.clone();
+                let task = tokio::spawn(async move {
+                    let _permit = semaphore.acquire().await.unwrap();
+                    crate::multipart_upload::upload_via_single_url(
+                        &blob_path,
+                        &upload_url,
+                        &progress,
+                        &transfer_client,
+                        &headers,
+                    )
+                    .await
+                    .with_context(|| format!("Failed to upload blob {}", blob_path.display()))
+                    .map(|_| ())
+                });
+                tasks.push(task);
+            }
+
+            for task in tasks {
+                task.await.context("Blob upload task panicked")??;
+            }
+        }
+    }
+
+    if verbose {
+        ui::info("  Uploading CAS index...");
+    }
+
+    let manifest_url = save_response
+        .manifest_upload_url
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Missing manifest_upload_url in response"))?;
+    let manifest_etag = crate::cas_transport::upload_payload(
+        api_client.transfer_client(),
+        manifest_url,
+        &pointer_bytes,
+        "application/cbor",
+        &save_response.upload_headers,
+    )
+    .await?;
+
+    if verbose {
+        ui::info("  Confirming CAS upload...");
+    }
+
+    let confirm_request = ConfirmRequest {
+        manifest_digest: expected_manifest_digest,
+        manifest_size: expected_manifest_size,
+        manifest_etag,
+        archive_size: None,
+        archive_etag: None,
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        file_count: Some(file_count),
+        uncompressed_size: None,
+        compressed_size: None,
+        tag: None,
+    };
+
+    api_client
+        .confirm(workspace, &save_response.cache_entry_id, &confirm_request)
+        .await
+        .with_context(|| format!("Failed to confirm CAS upload for {}", resolved_tag))?;
+
+    if verbose {
+        ui::info(&format!(
+            "  Synced {} ({} blobs, {})",
+            base_tag,
+            file_count,
+            crate::progress::format_bytes(blob_total_size_bytes)
+        ));
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn sync_to_remote_file(
+    api_client: &ApiClient,
+    workspace: &str,
+    base_tag: &str,
+    resolved_tag: &str,
+    local_path: &Path,
+    verbose: bool,
+    detected_kind: crate::cache_adapter::CacheAdapterKind,
+) -> Result<()> {
+    let scan_path = local_path.to_path_buf();
+    let scan = task::spawn_blocking(move || crate::cas_file::scan_path(&scan_path, Vec::new()))
+        .await
+        .context("File CAS scan task panicked")??;
+
+    let pointer_bytes = crate::cas_file::build_pointer(&scan)?;
+    let manifest_root_digest = crate::cas_file::prefixed_sha256_digest(&pointer_bytes);
+    let expected_manifest_digest = manifest_root_digest.clone();
+    let expected_manifest_size = pointer_bytes.len() as u64;
+    let blob_count = scan.blobs.len() as u64;
+    let file_count = scan
+        .entries
+        .iter()
+        .filter(|entry| entry.entry_type == EntryType::File)
+        .count()
+        .min(u32::MAX as usize) as u32;
+    let blob_total_size_bytes = scan.total_blob_bytes;
+    let total_size_bytes = blob_total_size_bytes;
+    if total_size_bytes == 0 {
+        anyhow::bail!(
+            "Cannot sync {} -> {}: no file content to upload (0 bytes)",
+            resolved_tag,
+            local_path.display()
+        );
+    }
+
+    let cas_layout =
+        crate::adapters::cas_layout_for(detected_kind, crate::adapters::AdapterDispatchKind::File)
+            .map(|layout| layout.to_string());
+
+    let check_response = api_client
+        .check_manifests(
+            workspace,
+            &[ManifestCheckRequest {
+                tag: resolved_tag.to_string(),
+                manifest_root_digest: manifest_root_digest.clone(),
+                lookup: None,
+            }],
+        )
+        .await;
+
+    if let Ok(response) = check_response {
+        if let Some(result) = response.results.first() {
+            if result.exists {
+                if verbose {
+                    ui::info("  Cache already up to date");
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    let blobs: Vec<BlobDescriptor> = scan
+        .blobs
+        .iter()
+        .map(|blob| BlobDescriptor {
+            digest: blob.digest.clone(),
+            size_bytes: blob.size_bytes,
+        })
+        .collect();
+    let blob_paths: HashMap<String, PathBuf> = scan
+        .blobs
+        .iter()
+        .map(|blob| (blob.digest.clone(), blob.path.clone()))
+        .collect();
+
+    let ci_provider = detect_ci_environment();
+    let request = SaveRequest {
+        tag: resolved_tag.to_string(),
+        manifest_root_digest: manifest_root_digest.clone(),
+        compression_algorithm: "zstd".to_string(),
+        storage_mode: Some("cas".to_string()),
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        cas_layout,
+        manifest_format_version: Some(1),
+        total_size_bytes,
+        uncompressed_size: None,
+        compressed_size: None,
+        file_count: Some(file_count),
+        expected_manifest_digest: Some(expected_manifest_digest.clone()),
+        expected_manifest_size: Some(expected_manifest_size),
+        force: None,
+        use_multipart: None,
+        ci_provider: Some(ci_provider),
+        encrypted: None,
+        encryption_algorithm: None,
+        encryption_recipient_hint: None,
+    };
+
+    if verbose {
+        ui::info("  Requesting CAS upload plan...");
+    }
+
+    let save_response = api_client
+        .save_entry(workspace, &request)
+        .await
+        .with_context(|| format!("Failed to create CAS entry for {}", resolved_tag))?;
+
+    let server_adapter = crate::cache_adapter::detect_restore_transport(
+        save_response.storage_mode.as_deref(),
+        save_response.cas_layout.as_deref(),
+    );
+    if !matches!(
+        server_adapter,
+        crate::cache_adapter::CacheAdapterKind::Cas
+            | crate::cache_adapter::CacheAdapterKind::CasBazel
+    ) {
+        anyhow::bail!(
+            "Server did not negotiate file CAS mode for {} (adapter '{}')",
+            resolved_tag,
+            server_adapter.as_str()
+        );
+    }
+
+    if save_response.exists {
+        if verbose {
+            ui::info("  Cache already exists on server");
+        }
+        return Ok(());
+    }
+
+    let missing_blobs = if blobs.is_empty() {
+        Vec::new()
+    } else {
+        let check_response = api_client
+            .check_blobs(workspace, &blobs)
+            .await
+            .context("Failed to check remote blob presence")?;
+        let existing: std::collections::HashSet<&str> = check_response
+            .results
+            .iter()
+            .filter_map(|result| result.exists.then_some(result.digest.as_str()))
+            .collect();
+        blobs
+            .iter()
+            .filter(|blob| !existing.contains(blob.digest.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    if verbose {
+        ui::info(&format!(
+            "  Uploading {} missing blob(s)...",
+            missing_blobs.len()
+        ));
+    }
+
+    if !missing_blobs.is_empty() {
+        let upload_plan = api_client
+            .blob_upload_urls(workspace, &save_response.cache_entry_id, &missing_blobs)
+            .await
+            .context("Failed to request CAS blob upload URLs")?;
+
+        let already_present: std::collections::HashSet<&str> = upload_plan
+            .already_present
+            .iter()
+            .map(|digest| digest.as_str())
+            .collect();
+        let upload_by_digest: HashMap<&str, (&str, &HashMap<String, String>)> = upload_plan
+            .upload_urls
+            .iter()
+            .map(|upload| {
+                (
+                    upload.digest.as_str(),
+                    (
+                        upload.url.as_str(),
+                        &upload.headers as &HashMap<String, String>,
+                    ),
+                )
+            })
+            .collect();
+
+        let mut upload_items = Vec::new();
+        for blob in &missing_blobs {
+            if already_present.contains(blob.digest.as_str()) {
+                continue;
+            }
+
+            let Some((url, headers)) = upload_by_digest.get(blob.digest.as_str()) else {
+                anyhow::bail!(
+                    "Server did not provide upload URL for missing blob {}",
+                    blob.digest
+                );
+            };
+            let blob_path = blob_paths
+                .get(&blob.digest)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Missing local file for blob {}", blob.digest))?;
+            upload_items.push((blob_path, (*url).to_string(), (*headers).clone()));
+        }
+
+        if !upload_items.is_empty() {
+            let transfer_client = api_client.transfer_client().clone();
+            let progress = crate::progress::TransferProgress::new_noop();
+            let max_concurrent =
+                crate::commands::utils::get_optimal_concurrency(upload_items.len(), "save");
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+            let mut tasks = Vec::new();
+
+            for (blob_path, upload_url, headers) in upload_items {
+                let transfer_client = transfer_client.clone();
+                let semaphore = semaphore.clone();
+                let progress = progress.clone();
+                let task = tokio::spawn(async move {
+                    let _permit = semaphore.acquire().await.unwrap();
+                    crate::multipart_upload::upload_via_single_url(
+                        &blob_path,
+                        &upload_url,
+                        &progress,
+                        &transfer_client,
+                        &headers,
+                    )
+                    .await
+                    .with_context(|| format!("Failed to upload blob {}", blob_path.display()))
+                    .map(|_| ())
+                });
+                tasks.push(task);
+            }
+
+            for task in tasks {
+                task.await.context("Blob upload task panicked")??;
+            }
+        }
+    }
+
+    if verbose {
+        ui::info("  Uploading CAS index...");
+    }
+
+    let manifest_url = save_response
+        .manifest_upload_url
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Missing manifest_upload_url in response"))?;
+    let manifest_etag = crate::cas_transport::upload_payload(
+        api_client.transfer_client(),
+        manifest_url,
+        &pointer_bytes,
+        "application/cbor",
+        &save_response.upload_headers,
+    )
+    .await?;
+
+    if verbose {
+        ui::info("  Confirming CAS upload...");
+    }
+
+    let confirm_request = ConfirmRequest {
+        manifest_digest: expected_manifest_digest,
+        manifest_size: expected_manifest_size,
+        manifest_etag,
+        archive_size: None,
+        archive_etag: None,
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        file_count: Some(file_count),
+        uncompressed_size: None,
+        compressed_size: None,
+        tag: None,
+    };
+
+    api_client
+        .confirm(workspace, &save_response.cache_entry_id, &confirm_request)
+        .await
+        .with_context(|| format!("Failed to confirm CAS upload for {}", resolved_tag))?;
+
+    if verbose {
+        ui::info(&format!(
+            "  Synced {} ({} files, {})",
+            base_tag,
+            file_count,
+            crate::progress::format_bytes(blob_total_size_bytes)
+        ));
+    }
+
+    Ok(())
+}
+
+fn local_file_manifest_digest(path: &Path) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let scan = crate::cas_file::scan_path(path, Vec::new())?;
+    let pointer_bytes = crate::cas_file::build_pointer(&scan)?;
+    Ok(Some(crate::cas_file::prefixed_sha256_digest(
+        &pointer_bytes,
+    )))
+}
+
+fn local_oci_manifest_digest(path: &Path) -> Result<Option<String>> {
+    if crate::cache_adapter::detect_layout(path).kind
+        != crate::cache_adapter::CacheAdapterKind::CasOci
+    {
+        return Ok(None);
+    }
+
+    let scan = crate::cas_oci::scan_layout(path)?;
+    let pointer_bytes = crate::cas_oci::build_pointer(&scan)?;
+    Ok(Some(crate::cas_oci::prefixed_sha256_digest(&pointer_bytes)))
+}
+
+async fn remove_path_if_exists(path: &Path) -> Result<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_dir() {
+                tokio::fs::remove_dir_all(path)
+                    .await
+                    .with_context(|| format!("Failed to remove {}", path.display()))?;
+            } else {
+                tokio::fs::remove_file(path)
+                    .await
+                    .with_context(|| format!("Failed to remove {}", path.display()))?;
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("Failed to inspect {}", path.display())),
+    }
+}
+
+async fn create_symlink(path: &Path, target: String) -> Result<()> {
+    let destination = path.to_path_buf();
+    tokio::task::spawn_blocking(move || create_symlink_blocking(&destination, &target))
+        .await
+        .context("Symlink task panicked")?
+}
+
+#[cfg(unix)]
+fn create_symlink_blocking(path: &Path, target: &str) -> Result<()> {
+    std::os::unix::fs::symlink(target, path)
+        .with_context(|| format!("Failed to create symlink {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_symlink_blocking(path: &Path, target: &str) -> Result<()> {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+
+    if symlink_file(target, path).is_err() {
+        symlink_dir(target, path)
+            .with_context(|| format!("Failed to create symlink {}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_oci_manifest_digest_returns_none_for_non_oci_layout() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(temp_dir.path().join("file.txt"), b"hello").unwrap();
+
+        let digest = local_oci_manifest_digest(temp_dir.path()).unwrap();
+        assert!(digest.is_none());
+    }
+
+    #[test]
+    fn local_oci_manifest_digest_matches_pointer_digest() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let blobs_dir = temp_dir.path().join("blobs").join("sha256");
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+
+        std::fs::write(temp_dir.path().join("index.json"), b"{\"schemaVersion\":2}").unwrap();
+        std::fs::write(
+            temp_dir.path().join("oci-layout"),
+            b"{\"imageLayoutVersion\":\"1.0.0\"}",
+        )
+        .unwrap();
+        std::fs::write(
+            blobs_dir.join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            b"blob-data",
+        )
+        .unwrap();
+
+        let digest = local_oci_manifest_digest(temp_dir.path())
+            .unwrap()
+            .expect("expected digest");
+
+        let scan = crate::cas_oci::scan_layout(temp_dir.path()).unwrap();
+        let pointer_bytes = crate::cas_oci::build_pointer(&scan).unwrap();
+        let expected = crate::cas_oci::prefixed_sha256_digest(&pointer_bytes);
+
+        assert_eq!(digest, expected);
+    }
 }

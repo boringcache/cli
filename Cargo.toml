@@ -1,6 +1,6 @@
 [package]
 name = "boring_cache_cli"
-version = "1.0.1"
+version = "1.0.0"
 edition = "2021"
 authors = ["BoringCache Team"]
 description = "High-performance cache management CLI for CI/CD workflows"
@@ -24,7 +24,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 
 # HTTP client - minimal features (removes TLS backends, cookies, gzip)
 # Using rustls with ring crypto provider (pure Rust, no glibc issues)
-reqwest = { version = "0.13", features = ["json", "stream", "rustls-no-provider"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "stream", "rustls-no-provider", "http2"], default-features = false }
 
 # Rustls with ring crypto provider (avoids aws-lc-sys glibc cross-compilation issues)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
