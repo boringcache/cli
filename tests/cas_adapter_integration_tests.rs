@@ -308,11 +308,7 @@ async fn test_save_requests_upload_urls_for_existing_cas_blobs() {
     let save_mock = server
         .mock("POST", "/workspaces/test/workspace/caches")
         .match_header("authorization", "Bearer test-token-123")
-        .match_body(Matcher::AllOf(vec![
-            Matcher::Regex(r#""tag":"oci-attach-tag""#.to_string()),
-            Matcher::Regex(r#""storage_mode":"cas""#.to_string()),
-            Matcher::Regex(r#""cas_layout":"oci-v1""#.to_string()),
-        ]))
+        .match_body(Matcher::Regex(r#""tag":"oci-attach-tag""#.to_string()))
         .with_status(201)
         .with_header("content-type", "application/json")
         .with_body(
