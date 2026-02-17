@@ -739,7 +739,7 @@ async fn put_manifest(
     let parsed: serde_json::Value = serde_json::from_slice(&manifest_body)
         .map_err(|e| OciError::internal(format!("Invalid manifest JSON: {e}")))?;
 
-    let blob_descriptors = extract_blob_descriptors(&parsed);
+    let blob_descriptors = extract_blob_descriptors(&parsed)?;
 
     let pointer = cas_oci::OciPointer {
         format_version: 1,
@@ -915,54 +915,68 @@ async fn put_manifest(
     cleanup_blob_sessions(&state, &blob_descriptors).await;
 
     let digest_tag_name = digest_tag(&manifest_digest);
-    let alias_request = SaveRequest {
-        tag: digest_tag_name,
-        manifest_root_digest: manifest_root_digest.clone(),
-        compression_algorithm: "zstd".to_string(),
-        storage_mode: Some("cas".to_string()),
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        cas_layout: Some("oci-v1".to_string()),
-        manifest_format_version: Some(1),
-        total_size_bytes,
-        uncompressed_size: None,
-        compressed_size: None,
-        file_count: Some(blob_count.min(u32::MAX as u64) as u32),
-        expected_manifest_digest: Some(manifest_root_digest.clone()),
-        expected_manifest_size: Some(pointer_bytes.len() as u64),
-        force: None,
-        use_multipart: None,
-        ci_provider: None,
-        encrypted: None,
-        encryption_algorithm: None,
-        encryption_recipient_hint: None,
-    };
+    let alias_result = async {
+        let alias_request = SaveRequest {
+            tag: digest_tag_name.clone(),
+            manifest_root_digest: manifest_root_digest.clone(),
+            compression_algorithm: "zstd".to_string(),
+            storage_mode: Some("cas".to_string()),
+            blob_count: Some(blob_count),
+            blob_total_size_bytes: Some(blob_total_size_bytes),
+            cas_layout: Some("oci-v1".to_string()),
+            manifest_format_version: Some(1),
+            total_size_bytes,
+            uncompressed_size: None,
+            compressed_size: None,
+            file_count: Some(blob_count.min(u32::MAX as u64) as u32),
+            expected_manifest_digest: Some(manifest_root_digest.clone()),
+            expected_manifest_size: Some(pointer_bytes.len() as u64),
+            force: None,
+            use_multipart: None,
+            ci_provider: None,
+            encrypted: None,
+            encryption_algorithm: None,
+            encryption_recipient_hint: None,
+        };
 
-    let alias_save = state
-        .api_client
-        .save_entry(&state.workspace, &alias_request)
-        .await
-        .map_err(|e| OciError::internal(format!("digest alias save_entry failed: {e}")))?;
+        let alias_save = state
+            .api_client
+            .save_entry(&state.workspace, &alias_request)
+            .await
+            .map_err(|e| format!("save_entry failed: {e}"))?;
 
-    let alias_confirm = ConfirmRequest {
-        manifest_digest: manifest_root_digest.clone(),
-        manifest_size: pointer_bytes.len() as u64,
-        manifest_etag: None,
-        archive_size: None,
-        archive_etag: None,
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        file_count: Some(blob_count.min(u32::MAX as u64) as u32),
-        uncompressed_size: None,
-        compressed_size: None,
-        tag: None,
-    };
+        let alias_confirm = ConfirmRequest {
+            manifest_digest: manifest_root_digest.clone(),
+            manifest_size: pointer_bytes.len() as u64,
+            manifest_etag: None,
+            archive_size: None,
+            archive_etag: None,
+            blob_count: Some(blob_count),
+            blob_total_size_bytes: Some(blob_total_size_bytes),
+            file_count: Some(blob_count.min(u32::MAX as u64) as u32),
+            uncompressed_size: None,
+            compressed_size: None,
+            tag: Some(digest_tag_name.clone()),
+        };
 
-    state
-        .api_client
-        .confirm(&state.workspace, &alias_save.cache_entry_id, &alias_confirm)
-        .await
-        .map_err(|e| OciError::internal(format!("digest alias confirm failed: {e}")))?;
+        state
+            .api_client
+            .confirm(&state.workspace, &alias_save.cache_entry_id, &alias_confirm)
+            .await
+            .map_err(|e| format!("confirm failed: {e}"))?;
+
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if let Err(error) = alias_result {
+        log::warn!(
+            "Digest alias write skipped for {} (workspace={}): {}",
+            digest_tag_name,
+            state.workspace,
+            error
+        );
+    }
 
     let mut headers = HeaderMap::new();
     headers.insert("Docker-Content-Digest", manifest_digest.parse().unwrap());
@@ -977,7 +991,7 @@ async fn put_manifest(
     Ok((StatusCode::CREATED, headers, Body::empty()).into_response())
 }
 
-fn extract_blob_descriptors(manifest: &serde_json::Value) -> Vec<BlobDescriptor> {
+fn extract_blob_descriptors(manifest: &serde_json::Value) -> Result<Vec<BlobDescriptor>, OciError> {
     let mut blobs = Vec::new();
 
     if let Some(config) = manifest.get("config") {
@@ -1006,7 +1020,25 @@ fn extract_blob_descriptors(manifest: &serde_json::Value) -> Vec<BlobDescriptor>
         }
     }
 
-    blobs
+    let mut deduped: Vec<BlobDescriptor> = Vec::with_capacity(blobs.len());
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    for descriptor in blobs {
+        if let Some(idx) = positions.get(&descriptor.digest) {
+            let existing = &deduped[*idx];
+            if existing.size_bytes != descriptor.size_bytes {
+                return Err(OciError::digest_invalid(format!(
+                    "conflicting descriptor sizes for {}: {} vs {}",
+                    descriptor.digest, existing.size_bytes, descriptor.size_bytes
+                )));
+            }
+            continue;
+        }
+
+        positions.insert(descriptor.digest.clone(), deduped.len());
+        deduped.push(descriptor);
+    }
+
+    Ok(deduped)
 }
 
 async fn cleanup_blob_sessions(state: &AppState, blob_descriptors: &[BlobDescriptor]) {
@@ -1118,7 +1150,7 @@ mod tests {
                 {"digest": "sha256:child2", "size": 600, "mediaType": "application/vnd.oci.image.manifest.v1+json"}
             ]
         });
-        let blobs = extract_blob_descriptors(&index_json);
+        let blobs = extract_blob_descriptors(&index_json).unwrap();
         assert!(blobs.is_empty());
     }
 
@@ -1132,11 +1164,43 @@ mod tests {
                 {"digest": "sha256:layer2", "size": 3000}
             ]
         });
-        let blobs = extract_blob_descriptors(&manifest_json);
+        let blobs = extract_blob_descriptors(&manifest_json).unwrap();
         assert_eq!(blobs.len(), 3);
         assert_eq!(blobs[0].digest, "sha256:cfg");
         assert_eq!(blobs[1].digest, "sha256:layer1");
         assert_eq!(blobs[2].digest, "sha256:layer2");
+    }
+
+    #[test]
+    fn extract_blob_descriptors_dedupes_by_digest() {
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "config": {"digest": "sha256:dup", "size": 32},
+            "layers": [
+                {"digest": "sha256:dup", "size": 32},
+                {"digest": "sha256:layer2", "size": 3000}
+            ]
+        });
+
+        let blobs = extract_blob_descriptors(&manifest_json).unwrap();
+        assert_eq!(blobs.len(), 2);
+        assert_eq!(blobs[0].digest, "sha256:dup");
+        assert_eq!(blobs[1].digest, "sha256:layer2");
+    }
+
+    #[test]
+    fn extract_blob_descriptors_rejects_conflicting_sizes_for_same_digest() {
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "config": {"digest": "sha256:dup", "size": 32},
+            "layers": [
+                {"digest": "sha256:dup", "size": 64}
+            ]
+        });
+
+        let error = extract_blob_descriptors(&manifest_json).unwrap_err();
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
