@@ -6,7 +6,7 @@ BoringCache is a universal build artifact cache for CI, Docker, and local develo
 
 BoringCache does not run builds and is not tied to any build tool. It works with any language, framework, or workflow by caching directories explicitly selected by the user.
 
-Caches are content-addressed and verified before restore. If identical content already exists, uploads are skipped. The same cache can be reused in GitHub Actions, Docker/BuildKit, and on developer machines using the same CLI.
+The CLI automatically detects what you're caching and picks the best storage strategy. OCI image layouts and Bazel disk caches get content-addressable storage with blob-level deduplication. Everything else is compressed into a single archive. No flags needed.
 
 This repository contains the BoringCache CLI, which can be used directly in CI pipelines, Docker builds, and local development.
 
@@ -49,6 +49,57 @@ You choose what to cache and where it should be restored.
 - BoringCache fingerprints the directory contents and skips uploads when unchanged.
 - Platform scoping is enabled by default for safety.
 
+## Content-addressable storage (CAS)
+
+BoringCache automatically detects structured layouts and uses content-addressable storage for efficient caching. No configuration needed — just point `save` at a directory and the CLI handles the rest.
+
+### Supported layouts
+
+| Layout | Detection | Storage |
+|--------|-----------|---------|
+| OCI image layout | `index.json` + `oci-layout` + `blobs/sha256/` | Each blob stored individually by SHA-256 digest |
+| Bazel disk cache | `ac/` + `cas/` directories | Each file stored individually by digest |
+| Everything else | Default | Single compressed archive (tar + zstd) |
+
+### How it works
+
+- **Save** scans the directory, identifies blobs already stored remotely, and uploads only new or changed blobs. Unchanged blobs are skipped entirely.
+- **Restore** downloads only the blobs missing locally. Large blobs (8MB+) use parallel byte-range downloads for maximum throughput.
+- **Mount** detects the layout, restores from remote, watches for local changes, and syncs back — all using the appropriate storage strategy.
+
+Every blob is verified against its SHA-256 digest on download. Sequential downloads hash inline during streaming. Parallel downloads verify after assembly.
+
+### Docker / BuildKit
+
+Cache OCI image layouts produced by BuildKit, Kaniko, or any OCI-compliant tool:
+
+```bash
+# Save a BuildKit cache export
+boringcache save my-org/ws "buildkit-cache:/path/to/oci-layout"
+
+# Restore before the next build
+boringcache restore my-org/ws "buildkit-cache:/path/to/oci-layout"
+
+# Keep it synced with mount
+boringcache mount my-org/ws "buildkit-cache:/path/to/oci-layout"
+```
+
+BuildKit produces OCI layouts with `index.json`, `oci-layout`, and `blobs/sha256/`. BoringCache detects this automatically and stores each layer as a separate blob. When layers are shared across builds (common with multi-stage Dockerfiles), they are uploaded once and deduplicated across cache entries.
+
+### Bazel
+
+Cache Bazel's disk cache directory:
+
+```bash
+# Save Bazel disk cache
+boringcache save my-org/ws "bazel-cache:/path/to/bazel-disk-cache"
+
+# Restore before build
+boringcache restore my-org/ws "bazel-cache:/path/to/bazel-disk-cache"
+```
+
+Bazel disk caches use `ac/` (action cache) and `cas/` (content-addressable storage) directories. BoringCache detects this structure and stores each file individually, deduplicating across saves.
+
 ## Commands
 
 ### `save <WORKSPACE> <TAG:PATH,...>`
@@ -81,6 +132,26 @@ boringcache mount my-org/ws "dev-cache:./node_modules"
 ```
 
 Restores from remote on start, syncs periodically, and performs a final sync on Ctrl+C.
+
+### `serve <WORKSPACE>`
+Run a local OCI registry proxy for native BuildKit `type=registry` integration.
+
+```bash
+boringcache serve my-org/ws --port 5000
+```
+
+BuildKit connects directly to the proxy as a standard OCI registry:
+
+```bash
+docker buildx build \
+  --cache-from type=registry,ref=localhost:5000/my-cache:main \
+  --cache-to type=registry,ref=localhost:5000/my-cache:main,mode=max \
+  .
+```
+
+The proxy translates OCI Distribution API calls into BoringCache CAS operations. BuildKit's `type=registry` supports lazy blob resolution — only the manifest is fetched on cache hit, and individual layers are pulled only if needed. This avoids downloading the entire cache upfront, which `type=local` cannot do.
+
+The proxy binds to `127.0.0.1` by default. Use `--host 0.0.0.0` when the BuildKit daemon runs in a separate container (e.g., `docker-container` driver).
 
 ### `delete <WORKSPACE> <TAGS>`
 Delete cache entries by tag.
@@ -156,6 +227,56 @@ jobs:
         if: success()
 ```
 
+### Docker layer caching in GitHub Actions
+
+Using the registry proxy (recommended — BuildKit only downloads layers it needs):
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: boringcache/setup-boringcache@v1
+        with:
+          token: ${{ secrets.BORINGCACHE_API_TOKEN }}
+
+      - run: boringcache serve my-org/project --port 5000 &
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          cache-from: type=registry,ref=localhost:5000/buildkit-cache:main
+          cache-to: type=registry,ref=localhost:5000/buildkit-cache:main,mode=max
+```
+
+Using local export (downloads all layers upfront):
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: boringcache/setup-boringcache@v1
+        with:
+          token: ${{ secrets.BORINGCACHE_API_TOKEN }}
+
+      - run: boringcache restore my-org/project "buildkit-cache:/tmp/buildkit-cache"
+        continue-on-error: true
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          cache-from: type=local,src=/tmp/buildkit-cache
+          cache-to: type=local,dest=/tmp/buildkit-cache,mode=max
+
+      - run: boringcache save my-org/project "buildkit-cache:/tmp/buildkit-cache"
+        if: always()
+```
+
 The action accepts these inputs:
 - `token` - BoringCache API token (sets `BORINGCACHE_API_TOKEN` env var)
 - `version` - Version to install (default: `v1.0.0`)
@@ -208,6 +329,8 @@ If manifest digest validation fails, the cache is skipped with a warning (no har
 
 Optional encryption for sensitive data like database backups. Data is encrypted before leaving your machine.
 
+When encryption is enabled on a CAS layout (OCI or Bazel), the CLI falls back to archive transport since encrypting individual blobs would break deduplication.
+
 Recommended: Workspace-scoped encryption
 
 ```bash
@@ -246,12 +369,13 @@ Key management:
 
 ## Performance
 
-- Parallel transfers: Concurrent uploads/downloads with adaptive concurrency
-- Zstd compression: Fast compression with excellent ratios
-- Streaming I/O: Memory-efficient for large files
-- Connection pooling: Reuses HTTP connections
-- Content fingerprinting: Skips redundant uploads
-- Blake3 hashing: Fast content-addressable storage
+- Adaptive concurrency: Scales with CPU cores, memory, and disk type
+- Parallel byte-range downloads: Large blobs (8MB+) are split into ranges and downloaded concurrently
+- Blob-level deduplication: CAS layouts skip uploading blobs that already exist remotely
+- Zstd compression: Fast compression with excellent ratios for archive transport
+- Streaming I/O: Memory-efficient with inline SHA-256 verification
+- Connection pooling: Reuses HTTP connections across transfers
+- Content fingerprinting: Skips redundant uploads via Blake3 hashing
 
 ## Development
 

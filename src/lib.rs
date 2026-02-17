@@ -17,6 +17,7 @@ pub mod multipart_upload;
 pub mod platform;
 pub mod progress;
 pub mod retry_resume;
+pub mod serve;
 pub mod signing;
 pub mod tag_utils;
 pub mod telemetry;

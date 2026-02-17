@@ -272,6 +272,174 @@ async fn test_save_uses_oci_layout_for_oci_cache() {
 }
 
 #[tokio::test]
+async fn test_save_requests_upload_urls_for_existing_cas_blobs() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!(
+            "skipping test_save_requests_upload_urls_for_existing_cas_blobs: networking disabled"
+        );
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    restore_env(temp_dir.path(), &server.url());
+
+    let cache_dir = temp_dir.path().join("oci_cache_attach");
+    let blobs_dir = cache_dir.join("blobs").join("sha256");
+    fs::create_dir_all(&blobs_dir).expect("Failed to create OCI blobs dir");
+    fs::write(cache_dir.join("index.json"), "{\"schemaVersion\":2}")
+        .expect("Failed to write OCI index");
+    fs::write(
+        cache_dir.join("oci-layout"),
+        "{\"imageLayoutVersion\":\"1.0.0\"}",
+    )
+    .expect("Failed to write OCI layout");
+
+    let blob_bytes = b"blobdata";
+    let blob_hex = cas_oci::sha256_hex(blob_bytes);
+    let blob_digest = format!("sha256:{blob_hex}");
+    let blob_size = blob_bytes.len() as u64;
+    fs::write(blobs_dir.join(&blob_hex), blob_bytes).expect("Failed to write OCI blob");
+
+    let manifest_upload_url = format!("{}/manifest-upload", server.url());
+
+    let save_mock = server
+        .mock("POST", "/workspaces/test/workspace/caches")
+        .match_header("authorization", "Bearer test-token-123")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": "oci-attach-tag",
+                "storage_mode": "cas",
+                "cas_layout": "oci-v1"
+            }
+        })))
+        .with_status(201)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "oci-attach-tag",
+                "cache_entry_id": "entry-oci-attach",
+                "exists": false,
+                "status": "pending",
+                "storage_mode": "cas",
+                "cas_layout": "oci-v1",
+                "blob_count": 1,
+                "blob_total_size_bytes": blob_size,
+                "manifest_upload_url": manifest_upload_url,
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let check_mock = server
+        .mock("POST", "/workspaces/test/workspace/caches/blobs/check")
+        .match_header("authorization", "Bearer test-token-123")
+        .match_body(Matcher::PartialJson(json!({
+            "blobs": [
+                {
+                    "digest": blob_digest,
+                    "size_bytes": blob_size
+                }
+            ]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [
+                    {
+                        "digest": blob_digest,
+                        "exists": true
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let upload_urls_mock = server
+        .mock(
+            "POST",
+            "/workspaces/test/workspace/caches/blobs/upload-urls",
+        )
+        .match_header("authorization", "Bearer test-token-123")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-oci-attach",
+            "blobs": [
+                {
+                    "digest": blob_digest,
+                    "size_bytes": blob_size
+                }
+            ]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_urls": [],
+                "already_present": [blob_digest]
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let manifest_upload_mock = server
+        .mock("PUT", "/manifest-upload")
+        .with_status(200)
+        .with_header("etag", "\"manifest-etag\"")
+        .create_async()
+        .await;
+
+    let confirm_mock = server
+        .mock(
+            "PATCH",
+            "/workspaces/test/workspace/caches/entry-oci-attach",
+        )
+        .match_header("authorization", "Bearer test-token-123")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "cache_entry_id": "entry-oci-attach",
+                "status": "ready",
+                "uploaded_at": "2026-02-16T00:00:00Z",
+                "tag_status": "ready"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let tag_path = format!("oci-attach-tag:{}", cache_dir.to_string_lossy());
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "save",
+            "test/workspace",
+            tag_path.as_str(),
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(0));
+    save_mock.assert_async().await;
+    check_mock.assert_async().await;
+    upload_urls_mock.assert_async().await;
+    manifest_upload_mock.assert_async().await;
+    confirm_mock.assert_async().await;
+    clear_env();
+}
+
+#[tokio::test]
 async fn test_restore_materializes_file_cas_layout() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {

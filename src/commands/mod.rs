@@ -6,6 +6,7 @@ pub mod ls;
 pub mod mount;
 pub mod restore;
 pub mod save;
+pub mod serve;
 pub mod setup_encryption;
 pub mod utils;
 pub mod workspaces;

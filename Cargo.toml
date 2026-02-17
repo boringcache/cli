@@ -19,7 +19,7 @@ path = "src/lib.rs"
 clap = { version = "4.5", features = ["derive", "env"] }
 
 # Async runtime - optimized features only (removes ~50-70KB by avoiding unused features)
-tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "fs", "io-util", "process", "sync"] }
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "fs", "io-util", "process", "sync", "signal", "net"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 
 # HTTP client - minimal features (removes TLS backends, cookies, gzip)
@@ -67,6 +67,9 @@ base64 = "0.22"
 # Archive creation
 tar = "0.4"
 filetime = "0.2"
+
+# HTTP server for OCI registry proxy
+axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "query"] }
 
 # Async utilities - minimal features
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
@@ -116,6 +119,8 @@ winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 mockito = "1.7"
 tempfile = "3.24"
 pretty_assertions = "1.4"
+tower = { version = "0.5.3", features = ["util"] }
+http-body-util = "0.1.3"
 
 
 [profile.release]

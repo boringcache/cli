@@ -1182,6 +1182,10 @@ async fn save_single_file_entry(
         .iter()
         .map(|blob| (blob.digest.clone(), blob.path.clone()))
         .collect();
+    let blob_sizes: HashMap<String, u64> = blobs
+        .iter()
+        .map(|blob| (blob.digest.clone(), blob.size_bytes))
+        .collect();
 
     let create_step = session.start_step("Creating cache entry".to_string(), None)?;
     let ci_provider = detect_ci_environment();
@@ -1324,52 +1328,28 @@ async fn save_single_file_entry(
         Some(format!("{} missing", missing_blobs.len())),
     )?;
     let upload_started = Instant::now();
-    if !missing_blobs.is_empty() {
+    if !blobs.is_empty() {
         let upload_plan = api_client
-            .blob_upload_urls(&workspace, &save_response.cache_entry_id, &missing_blobs)
+            .blob_upload_urls(&workspace, &save_response.cache_entry_id, &blobs)
             .await
             .context("Failed to request CAS blob upload URLs")?;
 
-        let already_present: std::collections::HashSet<&str> = upload_plan
-            .already_present
-            .iter()
-            .map(|digest| digest.as_str())
-            .collect();
-        let upload_by_digest: HashMap<&str, (&str, &HashMap<String, String>)> = upload_plan
-            .upload_urls
-            .iter()
-            .map(|upload| {
-                (
-                    upload.digest.as_str(),
-                    (
-                        upload.url.as_str(),
-                        &upload.headers as &HashMap<String, String>,
-                    ),
-                )
-            })
-            .collect();
-
         let mut items = Vec::new();
-        for blob in &missing_blobs {
-            if already_present.contains(blob.digest.as_str()) {
-                continue;
-            }
-            let Some((url, headers)) = upload_by_digest.get(blob.digest.as_str()) else {
-                anyhow::bail!(
-                    "Server did not provide upload URL for missing blob {}",
-                    blob.digest
-                );
-            };
+        for upload in &upload_plan.upload_urls {
             let blob_path = blob_paths
-                .get(&blob.digest)
+                .get(&upload.digest)
                 .cloned()
-                .ok_or_else(|| anyhow!("Missing local file for blob {}", blob.digest))?;
+                .ok_or_else(|| anyhow!("Missing local file for blob {}", upload.digest))?;
+            let size_bytes = blob_sizes
+                .get(&upload.digest)
+                .copied()
+                .ok_or_else(|| anyhow!("Missing local metadata for blob {}", upload.digest))?;
             items.push((
-                blob.digest.clone(),
+                upload.digest.clone(),
                 blob_path,
-                (*url).to_string(),
-                (*headers).clone(),
-                blob.size_bytes,
+                upload.url.clone(),
+                upload.headers.clone(),
+                size_bytes,
             ));
         }
 
@@ -1541,6 +1521,10 @@ async fn save_single_oci_entry(
         .iter()
         .map(|blob| (blob.digest.clone(), blob.path.clone()))
         .collect();
+    let blob_sizes: HashMap<String, u64> = blobs
+        .iter()
+        .map(|blob| (blob.digest.clone(), blob.size_bytes))
+        .collect();
 
     let create_step = session.start_step("Creating cache entry".to_string(), None)?;
     let ci_provider = detect_ci_environment();
@@ -1683,52 +1667,28 @@ async fn save_single_oci_entry(
         Some(format!("{} missing", missing_blobs.len())),
     )?;
     let upload_started = Instant::now();
-    if !missing_blobs.is_empty() {
+    if !blobs.is_empty() {
         let upload_plan = api_client
-            .blob_upload_urls(&workspace, &save_response.cache_entry_id, &missing_blobs)
+            .blob_upload_urls(&workspace, &save_response.cache_entry_id, &blobs)
             .await
             .context("Failed to request CAS blob upload URLs")?;
 
-        let already_present: std::collections::HashSet<&str> = upload_plan
-            .already_present
-            .iter()
-            .map(|digest| digest.as_str())
-            .collect();
-        let upload_by_digest: HashMap<&str, (&str, &HashMap<String, String>)> = upload_plan
-            .upload_urls
-            .iter()
-            .map(|upload| {
-                (
-                    upload.digest.as_str(),
-                    (
-                        upload.url.as_str(),
-                        &upload.headers as &HashMap<String, String>,
-                    ),
-                )
-            })
-            .collect();
-
         let mut items = Vec::new();
-        for blob in &missing_blobs {
-            if already_present.contains(blob.digest.as_str()) {
-                continue;
-            }
-            let Some((url, headers)) = upload_by_digest.get(blob.digest.as_str()) else {
-                anyhow::bail!(
-                    "Server did not provide upload URL for missing blob {}",
-                    blob.digest
-                );
-            };
+        for upload in &upload_plan.upload_urls {
             let path = blob_paths
-                .get(&blob.digest)
+                .get(&upload.digest)
                 .cloned()
-                .ok_or_else(|| anyhow!("Missing local file for blob {}", blob.digest))?;
+                .ok_or_else(|| anyhow!("Missing local file for blob {}", upload.digest))?;
+            let size_bytes = blob_sizes
+                .get(&upload.digest)
+                .copied()
+                .ok_or_else(|| anyhow!("Missing local metadata for blob {}", upload.digest))?;
             items.push((
-                blob.digest.clone(),
+                upload.digest.clone(),
                 path,
-                (*url).to_string(),
-                (*headers).clone(),
-                blob.size_bytes,
+                upload.url.clone(),
+                upload.headers.clone(),
+                size_bytes,
             ));
         }
 

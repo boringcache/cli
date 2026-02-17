@@ -240,6 +240,11 @@ async fn main() -> Result<()> {
             identity_output,
         } => commands::setup_encryption::execute(workspace, identity_output).await,
         cli::Commands::Workspaces => commands::workspaces::execute().await,
+        cli::Commands::Serve {
+            workspace,
+            port,
+            host,
+        } => commands::serve::execute(workspace, host, port).await,
     };
 
     handle_result(result)

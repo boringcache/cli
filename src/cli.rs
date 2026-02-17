@@ -174,6 +174,18 @@ pub enum Commands {
     },
 
     Workspaces,
+
+    #[command(about = "Run a local OCI registry proxy backed by BoringCache")]
+    Serve {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: String,
+
+        #[arg(short, long, default_value = "5000")]
+        port: u16,
+
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+    },
 }
 
 #[derive(Subcommand)]

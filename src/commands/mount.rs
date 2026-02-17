@@ -1677,6 +1677,10 @@ async fn sync_to_remote_oci(
         .iter()
         .map(|blob| (blob.digest.clone(), blob.path.clone()))
         .collect();
+    let blob_sizes: HashMap<String, u64> = blobs
+        .iter()
+        .map(|blob| (blob.digest.clone(), blob.size_bytes))
+        .collect();
 
     let ci_provider = detect_ci_environment();
     let request = SaveRequest {
@@ -1760,48 +1764,27 @@ async fn sync_to_remote_oci(
         ));
     }
 
-    if !missing_blobs.is_empty() {
+    if !blobs.is_empty() {
         let upload_plan = api_client
-            .blob_upload_urls(workspace, &save_response.cache_entry_id, &missing_blobs)
+            .blob_upload_urls(workspace, &save_response.cache_entry_id, &blobs)
             .await
             .context("Failed to request CAS blob upload URLs")?;
 
-        let already_present: std::collections::HashSet<&str> = upload_plan
-            .already_present
-            .iter()
-            .map(|digest| digest.as_str())
-            .collect();
-        let upload_by_digest: HashMap<&str, (&str, &HashMap<String, String>)> = upload_plan
-            .upload_urls
-            .iter()
-            .map(|upload| {
-                (
-                    upload.digest.as_str(),
-                    (
-                        upload.url.as_str(),
-                        &upload.headers as &HashMap<String, String>,
-                    ),
-                )
-            })
-            .collect();
-
         let mut upload_items = Vec::new();
-        for blob in &missing_blobs {
-            if already_present.contains(blob.digest.as_str()) {
-                continue;
-            }
-
-            let Some((url, headers)) = upload_by_digest.get(blob.digest.as_str()) else {
-                anyhow::bail!(
-                    "Server did not provide upload URL for missing blob {}",
-                    blob.digest
-                );
-            };
+        for upload in &upload_plan.upload_urls {
             let blob_path = blob_paths
-                .get(&blob.digest)
+                .get(&upload.digest)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Missing local file for blob {}", blob.digest))?;
-            upload_items.push((blob_path, (*url).to_string(), (*headers).clone()));
+                .ok_or_else(|| anyhow::anyhow!("Missing local file for blob {}", upload.digest))?;
+            let size_bytes = blob_sizes.get(&upload.digest).copied().ok_or_else(|| {
+                anyhow::anyhow!("Missing local metadata for blob {}", upload.digest)
+            })?;
+            upload_items.push((
+                blob_path,
+                upload.url.clone(),
+                upload.headers.clone(),
+                size_bytes,
+            ));
         }
 
         if !upload_items.is_empty() {
@@ -1812,7 +1795,7 @@ async fn sync_to_remote_oci(
             let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
             let mut tasks = Vec::new();
 
-            for (blob_path, upload_url, headers) in upload_items {
+            for (blob_path, upload_url, headers, _size_bytes) in upload_items {
                 let transfer_client = transfer_client.clone();
                 let semaphore = semaphore.clone();
                 let progress = progress.clone();
@@ -1965,6 +1948,10 @@ async fn sync_to_remote_file(
         .iter()
         .map(|blob| (blob.digest.clone(), blob.path.clone()))
         .collect();
+    let blob_sizes: HashMap<String, u64> = blobs
+        .iter()
+        .map(|blob| (blob.digest.clone(), blob.size_bytes))
+        .collect();
 
     let ci_provider = detect_ci_environment();
     let request = SaveRequest {
@@ -2048,48 +2035,27 @@ async fn sync_to_remote_file(
         ));
     }
 
-    if !missing_blobs.is_empty() {
+    if !blobs.is_empty() {
         let upload_plan = api_client
-            .blob_upload_urls(workspace, &save_response.cache_entry_id, &missing_blobs)
+            .blob_upload_urls(workspace, &save_response.cache_entry_id, &blobs)
             .await
             .context("Failed to request CAS blob upload URLs")?;
 
-        let already_present: std::collections::HashSet<&str> = upload_plan
-            .already_present
-            .iter()
-            .map(|digest| digest.as_str())
-            .collect();
-        let upload_by_digest: HashMap<&str, (&str, &HashMap<String, String>)> = upload_plan
-            .upload_urls
-            .iter()
-            .map(|upload| {
-                (
-                    upload.digest.as_str(),
-                    (
-                        upload.url.as_str(),
-                        &upload.headers as &HashMap<String, String>,
-                    ),
-                )
-            })
-            .collect();
-
         let mut upload_items = Vec::new();
-        for blob in &missing_blobs {
-            if already_present.contains(blob.digest.as_str()) {
-                continue;
-            }
-
-            let Some((url, headers)) = upload_by_digest.get(blob.digest.as_str()) else {
-                anyhow::bail!(
-                    "Server did not provide upload URL for missing blob {}",
-                    blob.digest
-                );
-            };
+        for upload in &upload_plan.upload_urls {
             let blob_path = blob_paths
-                .get(&blob.digest)
+                .get(&upload.digest)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Missing local file for blob {}", blob.digest))?;
-            upload_items.push((blob_path, (*url).to_string(), (*headers).clone()));
+                .ok_or_else(|| anyhow::anyhow!("Missing local file for blob {}", upload.digest))?;
+            let size_bytes = blob_sizes.get(&upload.digest).copied().ok_or_else(|| {
+                anyhow::anyhow!("Missing local metadata for blob {}", upload.digest)
+            })?;
+            upload_items.push((
+                blob_path,
+                upload.url.clone(),
+                upload.headers.clone(),
+                size_bytes,
+            ));
         }
 
         if !upload_items.is_empty() {
@@ -2100,7 +2066,7 @@ async fn sync_to_remote_file(
             let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
             let mut tasks = Vec::new();
 
-            for (blob_path, upload_url, headers) in upload_items {
+            for (blob_path, upload_url, headers, _size_bytes) in upload_items {
                 let transfer_client = transfer_client.clone();
                 let semaphore = semaphore.clone();
                 let progress = progress.clone();
