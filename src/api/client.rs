@@ -9,9 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::sleep;
 
-const BLOB_CHECK_BATCH_MAX: usize = 1_000;
-const BLOB_URL_BATCH_MAX: usize = 500;
-const API_BATCH_CONCURRENCY: usize = 3;
+const BLOB_CHECK_BATCH_MAX: usize = 10_000;
+const BLOB_URL_BATCH_MAX: usize = 2_000;
 
 #[derive(Clone)]
 pub struct ApiClient {
@@ -366,7 +365,10 @@ impl ApiClient {
             return self.post(&endpoint, &body).await;
         }
 
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(API_BATCH_CONCURRENCY));
+        let chunk_count = blobs.len().div_ceil(BLOB_CHECK_BATCH_MAX);
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(api_batch_concurrency(
+            chunk_count,
+        )));
         let mut tasks = Vec::new();
         for chunk in blobs.chunks(BLOB_CHECK_BATCH_MAX) {
             let client = self.clone();
@@ -411,7 +413,10 @@ impl ApiClient {
             return self.post(&endpoint, &body).await;
         }
 
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(API_BATCH_CONCURRENCY));
+        let chunk_count = blobs.len().div_ceil(BLOB_URL_BATCH_MAX);
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(api_batch_concurrency(
+            chunk_count,
+        )));
         let mut tasks = Vec::new();
         for chunk in blobs.chunks(BLOB_URL_BATCH_MAX) {
             let client = self.clone();
@@ -465,7 +470,10 @@ impl ApiClient {
             return self.post(&endpoint, &body).await;
         }
 
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(API_BATCH_CONCURRENCY));
+        let chunk_count = blobs.len().div_ceil(BLOB_URL_BATCH_MAX);
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(api_batch_concurrency(
+            chunk_count,
+        )));
         let mut tasks = Vec::new();
         for chunk in blobs.chunks(BLOB_URL_BATCH_MAX) {
             let client = self.clone();
@@ -933,6 +941,23 @@ fn dedupe_strings(values: Vec<String>) -> Vec<String> {
     deduped
 }
 
+fn api_batch_concurrency(chunk_count: usize) -> usize {
+    if chunk_count == 0 {
+        return 1;
+    }
+
+    let cpu_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let ci_cap = if std::env::var_os("CI").is_some() {
+        4
+    } else {
+        8
+    };
+
+    chunk_count.min(ci_cap).min(cpu_count.max(1)).max(1)
+}
+
 fn ensure_crypto_provider() {
     use std::sync::Once;
     static INIT: Once = Once::new();
@@ -1055,6 +1080,17 @@ mod tests {
             client.build_url("/test/endpoint"),
             "https://api.example.com/test/endpoint"
         );
+    }
+
+    #[test]
+    fn test_api_batch_concurrency_is_bounded() {
+        assert_eq!(api_batch_concurrency(1), 1);
+
+        let medium = api_batch_concurrency(4);
+        assert!((1..=4).contains(&medium));
+
+        let larger = api_batch_concurrency(32);
+        assert!((1..=32).contains(&larger));
     }
 
     #[test]

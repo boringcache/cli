@@ -883,6 +883,38 @@ async fn test_monolithic_upload() {
 }
 
 #[tokio::test]
+async fn test_large_monolithic_upload_over_two_megabytes() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let blob_data = vec![b'x'; 3 * 1024 * 1024];
+    let digest = cas_oci::prefixed_sha256_digest(&blob_data);
+
+    let app = build_router(state.clone());
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/v2/my-cache/blobs/uploads/?digest={digest}"))
+            .body(Body::from(blob_data))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        response
+            .headers()
+            .get("Docker-Content-Digest")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        digest
+    );
+}
+
+#[tokio::test]
 async fn test_multi_segment_name_manifest() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;

@@ -4,6 +4,8 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
@@ -13,6 +15,8 @@ use crate::serve::state::{
     digest_tag, ref_tag_for_input, AppState, BlobLocatorEntry, UploadSession,
 };
 use crate::tag_utils::TagResolver;
+
+const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
 
 enum OciRoute {
     Manifest { name: String, reference: String },
@@ -201,15 +205,40 @@ async fn resolve_manifest(
         .index_json_bytes()
         .map_err(|e| OciError::internal(format!("Failed to decode index_json: {e}")))?;
 
+    let blob_descriptors: Vec<BlobDescriptor> = pointer
+        .blobs
+        .iter()
+        .map(|blob| BlobDescriptor {
+            digest: blob.digest.clone(),
+            size_bytes: blob.size_bytes,
+        })
+        .collect();
+    let mut prefetched_urls: HashMap<String, String> = HashMap::new();
+    if !blob_descriptors.is_empty() {
+        if let Ok(response) = state
+            .api_client
+            .blob_download_urls(&state.workspace, cache_entry_id, &blob_descriptors)
+            .await
+        {
+            for entry in response.download_urls {
+                prefetched_urls.insert(entry.digest, entry.url);
+            }
+        }
+    }
+    let prefetched_at = std::time::Instant::now();
+
     {
         let mut locator = state.blob_locator.write().await;
         for blob in &pointer.blobs {
+            let download_url = prefetched_urls.get(&blob.digest).cloned();
             locator.insert(
                 name,
                 &blob.digest,
                 BlobLocatorEntry {
                     cache_entry_id: cache_entry_id.clone(),
                     size_bytes: blob.size_bytes,
+                    download_url: download_url.clone(),
+                    download_url_cached_at: download_url.as_ref().map(|_| prefetched_at),
                 },
             );
         }
@@ -257,41 +286,52 @@ async fn get_blob(
     name: String,
     digest: String,
 ) -> Result<Response, OciError> {
-    let locator_entry = {
+    let (cache_entry_id, size_bytes, cached_download_url) = {
         let locator = state.blob_locator.read().await;
-        locator
+        let entry = locator
             .get(&name, &digest)
-            .cloned()
-            .ok_or_else(|| OciError::blob_unknown(format!("{name}@{digest}")))?
+            .ok_or_else(|| OciError::blob_unknown(format!("{name}@{digest}")))?;
+        (
+            entry.cache_entry_id.clone(),
+            entry.size_bytes,
+            fresh_download_url(entry),
+        )
     };
 
     let blob_desc = BlobDescriptor {
         digest: digest.clone(),
-        size_bytes: locator_entry.size_bytes,
+        size_bytes,
     };
 
-    let download_response = state
-        .api_client
-        .blob_download_urls(
-            &state.workspace,
-            &locator_entry.cache_entry_id,
-            &[blob_desc],
-        )
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to get blob download URL: {e}")))?;
+    let download_url = if let Some(url) = cached_download_url {
+        url
+    } else {
+        let download_response = state
+            .api_client
+            .blob_download_urls(&state.workspace, &cache_entry_id, &[blob_desc])
+            .await
+            .map_err(|e| OciError::internal(format!("Failed to get blob download URL: {e}")))?;
 
-    let download_url = download_response
-        .download_urls
-        .first()
-        .ok_or_else(|| OciError::blob_unknown(format!("No download URL for {digest}")))?;
+        let download_url = download_response
+            .download_urls
+            .first()
+            .ok_or_else(|| OciError::blob_unknown(format!("No download URL for {digest}")))?
+            .url
+            .clone();
+        {
+            let mut locator = state.blob_locator.write().await;
+            if let Some(entry) = locator.get_mut(&name, &digest) {
+                entry.download_url = Some(download_url.clone());
+                entry.download_url_cached_at = Some(std::time::Instant::now());
+            }
+        }
+        download_url
+    };
 
     let mut headers = HeaderMap::new();
     headers.insert("Docker-Content-Digest", digest.parse().unwrap());
     headers.insert("Content-Type", "application/octet-stream".parse().unwrap());
-    headers.insert(
-        "Content-Length",
-        locator_entry.size_bytes.to_string().parse().unwrap(),
-    );
+    headers.insert("Content-Length", size_bytes.to_string().parse().unwrap());
     headers.insert(
         "Docker-Distribution-API-Version",
         "registry/2.0".parse().unwrap(),
@@ -304,7 +344,7 @@ async fn get_blob(
     let response = state
         .api_client
         .transfer_client()
-        .get(&download_url.url)
+        .get(&download_url)
         .send()
         .await
         .map_err(|e| OciError::internal(format!("Failed to download blob: {e}")))?
@@ -315,6 +355,43 @@ async fn get_blob(
     let body = Body::from_stream(stream);
 
     Ok((StatusCode::OK, headers, body).into_response())
+}
+
+fn fresh_download_url(entry: &BlobLocatorEntry) -> Option<String> {
+    let cached_at = entry.download_url_cached_at?;
+    if cached_at.elapsed() >= DOWNLOAD_URL_CACHE_TTL {
+        return None;
+    }
+    entry.download_url.clone()
+}
+
+fn adaptive_blob_upload_concurrency(operation_count: usize) -> usize {
+    use crate::platform::resources::{MemoryStrategy, SystemResources};
+
+    if operation_count == 0 {
+        return 1;
+    }
+
+    let resources = SystemResources::detect();
+    let mut concurrency: usize = match resources.memory_strategy {
+        MemoryStrategy::Balanced => 2,
+        MemoryStrategy::Aggressive => 4,
+        MemoryStrategy::UltraAggressive => 6,
+    };
+
+    if resources.cpu_load_percent > 75.0 {
+        concurrency = concurrency.saturating_sub(1).max(1);
+    }
+
+    if std::env::var_os("CI").is_some() {
+        concurrency = concurrency.min(4);
+    }
+
+    concurrency = concurrency
+        .min(resources.cpu_cores.max(1))
+        .min(resources.max_parallel_chunks.max(1));
+
+    concurrency.min(operation_count).max(1)
 }
 
 async fn start_upload(
@@ -706,30 +783,66 @@ async fn put_manifest(
                 .await
                 .map_err(|e| OciError::internal(format!("blob_upload_urls failed: {e}")))?;
 
-            let sessions = state.upload_sessions.read().await;
-            for upload_url_info in &upload_plan.upload_urls {
-                let session = sessions
-                    .find_by_digest(&upload_url_info.digest)
-                    .ok_or_else(|| {
-                        OciError::internal(format!(
-                            "No upload session for blob {}",
-                            upload_url_info.digest
-                        ))
-                    })?;
+            let upload_jobs = {
+                let sessions = state.upload_sessions.read().await;
+                let mut jobs = Vec::with_capacity(upload_plan.upload_urls.len());
+                for upload_url_info in &upload_plan.upload_urls {
+                    let session = sessions
+                        .find_by_digest(&upload_url_info.digest)
+                        .ok_or_else(|| {
+                            OciError::internal(format!(
+                                "No upload session for blob {}",
+                                upload_url_info.digest
+                            ))
+                        })?;
+                    jobs.push((
+                        upload_url_info.digest.clone(),
+                        session.temp_path.clone(),
+                        upload_url_info.url.clone(),
+                        upload_url_info.headers.clone(),
+                    ));
+                }
+                jobs
+            };
 
-                let blob_data = tokio::fs::read(&session.temp_path).await.map_err(|e| {
-                    OciError::internal(format!("Failed to read blob temp file: {e}"))
-                })?;
+            if !upload_jobs.is_empty() {
+                let max_concurrent = adaptive_blob_upload_concurrency(upload_jobs.len());
+                let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+                let transfer_client = state.api_client.transfer_client().clone();
+                let mut tasks = Vec::with_capacity(upload_jobs.len());
 
-                upload_payload(
-                    state.api_client.transfer_client(),
-                    &upload_url_info.url,
-                    &blob_data,
-                    "application/octet-stream",
-                    &upload_url_info.headers,
-                )
-                .await
-                .map_err(|e| OciError::internal(format!("Blob upload failed: {e}")))?;
+                for (digest, temp_path, upload_url, upload_headers) in upload_jobs {
+                    let semaphore = semaphore.clone();
+                    let transfer_client = transfer_client.clone();
+                    let task = tokio::spawn(async move {
+                        let _permit = semaphore.acquire().await.unwrap();
+                        let blob_data = tokio::fs::read(&temp_path).await.map_err(|e| {
+                            OciError::internal(format!(
+                                "Failed to read blob temp file for {}: {}",
+                                digest, e
+                            ))
+                        })?;
+                        upload_payload(
+                            &transfer_client,
+                            &upload_url,
+                            &blob_data,
+                            "application/octet-stream",
+                            &upload_headers,
+                        )
+                        .await
+                        .map_err(|e| {
+                            OciError::internal(format!("Blob upload failed for {}: {}", digest, e))
+                        })?;
+                        Ok::<(), OciError>(())
+                    });
+                    tasks.push(task);
+                }
+
+                for task in tasks {
+                    task.await.map_err(|e| {
+                        OciError::internal(format!("Blob upload task failed: {e}"))
+                    })??;
+                }
             }
         }
 
@@ -1078,5 +1191,16 @@ mod tests {
             tag,
             ref_tag_for_input("buildkit-cache:main-ubuntu-22-x86_64")
         );
+    }
+
+    #[test]
+    fn adaptive_blob_upload_concurrency_is_bounded() {
+        assert_eq!(adaptive_blob_upload_concurrency(1), 1);
+
+        let medium = adaptive_blob_upload_concurrency(5);
+        assert!((1..=5).contains(&medium));
+
+        let larger = adaptive_blob_upload_concurrency(32);
+        assert!((1..=32).contains(&larger));
     }
 }

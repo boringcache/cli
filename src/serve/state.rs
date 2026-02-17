@@ -20,6 +20,8 @@ pub struct AppState {
 pub struct BlobLocatorEntry {
     pub cache_entry_id: String,
     pub size_bytes: u64,
+    pub download_url: Option<String>,
+    pub download_url_cached_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -38,6 +40,10 @@ impl BlobLocatorCache {
 
     pub fn get(&self, name: &str, digest: &str) -> Option<&BlobLocatorEntry> {
         self.entries.get(&Self::key(name, digest))
+    }
+
+    pub fn get_mut(&mut self, name: &str, digest: &str) -> Option<&mut BlobLocatorEntry> {
+        self.entries.get_mut(&Self::key(name, digest))
     }
 }
 
@@ -148,6 +154,8 @@ mod tests {
             BlobLocatorEntry {
                 cache_entry_id: "entry1".into(),
                 size_bytes: 100,
+                download_url: None,
+                download_url_cached_at: None,
             },
         );
         let entry = cache.get("myimg", "sha256:abc").unwrap();
