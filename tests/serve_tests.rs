@@ -626,6 +626,191 @@ async fn test_upload_digest_mismatch_returns_error() {
 }
 
 #[tokio::test]
+async fn test_patch_retry_with_same_content_range_is_idempotent() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let app = build_router(state.clone());
+    let resp = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v2/my-cache/blobs/uploads/")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let uuid = resp
+        .headers()
+        .get("Docker-Upload-UUID")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let blob_data = b"retry-safe-blob";
+    let range = format!("0-{}", blob_data.len() - 1);
+    let app = build_router(state.clone());
+    let first_patch = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PATCH)
+            .uri(format!("/v2/my-cache/blobs/uploads/{uuid}"))
+            .header("Content-Range", range.clone())
+            .body(Body::from(blob_data.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first_patch.status(), StatusCode::ACCEPTED);
+
+    let app = build_router(state.clone());
+    let retry_patch = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PATCH)
+            .uri(format!("/v2/my-cache/blobs/uploads/{uuid}"))
+            .header("Content-Range", range)
+            .body(Body::from(blob_data.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry_patch.status(), StatusCode::ACCEPTED);
+
+    let digest = cas_oci::prefixed_sha256_digest(blob_data);
+    let app = build_router(state.clone());
+    let finalize = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v2/my-cache/blobs/uploads/{uuid}?digest={digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(finalize.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_put_upload_uses_content_range_offset() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let app = build_router(state.clone());
+    let resp = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v2/my-cache/blobs/uploads/")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let uuid = resp
+        .headers()
+        .get("Docker-Upload-UUID")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let prefix = b"hello ";
+    let suffix = b"world";
+    let app = build_router(state.clone());
+    let patch = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PATCH)
+            .uri(format!("/v2/my-cache/blobs/uploads/{uuid}"))
+            .header("Content-Range", "0-5")
+            .body(Body::from(prefix.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(patch.status(), StatusCode::ACCEPTED);
+
+    let full_blob = b"hello world";
+    let digest = cas_oci::prefixed_sha256_digest(full_blob);
+    let app = build_router(state.clone());
+    let finalize = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v2/my-cache/blobs/uploads/{uuid}?digest={digest}"))
+            .header("Content-Range", "6-10")
+            .body(Body::from(suffix.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(finalize.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_put_upload_rewrites_when_put_body_digest_matches() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let app = build_router(state.clone());
+    let resp = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v2/my-cache/blobs/uploads/")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let uuid = resp
+        .headers()
+        .get("Docker-Upload-UUID")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let stale_blob = b"this-is-an-older-and-longer-blob";
+    let app = build_router(state.clone());
+    let patch = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PATCH)
+            .uri(format!("/v2/my-cache/blobs/uploads/{uuid}"))
+            .header("Content-Range", format!("0-{}", stale_blob.len() - 1))
+            .body(Body::from(stale_blob.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(patch.status(), StatusCode::ACCEPTED);
+
+    let final_blob = b"final-v1";
+    let digest = cas_oci::prefixed_sha256_digest(final_blob);
+    let app = build_router(state.clone());
+    let finalize = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v2/my-cache/blobs/uploads/{uuid}?digest={digest}"))
+            .header("Content-Range", format!("0-{}", final_blob.len() - 1))
+            .body(Body::from(final_blob.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(finalize.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
 async fn test_delete_upload_returns_204() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
