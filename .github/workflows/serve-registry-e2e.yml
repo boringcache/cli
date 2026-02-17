@@ -64,8 +64,10 @@ jobs:
           ./target/debug/boringcache docker-registry "${WORKSPACE}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git > serve.log 2>&1 &
           SERVE_PID=$!
 
+          ready=0
           for _ in $(seq 1 40); do
-            if curl -fsS "http://127.0.0.1:${PORT}/v2/" >/dev/null; then
+            if curl -fsS --max-time 1 "http://127.0.0.1:${PORT}/v2/" >/dev/null 2>&1; then
+              ready=1
               break
             fi
             if ! kill -0 "${SERVE_PID}" >/dev/null 2>&1; then
@@ -76,7 +78,11 @@ jobs:
             sleep 0.5
           done
 
-          curl -fsS "http://127.0.0.1:${PORT}/v2/" >/dev/null
+          if [[ "${ready}" != "1" ]]; then
+            echo "timed out waiting for docker-registry readiness"
+            cat serve.log
+            exit 1
+          fi
 
           docker buildx create \
             --name "${BUILDER}" \
