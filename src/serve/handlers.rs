@@ -3,6 +3,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -85,7 +87,7 @@ pub async fn oci_dispatch(
     Path(path): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
-    body: axum::body::Bytes,
+    body: Body,
 ) -> Result<Response, OciError> {
     match parse_oci_path(&path) {
         Some(OciRoute::Manifest { name, reference }) => match method {
@@ -394,11 +396,58 @@ fn adaptive_blob_upload_concurrency(operation_count: usize) -> usize {
     concurrency.min(operation_count).max(1)
 }
 
+async fn write_body_to_file(body: Body, file: &mut tokio::fs::File) -> Result<u64, OciError> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut stream = body.into_data_stream();
+    let mut bytes_written: u64 = 0;
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result
+            .map_err(|e| OciError::internal(format!("Failed to read request body chunk: {e}")))?;
+        if chunk.is_empty() {
+            continue;
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| OciError::internal(format!("Failed to write request body chunk: {e}")))?;
+        bytes_written = bytes_written.saturating_add(chunk.len() as u64);
+    }
+
+    Ok(bytes_written)
+}
+
+async fn read_file_digest_and_size(path: &std::path::Path) -> Result<(u64, String), OciError> {
+    use tokio::io::AsyncReadExt;
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to open temp file: {e}")))?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+
+    loop {
+        let read = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| OciError::internal(format!("Failed to read temp file: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+        size = size.saturating_add(read as u64);
+    }
+
+    let digest = format!("sha256:{:x}", hasher.finalize());
+    Ok((size, digest))
+}
+
 async fn start_upload(
     state: AppState,
     name: String,
     params: HashMap<String, String>,
-    body: axum::body::Bytes,
+    body: Body,
 ) -> Result<Response, OciError> {
     let session_id = uuid::Uuid::new_v4().to_string();
 
@@ -408,13 +457,19 @@ async fn start_upload(
         .map_err(|e| OciError::internal(format!("Failed to create temp dir: {e}")))?;
     let temp_path = temp_dir.join(&session_id);
 
-    if let Some(digest_param) = params.get("digest") {
-        if !body.is_empty() {
-            tokio::fs::write(&temp_path, &body)
-                .await
-                .map_err(|e| OciError::internal(format!("Failed to write blob: {e}")))?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&temp_path)
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to create temp file: {e}")))?;
+    let body_size = write_body_to_file(body, &mut file).await?;
+    drop(file);
 
-            let actual_digest = cas_oci::prefixed_sha256_digest(&body);
+    if let Some(digest_param) = params.get("digest") {
+        if body_size > 0 {
+            let (_, actual_digest) = read_file_digest_and_size(&temp_path).await?;
             if actual_digest != *digest_param {
                 let _ = tokio::fs::remove_file(&temp_path).await;
                 return Err(OciError::digest_invalid(format!(
@@ -422,15 +477,14 @@ async fn start_upload(
                 )));
             }
 
-            let size = body.len() as u64;
             let mut sessions = state.upload_sessions.write().await;
             sessions.create(UploadSession {
                 id: session_id.clone(),
                 name: name.clone(),
                 temp_path,
-                bytes_received: size,
+                bytes_received: body_size,
                 finalized_digest: Some(digest_param.clone()),
-                finalized_size: Some(size),
+                finalized_size: Some(body_size),
                 created_at: std::time::Instant::now(),
             });
 
@@ -444,16 +498,12 @@ async fn start_upload(
         }
     }
 
-    tokio::fs::write(&temp_path, &[])
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to create temp file: {e}")))?;
-
     let mut sessions = state.upload_sessions.write().await;
     sessions.create(UploadSession {
         id: session_id.clone(),
         name: name.clone(),
         temp_path,
-        bytes_received: 0,
+        bytes_received: body_size,
         finalized_digest: None,
         finalized_size: None,
         created_at: std::time::Instant::now(),
@@ -474,7 +524,7 @@ async fn patch_upload(
     _name: String,
     uuid: String,
     headers: HeaderMap,
-    body: axum::body::Bytes,
+    body: Body,
 ) -> Result<Response, OciError> {
     let mut sessions = state.upload_sessions.write().await;
     let session = sessions
@@ -489,7 +539,7 @@ async fn patch_upload(
         )));
     }
 
-    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+    use tokio::io::AsyncSeekExt;
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .open(&session.temp_path)
@@ -499,11 +549,8 @@ async fn patch_upload(
         .await
         .map_err(|e| OciError::internal(format!("Failed to seek temp file: {e}")))?;
 
-    file.write_all(&body)
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to append data: {e}")))?;
-
-    let written_until = write_offset.saturating_add(body.len() as u64);
+    let bytes_written = write_body_to_file(body, &mut file).await?;
+    let written_until = write_offset.saturating_add(bytes_written);
     if written_until > session.bytes_received {
         session.bytes_received = written_until;
     }
@@ -531,7 +578,7 @@ async fn put_upload(
     uuid: String,
     params: HashMap<String, String>,
     headers: HeaderMap,
-    body: axum::body::Bytes,
+    body: Body,
 ) -> Result<Response, OciError> {
     let digest_param = params
         .get("digest")
@@ -539,10 +586,10 @@ async fn put_upload(
         .clone();
 
     let upload_offset = parse_upload_offset(&headers);
-    let (temp_path, bytes_before, bytes_after_write, write_offset) = {
-        let mut sessions = state.upload_sessions.write().await;
+    let (temp_path, bytes_before, write_offset) = {
+        let sessions = state.upload_sessions.read().await;
         let session = sessions
-            .get_mut(&uuid)
+            .get(&uuid)
             .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
         let bytes_before = session.bytes_received;
         let write_offset = upload_offset.unwrap_or(bytes_before);
@@ -551,42 +598,43 @@ async fn put_upload(
                 "upload offset {write_offset} exceeds current size {bytes_before}"
             )));
         }
-
-        if !body.is_empty() {
-            use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-            let mut file = tokio::fs::OpenOptions::new()
-                .write(true)
-                .open(&session.temp_path)
-                .await
-                .map_err(|e| OciError::internal(format!("Failed to open temp file: {e}")))?;
-            file.seek(std::io::SeekFrom::Start(write_offset))
-                .await
-                .map_err(|e| OciError::internal(format!("Failed to seek temp file: {e}")))?;
-            file.write_all(&body)
-                .await
-                .map_err(|e| OciError::internal(format!("Failed to append data: {e}")))?;
-            let written_until = write_offset.saturating_add(body.len() as u64);
-            if written_until > session.bytes_received {
-                session.bytes_received = written_until;
-            }
-        }
-
-        (
-            session.temp_path.clone(),
-            bytes_before,
-            session.bytes_received,
-            write_offset,
-        )
+        (session.temp_path.clone(), bytes_before, write_offset)
     };
 
-    let mut finalized_size = bytes_after_write;
-    let mut file_data = tokio::fs::read(&temp_path)
+    use tokio::io::AsyncSeekExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&temp_path)
         .await
-        .map_err(|e| OciError::internal(format!("Failed to read temp file: {e}")))?;
-    let mut actual_digest = cas_oci::prefixed_sha256_digest(&file_data);
+        .map_err(|e| OciError::internal(format!("Failed to open temp file: {e}")))?;
+    if write_offset == 0 {
+        file.set_len(0)
+            .await
+            .map_err(|e| OciError::internal(format!("Failed to truncate temp file: {e}")))?;
+    }
+    file.seek(std::io::SeekFrom::Start(write_offset))
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to seek temp file: {e}")))?;
+    let bytes_written = write_body_to_file(body, &mut file).await?;
+    drop(file);
+
+    let mut bytes_after_write = bytes_before;
+    if bytes_written > 0 {
+        if write_offset == 0 {
+            bytes_after_write = bytes_written;
+        } else {
+            let written_until = write_offset.saturating_add(bytes_written);
+            if written_until > bytes_after_write {
+                bytes_after_write = written_until;
+            }
+        }
+    }
+
+    let mut finalized_size = bytes_after_write;
+    let (mut file_size, mut actual_digest) = read_file_digest_and_size(&temp_path).await?;
 
     if actual_digest != digest_param
-        && !body.is_empty()
+        && bytes_written > 0
         && bytes_before > 0
         && write_offset == bytes_before
     {
@@ -599,38 +647,13 @@ async fn put_upload(
             .await
             .map_err(|e| OciError::internal(format!("Failed to truncate temp file: {e}")))?;
 
-        file_data = tokio::fs::read(&temp_path)
-            .await
-            .map_err(|e| OciError::internal(format!("Failed to read truncated temp file: {e}")))?;
-        actual_digest = cas_oci::prefixed_sha256_digest(&file_data);
+        let (truncated_size, truncated_digest) = read_file_digest_and_size(&temp_path).await?;
+        file_size = truncated_size;
+        actual_digest = truncated_digest;
         finalized_size = bytes_before;
-
-        if actual_digest != digest_param {
-            let body_digest = cas_oci::prefixed_sha256_digest(&body);
-            if body_digest == digest_param {
-                tokio::fs::write(&temp_path, &body)
-                    .await
-                    .map_err(|e| OciError::internal(format!("Failed to rewrite temp file: {e}")))?;
-                file_data = body.to_vec();
-                actual_digest = body_digest;
-                finalized_size = body.len() as u64;
-            }
-        }
     }
 
-    if actual_digest != digest_param && !body.is_empty() {
-        let body_digest = cas_oci::prefixed_sha256_digest(&body);
-        if body_digest == digest_param {
-            tokio::fs::write(&temp_path, &body)
-                .await
-                .map_err(|e| OciError::internal(format!("Failed to rewrite temp file: {e}")))?;
-            file_data = body.to_vec();
-            actual_digest = body_digest;
-            finalized_size = body.len() as u64;
-        }
-    }
-
-    let allow_remote_reuse = actual_digest != digest_param && file_data.is_empty();
+    let allow_remote_reuse = actual_digest != digest_param && file_size == 0;
     if allow_remote_reuse {
         let check = state
             .api_client
@@ -704,9 +727,12 @@ async fn put_manifest(
     state: AppState,
     name: String,
     reference: String,
-    body: axum::body::Bytes,
+    body: Body,
 ) -> Result<Response, OciError> {
-    let manifest_body: Vec<u8> = body.to_vec();
+    let manifest_body = axum::body::to_bytes(body, 32 * 1024 * 1024)
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to read manifest body: {e}")))?;
+    let manifest_body: Vec<u8> = manifest_body.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
     let index_json_base64 = STANDARD.encode(&manifest_body);
 
