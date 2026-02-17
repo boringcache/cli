@@ -3,10 +3,12 @@ use axum::http::{Method, Request, StatusCode};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use boring_cache_cli::api::client::ApiClient;
 use boring_cache_cli::cas_oci;
+use boring_cache_cli::git::GitContext;
 use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
     digest_tag, ref_tag, AppState, BlobLocatorCache, UploadSessionStore,
 };
+use boring_cache_cli::tag_utils::TagResolver;
 use http_body_util::BodyExt;
 use mockito::{Matcher, Server};
 use serde_json::json;
@@ -31,12 +33,13 @@ async fn setup(
         std::env::set_var("BORINGCACHE_TEST_MODE", "1");
     }
 
-    let api_client = ApiClient::new_with_token_override(Some("test-token".to_string()))
-        .expect("API client");
+    let api_client =
+        ApiClient::new_with_token_override(Some("test-token".to_string())).expect("API client");
 
     let state = AppState {
         api_client,
         workspace: "org/repo".to_string(),
+        tag_resolver: TagResolver::new(None, GitContext::default(), false),
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
     };
@@ -125,7 +128,10 @@ async fn test_manifest_hit_returns_decoded_index_json() {
     }]);
 
     let _restore_mock = server
-        .mock("GET", Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()))
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(restore_body.to_string())
@@ -180,7 +186,10 @@ async fn test_manifest_miss_returns_404() {
     }]);
 
     let _restore_mock = server
-        .mock("GET", Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()))
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(restore_body.to_string())
@@ -215,7 +224,10 @@ async fn test_manifest_head_returns_headers_no_body() {
     let tag = ref_tag("img", "latest");
 
     let _restore_mock = server
-        .mock("GET", Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()))
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -293,7 +305,10 @@ async fn test_blob_get_after_manifest_resolution() {
     let tag = ref_tag("img", "v1");
 
     let _restore_mock = server
-        .mock("GET", Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()))
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -394,7 +409,10 @@ async fn test_index_manifest_detected_as_index_type() {
     let tag = ref_tag("multi", "latest");
 
     let _restore_mock = server
-        .mock("GET", Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()))
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -529,9 +547,7 @@ async fn test_upload_start_and_finalize() {
         app,
         Request::builder()
             .method(Method::PUT)
-            .uri(format!(
-                "/v2/my-cache/blobs/uploads/{uuid}?digest={digest}"
-            ))
+            .uri(format!("/v2/my-cache/blobs/uploads/{uuid}?digest={digest}"))
             .body(Body::empty())
             .unwrap(),
     )

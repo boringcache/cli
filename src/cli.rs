@@ -175,7 +175,11 @@ pub enum Commands {
 
     Workspaces,
 
-    #[command(about = "Run a local OCI registry proxy backed by BoringCache")]
+    #[command(
+        name = "docker-registry",
+        about = "Run a local OCI registry proxy backed by BoringCache",
+        visible_alias = "serve"
+    )]
     Serve {
         #[arg(help = "Workspace name (org/project or user/project)")]
         workspace: String,
@@ -185,6 +189,15 @@ pub enum Commands {
 
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+
+        #[arg(
+            long,
+            help = "Disable automatic platform suffix for internal cache tags"
+        )]
+        no_platform: bool,
+
+        #[arg(long, help = "Disable automatic git suffix for internal cache tags")]
+        no_git: bool,
     },
 }
 

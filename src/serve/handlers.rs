@@ -9,7 +9,10 @@ use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
 use crate::cas_transport::upload_payload;
 use crate::serve::error::OciError;
-use crate::serve::state::{digest_tag, ref_tag, AppState, BlobLocatorEntry, UploadSession};
+use crate::serve::state::{
+    digest_tag, ref_tag_for_input, AppState, BlobLocatorEntry, UploadSession,
+};
+use crate::tag_utils::TagResolver;
 
 enum OciRoute {
     Manifest { name: String, reference: String },
@@ -136,22 +139,38 @@ async fn resolve_manifest(
     name: &str,
     reference: &str,
 ) -> Result<(Vec<u8>, String, String), OciError> {
-    let tag = if reference.starts_with("sha256:") {
-        digest_tag(reference)
+    let tags = if reference.starts_with("sha256:") {
+        vec![digest_tag(reference)]
     } else {
-        ref_tag(name, reference)
+        scoped_restore_tags(&state.tag_resolver, name, reference)
     };
 
     let entries = state
         .api_client
-        .restore(&state.workspace, &[tag.clone()])
+        .restore(&state.workspace, &tags)
         .await
         .map_err(|e| OciError::internal(format!("Backend restore failed: {e}")))?;
 
-    let entry = entries
+    let mut entries_by_tag: HashMap<String, _> = entries
         .into_iter()
-        .find(|e| e.status == "hit")
-        .ok_or_else(|| OciError::manifest_unknown(format!("{name}:{reference}")))?;
+        .map(|entry| (entry.tag.clone(), entry))
+        .collect();
+    let mut selected = None;
+    for tag in &tags {
+        if let Some(entry) = entries_by_tag.remove(tag) {
+            if entry.status == "hit" {
+                selected = Some(entry);
+                break;
+            }
+        }
+    }
+    if selected.is_none() {
+        selected = entries_by_tag
+            .into_values()
+            .find(|entry| entry.status == "hit");
+    }
+    let entry =
+        selected.ok_or_else(|| OciError::manifest_unknown(format!("{name}:{reference}")))?;
 
     let cache_entry_id = entry
         .cache_entry_id
@@ -199,6 +218,27 @@ async fn resolve_manifest(
     let digest = cas_oci::prefixed_sha256_digest(&index_json);
 
     Ok((index_json, content_type, digest))
+}
+
+fn scoped_restore_tags(tag_resolver: &TagResolver, name: &str, reference: &str) -> Vec<String> {
+    let scoped_input = format!("{name}:{reference}");
+    tag_resolver
+        .restore_tag_candidates(&scoped_input)
+        .into_iter()
+        .map(|candidate| ref_tag_for_input(&candidate))
+        .collect()
+}
+
+fn scoped_save_tag(
+    tag_resolver: &TagResolver,
+    name: &str,
+    reference: &str,
+) -> Result<String, OciError> {
+    let scoped_input = format!("{name}:{reference}");
+    let scoped = tag_resolver
+        .effective_save_tag(&scoped_input)
+        .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))?;
+    Ok(ref_tag_for_input(&scoped))
 }
 
 fn detect_manifest_content_type(json_bytes: &[u8]) -> String {
@@ -488,7 +528,11 @@ async fn put_manifest(
         .map_err(|e| OciError::internal(format!("Failed to serialize pointer: {e}")))?;
     let manifest_root_digest = cas_oci::prefixed_sha256_digest(&pointer_bytes);
 
-    let tag = ref_tag(&name, &reference);
+    let tag = if reference.starts_with("sha256:") {
+        digest_tag(&reference)
+    } else {
+        scoped_save_tag(&state.tag_resolver, &name, &reference)?
+    };
     let blob_count = blob_descriptors.len() as u64;
     let blob_total_size_bytes: u64 = blob_descriptors.iter().map(|b| b.size_bytes).sum();
     let total_size_bytes = blob_total_size_bytes + manifest_body.len() as u64;
@@ -545,10 +589,9 @@ async fn put_manifest(
                         ))
                     })?;
 
-                let blob_data =
-                    tokio::fs::read(&session.temp_path).await.map_err(|e| {
-                        OciError::internal(format!("Failed to read blob temp file: {e}"))
-                    })?;
+                let blob_data = tokio::fs::read(&session.temp_path).await.map_err(|e| {
+                    OciError::internal(format!("Failed to read blob temp file: {e}"))
+                })?;
 
                 upload_payload(
                     state.api_client.transfer_client(),
@@ -650,11 +693,7 @@ async fn put_manifest(
 
     state
         .api_client
-        .confirm(
-            &state.workspace,
-            &alias_save.cache_entry_id,
-            &alias_confirm,
-        )
+        .confirm(&state.workspace, &alias_save.cache_entry_id, &alias_confirm)
         .await
         .map_err(|e| OciError::internal(format!("digest alias confirm failed: {e}")))?;
 
@@ -717,6 +756,9 @@ async fn cleanup_blob_sessions(state: &AppState, blob_descriptors: &[BlobDescrip
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::GitContext;
+    use crate::platform::Platform;
+    use crate::tag_utils::TagResolver;
 
     #[test]
     fn parse_single_segment_manifest() {
@@ -818,5 +860,85 @@ mod tests {
         assert_eq!(blobs[0].digest, "sha256:cfg");
         assert_eq!(blobs[1].digest, "sha256:layer1");
         assert_eq!(blobs[2].digest, "sha256:layer2");
+    }
+
+    #[test]
+    fn scoped_save_tag_applies_git_suffix() {
+        let resolver = TagResolver::new(
+            None,
+            GitContext {
+                pr_number: None,
+                branch: Some("feature/x".to_string()),
+                default_branch: Some("main".to_string()),
+                commit_sha: None,
+            },
+            true,
+        );
+
+        let tag = scoped_save_tag(&resolver, "buildkit-cache", "main").unwrap();
+        assert_eq!(
+            tag,
+            ref_tag_for_input("buildkit-cache:main-branch-feature-x")
+        );
+    }
+
+    #[test]
+    fn scoped_restore_tags_include_default_branch_fallback() {
+        let resolver = TagResolver::new(
+            None,
+            GitContext {
+                pr_number: None,
+                branch: Some("feature/x".to_string()),
+                default_branch: Some("main".to_string()),
+                commit_sha: None,
+            },
+            true,
+        );
+
+        let tags = scoped_restore_tags(&resolver, "buildkit-cache", "main");
+        assert_eq!(
+            tags,
+            vec![
+                ref_tag_for_input("buildkit-cache:main-branch-feature-x"),
+                ref_tag_for_input("buildkit-cache:main"),
+            ]
+        );
+    }
+
+    #[test]
+    fn scoped_save_tag_on_default_branch_uses_base() {
+        let resolver = TagResolver::new(
+            None,
+            GitContext {
+                pr_number: None,
+                branch: Some("main".to_string()),
+                default_branch: Some("main".to_string()),
+                commit_sha: None,
+            },
+            true,
+        );
+
+        let tag = scoped_save_tag(&resolver, "buildkit-cache", "main").unwrap();
+        assert_eq!(tag, ref_tag_for_input("buildkit-cache:main"));
+    }
+
+    #[test]
+    fn scoped_save_tag_applies_platform_suffix() {
+        let resolver = TagResolver::new(
+            Some(Platform::new_for_testing(
+                "linux",
+                "x86_64",
+                Some("ubuntu"),
+                Some("22"),
+            )),
+            GitContext::default(),
+            false,
+        );
+
+        let tag = scoped_save_tag(&resolver, "buildkit-cache", "main").unwrap();
+        assert_eq!(
+            tag,
+            ref_tag_for_input("buildkit-cache:main-ubuntu-22-x86_64")
+        );
     }
 }

@@ -1,5 +1,6 @@
 use crate::api::client::ApiClient;
 use crate::cas_oci::sha256_hex;
+use crate::tag_utils::TagResolver;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use tokio::sync::RwLock;
 pub struct AppState {
     pub api_client: ApiClient,
     pub workspace: String,
+    pub tag_resolver: TagResolver,
     pub blob_locator: Arc<RwLock<BlobLocatorCache>>,
     pub upload_sessions: Arc<RwLock<UploadSessionStore>>,
 }
@@ -93,7 +95,10 @@ impl UploadSessionStore {
 }
 
 pub fn ref_tag(name: &str, reference: &str) -> String {
-    let input = format!("{}:{}", name, reference);
+    ref_tag_for_input(&format!("{}:{}", name, reference))
+}
+
+pub fn ref_tag_for_input(input: &str) -> String {
     format!("oci_ref_{}", sha256_hex(input.as_bytes()))
 }
 

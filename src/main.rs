@@ -244,7 +244,9 @@ async fn main() -> Result<()> {
             workspace,
             port,
             host,
-        } => commands::serve::execute(workspace, host, port).await,
+            no_platform,
+            no_git,
+        } => commands::serve::execute(workspace, host, port, no_platform, no_git).await,
     };
 
     handle_result(result)

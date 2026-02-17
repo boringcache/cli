@@ -1,0 +1,136 @@
+name: Serve Registry E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      workspace:
+        description: "Workspace slug (org/project)"
+        required: true
+      api_url:
+        description: "BoringCache API URL"
+        required: false
+        default: "https://api.boringcache.com"
+      cache_tag_prefix:
+        description: "Cache tag prefix"
+        required: false
+        default: "gha-e2e"
+
+jobs:
+  serve-registry-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+      BORINGCACHE_API_URL: ${{ inputs.api_url }}
+      WORKSPACE: ${{ inputs.workspace }}
+      CACHE_TAG_PREFIX: ${{ inputs.cache_tag_prefix }}
+      PORT: "5000"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
+
+      - name: Validate configuration
+        run: |
+          set -euo pipefail
+          if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+            echo "BORINGCACHE_API_TOKEN secret is required"
+            exit 1
+          fi
+          if [[ -z "${WORKSPACE:-}" ]]; then
+            echo "workspace input is required"
+            exit 1
+          fi
+
+      - name: Build CLI
+        run: cargo build --bin boringcache
+
+      - name: Run docker-registry + buildx registry cache round-trip
+        run: |
+          set -euo pipefail
+
+          BUILDER="bc-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          CACHE_TAG="${CACHE_TAG_PREFIX}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          CACHE_REF="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG}"
+
+          cleanup() {
+            set +e
+            if [[ -n "${SERVE_PID:-}" ]]; then
+              kill "${SERVE_PID}" >/dev/null 2>&1 || true
+              wait "${SERVE_PID}" >/dev/null 2>&1 || true
+            fi
+            docker buildx rm --force "${BUILDER}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          ./target/debug/boringcache docker-registry "${WORKSPACE}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git > serve.log 2>&1 &
+          SERVE_PID=$!
+
+          for _ in $(seq 1 40); do
+            if curl -fsS "http://127.0.0.1:${PORT}/v2/" >/dev/null; then
+              break
+            fi
+            if ! kill -0 "${SERVE_PID}" >/dev/null 2>&1; then
+              echo "boringcache docker-registry exited before readiness"
+              cat serve.log
+              exit 1
+            fi
+            sleep 0.5
+          done
+
+          curl -fsS "http://127.0.0.1:${PORT}/v2/" >/dev/null
+
+          docker buildx create \
+            --name "${BUILDER}" \
+            --driver docker-container \
+            --driver-opt network=host \
+            --use
+
+          docker buildx inspect "${BUILDER}" --bootstrap
+
+          mkdir -p e2e-context
+          cat > e2e-context/Dockerfile <<'EOF'
+          FROM scratch
+          COPY a.txt /a.txt
+          COPY b.txt /b.txt
+          EOF
+          printf 'alpha\n' > e2e-context/a.txt
+          printf 'bravo\n' > e2e-context/b.txt
+
+          docker buildx build \
+            --builder "${BUILDER}" \
+            --progress plain \
+            --load \
+            --cache-from "type=registry,ref=${CACHE_REF}" \
+            --cache-to "type=registry,ref=${CACHE_REF},mode=max" \
+            --file e2e-context/Dockerfile \
+            e2e-context 2>&1 | tee first-build.log
+
+          docker buildx build \
+            --builder "${BUILDER}" \
+            --progress plain \
+            --load \
+            --cache-from "type=registry,ref=${CACHE_REF}" \
+            --cache-to "type=registry,ref=${CACHE_REF},mode=max" \
+            --file e2e-context/Dockerfile \
+            e2e-context 2>&1 | tee second-build.log
+
+          if ! grep -q "CACHED" second-build.log; then
+            echo "expected second build to contain CACHED output"
+            exit 1
+          fi
+
+      - name: Upload E2E logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serve-registry-e2e-logs
+          path: |
+            serve.log
+            first-build.log
+            second-build.log

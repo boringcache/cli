@@ -10,16 +10,19 @@ use tokio::sync::RwLock;
 
 use crate::api::client::ApiClient;
 use crate::serve::state::{AppState, BlobLocatorCache, UploadSessionStore};
+use crate::tag_utils::TagResolver;
 
 pub async fn run_server(
     api_client: ApiClient,
     workspace: String,
     host: String,
     port: u16,
+    tag_resolver: TagResolver,
 ) -> Result<()> {
     let state = AppState {
         api_client,
         workspace: workspace.clone(),
+        tag_resolver,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
     };

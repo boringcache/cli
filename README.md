@@ -133,10 +133,14 @@ boringcache mount my-org/ws "dev-cache:./node_modules"
 
 Restores from remote on start, syncs periodically, and performs a final sync on Ctrl+C.
 
-### `serve <WORKSPACE>`
+### `docker-registry <WORKSPACE>`
 Run a local OCI registry proxy for native BuildKit `type=registry` integration.
 
+Alias: `serve`
+
 ```bash
+boringcache docker-registry my-org/ws --port 5000
+# same command via compatibility alias
 boringcache serve my-org/ws --port 5000
 ```
 
@@ -242,7 +246,7 @@ jobs:
         with:
           token: ${{ secrets.BORINGCACHE_API_TOKEN }}
 
-      - run: boringcache serve my-org/project --port 5000 &
+      - run: boringcache docker-registry my-org/project --port 5000 &
 
       - uses: docker/build-push-action@v6
         with:

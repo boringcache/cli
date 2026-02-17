@@ -150,6 +150,26 @@ fn test_workspaces_command_help() {
 }
 
 #[test]
+fn test_docker_registry_alias_help() {
+    let output = run_cli_command(&["docker-registry", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: boringcache docker-registry"));
+    assert!(stdout.contains("OCI registry proxy"));
+}
+
+#[test]
+fn test_serve_compat_alias_help() {
+    let output = run_cli_command(&["serve", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: boringcache docker-registry"));
+    assert!(stdout.contains("OCI registry proxy"));
+}
+
+#[test]
 fn test_verbose_flag() {
     let output = run_cli_command(&["--verbose", "workspaces", "--help"]);
 
