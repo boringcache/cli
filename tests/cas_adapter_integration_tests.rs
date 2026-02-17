@@ -56,12 +56,14 @@ fn setup_test_config(temp_dir: &TempDir, server_url: &str) {
 }
 
 fn restore_env(temp_home: &Path, server_url: &str) {
+    env::set_var("BORINGCACHE_API_TOKEN", "test-token-123");
     env::set_var("BORINGCACHE_API_URL", server_url);
     env::set_var("HOME", temp_home);
     env::set_var("BORINGCACHE_TELEMETRY_DISABLED", "1");
 }
 
 fn clear_env() {
+    env::remove_var("BORINGCACHE_API_TOKEN");
     env::remove_var("BORINGCACHE_API_URL");
     env::remove_var("HOME");
     env::remove_var("BORINGCACHE_TELEMETRY_DISABLED");
