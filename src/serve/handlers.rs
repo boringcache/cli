@@ -24,21 +24,21 @@ enum OciRoute {
 fn parse_oci_path(path: &str) -> Option<OciRoute> {
     let path = path.strip_prefix('/').unwrap_or(path);
 
-    if let Some(idx) = path.find("/blobs/uploads/") {
+    if let Some(idx) = path.find("/blobs/uploads") {
         let name = &path[..idx];
-        let rest = &path[idx + "/blobs/uploads/".len()..];
+        let rest = &path[idx + "/blobs/uploads".len()..];
         if name.is_empty() {
             return None;
         }
-        return if rest.is_empty() {
-            Some(OciRoute::BlobUploadStart {
+        return match rest {
+            "" | "/" => Some(OciRoute::BlobUploadStart {
                 name: name.to_string(),
-            })
-        } else {
-            Some(OciRoute::BlobUpload {
+            }),
+            _ if rest.starts_with('/') => Some(OciRoute::BlobUpload {
                 name: name.to_string(),
-                uuid: rest.to_string(),
-            })
+                uuid: rest.trim_start_matches('/').to_string(),
+            }),
+            _ => None,
         };
     }
 
@@ -444,7 +444,7 @@ async fn put_upload(
         .ok_or_else(|| OciError::digest_invalid("missing digest query parameter"))?
         .clone();
 
-    {
+    let (temp_path, bytes_received) = {
         let mut sessions = state.upload_sessions.write().await;
         let session = sessions
             .get_mut(&uuid)
@@ -463,19 +463,49 @@ async fn put_upload(
             session.bytes_received += body.len() as u64;
         }
 
-        let file_data = tokio::fs::read(&session.temp_path)
-            .await
-            .map_err(|e| OciError::internal(format!("Failed to read temp file: {e}")))?;
-        let actual_digest = cas_oci::prefixed_sha256_digest(&file_data);
+        (session.temp_path.clone(), session.bytes_received)
+    };
 
-        if actual_digest != digest_param {
+    let file_data = tokio::fs::read(&temp_path)
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to read temp file: {e}")))?;
+    let actual_digest = cas_oci::prefixed_sha256_digest(&file_data);
+
+    let allow_remote_reuse = actual_digest != digest_param && file_data.is_empty();
+    if allow_remote_reuse {
+        let check = state
+            .api_client
+            .check_blobs(
+                &state.workspace,
+                &[BlobDescriptor {
+                    digest: digest_param.clone(),
+                    size_bytes: 0,
+                }],
+            )
+            .await
+            .map_err(|e| OciError::internal(format!("Failed to check blob existence: {e}")))?;
+        let exists = check
+            .results
+            .iter()
+            .any(|result| result.digest == digest_param && result.exists);
+        if !exists {
             return Err(OciError::digest_invalid(format!(
                 "expected {digest_param}, got {actual_digest}"
             )));
         }
+    } else if actual_digest != digest_param {
+        return Err(OciError::digest_invalid(format!(
+            "expected {digest_param}, got {actual_digest}"
+        )));
+    }
 
+    {
+        let mut sessions = state.upload_sessions.write().await;
+        let session = sessions
+            .get_mut(&uuid)
+            .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
         session.finalized_digest = Some(digest_param.clone());
-        session.finalized_size = Some(session.bytes_received);
+        session.finalized_size = Some(bytes_received);
     }
 
     let location = format!("/v2/{name}/blobs/{digest_param}");
@@ -796,6 +826,16 @@ mod tests {
     #[test]
     fn parse_blob_upload_start() {
         match parse_oci_path("my-cache/blobs/uploads/") {
+            Some(OciRoute::BlobUploadStart { name }) => {
+                assert_eq!(name, "my-cache");
+            }
+            _ => panic!("expected BlobUploadStart"),
+        }
+    }
+
+    #[test]
+    fn parse_blob_upload_start_without_trailing_slash() {
+        match parse_oci_path("my-cache/blobs/uploads") {
             Some(OciRoute::BlobUploadStart { name }) => {
                 assert_eq!(name, "my-cache");
             }

@@ -780,6 +780,110 @@ async fn test_multi_segment_name_blob_upload() {
 }
 
 #[tokio::test]
+async fn test_blob_upload_start_without_trailing_slash() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let app = build_router(state.clone());
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v2/org/my-cache/blobs/uploads")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let location = response
+        .headers()
+        .get("Location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(location.starts_with("/v2/org/my-cache/blobs/uploads/"));
+}
+
+#[tokio::test]
+async fn test_put_upload_accepts_empty_body_when_blob_already_exists_remote() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let blob_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let _check_mock = server
+        .mock("POST", "/workspaces/org/repo/caches/blobs/check")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "blobs": [{
+                "digest": blob_digest,
+                "size_bytes": 0
+            }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": blob_digest,
+                    "exists": true
+                }]
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let start_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v2/my-cache/blobs/uploads/")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(start_response.status(), StatusCode::ACCEPTED);
+    let uuid = start_response
+        .headers()
+        .get("Docker-Upload-UUID")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!(
+                "/v2/my-cache/blobs/uploads/{uuid}?digest={blob_digest}"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        response
+            .headers()
+            .get("Docker-Content-Digest")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        blob_digest
+    );
+}
+
+#[tokio::test]
 async fn test_blob_proxy_returns_error_on_storage_failure() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
