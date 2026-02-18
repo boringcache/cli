@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Response};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -271,6 +271,93 @@ fn scoped_save_tag(
         .effective_save_tag(&scoped_input)
         .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))?;
     Ok(ref_tag_for_input(&scoped))
+}
+
+fn alias_tags_for_manifest(
+    primary_tag: &str,
+    manifest_digest: &str,
+    configured_human_tags: &[String],
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut aliases = Vec::new();
+
+    let digest_alias = digest_tag(manifest_digest);
+    if digest_alias != primary_tag && seen.insert(digest_alias.clone()) {
+        aliases.push(digest_alias);
+    }
+
+    for human_tag in configured_human_tags {
+        if human_tag != primary_tag && seen.insert(human_tag.clone()) {
+            aliases.push(human_tag.clone());
+        }
+    }
+
+    aliases
+}
+
+async fn bind_alias_tag(
+    state: &AppState,
+    alias_tag: &str,
+    manifest_root_digest: &str,
+    manifest_size: u64,
+    blob_count: u64,
+    blob_total_size_bytes: u64,
+    total_size_bytes: u64,
+) -> Result<(), String> {
+    let alias_request = SaveRequest {
+        tag: alias_tag.to_string(),
+        manifest_root_digest: manifest_root_digest.to_string(),
+        compression_algorithm: "zstd".to_string(),
+        storage_mode: Some("cas".to_string()),
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        cas_layout: Some("oci-v1".to_string()),
+        manifest_format_version: Some(1),
+        total_size_bytes,
+        uncompressed_size: None,
+        compressed_size: None,
+        file_count: Some(blob_count.min(u32::MAX as u64) as u32),
+        expected_manifest_digest: Some(manifest_root_digest.to_string()),
+        expected_manifest_size: Some(manifest_size),
+        force: None,
+        use_multipart: None,
+        ci_provider: None,
+        encrypted: None,
+        encryption_algorithm: None,
+        encryption_recipient_hint: None,
+    };
+
+    let alias_save = state
+        .api_client
+        .save_entry(&state.workspace, &alias_request)
+        .await
+        .map_err(|e| format!("save_entry failed: {e}"))?;
+
+    if alias_save.exists {
+        return Ok(());
+    }
+
+    let alias_confirm = ConfirmRequest {
+        manifest_digest: manifest_root_digest.to_string(),
+        manifest_size,
+        manifest_etag: None,
+        archive_size: None,
+        archive_etag: None,
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        file_count: Some(blob_count.min(u32::MAX as u64) as u32),
+        uncompressed_size: None,
+        compressed_size: None,
+        tag: Some(alias_tag.to_string()),
+    };
+
+    state
+        .api_client
+        .confirm(&state.workspace, &alias_save.cache_entry_id, &alias_confirm)
+        .await
+        .map_err(|e| format!("confirm failed: {e}"))?;
+
+    Ok(())
 }
 
 fn detect_manifest_content_type(json_bytes: &[u8]) -> String {
@@ -998,68 +1085,26 @@ async fn put_manifest(
 
     cleanup_blob_sessions(&state, &blob_descriptors).await;
 
-    let digest_tag_name = digest_tag(&manifest_digest);
-    let alias_result = async {
-        let alias_request = SaveRequest {
-            tag: digest_tag_name.clone(),
-            manifest_root_digest: manifest_root_digest.clone(),
-            compression_algorithm: "zstd".to_string(),
-            storage_mode: Some("cas".to_string()),
-            blob_count: Some(blob_count),
-            blob_total_size_bytes: Some(blob_total_size_bytes),
-            cas_layout: Some("oci-v1".to_string()),
-            manifest_format_version: Some(1),
+    let alias_tags = alias_tags_for_manifest(&tag, &manifest_digest, &state.configured_human_tags);
+    for alias_tag in alias_tags {
+        if let Err(error) = bind_alias_tag(
+            &state,
+            &alias_tag,
+            &manifest_root_digest,
+            pointer_bytes.len() as u64,
+            blob_count,
+            blob_total_size_bytes,
             total_size_bytes,
-            uncompressed_size: None,
-            compressed_size: None,
-            file_count: Some(blob_count.min(u32::MAX as u64) as u32),
-            expected_manifest_digest: Some(manifest_root_digest.clone()),
-            expected_manifest_size: Some(pointer_bytes.len() as u64),
-            force: None,
-            use_multipart: None,
-            ci_provider: None,
-            encrypted: None,
-            encryption_algorithm: None,
-            encryption_recipient_hint: None,
-        };
-
-        let alias_save = state
-            .api_client
-            .save_entry(&state.workspace, &alias_request)
-            .await
-            .map_err(|e| format!("save_entry failed: {e}"))?;
-
-        let alias_confirm = ConfirmRequest {
-            manifest_digest: manifest_root_digest.clone(),
-            manifest_size: pointer_bytes.len() as u64,
-            manifest_etag: None,
-            archive_size: None,
-            archive_etag: None,
-            blob_count: Some(blob_count),
-            blob_total_size_bytes: Some(blob_total_size_bytes),
-            file_count: Some(blob_count.min(u32::MAX as u64) as u32),
-            uncompressed_size: None,
-            compressed_size: None,
-            tag: Some(digest_tag_name.clone()),
-        };
-
-        state
-            .api_client
-            .confirm(&state.workspace, &alias_save.cache_entry_id, &alias_confirm)
-            .await
-            .map_err(|e| format!("confirm failed: {e}"))?;
-
-        Ok::<(), String>(())
-    }
-    .await;
-
-    if let Err(error) = alias_result {
-        log::warn!(
-            "Digest alias write skipped for {} (workspace={}): {}",
-            digest_tag_name,
-            state.workspace,
-            error
-        );
+        )
+        .await
+        {
+            log::warn!(
+                "Alias write skipped for {} (workspace={}): {}",
+                alias_tag,
+                state.workspace,
+                error
+            );
+        }
     }
 
     let mut headers = HeaderMap::new();
@@ -1154,6 +1199,7 @@ mod tests {
                 .expect("api client"),
             workspace: "boringcache/benchmarks".to_string(),
             tag_resolver: TagResolver::new(None, GitContext::default(), false),
+            configured_human_tags: Vec::new(),
             blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
             upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         }
@@ -1480,5 +1526,52 @@ mod tests {
 
         let larger = adaptive_blob_upload_concurrency(32);
         assert!((1..=32).contains(&larger));
+    }
+
+    #[test]
+    fn alias_tags_include_digest_and_human_alias_when_distinct() {
+        let tags = alias_tags_for_manifest(
+            "oci_ref_primary",
+            "sha256:abc123",
+            &["posthog-docker-build".to_string()],
+        );
+        assert_eq!(
+            tags,
+            vec![
+                "oci_digest_abc123".to_string(),
+                "posthog-docker-build".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn alias_tags_skip_primary_and_deduplicate() {
+        let tags = alias_tags_for_manifest(
+            "oci_digest_abc123",
+            "sha256:abc123",
+            &["oci_digest_abc123".to_string()],
+        );
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn alias_tags_include_multiple_human_aliases() {
+        let tags = alias_tags_for_manifest(
+            "oci_ref_primary",
+            "sha256:abc123",
+            &[
+                "posthog-build".to_string(),
+                "posthog-stable".to_string(),
+                "posthog-build".to_string(),
+            ],
+        );
+        assert_eq!(
+            tags,
+            vec![
+                "oci_digest_abc123".to_string(),
+                "posthog-build".to_string(),
+                "posthog-stable".to_string(),
+            ]
+        );
     }
 }

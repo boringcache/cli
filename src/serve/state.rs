@@ -12,6 +12,7 @@ pub struct AppState {
     pub api_client: ApiClient,
     pub workspace: String,
     pub tag_resolver: TagResolver,
+    pub configured_human_tags: Vec<String>,
     pub blob_locator: Arc<RwLock<BlobLocatorCache>>,
     pub upload_sessions: Arc<RwLock<UploadSessionStore>>,
 }

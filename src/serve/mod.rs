@@ -18,11 +18,13 @@ pub async fn run_server(
     host: String,
     port: u16,
     tag_resolver: TagResolver,
+    configured_human_tags: Vec<String>,
 ) -> Result<()> {
     let state = AppState {
         api_client,
         workspace: workspace.clone(),
         tag_resolver,
+        configured_human_tags,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
     };
@@ -33,6 +35,12 @@ pub async fn run_server(
 
     eprintln!("BoringCache OCI registry proxy listening on {addr}");
     eprintln!("  Workspace: {workspace}");
+    if !state.configured_human_tags.is_empty() {
+        eprintln!(
+            "  Human Tag Aliases: {}",
+            state.configured_human_tags.join(", ")
+        );
+    }
     eprintln!("  Use: --cache-from type=registry,ref={host}:{port}/CACHE_NAME:TAG");
     eprintln!("  Use: --cache-to type=registry,ref={host}:{port}/CACHE_NAME:TAG");
 

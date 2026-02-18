@@ -40,6 +40,7 @@ async fn setup(
         api_client,
         workspace: "org/repo".to_string(),
         tag_resolver: TagResolver::new(None, GitContext::default(), false),
+        configured_human_tags: Vec::new(),
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
     };
@@ -468,6 +469,128 @@ async fn test_tag_mapping_deterministic() {
 
     let dt = digest_tag("sha256:abc123");
     assert_eq!(dt, "oci_digest_abc123");
+}
+
+#[tokio::test]
+async fn test_manifest_put_skips_alias_confirm_when_alias_save_exists() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
+    let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
+    let primary_tag = ref_tag("my-cache", "main");
+    let alias_tag = digest_tag(&manifest_digest);
+
+    let primary_save_mock = server
+        .mock("POST", "/workspaces/org/repo/caches")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": primary_tag
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": primary_tag,
+                "cache_entry_id": "entry-primary",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 0,
+                "blob_total_size_bytes": 0,
+                "cas_layout": "oci-v1",
+                "manifest_upload_url": format!("{}/uploads/entry-primary-manifest", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let pointer_upload_mock = server
+        .mock("PUT", "/uploads/entry-primary-manifest")
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let primary_confirm_mock = server
+        .mock("PATCH", "/workspaces/org/repo/caches/entry-primary")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": primary_tag
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "status": "ok",
+                "cache_entry_id": "entry-primary"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let alias_save_mock = server
+        .mock("POST", "/workspaces/org/repo/caches")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": alias_tag
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": alias_tag,
+                "cache_entry_id": "entry-alias",
+                "exists": true,
+                "storage_mode": "cas",
+                "blob_count": 0,
+                "blob_total_size_bytes": 0,
+                "cas_layout": "oci-v1",
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let alias_confirm_mock = server
+        .mock("PATCH", "/workspaces/org/repo/caches/entry-alias")
+        .expect(0)
+        .create_async()
+        .await;
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v2/my-cache/manifests/main")
+            .body(Body::from(manifest_body))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    primary_save_mock.assert_async().await;
+    pointer_upload_mock.assert_async().await;
+    primary_confirm_mock.assert_async().await;
+    alias_save_mock.assert_async().await;
+    alias_confirm_mock.assert_async().await;
 }
 
 #[tokio::test]

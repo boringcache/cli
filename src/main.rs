@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
         let command = &args[1];
         if matches!(
             command.as_str(),
-            "save" | "restore" | "delete" | "check" | "ls"
+            "save" | "restore" | "delete" | "check" | "ls" | "serve" | "docker-registry"
         ) {
             let positional_args: Vec<&String> =
                 args[2..].iter().filter(|a| !a.starts_with('-')).collect();
@@ -67,6 +67,13 @@ async fn main() -> Result<()> {
 
                 "delete" | "check" => {
                     positional_args.len() == 1 && !positional_args[0].contains('/')
+                }
+                "serve" | "docker-registry" => {
+                    positional_args.is_empty()
+                        || positional_args
+                            .first()
+                            .map(|arg| !arg.contains('/'))
+                            .unwrap_or(true)
                 }
                 _ => false,
             };
@@ -242,11 +249,12 @@ async fn main() -> Result<()> {
         cli::Commands::Workspaces => commands::workspaces::execute().await,
         cli::Commands::Serve {
             workspace,
+            tag,
             port,
             host,
             no_platform,
             no_git,
-        } => commands::serve::execute(workspace, host, port, no_platform, no_git).await,
+        } => commands::serve::execute(workspace, tag, host, port, no_platform, no_git).await,
     };
 
     handle_result(result)
