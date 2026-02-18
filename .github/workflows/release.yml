@@ -327,13 +327,24 @@ jobs:
             exit 1
           fi
 
+      - name: Check whether release already exists
+        id: release_exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.get_tag.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
 
       - name: Create release (if not release event)
-        if: github.event_name != 'release'
+        if: github.event_name != 'release' && steps.release_exists.outputs.exists != 'true'
         id: create_release
         uses: softprops/action-gh-release@v2
         env:
