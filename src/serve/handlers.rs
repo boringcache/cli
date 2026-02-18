@@ -585,14 +585,13 @@ async fn put_upload(
         .ok_or_else(|| OciError::digest_invalid("missing digest query parameter"))?
         .clone();
 
-    let upload_offset = parse_upload_offset(&headers);
     let (temp_path, bytes_before, write_offset) = {
         let sessions = state.upload_sessions.read().await;
         let session = sessions
             .get(&uuid)
             .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
         let bytes_before = session.bytes_received;
-        let write_offset = upload_offset.unwrap_or(bytes_before);
+        let write_offset = parse_put_upload_offset(&headers, bytes_before);
         if write_offset > bytes_before {
             return Err(OciError::digest_invalid(format!(
                 "upload offset {write_offset} exceeds current size {bytes_before}"
@@ -607,15 +606,15 @@ async fn put_upload(
         .open(&temp_path)
         .await
         .map_err(|e| OciError::internal(format!("Failed to open temp file: {e}")))?;
-    if write_offset == 0 {
-        file.set_len(0)
-            .await
-            .map_err(|e| OciError::internal(format!("Failed to truncate temp file: {e}")))?;
-    }
     file.seek(std::io::SeekFrom::Start(write_offset))
         .await
         .map_err(|e| OciError::internal(format!("Failed to seek temp file: {e}")))?;
     let bytes_written = write_body_to_file(body, &mut file).await?;
+    if write_offset == 0 && bytes_before > 0 && bytes_written > 0 {
+        file.set_len(bytes_written)
+            .await
+            .map_err(|e| OciError::internal(format!("Failed to resize temp file: {e}")))?;
+    }
     drop(file);
 
     let mut bytes_after_write = bytes_before;
@@ -671,11 +670,41 @@ async fn put_upload(
             .iter()
             .any(|result| result.digest == digest_param && result.exists);
         if !exists {
+            log::warn!(
+                "OCI finalize digest mismatch (empty payload fallback failed): name={} upload={} expected={} actual={} bytes_before={} bytes_written={} write_offset={}",
+                name,
+                uuid,
+                digest_param,
+                actual_digest,
+                bytes_before,
+                bytes_written,
+                write_offset
+            );
             return Err(OciError::digest_invalid(format!(
                 "expected {digest_param}, got {actual_digest}"
             )));
         }
+        log::debug!(
+            "OCI finalize accepted remote blob reuse: name={} upload={} digest={} bytes_before={} bytes_written={} write_offset={}",
+            name,
+            uuid,
+            digest_param,
+            bytes_before,
+            bytes_written,
+            write_offset
+        );
     } else if actual_digest != digest_param {
+        log::warn!(
+            "OCI finalize digest mismatch: name={} upload={} expected={} actual={} bytes_before={} bytes_written={} write_offset={} file_size={}",
+            name,
+            uuid,
+            digest_param,
+            actual_digest,
+            bytes_before,
+            bytes_written,
+            write_offset,
+            file_size
+        );
         return Err(OciError::digest_invalid(format!(
             "expected {digest_param}, got {actual_digest}"
         )));
@@ -708,11 +737,46 @@ fn parse_upload_offset(headers: &HeaderMap) -> Option<u64> {
         .and_then(parse_range_start)
 }
 
+fn parse_put_upload_offset(headers: &HeaderMap, bytes_before: u64) -> u64 {
+    if let Some(offset) = headers
+        .get("Content-Range")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_range_start)
+    {
+        return offset;
+    }
+
+    if let Some(end) = headers
+        .get("Range")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_range_end)
+    {
+        let reported_bytes = end.saturating_add(1);
+        if reported_bytes != bytes_before {
+            log::debug!(
+                "OCI finalize Range header differs from tracked size: reported={} tracked={}",
+                reported_bytes,
+                bytes_before
+            );
+        }
+        return bytes_before;
+    }
+
+    bytes_before
+}
+
 fn parse_range_start(value: &str) -> Option<u64> {
     let trimmed = value.trim();
     let without_prefix = trimmed.strip_prefix("bytes ").unwrap_or(trimmed);
     let range = without_prefix.split('/').next().unwrap_or(without_prefix);
     range.split('-').next()?.trim().parse::<u64>().ok()
+}
+
+fn parse_range_end(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    let without_prefix = trimmed.strip_prefix("bytes ").unwrap_or(trimmed);
+    let range = without_prefix.split('/').next().unwrap_or(without_prefix);
+    range.split('-').nth(1)?.trim().parse::<u64>().ok()
 }
 
 async fn delete_upload(state: AppState, uuid: String) -> Result<Response, OciError> {
@@ -1139,6 +1203,34 @@ mod tests {
         assert!(parse_oci_path("").is_none());
         assert!(parse_oci_path("just-a-name").is_none());
         assert!(parse_oci_path("/manifests/ref").is_none());
+    }
+
+    #[test]
+    fn parse_upload_offset_prefers_range_start() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Range", "0-1023".parse().unwrap());
+        assert_eq!(parse_upload_offset(&headers), Some(0));
+    }
+
+    #[test]
+    fn parse_put_upload_offset_uses_content_range_start() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Content-Range", "bytes 4096-8191".parse().unwrap());
+        assert_eq!(parse_put_upload_offset(&headers, 8192), 4096);
+    }
+
+    #[test]
+    fn parse_put_upload_offset_uses_range_end_for_finalize() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Range", "0-8191".parse().unwrap());
+        assert_eq!(parse_put_upload_offset(&headers, 8192), 8192);
+    }
+
+    #[test]
+    fn parse_put_upload_offset_clamps_empty_range_to_current_size() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Range", "0-0".parse().unwrap());
+        assert_eq!(parse_put_upload_offset(&headers, 0), 0);
     }
 
     #[test]
