@@ -96,7 +96,8 @@ impl UploadSessionStore {
     pub fn find_by_digest(&self, digest: &str) -> Option<&UploadSession> {
         self.sessions
             .values()
-            .find(|s| s.finalized_digest.as_deref() == Some(digest))
+            .filter(|s| s.finalized_digest.as_deref() == Some(digest))
+            .max_by_key(|s| s.finalized_size.unwrap_or(s.bytes_received))
     }
 }
 
@@ -163,5 +164,35 @@ mod tests {
         assert_eq!(entry.size_bytes, 100);
         assert!(cache.get("myimg", "sha256:xyz").is_none());
         assert!(cache.get("other", "sha256:abc").is_none());
+    }
+
+    #[test]
+    fn find_by_digest_prefers_non_empty_finalized_session() {
+        let now = Instant::now();
+        let mut store = UploadSessionStore::default();
+
+        store.create(UploadSession {
+            id: "empty".to_string(),
+            name: "img".to_string(),
+            temp_path: PathBuf::from("/tmp/empty"),
+            bytes_received: 0,
+            finalized_digest: Some("sha256:abc".to_string()),
+            finalized_size: Some(0),
+            created_at: now,
+        });
+
+        store.create(UploadSession {
+            id: "filled".to_string(),
+            name: "img".to_string(),
+            temp_path: PathBuf::from("/tmp/filled"),
+            bytes_received: 0,
+            finalized_digest: Some("sha256:abc".to_string()),
+            finalized_size: Some(128),
+            created_at: now,
+        });
+
+        let selected = store.find_by_digest("sha256:abc").expect("digest session");
+        assert_eq!(selected.id, "filled");
+        assert_eq!(selected.finalized_size, Some(128));
     }
 }

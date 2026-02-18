@@ -652,8 +652,28 @@ async fn put_upload(
         finalized_size = bytes_before;
     }
 
-    let allow_remote_reuse = actual_digest != digest_param && file_size == 0;
-    if allow_remote_reuse {
+    let allow_local_reuse = if actual_digest != digest_param && file_size == 0 {
+        let sessions = state.upload_sessions.read().await;
+        sessions
+            .find_by_digest(&digest_param)
+            .map(|session| session.finalized_size.unwrap_or(session.bytes_received) > 0)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    let allow_remote_reuse = actual_digest != digest_param && file_size == 0 && !allow_local_reuse;
+    if allow_local_reuse {
+        log::debug!(
+            "OCI finalize accepted local blob reuse: name={} upload={} digest={} bytes_before={} bytes_written={} write_offset={}",
+            name,
+            uuid,
+            digest_param,
+            bytes_before,
+            bytes_written,
+            write_offset
+        );
+    } else if allow_remote_reuse {
         let check = state
             .api_client
             .check_blobs(
@@ -1119,9 +1139,34 @@ async fn cleanup_blob_sessions(state: &AppState, blob_descriptors: &[BlobDescrip
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::client::ApiClient;
     use crate::git::GitContext;
     use crate::platform::Platform;
+    use crate::serve::state::{BlobLocatorCache, UploadSessionStore};
     use crate::tag_utils::TagResolver;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::sync::RwLock;
+
+    fn test_state() -> AppState {
+        AppState {
+            api_client: ApiClient::new_with_token_override(Some("test-token".to_string()))
+                .expect("api client"),
+            workspace: "boringcache/benchmarks".to_string(),
+            tag_resolver: TagResolver::new(None, GitContext::default(), false),
+            blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
+            upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
+        }
+    }
+
+    async fn write_temp_upload_file(contents: &[u8]) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("boringcache-upload-test-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.expect("temp dir");
+        let path = dir.join("blob.bin");
+        tokio::fs::write(&path, contents).await.expect("temp file");
+        path
+    }
 
     #[test]
     fn parse_single_segment_manifest() {
@@ -1154,6 +1199,57 @@ mod tests {
             }
             _ => panic!("expected Blob"),
         }
+    }
+
+    #[tokio::test]
+    async fn put_upload_allows_local_reuse_when_finalize_payload_is_empty() {
+        let state = test_state();
+        let digest = cas_oci::prefixed_sha256_digest(b"existing payload");
+        let filled_path = write_temp_upload_file(b"existing payload").await;
+        let empty_path = write_temp_upload_file(&[]).await;
+
+        {
+            let mut sessions = state.upload_sessions.write().await;
+            sessions.create(UploadSession {
+                id: "filled-session".to_string(),
+                name: "cache".to_string(),
+                temp_path: filled_path.clone(),
+                bytes_received: 16,
+                finalized_digest: Some(digest.clone()),
+                finalized_size: Some(16),
+                created_at: Instant::now(),
+            });
+            sessions.create(UploadSession {
+                id: "empty-session".to_string(),
+                name: "cache".to_string(),
+                temp_path: empty_path.clone(),
+                bytes_received: 0,
+                finalized_digest: None,
+                finalized_size: None,
+                created_at: Instant::now(),
+            });
+        }
+
+        let mut params = HashMap::new();
+        params.insert("digest".to_string(), digest.clone());
+        let response = put_upload(
+            state.clone(),
+            "cache".to_string(),
+            "empty-session".to_string(),
+            params,
+            HeaderMap::new(),
+            Body::empty(),
+        )
+        .await
+        .expect("put upload should succeed via local reuse");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let sessions = state.upload_sessions.read().await;
+        let empty = sessions.get("empty-session").expect("empty session");
+        assert_eq!(empty.finalized_digest.as_deref(), Some(digest.as_str()));
+
+        let _ = tokio::fs::remove_file(&filled_path).await;
+        let _ = tokio::fs::remove_file(&empty_path).await;
     }
 
     #[test]
