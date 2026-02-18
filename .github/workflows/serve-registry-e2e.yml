@@ -40,16 +40,26 @@ jobs:
       - name: Build CLI
         run: cargo build --bin boringcache
 
+      - name: Run serve edge-case unit tests
+        run: |
+          set -euo pipefail
+          cargo test --lib serve::state::tests::find_by_digest_prefers_non_empty_finalized_session
+          cargo test --lib serve::handlers::tests::put_upload_allows_local_reuse_when_finalize_payload_is_empty
+
       - name: Validate workspace access
         run: ./target/debug/boringcache ls "${WORKSPACE}" --limit 1
 
-      - name: Run docker-registry + buildx registry cache round-trip
+      - name: Run docker-registry edge-case e2e matrix
         run: |
           set -euo pipefail
 
           BUILDER="bc-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           CACHE_TAG="${CACHE_TAG_PREFIX}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           CACHE_REF="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG}"
+          CACHE_TAG_ALIAS="${CACHE_TAG}-alias"
+          CACHE_REF_ALIAS="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG_ALIAS}"
+          SERVE_PID=""
+          declare -a LOG_FILES=()
 
           cleanup() {
             set +e
@@ -61,28 +71,61 @@ jobs:
           }
           trap cleanup EXIT
 
-          ./target/debug/boringcache docker-registry "${WORKSPACE}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git > serve.log 2>&1 &
-          SERVE_PID=$!
+          start_proxy() {
+            local log_file="$1"
+            LOG_FILES+=("$log_file")
+            ./target/debug/boringcache docker-registry "${WORKSPACE}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git > "${log_file}" 2>&1 &
+            SERVE_PID=$!
 
-          ready=0
-          for _ in $(seq 1 40); do
-            if curl -fsS --max-time 1 "http://127.0.0.1:${PORT}/v2/" >/dev/null 2>&1; then
-              ready=1
-              break
-            fi
-            if ! kill -0 "${SERVE_PID}" >/dev/null 2>&1; then
-              echo "boringcache docker-registry exited before readiness"
-              cat serve.log
+            local ready=0
+            for _ in $(seq 1 60); do
+              if curl -fsS --max-time 1 "http://127.0.0.1:${PORT}/v2/" >/dev/null 2>&1; then
+                ready=1
+                break
+              fi
+              if ! kill -0 "${SERVE_PID}" >/dev/null 2>&1; then
+                echo "boringcache docker-registry exited before readiness"
+                cat "${log_file}"
+                exit 1
+              fi
+              sleep 0.5
+            done
+
+            if [[ "${ready}" != "1" ]]; then
+              echo "timed out waiting for docker-registry readiness"
+              cat "${log_file}"
               exit 1
             fi
-            sleep 0.5
-          done
+          }
 
-          if [[ "${ready}" != "1" ]]; then
-            echo "timed out waiting for docker-registry readiness"
-            cat serve.log
-            exit 1
-          fi
+          stop_proxy() {
+            if [[ -n "${SERVE_PID:-}" ]]; then
+              kill "${SERVE_PID}" >/dev/null 2>&1 || true
+              wait "${SERVE_PID}" >/dev/null 2>&1 || true
+            fi
+            SERVE_PID=""
+          }
+
+          run_build() {
+            local log_file="$1"
+            shift
+            LOG_FILES+=("$log_file")
+            docker buildx build \
+              --builder "${BUILDER}" \
+              --progress plain \
+              --load \
+              --file e2e-context/Dockerfile \
+              "$@" \
+              e2e-context 2>&1 | tee "${log_file}"
+          }
+
+          assert_cached() {
+            local log_file="$1"
+            if ! grep -q "CACHED" "${log_file}"; then
+              echo "expected cached steps in ${log_file}"
+              exit 1
+            fi
+          }
 
           docker buildx create \
             --name "${BUILDER}" \
@@ -95,34 +138,79 @@ jobs:
           mkdir -p e2e-context
           cat > e2e-context/Dockerfile <<'EOF'
           FROM scratch
-          COPY a.txt /a.txt
-          COPY b.txt /b.txt
+          COPY payload.bin /payload.bin
+          COPY f01.txt /f01.txt
+          COPY f02.txt /f02.txt
+          COPY f03.txt /f03.txt
+          COPY f04.txt /f04.txt
+          COPY f05.txt /f05.txt
+          COPY f06.txt /f06.txt
+          COPY f07.txt /f07.txt
+          COPY f08.txt /f08.txt
+          COPY f09.txt /f09.txt
+          COPY f10.txt /f10.txt
+          COPY f11.txt /f11.txt
+          COPY f12.txt /f12.txt
           EOF
-          printf 'alpha\n' > e2e-context/a.txt
-          printf 'bravo\n' > e2e-context/b.txt
+          for i in $(seq -w 1 12); do
+            printf 'layer-%s\n' "${i}" > "e2e-context/f${i}.txt"
+          done
+          dd if=/dev/zero of=e2e-context/payload.bin bs=1M count=6 status=none
 
-          docker buildx build \
-            --builder "${BUILDER}" \
-            --progress plain \
-            --load \
+          # Phase 1: seed + warm + no-cache re-export against one tag.
+          start_proxy "serve-initial.log"
+          run_build "first-build.log" \
             --cache-from "type=registry,ref=${CACHE_REF}" \
-            --cache-to "type=registry,ref=${CACHE_REF},mode=max" \
-            --file e2e-context/Dockerfile \
-            e2e-context 2>&1 | tee first-build.log
-
-          docker buildx build \
-            --builder "${BUILDER}" \
-            --progress plain \
-            --load \
+            --cache-to "type=registry,ref=${CACHE_REF},mode=max"
+          run_build "second-build.log" \
             --cache-from "type=registry,ref=${CACHE_REF}" \
-            --cache-to "type=registry,ref=${CACHE_REF},mode=max" \
-            --file e2e-context/Dockerfile \
-            e2e-context 2>&1 | tee second-build.log
+            --cache-to "type=registry,ref=${CACHE_REF},mode=max"
+          assert_cached "second-build.log"
+          run_build "third-build-reexport.log" \
+            --no-cache \
+            --cache-to "type=registry,ref=${CACHE_REF},mode=max"
+          stop_proxy
 
-          if ! grep -q "CACHED" second-build.log; then
-            echo "expected second build to contain CACHED output"
-            exit 1
-          fi
+          # Phase 2: restart proxy, verify cache still resolves, then alias tag finalize path.
+          start_proxy "serve-restart.log"
+          run_build "fourth-build-after-restart.log" \
+            --cache-from "type=registry,ref=${CACHE_REF}" \
+            --cache-to "type=registry,ref=${CACHE_REF},mode=max"
+          assert_cached "fourth-build-after-restart.log"
+          run_build "fifth-build-alias-export.log" \
+            --cache-from "type=registry,ref=${CACHE_REF}" \
+            --cache-to "type=registry,ref=${CACHE_REF_ALIAS},mode=max"
+          run_build "sixth-build-alias-warm.log" \
+            --cache-from "type=registry,ref=${CACHE_REF_ALIAS}" \
+            --cache-to "type=registry,ref=${CACHE_REF_ALIAS},mode=max"
+          assert_cached "sixth-build-alias-warm.log"
+
+          # Verify both tags are readable manifests through the registry API.
+          for tag in "${CACHE_TAG}" "${CACHE_TAG_ALIAS}"; do
+            manifest_file="manifest-${tag}.json"
+            LOG_FILES+=("${manifest_file}")
+            curl -fsS \
+              -H "Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+              "http://127.0.0.1:${PORT}/v2/boringcache-e2e/cache/manifests/${tag}" \
+              -o "${manifest_file}"
+          done
+
+          # Hard fail on known historical export/finalize signatures.
+          declare -a BAD_PATTERNS=(
+            'expected sha256:.*got sha256:e3b0'
+            'error writing layer blob'
+            'broken pipe'
+            'Validation failed on cache confirm'
+            '422 Unprocessable Entity'
+            'unexpected status from PUT request.*400 Bad Request'
+          )
+          for pattern in "${BAD_PATTERNS[@]}"; do
+            if grep -E -n "${pattern}" "${LOG_FILES[@]}" >/tmp/e2e-pattern-hit.log 2>/dev/null; then
+              echo "found bad signature pattern: ${pattern}"
+              cat /tmp/e2e-pattern-hit.log
+              exit 1
+            fi
+          done
 
       - name: Upload E2E logs
         if: always()
@@ -130,6 +218,12 @@ jobs:
         with:
           name: serve-registry-e2e-logs
           path: |
-            serve.log
+            serve-initial.log
+            serve-restart.log
             first-build.log
             second-build.log
+            third-build-reexport.log
+            fourth-build-after-restart.log
+            fifth-build-alias-export.log
+            sixth-build-alias-warm.log
+            manifest-*.json
