@@ -13,6 +13,7 @@ permissions:
 env:
   RUST_VERSION: "1.89"
   BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+  BORINGCACHE_BOOTSTRAP_VERSION: "v1.0.3"
 
 jobs:
   # Build CLI binaries for multiple platforms
@@ -188,15 +189,25 @@ jobs:
                 fi
               fi
 
-              # Install boringcache CLI (optional - build continues if unavailable)
-              if curl -fsSL https://install.boringcache.com/install.sh | sh 2>/dev/null; then
-                export PATH="$HOME/.boringcache/bin:$PATH"
-                # Restore Cargo cache before build
-                boringcache restore ${{ github.repository }} \
-                  "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git,cargo-target-${{ matrix.name }}:/workspace/target" \
-                  || echo "Cache restore skipped (cache miss or error)"
+              # Install a known stable boringcache CLI (optional - build continues if unavailable)
+              # This intentionally pins to a stable bootstrap version so builds do not depend on
+              # the tag currently being published.
+              BC_CACHE_ENABLED=0
+              BOOTSTRAP_URL="https://github.com/boringcache/cli/releases/download/${{ env.BORINGCACHE_BOOTSTRAP_VERSION }}/${{ matrix.binary_name }}"
+              if curl -fsSL "$BOOTSTRAP_URL" -o /tmp/boringcache-bootstrap; then
+                chmod +x /tmp/boringcache-bootstrap
+                mv /tmp/boringcache-bootstrap /usr/local/bin/boringcache
+                if boringcache --version >/dev/null 2>&1; then
+                  BC_CACHE_ENABLED=1
+                  # Restore Cargo cache before build
+                  boringcache restore ${{ github.repository }} \
+                    "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git,cargo-target-${{ matrix.name }}:/workspace/target" \
+                    || echo "Cache restore skipped (cache miss or error)"
+                else
+                  echo "Downloaded bootstrap boringcache binary is invalid - skipping cache restore/save"
+                fi
               else
-                echo "BoringCache CLI not available - continuing without cache"
+                echo "Bootstrap boringcache download failed from $BOOTSTRAP_URL - continuing without cache"
               fi
 
               # Add target
@@ -214,7 +225,7 @@ jobs:
               chmod +x /workspace/${{ matrix.binary_name }}
 
               # Save Cargo cache after build (if CLI available)
-              if command -v boringcache >/dev/null 2>&1; then
+              if [ "$BC_CACHE_ENABLED" = "1" ]; then
                 boringcache save ${{ github.repository }} \
                   "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git,cargo-target-${{ matrix.name }}:/workspace/target" \
                   || echo "Cache save skipped (error)"
@@ -283,25 +294,55 @@ jobs:
           cp ${{ matrix.binary_name }} boringcache-linux-arm64
           chmod +x boringcache-linux-arm64
 
-      - name: Upload CLI artifact
+      - name: Upload CLI artifact (attempt 1)
+        id: upload_cli_artifact_attempt_1
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ matrix.binary_name }}
           path: ${{ matrix.binary_name }}
 
-      - name: Upload generic Linux artifact (AMD64)
-        if: matrix.use_docker != true && matrix.name == 'ubuntu-22.04-amd64'
+      - name: Upload CLI artifact (retry)
+        if: steps.upload_cli_artifact_attempt_1.outcome == 'failure'
         uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary_name }}
+          path: ${{ matrix.binary_name }}
+          overwrite: true
+
+      - name: Upload generic Linux artifact (AMD64) (attempt 1)
+        if: matrix.use_docker != true && matrix.name == 'ubuntu-22.04-amd64'
+        id: upload_generic_linux_amd64_attempt_1
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: boringcache-linux-amd64
           path: boringcache-linux-amd64
 
-      - name: Upload generic Linux artifact (ARM64)
+      - name: Upload generic Linux artifact (AMD64) (retry)
+        if: matrix.use_docker != true && matrix.name == 'ubuntu-22.04-amd64' && steps.upload_generic_linux_amd64_attempt_1.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: boringcache-linux-amd64
+          path: boringcache-linux-amd64
+          overwrite: true
+
+      - name: Upload generic Linux artifact (ARM64) (attempt 1)
         if: matrix.use_docker != true && matrix.name == 'ubuntu-22.04-arm64'
+        id: upload_generic_linux_arm64_attempt_1
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: boringcache-linux-arm64
+          path: boringcache-linux-arm64
+
+      - name: Upload generic Linux artifact (ARM64) (retry)
+        if: matrix.use_docker != true && matrix.name == 'ubuntu-22.04-arm64' && steps.upload_generic_linux_arm64_attempt_1.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: boringcache-linux-arm64
           path: boringcache-linux-arm64
+          overwrite: true
 
   # Create GitHub Release
   create-release:
