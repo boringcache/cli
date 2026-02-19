@@ -20,6 +20,15 @@ use crate::tag_utils::TagResolver;
 
 const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
 
+fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) -> Result<(), OciError> {
+    let header_name = axum::http::header::HeaderName::from_bytes(name.as_bytes())
+        .map_err(|e| OciError::internal(format!("Invalid header name {name}: {e}")))?;
+    let header_value = axum::http::header::HeaderValue::from_str(value)
+        .map_err(|e| OciError::internal(format!("Invalid header value for {name}: {e}")))?;
+    headers.insert(header_name, header_value);
+    Ok(())
+}
+
 enum OciRoute {
     Manifest { name: String, reference: String },
     Blob { name: String, digest: String },
@@ -123,16 +132,18 @@ async fn get_manifest(
         resolve_manifest(&state, &name, &reference).await?;
 
     let mut headers = HeaderMap::new();
-    headers.insert("Docker-Content-Digest", digest.parse().unwrap());
-    headers.insert("Content-Type", content_type.parse().unwrap());
-    headers.insert(
+    insert_header(&mut headers, "Docker-Content-Digest", &digest)?;
+    insert_header(&mut headers, "Content-Type", &content_type)?;
+    insert_header(
+        &mut headers,
         "Docker-Distribution-API-Version",
-        "registry/2.0".parse().unwrap(),
-    );
-    headers.insert(
+        "registry/2.0",
+    )?;
+    insert_header(
+        &mut headers,
         "Content-Length",
-        manifest_bytes.len().to_string().parse().unwrap(),
-    );
+        &manifest_bytes.len().to_string(),
+    )?;
 
     if method == Method::HEAD {
         return Ok((StatusCode::OK, headers, Body::empty()).into_response());
@@ -418,13 +429,14 @@ async fn get_blob(
     };
 
     let mut headers = HeaderMap::new();
-    headers.insert("Docker-Content-Digest", digest.parse().unwrap());
-    headers.insert("Content-Type", "application/octet-stream".parse().unwrap());
-    headers.insert("Content-Length", size_bytes.to_string().parse().unwrap());
-    headers.insert(
+    insert_header(&mut headers, "Docker-Content-Digest", &digest)?;
+    insert_header(&mut headers, "Content-Type", "application/octet-stream")?;
+    insert_header(&mut headers, "Content-Length", &size_bytes.to_string())?;
+    insert_header(
+        &mut headers,
         "Docker-Distribution-API-Version",
-        "registry/2.0".parse().unwrap(),
-    );
+        "registry/2.0",
+    )?;
 
     if method == Method::HEAD {
         return Ok((StatusCode::OK, headers, Body::empty()).into_response());
@@ -577,10 +589,10 @@ async fn start_upload(
 
             let location = format!("/v2/{name}/blobs/uploads/{session_id}");
             let mut headers = HeaderMap::new();
-            headers.insert("Location", location.parse().unwrap());
-            headers.insert("Docker-Upload-UUID", session_id.parse().unwrap());
-            headers.insert("Docker-Content-Digest", digest_param.parse().unwrap());
-            headers.insert("Content-Length", "0".parse().unwrap());
+            insert_header(&mut headers, "Location", &location)?;
+            insert_header(&mut headers, "Docker-Upload-UUID", &session_id)?;
+            insert_header(&mut headers, "Docker-Content-Digest", digest_param)?;
+            insert_header(&mut headers, "Content-Length", "0")?;
             return Ok((StatusCode::CREATED, headers, Body::empty()).into_response());
         }
     }
@@ -598,10 +610,10 @@ async fn start_upload(
 
     let location = format!("/v2/{name}/blobs/uploads/{session_id}");
     let mut headers = HeaderMap::new();
-    headers.insert("Location", location.parse().unwrap());
-    headers.insert("Docker-Upload-UUID", session_id.parse().unwrap());
-    headers.insert("Range", "0-0".parse().unwrap());
-    headers.insert("Content-Length", "0".parse().unwrap());
+    insert_header(&mut headers, "Location", &location)?;
+    insert_header(&mut headers, "Docker-Upload-UUID", &session_id)?;
+    insert_header(&mut headers, "Range", "0-0")?;
+    insert_header(&mut headers, "Content-Length", "0")?;
 
     Ok((StatusCode::ACCEPTED, headers, Body::empty()).into_response())
 }
@@ -651,10 +663,10 @@ async fn patch_upload(
     let location = format!("/v2/{name}/blobs/uploads/{uuid}");
     let range = format!("0-{end}");
     let mut headers = HeaderMap::new();
-    headers.insert("Location", location.parse().unwrap());
-    headers.insert("Docker-Upload-UUID", uuid.parse().unwrap());
-    headers.insert("Range", range.parse().unwrap());
-    headers.insert("Content-Length", "0".parse().unwrap());
+    insert_header(&mut headers, "Location", &location)?;
+    insert_header(&mut headers, "Docker-Upload-UUID", &uuid)?;
+    insert_header(&mut headers, "Range", &range)?;
+    insert_header(&mut headers, "Content-Length", "0")?;
 
     Ok((StatusCode::ACCEPTED, headers, Body::empty()).into_response())
 }
@@ -829,9 +841,9 @@ async fn put_upload(
 
     let location = format!("/v2/{name}/blobs/{digest_param}");
     let mut headers = HeaderMap::new();
-    headers.insert("Location", location.parse().unwrap());
-    headers.insert("Docker-Content-Digest", digest_param.parse().unwrap());
-    headers.insert("Content-Length", "0".parse().unwrap());
+    insert_header(&mut headers, "Location", &location)?;
+    insert_header(&mut headers, "Docker-Content-Digest", &digest_param)?;
+    insert_header(&mut headers, "Content-Length", "0")?;
 
     Ok((StatusCode::CREATED, headers, Body::empty()).into_response())
 }
@@ -1012,7 +1024,9 @@ async fn put_manifest(
                     let semaphore = semaphore.clone();
                     let transfer_client = transfer_client.clone();
                     let task = tokio::spawn(async move {
-                        let _permit = semaphore.acquire().await.unwrap();
+                        let _permit = semaphore.acquire().await.map_err(|e| {
+                            OciError::internal(format!("Blob upload semaphore closed: {e}"))
+                        })?;
                         let blob_data = tokio::fs::read(&temp_path).await.map_err(|e| {
                             OciError::internal(format!(
                                 "Failed to read blob temp file for {}: {}",
@@ -1108,14 +1122,13 @@ async fn put_manifest(
     }
 
     let mut headers = HeaderMap::new();
-    headers.insert("Docker-Content-Digest", manifest_digest.parse().unwrap());
-    headers.insert(
+    insert_header(&mut headers, "Docker-Content-Digest", &manifest_digest)?;
+    insert_header(
+        &mut headers,
         "Location",
-        format!("/v2/{name}/manifests/{manifest_digest}")
-            .parse()
-            .unwrap(),
-    );
-    headers.insert("Content-Length", "0".parse().unwrap());
+        &format!("/v2/{name}/manifests/{manifest_digest}"),
+    )?;
+    insert_header(&mut headers, "Content-Length", "0")?;
 
     Ok((StatusCode::CREATED, headers, Body::empty()).into_response())
 }
@@ -1128,6 +1141,11 @@ fn extract_blob_descriptors(manifest: &serde_json::Value) -> Result<Vec<BlobDesc
             config.get("digest").and_then(|d| d.as_str()),
             config.get("size").and_then(|s| s.as_u64()),
         ) {
+            if !cas_oci::is_valid_sha256_digest(digest) {
+                return Err(OciError::digest_invalid(format!(
+                    "unsupported config digest format: {digest}"
+                )));
+            }
             blobs.push(BlobDescriptor {
                 digest: digest.to_string(),
                 size_bytes: size,
@@ -1141,6 +1159,11 @@ fn extract_blob_descriptors(manifest: &serde_json::Value) -> Result<Vec<BlobDesc
                 layer.get("digest").and_then(|d| d.as_str()),
                 layer.get("size").and_then(|s| s.as_u64()),
             ) {
+                if !cas_oci::is_valid_sha256_digest(digest) {
+                    return Err(OciError::digest_invalid(format!(
+                        "unsupported layer digest format: {digest}"
+                    )));
+                }
                 blobs.push(BlobDescriptor {
                     digest: digest.to_string(),
                     size_bytes: size,
@@ -1392,44 +1415,72 @@ mod tests {
     fn extract_blob_descriptors_includes_config_and_layers() {
         let manifest_json = serde_json::json!({
             "schemaVersion": 2,
-            "config": {"digest": "sha256:cfg", "size": 100},
+            "config": {"digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 100},
             "layers": [
-                {"digest": "sha256:layer1", "size": 2000},
-                {"digest": "sha256:layer2", "size": 3000}
+                {"digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size": 2000},
+                {"digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "size": 3000}
             ]
         });
         let blobs = extract_blob_descriptors(&manifest_json).unwrap();
         assert_eq!(blobs.len(), 3);
-        assert_eq!(blobs[0].digest, "sha256:cfg");
-        assert_eq!(blobs[1].digest, "sha256:layer1");
-        assert_eq!(blobs[2].digest, "sha256:layer2");
+        assert_eq!(
+            blobs[0].digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(
+            blobs[1].digest,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert_eq!(
+            blobs[2].digest,
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        );
     }
 
     #[test]
     fn extract_blob_descriptors_dedupes_by_digest() {
         let manifest_json = serde_json::json!({
             "schemaVersion": 2,
-            "config": {"digest": "sha256:dup", "size": 32},
+            "config": {"digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size": 32},
             "layers": [
-                {"digest": "sha256:dup", "size": 32},
-                {"digest": "sha256:layer2", "size": 3000}
+                {"digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size": 32},
+                {"digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "size": 3000}
             ]
         });
 
         let blobs = extract_blob_descriptors(&manifest_json).unwrap();
         assert_eq!(blobs.len(), 2);
-        assert_eq!(blobs[0].digest, "sha256:dup");
-        assert_eq!(blobs[1].digest, "sha256:layer2");
+        assert_eq!(
+            blobs[0].digest,
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        );
+        assert_eq!(
+            blobs[1].digest,
+            "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        );
     }
 
     #[test]
     fn extract_blob_descriptors_rejects_conflicting_sizes_for_same_digest() {
         let manifest_json = serde_json::json!({
             "schemaVersion": 2,
-            "config": {"digest": "sha256:dup", "size": 32},
+            "config": {"digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size": 32},
             "layers": [
-                {"digest": "sha256:dup", "size": 64}
+                {"digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size": 64}
             ]
+        });
+
+        let error = extract_blob_descriptors(&manifest_json).unwrap_err();
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn extract_blob_descriptors_rejects_invalid_digest_format() {
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "config": {"digest": "sha256:not-a-real-digest", "size": 32},
+            "layers": []
         });
 
         let error = extract_blob_descriptors(&manifest_json).unwrap_err();

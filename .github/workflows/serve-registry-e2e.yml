@@ -3,10 +3,14 @@ name: Serve Registry E2E
 on:
   push:
     branches: ["main"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
   serve-registry-e2e:
+    name: BuildKit Registry E2E
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -227,3 +231,196 @@ jobs:
             fifth-build-alias-export.log
             sixth-build-alias-warm.log
             manifest-*.json
+
+  serve-registry-adapter-e2e:
+    name: Adapter Protocol E2E
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+      BORINGCACHE_API_URL: "https://api.boringcache.com/v1"
+      WORKSPACE: "boringcache/cli"
+      PORT: "5001"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89"
+
+      - name: Validate configuration
+        run: |
+          set -euo pipefail
+          if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+            echo "BORINGCACHE_API_TOKEN secret is required"
+            exit 1
+          fi
+          if [[ -z "${WORKSPACE:-}" ]]; then
+            echo "WORKSPACE is not set"
+            exit 1
+          fi
+
+      - name: Build CLI
+        run: cargo build --bin boringcache
+
+      - name: Validate workspace access
+        run: ./target/debug/boringcache ls "${WORKSPACE}" --limit 1
+
+      - name: Run adapter protocol e2e checks
+        run: |
+          set -euo pipefail
+
+          mkdir -p adapter-e2e
+          SERVE_PID=""
+          ADAPTER_PROXY_LOG="adapter-e2e/adapter-proxy.log"
+
+          cleanup() {
+            set +e
+            if [[ -n "${SERVE_PID:-}" ]]; then
+              kill "${SERVE_PID}" >/dev/null 2>&1 || true
+              wait "${SERVE_PID}" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          start_proxy() {
+            ./target/debug/boringcache docker-registry "${WORKSPACE}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git > "${ADAPTER_PROXY_LOG}" 2>&1 &
+            SERVE_PID=$!
+
+            local ready=0
+            for _ in $(seq 1 60); do
+              if curl -fsS --max-time 1 "http://127.0.0.1:${PORT}/v2/" >/dev/null 2>&1; then
+                ready=1
+                break
+              fi
+              if ! kill -0 "${SERVE_PID}" >/dev/null 2>&1; then
+                echo "boringcache docker-registry exited before readiness"
+                cat "${ADAPTER_PROXY_LOG}"
+                exit 1
+              fi
+              sleep 0.5
+            done
+
+            if [[ "${ready}" != "1" ]]; then
+              echo "timed out waiting for docker-registry readiness"
+              cat "${ADAPTER_PROXY_LOG}"
+              exit 1
+            fi
+          }
+
+          run_http() {
+            local expected_status="$1"
+            local output_path="$2"
+            shift 2
+            local status
+            status=$(curl -sS -o "${output_path}" -w "%{http_code}" "$@")
+            if [[ "${status}" != "${expected_status}" ]]; then
+              echo "unexpected status: expected ${expected_status}, got ${status}"
+              echo "curl args: $*"
+              if [[ -f "${output_path}" ]]; then
+                cat "${output_path}"
+              fi
+              exit 1
+            fi
+          }
+
+          assert_file_equals() {
+            local expected="$1"
+            local actual="$2"
+            if ! cmp -s "${expected}" "${actual}"; then
+              echo "payload mismatch between ${expected} and ${actual}"
+              exit 1
+            fi
+          }
+
+          start_proxy
+
+          # Bazel HTTP cache adapter
+          bazel_key=$(printf 'bazel-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
+          printf 'bazel-e2e-%s\n' "${bazel_key}" > adapter-e2e/bazel.bin
+          run_http "200" adapter-e2e/bazel-cas-put.txt -X PUT --data-binary @adapter-e2e/bazel.bin "http://127.0.0.1:${PORT}/cas/${bazel_key}"
+          run_http "200" adapter-e2e/bazel-cas-head.txt -I "http://127.0.0.1:${PORT}/cas/${bazel_key}"
+          run_http "200" adapter-e2e/bazel-cas-get.bin "http://127.0.0.1:${PORT}/cas/${bazel_key}"
+          assert_file_equals adapter-e2e/bazel.bin adapter-e2e/bazel-cas-get.bin
+
+          run_http "200" adapter-e2e/bazel-ac-put.txt -X PUT --data-binary @adapter-e2e/bazel.bin "http://127.0.0.1:${PORT}/ac/${bazel_key}"
+          run_http "200" adapter-e2e/bazel-ac-get.bin "http://127.0.0.1:${PORT}/ac/${bazel_key}"
+          assert_file_equals adapter-e2e/bazel.bin adapter-e2e/bazel-ac-get.bin
+
+          # Gradle HTTP cache adapter
+          gradle_key="gradle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:7}"
+          printf 'gradle-e2e-%s\n' "${gradle_key}" > adapter-e2e/gradle.bin
+          run_http "200" adapter-e2e/gradle-put.txt -X PUT --data-binary @adapter-e2e/gradle.bin "http://127.0.0.1:${PORT}/cache/${gradle_key}"
+          run_http "200" adapter-e2e/gradle-head.txt -I "http://127.0.0.1:${PORT}/cache/${gradle_key}"
+          run_http "200" adapter-e2e/gradle-get.bin "http://127.0.0.1:${PORT}/cache/${gradle_key}"
+          assert_file_equals adapter-e2e/gradle.bin adapter-e2e/gradle-get.bin
+
+          # Turborepo adapter
+          turbo_hash=$(printf 'turbo-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
+          turbo_auth="authorization: Bearer turbo-token-${GITHUB_RUN_ID}"
+          printf 'turbo-e2e-%s\n' "${turbo_hash}" > adapter-e2e/turbo.bin
+
+          run_http "200" adapter-e2e/turbo-status.json -H "${turbo_auth}" "http://127.0.0.1:${PORT}/v8/artifacts/status"
+          grep -q '"status":"enabled"' adapter-e2e/turbo-status.json
+
+          run_http "202" adapter-e2e/turbo-put.json -X PUT -H "${turbo_auth}" --data-binary @adapter-e2e/turbo.bin "http://127.0.0.1:${PORT}/v8/artifacts/${turbo_hash}"
+          grep -q '"urls"' adapter-e2e/turbo-put.json
+
+          run_http "200" adapter-e2e/turbo-head.txt -I -H "${turbo_auth}" "http://127.0.0.1:${PORT}/v8/artifacts/${turbo_hash}"
+          run_http "200" adapter-e2e/turbo-get.bin -H "${turbo_auth}" "http://127.0.0.1:${PORT}/v8/artifacts/${turbo_hash}"
+          assert_file_equals adapter-e2e/turbo.bin adapter-e2e/turbo-get.bin
+
+          cat > adapter-e2e/turbo-query.json <<EOF
+          {"hashes":["${turbo_hash}","deadbeef"]}
+          EOF
+          run_http "200" adapter-e2e/turbo-query-response.json -X POST -H "${turbo_auth}" -H "content-type: application/json" --data @adapter-e2e/turbo-query.json "http://127.0.0.1:${PORT}/v8/artifacts"
+          grep -q "\"${turbo_hash}\"" adapter-e2e/turbo-query-response.json
+          grep -q '"size"' adapter-e2e/turbo-query-response.json
+
+          cat > adapter-e2e/turbo-events.json <<EOF
+          [{"sessionId":"e2e","source":"REMOTE","event":"HIT","hash":"${turbo_hash}","duration":7}]
+          EOF
+          run_http "200" adapter-e2e/turbo-events-response.txt -X POST -H "${turbo_auth}" -H "content-type: application/json" --data @adapter-e2e/turbo-events.json "http://127.0.0.1:${PORT}/v8/artifacts/events"
+
+          # sccache adapter
+          sccache_key=$(printf 'sccache-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
+          shard_a="${sccache_key:0:1}"
+          shard_b="${sccache_key:1:1}"
+          shard_c="${sccache_key:2:1}"
+          sccache_prefix="sccache-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sccache_path="${sccache_prefix}/${shard_a}/${shard_b}/${shard_c}/${sccache_key}"
+          printf 'sccache-e2e-%s\n' "${sccache_key}" > adapter-e2e/sccache.bin
+
+          run_http "201" adapter-e2e/sccache-mkcol.txt -X MKCOL "http://127.0.0.1:${PORT}/${sccache_prefix}/${shard_a}/${shard_b}/${shard_c}"
+          run_http "201" adapter-e2e/sccache-put.txt -X PUT --data-binary @adapter-e2e/sccache.bin "http://127.0.0.1:${PORT}/${sccache_path}"
+          run_http "200" adapter-e2e/sccache-head.txt -I "http://127.0.0.1:${PORT}/${sccache_path}"
+          run_http "200" adapter-e2e/sccache-get.bin "http://127.0.0.1:${PORT}/${sccache_path}"
+          assert_file_equals adapter-e2e/sccache.bin adapter-e2e/sccache-get.bin
+
+          # Fail fast on known proxy failures
+          declare -a BAD_PATTERNS=(
+            'INTERNAL_ERROR'
+            'panic'
+            'thread .* panicked'
+            'Validation failed on cache confirm'
+            '422 Unprocessable Entity'
+          )
+          for pattern in "${BAD_PATTERNS[@]}"; do
+            if grep -E -n "${pattern}" "${ADAPTER_PROXY_LOG}" >/tmp/adapter-pattern-hit.log 2>/dev/null; then
+              echo "found bad signature pattern: ${pattern}"
+              cat /tmp/adapter-pattern-hit.log
+              exit 1
+            fi
+          done
+
+      - name: Upload adapter E2E logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serve-registry-adapter-e2e-logs
+          path: |
+            adapter-e2e/**

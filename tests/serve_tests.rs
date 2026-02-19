@@ -608,6 +608,38 @@ async fn test_manifest_put_skips_alias_confirm_when_alias_save_exists() {
 }
 
 #[tokio::test]
+async fn test_manifest_put_rejects_invalid_blob_digest() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let manifest_body = br#"{
+        "schemaVersion": 2,
+        "config": {
+            "digest": "sha256:not-a-valid-digest",
+            "size": 123
+        },
+        "layers": []
+    }"#;
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v2/my-cache/manifests/main")
+            .body(Body::from(manifest_body.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["errors"][0]["code"], "DIGEST_INVALID");
+}
+
+#[tokio::test]
 async fn test_oci_error_envelope_format() {
     use axum::response::IntoResponse;
     use boring_cache_cli::serve::error::OciError;
@@ -1806,6 +1838,28 @@ async fn test_sccache_put_head_get_round_trip() {
 }
 
 #[tokio::test]
+async fn test_sccache_rejects_unsupported_method() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let key_path =
+        "cache-prefix/0/1/2/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/{key_path}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
 async fn test_bazel_route_rejects_invalid_digest() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
@@ -1823,6 +1877,27 @@ async fn test_bazel_route_rejects_invalid_digest() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_bazel_rejects_unsupported_method() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+    let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/ac/{digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[tokio::test]
@@ -1993,6 +2068,26 @@ async fn test_gradle_put_get_round_trip() {
 }
 
 #[tokio::test]
+async fn test_gradle_rejects_unsupported_method() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::DELETE)
+            .uri("/cache/test-key")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
 async fn test_turborepo_status_requires_bearer_auth() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
@@ -2025,6 +2120,48 @@ async fn test_turborepo_status_requires_bearer_auth() {
     let body = auth.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(parsed["status"], "enabled");
+}
+
+#[tokio::test]
+async fn test_turborepo_status_rejects_unsupported_method() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v8/artifacts/status")
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn test_turborepo_status_rejects_invalid_bearer_header() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v8/artifacts/status")
+            .header("authorization", "token only")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -2288,6 +2425,27 @@ async fn test_turborepo_put_head_get_round_trip() {
     assert_eq!(get_response.status(), StatusCode::OK);
     let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(get_body.as_ref(), payload);
+}
+
+#[tokio::test]
+async fn test_turborepo_artifact_rejects_unsupported_method() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::DELETE)
+            .uri("/v8/artifacts/aabbcc")
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[tokio::test]
