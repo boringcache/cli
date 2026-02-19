@@ -9,6 +9,7 @@ on:
 env:
   RUST_VERSION: "1.89"
   BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+  BORINGCACHE_BOOTSTRAP_VERSION: "v1.0.3"
 
 jobs:
   test-boringcache:
@@ -145,14 +146,24 @@ jobs:
             sh -c '
               set -e
 
-              # Install boringcache CLI
-              curl -fsSL https://install.boringcache.com/install.sh | sh
-              export PATH="$HOME/.boringcache/bin:$PATH"
-
-              # Restore target cache
-              boringcache restore ${{ github.repository }} \
-                "docker-target-cargo-registry:/root/.cargo/registry,docker-target-cargo-git:/root/.cargo/git,docker-target-target:/workspace/target" \
-                || echo "Cache restore skipped"
+              # Install a stable boringcache bootstrap binary (optional)
+              BC_CACHE_ENABLED=0
+              BOOTSTRAP_URL="https://github.com/boringcache/cli/releases/download/${{ env.BORINGCACHE_BOOTSTRAP_VERSION }}/boringcache-debian-bookworm-amd64"
+              if curl -fsSL "$BOOTSTRAP_URL" -o /tmp/boringcache-bootstrap; then
+                chmod +x /tmp/boringcache-bootstrap
+                mv /tmp/boringcache-bootstrap /usr/local/bin/boringcache
+                if boringcache --version >/dev/null 2>&1; then
+                  BC_CACHE_ENABLED=1
+                  # Restore target cache
+                  boringcache restore ${{ github.repository }} \
+                    "docker-target-cargo-registry:/root/.cargo/registry,docker-target-cargo-git:/root/.cargo/git,docker-target-target:/workspace/target" \
+                    || echo "Cache restore skipped"
+                else
+                  echo "Downloaded bootstrap boringcache binary is invalid - skipping cache restore/save"
+                fi
+              else
+                echo "Bootstrap boringcache download failed from $BOOTSTRAP_URL - continuing without cache"
+              fi
 
               # Build with timing
               START_TIME=$(date +%s%N)
@@ -165,9 +176,11 @@ jobs:
               echo "${DURATION}" > benchmark-results/docker-target-run${{ matrix.run }}.txt
 
               # Save target cache
-              boringcache save ${{ github.repository }} \
-                "docker-target-cargo-registry:/root/.cargo/registry,docker-target-cargo-git:/root/.cargo/git,docker-target-target:/workspace/target" \
-                || echo "Cache save skipped"
+              if [ "$BC_CACHE_ENABLED" = "1" ]; then
+                boringcache save ${{ github.repository }} \
+                  "docker-target-cargo-registry:/root/.cargo/registry,docker-target-cargo-git:/root/.cargo/git,docker-target-target:/workspace/target" \
+                  || echo "Cache save skipped"
+              fi
             '
 
       - name: Upload results
@@ -330,15 +343,23 @@ jobs:
                 fi
               fi
 
-              # Install boringcache CLI (optional - build continues if unavailable)
-              if curl -fsSL https://install.boringcache.com/install.sh | sh 2>/dev/null; then
-                export PATH="$HOME/.boringcache/bin:$PATH"
-                # Restore Cargo cache before build
-                boringcache restore ${{ github.repository }} \
-                  "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git,cargo-target-${{ matrix.name }}:/workspace/target" \
-                  || echo "Cache restore skipped (cache miss or error)"
+              # Install a known stable boringcache CLI (optional - build continues if unavailable)
+              BC_CACHE_ENABLED=0
+              BOOTSTRAP_URL="https://github.com/boringcache/cli/releases/download/${{ env.BORINGCACHE_BOOTSTRAP_VERSION }}/${{ matrix.binary_name }}"
+              if curl -fsSL "$BOOTSTRAP_URL" -o /tmp/boringcache-bootstrap; then
+                chmod +x /tmp/boringcache-bootstrap
+                mv /tmp/boringcache-bootstrap /usr/local/bin/boringcache
+                if boringcache --version >/dev/null 2>&1; then
+                  BC_CACHE_ENABLED=1
+                  # Restore Cargo cache before build
+                  boringcache restore ${{ github.repository }} \
+                    "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git,cargo-target-${{ matrix.name }}:/workspace/target" \
+                    || echo "Cache restore skipped (cache miss or error)"
+                else
+                  echo "Downloaded bootstrap boringcache binary is invalid - skipping cache restore/save"
+                fi
               else
-                echo "BoringCache CLI not available - continuing without cache"
+                echo "Bootstrap boringcache download failed from $BOOTSTRAP_URL - continuing without cache"
               fi
 
               # Add target
@@ -355,8 +376,8 @@ jobs:
               cp target/${{ matrix.target }}/release/boringcache /workspace/${{ matrix.binary_name }}
               chmod +x /workspace/${{ matrix.binary_name }}
 
-              # Save Cargo cache after build (if CLI available)
-              if command -v boringcache >/dev/null 2>&1; then
+              # Save Cargo cache after build (if stable bootstrap CLI is available)
+              if [ "$BC_CACHE_ENABLED" = "1" ]; then
                 boringcache save ${{ github.repository }} \
                   "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git,cargo-target-${{ matrix.name }}:/workspace/target" \
                   || echo "Cache save skipped (error)"
