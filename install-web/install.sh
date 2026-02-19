@@ -69,7 +69,7 @@ get_latest_release() {
     
     # If API fails (e.g., private repo), fall back to known version
     # This should be updated when new versions are released
-    local fallback_version="v1.0.0"
+    local fallback_version="v1.1.0"
     
     print_warning "GitHub API unavailable, using fallback version: $fallback_version"
     print_warning "This may not be the latest version. Check https://github.com/${repo}/releases manually."

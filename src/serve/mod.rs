@@ -1,3 +1,4 @@
+pub mod cache_registry;
 pub mod error;
 pub mod handlers;
 pub mod routes;
@@ -33,7 +34,7 @@ pub async fn run_server(
     let addr = format!("{host}:{port}");
     let listener = TcpListener::bind(&addr).await?;
 
-    eprintln!("BoringCache OCI registry proxy listening on {addr}");
+    eprintln!("BoringCache cache registry proxy listening on {addr}");
     eprintln!("  Workspace: {workspace}");
     if !state.configured_human_tags.is_empty() {
         eprintln!(
@@ -41,8 +42,11 @@ pub async fn run_server(
             state.configured_human_tags.join(", ")
         );
     }
-    eprintln!("  Use: --cache-from type=registry,ref={host}:{port}/CACHE_NAME:TAG");
-    eprintln!("  Use: --cache-to type=registry,ref={host}:{port}/CACHE_NAME:TAG");
+    eprintln!("  OCI: --cache-from/--cache-to type=registry,ref={host}:{port}/CACHE_NAME:TAG");
+    eprintln!("  Bazel HTTP: http://{host}:{port}/ac/{{sha256}} and /cas/{{sha256}}");
+    eprintln!("  Gradle HTTP: http://{host}:{port}/cache/{{cache-key}}");
+    eprintln!("  Turborepo: http://{host}:{port}/v8/artifacts/{{hash}}");
+    eprintln!("  sccache WebDAV: http://{host}:{port}/<prefix>/a/b/c/<key>");
 
     let upload_sessions = state.upload_sessions.clone();
     tokio::spawn(async move {

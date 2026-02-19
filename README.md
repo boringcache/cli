@@ -134,14 +134,21 @@ boringcache mount my-org/ws "dev-cache:./node_modules"
 Restores from remote on start, syncs periodically, and performs a final sync on Ctrl+C.
 
 ### `docker-registry <WORKSPACE>`
-Run a local OCI registry proxy for native BuildKit `type=registry` integration.
+Run a local cache registry proxy for native integrations:
+- OCI registry (`/v2/*`) for BuildKit `type=registry`
+- Bazel HTTP cache (`/ac/*`, `/cas/*`)
+- Gradle HTTP build cache (`/cache/*`)
+- Turborepo remote cache (`/v8/artifacts/*`)
+- sccache WebDAV-style paths (`/<prefix>/a/b/c/<key>`)
 
-Alias: `serve`
+Aliases: `serve`, `cache-registry`
 
 ```bash
 boringcache docker-registry my-org/ws --port 5000
 # same command via compatibility alias
 boringcache serve my-org/ws --port 5000
+# same command via explicit multi-protocol alias
+boringcache cache-registry my-org/ws --port 5000
 ```
 
 BuildKit connects directly to the proxy as a standard OCI registry:
@@ -283,7 +290,7 @@ jobs:
 
 The action accepts these inputs:
 - `token` - BoringCache API token (sets `BORINGCACHE_API_TOKEN` env var)
-- `version` - Version to install (default: `v1.0.0`)
+- `version` - Version to install (default: `v1.1.0`)
 - `verify-checksum` - Verify SHA256 checksum (default: `true`)
 - `skip-cache` - Skip tool cache, always download fresh (default: `false`)
 

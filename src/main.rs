@@ -53,7 +53,14 @@ async fn main() -> Result<()> {
         let command = &args[1];
         if matches!(
             command.as_str(),
-            "save" | "restore" | "delete" | "check" | "ls" | "serve" | "docker-registry"
+            "save"
+                | "restore"
+                | "delete"
+                | "check"
+                | "ls"
+                | "serve"
+                | "docker-registry"
+                | "cache-registry"
         ) {
             let positional_args: Vec<&String> =
                 args[2..].iter().filter(|a| !a.starts_with('-')).collect();
@@ -68,7 +75,7 @@ async fn main() -> Result<()> {
                 "delete" | "check" => {
                     positional_args.len() == 1 && !positional_args[0].contains('/')
                 }
-                "serve" | "docker-registry" => {
+                "serve" | "docker-registry" | "cache-registry" => {
                     positional_args.is_empty()
                         || positional_args
                             .first()

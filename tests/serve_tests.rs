@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use boring_cache_cli::api::client::ApiClient;
+use boring_cache_cli::cas_file;
 use boring_cache_cli::cas_oci;
 use boring_cache_cli::git::GitContext;
 use boring_cache_cli::serve::routes::build_router;
@@ -61,6 +62,19 @@ fn make_pointer(index_json: &[u8], blobs: &[(&str, u64)]) -> Vec<u8> {
                 size_bytes: *size,
             })
             .collect(),
+    };
+    serde_json::to_vec(&pointer).unwrap()
+}
+
+fn make_file_pointer(blob_digest: &str, size_bytes: u64) -> Vec<u8> {
+    let pointer = cas_file::FilePointer {
+        format_version: 1,
+        adapter: "file-v1".to_string(),
+        entries: Vec::new(),
+        blobs: vec![cas_file::FilePointerBlob {
+            digest: blob_digest.to_string(),
+            size_bytes,
+        }],
     };
     serde_json::to_vec(&pointer).unwrap()
 }
@@ -1314,4 +1328,1073 @@ async fn test_blob_proxy_returns_error_on_storage_failure() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(parsed["errors"][0]["code"], "INTERNAL_ERROR");
+}
+
+#[tokio::test]
+async fn test_bazel_cas_put_head_get_round_trip() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let bazel_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let payload = b"bazel-cas-payload";
+    let payload_digest = cas_file::prefixed_sha256_digest(payload);
+    let pointer_bytes = make_file_pointer(&payload_digest, payload.len() as u64);
+    let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
+
+    let _save_mock = server
+        .mock("POST", "/workspaces/org/repo/caches")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "unused",
+                "cache_entry_id": "entry-bazel-kv",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": payload.len(),
+                "cas_layout": "file-v1",
+                "manifest_upload_url": format!("{}/manifest-upload", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_upload_urls_mock = server
+        .mock("POST", "/workspaces/org/repo/caches/blobs/upload-urls")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_urls": [{
+                    "digest": payload_digest,
+                    "url": format!("{}/blob-upload", server.url()),
+                    "headers": {}
+                }],
+                "already_present": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_upload_mock = server
+        .mock("PUT", "/blob-upload")
+        .match_body(Matcher::Exact(
+            String::from_utf8(payload.to_vec()).expect("payload is utf8"),
+        ))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let _manifest_upload_mock = server
+        .mock("PUT", "/manifest-upload")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let _confirm_mock = server
+        .mock("PATCH", "/workspaces/org/repo/caches/entry-bazel-kv")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "status": "confirmed",
+                "cache_entry_id": "entry-bazel-kv"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let put_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/cas/{bazel_key}"))
+            .body(Body::from(payload.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_response.status(), StatusCode::OK);
+
+    let _restore_head_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "unused",
+                "status": "hit",
+                "cache_entry_id": "entry-bazel-kv",
+                "manifest_url": format!("{}/pointer-download", server.url()),
+                "manifest_root_digest": pointer_digest,
+                "storage_mode": "cas",
+                "cas_layout": "file-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _pointer_head_mock = server
+        .mock("GET", "/pointer-download")
+        .with_status(200)
+        .with_body(pointer_bytes.clone())
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let head_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/cas/{bazel_key}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(head_response.status(), StatusCode::OK);
+    let expected_content_length = payload.len().to_string();
+    assert_eq!(
+        head_response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some(expected_content_length.as_str())
+    );
+    let head_body = head_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert!(head_body.is_empty());
+
+    let _restore_get_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "unused",
+                "status": "hit",
+                "cache_entry_id": "entry-bazel-kv",
+                "manifest_url": format!("{}/pointer-download-get", server.url()),
+                "manifest_root_digest": pointer_digest,
+                "storage_mode": "cas",
+                "cas_layout": "file-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _pointer_get_mock = server
+        .mock("GET", "/pointer-download-get")
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let _download_urls_mock = server
+        .mock("POST", "/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": payload_digest,
+                    "url": format!("{}/blob-download", server.url())
+                }],
+                "missing": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_download_mock = server
+        .mock("GET", "/blob-download")
+        .with_status(200)
+        .with_body(payload)
+        .create_async()
+        .await;
+
+    let app = build_router(state);
+    let get_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/cas/{bazel_key}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(get_body.as_ref(), payload);
+}
+
+#[tokio::test]
+async fn test_sccache_mkcol_is_noop_success() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::from_bytes(b"MKCOL").unwrap())
+            .uri("/prefix/0/1/")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn test_sccache_put_head_get_round_trip() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let key_path = format!(
+        "cache-prefix/{}/{}/{}/{}",
+        &key[0..1],
+        &key[1..2],
+        &key[2..3],
+        key
+    );
+    let payload = b"sccache-payload";
+    let payload_digest = cas_file::prefixed_sha256_digest(payload);
+    let pointer_bytes = make_file_pointer(&payload_digest, payload.len() as u64);
+    let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
+
+    let _save_mock = server
+        .mock("POST", "/workspaces/org/repo/caches")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "unused",
+                "cache_entry_id": "entry-sccache-kv",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": payload.len(),
+                "cas_layout": "file-v1",
+                "manifest_upload_url": format!("{}/manifest-upload-sccache", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_upload_urls_mock = server
+        .mock("POST", "/workspaces/org/repo/caches/blobs/upload-urls")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_urls": [{
+                    "digest": payload_digest,
+                    "url": format!("{}/blob-upload-sccache", server.url()),
+                    "headers": {}
+                }],
+                "already_present": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_upload_mock = server
+        .mock("PUT", "/blob-upload-sccache")
+        .match_body(Matcher::Exact(
+            String::from_utf8(payload.to_vec()).expect("payload is utf8"),
+        ))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let _manifest_upload_mock = server
+        .mock("PUT", "/manifest-upload-sccache")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let _confirm_mock = server
+        .mock("PATCH", "/workspaces/org/repo/caches/entry-sccache-kv")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "status": "confirmed",
+                "cache_entry_id": "entry-sccache-kv"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let put_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/{key_path}"))
+            .body(Body::from(payload.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_response.status(), StatusCode::CREATED);
+
+    let _restore_head_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "unused",
+                "status": "hit",
+                "cache_entry_id": "entry-sccache-kv",
+                "manifest_url": format!("{}/pointer-download-sccache", server.url()),
+                "manifest_root_digest": pointer_digest,
+                "storage_mode": "cas",
+                "cas_layout": "file-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _pointer_head_mock = server
+        .mock("GET", "/pointer-download-sccache")
+        .with_status(200)
+        .with_body(pointer_bytes.clone())
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let head_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/{key_path}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(head_response.status(), StatusCode::OK);
+    let expected_content_length = payload.len().to_string();
+    assert_eq!(
+        head_response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some(expected_content_length.as_str())
+    );
+    let head_body = head_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert!(head_body.is_empty());
+
+    let _restore_get_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "unused",
+                "status": "hit",
+                "cache_entry_id": "entry-sccache-kv",
+                "manifest_url": format!("{}/pointer-download-sccache-get", server.url()),
+                "manifest_root_digest": pointer_digest,
+                "storage_mode": "cas",
+                "cas_layout": "file-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _pointer_get_mock = server
+        .mock("GET", "/pointer-download-sccache-get")
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let _download_urls_mock = server
+        .mock("POST", "/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": payload_digest,
+                    "url": format!("{}/blob-download-sccache", server.url())
+                }],
+                "missing": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_download_mock = server
+        .mock("GET", "/blob-download-sccache")
+        .with_status(200)
+        .with_body(payload)
+        .create_async()
+        .await;
+
+    let app = build_router(state);
+    let get_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/{key_path}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(get_body.as_ref(), payload);
+}
+
+#[tokio::test]
+async fn test_bazel_route_rejects_invalid_digest() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/ac/not-a-sha256")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_gradle_put_get_round_trip() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let cache_key = "1234abcd";
+    let payload = b"gradle-cache-payload";
+    let payload_digest = cas_file::prefixed_sha256_digest(payload);
+    let pointer_bytes = make_file_pointer(&payload_digest, payload.len() as u64);
+    let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
+
+    let _save_mock = server
+        .mock("POST", "/workspaces/org/repo/caches")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "unused",
+                "cache_entry_id": "entry-gradle-kv",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": payload.len(),
+                "cas_layout": "file-v1",
+                "manifest_upload_url": format!("{}/manifest-upload-gradle", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_upload_urls_mock = server
+        .mock("POST", "/workspaces/org/repo/caches/blobs/upload-urls")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_urls": [{
+                    "digest": payload_digest,
+                    "url": format!("{}/blob-upload-gradle", server.url()),
+                    "headers": {}
+                }],
+                "already_present": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_upload_mock = server
+        .mock("PUT", "/blob-upload-gradle")
+        .match_body(Matcher::Exact(
+            String::from_utf8(payload.to_vec()).expect("payload is utf8"),
+        ))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let _manifest_upload_mock = server
+        .mock("PUT", "/manifest-upload-gradle")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let _confirm_mock = server
+        .mock("PATCH", "/workspaces/org/repo/caches/entry-gradle-kv")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "status": "confirmed",
+                "cache_entry_id": "entry-gradle-kv"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let put_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/cache/{cache_key}"))
+            .body(Body::from(payload.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_response.status(), StatusCode::OK);
+
+    let _restore_get_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "unused",
+                "status": "hit",
+                "cache_entry_id": "entry-gradle-kv",
+                "manifest_url": format!("{}/pointer-download-gradle", server.url()),
+                "manifest_root_digest": pointer_digest,
+                "storage_mode": "cas",
+                "cas_layout": "file-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _pointer_get_mock = server
+        .mock("GET", "/pointer-download-gradle")
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let _download_urls_mock = server
+        .mock("POST", "/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": payload_digest,
+                    "url": format!("{}/blob-download-gradle", server.url())
+                }],
+                "missing": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_download_mock = server
+        .mock("GET", "/blob-download-gradle")
+        .with_status(200)
+        .with_body(payload)
+        .create_async()
+        .await;
+
+    let app = build_router(state);
+    let get_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/cache/{cache_key}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(get_body.as_ref(), payload);
+}
+
+#[tokio::test]
+async fn test_turborepo_status_requires_bearer_auth() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let unauth = tower::ServiceExt::oneshot(
+        app.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v8/artifacts/status")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+    let auth = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v8/artifacts/status")
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(auth.status(), StatusCode::OK);
+    let body = auth.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["status"], "enabled");
+}
+
+#[tokio::test]
+async fn test_turborepo_query_requires_bearer_auth() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v8/artifacts")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "hashes": ["a1b2"]
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_turborepo_query_rejects_invalid_payload() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v8/artifacts")
+            .header("authorization", "Bearer token")
+            .header("content-type", "application/json")
+            .body(Body::from("not-json"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_turborepo_put_head_get_round_trip() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let hash = "aabbcc1234";
+    let payload = b"turbo-cache-payload";
+    let payload_digest = cas_file::prefixed_sha256_digest(payload);
+    let pointer_bytes = make_file_pointer(&payload_digest, payload.len() as u64);
+    let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
+
+    let _save_mock = server
+        .mock("POST", "/workspaces/org/repo/caches")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "unused",
+                "cache_entry_id": "entry-turbo-kv",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": payload.len(),
+                "cas_layout": "file-v1",
+                "manifest_upload_url": format!("{}/manifest-upload-turbo", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_upload_urls_mock = server
+        .mock("POST", "/workspaces/org/repo/caches/blobs/upload-urls")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_urls": [{
+                    "digest": payload_digest,
+                    "url": format!("{}/blob-upload-turbo", server.url()),
+                    "headers": {}
+                }],
+                "already_present": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_upload_mock = server
+        .mock("PUT", "/blob-upload-turbo")
+        .match_body(Matcher::Exact(
+            String::from_utf8(payload.to_vec()).expect("payload is utf8"),
+        ))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let _manifest_upload_mock = server
+        .mock("PUT", "/manifest-upload-turbo")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let _confirm_mock = server
+        .mock("PATCH", "/workspaces/org/repo/caches/entry-turbo-kv")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "status": "confirmed",
+                "cache_entry_id": "entry-turbo-kv"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let put_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v8/artifacts/{hash}"))
+            .header("authorization", "Bearer token")
+            .body(Body::from(payload.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_response.status(), StatusCode::ACCEPTED);
+    let put_body = put_response.into_body().collect().await.unwrap().to_bytes();
+    let put_json: serde_json::Value = serde_json::from_slice(&put_body).unwrap();
+    assert_eq!(put_json["urls"], json!([]));
+
+    let _restore_head_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "unused",
+                "status": "hit",
+                "cache_entry_id": "entry-turbo-kv",
+                "manifest_url": format!("{}/pointer-download-turbo", server.url()),
+                "manifest_root_digest": pointer_digest,
+                "storage_mode": "cas",
+                "cas_layout": "file-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _pointer_head_mock = server
+        .mock("GET", "/pointer-download-turbo")
+        .with_status(200)
+        .with_body(pointer_bytes.clone())
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let head_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/v8/artifacts/{hash}"))
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(head_response.status(), StatusCode::OK);
+
+    let _restore_get_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "unused",
+                "status": "hit",
+                "cache_entry_id": "entry-turbo-kv",
+                "manifest_url": format!("{}/pointer-download-turbo-get", server.url()),
+                "manifest_root_digest": pointer_digest,
+                "storage_mode": "cas",
+                "cas_layout": "file-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _pointer_get_mock = server
+        .mock("GET", "/pointer-download-turbo-get")
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let _download_urls_mock = server
+        .mock("POST", "/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": payload_digest,
+                    "url": format!("{}/blob-download-turbo", server.url())
+                }],
+                "missing": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_download_mock = server
+        .mock("GET", "/blob-download-turbo")
+        .with_status(200)
+        .with_body(payload)
+        .create_async()
+        .await;
+
+    let app = build_router(state);
+    let get_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v8/artifacts/{hash}"))
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(get_body.as_ref(), payload);
+}
+
+#[tokio::test]
+async fn test_turborepo_query_artifacts_returns_metadata_map() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let _restore_hit_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=registry_turbo_.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "unused",
+                "status": "hit",
+                "cache_entry_id": "entry-turbo-query",
+                "metadata": {
+                    "total_size_bytes": 42
+                },
+                "storage_mode": "cas",
+                "cas_layout": "file-v1",
+            }])
+            .to_string(),
+        )
+        .expect(2)
+        .create_async()
+        .await;
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v8/artifacts")
+            .header("authorization", "Bearer token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "hashes": ["a1b2", "c3d4"]
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(parsed["a1b2"]["size"].is_number());
+    assert_eq!(parsed["a1b2"]["taskDurationMs"], 0);
+}
+
+#[tokio::test]
+async fn test_turborepo_events_accepts_post_with_bearer() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v8/artifacts/events")
+            .header("authorization", "Bearer token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!([
+                    {
+                        "sessionId": "abc",
+                        "source": "REMOTE",
+                        "event": "HIT",
+                        "hash": "hash-a",
+                        "duration": 12
+                    }
+                ])
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_turborepo_events_rejects_get() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v8/artifacts/events")
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
 }

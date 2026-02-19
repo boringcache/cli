@@ -356,6 +356,7 @@ jobs:
             ## BoringCache CLI Release ${{ steps.get_tag.outputs.tag }}
 
             ### 🚀 What's New
+            - Unified `cache-registry` command with native OCI + Bazel + Gradle + Turborepo + sccache support
             - Cross-platform support: Linux (AMD64/ARM64), macOS (Apple Silicon), Windows (AMD64)
             - Zstd-compressed tar archives with optional age encryption
             - Streaming I/O for large caches
@@ -478,7 +479,7 @@ jobs:
             ```
 
             ---
-            **Full Changelog**: https://github.com/${{ github.repository }}/compare/v1.0.0...${{ steps.get_tag.outputs.tag }}
+            **Full Changelog**: https://github.com/${{ github.repository }}/compare/v1.0.3...${{ steps.get_tag.outputs.tag }}
           draft: false
           prerelease: false
 

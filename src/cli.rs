@@ -177,8 +177,8 @@ pub enum Commands {
 
     #[command(
         name = "docker-registry",
-        about = "Run a local OCI registry proxy backed by BoringCache",
-        visible_alias = "serve"
+        about = "Run a local cache registry proxy backed by BoringCache (OCI + Bazel + Gradle + Turborepo + sccache)",
+        visible_aliases = ["serve", "cache-registry"]
     )]
     Serve {
         #[arg(help = "Workspace name (org/project or user/project)")]
