@@ -1269,6 +1269,7 @@ mod tests {
             kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
             kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
             kv_last_put: Arc::new(RwLock::new(None)),
+            kv_next_flush_at: Arc::new(RwLock::new(None)),
             kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
         }
     }

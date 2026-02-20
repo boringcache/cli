@@ -20,6 +20,7 @@ pub struct AppState {
     pub kv_pending: Arc<RwLock<KvPendingStore>>,
     pub kv_flush_lock: Arc<Mutex<()>>,
     pub kv_last_put: Arc<RwLock<Option<Instant>>>,
+    pub kv_next_flush_at: Arc<RwLock<Option<Instant>>>,
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
 }
 

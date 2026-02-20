@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
+use rand::Rng;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -93,14 +94,20 @@ pub(crate) async fn put_kv_object(
     }
 
     {
-        let pending = state.kv_pending.read().await;
-        if pending.blob_count() >= crate::serve::state::FLUSH_BLOB_THRESHOLD
-            || pending.total_spool_bytes() >= crate::serve::state::FLUSH_SIZE_THRESHOLD
-        {
-            let flush_state = state.clone();
-            tokio::spawn(async move {
-                flush_kv_index(&flush_state).await;
-            });
+        let gated = {
+            let gate = state.kv_next_flush_at.read().await;
+            gate.is_some_and(|t| std::time::Instant::now() < t)
+        };
+        if !gated {
+            let pending = state.kv_pending.read().await;
+            if pending.blob_count() >= crate::serve::state::FLUSH_BLOB_THRESHOLD
+                || pending.total_spool_bytes() >= crate::serve::state::FLUSH_SIZE_THRESHOLD
+            {
+                let flush_state = state.clone();
+                tokio::spawn(async move {
+                    flush_kv_index(&flush_state).await;
+                });
+            }
         }
     }
 
@@ -537,9 +544,13 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
         }
         Err(FlushError::Conflict(msg)) => {
             eprintln!("KV batch flush: skipped — tag conflict ({msg})");
-            for path in pending_blob_paths.values() {
-                let _ = tokio::fs::remove_file(path).await;
-            }
+            let mut pending = state.kv_pending.write().await;
+            pending.restore(pending_entries, pending_blob_paths);
+            drop(pending);
+            let jitter_ms = rand::thread_rng().gen_range(0..3000);
+            let backoff = std::time::Duration::from_millis(5000 + jitter_ms);
+            let mut next = state.kv_next_flush_at.write().await;
+            *next = Some(std::time::Instant::now() + backoff);
             FlushResult::Conflict
         }
         Err(FlushError::Transient(msg)) => {
@@ -673,13 +684,15 @@ async fn do_flush(
     {
         Ok(resp) => resp,
         Err(e) => {
+            let msg = format!("{e}");
             let is_conflict = e
                 .downcast_ref::<crate::error::BoringCacheError>()
-                .is_some_and(|bc| matches!(bc, crate::error::BoringCacheError::CacheConflict(_)));
+                .is_some_and(|bc| matches!(bc, crate::error::BoringCacheError::CacheConflict(_)))
+                || msg.contains("another cache upload is in progress");
             if is_conflict {
-                return Err(FlushError::Conflict(format!("{e}")));
+                return Err(FlushError::Conflict(msg));
             }
-            return Err(FlushError::Transient(format!("save_entry failed: {e}")));
+            return Err(FlushError::Transient(format!("save_entry failed: {msg}")));
         }
     };
 

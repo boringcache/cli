@@ -35,6 +35,7 @@ pub async fn run_server(
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
         kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
         kv_last_put: Arc::new(RwLock::new(None)),
+        kv_next_flush_at: Arc::new(RwLock::new(None)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
     };
 
@@ -94,6 +95,15 @@ pub async fn run_server(
         loop {
             interval.tick().await;
 
+            {
+                let gate = flush_state.kv_next_flush_at.read().await;
+                if let Some(next) = *gate {
+                    if std::time::Instant::now() < next {
+                        continue;
+                    }
+                }
+            }
+
             if consecutive_failures > 0 {
                 let base_secs: u64 = match consecutive_failures {
                     1 => 2,
@@ -127,7 +137,11 @@ pub async fn run_server(
 
             if should_flush {
                 match cache_registry::flush_kv_index(&flush_state).await {
-                    cache_registry::FlushResult::Ok => consecutive_failures = 0,
+                    cache_registry::FlushResult::Ok => {
+                        consecutive_failures = 0;
+                        let mut gate = flush_state.kv_next_flush_at.write().await;
+                        *gate = None;
+                    }
                     cache_registry::FlushResult::Conflict => {}
                     cache_registry::FlushResult::Error => {
                         consecutive_failures = consecutive_failures.saturating_add(1);
