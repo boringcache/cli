@@ -1210,7 +1210,9 @@ mod tests {
     use crate::api::client::ApiClient;
     use crate::git::GitContext;
     use crate::platform::Platform;
-    use crate::serve::state::{BlobLocatorCache, UploadSessionStore};
+    use crate::serve::state::{
+        BlobLocatorCache, KvPendingStore, KvPublishedIndex, UploadSessionStore,
+    };
     use crate::tag_utils::TagResolver;
     use std::sync::Arc;
     use std::time::Instant;
@@ -1226,6 +1228,10 @@ mod tests {
             registry_root_tag: "registry".to_string(),
             blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
             upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
+            kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
+            kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
+            kv_last_put: Arc::new(RwLock::new(None)),
+            kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
         }
     }
 

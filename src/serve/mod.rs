@@ -10,7 +10,9 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use crate::api::client::ApiClient;
-use crate::serve::state::{AppState, BlobLocatorCache, UploadSessionStore};
+use crate::serve::state::{
+    AppState, BlobLocatorCache, KvPendingStore, KvPublishedIndex, UploadSessionStore,
+};
 use crate::tag_utils::TagResolver;
 
 pub async fn run_server(
@@ -30,6 +32,10 @@ pub async fn run_server(
         registry_root_tag,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
+        kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
+        kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
+        kv_last_put: Arc::new(RwLock::new(None)),
+        kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
     };
 
     let router = routes::build_router(state.clone());
@@ -51,6 +57,11 @@ pub async fn run_server(
     eprintln!("  Turborepo: http://{host}:{port}/v8/artifacts/{{hash}}");
     eprintln!("  sccache WebDAV: http://{host}:{port}/<prefix>/a/b/c/<key>");
 
+    let preload_state = state.clone();
+    tokio::spawn(async move {
+        cache_registry::preload_kv_index(&preload_state).await;
+    });
+
     let upload_sessions = state.upload_sessions.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -66,9 +77,41 @@ pub async fn run_server(
         }
     });
 
+    let flush_state = state.clone();
+    tokio::spawn(async move {
+        use crate::serve::state::{FLUSH_BLOB_THRESHOLD, FLUSH_SIZE_THRESHOLD};
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+
+            let should_flush = {
+                let pending = flush_state.kv_pending.read().await;
+                if pending.is_empty() {
+                    false
+                } else if pending.blob_count() >= FLUSH_BLOB_THRESHOLD
+                    || pending.total_spool_bytes() >= FLUSH_SIZE_THRESHOLD
+                {
+                    true
+                } else {
+                    let last_put = flush_state.kv_last_put.read().await;
+                    last_put
+                        .map(|t| t.elapsed() >= std::time::Duration::from_secs(10))
+                        .unwrap_or(false)
+                }
+            };
+
+            if should_flush {
+                cache_registry::flush_kv_index(&flush_state).await;
+            }
+        }
+    });
+
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    cache_registry::flush_kv_index(&state).await;
 
     Ok(())
 }

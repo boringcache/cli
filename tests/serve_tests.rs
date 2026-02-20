@@ -5,9 +5,11 @@ use boring_cache_cli::api::client::ApiClient;
 use boring_cache_cli::cas_file;
 use boring_cache_cli::cas_oci;
 use boring_cache_cli::git::GitContext;
+use boring_cache_cli::manifest::EntryType;
 use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
-    digest_tag, ref_tag, AppState, BlobLocatorCache, UploadSessionStore,
+    digest_tag, ref_tag, AppState, BlobLocatorCache, KvPendingStore, KvPublishedIndex,
+    UploadSessionStore,
 };
 use boring_cache_cli::tag_utils::TagResolver;
 use http_body_util::BodyExt;
@@ -45,6 +47,10 @@ async fn setup(
         registry_root_tag: "registry".to_string(),
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
+        kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
+        kv_flush_lock: Arc::new(Mutex::new(())),
+        kv_last_put: Arc::new(RwLock::new(None)),
+        kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
     };
 
     (state, temp_home, guard)
@@ -1374,14 +1380,6 @@ async fn test_bazel_cas_put_head_get_round_trip() {
     let pointer_bytes = make_file_pointer(&payload_digest, payload.len() as u64);
     let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
 
-    let _restore_before_save_mock = server
-        .mock("GET", "/workspaces/org/repo/caches?entries=registry")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body("[]")
-        .create_async()
-        .await;
-
     let _save_mock = server
         .mock("POST", "/workspaces/org/repo/caches")
         .match_body(Matcher::Any)
@@ -1632,14 +1630,6 @@ async fn test_sccache_put_head_get_round_trip() {
     let payload_digest = cas_file::prefixed_sha256_digest(payload);
     let pointer_bytes = make_file_pointer(&payload_digest, payload.len() as u64);
     let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
-
-    let _restore_before_save_mock = server
-        .mock("GET", "/workspaces/org/repo/caches?entries=registry")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body("[]")
-        .create_async()
-        .await;
 
     let _save_mock = server
         .mock("POST", "/workspaces/org/repo/caches")
@@ -1927,14 +1917,6 @@ async fn test_gradle_put_get_round_trip() {
     let payload_digest = cas_file::prefixed_sha256_digest(payload);
     let pointer_bytes = make_file_pointer(&payload_digest, payload.len() as u64);
     let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
-
-    let _restore_before_save_mock = server
-        .mock("GET", "/workspaces/org/repo/caches?entries=registry")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body("[]")
-        .create_async()
-        .await;
 
     let _save_mock = server
         .mock("POST", "/workspaces/org/repo/caches")
@@ -2248,14 +2230,6 @@ async fn test_turborepo_put_head_get_round_trip() {
     let pointer_bytes = make_file_pointer(&payload_digest, payload.len() as u64);
     let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
 
-    let _restore_before_save_mock = server
-        .mock("GET", "/workspaces/org/repo/caches?entries=registry")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body("[]")
-        .create_async()
-        .await;
-
     let _save_mock = server
         .mock("POST", "/workspaces/org/repo/caches")
         .match_body(Matcher::Any)
@@ -2486,25 +2460,23 @@ async fn test_turborepo_query_artifacts_returns_metadata_map() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
 
-    let hash_a = "a1b2";
-    let hash_b = "c3d4";
-    let digest_a = cas_file::prefixed_sha256_digest(b"artifact-a");
-    let digest_b = cas_file::prefixed_sha256_digest(b"artifact-b");
+    let digest_a = format!("sha256:{}", "a".repeat(64));
+    let digest_b = format!("sha256:{}", "b".repeat(64));
     let pointer = cas_file::FilePointer {
         format_version: 1,
         adapter: "file-v1".to_string(),
         entries: vec![
             cas_file::FilePointerEntry {
-                path: format!("turbo/{hash_a}"),
-                entry_type: boring_cache_cli::manifest::EntryType::File,
+                path: "turbo/a1b2".to_string(),
+                entry_type: EntryType::File,
                 size_bytes: 11,
                 executable: None,
                 target: None,
                 digest: Some(digest_a.clone()),
             },
             cas_file::FilePointerEntry {
-                path: format!("turbo/{hash_b}"),
-                entry_type: boring_cache_cli::manifest::EntryType::File,
+                path: "turbo/c3d4".to_string(),
+                entry_type: EntryType::File,
                 size_bytes: 17,
                 executable: None,
                 target: None,
@@ -2523,28 +2495,35 @@ async fn test_turborepo_query_artifacts_returns_metadata_map() {
         ],
     };
     let pointer_bytes = serde_json::to_vec(&pointer).unwrap();
+    let manifest_url = format!("{}/pointer/registry", server.url());
 
-    let _restore_hit_mock = server
-        .mock("GET", "/workspaces/org/repo/caches?entries=registry")
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
-            json!([{
-                "tag": "unused",
-                "status": "hit",
-                "cache_entry_id": "entry-turbo-query",
-                "manifest_url": format!("{}/pointer-turbo-query", server.url()),
-                "storage_mode": "cas",
-                "cas_layout": "file-v1",
-            }])
+            json!([
+                {
+                    "tag": "registry",
+                    "status": "hit",
+                    "cache_entry_id": "entry-turbo-index",
+                    "manifest_url": manifest_url,
+                    "storage_mode": "cas",
+                    "cas_layout": "file-v1",
+                }
+            ])
             .to_string(),
         )
         .create_async()
         .await;
 
     let _pointer_mock = server
-        .mock("GET", "/pointer-turbo-query")
+        .mock("GET", "/pointer/registry")
         .with_status(200)
+        .with_header("content-type", "application/cbor")
         .with_body(pointer_bytes)
         .create_async()
         .await;

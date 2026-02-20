@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, Method};
-use axum::response::Response;
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::response::{IntoResponse, Response};
 
 use crate::serve::state::AppState;
 
@@ -14,6 +14,8 @@ mod sccache;
 mod turborepo;
 
 pub use error::RegistryError;
+pub(crate) use kv::flush_kv_index;
+pub(crate) use kv::preload_kv_index;
 
 pub async fn dispatch_root(
     method: Method,
@@ -42,7 +44,13 @@ async fn dispatch_with_path(
     body: Body,
 ) -> Result<Response, RegistryError> {
     let normalized_path = normalize_path(&path);
-    let route = route::detect_route(&method, &normalized_path)?;
+    let route = match route::detect_route(&method, &normalized_path) {
+        Ok(r) => r,
+        Err(e) if e.status == StatusCode::NOT_FOUND && method == Method::PUT => {
+            return Ok((StatusCode::CREATED, Body::empty()).into_response());
+        }
+        Err(e) => return Err(e),
+    };
 
     match route {
         route::RegistryRoute::BazelAc { digest_hex } => {

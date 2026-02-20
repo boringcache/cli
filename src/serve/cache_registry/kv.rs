@@ -5,6 +5,7 @@ use futures_util::StreamExt;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 
 use crate::api::models::cache::{
@@ -49,12 +50,6 @@ impl KvNamespace {
     pub(crate) fn scoped_key(self, key: &str) -> String {
         format!("{}/{}", self.namespace_prefix(), self.normalize_key(key))
     }
-
-    pub(crate) fn root_tag(self, state: &AppState) -> String {
-        let _ = self;
-        let prefix = state.registry_root_tag.trim();
-        prefix.to_string()
-    }
 }
 
 pub(crate) async fn put_kv_object(
@@ -64,125 +59,93 @@ pub(crate) async fn put_kv_object(
     body: Body,
     put_status: StatusCode,
 ) -> Result<Response, RegistryError> {
-    let (temp_blob_path, blob_size, blob_digest) = write_body_to_temp_file(body).await?;
-    let scoped_key = namespace.scoped_key(key);
-    let tag = namespace.root_tag(state);
-
-    let mut existing_entries = load_index_entries(state, &tag).await?;
-    existing_entries.insert(
-        scoped_key,
-        BlobDescriptor {
-            digest: blob_digest.clone(),
-            size_bytes: blob_size,
-        },
-    );
-
-    let (pointer_bytes, blobs) = build_index_pointer(&existing_entries)?;
-    let manifest_root_digest = crate::cas_file::prefixed_sha256_digest(&pointer_bytes);
-    let expected_manifest_size = pointer_bytes.len() as u64;
-    let blob_count = blobs.len() as u64;
-    let blob_total_size_bytes: u64 = blobs.iter().map(|blob| blob.size_bytes).sum();
-    let file_count = existing_entries.len().min(u32::MAX as usize) as u32;
-
-    let request = SaveRequest {
-        tag: tag.clone(),
-        manifest_root_digest: manifest_root_digest.clone(),
-        compression_algorithm: "zstd".to_string(),
-        storage_mode: Some("cas".to_string()),
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        cas_layout: Some("file-v1".to_string()),
-        manifest_format_version: Some(1),
-        total_size_bytes: blob_total_size_bytes,
-        uncompressed_size: None,
-        compressed_size: None,
-        file_count: Some(file_count),
-        expected_manifest_digest: Some(manifest_root_digest.clone()),
-        expected_manifest_size: Some(expected_manifest_size),
-        force: None,
-        use_multipart: None,
-        ci_provider: None,
-        encrypted: None,
-        encryption_algorithm: None,
-        encryption_recipient_hint: None,
-    };
-
-    let save_response = state
-        .api_client
-        .save_entry(&state.workspace, &request)
-        .await
-        .map_err(|e| RegistryError::internal(format!("Failed to create cache entry: {e}")))?;
-
-    if !save_response.exists {
-        let mut local_blob_paths = HashMap::new();
-        local_blob_paths.insert(blob_digest.clone(), temp_blob_path.to_path_buf());
-
-        upload_blobs_if_missing(
-            state,
-            &save_response.cache_entry_id,
-            &blobs,
-            &local_blob_paths,
-        )
-        .await?;
-
-        let manifest_upload_url = save_response
-            .manifest_upload_url
-            .as_ref()
-            .ok_or_else(|| RegistryError::internal("Missing manifest upload URL"))?;
-        upload_payload(
-            state.api_client.transfer_client(),
-            manifest_upload_url,
-            &pointer_bytes,
-            "application/cbor",
-            &save_response.upload_headers,
-        )
-        .await
-        .map_err(|e| RegistryError::internal(format!("Failed to upload manifest pointer: {e}")))?;
-
-        let confirm_request = ConfirmRequest {
-            manifest_digest: manifest_root_digest,
-            manifest_size: expected_manifest_size,
-            manifest_etag: None,
-            archive_size: None,
-            archive_etag: None,
-            blob_count: Some(blob_count),
-            blob_total_size_bytes: Some(blob_total_size_bytes),
-            file_count: Some(file_count),
-            uncompressed_size: None,
-            compressed_size: None,
-            tag: Some(tag),
-        };
-
-        state
-            .api_client
-            .confirm(
-                &state.workspace,
-                &save_response.cache_entry_id,
-                &confirm_request,
-            )
-            .await
-            .map_err(|e| RegistryError::internal(format!("Failed to confirm cache entry: {e}")))?;
+    {
+        let pending = state.kv_pending.read().await;
+        if pending.total_spool_bytes() >= crate::serve::state::MAX_SPOOL_BYTES {
+            return Err(RegistryError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "KV spool budget exceeded, try again after flush",
+            ));
+        }
     }
 
+    let (path, blob_size, blob_digest) = write_body_to_temp_file(body).await?;
+    let scoped_key = namespace.scoped_key(key);
+
+    let redundant = {
+        let mut pending = state.kv_pending.write().await;
+        pending.insert(
+            scoped_key.clone(),
+            BlobDescriptor {
+                digest: blob_digest.clone(),
+                size_bytes: blob_size,
+            },
+            path,
+        )
+    };
+    if let Some(redundant_path) = redundant {
+        let _ = tokio::fs::remove_file(&redundant_path).await;
+    }
+
+    {
+        let mut last_put = state.kv_last_put.write().await;
+        *last_put = Some(std::time::Instant::now());
+    }
+
+    {
+        let pending = state.kv_pending.read().await;
+        if pending.blob_count() >= crate::serve::state::FLUSH_BLOB_THRESHOLD
+            || pending.total_spool_bytes() >= crate::serve::state::FLUSH_SIZE_THRESHOLD
+        {
+            let flush_state = state.clone();
+            tokio::spawn(async move {
+                flush_kv_index(&flush_state).await;
+            });
+        }
+    }
+
+    log::debug!("KV PUT {scoped_key}: queued ({blob_size} bytes, digest={blob_digest})");
     Ok((put_status, Body::empty()).into_response())
 }
 
-pub(crate) async fn get_or_head_kv_object(
+async fn resolve_download_url(
     state: &AppState,
-    namespace: KvNamespace,
-    key: &str,
+    cache_entry_id: &str,
+    blob: &BlobDescriptor,
+) -> Result<String, RegistryError> {
+    let download_urls = state
+        .api_client
+        .blob_download_urls(&state.workspace, cache_entry_id, std::slice::from_ref(blob))
+        .await
+        .map_err(|e| {
+            RegistryError::internal(format!("Failed to resolve blob download URL: {e}"))
+        })?;
+
+    if download_urls
+        .missing
+        .iter()
+        .any(|digest| digest == &blob.digest)
+    {
+        return Err(RegistryError::not_found(
+            "Cache object is missing blob data",
+        ));
+    }
+
+    download_urls
+        .download_urls
+        .iter()
+        .find(|item| item.digest == blob.digest)
+        .map(|item| item.url.clone())
+        .ok_or_else(|| RegistryError::internal("Missing blob download URL in API response"))
+}
+
+async fn serve_backend_blob(
+    state: &AppState,
+    cache_entry_id: &str,
+    blob: &BlobDescriptor,
+    cached_url: Option<&str>,
     is_head: bool,
 ) -> Result<Response, RegistryError> {
-    let scoped_key = namespace.scoped_key(key);
-    let tag = namespace.root_tag(state);
-    let hit = resolve_hit(state, &tag).await?;
-    let pointer = fetch_pointer(state, &hit).await?;
-    let cache_entry_id = hit
-        .cache_entry_id
-        .ok_or_else(|| RegistryError::internal("Cache hit is missing cache_entry_id"))?;
-    let blob = select_blob_for_key(&pointer, &scoped_key)?
-        .ok_or_else(|| RegistryError::not_found("Cache key not found"))?;
-
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         CONTENT_TYPE,
@@ -202,45 +165,43 @@ pub(crate) async fn get_or_head_kv_object(
         return Ok((StatusCode::OK, response_headers, Body::empty()).into_response());
     }
 
-    let download_urls = state
-        .api_client
-        .blob_download_urls(
-            &state.workspace,
-            &cache_entry_id,
-            &[BlobDescriptor {
-                digest: blob.digest.clone(),
-                size_bytes: blob.size_bytes,
-            }],
+    let (download_url, from_cache) = if let Some(url) = cached_url {
+        (url.to_string(), true)
+    } else {
+        (
+            resolve_download_url(state, cache_entry_id, blob).await?,
+            false,
         )
-        .await
-        .map_err(|e| {
-            RegistryError::internal(format!("Failed to resolve blob download URL: {e}"))
-        })?;
+    };
 
-    if download_urls
-        .missing
-        .iter()
-        .any(|digest| digest == &blob.digest)
-    {
-        return Err(RegistryError::not_found(
-            "Cache object is missing blob data",
-        ));
-    }
-
-    let download_url = download_urls
-        .download_urls
-        .iter()
-        .find(|item| item.digest == blob.digest)
-        .map(|item| item.url.clone())
-        .ok_or_else(|| RegistryError::internal("Missing blob download URL in API response"))?;
-
-    let download_response = state
+    let download_result = state
         .api_client
         .transfer_client()
-        .get(download_url)
+        .get(&download_url)
         .send()
         .await
-        .map_err(|e| RegistryError::internal(format!("Failed to download blob bytes: {e}")))?
+        .map_err(|e| RegistryError::internal(format!("Failed to download blob bytes: {e}")))?;
+
+    if from_cache && download_result.status() == StatusCode::FORBIDDEN {
+        {
+            let mut published = state.kv_published_index.write().await;
+            published.invalidate_download_url(&blob.digest);
+        }
+        let fresh_url = resolve_download_url(state, cache_entry_id, blob).await?;
+        let retry_response = state
+            .api_client
+            .transfer_client()
+            .get(&fresh_url)
+            .send()
+            .await
+            .map_err(|e| RegistryError::internal(format!("Failed to download blob bytes: {e}")))?
+            .error_for_status()
+            .map_err(|e| RegistryError::internal(format!("Blob storage returned an error: {e}")))?;
+        let body = Body::from_stream(retry_response.bytes_stream());
+        return Ok((StatusCode::OK, response_headers, body).into_response());
+    }
+
+    let download_response = download_result
         .error_for_status()
         .map_err(|e| RegistryError::internal(format!("Blob storage returned an error: {e}")))?;
     let body = Body::from_stream(download_response.bytes_stream());
@@ -248,20 +209,154 @@ pub(crate) async fn get_or_head_kv_object(
     Ok((StatusCode::OK, response_headers, body).into_response())
 }
 
-pub(crate) async fn load_kv_blob_map(
+pub(crate) async fn get_or_head_kv_object(
     state: &AppState,
     namespace: KvNamespace,
-) -> Result<HashMap<String, BlobDescriptor>, RegistryError> {
-    let tag = namespace.root_tag(state);
+    key: &str,
+    is_head: bool,
+) -> Result<Response, RegistryError> {
+    let scoped_key = namespace.scoped_key(key);
+
+    let local = {
+        let pending = state.kv_pending.read().await;
+        pending.get(&scoped_key).and_then(|blob| {
+            pending
+                .blob_path(&blob.digest)
+                .map(|path| (blob.clone(), path.clone()))
+        })
+    };
+
+    if let Some((blob, path)) = local {
+        match serve_local_blob(&blob, &path, is_head).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                log::warn!("KV local blob read failed, falling back to backend: {e:?}");
+            }
+        }
+    }
+
+    {
+        let published = state.kv_published_index.read().await;
+        if let Some((blob, cache_entry_id)) = published.get(&scoped_key) {
+            let blob = blob.clone();
+            let cache_entry_id = cache_entry_id.to_string();
+            let cached_url = published.download_url(&blob.digest).map(|s| s.to_string());
+            drop(published);
+            return serve_backend_blob(
+                state,
+                &cache_entry_id,
+                &blob,
+                cached_url.as_deref(),
+                is_head,
+            )
+            .await;
+        }
+    }
+
+    let tag = state.registry_root_tag.trim().to_string();
     let hit = resolve_hit(state, &tag).await?;
     let pointer = fetch_pointer(state, &hit).await?;
-    pointer_entries_to_blob_map(&pointer)
+    let cache_entry_id = hit
+        .cache_entry_id
+        .ok_or_else(|| RegistryError::internal("Cache hit is missing cache_entry_id"))?;
+    let blob = select_blob_for_key(&pointer, &scoped_key)?
+        .ok_or_else(|| RegistryError::not_found("Cache key not found"))?;
+
+    serve_backend_blob(state, &cache_entry_id, &blob, None, is_head).await
+}
+
+async fn serve_local_blob(
+    blob: &BlobDescriptor,
+    path: &PathBuf,
+    is_head: bool,
+) -> Result<Response, RegistryError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_TYPE,
+        "application/octet-stream"
+            .parse()
+            .map_err(|e| RegistryError::internal(format!("Invalid content-type header: {e}")))?,
+    );
+    headers.insert(
+        CONTENT_LENGTH,
+        blob.size_bytes
+            .to_string()
+            .parse()
+            .map_err(|e| RegistryError::internal(format!("Invalid content-length header: {e}")))?,
+    );
+
+    if is_head {
+        return Ok((StatusCode::OK, headers, Body::empty()).into_response());
+    }
+
+    let data = tokio::fs::read(path)
+        .await
+        .map_err(|e| RegistryError::internal(format!("Failed to read local blob: {e}")))?;
+
+    Ok((StatusCode::OK, headers, Body::from(data)).into_response())
+}
+
+pub(crate) async fn resolve_kv_entries(
+    state: &AppState,
+    namespace: KvNamespace,
+    keys: &[&str],
+) -> Result<HashMap<String, u64>, RegistryError> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut sizes = HashMap::new();
+    let scoped_keys: Vec<String> = keys.iter().map(|k| namespace.scoped_key(k)).collect();
+
+    {
+        let pending = state.kv_pending.read().await;
+        for scoped in &scoped_keys {
+            if let Some(blob) = pending.get(scoped) {
+                sizes.insert(scoped.clone(), blob.size_bytes);
+            }
+        }
+    }
+
+    if sizes.len() == scoped_keys.len() {
+        return Ok(sizes);
+    }
+
+    {
+        let published = state.kv_published_index.read().await;
+        for scoped in &scoped_keys {
+            if !sizes.contains_key(scoped) {
+                if let Some((blob, _)) = published.get(scoped) {
+                    sizes.insert(scoped.clone(), blob.size_bytes);
+                }
+            }
+        }
+    }
+
+    if sizes.len() == scoped_keys.len() {
+        return Ok(sizes);
+    }
+
+    let tag = state.registry_root_tag.trim().to_string();
+    if let Ok(hit) = resolve_hit(state, &tag).await {
+        if let Ok(pointer) = fetch_pointer(state, &hit).await {
+            for entry in &pointer.entries {
+                if !matches!(entry.entry_type, EntryType::File) {
+                    continue;
+                }
+                if scoped_keys.contains(&entry.path) && !sizes.contains_key(&entry.path) {
+                    sizes.insert(entry.path.clone(), entry.size_bytes);
+                }
+            }
+        }
+    }
+
+    Ok(sizes)
 }
 
 pub(crate) async fn resolve_hit(
     state: &AppState,
     tag: &str,
-) -> Result<crate::api::models::cache::CacheResolutionEntry, RegistryError> {
+) -> Result<CacheResolutionEntry, RegistryError> {
     let response = state
         .api_client
         .restore(&state.workspace, &[tag.to_string()])
@@ -272,21 +367,6 @@ pub(crate) async fn resolve_hit(
         .into_iter()
         .find(|entry| entry.status == "hit")
         .ok_or_else(|| RegistryError::not_found("Cache key not found"))
-}
-
-async fn load_index_entries(
-    state: &AppState,
-    tag: &str,
-) -> Result<BTreeMap<String, BlobDescriptor>, RegistryError> {
-    let hit = match resolve_hit(state, tag).await {
-        Ok(hit) => hit,
-        Err(error) if error.status == StatusCode::NOT_FOUND => return Ok(BTreeMap::new()),
-        Err(error) => return Err(error),
-    };
-
-    let pointer = fetch_pointer(state, &hit).await?;
-    let map = pointer_entries_to_blob_map(&pointer)?;
-    Ok(map.into_iter().collect())
 }
 
 async fn fetch_pointer(
@@ -317,31 +397,6 @@ async fn fetch_pointer(
 
     crate::cas_file::parse_pointer(&pointer_bytes)
         .map_err(|e| RegistryError::internal(format!("Invalid file CAS pointer: {e}")))
-}
-
-fn pointer_entries_to_blob_map(
-    pointer: &crate::cas_file::FilePointer,
-) -> Result<HashMap<String, BlobDescriptor>, RegistryError> {
-    let mut map = HashMap::with_capacity(pointer.entries.len());
-    for entry in &pointer.entries {
-        if !matches!(entry.entry_type, EntryType::File) {
-            continue;
-        }
-        let digest = entry.digest.clone().ok_or_else(|| {
-            RegistryError::internal(format!(
-                "Cache pointer entry is missing digest: {}",
-                entry.path
-            ))
-        })?;
-        map.insert(
-            entry.path.clone(),
-            BlobDescriptor {
-                digest,
-                size_bytes: entry.size_bytes,
-            },
-        );
-    }
-    Ok(map)
 }
 
 fn select_blob_for_key(
@@ -428,25 +483,257 @@ fn build_index_pointer(
     Ok((pointer_bytes, blobs))
 }
 
-async fn upload_blobs_if_missing(
+pub(crate) async fn flush_kv_index(state: &AppState) {
+    let _guard = state.kv_flush_lock.lock().await;
+
+    let (pending_entries, pending_blob_paths) = {
+        let mut pending = state.kv_pending.write().await;
+        if pending.is_empty() {
+            return;
+        }
+        pending.take_all()
+    };
+
+    if pending_entries.is_empty() {
+        return;
+    }
+
+    let entry_count = pending_entries.len();
+
+    match do_flush(state, &pending_entries, &pending_blob_paths).await {
+        Ok((merged_entries, cache_entry_id)) => {
+            for path in pending_blob_paths.values() {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+
+            {
+                let mut published = state.kv_published_index.write().await;
+                published.update(merged_entries.into_iter().collect(), cache_entry_id.clone());
+            }
+
+            {
+                let mut last_put = state.kv_last_put.write().await;
+                *last_put = None;
+            }
+
+            eprintln!(
+                "KV batch: flushed {entry_count} new entries ({} blobs cleaned up)",
+                pending_blob_paths.len()
+            );
+
+            preload_download_urls(state, &cache_entry_id).await;
+        }
+        Err(msg) => {
+            log::warn!("KV batch flush: {msg}");
+            let mut pending = state.kv_pending.write().await;
+            pending.restore(pending_entries, pending_blob_paths);
+        }
+    }
+}
+
+pub(crate) async fn preload_kv_index(state: &AppState) {
+    let tag = state.registry_root_tag.trim().to_string();
+    match load_existing_index(state, &tag).await {
+        Ok((entries, Some(cache_entry_id))) if !entries.is_empty() => {
+            let count = entries.len();
+            {
+                let mut published = state.kv_published_index.write().await;
+                if published.entry_count() > 0 {
+                    eprintln!("KV index preload: skipped, flush already published");
+                    return;
+                }
+                published.update(entries.into_iter().collect(), cache_entry_id.clone());
+            }
+            eprintln!("KV index preloaded: {count} entries, resolving download URLs...");
+            preload_download_urls(state, &cache_entry_id).await;
+        }
+        Ok(_) => {
+            eprintln!("KV index preload: no existing entries");
+        }
+        Err(e) => {
+            log::warn!("KV index preload failed: {e:?}");
+        }
+    }
+}
+
+async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
+    let blobs = {
+        let published = state.kv_published_index.read().await;
+        published.unique_blobs()
+    };
+
+    if blobs.is_empty() {
+        return;
+    }
+
+    match state
+        .api_client
+        .blob_download_urls(&state.workspace, cache_entry_id, &blobs)
+        .await
+    {
+        Ok(response) => {
+            let urls: HashMap<String, String> = response
+                .download_urls
+                .into_iter()
+                .map(|u| (u.digest, u.url))
+                .collect();
+            let url_count = urls.len();
+            let mut published = state.kv_published_index.write().await;
+            published.set_download_urls(urls);
+            eprintln!("KV index preload: resolved {url_count} download URLs");
+        }
+        Err(e) => {
+            log::warn!("KV index preload: failed to resolve download URLs: {e}");
+        }
+    }
+}
+
+async fn do_flush(
+    state: &AppState,
+    pending_entries: &BTreeMap<String, BlobDescriptor>,
+    pending_blob_paths: &HashMap<String, PathBuf>,
+) -> Result<(BTreeMap<String, BlobDescriptor>, String), String> {
+    let tag = state.registry_root_tag.trim().to_string();
+
+    let existing_count;
+    let mut entries = match load_existing_index(state, &tag).await {
+        Ok((existing, _)) => {
+            existing_count = existing.len();
+            existing
+        }
+        Err(e) => {
+            log::warn!("KV flush: failed to load existing index: {e:?}");
+            existing_count = 0;
+            BTreeMap::new()
+        }
+    };
+    entries.extend(pending_entries.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let total_count = entries.len();
+    eprintln!(
+        "KV flush: merging {existing_count} existing + {} pending = {total_count} total entries",
+        pending_entries.len()
+    );
+
+    let (pointer_bytes, blobs) =
+        build_index_pointer(&entries).map_err(|e| format!("build pointer failed: {e:?}"))?;
+
+    let manifest_root_digest = crate::cas_file::prefixed_sha256_digest(&pointer_bytes);
+    let expected_manifest_size = pointer_bytes.len() as u64;
+    let blob_count = blobs.len() as u64;
+    let blob_total_size_bytes: u64 = blobs.iter().map(|b| b.size_bytes).sum();
+    let file_count = entries.len().min(u32::MAX as usize) as u32;
+
+    let request = SaveRequest {
+        tag: tag.clone(),
+        manifest_root_digest: manifest_root_digest.clone(),
+        compression_algorithm: "zstd".to_string(),
+        storage_mode: Some("cas".to_string()),
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        cas_layout: Some("file-v1".to_string()),
+        manifest_format_version: Some(1),
+        total_size_bytes: blob_total_size_bytes,
+        uncompressed_size: None,
+        compressed_size: None,
+        file_count: Some(file_count),
+        expected_manifest_digest: Some(manifest_root_digest.clone()),
+        expected_manifest_size: Some(expected_manifest_size),
+        force: None,
+        use_multipart: None,
+        ci_provider: None,
+        encrypted: None,
+        encryption_algorithm: None,
+        encryption_recipient_hint: None,
+    };
+
+    let save_response = state
+        .api_client
+        .save_entry(&state.workspace, &request)
+        .await
+        .map_err(|e| format!("save_entry failed: {e}"))?;
+
+    if save_response.exists {
+        eprintln!("KV flush: save_entry returned exists=true ({total_count} entries, {blob_count} blobs, digest={manifest_root_digest})");
+        return Ok((entries, save_response.cache_entry_id));
+    }
+    eprintln!("KV flush: uploading {total_count} entries, {blob_count} blobs, pointer={expected_manifest_size} bytes");
+
+    if !blobs.is_empty() {
+        upload_blobs(
+            state,
+            &save_response.cache_entry_id,
+            &blobs,
+            pending_blob_paths,
+        )
+        .await
+        .map_err(|e| format!("blob upload failed: {e:?}"))?;
+    }
+
+    let manifest_upload_url = save_response
+        .manifest_upload_url
+        .as_ref()
+        .ok_or("missing manifest upload URL")?;
+
+    upload_payload(
+        state.api_client.transfer_client(),
+        manifest_upload_url,
+        &pointer_bytes,
+        "application/cbor",
+        &save_response.upload_headers,
+    )
+    .await
+    .map_err(|e| format!("manifest upload failed: {e}"))?;
+
+    let confirm_request = ConfirmRequest {
+        manifest_digest: manifest_root_digest,
+        manifest_size: expected_manifest_size,
+        manifest_etag: None,
+        archive_size: None,
+        archive_etag: None,
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        file_count: Some(file_count),
+        uncompressed_size: None,
+        compressed_size: None,
+        tag: Some(tag),
+    };
+
+    state
+        .api_client
+        .confirm(
+            &state.workspace,
+            &save_response.cache_entry_id,
+            &confirm_request,
+        )
+        .await
+        .map_err(|e| format!("confirm failed: {e}"))?;
+
+    Ok((entries, save_response.cache_entry_id))
+}
+
+async fn upload_blobs(
     state: &AppState,
     cache_entry_id: &str,
     blobs: &[BlobDescriptor],
-    local_blob_paths: &HashMap<String, std::path::PathBuf>,
+    local_blob_paths: &HashMap<String, PathBuf>,
 ) -> Result<(), RegistryError> {
     let upload_plan = state
         .api_client
         .blob_upload_urls(&state.workspace, cache_entry_id, blobs)
         .await
-        .map_err(|e| RegistryError::internal(format!("Failed to request blob upload URL: {e}")))?;
+        .map_err(|e| RegistryError::internal(format!("Failed to get blob upload URLs: {e}")))?;
 
     for upload in &upload_plan.upload_urls {
-        let blob_path = local_blob_paths.get(&upload.digest).ok_or_else(|| {
-            RegistryError::internal(format!(
-                "Missing local blob bytes required for digest {} while updating index",
-                upload.digest
-            ))
-        })?;
+        let blob_path = match local_blob_paths.get(&upload.digest) {
+            Some(path) => path,
+            None => {
+                log::warn!(
+                    "KV batch flush: skipping blob {} (no local file)",
+                    upload.digest
+                );
+                continue;
+            }
+        };
         let progress = TransferProgress::new_noop();
         crate::multipart_upload::upload_via_single_url(
             blob_path.as_path(),
@@ -462,21 +749,46 @@ async fn upload_blobs_if_missing(
     Ok(())
 }
 
-async fn write_body_to_temp_file(
-    body: Body,
-) -> Result<(tempfile::TempPath, u64, String), RegistryError> {
-    let temp_file = tempfile::Builder::new()
-        .prefix("boringcache-registry-blob-")
-        .tempfile()
-        .map_err(|e| RegistryError::internal(format!("Failed to allocate temp file: {e}")))?;
-    let temp_path = temp_file.into_temp_path();
+async fn load_existing_index(
+    state: &AppState,
+    tag: &str,
+) -> Result<(BTreeMap<String, BlobDescriptor>, Option<String>), RegistryError> {
+    let hit = match resolve_hit(state, tag).await {
+        Ok(hit) => hit,
+        Err(error) if error.status == StatusCode::NOT_FOUND => return Ok((BTreeMap::new(), None)),
+        Err(error) => return Err(error),
+    };
 
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(&temp_path)
+    let cache_entry_id = hit.cache_entry_id.clone();
+    let pointer = fetch_pointer(state, &hit).await?;
+    let mut map = BTreeMap::new();
+    for entry in &pointer.entries {
+        if !matches!(entry.entry_type, EntryType::File) {
+            continue;
+        }
+        if let Some(digest) = &entry.digest {
+            map.insert(
+                entry.path.clone(),
+                BlobDescriptor {
+                    digest: digest.clone(),
+                    size_bytes: entry.size_bytes,
+                },
+            );
+        }
+    }
+    Ok((map, cache_entry_id))
+}
+
+async fn write_body_to_temp_file(body: Body) -> Result<(PathBuf, u64, String), RegistryError> {
+    let temp_dir = std::env::temp_dir().join("boringcache-kv-blobs");
+    tokio::fs::create_dir_all(&temp_dir)
         .await
-        .map_err(|e| RegistryError::internal(format!("Failed to open temp file: {e}")))?;
+        .map_err(|e| RegistryError::internal(format!("Failed to create temp dir: {e}")))?;
+    let path = temp_dir.join(uuid::Uuid::new_v4().to_string());
+
+    let mut file = tokio::fs::File::create(&path)
+        .await
+        .map_err(|e| RegistryError::internal(format!("Failed to create temp file: {e}")))?;
 
     let mut stream = body.into_data_stream();
     let mut total_size = 0u64;
@@ -500,5 +812,5 @@ async fn write_body_to_temp_file(
         .map_err(|e| RegistryError::internal(format!("Failed to flush temp file: {e}")))?;
 
     let digest = format!("sha256:{:x}", hasher.finalize());
-    Ok((temp_path, total_size, digest))
+    Ok((path, total_size, digest))
 }

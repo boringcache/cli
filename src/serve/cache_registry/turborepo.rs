@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use crate::serve::state::AppState;
 
 use super::error::RegistryError;
-use super::kv::{get_or_head_kv_object, load_kv_blob_map, put_kv_object, KvNamespace};
+use super::kv::{get_or_head_kv_object, put_kv_object, resolve_kv_entries, KvNamespace};
 
 pub(crate) fn handle_status(
     method: Method,
@@ -129,19 +129,27 @@ async fn handle_query_artifacts_body(
         .map_err(|e| RegistryError::bad_request(format!("Invalid query request body: {e}")))?;
     let request: TurborepoQueryRequest = serde_json::from_slice(&bytes)
         .map_err(|e| RegistryError::bad_request(format!("Invalid query request payload: {e}")))?;
-    let mut response: BTreeMap<String, Option<TurborepoArtifactInfo>> = BTreeMap::new();
-    let blobs_by_key = match load_kv_blob_map(state, KvNamespace::Turborepo).await {
+
+    let valid_hashes: Vec<&str> = request
+        .hashes
+        .iter()
+        .filter(|h| !h.is_empty())
+        .map(|h| h.as_str())
+        .collect();
+
+    let sizes = match resolve_kv_entries(state, KvNamespace::Turborepo, &valid_hashes).await {
         Ok(map) => map,
         Err(error) if error.status == StatusCode::NOT_FOUND => Default::default(),
         Err(error) => return Err(error),
     };
 
+    let mut response: BTreeMap<String, Option<TurborepoArtifactInfo>> = BTreeMap::new();
     for hash in request.hashes {
         if hash.is_empty() {
             continue;
         }
         let scoped_key = KvNamespace::Turborepo.scoped_key(&hash);
-        let size = blobs_by_key.get(&scoped_key).map(|blob| blob.size_bytes);
+        let size = sizes.get(&scoped_key).copied();
         response.insert(
             hash,
             size.map(|size| TurborepoArtifactInfo {

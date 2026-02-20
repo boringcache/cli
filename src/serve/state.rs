@@ -1,11 +1,12 @@
 use crate::api::client::ApiClient;
+use crate::api::models::cache::BlobDescriptor;
 use crate::cas_oci::sha256_hex;
 use crate::tag_utils::TagResolver;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -16,6 +17,10 @@ pub struct AppState {
     pub registry_root_tag: String,
     pub blob_locator: Arc<RwLock<BlobLocatorCache>>,
     pub upload_sessions: Arc<RwLock<UploadSessionStore>>,
+    pub kv_pending: Arc<RwLock<KvPendingStore>>,
+    pub kv_flush_lock: Arc<Mutex<()>>,
+    pub kv_last_put: Arc<RwLock<Option<Instant>>>,
+    pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +105,212 @@ impl UploadSessionStore {
             .values()
             .filter(|s| s.finalized_digest.as_deref() == Some(digest))
             .max_by_key(|s| s.finalized_size.unwrap_or(s.bytes_received))
+    }
+}
+
+pub const MAX_SPOOL_BYTES: u64 = 512 * 1024 * 1024;
+pub const FLUSH_BLOB_THRESHOLD: usize = 500;
+pub const FLUSH_SIZE_THRESHOLD: u64 = 256 * 1024 * 1024;
+
+#[derive(Default)]
+pub struct KvPendingStore {
+    entries: BTreeMap<String, BlobDescriptor>,
+    blob_refs: HashMap<String, BlobRef>,
+    total_spool_bytes: u64,
+}
+
+struct BlobRef {
+    path: PathBuf,
+    size_bytes: u64,
+    refcount: u32,
+}
+
+impl KvPendingStore {
+    pub fn insert(
+        &mut self,
+        scoped_key: String,
+        blob: BlobDescriptor,
+        temp_path: PathBuf,
+    ) -> Option<PathBuf> {
+        if let Some(old) = self.entries.get(&scoped_key) {
+            if old.digest != blob.digest {
+                self.dec_ref(&old.digest.clone());
+            }
+        }
+
+        let redundant_path = match self.blob_refs.get_mut(&blob.digest) {
+            Some(existing) => {
+                existing.refcount += 1;
+                Some(temp_path)
+            }
+            None => {
+                if self.total_spool_bytes + blob.size_bytes > MAX_SPOOL_BYTES {
+                    log::warn!(
+                        "KV spool budget exceeded ({} + {} > {}), dropping oldest",
+                        self.total_spool_bytes,
+                        blob.size_bytes,
+                        MAX_SPOOL_BYTES
+                    );
+                }
+                self.total_spool_bytes += blob.size_bytes;
+                self.blob_refs.insert(
+                    blob.digest.clone(),
+                    BlobRef {
+                        path: temp_path,
+                        size_bytes: blob.size_bytes,
+                        refcount: 1,
+                    },
+                );
+                None
+            }
+        };
+
+        self.entries.insert(scoped_key, blob);
+        redundant_path
+    }
+
+    fn dec_ref(&mut self, digest: &str) -> Option<PathBuf> {
+        let remove = match self.blob_refs.get_mut(digest) {
+            Some(bref) => {
+                bref.refcount = bref.refcount.saturating_sub(1);
+                bref.refcount == 0
+            }
+            None => false,
+        };
+        if remove {
+            if let Some(bref) = self.blob_refs.remove(digest) {
+                self.total_spool_bytes = self.total_spool_bytes.saturating_sub(bref.size_bytes);
+                return Some(bref.path);
+            }
+        }
+        None
+    }
+
+    pub fn get(&self, scoped_key: &str) -> Option<&BlobDescriptor> {
+        self.entries.get(scoped_key)
+    }
+
+    pub fn blob_path(&self, digest: &str) -> Option<&PathBuf> {
+        self.blob_refs.get(digest).map(|b| &b.path)
+    }
+
+    pub fn take_all(&mut self) -> (BTreeMap<String, BlobDescriptor>, HashMap<String, PathBuf>) {
+        let entries = std::mem::take(&mut self.entries);
+        let blob_paths: HashMap<String, PathBuf> = self
+            .blob_refs
+            .drain()
+            .map(|(digest, bref)| (digest, bref.path))
+            .collect();
+        self.total_spool_bytes = 0;
+        (entries, blob_paths)
+    }
+
+    pub fn restore(
+        &mut self,
+        entries: BTreeMap<String, BlobDescriptor>,
+        blob_paths: HashMap<String, PathBuf>,
+    ) {
+        for (key, blob) in &entries {
+            self.entries.entry(key.clone()).or_insert(blob.clone());
+        }
+        for (digest, path) in blob_paths {
+            self.blob_refs.entry(digest.clone()).or_insert_with(|| {
+                let size = entries
+                    .values()
+                    .find(|b| b.digest == digest)
+                    .map(|b| b.size_bytes)
+                    .unwrap_or(0);
+                self.total_spool_bytes += size;
+                BlobRef {
+                    path,
+                    size_bytes: size,
+                    refcount: 1,
+                }
+            });
+        }
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn blob_count(&self) -> usize {
+        self.blob_refs.len()
+    }
+
+    pub fn total_spool_bytes(&self) -> u64 {
+        self.total_spool_bytes
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+pub const DOWNLOAD_URL_TTL: std::time::Duration = std::time::Duration::from_secs(45 * 60);
+
+struct CachedUrl {
+    url: String,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+pub struct KvPublishedIndex {
+    entries: HashMap<String, BlobDescriptor>,
+    cache_entry_id: Option<String>,
+    download_urls: HashMap<String, CachedUrl>,
+}
+
+impl KvPublishedIndex {
+    pub fn update(&mut self, entries: HashMap<String, BlobDescriptor>, cache_entry_id: String) {
+        self.entries = entries;
+        self.cache_entry_id = Some(cache_entry_id);
+        self.download_urls.clear();
+    }
+
+    pub fn set_download_urls(&mut self, urls: HashMap<String, String>) {
+        let expires_at = Instant::now() + DOWNLOAD_URL_TTL;
+        self.download_urls = urls
+            .into_iter()
+            .map(|(digest, url)| (digest, CachedUrl { url, expires_at }))
+            .collect();
+    }
+
+    pub fn invalidate_download_url(&mut self, digest: &str) {
+        self.download_urls.remove(digest);
+    }
+
+    pub fn get(&self, scoped_key: &str) -> Option<(&BlobDescriptor, &str)> {
+        let blob = self.entries.get(scoped_key)?;
+        let cache_entry_id = self.cache_entry_id.as_deref()?;
+        Some((blob, cache_entry_id))
+    }
+
+    pub fn download_url(&self, digest: &str) -> Option<&str> {
+        let cached = self.download_urls.get(digest)?;
+        if Instant::now() >= cached.expires_at {
+            return None;
+        }
+        Some(&cached.url)
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn unique_blobs(&self) -> Vec<BlobDescriptor> {
+        let mut seen = HashMap::new();
+        for blob in self.entries.values() {
+            seen.entry(blob.digest.clone()).or_insert(BlobDescriptor {
+                digest: blob.digest.clone(),
+                size_bytes: blob.size_bytes,
+            });
+        }
+        seen.into_values().collect()
+    }
+
+    pub fn cache_entry_id(&self) -> Option<&str> {
+        self.cache_entry_id.as_deref()
     }
 }
 
