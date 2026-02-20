@@ -16,6 +16,7 @@ mod turborepo;
 pub use error::RegistryError;
 pub(crate) use kv::flush_kv_index;
 pub(crate) use kv::preload_kv_index;
+pub(crate) use kv::FlushResult;
 
 pub async fn dispatch_root(
     method: Method,

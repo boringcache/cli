@@ -87,6 +87,7 @@ pub async fn run_server(
     let flush_state = state.clone();
     tokio::spawn(async move {
         use crate::serve::state::{FLUSH_BLOB_THRESHOLD, FLUSH_SIZE_THRESHOLD};
+        use rand::Rng;
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         interval.tick().await;
         let mut consecutive_failures: u32 = 0;
@@ -94,10 +95,18 @@ pub async fn run_server(
             interval.tick().await;
 
             if consecutive_failures > 0 {
-                let backoff_ticks = 1u32 << consecutive_failures.min(5);
-                for _ in 0..backoff_ticks {
-                    interval.tick().await;
-                }
+                let base_secs: u64 = match consecutive_failures {
+                    1 => 2,
+                    2 => 5,
+                    3 => 15,
+                    4 => 30,
+                    _ => 60,
+                };
+                let jitter_ms: u64 = rand::thread_rng().gen_range(0..3000);
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    base_secs * 1000 + jitter_ms,
+                ))
+                .await;
             }
 
             let should_flush = {
@@ -117,10 +126,14 @@ pub async fn run_server(
             };
 
             if should_flush {
-                if cache_registry::flush_kv_index(&flush_state).await {
-                    consecutive_failures = 0;
-                } else {
-                    consecutive_failures += 1;
+                match cache_registry::flush_kv_index(&flush_state).await {
+                    cache_registry::FlushResult::Ok => consecutive_failures = 0,
+                    cache_registry::FlushResult::Conflict => {
+                        consecutive_failures = consecutive_failures.saturating_add(1).min(2);
+                    }
+                    cache_registry::FlushResult::Error => {
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                    }
                 }
             }
         }

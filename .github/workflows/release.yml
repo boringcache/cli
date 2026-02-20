@@ -204,7 +204,7 @@ jobs:
                   sccache --version
 
                   SCCACHE_PORT=4227
-                  boringcache cache-registry ${{ github.repository }} "sccache,rust-${{ env.RUST_VERSION }}-sccache" \
+                  boringcache cache-registry ${{ github.repository }} "rust-${{ env.RUST_VERSION }}-sccache-${{ matrix.name }}" \
                     --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
                   PROXY_PID=$!
                   for _ in $(seq 1 30); do

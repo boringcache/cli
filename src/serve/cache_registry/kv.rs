@@ -483,19 +483,25 @@ fn build_index_pointer(
     Ok((pointer_bytes, blobs))
 }
 
-pub(crate) async fn flush_kv_index(state: &AppState) -> bool {
+pub(crate) enum FlushResult {
+    Ok,
+    Conflict,
+    Error,
+}
+
+pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
     let _guard = state.kv_flush_lock.lock().await;
 
     let (pending_entries, pending_blob_paths) = {
         let mut pending = state.kv_pending.write().await;
         if pending.is_empty() {
-            return true;
+            return FlushResult::Ok;
         }
         pending.take_all()
     };
 
     if pending_entries.is_empty() {
-        return true;
+        return FlushResult::Ok;
     }
 
     let entry_count = pending_entries.len();
@@ -522,13 +528,22 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> bool {
             );
 
             preload_download_urls(state, &cache_entry_id).await;
-            true
+            FlushResult::Ok
         }
         Err(msg) => {
-            eprintln!("KV batch flush failed: {msg}");
+            let is_conflict = msg.contains("CacheConflict") || msg.contains("Concurrent");
+            if is_conflict {
+                eprintln!("KV batch flush: tag lease conflict, will retry");
+            } else {
+                eprintln!("KV batch flush failed: {msg}");
+            }
             let mut pending = state.kv_pending.write().await;
             pending.restore(pending_entries, pending_blob_paths);
-            false
+            if is_conflict {
+                FlushResult::Conflict
+            } else {
+                FlushResult::Error
+            }
         }
     }
 }
