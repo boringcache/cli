@@ -30,6 +30,7 @@ jobs:
         with:
           workspace: ${{ env.WORKSPACE }}
           rust-version: "1.89"
+          cache-tag: "rust-1.89-e2e-registry"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "false"
@@ -259,6 +260,7 @@ jobs:
         with:
           workspace: ${{ env.WORKSPACE }}
           rust-version: "1.89"
+          cache-tag: "rust-1.89-e2e-adapter"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "false"

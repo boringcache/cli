@@ -245,6 +245,7 @@ jobs:
         with:
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
+          cache-tag: "rust-${{ env.RUST_VERSION }}-release-build-${{ matrix.name }}"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "false"
@@ -255,6 +256,7 @@ jobs:
         with:
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
+          cache-tag: "rust-${{ env.RUST_VERSION }}-release-build-${{ matrix.name }}"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "false"
@@ -621,6 +623,7 @@ jobs:
         with:
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
+          cache-tag: "rust-${{ env.RUST_VERSION }}-release-test"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "false"
@@ -631,6 +634,7 @@ jobs:
         with:
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
+          cache-tag: "rust-${{ env.RUST_VERSION }}-release-test"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "false"
