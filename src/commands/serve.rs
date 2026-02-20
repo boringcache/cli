@@ -17,6 +17,10 @@ pub async fn execute(
         "Workspace must be in org/project format"
     );
 
+    if std::env::var("BORINGCACHE_TEST_MODE").as_deref() == Ok("1") {
+        return Ok(());
+    }
+
     let api_client = ApiClient::new()?;
     let platform = if no_platform {
         None
