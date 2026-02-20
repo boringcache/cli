@@ -247,6 +247,7 @@ jobs:
           rust-version: ${{ env.RUST_VERSION }}
           sccache: "true"
           sccache-mode: "proxy"
+          cache-target: "false"
 
       - name: Setup Rust (Native Fallback)
         if: matrix.use_docker != true && steps.boringcache-rust-native.outcome == 'failure'
@@ -256,6 +257,7 @@ jobs:
           rust-version: ${{ env.RUST_VERSION }}
           sccache: "true"
           sccache-mode: "proxy"
+          cache-target: "false"
 
       - name: Install Rust target (Native builds)
         if: matrix.use_docker != true
@@ -621,6 +623,7 @@ jobs:
           rust-version: ${{ env.RUST_VERSION }}
           sccache: "true"
           sccache-mode: "proxy"
+          cache-target: "false"
 
       - name: Setup Rust (Fallback)
         if: steps.boringcache-rust.outcome == 'failure'
@@ -630,6 +633,7 @@ jobs:
           rust-version: ${{ env.RUST_VERSION }}
           sccache: "true"
           sccache-mode: "proxy"
+          cache-target: "false"
 
       - name: Install Rust components
         run: rustup component add clippy rustfmt

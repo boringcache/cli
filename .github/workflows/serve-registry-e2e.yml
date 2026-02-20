@@ -32,6 +32,7 @@ jobs:
           rust-version: "1.89"
           sccache: "true"
           sccache-mode: "proxy"
+          cache-target: "false"
 
       - name: Validate configuration
         run: |
@@ -260,6 +261,7 @@ jobs:
           rust-version: "1.89"
           sccache: "true"
           sccache-mode: "proxy"
+          cache-target: "false"
 
       - name: Validate configuration
         run: |
