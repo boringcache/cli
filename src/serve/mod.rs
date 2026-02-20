@@ -57,6 +57,11 @@ pub async fn run_server(
     eprintln!("  Turborepo: http://{host}:{port}/v8/artifacts/{{hash}}");
     eprintln!("  sccache WebDAV: http://{host}:{port}/<prefix>/a/b/c/<key>");
 
+    let spool_dir = std::env::temp_dir().join("boringcache-kv-blobs");
+    if spool_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&spool_dir).await;
+    }
+
     let preload_state = state.clone();
     tokio::spawn(async move {
         cache_registry::preload_kv_index(&preload_state).await;

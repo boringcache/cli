@@ -210,23 +210,45 @@ impl KvPendingStore {
         entries: BTreeMap<String, BlobDescriptor>,
         blob_paths: HashMap<String, PathBuf>,
     ) {
+        let mut restore_refcounts: HashMap<String, u32> = HashMap::new();
         for (key, blob) in &entries {
-            self.entries.entry(key.clone()).or_insert(blob.clone());
+            if let std::collections::btree_map::Entry::Vacant(e) = self.entries.entry(key.clone()) {
+                e.insert(blob.clone());
+                *restore_refcounts.entry(blob.digest.clone()).or_default() += 1;
+            }
         }
-        for (digest, path) in blob_paths {
-            self.blob_refs.entry(digest.clone()).or_insert_with(|| {
-                let size = entries
-                    .values()
-                    .find(|b| b.digest == digest)
-                    .map(|b| b.size_bytes)
-                    .unwrap_or(0);
-                self.total_spool_bytes += size;
-                BlobRef {
-                    path,
-                    size_bytes: size,
-                    refcount: 1,
+
+        for (digest, count) in &restore_refcounts {
+            if let Some(path) = blob_paths.get(digest) {
+                match self.blob_refs.get_mut(digest) {
+                    Some(existing) => {
+                        existing.refcount += count;
+                        let _ = std::fs::remove_file(path);
+                    }
+                    None => {
+                        let size = entries
+                            .values()
+                            .find(|b| &b.digest == digest)
+                            .map(|b| b.size_bytes)
+                            .unwrap_or(0);
+                        self.total_spool_bytes += size;
+                        self.blob_refs.insert(
+                            digest.clone(),
+                            BlobRef {
+                                path: path.clone(),
+                                size_bytes: size,
+                                refcount: *count,
+                            },
+                        );
+                    }
                 }
-            });
+            }
+        }
+
+        for (digest, path) in &blob_paths {
+            if !restore_refcounts.contains_key(digest) {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 
