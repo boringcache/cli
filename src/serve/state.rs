@@ -133,9 +133,10 @@ impl KvPendingStore {
         temp_path: PathBuf,
     ) -> Option<PathBuf> {
         if let Some(old) = self.entries.get(&scoped_key) {
-            if old.digest != blob.digest {
-                self.dec_ref(&old.digest.clone());
+            if old.digest == blob.digest {
+                return Some(temp_path);
             }
+            self.dec_ref(&old.digest.clone());
         }
 
         let redundant_path = match self.blob_refs.get_mut(&blob.digest) {

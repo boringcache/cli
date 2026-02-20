@@ -403,29 +403,12 @@ async fn get_blob(
         size_bytes,
     };
 
-    let download_url = if let Some(url) = cached_download_url {
-        url
+    let (download_url, from_cache) = if let Some(url) = cached_download_url {
+        (url, true)
     } else {
-        let download_response = state
-            .api_client
-            .blob_download_urls(&state.workspace, &cache_entry_id, &[blob_desc])
-            .await
-            .map_err(|e| OciError::internal(format!("Failed to get blob download URL: {e}")))?;
-
-        let download_url = download_response
-            .download_urls
-            .first()
-            .ok_or_else(|| OciError::blob_unknown(format!("No download URL for {digest}")))?
-            .url
-            .clone();
-        {
-            let mut locator = state.blob_locator.write().await;
-            if let Some(entry) = locator.get_mut(&name, &digest) {
-                entry.download_url = Some(download_url.clone());
-                entry.download_url_cached_at = Some(std::time::Instant::now());
-            }
-        }
-        download_url
+        let url =
+            resolve_oci_download_url(&state, &cache_entry_id, &blob_desc, &name, &digest).await?;
+        (url, false)
     };
 
     let mut headers = HeaderMap::new();
@@ -442,20 +425,75 @@ async fn get_blob(
         return Ok((StatusCode::OK, headers, Body::empty()).into_response());
     }
 
-    let response = state
+    let download_result = state
         .api_client
         .transfer_client()
         .get(&download_url)
         .send()
         .await
-        .map_err(|e| OciError::internal(format!("Failed to download blob: {e}")))?
+        .map_err(|e| OciError::internal(format!("Failed to download blob: {e}")))?;
+
+    if from_cache && download_result.status() == StatusCode::FORBIDDEN {
+        {
+            let mut locator = state.blob_locator.write().await;
+            if let Some(entry) = locator.get_mut(&name, &digest) {
+                entry.download_url = None;
+            }
+        }
+        let fresh_url =
+            resolve_oci_download_url(&state, &cache_entry_id, &blob_desc, &name, &digest).await?;
+        let retry_response = state
+            .api_client
+            .transfer_client()
+            .get(&fresh_url)
+            .send()
+            .await
+            .map_err(|e| OciError::internal(format!("Failed to download blob: {e}")))?
+            .error_for_status()
+            .map_err(|e| OciError::internal(format!("Blob storage returned error: {e}")))?;
+        let body = Body::from_stream(retry_response.bytes_stream());
+        return Ok((StatusCode::OK, headers, body).into_response());
+    }
+
+    let response = download_result
         .error_for_status()
         .map_err(|e| OciError::internal(format!("Blob storage returned error: {e}")))?;
-
-    let stream = response.bytes_stream();
-    let body = Body::from_stream(stream);
+    let body = Body::from_stream(response.bytes_stream());
 
     Ok((StatusCode::OK, headers, body).into_response())
+}
+
+async fn resolve_oci_download_url(
+    state: &AppState,
+    cache_entry_id: &str,
+    blob_desc: &BlobDescriptor,
+    name: &str,
+    digest: &str,
+) -> Result<String, OciError> {
+    let download_response = state
+        .api_client
+        .blob_download_urls(
+            &state.workspace,
+            cache_entry_id,
+            std::slice::from_ref(blob_desc),
+        )
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to get blob download URL: {e}")))?;
+
+    let url = download_response
+        .download_urls
+        .first()
+        .ok_or_else(|| OciError::blob_unknown(format!("No download URL for {digest}")))?
+        .url
+        .clone();
+    {
+        let mut locator = state.blob_locator.write().await;
+        if let Some(entry) = locator.get_mut(name, digest) {
+            entry.download_url = Some(url.clone());
+            entry.download_url_cached_at = Some(std::time::Instant::now());
+        }
+    }
+    Ok(url)
 }
 
 fn fresh_download_url(entry: &BlobLocatorEntry) -> Option<String> {

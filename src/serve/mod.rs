@@ -57,9 +57,11 @@ pub async fn run_server(
     eprintln!("  Turborepo: http://{host}:{port}/v8/artifacts/{{hash}}");
     eprintln!("  sccache WebDAV: http://{host}:{port}/<prefix>/a/b/c/<key>");
 
-    let spool_dir = std::env::temp_dir().join("boringcache-kv-blobs");
-    if spool_dir.exists() {
-        let _ = tokio::fs::remove_dir_all(&spool_dir).await;
+    for dir_name in ["boringcache-kv-blobs", "boringcache-uploads"] {
+        let stale_dir = std::env::temp_dir().join(dir_name);
+        if stale_dir.exists() {
+            let _ = tokio::fs::remove_dir_all(&stale_dir).await;
+        }
     }
 
     let preload_state = state.clone();
@@ -87,8 +89,16 @@ pub async fn run_server(
         use crate::serve::state::{FLUSH_BLOB_THRESHOLD, FLUSH_SIZE_THRESHOLD};
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         interval.tick().await;
+        let mut consecutive_failures: u32 = 0;
         loop {
             interval.tick().await;
+
+            if consecutive_failures > 0 {
+                let backoff_ticks = 1u32 << consecutive_failures.min(5);
+                for _ in 0..backoff_ticks {
+                    interval.tick().await;
+                }
+            }
 
             let should_flush = {
                 let pending = flush_state.kv_pending.read().await;
@@ -107,7 +117,11 @@ pub async fn run_server(
             };
 
             if should_flush {
-                cache_registry::flush_kv_index(&flush_state).await;
+                if cache_registry::flush_kv_index(&flush_state).await {
+                    consecutive_failures = 0;
+                } else {
+                    consecutive_failures += 1;
+                }
             }
         }
     });

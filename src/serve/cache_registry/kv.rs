@@ -483,19 +483,19 @@ fn build_index_pointer(
     Ok((pointer_bytes, blobs))
 }
 
-pub(crate) async fn flush_kv_index(state: &AppState) {
+pub(crate) async fn flush_kv_index(state: &AppState) -> bool {
     let _guard = state.kv_flush_lock.lock().await;
 
     let (pending_entries, pending_blob_paths) = {
         let mut pending = state.kv_pending.write().await;
         if pending.is_empty() {
-            return;
+            return true;
         }
         pending.take_all()
     };
 
     if pending_entries.is_empty() {
-        return;
+        return true;
     }
 
     let entry_count = pending_entries.len();
@@ -522,11 +522,13 @@ pub(crate) async fn flush_kv_index(state: &AppState) {
             );
 
             preload_download_urls(state, &cache_entry_id).await;
+            true
         }
         Err(msg) => {
-            log::warn!("KV batch flush: {msg}");
+            eprintln!("KV batch flush failed: {msg}");
             let mut pending = state.kv_pending.write().await;
             pending.restore(pending_entries, pending_blob_paths);
+            false
         }
     }
 }
