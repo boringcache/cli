@@ -232,7 +232,7 @@ jobs:
               cp target/${{ matrix.target }}/release/boringcache /workspace/${{ matrix.binary_name }}
               chmod +x /workspace/${{ matrix.binary_name }}
 
-              # Show sccache stats
+              echo "=== sccache stats ==="
               sccache --show-stats 2>/dev/null || true
             '
 
