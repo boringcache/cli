@@ -100,23 +100,15 @@ jobs:
             sh -c '
               set -e
 
-              BC_CACHE_ENABLED=0
-              if boringcache --version >/dev/null 2>&1; then
-                BC_CACHE_ENABLED=1
-                boringcache restore ${{ github.repository }} \
-                  "docker-target-cargo-registry:/root/.cargo/registry,docker-target-cargo-git:/root/.cargo/git" \
-                  || echo "Cache restore skipped"
-              fi
-
               # Install sccache + start proxy for compilation caching
-              if [ "$BC_CACHE_ENABLED" = "1" ]; then
+              if boringcache --version >/dev/null 2>&1; then
                 SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/${{ env.SCCACHE_VERSION }}/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl.tar.gz"
                 if curl -fsSL "$SCCACHE_URL" | tar xz -C /tmp; then
                   mv "/tmp/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
                   chmod +x /usr/local/bin/sccache
                   sccache --version
 
-                  SCCACHE_PORT=4226
+                  SCCACHE_PORT=4227
                   boringcache cache-registry ${{ github.repository }} "sccache,rust-${{ env.RUST_VERSION }}-sccache" \
                     --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
                   PROXY_PID=$!
@@ -145,13 +137,6 @@ jobs:
 
               # Show sccache stats
               sccache --show-stats 2>/dev/null || true
-
-              # Save static caches
-              if [ "$BC_CACHE_ENABLED" = "1" ]; then
-                boringcache save ${{ github.repository }} \
-                  "docker-target-cargo-registry:/root/.cargo/registry,docker-target-cargo-git:/root/.cargo/git" \
-                  || echo "Cache save skipped"
-              fi
             '
 
       - name: Upload results
@@ -318,23 +303,15 @@ jobs:
                 fi
               fi
 
-              BC_CACHE_ENABLED=0
-              if boringcache --version >/dev/null 2>&1; then
-                BC_CACHE_ENABLED=1
-                boringcache restore ${{ github.repository }} \
-                  "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git" \
-                  || echo "Cache restore skipped (cache miss or error)"
-              fi
-
               # Install sccache + start proxy for compilation caching
-              if [ "$BC_CACHE_ENABLED" = "1" ]; then
+              if boringcache --version >/dev/null 2>&1; then
                 SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/${{ env.SCCACHE_VERSION }}/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl.tar.gz"
                 if curl -fsSL "$SCCACHE_URL" | tar xz -C /tmp; then
                   mv "/tmp/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
                   chmod +x /usr/local/bin/sccache
                   sccache --version
 
-                  SCCACHE_PORT=4226
+                  SCCACHE_PORT=4227
                   boringcache cache-registry ${{ github.repository }} "sccache,rust-${{ env.RUST_VERSION }}-sccache" \
                     --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
                   PROXY_PID=$!
@@ -361,19 +338,12 @@ jobs:
                 cargo build --release --target ${{ matrix.target }}
               fi
 
-              # Copy binary before saving cache (so target cache excludes final binary)
+              # Copy binary
               cp target/${{ matrix.target }}/release/boringcache /workspace/${{ matrix.binary_name }}
               chmod +x /workspace/${{ matrix.binary_name }}
 
               # Show sccache stats
               sccache --show-stats 2>/dev/null || true
-
-              # Save static caches
-              if [ "$BC_CACHE_ENABLED" = "1" ]; then
-                boringcache save ${{ github.repository }} \
-                  "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git" \
-                  || echo "Cache save skipped (error)"
-              fi
             '
 
       # Native builds for Ubuntu/macOS/Windows
