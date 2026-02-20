@@ -117,11 +117,9 @@ jobs:
                     sleep 0.5
                   done
                   export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
-                  if SCCACHE_LOG=info sccache --start-server; then
-                    export RUSTC_WRAPPER=sccache
-                  else
-                    echo "sccache server failed to start - continuing without sccache"
-                  fi
+                  export RUSTC_WRAPPER=sccache
+                  echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
+                  sccache --start-server || true
                 fi
               fi
 
@@ -320,11 +318,9 @@ jobs:
                     sleep 0.5
                   done
                   export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
-                  if SCCACHE_LOG=info sccache --start-server; then
-                    export RUSTC_WRAPPER=sccache
-                  else
-                    echo "sccache server failed to start - continuing without sccache"
-                  fi
+                  export RUSTC_WRAPPER=sccache
+                  echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
+                  sccache --start-server || true
                 fi
               fi
 
