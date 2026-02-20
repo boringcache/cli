@@ -533,7 +533,10 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
         Err(msg) => {
             let is_conflict = msg.contains("CacheConflict") || msg.contains("Concurrent");
             if is_conflict {
-                eprintln!("KV batch flush: tag lease conflict, will retry");
+                eprintln!(
+                    "KV batch flush: tag lease held by another writer, \
+                     will retry after lease expires"
+                );
             } else {
                 eprintln!("KV batch flush failed: {msg}");
             }

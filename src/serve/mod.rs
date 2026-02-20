@@ -129,7 +129,7 @@ pub async fn run_server(
                 match cache_registry::flush_kv_index(&flush_state).await {
                     cache_registry::FlushResult::Ok => consecutive_failures = 0,
                     cache_registry::FlushResult::Conflict => {
-                        consecutive_failures = consecutive_failures.saturating_add(1).min(2);
+                        consecutive_failures = 5;
                     }
                     cache_registry::FlushResult::Error => {
                         consecutive_failures = consecutive_failures.saturating_add(1);
