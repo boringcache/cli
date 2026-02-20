@@ -219,8 +219,12 @@ jobs:
                     curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1 && break
                     sleep 0.5
                   done
-                  export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
-                  export RUSTC_WRAPPER=sccache
+                  export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}"
+                  if SCCACHE_LOG=info sccache --start-server; then
+                    export RUSTC_WRAPPER=sccache
+                  else
+                    echo "sccache server failed to start - continuing without sccache"
+                  fi
                 fi
               fi
 
