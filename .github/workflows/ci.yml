@@ -10,6 +10,7 @@ env:
   RUST_VERSION: "1.89"
   BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
   BORINGCACHE_BOOTSTRAP_VERSION: "v1.0.3"
+  SCCACHE_VERSION: "v0.13.0"
 
 jobs:
   test-boringcache:
@@ -42,18 +43,6 @@ jobs:
           sccache: "true"
           sccache-mode: "proxy"
 
-      - name: Cache cargo (Fallback)
-        if: steps.boringcache-rust.outcome == 'failure'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
       - name: Install Rust components
         run: rustup component add clippy rustfmt
 
@@ -76,60 +65,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: boringcache-results-${{ matrix.run }}
-          path: benchmark-results/
-
-  test-actions-cache:
-    name: Test CLI (Actions Cache)
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        run: [1, 2, 3]
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: boringcache/rust-action@v1
-        with:
-          workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          sccache: "true"
-          sccache-mode: "proxy"
-
-      - name: Install Rust components
-        run: rustup component add clippy rustfmt
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Build and test with timing
-        run: |
-          START_TIME=$(date +%s%N)
-          cargo build
-          cargo test
-          cargo clippy -- -D warnings
-          END_TIME=$(date +%s%N)
-          DURATION=$(( (END_TIME - START_TIME) / 1000000 ))
-          echo "Actions cache build+test - Run ${{ matrix.run }}: ${DURATION}ms"
-          mkdir -p benchmark-results
-          echo "${DURATION}" > benchmark-results/actions-cache-run${{ matrix.run }}.txt
-
-      - name: Check formatting
-        run: cargo fmt -- --check
-
-      - name: Upload results
-        uses: actions/upload-artifact@v4
-        with:
-          name: actions-cache-results-${{ matrix.run }}
           path: benchmark-results/
 
   docker:
@@ -162,15 +97,36 @@ jobs:
                 mv /tmp/boringcache-bootstrap /usr/local/bin/boringcache
                 if boringcache --version >/dev/null 2>&1; then
                   BC_CACHE_ENABLED=1
-                  # Restore target cache
+                  # Restore static caches
                   boringcache restore ${{ github.repository }} \
-                    "docker-target-cargo-registry:/root/.cargo/registry,docker-target-cargo-git:/root/.cargo/git,docker-target-target:/workspace/target" \
+                    "docker-target-cargo-registry:/root/.cargo/registry,docker-target-cargo-git:/root/.cargo/git" \
                     || echo "Cache restore skipped"
                 else
                   echo "Downloaded bootstrap boringcache binary is invalid - skipping cache restore/save"
                 fi
               else
                 echo "Bootstrap boringcache download failed from $BOOTSTRAP_URL - continuing without cache"
+              fi
+
+              # Install sccache + start proxy for compilation caching
+              if [ "$BC_CACHE_ENABLED" = "1" ]; then
+                SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/${{ env.SCCACHE_VERSION }}/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl.tar.gz"
+                if curl -fsSL "$SCCACHE_URL" | tar xz -C /tmp; then
+                  mv "/tmp/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
+                  chmod +x /usr/local/bin/sccache
+                  sccache --version
+
+                  SCCACHE_PORT=4226
+                  boringcache cache-registry ${{ github.repository }} "sccache,rust-${{ env.RUST_VERSION }}-sccache" \
+                    --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
+                  PROXY_PID=$!
+                  for _ in $(seq 1 30); do
+                    curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1 && break
+                    sleep 0.5
+                  done
+                  export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
+                  export RUSTC_WRAPPER=sccache
+                fi
               fi
 
               # Build with timing
@@ -183,10 +139,13 @@ jobs:
               mkdir -p benchmark-results
               echo "${DURATION}" > benchmark-results/docker-target-run${{ matrix.run }}.txt
 
-              # Save target cache
+              # Show sccache stats
+              sccache --show-stats 2>/dev/null || true
+
+              # Save static caches
               if [ "$BC_CACHE_ENABLED" = "1" ]; then
                 boringcache save ${{ github.repository }} \
-                  "docker-target-cargo-registry:/root/.cargo/registry,docker-target-cargo-git:/root/.cargo/git,docker-target-target:/workspace/target" \
+                  "docker-target-cargo-registry:/root/.cargo/registry,docker-target-cargo-git:/root/.cargo/git" \
                   || echo "Cache save skipped"
               fi
             '
@@ -202,7 +161,6 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - test-boringcache
-      - test-actions-cache
       - docker
     if: always()
     steps:
@@ -217,21 +175,20 @@ jobs:
           echo "# Rust Build Cache Benchmark Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo "## Native Runner: actions/cache vs boringcache" >> $GITHUB_STEP_SUMMARY
-          echo "| Run | actions/cache | boringcache | Improvement |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|---------------|-------------|-------------|" >> $GITHUB_STEP_SUMMARY
+          echo "## Native Runner (boringcache + sccache proxy)" >> $GITHUB_STEP_SUMMARY
+          echo "| Run | Time |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|------|" >> $GITHUB_STEP_SUMMARY
           for run in 1 2 3; do
-            if [[ -f "actions-cache-run${run}.txt" && -f "boringcache-run${run}.txt" ]]; then
-              a=$(cat "actions-cache-run${run}.txt"); b=$(cat "boringcache-run${run}.txt")
-              if [[ $b -gt 0 ]]; then imp=$(echo "scale=1; $a / $b" | bc -l); else imp="N/A"; fi
-              echo "| $run | ${a}ms | ${b}ms | ${imp}x faster |" >> $GITHUB_STEP_SUMMARY
+            if [[ -f "boringcache-run${run}.txt" ]]; then
+              b=$(cat "boringcache-run${run}.txt")
+              echo "| $run | ${b}ms |" >> $GITHUB_STEP_SUMMARY
             else
-              echo "| $run | Missing | Missing | N/A |" >> $GITHUB_STEP_SUMMARY
+              echo "| $run | Missing |" >> $GITHUB_STEP_SUMMARY
             fi
           done
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo "## Docker" >> $GITHUB_STEP_SUMMARY
+          echo "## Docker (boringcache + sccache proxy)" >> $GITHUB_STEP_SUMMARY
           echo "| Run | Time |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|------|" >> $GITHUB_STEP_SUMMARY
           for run in 1 2 3; do
@@ -246,13 +203,9 @@ jobs:
 
           echo "## Averages" >> $GITHUB_STEP_SUMMARY
           echo "### Native Runner" >> $GITHUB_STEP_SUMMARY
-          if [[ -f actions-cache-run1.txt && -f actions-cache-run2.txt && -f actions-cache-run3.txt && -f boringcache-run1.txt && -f boringcache-run2.txt && -f boringcache-run3.txt ]]; then
-            aa=$(( ($(cat actions-cache-run1.txt)+$(cat actions-cache-run2.txt)+$(cat actions-cache-run3.txt))/3 ))
+          if [[ -f boringcache-run1.txt && -f boringcache-run2.txt && -f boringcache-run3.txt ]]; then
             bb=$(( ($(cat boringcache-run1.txt)+$(cat boringcache-run2.txt)+$(cat boringcache-run3.txt))/3 ))
-            if [[ $bb -gt 0 ]]; then imp=$(echo "scale=1; $aa / $bb" | bc -l); else imp="N/A"; fi
-            echo "- **actions/cache**: ${aa}ms" >> $GITHUB_STEP_SUMMARY
-            echo "- **boringcache**: ${bb}ms" >> $GITHUB_STEP_SUMMARY
-            echo "- **Improvement**: ${imp}x faster with boringcache" >> $GITHUB_STEP_SUMMARY
+            echo "- **Average**: ${bb}ms" >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Docker" >> $GITHUB_STEP_SUMMARY
@@ -359,15 +312,36 @@ jobs:
                 mv /tmp/boringcache-bootstrap /usr/local/bin/boringcache
                 if boringcache --version >/dev/null 2>&1; then
                   BC_CACHE_ENABLED=1
-                  # Restore Cargo cache before build
+                  # Restore static caches
                   boringcache restore ${{ github.repository }} \
-                    "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git,cargo-target-${{ matrix.name }}:/workspace/target" \
+                    "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git" \
                     || echo "Cache restore skipped (cache miss or error)"
                 else
                   echo "Downloaded bootstrap boringcache binary is invalid - skipping cache restore/save"
                 fi
               else
                 echo "Bootstrap boringcache download failed from $BOOTSTRAP_URL - continuing without cache"
+              fi
+
+              # Install sccache + start proxy for compilation caching
+              if [ "$BC_CACHE_ENABLED" = "1" ]; then
+                SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/${{ env.SCCACHE_VERSION }}/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl.tar.gz"
+                if curl -fsSL "$SCCACHE_URL" | tar xz -C /tmp; then
+                  mv "/tmp/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
+                  chmod +x /usr/local/bin/sccache
+                  sccache --version
+
+                  SCCACHE_PORT=4226
+                  boringcache cache-registry ${{ github.repository }} "sccache,rust-${{ env.RUST_VERSION }}-sccache" \
+                    --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
+                  PROXY_PID=$!
+                  for _ in $(seq 1 30); do
+                    curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1 && break
+                    sleep 0.5
+                  done
+                  export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
+                  export RUSTC_WRAPPER=sccache
+                fi
               fi
 
               # Add target
@@ -384,10 +358,13 @@ jobs:
               cp target/${{ matrix.target }}/release/boringcache /workspace/${{ matrix.binary_name }}
               chmod +x /workspace/${{ matrix.binary_name }}
 
-              # Save Cargo cache after build (if stable bootstrap CLI is available)
+              # Show sccache stats
+              sccache --show-stats 2>/dev/null || true
+
+              # Save static caches
               if [ "$BC_CACHE_ENABLED" = "1" ]; then
                 boringcache save ${{ github.repository }} \
-                  "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git,cargo-target-${{ matrix.name }}:/workspace/target" \
+                  "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git" \
                   || echo "Cache save skipped (error)"
               fi
             '
@@ -412,18 +389,6 @@ jobs:
           rust-version: ${{ env.RUST_VERSION }}
           sccache: "true"
           sccache-mode: "proxy"
-
-      - name: Cache cargo (Native Fallback)
-        if: matrix.use_docker != true && steps.boringcache-rust-native.outcome == 'failure'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.name }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.name }}-cargo-
 
       - name: Install Rust target (Native builds)
         if: matrix.use_docker != true

@@ -14,6 +14,7 @@ env:
   RUST_VERSION: "1.89"
   BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
   BORINGCACHE_BOOTSTRAP_VERSION: "v1.0.3"
+  SCCACHE_VERSION: "v0.13.0"
 
 jobs:
   # Build CLI binaries for multiple platforms
@@ -199,15 +200,36 @@ jobs:
                 mv /tmp/boringcache-bootstrap /usr/local/bin/boringcache
                 if boringcache --version >/dev/null 2>&1; then
                   BC_CACHE_ENABLED=1
-                  # Restore Cargo cache before build
+                  # Restore static caches
                   boringcache restore ${{ github.repository }} \
-                    "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git,cargo-target-${{ matrix.name }}:/workspace/target" \
+                    "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git" \
                     || echo "Cache restore skipped (cache miss or error)"
                 else
                   echo "Downloaded bootstrap boringcache binary is invalid - skipping cache restore/save"
                 fi
               else
                 echo "Bootstrap boringcache download failed from $BOOTSTRAP_URL - continuing without cache"
+              fi
+
+              # Install sccache + start proxy for compilation caching
+              if [ "$BC_CACHE_ENABLED" = "1" ]; then
+                SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/${{ env.SCCACHE_VERSION }}/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl.tar.gz"
+                if curl -fsSL "$SCCACHE_URL" | tar xz -C /tmp; then
+                  mv "/tmp/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
+                  chmod +x /usr/local/bin/sccache
+                  sccache --version
+
+                  SCCACHE_PORT=4226
+                  boringcache cache-registry ${{ github.repository }} "sccache,rust-${{ env.RUST_VERSION }}-sccache" \
+                    --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
+                  PROXY_PID=$!
+                  for _ in $(seq 1 30); do
+                    curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1 && break
+                    sleep 0.5
+                  done
+                  export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
+                  export RUSTC_WRAPPER=sccache
+                fi
               fi
 
               # Add target
@@ -224,10 +246,13 @@ jobs:
               cp target/${{ matrix.target }}/release/boringcache /workspace/${{ matrix.binary_name }}
               chmod +x /workspace/${{ matrix.binary_name }}
 
-              # Save Cargo cache after build (if CLI available)
+              # Show sccache stats
+              sccache --show-stats 2>/dev/null || true
+
+              # Save static caches
               if [ "$BC_CACHE_ENABLED" = "1" ]; then
                 boringcache save ${{ github.repository }} \
-                  "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git,cargo-target-${{ matrix.name }}:/workspace/target" \
+                  "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git" \
                   || echo "Cache save skipped (error)"
               fi
             '
@@ -252,18 +277,6 @@ jobs:
           rust-version: ${{ env.RUST_VERSION }}
           sccache: "true"
           sccache-mode: "proxy"
-
-      - name: Cache cargo (Native Fallback)
-        if: matrix.use_docker != true && steps.boringcache-rust-native.outcome == 'failure'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.name }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.name }}-cargo-
 
       - name: Install Rust target (Native builds)
         if: matrix.use_docker != true
@@ -638,18 +651,6 @@ jobs:
           rust-version: ${{ env.RUST_VERSION }}
           sccache: "true"
           sccache-mode: "proxy"
-
-      - name: Cache cargo (Fallback)
-        if: steps.boringcache-rust.outcome == 'failure'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
 
       - name: Install Rust components
         run: rustup component add clippy rustfmt
