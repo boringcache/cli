@@ -13,7 +13,6 @@ permissions:
 env:
   RUST_VERSION: "1.89"
   BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
-  BORINGCACHE_BOOTSTRAP_VERSION: "v1.0.3"
   SCCACHE_VERSION: "v0.13.0"
 
 jobs:
@@ -141,12 +140,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Setup BoringCache CLI
+        if: matrix.use_docker == true
+        continue-on-error: true
+        uses: boringcache/setup-boringcache@v1
+        with:
+          token: ${{ secrets.BORINGCACHE_API_TOKEN }}
+          platform: ${{ matrix.musl && 'alpine-amd64' || 'linux-amd64' }}
+
       # Docker builds for Debian/Alpine
       - name: Build in Docker container
         if: matrix.use_docker == true
         run: |
+          BC_MOUNT=""
+          if command -v boringcache >/dev/null 2>&1; then
+            BC_MOUNT="-v $(which boringcache):/usr/local/bin/boringcache:ro"
+          fi
           docker run --rm \
             -v "$PWD:/workspace" \
+            $BC_MOUNT \
             -w /workspace \
             -e CARGO_TARGET_DIR=/workspace/target \
             -e BORINGCACHE_API_TOKEN=${{ secrets.BORINGCACHE_API_TOKEN }} \
@@ -156,18 +168,14 @@ jobs:
 
               # Install build dependencies based on container type
               if [ -f /etc/alpine-release ]; then
-                # Alpine packages (minimal - rustls is pure Rust, no OpenSSL needed)
                 apk add --no-cache build-base musl-dev curl
               elif [ -f /etc/debian_version ]; then
-                # Debian/Ubuntu packages
                 apt-get update
                 apt-get install -y build-essential pkg-config libssl-dev curl
-                # Install Rust if not present (for bare Ubuntu images)
                 if ! command -v rustup >/dev/null 2>&1; then
                   curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ env.RUST_VERSION }}
                   export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
                 fi
-                # ARM64 cross-compilation for Debian/Ubuntu
                 if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
                   apt-get install -y gcc-aarch64-linux-gnu
                   export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
@@ -175,13 +183,10 @@ jobs:
                   export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
                 fi
               elif [ -f /etc/arch-release ]; then
-                # Arch Linux packages
                 pacman -Syu --noconfirm
                 pacman -S --noconfirm base-devel pkg-config openssl curl
-                # Install Rust via rustup
                 curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ env.RUST_VERSION }}
                 export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
-                # ARM64 cross-compilation for Arch Linux
                 if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
                   pacman -S --noconfirm aarch64-linux-gnu-gcc
                   export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
@@ -190,25 +195,12 @@ jobs:
                 fi
               fi
 
-              # Install a known stable boringcache CLI (optional - build continues if unavailable)
-              # This intentionally pins to a stable bootstrap version so builds do not depend on
-              # the tag currently being published.
               BC_CACHE_ENABLED=0
-              BOOTSTRAP_URL="https://github.com/boringcache/cli/releases/download/${{ env.BORINGCACHE_BOOTSTRAP_VERSION }}/${{ matrix.binary_name }}"
-              if curl -fsSL "$BOOTSTRAP_URL" -o /tmp/boringcache-bootstrap; then
-                chmod +x /tmp/boringcache-bootstrap
-                mv /tmp/boringcache-bootstrap /usr/local/bin/boringcache
-                if boringcache --version >/dev/null 2>&1; then
-                  BC_CACHE_ENABLED=1
-                  # Restore static caches
-                  boringcache restore ${{ github.repository }} \
-                    "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git" \
-                    || echo "Cache restore skipped (cache miss or error)"
-                else
-                  echo "Downloaded bootstrap boringcache binary is invalid - skipping cache restore/save"
-                fi
-              else
-                echo "Bootstrap boringcache download failed from $BOOTSTRAP_URL - continuing without cache"
+              if boringcache --version >/dev/null 2>&1; then
+                BC_CACHE_ENABLED=1
+                boringcache restore ${{ github.repository }} \
+                  "cargo-registry-${{ matrix.name }}:/root/.cargo/registry,cargo-git-${{ matrix.name }}:/root/.cargo/git" \
+                  || echo "Cache restore skipped (cache miss or error)"
               fi
 
               # Install sccache + start proxy for compilation caching
