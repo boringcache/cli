@@ -489,6 +489,11 @@ pub(crate) enum FlushResult {
     Error,
 }
 
+enum FlushError {
+    Conflict(String),
+    Transient(String),
+}
+
 pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
     let _guard = state.kv_flush_lock.lock().await;
 
@@ -530,23 +535,18 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
             preload_download_urls(state, &cache_entry_id).await;
             FlushResult::Ok
         }
-        Err(msg) => {
-            let is_conflict = msg.contains("CacheConflict") || msg.contains("Concurrent");
-            if is_conflict {
-                eprintln!(
-                    "KV batch flush: tag lease held by another writer, \
-                     will retry after lease expires"
-                );
-            } else {
-                eprintln!("KV batch flush failed: {msg}");
+        Err(FlushError::Conflict(msg)) => {
+            eprintln!("KV batch flush: skipped — tag conflict ({msg})");
+            for path in pending_blob_paths.values() {
+                let _ = tokio::fs::remove_file(path).await;
             }
+            FlushResult::Conflict
+        }
+        Err(FlushError::Transient(msg)) => {
+            eprintln!("KV batch flush failed: {msg}");
             let mut pending = state.kv_pending.write().await;
             pending.restore(pending_entries, pending_blob_paths);
-            if is_conflict {
-                FlushResult::Conflict
-            } else {
-                FlushResult::Error
-            }
+            FlushResult::Error
         }
     }
 }
@@ -612,7 +612,7 @@ async fn do_flush(
     state: &AppState,
     pending_entries: &BTreeMap<String, BlobDescriptor>,
     pending_blob_paths: &HashMap<String, PathBuf>,
-) -> Result<(BTreeMap<String, BlobDescriptor>, String), String> {
+) -> Result<(BTreeMap<String, BlobDescriptor>, String), FlushError> {
     let tag = state.registry_root_tag.trim().to_string();
 
     let existing_count;
@@ -634,8 +634,8 @@ async fn do_flush(
         pending_entries.len()
     );
 
-    let (pointer_bytes, blobs) =
-        build_index_pointer(&entries).map_err(|e| format!("build pointer failed: {e:?}"))?;
+    let (pointer_bytes, blobs) = build_index_pointer(&entries)
+        .map_err(|e| FlushError::Transient(format!("build pointer failed: {e:?}")))?;
 
     let manifest_root_digest = crate::cas_file::prefixed_sha256_digest(&pointer_bytes);
     let expected_manifest_size = pointer_bytes.len() as u64;
@@ -666,11 +666,22 @@ async fn do_flush(
         encryption_recipient_hint: None,
     };
 
-    let save_response = state
+    let save_response = match state
         .api_client
         .save_entry(&state.workspace, &request)
         .await
-        .map_err(|e| format!("save_entry failed: {e}"))?;
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            let is_conflict = e
+                .downcast_ref::<crate::error::BoringCacheError>()
+                .is_some_and(|bc| matches!(bc, crate::error::BoringCacheError::CacheConflict(_)));
+            if is_conflict {
+                return Err(FlushError::Conflict(format!("{e}")));
+            }
+            return Err(FlushError::Transient(format!("save_entry failed: {e}")));
+        }
+    };
 
     if save_response.exists {
         eprintln!("KV flush: save_entry returned exists=true ({total_count} entries, {blob_count} blobs, digest={manifest_root_digest})");
@@ -686,13 +697,13 @@ async fn do_flush(
             pending_blob_paths,
         )
         .await
-        .map_err(|e| format!("blob upload failed: {e:?}"))?;
+        .map_err(|e| FlushError::Transient(format!("blob upload failed: {e:?}")))?;
     }
 
     let manifest_upload_url = save_response
         .manifest_upload_url
         .as_ref()
-        .ok_or("missing manifest upload URL")?;
+        .ok_or(FlushError::Transient("missing manifest upload URL".into()))?;
 
     upload_payload(
         state.api_client.transfer_client(),
@@ -702,7 +713,7 @@ async fn do_flush(
         &save_response.upload_headers,
     )
     .await
-    .map_err(|e| format!("manifest upload failed: {e}"))?;
+    .map_err(|e| FlushError::Transient(format!("manifest upload failed: {e}")))?;
 
     let confirm_request = ConfirmRequest {
         manifest_digest: manifest_root_digest,
@@ -726,7 +737,7 @@ async fn do_flush(
             &confirm_request,
         )
         .await
-        .map_err(|e| format!("confirm failed: {e}"))?;
+        .map_err(|e| FlushError::Transient(format!("confirm failed: {e}")))?;
 
     Ok((entries, save_response.cache_entry_id))
 }
