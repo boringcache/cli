@@ -25,9 +25,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: boringcache/rust-action@v1
         with:
-          toolchain: "1.89"
+          workspace: ${{ env.WORKSPACE }}
+          rust-version: "1.89"
+          sccache: "true"
+          sccache-mode: "proxy"
 
       - name: Validate configuration
         run: |
@@ -248,9 +251,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: boringcache/rust-action@v1
         with:
-          toolchain: "1.89"
+          workspace: ${{ env.WORKSPACE }}
+          rust-version: "1.89"
+          sccache: "true"
+          sccache-mode: "proxy"
 
       - name: Validate configuration
         run: |

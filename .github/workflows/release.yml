@@ -241,12 +241,17 @@ jobs:
         with:
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
+          sccache: "true"
+          sccache-mode: "proxy"
 
       - name: Setup Rust (Native Fallback)
         if: matrix.use_docker != true && steps.boringcache-rust-native.outcome == 'failure'
-        uses: dtolnay/rust-toolchain@master
+        uses: boringcache/rust-action@v1
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          workspace: ${{ github.repository }}
+          rust-version: ${{ env.RUST_VERSION }}
+          sccache: "true"
+          sccache-mode: "proxy"
 
       - name: Cache cargo (Native Fallback)
         if: matrix.use_docker != true && steps.boringcache-rust-native.outcome == 'failure'
@@ -621,12 +626,17 @@ jobs:
         with:
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
+          sccache: "true"
+          sccache-mode: "proxy"
 
       - name: Setup Rust (Fallback)
         if: steps.boringcache-rust.outcome == 'failure'
-        uses: dtolnay/rust-toolchain@master
+        uses: boringcache/rust-action@v1
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          workspace: ${{ github.repository }}
+          rust-version: ${{ env.RUST_VERSION }}
+          sccache: "true"
+          sccache-mode: "proxy"
 
       - name: Cache cargo (Fallback)
         if: steps.boringcache-rust.outcome == 'failure'
