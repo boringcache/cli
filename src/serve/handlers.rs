@@ -1223,6 +1223,7 @@ mod tests {
             workspace: "boringcache/benchmarks".to_string(),
             tag_resolver: TagResolver::new(None, GitContext::default(), false),
             configured_human_tags: Vec::new(),
+            registry_root_tag: "registry".to_string(),
             blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
             upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         }

@@ -27,6 +27,70 @@ fn resolve_default_workspace() -> Option<String> {
     resolve_effective_workspace(&workspace)
 }
 
+fn long_option_requires_value(command: &str, option: &str) -> bool {
+    match command {
+        "save" => matches!(option, "--exclude" | "--recipient"),
+        "restore" => matches!(option, "--identity"),
+        "ls" => matches!(option, "--limit" | "--page"),
+        "serve" | "docker-registry" | "cache-registry" => matches!(option, "--host" | "--port"),
+        _ => false,
+    }
+}
+
+fn short_option_requires_value(command: &str, option: &str) -> bool {
+    match command {
+        "serve" | "docker-registry" | "cache-registry" => {
+            option == "-p" || (option.starts_with("-p") && option.len() > 2)
+        }
+        _ => false,
+    }
+}
+
+fn positional_args_with_indices<'a>(
+    command: &str,
+    args_after_command: &'a [String],
+) -> Vec<(usize, &'a String)> {
+    let mut positional = Vec::new();
+    let mut skip_next = false;
+    let mut positional_mode = false;
+
+    for (index, arg) in args_after_command.iter().enumerate() {
+        if positional_mode {
+            positional.push((index, arg));
+            continue;
+        }
+
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        if arg == "--" {
+            positional_mode = true;
+            continue;
+        }
+
+        if arg.starts_with("--") {
+            let option_name = arg.split('=').next().unwrap_or(arg.as_str());
+            if !arg.contains('=') && long_option_requires_value(command, option_name) {
+                skip_next = true;
+            }
+            continue;
+        }
+
+        if arg.starts_with('-') && arg != "-" {
+            if short_option_requires_value(command, arg) && arg.len() == 2 {
+                skip_next = true;
+            }
+            continue;
+        }
+
+        positional.push((index, arg));
+    }
+
+    positional
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     std::panic::set_hook(Box::new(|panic_info| {
@@ -62,26 +126,22 @@ async fn main() -> Result<()> {
                 | "docker-registry"
                 | "cache-registry"
         ) {
-            let positional_args: Vec<&String> =
-                args[2..].iter().filter(|a| !a.starts_with('-')).collect();
+            let positional_args = positional_args_with_indices(command, &args[2..]);
 
             let needs_workspace_injection = match command.as_str() {
                 "ls" => positional_args.is_empty(),
 
                 "save" | "restore" => {
-                    positional_args.len() == 1 && positional_args[0].contains(':')
+                    positional_args.len() == 1 && positional_args[0].1.contains(':')
                 }
 
                 "delete" | "check" => {
-                    positional_args.len() == 1 && !positional_args[0].contains('/')
+                    positional_args.len() == 1 && !positional_args[0].1.contains('/')
                 }
-                "serve" | "docker-registry" | "cache-registry" => {
-                    positional_args.is_empty()
-                        || positional_args
-                            .first()
-                            .map(|arg| !arg.contains('/'))
-                            .unwrap_or(true)
-                }
+                "serve" | "docker-registry" | "cache-registry" => positional_args
+                    .first()
+                    .map(|(_, arg)| !arg.contains('/'))
+                    .unwrap_or(false),
                 _ => false,
             };
 
@@ -90,11 +150,7 @@ async fn main() -> Result<()> {
                     if command == "ls" || positional_args.is_empty() {
                         args.push(default_workspace);
                     } else {
-                        let first_pos_idx = args[2..]
-                            .iter()
-                            .position(|a| !a.starts_with('-'))
-                            .map(|i| i + 2)
-                            .unwrap_or(args.len());
+                        let first_pos_idx = positional_args[0].0 + 2;
                         args.insert(first_pos_idx, default_workspace);
                     }
                 }

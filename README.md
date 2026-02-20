@@ -133,7 +133,7 @@ boringcache mount my-org/ws "dev-cache:./node_modules"
 
 Restores from remote on start, syncs periodically, and performs a final sync on Ctrl+C.
 
-### `docker-registry <WORKSPACE>`
+### `docker-registry <WORKSPACE> <TAG>`
 Run a local cache registry proxy for native integrations:
 - OCI registry (`/v2/*`) for BuildKit `type=registry`
 - Bazel HTTP cache (`/ac/*`, `/cas/*`)
@@ -143,12 +143,20 @@ Run a local cache registry proxy for native integrations:
 
 Aliases: `serve`, `cache-registry`
 
+`TAG` uses this format:
+- first tag is the shared registry root tag for Bazel/Gradle/Turborepo/sccache
+- optional additional comma-separated tags are OCI human aliases
+
 ```bash
-boringcache docker-registry my-org/ws --port 5000
+boringcache docker-registry my-org/ws registry-cache --port 5000
 # same command via compatibility alias
-boringcache serve my-org/ws --port 5000
+boringcache serve my-org/ws registry-cache --port 5000
 # same command via explicit multi-protocol alias
-boringcache cache-registry my-org/ws --port 5000
+boringcache cache-registry my-org/ws registry-cache --port 5000
+# with explicit OCI human aliases
+boringcache cache-registry my-org/ws registry-cache,docker-main,docker-stable --port 5000
+# when BORINGCACHE_DEFAULT_WORKSPACE is set
+boringcache cache-registry registry-cache --port 5000
 ```
 
 BuildKit connects directly to the proxy as a standard OCI registry:
@@ -253,7 +261,7 @@ jobs:
         with:
           token: ${{ secrets.BORINGCACHE_API_TOKEN }}
 
-      - run: boringcache docker-registry my-org/project --port 5000 &
+      - run: boringcache docker-registry my-org/project registry-cache --port 5000 &
 
       - uses: docker/build-push-action@v6
         with:

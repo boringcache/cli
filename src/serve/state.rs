@@ -13,6 +13,7 @@ pub struct AppState {
     pub workspace: String,
     pub tag_resolver: TagResolver,
     pub configured_human_tags: Vec<String>,
+    pub registry_root_tag: String,
     pub blob_locator: Arc<RwLock<BlobLocatorCache>>,
     pub upload_sessions: Arc<RwLock<UploadSessionStore>>,
 }

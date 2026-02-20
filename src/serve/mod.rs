@@ -20,12 +20,14 @@ pub async fn run_server(
     port: u16,
     tag_resolver: TagResolver,
     configured_human_tags: Vec<String>,
+    registry_root_tag: String,
 ) -> Result<()> {
     let state = AppState {
         api_client,
         workspace: workspace.clone(),
         tag_resolver,
         configured_human_tags,
+        registry_root_tag,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
     };
@@ -38,10 +40,11 @@ pub async fn run_server(
     eprintln!("  Workspace: {workspace}");
     if !state.configured_human_tags.is_empty() {
         eprintln!(
-            "  Human Tag Aliases: {}",
+            "  OCI Human Tag Aliases: {}",
             state.configured_human_tags.join(", ")
         );
     }
+    eprintln!("  Registry Root Tag: {}", state.registry_root_tag);
     eprintln!("  OCI: --cache-from/--cache-to type=registry,ref={host}:{port}/CACHE_NAME:TAG");
     eprintln!("  Bazel HTTP: http://{host}:{port}/ac/{{sha256}} and /cas/{{sha256}}");
     eprintln!("  Gradle HTTP: http://{host}:{port}/cache/{{cache-key}}");

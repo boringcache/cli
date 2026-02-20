@@ -28,6 +28,7 @@ fn run_cli_with_default_workspace(args: &[&str]) -> std::process::Output {
         .args(args)
         .env("HOME", temp_dir.path())
         .env("BORINGCACHE_DEFAULT_WORKSPACE", TEST_WORKSPACE)
+        .env_remove("BORINGCACHE_AUTH_TOKEN")
         .env_remove("BORINGCACHE_TOKEN")
         .env_remove("BORINGCACHE_API_TOKEN")
         .output()
@@ -52,6 +53,7 @@ fn run_cli_with_default_workspace_config(args: &[&str]) -> std::process::Output 
         .args(args)
         .env("HOME", temp_dir.path())
         .env_remove("BORINGCACHE_DEFAULT_WORKSPACE")
+        .env_remove("BORINGCACHE_AUTH_TOKEN")
         .env_remove("BORINGCACHE_TOKEN")
         .env_remove("BORINGCACHE_API_TOKEN")
         .output()
@@ -65,6 +67,7 @@ fn run_cli_without_default_workspace(args: &[&str]) -> std::process::Output {
     command
         .args(args)
         .env("HOME", temp_dir.path())
+        .env_remove("BORINGCACHE_AUTH_TOKEN")
         .env_remove("BORINGCACHE_TOKEN")
         .env_remove("BORINGCACHE_API_TOKEN")
         .env_remove("BORINGCACHE_DEFAULT_WORKSPACE")
@@ -334,6 +337,22 @@ fn test_save_with_flags_mixed_positions() {
 }
 
 #[test]
+fn test_save_with_value_option_before_tag_path() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let test_path = temp_dir.path().join("test.txt");
+    std::fs::write(&test_path, "test").expect("Failed to create test file");
+
+    let arg = format!("test-tag:{}", test_path.display());
+    let output = run_cli_with_default_workspace(&["save", "--exclude", "node_modules", &arg]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("required arguments were not provided")
+            && !stderr.contains("<PATH_TAG_PAIRS>")
+    );
+}
+
+#[test]
 fn test_delete_with_workspace_format_tag() {
     let output = run_cli_with_default_workspace(&["delete", "org/tag-name"]);
 
@@ -341,6 +360,74 @@ fn test_delete_with_workspace_format_tag() {
     assert!(
         stderr.contains("required arguments were not provided") || stderr.contains("<TAGS>"),
         "Expected missing TAGS error since org/tag-name is treated as workspace, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_serve_with_default_workspace_and_tag() {
+    let output = run_cli_with_default_workspace(&["cache-registry", "registry-cache"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("required arguments were not provided")
+            && !stderr.contains("<WORKSPACE>")
+            && !stderr.contains("<TAG>"),
+        "Expected workspace injection for cache-registry short form, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_serve_with_default_workspace_and_tag_with_options() {
+    let output = run_cli_with_default_workspace(&[
+        "cache-registry",
+        "registry-cache",
+        "--port",
+        "5000",
+        "--host",
+        "127.0.0.1",
+    ]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("required arguments were not provided")
+            && !stderr.contains("<WORKSPACE>")
+            && !stderr.contains("<TAG>"),
+        "Expected workspace injection for cache-registry short form with options, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_serve_with_options_before_tag_injects_workspace() {
+    let output = run_cli_with_default_workspace(&[
+        "cache-registry",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5000",
+        "registry-cache",
+    ]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("required arguments were not provided")
+            && !stderr.contains("<WORKSPACE>")
+            && !stderr.contains("<TAG>"),
+        "Expected workspace injection for cache-registry with options before tag, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_serve_without_default_workspace_requires_workspace_and_tag() {
+    let output = run_cli_without_default_workspace(&["cache-registry", "registry-cache"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("required arguments were not provided") && stderr.contains("<TAG>"),
+        "Expected missing TAG parsing error, got: {}",
         stderr
     );
 }

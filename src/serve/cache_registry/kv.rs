@@ -4,10 +4,14 @@ use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
 use tokio::io::AsyncWriteExt;
 
-use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
+use crate::api::models::cache::{
+    BlobDescriptor, CacheResolutionEntry, ConfirmRequest, SaveRequest,
+};
 use crate::cas_transport::upload_payload;
+use crate::manifest::EntryType;
 use crate::progress::TransferProgress;
 use crate::serve::state::AppState;
 
@@ -23,20 +27,33 @@ pub(crate) enum KvNamespace {
 }
 
 impl KvNamespace {
-    fn tag_for_key(self, key: &str) -> String {
+    pub(crate) fn normalize_key(self, key: &str) -> String {
         match self {
-            KvNamespace::BazelAc => format!("registry_bazel_ac_{}", key.to_ascii_lowercase()),
-            KvNamespace::BazelCas => format!("registry_bazel_cas_{}", key.to_ascii_lowercase()),
-            KvNamespace::Gradle => format!("registry_gradle_{}", key.to_ascii_lowercase()),
-            KvNamespace::Turborepo => {
-                let digest = crate::cas_oci::sha256_hex(key.as_bytes());
-                format!("registry_turbo_{digest}")
+            KvNamespace::BazelAc | KvNamespace::BazelCas | KvNamespace::Gradle => {
+                key.to_ascii_lowercase()
             }
-            KvNamespace::Sccache => {
-                let digest = crate::cas_oci::sha256_hex(key.as_bytes());
-                format!("registry_sccache_{digest}")
-            }
+            KvNamespace::Turborepo | KvNamespace::Sccache => key.to_string(),
         }
+    }
+
+    fn namespace_prefix(self) -> &'static str {
+        match self {
+            KvNamespace::BazelAc => "bazel_ac",
+            KvNamespace::BazelCas => "bazel_cas",
+            KvNamespace::Gradle => "gradle",
+            KvNamespace::Turborepo => "turbo",
+            KvNamespace::Sccache => "sccache",
+        }
+    }
+
+    pub(crate) fn scoped_key(self, key: &str) -> String {
+        format!("{}/{}", self.namespace_prefix(), self.normalize_key(key))
+    }
+
+    pub(crate) fn root_tag(self, state: &AppState) -> String {
+        let _ = self;
+        let prefix = state.registry_root_tag.trim();
+        prefix.to_string()
     }
 }
 
@@ -48,24 +65,38 @@ pub(crate) async fn put_kv_object(
     put_status: StatusCode,
 ) -> Result<Response, RegistryError> {
     let (temp_blob_path, blob_size, blob_digest) = write_body_to_temp_file(body).await?;
-    let pointer_bytes = build_single_blob_pointer(&blob_digest, blob_size)?;
+    let scoped_key = namespace.scoped_key(key);
+    let tag = namespace.root_tag(state);
+
+    let mut existing_entries = load_index_entries(state, &tag).await?;
+    existing_entries.insert(
+        scoped_key,
+        BlobDescriptor {
+            digest: blob_digest.clone(),
+            size_bytes: blob_size,
+        },
+    );
+
+    let (pointer_bytes, blobs) = build_index_pointer(&existing_entries)?;
     let manifest_root_digest = crate::cas_file::prefixed_sha256_digest(&pointer_bytes);
     let expected_manifest_size = pointer_bytes.len() as u64;
-    let tag = namespace.tag_for_key(key);
+    let blob_count = blobs.len() as u64;
+    let blob_total_size_bytes: u64 = blobs.iter().map(|blob| blob.size_bytes).sum();
+    let file_count = existing_entries.len().min(u32::MAX as usize) as u32;
 
     let request = SaveRequest {
         tag: tag.clone(),
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
-        blob_count: Some(1),
-        blob_total_size_bytes: Some(blob_size),
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
         cas_layout: Some("file-v1".to_string()),
         manifest_format_version: Some(1),
-        total_size_bytes: blob_size,
+        total_size_bytes: blob_total_size_bytes,
         uncompressed_size: None,
         compressed_size: None,
-        file_count: Some(1),
+        file_count: Some(file_count),
         expected_manifest_digest: Some(manifest_root_digest.clone()),
         expected_manifest_size: Some(expected_manifest_size),
         force: None,
@@ -83,12 +114,14 @@ pub(crate) async fn put_kv_object(
         .map_err(|e| RegistryError::internal(format!("Failed to create cache entry: {e}")))?;
 
     if !save_response.exists {
-        upload_blob_if_missing(
+        let mut local_blob_paths = HashMap::new();
+        local_blob_paths.insert(blob_digest.clone(), temp_blob_path.to_path_buf());
+
+        upload_blobs_if_missing(
             state,
             &save_response.cache_entry_id,
-            &temp_blob_path,
-            &blob_digest,
-            blob_size,
+            &blobs,
+            &local_blob_paths,
         )
         .await?;
 
@@ -112,9 +145,9 @@ pub(crate) async fn put_kv_object(
             manifest_etag: None,
             archive_size: None,
             archive_etag: None,
-            blob_count: Some(1),
-            blob_total_size_bytes: Some(blob_size),
-            file_count: Some(1),
+            blob_count: Some(blob_count),
+            blob_total_size_bytes: Some(blob_total_size_bytes),
+            file_count: Some(file_count),
             uncompressed_size: None,
             compressed_size: None,
             tag: Some(tag),
@@ -140,39 +173,15 @@ pub(crate) async fn get_or_head_kv_object(
     key: &str,
     is_head: bool,
 ) -> Result<Response, RegistryError> {
-    let tag = namespace.tag_for_key(key);
+    let scoped_key = namespace.scoped_key(key);
+    let tag = namespace.root_tag(state);
     let hit = resolve_hit(state, &tag).await?;
-    let manifest_url = hit
-        .manifest_url
-        .ok_or_else(|| RegistryError::internal("Cache hit is missing manifest_url"))?;
+    let pointer = fetch_pointer(state, &hit).await?;
     let cache_entry_id = hit
         .cache_entry_id
         .ok_or_else(|| RegistryError::internal("Cache hit is missing cache_entry_id"))?;
-
-    let pointer_response = state
-        .api_client
-        .transfer_client()
-        .get(&manifest_url)
-        .send()
-        .await
-        .map_err(|e| RegistryError::internal(format!("Failed to fetch manifest pointer: {e}")))?
-        .error_for_status()
-        .map_err(|e| RegistryError::internal(format!("Manifest pointer request failed: {e}")))?;
-    let pointer_bytes = pointer_response
-        .bytes()
-        .await
-        .map_err(|e| {
-            RegistryError::internal(format!("Failed to read manifest pointer bytes: {e}"))
-        })?
-        .to_vec();
-
-    let pointer = crate::cas_file::parse_pointer(&pointer_bytes).map_err(|e| {
-        RegistryError::internal(format!("Invalid file CAS pointer for key lookup: {e}"))
-    })?;
-    let blob = pointer
-        .blobs
-        .first()
-        .ok_or_else(|| RegistryError::internal("Manifest pointer missing blob metadata"))?;
+    let blob = select_blob_for_key(&pointer, &scoped_key)?
+        .ok_or_else(|| RegistryError::not_found("Cache key not found"))?;
 
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
@@ -239,6 +248,16 @@ pub(crate) async fn get_or_head_kv_object(
     Ok((StatusCode::OK, response_headers, body).into_response())
 }
 
+pub(crate) async fn load_kv_blob_map(
+    state: &AppState,
+    namespace: KvNamespace,
+) -> Result<HashMap<String, BlobDescriptor>, RegistryError> {
+    let tag = namespace.root_tag(state);
+    let hit = resolve_hit(state, &tag).await?;
+    let pointer = fetch_pointer(state, &hit).await?;
+    pointer_entries_to_blob_map(&pointer)
+}
+
 pub(crate) async fn resolve_hit(
     state: &AppState,
     tag: &str,
@@ -255,32 +274,182 @@ pub(crate) async fn resolve_hit(
         .ok_or_else(|| RegistryError::not_found("Cache key not found"))
 }
 
-async fn upload_blob_if_missing(
+async fn load_index_entries(
     state: &AppState,
-    cache_entry_id: &str,
-    blob_path: &tempfile::TempPath,
-    blob_digest: &str,
-    blob_size: u64,
-) -> Result<(), RegistryError> {
-    let blob_descriptor = BlobDescriptor {
-        digest: blob_digest.to_string(),
-        size_bytes: blob_size,
+    tag: &str,
+) -> Result<BTreeMap<String, BlobDescriptor>, RegistryError> {
+    let hit = match resolve_hit(state, tag).await {
+        Ok(hit) => hit,
+        Err(error) if error.status == StatusCode::NOT_FOUND => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error),
     };
 
+    let pointer = fetch_pointer(state, &hit).await?;
+    let map = pointer_entries_to_blob_map(&pointer)?;
+    Ok(map.into_iter().collect())
+}
+
+async fn fetch_pointer(
+    state: &AppState,
+    hit: &CacheResolutionEntry,
+) -> Result<crate::cas_file::FilePointer, RegistryError> {
+    let manifest_url = hit
+        .manifest_url
+        .as_ref()
+        .ok_or_else(|| RegistryError::internal("Cache hit is missing manifest_url"))?;
+
+    let pointer_response = state
+        .api_client
+        .transfer_client()
+        .get(manifest_url)
+        .send()
+        .await
+        .map_err(|e| RegistryError::internal(format!("Failed to fetch manifest pointer: {e}")))?
+        .error_for_status()
+        .map_err(|e| RegistryError::internal(format!("Manifest pointer request failed: {e}")))?;
+    let pointer_bytes = pointer_response
+        .bytes()
+        .await
+        .map_err(|e| {
+            RegistryError::internal(format!("Failed to read manifest pointer bytes: {e}"))
+        })?
+        .to_vec();
+
+    crate::cas_file::parse_pointer(&pointer_bytes)
+        .map_err(|e| RegistryError::internal(format!("Invalid file CAS pointer: {e}")))
+}
+
+fn pointer_entries_to_blob_map(
+    pointer: &crate::cas_file::FilePointer,
+) -> Result<HashMap<String, BlobDescriptor>, RegistryError> {
+    let mut map = HashMap::with_capacity(pointer.entries.len());
+    for entry in &pointer.entries {
+        if !matches!(entry.entry_type, EntryType::File) {
+            continue;
+        }
+        let digest = entry.digest.clone().ok_or_else(|| {
+            RegistryError::internal(format!(
+                "Cache pointer entry is missing digest: {}",
+                entry.path
+            ))
+        })?;
+        map.insert(
+            entry.path.clone(),
+            BlobDescriptor {
+                digest,
+                size_bytes: entry.size_bytes,
+            },
+        );
+    }
+    Ok(map)
+}
+
+fn select_blob_for_key(
+    pointer: &crate::cas_file::FilePointer,
+    key: &str,
+) -> Result<Option<BlobDescriptor>, RegistryError> {
+    for entry in &pointer.entries {
+        if !matches!(entry.entry_type, EntryType::File) || entry.path != key {
+            continue;
+        }
+        let digest = entry.digest.clone().ok_or_else(|| {
+            RegistryError::internal(format!(
+                "Cache pointer entry is missing digest: {}",
+                entry.path
+            ))
+        })?;
+        return Ok(Some(BlobDescriptor {
+            digest,
+            size_bytes: entry.size_bytes,
+        }));
+    }
+
+    if pointer.entries.is_empty() {
+        if let Some(blob) = pointer.blobs.first() {
+            return Ok(Some(BlobDescriptor {
+                digest: blob.digest.clone(),
+                size_bytes: blob.size_bytes,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+fn build_index_pointer(
+    entries: &BTreeMap<String, BlobDescriptor>,
+) -> Result<(Vec<u8>, Vec<BlobDescriptor>), RegistryError> {
+    let mut blob_sizes: HashMap<String, u64> = HashMap::new();
+    let mut pointer_entries = Vec::with_capacity(entries.len());
+
+    for (key, blob) in entries {
+        if let Some(existing_size) = blob_sizes.get(&blob.digest) {
+            if *existing_size != blob.size_bytes {
+                return Err(RegistryError::internal(format!(
+                    "Digest {} has inconsistent sizes ({} vs {})",
+                    blob.digest, existing_size, blob.size_bytes
+                )));
+            }
+        } else {
+            blob_sizes.insert(blob.digest.clone(), blob.size_bytes);
+        }
+
+        pointer_entries.push(crate::cas_file::FilePointerEntry {
+            path: key.clone(),
+            entry_type: EntryType::File,
+            size_bytes: blob.size_bytes,
+            executable: None,
+            target: None,
+            digest: Some(blob.digest.clone()),
+        });
+    }
+
+    let mut blobs: Vec<BlobDescriptor> = blob_sizes
+        .into_iter()
+        .map(|(digest, size_bytes)| BlobDescriptor { digest, size_bytes })
+        .collect();
+    blobs.sort_by(|left, right| left.digest.cmp(&right.digest));
+
+    let pointer = crate::cas_file::FilePointer {
+        format_version: 1,
+        adapter: "file-v1".to_string(),
+        entries: pointer_entries,
+        blobs: blobs
+            .iter()
+            .map(|blob| crate::cas_file::FilePointerBlob {
+                digest: blob.digest.clone(),
+                size_bytes: blob.size_bytes,
+            })
+            .collect(),
+    };
+    let pointer_bytes = serde_json::to_vec(&pointer)
+        .map_err(|e| RegistryError::internal(format!("Failed to serialize file pointer: {e}")))?;
+
+    Ok((pointer_bytes, blobs))
+}
+
+async fn upload_blobs_if_missing(
+    state: &AppState,
+    cache_entry_id: &str,
+    blobs: &[BlobDescriptor],
+    local_blob_paths: &HashMap<String, std::path::PathBuf>,
+) -> Result<(), RegistryError> {
     let upload_plan = state
         .api_client
-        .blob_upload_urls(&state.workspace, cache_entry_id, &[blob_descriptor])
+        .blob_upload_urls(&state.workspace, cache_entry_id, blobs)
         .await
         .map_err(|e| RegistryError::internal(format!("Failed to request blob upload URL: {e}")))?;
 
-    if let Some(upload) = upload_plan
-        .upload_urls
-        .iter()
-        .find(|item| item.digest == blob_digest)
-    {
+    for upload in &upload_plan.upload_urls {
+        let blob_path = local_blob_paths.get(&upload.digest).ok_or_else(|| {
+            RegistryError::internal(format!(
+                "Missing local blob bytes required for digest {} while updating index",
+                upload.digest
+            ))
+        })?;
         let progress = TransferProgress::new_noop();
         crate::multipart_upload::upload_via_single_url(
-            blob_path.as_ref(),
+            blob_path.as_path(),
             &upload.url,
             &progress,
             state.api_client.transfer_client(),
@@ -291,20 +460,6 @@ async fn upload_blob_if_missing(
     }
 
     Ok(())
-}
-
-fn build_single_blob_pointer(digest: &str, size_bytes: u64) -> Result<Vec<u8>, RegistryError> {
-    let pointer = crate::cas_file::FilePointer {
-        format_version: 1,
-        adapter: "file-v1".to_string(),
-        entries: Vec::new(),
-        blobs: vec![crate::cas_file::FilePointerBlob {
-            digest: digest.to_string(),
-            size_bytes,
-        }],
-    };
-    serde_json::to_vec(&pointer)
-        .map_err(|e| RegistryError::internal(format!("Failed to serialize file pointer: {e}")))
 }
 
 async fn write_body_to_temp_file(

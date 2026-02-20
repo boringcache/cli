@@ -18,6 +18,7 @@ jobs:
       BORINGCACHE_API_URL: "https://api.boringcache.com/v1"
       WORKSPACE: "boringcache/cli"
       CACHE_TAG_PREFIX: "boringcache-cli"
+      REGISTRY_ROOT_TAG_PREFIX: "boringcache-cli-registry"
       PORT: "5000"
 
     steps:
@@ -65,6 +66,7 @@ jobs:
           CACHE_REF="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG}"
           CACHE_TAG_ALIAS="${CACHE_TAG}-alias"
           CACHE_REF_ALIAS="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG_ALIAS}"
+          REGISTRY_ROOT_TAG="${REGISTRY_ROOT_TAG_PREFIX}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           SERVE_PID=""
           declare -a LOG_FILES=()
 
@@ -81,7 +83,7 @@ jobs:
           start_proxy() {
             local log_file="$1"
             LOG_FILES+=("$log_file")
-            ./target/debug/boringcache docker-registry "${WORKSPACE}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git > "${log_file}" 2>&1 &
+            ./target/debug/boringcache docker-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git > "${log_file}" 2>&1 &
             SERVE_PID=$!
 
             local ready=0
@@ -244,6 +246,7 @@ jobs:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_API_URL: "https://api.boringcache.com/v1"
       WORKSPACE: "boringcache/cli"
+      REGISTRY_ROOT_TAG_PREFIX: "boringcache-cli-adapter-registry"
       PORT: "5001"
 
     steps:
@@ -281,6 +284,7 @@ jobs:
           set -euo pipefail
 
           mkdir -p adapter-e2e
+          REGISTRY_ROOT_TAG="${REGISTRY_ROOT_TAG_PREFIX}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           SERVE_PID=""
           ADAPTER_PROXY_LOG="adapter-e2e/adapter-proxy.log"
 
@@ -294,7 +298,7 @@ jobs:
           trap cleanup EXIT
 
           start_proxy() {
-            ./target/debug/boringcache docker-registry "${WORKSPACE}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git > "${ADAPTER_PROXY_LOG}" 2>&1 &
+            ./target/debug/boringcache docker-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git > "${ADAPTER_PROXY_LOG}" 2>&1 &
             SERVE_PID=$!
 
             local ready=0

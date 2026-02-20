@@ -184,8 +184,10 @@ pub enum Commands {
         #[arg(help = "Workspace name (org/project or user/project)")]
         workspace: String,
 
-        #[arg(help = "Optional comma-separated human-readable cache tag aliases for OCI entries")]
-        tag: Option<String>,
+        #[arg(
+            help = "Cache tag root (first tag). Optional extra comma-separated tags become OCI human aliases"
+        )]
+        tag: String,
 
         #[arg(short, long, default_value = "5000")]
         port: u16,
