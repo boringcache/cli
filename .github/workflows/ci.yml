@@ -48,6 +48,34 @@ jobs:
 
       - name: Build and test with timing
         run: |
+          set -euo pipefail
+          PROXY_PID=""
+
+          cleanup() {
+            sccache --stop-server >/dev/null 2>&1 || true
+            if [[ -n "${PROXY_PID}" ]]; then
+              kill "${PROXY_PID}" >/dev/null 2>&1 || true
+              wait "${PROXY_PID}" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          if command -v boringcache >/dev/null 2>&1 && command -v sccache >/dev/null 2>&1; then
+            SCCACHE_PORT=4228
+            boringcache cache-registry ${{ github.repository }} "rust-${{ env.RUST_VERSION }}-sccache-native-test" \
+              --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
+            PROXY_PID=$!
+            for _ in $(seq 1 30); do
+              curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1 && break
+              sleep 0.5
+            done
+            export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
+            export RUSTC_WRAPPER=sccache
+            echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
+            sccache --stop-server >/dev/null 2>&1 || true
+            sccache --start-server || true
+          fi
+
           START_TIME=$(date +%s%N)
           cargo build --locked
           cargo test --locked
@@ -57,6 +85,19 @@ jobs:
           echo "BoringCache build+test - Run ${{ matrix.run }}: ${DURATION}ms"
           mkdir -p benchmark-results
           echo "${DURATION}" > benchmark-results/boringcache-run${{ matrix.run }}.txt
+
+          echo "=== sccache stats ==="
+          SCCACHE_STATS="$(sccache --show-stats || true)"
+          echo "${SCCACHE_STATS}"
+          COMPILE_REQUESTS="$(printf '%s\n' "${SCCACHE_STATS}" | awk '$1 == "Compile" && $2 == "requests" { print $3; exit }')"
+          CACHE_HITS="$(printf '%s\n' "${SCCACHE_STATS}" | awk '$1 == "Cache" && $2 == "hits" && $3 ~ /^[0-9]+$/ { print $3; exit }')"
+          CACHE_MISSES="$(printf '%s\n' "${SCCACHE_STATS}" | awk '$1 == "Cache" && $2 == "misses" && $3 ~ /^[0-9]+$/ { print $3; exit }')"
+          COMPILE_REQUESTS="${COMPILE_REQUESTS:-0}"
+          CACHE_HITS="${CACHE_HITS:-0}"
+          CACHE_MISSES="${CACHE_MISSES:-0}"
+          printf "compile_requests,cache_hits,cache_misses\n%s,%s,%s\n" \
+            "${COMPILE_REQUESTS}" "${CACHE_HITS}" "${CACHE_MISSES}" \
+            > benchmark-results/boringcache-run${{ matrix.run }}-stats.csv
 
       - name: Check formatting
         run: cargo fmt -- --check
@@ -97,10 +138,23 @@ jobs:
             $BC_MOUNT \
             -w /workspace \
             -e CARGO_TARGET_DIR=/workspace/target \
+            -e CARGO_INCREMENTAL=${{ env.CARGO_INCREMENTAL }} \
             -e BORINGCACHE_API_TOKEN=${{ secrets.BORINGCACHE_API_TOKEN }} \
             rust:${{ env.RUST_VERSION }}-bookworm \
             sh -c '
-              set -e
+              set -euo pipefail
+              PROXY_PID=""
+
+              cleanup() {
+                if command -v sccache >/dev/null 2>&1; then
+                  sccache --stop-server >/dev/null 2>&1 || true
+                fi
+                if [[ -n "${PROXY_PID}" ]]; then
+                  kill "${PROXY_PID}" >/dev/null 2>&1 || true
+                  wait "${PROXY_PID}" >/dev/null 2>&1 || true
+                fi
+              }
+              trap cleanup EXIT
 
               # Install sccache + start proxy for compilation caching
               if boringcache --version >/dev/null 2>&1; then
@@ -137,7 +191,17 @@ jobs:
               echo "${DURATION}" > benchmark-results/docker-target-run${{ matrix.run }}.txt
 
               echo "=== sccache stats ==="
-              sccache --show-stats || true
+              SCCACHE_STATS="$(sccache --show-stats || true)"
+              echo "${SCCACHE_STATS}"
+              COMPILE_REQUESTS="$(printf "%s\n" "${SCCACHE_STATS}" | sed -n "s/^Compile requests[[:space:]]\\+\\([0-9]\\+\\)$/\\1/p" | head -n 1)"
+              CACHE_HITS="$(printf "%s\n" "${SCCACHE_STATS}" | sed -n "s/^Cache hits[[:space:]]\\+\\([0-9]\\+\\)$/\\1/p" | head -n 1)"
+              CACHE_MISSES="$(printf "%s\n" "${SCCACHE_STATS}" | sed -n "s/^Cache misses[[:space:]]\\+\\([0-9]\\+\\)$/\\1/p" | head -n 1)"
+              COMPILE_REQUESTS="${COMPILE_REQUESTS:-0}"
+              CACHE_HITS="${CACHE_HITS:-0}"
+              CACHE_MISSES="${CACHE_MISSES:-0}"
+              printf "compile_requests,cache_hits,cache_misses\n%s,%s,%s\n" \
+                "${COMPILE_REQUESTS}" "${CACHE_HITS}" "${CACHE_MISSES}" \
+                > benchmark-results/docker-target-run${{ matrix.run }}-stats.csv
             '
 
       - name: Upload results
@@ -178,6 +242,24 @@ jobs:
           done
           echo "" >> $GITHUB_STEP_SUMMARY
 
+          echo "### Native Runner Hit Stats" >> $GITHUB_STEP_SUMMARY
+          echo "| Run | Compile Requests | Hits | Misses | Hit Rate |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|------------------|------|--------|----------|" >> $GITHUB_STEP_SUMMARY
+          for run in 1 2 3; do
+            stats_file="boringcache-run${run}-stats.csv"
+            if [[ -f "${stats_file}" ]]; then
+              IFS=',' read -r compile_requests cache_hits cache_misses < <(tail -n 1 "${stats_file}")
+              hit_rate="0.00"
+              if [[ "${compile_requests}" -gt 0 ]]; then
+                hit_rate=$(awk -v hits="${cache_hits}" -v total="${compile_requests}" "BEGIN { printf \"%.2f\", (hits * 100) / total }")
+              fi
+              echo "| $run | ${compile_requests} | ${cache_hits} | ${cache_misses} | ${hit_rate}% |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| $run | Missing | Missing | Missing | Missing |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+
           echo "## Docker (boringcache + sccache proxy)" >> $GITHUB_STEP_SUMMARY
           echo "| Run | Time |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|------|" >> $GITHUB_STEP_SUMMARY
@@ -187,6 +269,24 @@ jobs:
               echo "| $run | ${t}ms |" >> $GITHUB_STEP_SUMMARY
             else
               echo "| $run | Missing |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Docker Hit Stats" >> $GITHUB_STEP_SUMMARY
+          echo "| Run | Compile Requests | Hits | Misses | Hit Rate |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|------------------|------|--------|----------|" >> $GITHUB_STEP_SUMMARY
+          for run in 1 2 3; do
+            stats_file="docker-target-run${run}-stats.csv"
+            if [[ -f "${stats_file}" ]]; then
+              IFS=',' read -r compile_requests cache_hits cache_misses < <(tail -n 1 "${stats_file}")
+              hit_rate="0.00"
+              if [[ "${compile_requests}" -gt 0 ]]; then
+                hit_rate=$(awk -v hits="${cache_hits}" -v total="${compile_requests}" "BEGIN { printf \"%.2f\", (hits * 100) / total }")
+              fi
+              echo "| $run | ${compile_requests} | ${cache_hits} | ${cache_misses} | ${hit_rate}% |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| $run | Missing | Missing | Missing | Missing |" >> $GITHUB_STEP_SUMMARY
             fi
           done
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -202,6 +302,23 @@ jobs:
           if [[ -f docker-target-run1.txt && -f docker-target-run2.txt && -f docker-target-run3.txt ]]; then
             tt=$(( ($(cat docker-target-run1.txt)+$(cat docker-target-run2.txt)+$(cat docker-target-run3.txt))/3 ))
             echo "- **Average**: ${tt}ms" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## Cold vs Warm Savings" >> $GITHUB_STEP_SUMMARY
+          if [[ -f boringcache-run1.txt && -f boringcache-run2.txt && -f boringcache-run3.txt ]]; then
+            native_cold=$(cat boringcache-run1.txt)
+            native_warm=$(( ($(cat boringcache-run2.txt)+$(cat boringcache-run3.txt))/2 ))
+            native_saved=$(( native_cold - native_warm ))
+            native_saved_pct=$(awk -v saved="${native_saved}" -v cold="${native_cold}" 'BEGIN { if (cold == 0) { print "0.00" } else { printf "%.2f", (saved * 100) / cold } }')
+            echo "- Native: cold=${native_cold}ms, warm_avg=${native_warm}ms, savings=${native_saved}ms (${native_saved_pct}%)" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [[ -f docker-target-run1.txt && -f docker-target-run2.txt && -f docker-target-run3.txt ]]; then
+            docker_cold=$(cat docker-target-run1.txt)
+            docker_warm=$(( ($(cat docker-target-run2.txt)+$(cat docker-target-run3.txt))/2 ))
+            docker_saved=$(( docker_cold - docker_warm ))
+            docker_saved_pct=$(awk -v saved="${docker_saved}" -v cold="${docker_cold}" 'BEGIN { if (cold == 0) { print "0.00" } else { printf "%.2f", (saved * 100) / cold } }')
+            echo "- Docker: cold=${docker_cold}ms, warm_avg=${docker_warm}ms, savings=${docker_saved}ms (${docker_saved_pct}%)" >> $GITHUB_STEP_SUMMARY
           fi
 
   build:
@@ -287,10 +404,12 @@ jobs:
             $BC_MOUNT \
             -w /workspace \
             -e CARGO_TARGET_DIR=/workspace/target \
+            -e CARGO_INCREMENTAL=${{ env.CARGO_INCREMENTAL }} \
             -e BORINGCACHE_API_TOKEN=${{ secrets.BORINGCACHE_API_TOKEN }} \
             ${{ matrix.container }} \
             sh -c '
-              set -e
+              set -euo pipefail
+              PROXY_PID=""
 
               # Install build dependencies based on container type
               if [ -f /etc/alpine-release ]; then
@@ -343,6 +462,11 @@ jobs:
 
               echo "=== sccache stats ==="
               sccache --show-stats || true
+              sccache --stop-server >/dev/null 2>&1 || true
+              if [[ -n "${PROXY_PID}" ]]; then
+                kill "${PROXY_PID}" >/dev/null 2>&1 || true
+                wait "${PROXY_PID}" >/dev/null 2>&1 || true
+              fi
             '
 
       # Native builds for Ubuntu/macOS/Windows
