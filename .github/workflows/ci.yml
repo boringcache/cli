@@ -37,14 +37,9 @@ jobs:
 
       - name: Setup Rust (Fallback)
         if: steps.boringcache-rust.outcome == 'failure'
-        uses: boringcache/rust-action@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-ci-test"
-          sccache: "true"
-          sccache-mode: "proxy"
-          cache-target: "false"
+          toolchain: ${{ env.RUST_VERSION }}
 
       - name: Install Rust components
         run: rustup component add clippy rustfmt
@@ -363,14 +358,10 @@ jobs:
 
       - name: Setup Rust (Native Fallback)
         if: matrix.use_docker != true && steps.boringcache-rust-native.outcome == 'failure'
-        uses: boringcache/rust-action@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-ci-build-${{ matrix.name }}"
-          sccache: "true"
-          sccache-mode: "proxy"
-          cache-target: "false"
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
 
       - name: Install Rust target (Native builds)
         if: matrix.use_docker != true
