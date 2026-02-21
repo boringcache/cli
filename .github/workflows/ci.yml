@@ -10,12 +10,14 @@ env:
   RUST_VERSION: "1.89"
   BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
   SCCACHE_VERSION: "v0.13.0"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   test-boringcache:
     name: Test CLI (BoringCache)
     runs-on: ubuntu-latest
     strategy:
+      max-parallel: 1
       matrix:
         run: [1, 2, 3]
 
@@ -47,9 +49,9 @@ jobs:
       - name: Build and test with timing
         run: |
           START_TIME=$(date +%s%N)
-          cargo build
-          cargo test
-          cargo clippy -- -D warnings
+          cargo build --locked
+          cargo test --locked
+          cargo clippy --locked -- -D warnings
           END_TIME=$(date +%s%N)
           DURATION=$(( (END_TIME - START_TIME) / 1000000 ))
           echo "BoringCache build+test - Run ${{ matrix.run }}: ${DURATION}ms"
@@ -69,6 +71,7 @@ jobs:
     name: Test Docker
     runs-on: ubuntu-latest
     strategy:
+      max-parallel: 1
       matrix:
         run: [1, 2, 3]
 
@@ -125,8 +128,8 @@ jobs:
 
               # Build with timing
               START_TIME=$(date +%s%N)
-              cargo build
-              cargo test
+              cargo build --locked
+              cargo test --locked
               END_TIME=$(date +%s%N)
               DURATION=$(( (END_TIME - START_TIME) / 1000000 ))
               echo "Docker target cache - Run ${{ matrix.run }}: ${DURATION}ms"
@@ -134,7 +137,7 @@ jobs:
               echo "${DURATION}" > benchmark-results/docker-target-run${{ matrix.run }}.txt
 
               echo "=== sccache stats ==="
-              sccache --show-stats 2>/dev/null || true
+              sccache --show-stats || true
             '
 
       - name: Upload results
@@ -329,9 +332,9 @@ jobs:
 
               # Build with appropriate flags
               if [ "${{ matrix.musl }}" = "true" ]; then
-                RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target ${{ matrix.target }}
+                RUSTFLAGS="-C target-feature=+crt-static" cargo build --locked --release --target ${{ matrix.target }}
               else
-                cargo build --release --target ${{ matrix.target }}
+                cargo build --locked --release --target ${{ matrix.target }}
               fi
 
               # Copy binary
@@ -339,7 +342,7 @@ jobs:
               chmod +x /workspace/${{ matrix.binary_name }}
 
               echo "=== sccache stats ==="
-              sccache --show-stats 2>/dev/null || true
+              sccache --show-stats || true
             '
 
       # Native builds for Ubuntu/macOS/Windows
@@ -370,7 +373,7 @@ jobs:
       - name: Build CLI (Native builds)
         if: matrix.use_docker != true
         run: |
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Prepare binary (Native builds)
         if: matrix.use_docker != true
