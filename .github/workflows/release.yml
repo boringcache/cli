@@ -204,6 +204,7 @@ jobs:
                   sccache --version
 
                   SCCACHE_PORT=4227
+                  # Target-scoped but run-stable tag: avoid run-id/attempt suffixes in release builds.
                   boringcache cache-registry ${{ github.repository }} "rust-${{ env.RUST_VERSION }}-sccache-${{ matrix.name }}" \
                     --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
                   PROXY_PID=$!

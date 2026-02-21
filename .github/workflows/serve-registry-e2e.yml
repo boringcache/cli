@@ -63,6 +63,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Intentionally run-scoped for isolated protocol/e2e coverage.
           BUILDER="bc-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           CACHE_TAG="${CACHE_TAG_PREFIX}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           CACHE_REF="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG}"

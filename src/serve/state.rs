@@ -19,9 +19,11 @@ pub struct AppState {
     pub upload_sessions: Arc<RwLock<UploadSessionStore>>,
     pub kv_pending: Arc<RwLock<KvPendingStore>>,
     pub kv_flush_lock: Arc<Mutex<()>>,
+    pub kv_lookup_lock: Arc<Mutex<()>>,
     pub kv_last_put: Arc<RwLock<Option<Instant>>>,
     pub kv_next_flush_at: Arc<RwLock<Option<Instant>>>,
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
+    pub kv_recent_misses: Arc<RwLock<HashMap<String, Instant>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -290,6 +292,16 @@ impl KvPublishedIndex {
         self.entries = entries;
         self.cache_entry_id = Some(cache_entry_id);
         self.download_urls.clear();
+    }
+
+    pub fn insert(&mut self, scoped_key: String, blob: BlobDescriptor, cache_entry_id: String) {
+        if self.cache_entry_id.as_deref() != Some(cache_entry_id.as_str()) {
+            self.entries.clear();
+            self.download_urls.clear();
+            self.cache_entry_id = Some(cache_entry_id);
+        }
+
+        self.entries.insert(scoped_key, blob);
     }
 
     pub fn set_download_urls(&mut self, urls: HashMap<String, String>) {

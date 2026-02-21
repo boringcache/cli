@@ -404,7 +404,10 @@ async fn execute_batch_restore_inner(
         };
         let resolver =
             crate::tag_utils::TagResolver::new(platform.clone(), git_context, git_enabled);
-        let candidates = resolver.restore_tag_candidates(&spec.tag);
+        let effective_tag = resolver
+            .effective_save_tag(&spec.tag)
+            .unwrap_or_else(|_| spec.tag.clone());
+        let candidates = vec![effective_tag];
         let target_path = spec
             .path
             .as_deref()

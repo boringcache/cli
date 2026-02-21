@@ -113,7 +113,8 @@ jobs:
                   sccache --version
 
                   SCCACHE_PORT=4227
-                  boringcache cache-registry ${{ github.repository }} "rust-${{ env.RUST_VERSION }}-sccache-docker-test-${{ matrix.run }}" \
+                  # Keep a stable root tag in normal CI to preserve key->digest mappings across runs.
+                  boringcache cache-registry ${{ github.repository }} "rust-${{ env.RUST_VERSION }}-sccache-docker-test" \
                     --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
                   PROXY_PID=$!
                   for _ in $(seq 1 30); do

@@ -19,6 +19,8 @@ use crate::serve::state::AppState;
 
 use super::error::RegistryError;
 
+const KV_MISS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum KvNamespace {
     BazelAc,
@@ -84,6 +86,10 @@ pub(crate) async fn put_kv_object(
             path,
         )
     };
+    {
+        let mut misses = state.kv_recent_misses.write().await;
+        misses.remove(&scoped_key);
+    }
     if let Some(redundant_path) = redundant {
         let _ = tokio::fs::remove_file(&redundant_path).await;
     }
@@ -216,6 +222,33 @@ async fn serve_backend_blob(
     Ok((StatusCode::OK, response_headers, body).into_response())
 }
 
+async fn is_recent_kv_miss(state: &AppState, scoped_key: &str) -> bool {
+    let now = std::time::Instant::now();
+    let mut misses = state.kv_recent_misses.write().await;
+
+    match misses.get(scoped_key).copied() {
+        Some(expires_at) if expires_at > now => true,
+        Some(_) => {
+            misses.remove(scoped_key);
+            false
+        }
+        None => false,
+    }
+}
+
+async fn mark_kv_miss(state: &AppState, scoped_key: &str) {
+    let mut misses = state.kv_recent_misses.write().await;
+    misses.insert(
+        scoped_key.to_string(),
+        std::time::Instant::now() + KV_MISS_CACHE_TTL,
+    );
+}
+
+async fn clear_kv_miss(state: &AppState, scoped_key: &str) {
+    let mut misses = state.kv_recent_misses.write().await;
+    misses.remove(scoped_key);
+}
+
 pub(crate) async fn get_or_head_kv_object(
     state: &AppState,
     namespace: KvNamespace,
@@ -260,14 +293,43 @@ pub(crate) async fn get_or_head_kv_object(
         }
     }
 
+    if is_recent_kv_miss(state, &scoped_key).await {
+        return Err(RegistryError::not_found("Cache key not found"));
+    }
+
+    let _lookup_guard = state.kv_lookup_lock.lock().await;
+
+    if is_recent_kv_miss(state, &scoped_key).await {
+        return Err(RegistryError::not_found("Cache key not found"));
+    }
+
     let tag = state.registry_root_tag.trim().to_string();
-    let hit = resolve_hit(state, &tag).await?;
+    let hit = match resolve_hit(state, &tag).await {
+        Ok(hit) => hit,
+        Err(error) if error.status == StatusCode::NOT_FOUND => {
+            mark_kv_miss(state, &scoped_key).await;
+            return Err(RegistryError::not_found("Cache key not found"));
+        }
+        Err(error) => return Err(error),
+    };
+
     let pointer = fetch_pointer(state, &hit).await?;
     let cache_entry_id = hit
         .cache_entry_id
         .ok_or_else(|| RegistryError::internal("Cache hit is missing cache_entry_id"))?;
-    let blob = select_blob_for_key(&pointer, &scoped_key)?
-        .ok_or_else(|| RegistryError::not_found("Cache key not found"))?;
+    let blob = match select_blob_for_key(&pointer, &scoped_key)? {
+        Some(blob) => blob,
+        None => {
+            mark_kv_miss(state, &scoped_key).await;
+            return Err(RegistryError::not_found("Cache key not found"));
+        }
+    };
+
+    clear_kv_miss(state, &scoped_key).await;
+    {
+        let mut published = state.kv_published_index.write().await;
+        published.insert(scoped_key.clone(), blob.clone(), cache_entry_id.clone());
+    }
 
     serve_backend_blob(state, &cache_entry_id, &blob, None, is_head).await
 }

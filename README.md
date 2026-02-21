@@ -188,10 +188,9 @@ boringcache check my-org/ws "node-deps,build-cache" --json
 By default, tags are git-aware.
 
 - Save on a feature branch uses a branch-suffixed tag.
-- Restore on a feature branch tries the branch tag first, then falls back to the base tag.
-- Restore on the default branch only uses the base tag.
+- Restore uses one effective tag (branch-suffixed on feature branches, base tag on the default branch).
 - Platform suffixes are appended by default; disable with `--no-platform`.
-- If a tag already includes an explicit channel (`-branch-`, `-sha-`, `-main`, `-master`), no git suffix or fallback is applied.
+- If a tag already includes an explicit channel (`-branch-`, `-sha-`, `-main`, `-master`), no git suffix is applied.
 - Disable this behavior with `--no-git` or `BORINGCACHE_NO_GIT=1`.
 
 ### `workspaces`

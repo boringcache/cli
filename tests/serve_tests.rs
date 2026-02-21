@@ -49,9 +49,11 @@ async fn setup(
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
         kv_flush_lock: Arc::new(Mutex::new(())),
+        kv_lookup_lock: Arc::new(Mutex::new(())),
         kv_last_put: Arc::new(RwLock::new(None)),
         kv_next_flush_at: Arc::new(RwLock::new(None)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
+        kv_recent_misses: Arc::new(RwLock::new(std::collections::HashMap::new())),
     };
 
     (state, temp_home, guard)
@@ -1865,6 +1867,99 @@ async fn test_sccache_rejects_unsupported_method() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn test_sccache_miss_is_temporarily_cached_to_reduce_backend_lookups() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let key_path = format!(
+        "cache-prefix/{}/{}/{}/{}",
+        &key[0..1],
+        &key[1..2],
+        &key[2..3],
+        key
+    );
+    let payload_digest = cas_file::prefixed_sha256_digest(b"unrelated");
+    let pointer = cas_file::FilePointer {
+        format_version: 1,
+        adapter: "file-v1".to_string(),
+        entries: vec![cas_file::FilePointerEntry {
+            path: "sccache/other-key".to_string(),
+            entry_type: EntryType::File,
+            size_bytes: 9,
+            executable: None,
+            target: None,
+            digest: Some(payload_digest.clone()),
+        }],
+        blobs: vec![cas_file::FilePointerBlob {
+            digest: payload_digest,
+            size_bytes: 9,
+        }],
+    };
+    let pointer_bytes = serde_json::to_vec(&pointer).expect("pointer");
+
+    let restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "unused",
+                "status": "hit",
+                "cache_entry_id": "entry-sccache-kv",
+                "manifest_url": format!("{}/pointer-miss-sccache", server.url()),
+                "manifest_root_digest": cas_file::prefixed_sha256_digest(&pointer_bytes),
+                "storage_mode": "cas",
+                "cas_layout": "file-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let pointer_mock = server
+        .mock("GET", "/pointer-miss-sccache")
+        .expect(1)
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let first_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/{key_path}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first_response.status(), StatusCode::NOT_FOUND);
+
+    let app = build_router(state);
+    let second_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/{key_path}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second_response.status(), StatusCode::NOT_FOUND);
+
+    restore_mock.assert_async().await;
+    pointer_mock.assert_async().await;
 }
 
 #[tokio::test]
