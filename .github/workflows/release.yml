@@ -239,20 +239,7 @@ jobs:
 
       # Native builds for Ubuntu/macOS/Windows
       - name: Setup Rust (Native builds)
-        id: boringcache-rust-native
         if: matrix.use_docker != true
-        continue-on-error: true
-        uses: boringcache/rust-action@v1
-        with:
-          workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-release-build-${{ matrix.name }}"
-          sccache: "true"
-          sccache-mode: "proxy"
-          cache-target: "false"
-
-      - name: Setup Rust (Native Fallback)
-        if: matrix.use_docker != true && steps.boringcache-rust-native.outcome == 'failure'
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -614,19 +601,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust (BoringCache)
-        id: boringcache-rust
-        continue-on-error: true
-        uses: boringcache/rust-action@v1
-        with:
-          workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-release-test"
-          sccache: "true"
-          sccache-mode: "proxy"
-          cache-target: "false"
-
-      - name: Setup Rust (Fallback)
-        if: steps.boringcache-rust.outcome == 'failure'
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
