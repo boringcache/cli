@@ -4,6 +4,7 @@ use crate::cas_oci::sha256_hex;
 use crate::tag_utils::TagResolver;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
@@ -22,6 +23,7 @@ pub struct AppState {
     pub kv_lookup_lock: Arc<Mutex<()>>,
     pub kv_last_put: Arc<RwLock<Option<Instant>>>,
     pub kv_next_flush_at: Arc<RwLock<Option<Instant>>>,
+    pub kv_flush_scheduled: Arc<AtomicBool>,
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
     pub kv_recent_misses: Arc<RwLock<HashMap<String, Instant>>>,
 }
@@ -310,6 +312,12 @@ impl KvPublishedIndex {
             .into_iter()
             .map(|(digest, url)| (digest, CachedUrl { url, expires_at }))
             .collect();
+    }
+
+    pub fn set_download_url(&mut self, digest: String, url: String) {
+        let expires_at = Instant::now() + DOWNLOAD_URL_TTL;
+        self.download_urls
+            .insert(digest, CachedUrl { url, expires_at });
     }
 
     pub fn invalidate_download_url(&mut self, digest: &str) {

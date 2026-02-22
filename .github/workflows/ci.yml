@@ -16,6 +16,9 @@ jobs:
   test-boringcache:
     name: Test CLI (BoringCache)
     runs-on: ubuntu-latest
+    concurrency:
+      group: cli-ci-native-bench-${{ github.ref_name }}
+      cancel-in-progress: false
     strategy:
       max-parallel: 1
       matrix:
@@ -74,8 +77,10 @@ jobs:
             echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
             sccache --stop-server >/dev/null 2>&1 || true
             sccache --start-server || true
+            sccache --zero-stats >/dev/null 2>&1 || true
           fi
 
+          export CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target"
           START_TIME=$(date +%s%N)
           cargo build --locked
           cargo test --locked
@@ -92,11 +97,13 @@ jobs:
           COMPILE_REQUESTS="$(printf '%s\n' "${SCCACHE_STATS}" | awk '$1 == "Compile" && $2 == "requests" { print $3; exit }')"
           CACHE_HITS="$(printf '%s\n' "${SCCACHE_STATS}" | awk '$1 == "Cache" && $2 == "hits" && $3 ~ /^[0-9]+$/ { print $3; exit }')"
           CACHE_MISSES="$(printf '%s\n' "${SCCACHE_STATS}" | awk '$1 == "Cache" && $2 == "misses" && $3 ~ /^[0-9]+$/ { print $3; exit }')"
+          RUST_HIT_RATE="$(printf '%s\n' "${SCCACHE_STATS}" | awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }')"
           COMPILE_REQUESTS="${COMPILE_REQUESTS:-0}"
           CACHE_HITS="${CACHE_HITS:-0}"
           CACHE_MISSES="${CACHE_MISSES:-0}"
-          printf "compile_requests,cache_hits,cache_misses\n%s,%s,%s\n" \
-            "${COMPILE_REQUESTS}" "${CACHE_HITS}" "${CACHE_MISSES}" \
+          RUST_HIT_RATE="${RUST_HIT_RATE:-0.00}"
+          printf "compile_requests,cache_hits,cache_misses,rust_hit_rate\n%s,%s,%s,%s\n" \
+            "${COMPILE_REQUESTS}" "${CACHE_HITS}" "${CACHE_MISSES}" "${RUST_HIT_RATE}" \
             > benchmark-results/boringcache-run${{ matrix.run }}-stats.csv
 
       - name: Check formatting
@@ -111,6 +118,9 @@ jobs:
   docker:
     name: Test Docker
     runs-on: ubuntu-latest
+    concurrency:
+      group: cli-ci-docker-bench-${{ github.ref_name }}
+      cancel-in-progress: false
     strategy:
       max-parallel: 1
       matrix:
@@ -177,6 +187,7 @@ jobs:
                   export RUSTC_WRAPPER=sccache
                   echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
                   sccache --start-server || true
+                  sccache --zero-stats >/dev/null 2>&1 || true
                 fi
               fi
 
@@ -196,11 +207,13 @@ jobs:
               COMPILE_REQUESTS="$(printf "%s\n" "${SCCACHE_STATS}" | sed -n "s/^Compile requests[[:space:]]\\+\\([0-9]\\+\\)$/\\1/p" | head -n 1)"
               CACHE_HITS="$(printf "%s\n" "${SCCACHE_STATS}" | sed -n "s/^Cache hits[[:space:]]\\+\\([0-9]\\+\\)$/\\1/p" | head -n 1)"
               CACHE_MISSES="$(printf "%s\n" "${SCCACHE_STATS}" | sed -n "s/^Cache misses[[:space:]]\\+\\([0-9]\\+\\)$/\\1/p" | head -n 1)"
+              RUST_HIT_RATE="$(printf "%s\n" "${SCCACHE_STATS}" | awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }')"
               COMPILE_REQUESTS="${COMPILE_REQUESTS:-0}"
               CACHE_HITS="${CACHE_HITS:-0}"
               CACHE_MISSES="${CACHE_MISSES:-0}"
-              printf "compile_requests,cache_hits,cache_misses\n%s,%s,%s\n" \
-                "${COMPILE_REQUESTS}" "${CACHE_HITS}" "${CACHE_MISSES}" \
+              RUST_HIT_RATE="${RUST_HIT_RATE:-0.00}"
+              printf "compile_requests,cache_hits,cache_misses,rust_hit_rate\n%s,%s,%s,%s\n" \
+                "${COMPILE_REQUESTS}" "${CACHE_HITS}" "${CACHE_MISSES}" "${RUST_HIT_RATE}" \
                 > benchmark-results/docker-target-run${{ matrix.run }}-stats.csv
             '
 
@@ -243,19 +256,20 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           echo "### Native Runner Hit Stats" >> $GITHUB_STEP_SUMMARY
-          echo "| Run | Compile Requests | Hits | Misses | Hit Rate |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|------------------|------|--------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Run | Compile Requests | Hits | Misses | Hit Rate | Rust Hit Rate |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|------------------|------|--------|----------|---------------|" >> $GITHUB_STEP_SUMMARY
           for run in 1 2 3; do
             stats_file="boringcache-run${run}-stats.csv"
             if [[ -f "${stats_file}" ]]; then
-              IFS=',' read -r compile_requests cache_hits cache_misses < <(tail -n 1 "${stats_file}")
+              IFS=',' read -r compile_requests cache_hits cache_misses rust_hit_rate < <(tail -n 1 "${stats_file}")
               hit_rate="0.00"
               if [[ "${compile_requests}" -gt 0 ]]; then
                 hit_rate=$(awk -v hits="${cache_hits}" -v total="${compile_requests}" "BEGIN { printf \"%.2f\", (hits * 100) / total }")
               fi
-              echo "| $run | ${compile_requests} | ${cache_hits} | ${cache_misses} | ${hit_rate}% |" >> $GITHUB_STEP_SUMMARY
+              rust_hit_rate="${rust_hit_rate:-0.00}"
+              echo "| $run | ${compile_requests} | ${cache_hits} | ${cache_misses} | ${hit_rate}% | ${rust_hit_rate}% |" >> $GITHUB_STEP_SUMMARY
             else
-              echo "| $run | Missing | Missing | Missing | Missing |" >> $GITHUB_STEP_SUMMARY
+              echo "| $run | Missing | Missing | Missing | Missing | Missing |" >> $GITHUB_STEP_SUMMARY
             fi
           done
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -274,19 +288,20 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           echo "### Docker Hit Stats" >> $GITHUB_STEP_SUMMARY
-          echo "| Run | Compile Requests | Hits | Misses | Hit Rate |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|------------------|------|--------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Run | Compile Requests | Hits | Misses | Hit Rate | Rust Hit Rate |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|------------------|------|--------|----------|---------------|" >> $GITHUB_STEP_SUMMARY
           for run in 1 2 3; do
             stats_file="docker-target-run${run}-stats.csv"
             if [[ -f "${stats_file}" ]]; then
-              IFS=',' read -r compile_requests cache_hits cache_misses < <(tail -n 1 "${stats_file}")
+              IFS=',' read -r compile_requests cache_hits cache_misses rust_hit_rate < <(tail -n 1 "${stats_file}")
               hit_rate="0.00"
               if [[ "${compile_requests}" -gt 0 ]]; then
                 hit_rate=$(awk -v hits="${cache_hits}" -v total="${compile_requests}" "BEGIN { printf \"%.2f\", (hits * 100) / total }")
               fi
-              echo "| $run | ${compile_requests} | ${cache_hits} | ${cache_misses} | ${hit_rate}% |" >> $GITHUB_STEP_SUMMARY
+              rust_hit_rate="${rust_hit_rate:-0.00}"
+              echo "| $run | ${compile_requests} | ${cache_hits} | ${cache_misses} | ${hit_rate}% | ${rust_hit_rate}% |" >> $GITHUB_STEP_SUMMARY
             else
-              echo "| $run | Missing | Missing | Missing | Missing |" >> $GITHUB_STEP_SUMMARY
+              echo "| $run | Missing | Missing | Missing | Missing | Missing |" >> $GITHUB_STEP_SUMMARY
             fi
           done
           echo "" >> $GITHUB_STEP_SUMMARY

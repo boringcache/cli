@@ -1271,6 +1271,7 @@ mod tests {
             kv_lookup_lock: Arc::new(tokio::sync::Mutex::new(())),
             kv_last_put: Arc::new(RwLock::new(None)),
             kv_next_flush_at: Arc::new(RwLock::new(None)),
+            kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
             kv_recent_misses: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }

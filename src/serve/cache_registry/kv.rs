@@ -7,12 +7,16 @@ use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
+use tokio_util::io::ReaderStream;
 
 use crate::api::models::cache::{
     BlobDescriptor, CacheResolutionEntry, ConfirmRequest, SaveRequest,
 };
 use crate::cas_transport::upload_payload;
+use crate::error::BoringCacheError;
 use crate::manifest::EntryType;
 use crate::progress::TransferProgress;
 use crate::serve::state::AppState;
@@ -20,6 +24,14 @@ use crate::serve::state::AppState;
 use super::error::RegistryError;
 
 const KV_MISS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+const KV_CONFLICT_BACKOFF_MS: u64 = 5_000;
+const KV_CONFLICT_JITTER_MS: u64 = 3_000;
+const KV_TRANSIENT_BACKOFF_MS: u64 = 2_000;
+const KV_TRANSIENT_JITTER_MS: u64 = 2_000;
+
+fn kv_miss_cache_key(registry_root_tag: &str, scoped_key: &str) -> String {
+    format!("{}\u{0}{}", registry_root_tag.trim(), scoped_key)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum KvNamespace {
@@ -74,6 +86,7 @@ pub(crate) async fn put_kv_object(
 
     let (path, blob_size, blob_digest) = write_body_to_temp_file(body).await?;
     let scoped_key = namespace.scoped_key(key);
+    let miss_key = kv_miss_cache_key(&state.registry_root_tag, &scoped_key);
 
     let redundant = {
         let mut pending = state.kv_pending.write().await;
@@ -88,7 +101,7 @@ pub(crate) async fn put_kv_object(
     };
     {
         let mut misses = state.kv_recent_misses.write().await;
-        misses.remove(&scoped_key);
+        misses.remove(&miss_key);
     }
     if let Some(redundant_path) = redundant {
         let _ = tokio::fs::remove_file(&redundant_path).await;
@@ -106,13 +119,18 @@ pub(crate) async fn put_kv_object(
         };
         if !gated {
             let pending = state.kv_pending.read().await;
-            if pending.blob_count() >= crate::serve::state::FLUSH_BLOB_THRESHOLD
-                || pending.total_spool_bytes() >= crate::serve::state::FLUSH_SIZE_THRESHOLD
-            {
-                let flush_state = state.clone();
-                tokio::spawn(async move {
-                    flush_kv_index(&flush_state).await;
-                });
+            let should_flush = pending.blob_count() >= crate::serve::state::FLUSH_BLOB_THRESHOLD
+                || pending.total_spool_bytes() >= crate::serve::state::FLUSH_SIZE_THRESHOLD;
+            drop(pending);
+
+            if should_flush {
+                if let Some(flush_guard) = try_schedule_flush(state) {
+                    let flush_state = state.clone();
+                    tokio::spawn(async move {
+                        let _flush_guard = flush_guard;
+                        flush_kv_index(&flush_state).await;
+                    });
+                }
             }
         }
     }
@@ -181,10 +199,12 @@ async fn serve_backend_blob(
     let (download_url, from_cache) = if let Some(url) = cached_url {
         (url.to_string(), true)
     } else {
-        (
-            resolve_download_url(state, cache_entry_id, blob).await?,
-            false,
-        )
+        let resolved = resolve_download_url(state, cache_entry_id, blob).await?;
+        {
+            let mut published = state.kv_published_index.write().await;
+            published.set_download_url(blob.digest.clone(), resolved.clone());
+        }
+        (resolved, false)
     };
 
     let download_result = state
@@ -201,6 +221,10 @@ async fn serve_backend_blob(
             published.invalidate_download_url(&blob.digest);
         }
         let fresh_url = resolve_download_url(state, cache_entry_id, blob).await?;
+        {
+            let mut published = state.kv_published_index.write().await;
+            published.set_download_url(blob.digest.clone(), fresh_url.clone());
+        }
         let retry_response = state
             .api_client
             .transfer_client()
@@ -249,6 +273,13 @@ async fn clear_kv_miss(state: &AppState, scoped_key: &str) {
     misses.remove(scoped_key);
 }
 
+async fn clear_tag_misses(state: &AppState, registry_root_tag: &str) {
+    let prefix = format!("{}\u{0}", registry_root_tag.trim());
+    let now = std::time::Instant::now();
+    let mut misses = state.kv_recent_misses.write().await;
+    misses.retain(|key, expires_at| *expires_at > now && !key.starts_with(&prefix));
+}
+
 pub(crate) async fn get_or_head_kv_object(
     state: &AppState,
     namespace: KvNamespace,
@@ -256,6 +287,7 @@ pub(crate) async fn get_or_head_kv_object(
     is_head: bool,
 ) -> Result<Response, RegistryError> {
     let scoped_key = namespace.scoped_key(key);
+    let miss_key = kv_miss_cache_key(&state.registry_root_tag, &scoped_key);
 
     let local = {
         let pending = state.kv_pending.read().await;
@@ -293,13 +325,13 @@ pub(crate) async fn get_or_head_kv_object(
         }
     }
 
-    if is_recent_kv_miss(state, &scoped_key).await {
+    if is_recent_kv_miss(state, &miss_key).await {
         return Err(RegistryError::not_found("Cache key not found"));
     }
 
     let _lookup_guard = state.kv_lookup_lock.lock().await;
 
-    if is_recent_kv_miss(state, &scoped_key).await {
+    if is_recent_kv_miss(state, &miss_key).await {
         return Err(RegistryError::not_found("Cache key not found"));
     }
 
@@ -307,7 +339,7 @@ pub(crate) async fn get_or_head_kv_object(
     let hit = match resolve_hit(state, &tag).await {
         Ok(hit) => hit,
         Err(error) if error.status == StatusCode::NOT_FOUND => {
-            mark_kv_miss(state, &scoped_key).await;
+            mark_kv_miss(state, &miss_key).await;
             return Err(RegistryError::not_found("Cache key not found"));
         }
         Err(error) => return Err(error),
@@ -317,18 +349,23 @@ pub(crate) async fn get_or_head_kv_object(
     let cache_entry_id = hit
         .cache_entry_id
         .ok_or_else(|| RegistryError::internal("Cache hit is missing cache_entry_id"))?;
+    let entries_from_pointer = pointer_entries_by_key(&pointer);
     let blob = match select_blob_for_key(&pointer, &scoped_key)? {
         Some(blob) => blob,
         None => {
-            mark_kv_miss(state, &scoped_key).await;
+            mark_kv_miss(state, &miss_key).await;
             return Err(RegistryError::not_found("Cache key not found"));
         }
     };
 
-    clear_kv_miss(state, &scoped_key).await;
+    clear_kv_miss(state, &miss_key).await;
     {
         let mut published = state.kv_published_index.write().await;
-        published.insert(scoped_key.clone(), blob.clone(), cache_entry_id.clone());
+        if entries_from_pointer.is_empty() {
+            published.insert(scoped_key.clone(), blob.clone(), cache_entry_id.clone());
+        } else {
+            published.update(entries_from_pointer, cache_entry_id.clone());
+        }
     }
 
     serve_backend_blob(state, &cache_entry_id, &blob, None, is_head).await
@@ -358,11 +395,12 @@ async fn serve_local_blob(
         return Ok((StatusCode::OK, headers, Body::empty()).into_response());
     }
 
-    let data = tokio::fs::read(path)
+    let file = tokio::fs::File::open(path)
         .await
-        .map_err(|e| RegistryError::internal(format!("Failed to read local blob: {e}")))?;
+        .map_err(|e| RegistryError::internal(format!("Failed to open local blob: {e}")))?;
+    let stream = ReaderStream::new(file);
 
-    Ok((StatusCode::OK, headers, Body::from(data)).into_response())
+    Ok((StatusCode::OK, headers, Body::from_stream(stream)).into_response())
 }
 
 pub(crate) async fn resolve_kv_entries(
@@ -500,6 +538,28 @@ fn select_blob_for_key(
     Ok(None)
 }
 
+fn pointer_entries_by_key(
+    pointer: &crate::cas_file::FilePointer,
+) -> HashMap<String, BlobDescriptor> {
+    let mut entries = HashMap::new();
+    for entry in &pointer.entries {
+        if !matches!(entry.entry_type, EntryType::File) {
+            continue;
+        }
+        let Some(digest) = &entry.digest else {
+            continue;
+        };
+        entries.insert(
+            entry.path.clone(),
+            BlobDescriptor {
+                digest: digest.clone(),
+                size_bytes: entry.size_bytes,
+            },
+        );
+    }
+    entries
+}
+
 fn build_index_pointer(
     entries: &BTreeMap<String, BlobDescriptor>,
 ) -> Result<(Vec<u8>, Vec<BlobDescriptor>), RegistryError> {
@@ -556,11 +616,122 @@ pub(crate) enum FlushResult {
     Ok,
     Conflict,
     Error,
+    Permanent,
 }
 
 enum FlushError {
     Conflict(String),
     Transient(String),
+    Permanent(String),
+}
+
+pub(crate) struct FlushScheduleGuard {
+    flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for FlushScheduleGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
+pub(crate) fn try_schedule_flush(state: &AppState) -> Option<FlushScheduleGuard> {
+    if state
+        .kv_flush_scheduled
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return None;
+    }
+
+    Some(FlushScheduleGuard {
+        flag: state.kv_flush_scheduled.clone(),
+    })
+}
+
+fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
+    let message = format!("{context}: {error}");
+    let lower = message.to_ascii_lowercase();
+
+    let is_conflict = error
+        .downcast_ref::<BoringCacheError>()
+        .is_some_and(|bc| matches!(bc, BoringCacheError::CacheConflict(_)))
+        || lower.contains("another cache upload is in progress");
+    let conflict_status = lower.contains("http 409") || lower.contains("http 412");
+    let conflict_hint = lower.contains("precondition failed")
+        || lower.contains("etag mismatch")
+        || lower.contains("manifest digest mismatch");
+    if is_conflict || conflict_status || conflict_hint {
+        return FlushError::Conflict(message);
+    }
+
+    let transient_status = lower.contains("http 429")
+        || lower.contains("http 500")
+        || lower.contains("http 502")
+        || lower.contains("http 503")
+        || lower.contains("http 504");
+    let transient_hint = lower.contains("transient error")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("rate limit exceeded")
+        || lower.contains("cannot connect")
+        || lower.contains("connection refused")
+        || lower.contains("broken pipe")
+        || lower.contains("connection reset");
+    let transient_kind = error.downcast_ref::<BoringCacheError>().is_some_and(|bc| {
+        matches!(
+            bc,
+            BoringCacheError::NetworkError(_)
+                | BoringCacheError::ConnectionError(_)
+                | BoringCacheError::CachePending
+        )
+    });
+    if transient_status || transient_hint || transient_kind {
+        return FlushError::Transient(message);
+    }
+
+    let permanent_status = lower.contains("http 400")
+        || lower.contains("http 401")
+        || lower.contains("http 403")
+        || lower.contains("http 404")
+        || lower.contains("http 405")
+        || lower.contains("http 410")
+        || lower.contains("http 411")
+        || lower.contains("http 413")
+        || lower.contains("http 414")
+        || lower.contains("http 415")
+        || lower.contains("http 422");
+    let permanent_hint = lower.contains("authentication failed")
+        || lower.contains("invalid or expired token")
+        || lower.contains("access forbidden")
+        || lower.contains("workspace")
+        || lower.contains("unprocessable");
+    let permanent_kind = error.downcast_ref::<BoringCacheError>().is_some_and(|bc| {
+        matches!(
+            bc,
+            BoringCacheError::ConfigNotFound
+                | BoringCacheError::TokenNotFound
+                | BoringCacheError::WorkspaceNotFound(_)
+                | BoringCacheError::AuthenticationFailed(_)
+        )
+    });
+    if permanent_status || permanent_hint || permanent_kind {
+        return FlushError::Permanent(message);
+    }
+
+    FlushError::Transient(message)
+}
+
+async fn set_next_flush_at_with_jitter(state: &AppState, base_ms: u64, jitter_ms: u64) {
+    let jitter = if jitter_ms == 0 {
+        0
+    } else {
+        rand::thread_rng().gen_range(0..jitter_ms)
+    };
+    let backoff = std::time::Duration::from_millis(base_ms + jitter);
+    let mut next = state.kv_next_flush_at.write().await;
+    *next = Some(std::time::Instant::now() + backoff);
 }
 
 pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
@@ -590,6 +761,7 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
                 let mut published = state.kv_published_index.write().await;
                 published.update(merged_entries.into_iter().collect(), cache_entry_id.clone());
             }
+            clear_tag_misses(state, &state.registry_root_tag).await;
 
             {
                 let mut last_put = state.kv_last_put.write().await;
@@ -600,7 +772,6 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
                 "KV batch: flushed {entry_count} new entries ({} blobs cleaned up)",
                 pending_blob_paths.len()
             );
-
             preload_download_urls(state, &cache_entry_id).await;
             FlushResult::Ok
         }
@@ -609,17 +780,28 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
             let mut pending = state.kv_pending.write().await;
             pending.restore(pending_entries, pending_blob_paths);
             drop(pending);
-            let jitter_ms = rand::thread_rng().gen_range(0..3000);
-            let backoff = std::time::Duration::from_millis(5000 + jitter_ms);
-            let mut next = state.kv_next_flush_at.write().await;
-            *next = Some(std::time::Instant::now() + backoff);
+            set_next_flush_at_with_jitter(state, KV_CONFLICT_BACKOFF_MS, KV_CONFLICT_JITTER_MS)
+                .await;
             FlushResult::Conflict
         }
         Err(FlushError::Transient(msg)) => {
             eprintln!("KV batch flush failed: {msg}");
             let mut pending = state.kv_pending.write().await;
             pending.restore(pending_entries, pending_blob_paths);
+            set_next_flush_at_with_jitter(state, KV_TRANSIENT_BACKOFF_MS, KV_TRANSIENT_JITTER_MS)
+                .await;
             FlushResult::Error
+        }
+        Err(FlushError::Permanent(msg)) => {
+            eprintln!("KV batch flush dropped permanently: {msg}");
+            for path in pending_blob_paths.values() {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+            {
+                let mut last_put = state.kv_last_put.write().await;
+                *last_put = None;
+            }
+            FlushResult::Permanent
         }
     }
 }
@@ -627,7 +809,7 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
 pub(crate) async fn preload_kv_index(state: &AppState) {
     let tag = state.registry_root_tag.trim().to_string();
     match load_existing_index(state, &tag).await {
-        Ok((entries, Some(cache_entry_id))) if !entries.is_empty() => {
+        Ok((entries, Some(cache_entry_id), _manifest_root_digest)) if !entries.is_empty() => {
             let count = entries.len();
             {
                 let mut published = state.kv_published_index.write().await;
@@ -637,6 +819,7 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
                 }
                 published.update(entries.into_iter().collect(), cache_entry_id.clone());
             }
+            clear_tag_misses(state, &tag).await;
             eprintln!("KV index preloaded: {count} entries, resolving download URLs...");
             preload_download_urls(state, &cache_entry_id).await;
         }
@@ -647,6 +830,99 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
             log::warn!("KV index preload failed: {e:?}");
         }
     }
+}
+
+pub(crate) async fn refresh_kv_index(state: &AppState) {
+    if state.kv_flush_scheduled.load(Ordering::Acquire) {
+        return;
+    }
+
+    let tag = state.registry_root_tag.trim().to_string();
+    match load_existing_index(state, &tag).await {
+        Ok((entries, Some(cache_entry_id), manifest_root_digest)) if !entries.is_empty() => {
+            let should_fence = {
+                let published = state.kv_published_index.read().await;
+                published
+                    .cache_entry_id()
+                    .is_some_and(|current| current != cache_entry_id)
+            };
+            if should_fence
+                && !refresh_fence_allows_update(
+                    state,
+                    &tag,
+                    &cache_entry_id,
+                    manifest_root_digest.as_deref(),
+                )
+                .await
+            {
+                return;
+            }
+
+            let count = entries.len();
+            {
+                let mut published = state.kv_published_index.write().await;
+                published.update(entries.into_iter().collect(), cache_entry_id.clone());
+            }
+            clear_tag_misses(state, &tag).await;
+            eprintln!("KV index refresh: {count} entries loaded");
+            preload_download_urls(state, &cache_entry_id).await;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            log::warn!("KV index refresh failed: {e:?}");
+        }
+    }
+}
+
+async fn refresh_fence_allows_update(
+    state: &AppState,
+    tag: &str,
+    expected_cache_entry_id: &str,
+    expected_manifest_root_digest: Option<&str>,
+) -> bool {
+    let live_hit = match resolve_hit(state, tag).await {
+        Ok(hit) => hit,
+        Err(error) => {
+            log::warn!(
+                "KV index refresh fence: live resolve failed (skipping update): {}",
+                error.status
+            );
+            return false;
+        }
+    };
+
+    let live_cache_entry_id = match live_hit.cache_entry_id.as_deref() {
+        Some(id) => id,
+        None => {
+            log::warn!("KV index refresh fence: live hit missing cache_entry_id");
+            return false;
+        }
+    };
+    if live_cache_entry_id != expected_cache_entry_id {
+        eprintln!(
+            "KV index refresh fence: skipping stale update (expected entry {}, live entry {})",
+            expected_cache_entry_id, live_cache_entry_id
+        );
+        return false;
+    }
+
+    if let (Some(expected_digest), Some(live_digest)) = (
+        expected_manifest_root_digest,
+        live_hit
+            .manifest_root_digest
+            .as_deref()
+            .or(live_hit.manifest_digest.as_deref()),
+    ) {
+        if expected_digest != live_digest {
+            eprintln!(
+                "KV index refresh fence: skipping stale update (expected digest {}, live digest {})",
+                expected_digest, live_digest
+            );
+            return false;
+        }
+    }
+
+    true
 }
 
 async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
@@ -686,11 +962,12 @@ async fn do_flush(
     pending_entries: &BTreeMap<String, BlobDescriptor>,
     pending_blob_paths: &HashMap<String, PathBuf>,
 ) -> Result<(BTreeMap<String, BlobDescriptor>, String), FlushError> {
+    let flush_started_at = std::time::Instant::now();
     let tag = state.registry_root_tag.trim().to_string();
 
     let existing_count;
     let mut entries = match load_existing_index(state, &tag).await {
-        Ok((existing, _)) => {
+        Ok((existing, _, _)) => {
             existing_count = existing.len();
             existing
         }
@@ -745,17 +1022,7 @@ async fn do_flush(
         .await
     {
         Ok(resp) => resp,
-        Err(e) => {
-            let msg = format!("{e}");
-            let is_conflict = e
-                .downcast_ref::<crate::error::BoringCacheError>()
-                .is_some_and(|bc| matches!(bc, crate::error::BoringCacheError::CacheConflict(_)))
-                || msg.contains("another cache upload is in progress");
-            if is_conflict {
-                return Err(FlushError::Conflict(msg));
-            }
-            return Err(FlushError::Transient(format!("save_entry failed: {msg}")));
-        }
+        Err(e) => return Err(classify_flush_error(&e, "save_entry failed")),
     };
 
     if save_response.exists {
@@ -764,7 +1031,7 @@ async fn do_flush(
     }
     eprintln!("KV flush: uploading {total_count} entries, {blob_count} blobs, pointer={expected_manifest_size} bytes");
 
-    if !blobs.is_empty() {
+    let upload_stats = if !blobs.is_empty() {
         upload_blobs(
             state,
             &save_response.cache_entry_id,
@@ -772,13 +1039,15 @@ async fn do_flush(
             pending_blob_paths,
         )
         .await
-        .map_err(|e| FlushError::Transient(format!("blob upload failed: {e:?}")))?;
-    }
+        .map_err(|e| classify_flush_error(&e, "blob upload failed"))?
+    } else {
+        BlobUploadStats::default()
+    };
 
     let manifest_upload_url = save_response
         .manifest_upload_url
         .as_ref()
-        .ok_or(FlushError::Transient("missing manifest upload URL".into()))?;
+        .ok_or(FlushError::Permanent("missing manifest upload URL".into()))?;
 
     upload_payload(
         state.api_client.transfer_client(),
@@ -788,7 +1057,7 @@ async fn do_flush(
         &save_response.upload_headers,
     )
     .await
-    .map_err(|e| FlushError::Transient(format!("manifest upload failed: {e}")))?;
+    .map_err(|e| classify_flush_error(&e, "manifest upload failed"))?;
 
     let confirm_request = ConfirmRequest {
         manifest_digest: manifest_root_digest,
@@ -812,9 +1081,27 @@ async fn do_flush(
             &confirm_request,
         )
         .await
-        .map_err(|e| FlushError::Transient(format!("confirm failed: {e}")))?;
+        .map_err(|e| classify_flush_error(&e, "confirm failed"))?;
+
+    eprintln!(
+        "KV flush summary: entries={} unique_blobs={} uploaded={} already_present={} skipped_local={} bytes={} duration_ms={}",
+        total_count,
+        blob_count,
+        upload_stats.uploaded_count,
+        upload_stats.already_present_count,
+        upload_stats.missing_local_count,
+        blob_total_size_bytes,
+        flush_started_at.elapsed().as_millis()
+    );
 
     Ok((entries, save_response.cache_entry_id))
+}
+
+#[derive(Default)]
+struct BlobUploadStats {
+    uploaded_count: u64,
+    already_present_count: u64,
+    missing_local_count: u64,
 }
 
 async fn upload_blobs(
@@ -822,12 +1109,18 @@ async fn upload_blobs(
     cache_entry_id: &str,
     blobs: &[BlobDescriptor],
     local_blob_paths: &HashMap<String, PathBuf>,
-) -> Result<(), RegistryError> {
+) -> anyhow::Result<BlobUploadStats> {
     let upload_plan = state
         .api_client
         .blob_upload_urls(&state.workspace, cache_entry_id, blobs)
         .await
-        .map_err(|e| RegistryError::internal(format!("Failed to get blob upload URLs: {e}")))?;
+        .map_err(|e| anyhow::anyhow!("Failed to get blob upload URLs: {e}"))?;
+
+    let mut stats = BlobUploadStats {
+        uploaded_count: 0,
+        already_present_count: upload_plan.already_present.len() as u64,
+        missing_local_count: 0,
+    };
 
     for upload in &upload_plan.upload_urls {
         let blob_path = match local_blob_paths.get(&upload.digest) {
@@ -837,6 +1130,7 @@ async fn upload_blobs(
                     "KV batch flush: skipping blob {} (no local file)",
                     upload.digest
                 );
+                stats.missing_local_count = stats.missing_local_count.saturating_add(1);
                 continue;
             }
         };
@@ -849,23 +1143,37 @@ async fn upload_blobs(
             &upload.headers,
         )
         .await
-        .map_err(|e| RegistryError::internal(format!("Failed to upload blob: {e}")))?;
+        .map_err(|e| anyhow::anyhow!("Failed to upload blob {}: {e}", upload.digest))?;
+        stats.uploaded_count = stats.uploaded_count.saturating_add(1);
     }
 
-    Ok(())
+    Ok(stats)
 }
 
 async fn load_existing_index(
     state: &AppState,
     tag: &str,
-) -> Result<(BTreeMap<String, BlobDescriptor>, Option<String>), RegistryError> {
+) -> Result<
+    (
+        BTreeMap<String, BlobDescriptor>,
+        Option<String>,
+        Option<String>,
+    ),
+    RegistryError,
+> {
     let hit = match resolve_hit(state, tag).await {
         Ok(hit) => hit,
-        Err(error) if error.status == StatusCode::NOT_FOUND => return Ok((BTreeMap::new(), None)),
+        Err(error) if error.status == StatusCode::NOT_FOUND => {
+            return Ok((BTreeMap::new(), None, None));
+        }
         Err(error) => return Err(error),
     };
 
     let cache_entry_id = hit.cache_entry_id.clone();
+    let manifest_root_digest = hit
+        .manifest_root_digest
+        .clone()
+        .or(hit.manifest_digest.clone());
     let pointer = fetch_pointer(state, &hit).await?;
     let mut map = BTreeMap::new();
     for entry in &pointer.entries {
@@ -882,7 +1190,7 @@ async fn load_existing_index(
             );
         }
     }
-    Ok((map, cache_entry_id))
+    Ok((map, cache_entry_id, manifest_root_digest))
 }
 
 async fn write_body_to_temp_file(body: Body) -> Result<(PathBuf, u64, String), RegistryError> {
@@ -919,4 +1227,23 @@ async fn write_body_to_temp_file(body: Body) -> Result<(PathBuf, u64, String), R
 
     let digest = format!("sha256:{:x}", hasher.finalize());
     Ok((path, total_size, digest))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_flush_error_treats_precondition_failed_as_conflict() {
+        let error = anyhow::anyhow!("HTTP 412 from backend: precondition failed");
+        let classified = classify_flush_error(&error, "confirm failed");
+        assert!(matches!(classified, FlushError::Conflict(_)));
+    }
+
+    #[test]
+    fn classify_flush_error_treats_bad_request_as_permanent() {
+        let error = anyhow::anyhow!("HTTP 400 from backend: invalid payload");
+        let classified = classify_flush_error(&error, "save failed");
+        assert!(matches!(classified, FlushError::Permanent(_)));
+    }
 }

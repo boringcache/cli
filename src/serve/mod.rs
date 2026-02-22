@@ -37,6 +37,7 @@ pub async fn run_server(
         kv_lookup_lock: Arc::new(tokio::sync::Mutex::new(())),
         kv_last_put: Arc::new(RwLock::new(None)),
         kv_next_flush_at: Arc::new(RwLock::new(None)),
+        kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
         kv_recent_misses: Arc::new(RwLock::new(std::collections::HashMap::new())),
     };
@@ -67,9 +68,16 @@ pub async fn run_server(
         }
     }
 
-    let preload_state = state.clone();
+    cache_registry::preload_kv_index(&state).await;
+
+    let refresh_state = state.clone();
     tokio::spawn(async move {
-        cache_registry::preload_kv_index(&preload_state).await;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            cache_registry::refresh_kv_index(&refresh_state).await;
+        }
     });
 
     let upload_sessions = state.upload_sessions.clone();
@@ -138,6 +146,9 @@ pub async fn run_server(
             };
 
             if should_flush {
+                let Some(_flush_guard) = cache_registry::try_schedule_flush(&flush_state) else {
+                    continue;
+                };
                 match cache_registry::flush_kv_index(&flush_state).await {
                     cache_registry::FlushResult::Ok => {
                         consecutive_failures = 0;
@@ -148,6 +159,11 @@ pub async fn run_server(
                     cache_registry::FlushResult::Error => {
                         consecutive_failures = consecutive_failures.saturating_add(1);
                     }
+                    cache_registry::FlushResult::Permanent => {
+                        consecutive_failures = 0;
+                        let mut gate = flush_state.kv_next_flush_at.write().await;
+                        *gate = None;
+                    }
                 }
             }
         }
@@ -157,7 +173,18 @@ pub async fn run_server(
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    cache_registry::flush_kv_index(&state).await;
+    if let Some(_flush_guard) = cache_registry::try_schedule_flush(&state) {
+        eprintln!("Shutdown: flushing pending KV entries");
+        cache_registry::flush_kv_index(&state).await;
+    } else {
+        eprintln!("Shutdown: waiting for in-flight KV flush");
+        let _running_flush = state.kv_flush_lock.lock().await;
+        drop(_running_flush);
+        if let Some(_flush_guard) = cache_registry::try_schedule_flush(&state) {
+            eprintln!("Shutdown: running follow-up KV flush");
+            cache_registry::flush_kv_index(&state).await;
+        }
+    }
 
     Ok(())
 }

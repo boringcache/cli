@@ -1,0 +1,146 @@
+name: SCCache Benchmark
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "scripts/e2e-sccache-test.sh"
+      - ".github/workflows/sccache-benchmark.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+  schedule:
+    - cron: "25 5 * * *"
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.89"
+  SCCACHE_VERSION: "v0.13.0"
+
+jobs:
+  benchmark:
+    name: Benchmark (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [local, proxy]
+    if: matrix.backend == 'local' || secrets.BORINGCACHE_API_TOKEN != ''
+    env:
+      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+      BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
+      RUN_SCOPED_TAGS: "0"
+      RUN_STRESS: "1"
+      PARALLEL_JOBS: "2"
+      SETTLE_SECS: "5"
+      RUST_LOG_LEVEL: info
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install sccache
+        run: |
+          set -euo pipefail
+          url="https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL "$url" | tar xz -C /tmp
+          sudo mv "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
+          sudo chmod +x /usr/local/bin/sccache
+          sccache --version
+
+      - name: Build CLI binary
+        run: cargo build --release --locked
+
+      - name: Run benchmark
+        env:
+          SCCACHE_BACKEND: ${{ matrix.backend }}
+        run: |
+          set -euo pipefail
+          LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/${SCCACHE_BACKEND}"
+          mkdir -p "$LOG_DIR"
+          TAG="gha-sccache-${SCCACHE_BACKEND}-${GITHUB_RUN_ID}"
+          BINARY="${GITHUB_WORKSPACE}/target/release/boringcache" \
+          WORKSPACE="${GITHUB_REPOSITORY}" \
+          LOG_DIR="$LOG_DIR" \
+          TAG="$TAG" \
+          ./scripts/e2e-sccache-test.sh | tee "$LOG_DIR/run.log"
+
+      - name: Extract metrics
+        env:
+          SCCACHE_BACKEND: ${{ matrix.backend }}
+        run: |
+          set -euo pipefail
+          log_dir="${GITHUB_WORKSPACE}/benchmark-logs/${SCCACHE_BACKEND}"
+          cold="$(cat "${log_dir}/efficacy/cold.log.seconds")"
+          warm="$(cat "${log_dir}/efficacy/warm.log.seconds")"
+          rust_hit_rate="$(awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
+          avg_read_hit="$(awk '$1 == "Average" && $2 == "cache" && $3 == "read" && $4 == "hit" { print $5; exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
+          proxy_429="0"
+          proxy_conflicts="0"
+          if [[ -f "${log_dir}/efficacy/proxy.log" ]]; then
+            proxy_429="$(grep -c "429 Too Many Requests" "${log_dir}/efficacy/proxy.log" || true)"
+            proxy_conflicts="$(grep -c "tag conflict" "${log_dir}/efficacy/proxy.log" || true)"
+          fi
+          {
+            echo "backend=${SCCACHE_BACKEND}"
+            echo "cold_seconds=${cold}"
+            echo "warm_seconds=${warm}"
+            echo "warm_rust_hit_rate=${rust_hit_rate:-0}"
+            echo "warm_avg_cache_read_hit=${avg_read_hit:-0}"
+            echo "proxy_429=${proxy_429}"
+            echo "proxy_tag_conflicts=${proxy_conflicts}"
+          } > "${log_dir}/metrics.env"
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sccache-benchmark-${{ matrix.backend }}
+          path: benchmark-logs/${{ matrix.backend }}
+
+  benchmark-summary:
+    name: SCCache Benchmark Summary
+    runs-on: ubuntu-latest
+    needs: benchmark
+    if: always()
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Write summary
+        run: |
+          set -euo pipefail
+          echo "# SCCache Local vs Proxy" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Backend | Cold (s) | Warm (s) | Warm Rust hit rate | Warm avg cache read hit (s) | Proxy 429 | Proxy conflicts |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|----------|----------|--------------------|-----------------------------|-----------|-----------------|" >> "$GITHUB_STEP_SUMMARY"
+
+          local_warm=""
+          proxy_warm=""
+          for metrics in artifacts/sccache-benchmark-*/metrics.env; do
+            [[ -f "$metrics" ]] || continue
+            # shellcheck disable=SC1090
+            source "$metrics"
+            echo "| ${backend} | ${cold_seconds} | ${warm_seconds} | ${warm_rust_hit_rate}% | ${warm_avg_cache_read_hit} | ${proxy_429} | ${proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$backend" == "local" ]]; then
+              local_warm="$warm_seconds"
+            elif [[ "$backend" == "proxy" ]]; then
+              proxy_warm="$warm_seconds"
+            fi
+          done
+
+          if [[ -n "$local_warm" && -n "$proxy_warm" ]]; then
+            delta="$(awk -v p="$proxy_warm" -v l="$local_warm" 'BEGIN { printf "%.2f", p-l }')"
+            pct="$(awk -v p="$proxy_warm" -v l="$local_warm" 'BEGIN { if (l <= 0) { print "0.00" } else { printf "%.2f", ((p-l)/l)*100 } }')"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Warm delta (proxy - local): ${delta}s (${pct}%)" >> "$GITHUB_STEP_SUMMARY"
+          fi
