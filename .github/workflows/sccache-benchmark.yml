@@ -28,7 +28,6 @@ jobs:
       fail-fast: false
       matrix:
         backend: [local, proxy]
-    if: matrix.backend == 'local' || secrets.BORINGCACHE_API_TOKEN != ''
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
@@ -42,12 +41,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Gate matrix leg
+        id: gate
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.backend }}" == "proxy" && -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping proxy benchmark: BORINGCACHE_API_TOKEN is not configured."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Rust
+        if: steps.gate.outputs.run == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Install sccache
+        if: steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
           url="https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
@@ -57,9 +69,11 @@ jobs:
           sccache --version
 
       - name: Build CLI binary
+        if: steps.gate.outputs.run == 'true'
         run: cargo build --release --locked
 
       - name: Run benchmark
+        if: steps.gate.outputs.run == 'true'
         env:
           SCCACHE_BACKEND: ${{ matrix.backend }}
         run: |
@@ -74,6 +88,7 @@ jobs:
           ./scripts/e2e-sccache-test.sh | tee "$LOG_DIR/run.log"
 
       - name: Extract metrics
+        if: steps.gate.outputs.run == 'true'
         env:
           SCCACHE_BACKEND: ${{ matrix.backend }}
         run: |
@@ -100,6 +115,7 @@ jobs:
           } > "${log_dir}/metrics.env"
 
       - name: Upload benchmark artifacts
+        if: steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: sccache-benchmark-${{ matrix.backend }}
