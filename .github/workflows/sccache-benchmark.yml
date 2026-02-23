@@ -80,7 +80,8 @@ jobs:
           set -euo pipefail
           LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/${SCCACHE_BACKEND}"
           mkdir -p "$LOG_DIR"
-          TAG="gha-sccache-${SCCACHE_BACKEND}-${GITHUB_RUN_ID}"
+          BRANCH_SLUG="${GITHUB_REF_NAME//\//-}"
+          TAG="gha-sccache-${SCCACHE_BACKEND}-rust-${RUST_VERSION}-${BRANCH_SLUG}"
           BINARY="${GITHUB_WORKSPACE}/target/release/boringcache" \
           WORKSPACE="${GITHUB_REPOSITORY}" \
           LOG_DIR="$LOG_DIR" \

@@ -207,7 +207,7 @@ jobs:
               COMPILE_REQUESTS="$(printf "%s\n" "${SCCACHE_STATS}" | sed -n "s/^Compile requests[[:space:]]\\+\\([0-9]\\+\\)$/\\1/p" | head -n 1)"
               CACHE_HITS="$(printf "%s\n" "${SCCACHE_STATS}" | sed -n "s/^Cache hits[[:space:]]\\+\\([0-9]\\+\\)$/\\1/p" | head -n 1)"
               CACHE_MISSES="$(printf "%s\n" "${SCCACHE_STATS}" | sed -n "s/^Cache misses[[:space:]]\\+\\([0-9]\\+\\)$/\\1/p" | head -n 1)"
-              RUST_HIT_RATE="$(printf "%s\n" "${SCCACHE_STATS}" | awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }')"
+              RUST_HIT_RATE="$(printf "%s\n" "${SCCACHE_STATS}" | sed -n "s/^Cache hits rate (Rust)[[:space:]]\\+\\([0-9.][0-9.]*\\)[[:space:]]*%$/\\1/p" | head -n 1)"
               COMPILE_REQUESTS="${COMPILE_REQUESTS:-0}"
               CACHE_HITS="${CACHE_HITS:-0}"
               CACHE_MISSES="${CACHE_MISSES:-0}"
