@@ -359,6 +359,7 @@ async fn bind_alias_tag(
         file_count: Some(blob_count.min(u32::MAX as u64) as u32),
         uncompressed_size: None,
         compressed_size: None,
+        storage_mode: Some("cas".to_string()),
         tag: Some(alias_tag.to_string()),
     };
 
@@ -1122,6 +1123,7 @@ async fn put_manifest(
         file_count: Some(blob_count.min(u32::MAX as u64) as u32),
         uncompressed_size: None,
         compressed_size: None,
+        storage_mode: Some("cas".to_string()),
         tag: Some(tag.clone()),
     };
 

@@ -1599,6 +1599,7 @@ async fn sync_to_remote_archive(
         file_count: Some(file_count),
         uncompressed_size: Some(archive_info.uncompressed_size),
         compressed_size: Some(final_compressed_size),
+        storage_mode: Some("archive".to_string()),
         tag: None,
     };
 
@@ -1853,6 +1854,7 @@ async fn sync_to_remote_oci(
         file_count: Some(file_count),
         uncompressed_size: None,
         compressed_size: None,
+        storage_mode: Some("cas".to_string()),
         tag: None,
     };
 
@@ -2124,6 +2126,7 @@ async fn sync_to_remote_file(
         file_count: Some(file_count),
         uncompressed_size: None,
         compressed_size: None,
+        storage_mode: Some("cas".to_string()),
         tag: None,
     };
 

@@ -90,6 +90,7 @@ mod request_validation {
             file_count: Some(100),
             uncompressed_size: Some(2_000_000),
             compressed_size: Some(1_000_000),
+            storage_mode: None,
             tag: None,
         };
 
@@ -119,6 +120,7 @@ mod request_validation {
             file_count: Some(100),
             uncompressed_size: Some(2_000_000),
             compressed_size: Some(1_000_000),
+            storage_mode: None,
             tag: Some("my-cache-tag".to_string()),
         };
 

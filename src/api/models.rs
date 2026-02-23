@@ -186,6 +186,8 @@ pub mod cache {
         pub uncompressed_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub compressed_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub storage_mode: Option<String>,
 
         #[serde(skip_serializing_if = "Option::is_none")]
         pub tag: Option<String>,

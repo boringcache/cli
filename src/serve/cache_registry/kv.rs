@@ -1111,6 +1111,7 @@ async fn do_flush(
         file_count: Some(file_count),
         uncompressed_size: None,
         compressed_size: None,
+        storage_mode: Some("cas".to_string()),
         tag: Some(tag),
     };
 
