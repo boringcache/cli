@@ -1430,9 +1430,11 @@ fn build_transfer_client_with_headers(
     let is_test_mode = std::env::var("BORINGCACHE_TEST_MODE")
         .map(|value| value == "1")
         .unwrap_or(false);
+    let use_http2 = std::env::var("BORINGCACHE_TRANSFER_HTTP2")
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
 
     let mut builder = reqwest::Client::builder()
-        .http1_only()
         .pool_max_idle_per_host(64)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Some(Duration::from_secs(30)))
@@ -1441,6 +1443,11 @@ fn build_transfer_client_with_headers(
         .no_brotli()
         .no_deflate()
         .redirect(reqwest::redirect::Policy::limited(4));
+    if use_http2 {
+        builder = builder.http2_adaptive_window(true);
+    } else {
+        builder = builder.http1_only();
+    }
 
     if is_test_mode {
         builder = builder

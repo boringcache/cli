@@ -8,8 +8,8 @@ use boring_cache_cli::git::GitContext;
 use boring_cache_cli::manifest::EntryType;
 use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
-    digest_tag, ref_tag, AppState, BlobLocatorCache, KvPendingStore, KvPublishedIndex,
-    UploadSessionStore,
+    digest_tag, ref_tag, AppState, BlobLocatorCache, BlobReadCache, KvPendingStore,
+    KvPublishedIndex, UploadSessionStore,
 };
 use boring_cache_cli::tag_utils::TagResolver;
 use http_body_util::BodyExt;
@@ -55,6 +55,13 @@ async fn setup(
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
         kv_recent_misses: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        blob_read_cache: Arc::new(
+            BlobReadCache::new_at(
+                temp_home.path().join("blob-read-cache"),
+                2 * 1024 * 1024 * 1024,
+            )
+            .expect("blob read cache"),
+        ),
     };
 
     (state, temp_home, guard)

@@ -12,8 +12,8 @@ use tokio::sync::RwLock;
 
 use crate::api::client::ApiClient;
 use crate::serve::state::{
-    unix_time_ms_now, AppState, BlobLocatorCache, KvPendingStore, KvPublishedIndex,
-    UploadSessionStore,
+    unix_time_ms_now, AppState, BlobLocatorCache, BlobReadCache, KvPendingStore, KvPublishedIndex,
+    UploadSessionStore, DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
 };
 use crate::tag_utils::TagResolver;
 
@@ -26,6 +26,7 @@ pub async fn run_server(
     configured_human_tags: Vec<String>,
     registry_root_tag: String,
 ) -> Result<()> {
+    let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
     let state = AppState {
         api_client,
         workspace: workspace.clone(),
@@ -42,6 +43,7 @@ pub async fn run_server(
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
         kv_recent_misses: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        blob_read_cache,
     };
 
     let router = routes::build_router(state.clone());
@@ -62,6 +64,11 @@ pub async fn run_server(
     eprintln!("  Gradle HTTP: http://{host}:{port}/cache/{{cache-key}}");
     eprintln!("  Turborepo: http://{host}:{port}/v8/artifacts/{{hash}}");
     eprintln!("  sccache WebDAV: http://{host}:{port}/<prefix>/a/b/c/<key>");
+    eprintln!(
+        "  Blob Read Cache: {} (max {} bytes)",
+        state.blob_read_cache.cache_dir().display(),
+        state.blob_read_cache.max_bytes()
+    );
 
     for dir_name in ["boringcache-kv-blobs", "boringcache-uploads"] {
         let stale_dir = std::env::temp_dir().join(dir_name);
@@ -180,6 +187,14 @@ pub async fn run_server(
     flush_pending_on_shutdown(&state).await;
 
     Ok(())
+}
+
+fn blob_read_cache_max_bytes() -> u64 {
+    std::env::var("BORINGCACHE_BLOB_READ_CACHE_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_BLOB_READ_CACHE_MAX_BYTES)
 }
 
 async fn flush_pending_on_shutdown(state: &AppState) {

@@ -3,8 +3,9 @@ use crate::api::models::cache::BlobDescriptor;
 use crate::cas_oci::sha256_hex;
 use crate::tag_utils::TagResolver;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, Notify, RwLock};
@@ -26,6 +27,372 @@ pub struct AppState {
     pub kv_flush_scheduled: Arc<AtomicBool>,
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
     pub kv_recent_misses: Arc<RwLock<HashMap<String, Instant>>>,
+    pub blob_read_cache: Arc<BlobReadCache>,
+}
+
+pub const DEFAULT_BLOB_READ_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const BLOB_READ_CACHE_DIR_NAME: &str = "boringcache-blob-cache";
+
+struct BlobReadInFlightGuard {
+    key: String,
+    notify: Arc<Notify>,
+    inflight: Arc<std::sync::Mutex<HashMap<String, Arc<Notify>>>>,
+}
+
+impl Drop for BlobReadInFlightGuard {
+    fn drop(&mut self) {
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inflight.remove(&self.key);
+        self.notify.notify_waiters();
+    }
+}
+
+enum BlobReadInFlight {
+    Leader(BlobReadInFlightGuard),
+    Follower(Arc<Notify>),
+}
+
+pub struct BlobReadCache {
+    cache_dir: PathBuf,
+    total_bytes: AtomicU64,
+    max_bytes: u64,
+    inflight: Arc<std::sync::Mutex<HashMap<String, Arc<Notify>>>>,
+    evict_lock: Arc<Mutex<()>>,
+}
+
+impl BlobReadCache {
+    pub fn new(max_bytes: u64) -> io::Result<Self> {
+        let cache_dir = std::env::temp_dir().join(BLOB_READ_CACHE_DIR_NAME);
+        Self::new_at(cache_dir, max_bytes)
+    }
+
+    pub fn new_at(cache_dir: PathBuf, max_bytes: u64) -> io::Result<Self> {
+        std::fs::create_dir_all(&cache_dir)?;
+        let total_bytes = Self::scan_total_bytes(&cache_dir)?;
+        Ok(Self {
+            cache_dir,
+            total_bytes: AtomicU64::new(total_bytes),
+            max_bytes: max_bytes.max(1),
+            inflight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            evict_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
+    pub fn cache_dir(&self) -> &Path {
+        self.cache_dir.as_path()
+    }
+
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
+    pub fn total_bytes(&self) -> u64 {
+        self.total_bytes.load(Ordering::Acquire)
+    }
+
+    pub async fn get(&self, digest: &str) -> Option<PathBuf> {
+        let path = self.path_for_digest(digest)?;
+        match tokio::fs::metadata(&path).await {
+            Ok(metadata) if metadata.is_file() && metadata.len() > 0 => Some(path),
+            Ok(metadata) if metadata.is_file() => {
+                let _ = tokio::fs::remove_file(&path).await;
+                self.sub_total(metadata.len());
+                None
+            }
+            Ok(_) => None,
+            Err(_) => None,
+        }
+    }
+
+    pub async fn remove(&self, digest: &str) {
+        let Some(path) = self.path_for_digest(digest) else {
+            return;
+        };
+        if let Ok(metadata) = tokio::fs::metadata(&path).await {
+            if metadata.is_file() {
+                let _ = tokio::fs::remove_file(&path).await;
+                self.sub_total(metadata.len());
+            }
+        }
+    }
+
+    pub async fn insert(&self, digest: &str, data: &[u8]) -> io::Result<bool> {
+        if data.is_empty() {
+            return Ok(false);
+        }
+        let Some((path, key)) = self.path_and_key_for_digest(digest) else {
+            return Ok(false);
+        };
+
+        if Self::is_non_empty_file(&path).await? {
+            return Ok(false);
+        }
+
+        match self.begin_inflight(key) {
+            BlobReadInFlight::Follower(notify) => {
+                notify.notified().await;
+                Ok(false)
+            }
+            BlobReadInFlight::Leader(_guard) => {
+                if Self::is_non_empty_file(&path).await? {
+                    return Ok(false);
+                }
+
+                tokio::fs::create_dir_all(&self.cache_dir).await?;
+                let temp_path = self.temp_path(&path);
+                let mut temp_file = tokio::fs::File::create(&temp_path).await?;
+                tokio::io::AsyncWriteExt::write_all(&mut temp_file, data).await?;
+                tokio::io::AsyncWriteExt::flush(&mut temp_file).await?;
+                temp_file.sync_all().await?;
+                drop(temp_file);
+
+                match tokio::fs::rename(&temp_path, &path).await {
+                    Ok(_) => {
+                        self.total_bytes
+                            .fetch_add(data.len() as u64, Ordering::AcqRel);
+                        if let Err(error) = self.evict_over_budget().await {
+                            log::warn!("Blob read cache eviction failed after insert: {error}");
+                        }
+                        Ok(true)
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        let _ = tokio::fs::remove_file(&temp_path).await;
+                        Ok(false)
+                    }
+                    Err(error) => {
+                        let _ = tokio::fs::remove_file(&temp_path).await;
+                        Err(error)
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn promote(
+        &self,
+        digest: &str,
+        src_path: &Path,
+        size_bytes: u64,
+    ) -> io::Result<bool> {
+        let Some((dst_path, key)) = self.path_and_key_for_digest(digest) else {
+            return Ok(false);
+        };
+
+        let src_metadata = match tokio::fs::metadata(src_path).await {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+
+        let source_size = if size_bytes > 0 {
+            size_bytes
+        } else {
+            src_metadata.len()
+        };
+        if source_size == 0 {
+            let _ = tokio::fs::remove_file(src_path).await;
+            return Ok(false);
+        }
+
+        if Self::is_non_empty_file(&dst_path).await? {
+            let _ = tokio::fs::remove_file(src_path).await;
+            return Ok(false);
+        }
+
+        match self.begin_inflight(key) {
+            BlobReadInFlight::Follower(notify) => {
+                notify.notified().await;
+                let _ = tokio::fs::remove_file(src_path).await;
+                Ok(false)
+            }
+            BlobReadInFlight::Leader(_guard) => {
+                if Self::is_non_empty_file(&dst_path).await? {
+                    let _ = tokio::fs::remove_file(src_path).await;
+                    return Ok(false);
+                }
+
+                tokio::fs::create_dir_all(&self.cache_dir).await?;
+                match tokio::fs::rename(src_path, &dst_path).await {
+                    Ok(_) => {
+                        self.total_bytes.fetch_add(source_size, Ordering::AcqRel);
+                        if let Err(error) = self.evict_over_budget().await {
+                            log::warn!("Blob read cache eviction failed after promote: {error}");
+                        }
+                        Ok(true)
+                    }
+                    Err(error)
+                        if error.kind() == io::ErrorKind::CrossesDevices
+                            || error.raw_os_error() == Some(18) =>
+                    {
+                        let temp_path = self.temp_path(&dst_path);
+                        tokio::fs::copy(src_path, &temp_path).await?;
+                        match tokio::fs::rename(&temp_path, &dst_path).await {
+                            Ok(_) => {
+                                let _ = tokio::fs::remove_file(src_path).await;
+                                self.total_bytes.fetch_add(source_size, Ordering::AcqRel);
+                                if let Err(error) = self.evict_over_budget().await {
+                                    log::warn!(
+                                        "Blob read cache eviction failed after cross-device promote: {error}"
+                                    );
+                                }
+                                Ok(true)
+                            }
+                            Err(rename_error)
+                                if rename_error.kind() == io::ErrorKind::AlreadyExists =>
+                            {
+                                let _ = tokio::fs::remove_file(&temp_path).await;
+                                let _ = tokio::fs::remove_file(src_path).await;
+                                Ok(false)
+                            }
+                            Err(rename_error) => {
+                                let _ = tokio::fs::remove_file(&temp_path).await;
+                                Err(rename_error)
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        let _ = tokio::fs::remove_file(src_path).await;
+                        Ok(false)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+
+    async fn evict_over_budget(&self) -> io::Result<()> {
+        if self.total_bytes.load(Ordering::Acquire) <= self.max_bytes {
+            return Ok(());
+        }
+
+        let _guard = self.evict_lock.lock().await;
+
+        let mut read_dir = tokio::fs::read_dir(&self.cache_dir).await?;
+        let mut files: Vec<(std::time::SystemTime, PathBuf, u64)> = Vec::new();
+        let mut total = 0u64;
+
+        while let Some(entry) = read_dir.next_entry().await? {
+            let path = entry.path();
+            let metadata = match entry.metadata().await {
+                Ok(metadata) if metadata.is_file() => metadata,
+                Ok(_) => continue,
+                Err(_) => continue,
+            };
+            let modified = metadata
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            total = total.saturating_add(metadata.len());
+            files.push((modified, path, metadata.len()));
+        }
+
+        if total <= self.max_bytes {
+            self.total_bytes.store(total, Ordering::Release);
+            return Ok(());
+        }
+
+        files.sort_by_key(|(modified, _, _)| *modified);
+        for (_, path, size) in files {
+            if total <= self.max_bytes {
+                break;
+            }
+            if tokio::fs::remove_file(&path).await.is_ok() {
+                total = total.saturating_sub(size);
+            }
+        }
+
+        self.total_bytes.store(total, Ordering::Release);
+        Ok(())
+    }
+
+    fn scan_total_bytes(cache_dir: &Path) -> io::Result<u64> {
+        let mut total_bytes = 0u64;
+        for entry in std::fs::read_dir(cache_dir)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_file() {
+                total_bytes = total_bytes.saturating_add(metadata.len());
+            }
+        }
+        Ok(total_bytes)
+    }
+
+    fn temp_path(&self, dst_path: &Path) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let suffix = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let file_name = dst_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("blob");
+        self.cache_dir.join(format!(".tmp-{file_name}-{suffix}"))
+    }
+
+    fn begin_inflight(&self, key: String) -> BlobReadInFlight {
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = inflight.get(&key) {
+            return BlobReadInFlight::Follower(existing.clone());
+        }
+
+        let notify = Arc::new(Notify::new());
+        inflight.insert(key.clone(), notify.clone());
+        BlobReadInFlight::Leader(BlobReadInFlightGuard {
+            key,
+            notify,
+            inflight: self.inflight.clone(),
+        })
+    }
+
+    fn path_and_key_for_digest(&self, digest: &str) -> Option<(PathBuf, String)> {
+        let key = Self::normalize_digest_hex(digest)?;
+        Some((self.cache_dir.join(&key), key))
+    }
+
+    fn path_for_digest(&self, digest: &str) -> Option<PathBuf> {
+        self.path_and_key_for_digest(digest).map(|(path, _)| path)
+    }
+
+    fn normalize_digest_hex(digest: &str) -> Option<String> {
+        let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+        if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(hex.to_ascii_lowercase())
+    }
+
+    async fn is_non_empty_file(path: &Path) -> io::Result<bool> {
+        match tokio::fs::metadata(path).await {
+            Ok(metadata) if metadata.is_file() && metadata.len() > 0 => Ok(true),
+            Ok(metadata) if metadata.is_file() => {
+                let _ = tokio::fs::remove_file(path).await;
+                Ok(false)
+            }
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn sub_total(&self, amount: u64) {
+        let mut current = self.total_bytes.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_sub(amount);
+            match self.total_bytes.compare_exchange(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -505,5 +872,54 @@ mod tests {
         let selected = store.find_by_digest("sha256:abc").expect("digest session");
         assert_eq!(selected.id, "filled");
         assert_eq!(selected.finalized_size, Some(128));
+    }
+
+    #[tokio::test]
+    async fn blob_read_cache_insert_and_get_round_trip() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache = BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 1024 * 1024)
+            .expect("blob cache");
+        let digest = format!("sha256:{}", "a".repeat(64));
+
+        let inserted = cache.insert(&digest, b"hello-world").await.expect("insert");
+        assert!(inserted);
+
+        let path = cache.get(&digest).await.expect("cache hit");
+        let bytes = tokio::fs::read(path).await.expect("read cached bytes");
+        assert_eq!(bytes, b"hello-world");
+    }
+
+    #[tokio::test]
+    async fn blob_read_cache_promote_moves_source_file() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache = BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 1024 * 1024)
+            .expect("blob cache");
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let source_path = temp_dir.path().join("source-blob");
+        tokio::fs::write(&source_path, b"promoted")
+            .await
+            .expect("source");
+
+        let promoted = cache
+            .promote(&digest, &source_path, 8)
+            .await
+            .expect("promote");
+        assert!(promoted);
+        assert!(!source_path.exists());
+        assert!(cache.get(&digest).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn blob_read_cache_rejects_invalid_digest() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache = BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 1024 * 1024)
+            .expect("blob cache");
+
+        let inserted = cache
+            .insert("not-a-digest", b"invalid")
+            .await
+            .expect("insert call");
+        assert!(!inserted);
+        assert!(cache.get("not-a-digest").await.is_none());
     }
 }

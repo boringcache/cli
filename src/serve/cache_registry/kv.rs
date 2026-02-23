@@ -39,6 +39,9 @@ const KV_BLOB_UPLOAD_MAX_ATTEMPTS: u32 = 3;
 const KV_BLOB_UPLOAD_RETRY_BASE_MS: u64 = 300;
 const KV_BLOB_UPLOAD_RETRY_MAX_MS: u64 = 1_500;
 const KV_BLOB_UPLOAD_MAX_CONCURRENCY: usize = 16;
+const KV_BLOB_PRELOAD_MAX_CONCURRENCY: usize = 32;
+const KV_BLOB_PRELOAD_MAX_BLOBS: usize = 2_000;
+const KV_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 
 fn kv_miss_cache_key(registry_root_tag: &str, scoped_key: &str) -> String {
     format!("{}\u{0}{}", registry_root_tag.trim(), scoped_key)
@@ -289,6 +292,16 @@ async fn serve_backend_blob(
         return Ok((StatusCode::OK, response_headers, Body::empty()).into_response());
     }
 
+    if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
+        match serve_local_blob(blob, &cache_path, false).await {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                log::warn!("KV blob read cache failed for {}: {:?}", blob.digest, error);
+                state.blob_read_cache.remove(&blob.digest).await;
+            }
+        }
+    }
+
     let (download_url, from_cache) = if let Some(url) = cached_url {
         (url.to_string(), true)
     } else {
@@ -308,7 +321,10 @@ async fn serve_backend_blob(
         .await
         .map_err(|e| RegistryError::internal(format!("Failed to download blob bytes: {e}")))?;
 
-    if from_cache && download_result.status() == StatusCode::FORBIDDEN {
+    if from_cache
+        && (download_result.status() == StatusCode::FORBIDDEN
+            || download_result.status() == StatusCode::NOT_FOUND)
+    {
         {
             let mut published = state.kv_published_index.write().await;
             published.invalidate_download_url(&blob.digest);
@@ -879,9 +895,38 @@ async fn cleanup_blob_files(paths: &HashMap<String, PathBuf>) {
     let removals = paths.values().map(tokio::fs::remove_file);
     for result in join_all(removals).await {
         if let Err(error) = result {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                continue;
+            }
             log::warn!("KV cleanup: failed to remove blob temp file: {error}");
         }
     }
+}
+
+async fn promote_pending_blobs_to_read_cache(
+    state: &AppState,
+    pending_entries: &BTreeMap<String, BlobDescriptor>,
+    pending_blob_paths: &HashMap<String, PathBuf>,
+) -> usize {
+    let mut blob_sizes = HashMap::new();
+    for blob in pending_entries.values() {
+        blob_sizes
+            .entry(blob.digest.clone())
+            .or_insert(blob.size_bytes);
+    }
+
+    let mut promoted = 0usize;
+    for (digest, path) in pending_blob_paths {
+        let size = blob_sizes.get(digest).copied().unwrap_or(0);
+        match state.blob_read_cache.promote(digest, path, size).await {
+            Ok(true) => promoted = promoted.saturating_add(1),
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("KV blob read cache promote failed for {digest}: {error}");
+            }
+        }
+    }
+    promoted
 }
 
 pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
@@ -903,6 +948,9 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
 
     match do_flush(state, &pending_entries, &pending_blob_paths).await {
         Ok((merged_entries, cache_entry_id)) => {
+            let promoted =
+                promote_pending_blobs_to_read_cache(state, &pending_entries, &pending_blob_paths)
+                    .await;
             cleanup_blob_files(&pending_blob_paths).await;
 
             {
@@ -913,11 +961,16 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
             state.kv_last_put.store(0, Ordering::Release);
 
             eprintln!(
-                "KV batch: flushed {entry_count} new entries ({} blobs cleaned up)",
-                pending_blob_paths.len()
+                "KV batch: flushed {entry_count} new entries ({} blobs cleaned up, {promoted} promoted to read cache)",
+                pending_blob_paths.len(),
             );
             drop(guard);
             preload_download_urls(state, &cache_entry_id).await;
+            let preload_state = state.clone();
+            let preload_cache_entry_id = cache_entry_id.clone();
+            tokio::spawn(async move {
+                preload_blobs(&preload_state, &preload_cache_entry_id).await;
+            });
             FlushResult::Ok
         }
         Err(FlushError::Conflict(msg)) => {
@@ -962,6 +1015,10 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
             clear_tag_misses(state, &tag).await;
             eprintln!("KV index preloaded: {count} entries, resolving download URLs...");
             preload_download_urls(state, &cache_entry_id).await;
+            let preload_state = state.clone();
+            tokio::spawn(async move {
+                preload_blobs(&preload_state, &cache_entry_id).await;
+            });
         }
         Ok(_) => {
             {
@@ -1093,6 +1150,10 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
     clear_tag_misses(state, &tag).await;
     eprintln!("KV index refresh: {count} entries loaded");
     preload_download_urls(state, &cache_entry_id).await;
+    let preload_state = state.clone();
+    tokio::spawn(async move {
+        preload_blobs(&preload_state, &cache_entry_id).await;
+    });
 }
 
 async fn refresh_fence_allows_update(
@@ -1175,6 +1236,169 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
         Err(e) => {
             log::warn!("KV index preload: failed to resolve download URLs: {e}");
         }
+    }
+}
+
+fn kv_blob_preload_concurrency(target_count: usize) -> usize {
+    if target_count == 0 {
+        return 1;
+    }
+
+    let configured = std::env::var("BORINGCACHE_BLOB_PRELOAD_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(KV_BLOB_PRELOAD_MAX_CONCURRENCY);
+
+    configured
+        .min(KV_BLOB_PRELOAD_MAX_CONCURRENCY)
+        .min(target_count)
+}
+
+fn kv_blob_preload_max_blob_bytes() -> u64 {
+    std::env::var("BORINGCACHE_BLOB_PRELOAD_MAX_BLOB_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(KV_BLOB_PRELOAD_MAX_BLOB_BYTES)
+}
+
+fn kv_blob_preload_max_blobs() -> usize {
+    std::env::var("BORINGCACHE_BLOB_PRELOAD_MAX_BLOBS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(KV_BLOB_PRELOAD_MAX_BLOBS)
+}
+
+async fn preload_single_blob(
+    state: AppState,
+    cache_entry_id: String,
+    blob: BlobDescriptor,
+    mut url: String,
+) -> anyhow::Result<bool> {
+    if state.blob_read_cache.get(&blob.digest).await.is_some() {
+        return Ok(false);
+    }
+
+    for _attempt in 0..2 {
+        let response = state
+            .api_client
+            .transfer_client()
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| anyhow::anyhow!("download request failed: {error}"))?;
+
+        if response.status() == StatusCode::FORBIDDEN || response.status() == StatusCode::NOT_FOUND
+        {
+            let fresh_url = resolve_download_url(&state, &cache_entry_id, &blob)
+                .await
+                .map_err(|error| anyhow::anyhow!("refresh download URL failed: {:?}", error))?;
+            {
+                let mut published = state.kv_published_index.write().await;
+                published.set_download_url(blob.digest.clone(), fresh_url.clone());
+            }
+            url = fresh_url;
+            continue;
+        }
+
+        let response = response
+            .error_for_status()
+            .map_err(|error| anyhow::anyhow!("download returned error status: {error}"))?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| anyhow::anyhow!("read blob response failed: {error}"))?;
+        if bytes.is_empty() {
+            return Ok(false);
+        }
+        let inserted = state
+            .blob_read_cache
+            .insert(&blob.digest, bytes.as_ref())
+            .await
+            .map_err(|error| anyhow::anyhow!("cache insert failed: {error}"))?;
+        return Ok(inserted);
+    }
+
+    Ok(false)
+}
+
+pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
+    let max_blob_bytes = kv_blob_preload_max_blob_bytes();
+    let max_blobs = kv_blob_preload_max_blobs();
+    let mut candidates = {
+        let published = state.kv_published_index.read().await;
+        let mut values = Vec::new();
+        for blob in published.unique_blobs() {
+            if blob.size_bytes == 0 || blob.size_bytes > max_blob_bytes {
+                continue;
+            }
+            if let Some(url) = published.download_url(&blob.digest) {
+                values.push((blob, url.to_string()));
+            }
+            if values.len() >= max_blobs {
+                break;
+            }
+        }
+        values
+    };
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let mut targets = Vec::new();
+    for (blob, url) in candidates.drain(..) {
+        if state.blob_read_cache.get(&blob.digest).await.is_none() {
+            targets.push((blob, url));
+        }
+    }
+    if targets.is_empty() {
+        return;
+    }
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(kv_blob_preload_concurrency(
+        targets.len(),
+    )));
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut scheduled = 0usize;
+    for (blob, url) in targets {
+        let state = state.clone();
+        let cache_entry_id = cache_entry_id.to_string();
+        let semaphore = semaphore.clone();
+        scheduled = scheduled.saturating_add(1);
+        tasks.spawn(async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|error| anyhow::anyhow!("preload semaphore closed: {error}"))?;
+            preload_single_blob(state, cache_entry_id, blob, url).await
+        });
+    }
+
+    let mut inserted = 0usize;
+    let mut failures = 0usize;
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(true)) => inserted = inserted.saturating_add(1),
+            Ok(Ok(false)) => {}
+            Ok(Err(error)) => {
+                failures = failures.saturating_add(1);
+                log::warn!("KV blob preload failed: {error}");
+            }
+            Err(error) => {
+                failures = failures.saturating_add(1);
+                log::warn!("KV blob preload task failed: {error}");
+            }
+        }
+    }
+
+    if inserted > 0 || failures > 0 {
+        eprintln!(
+            "KV blob preload: inserted={inserted} scheduled={scheduled} failures={failures} cache_size={} bytes",
+            state.blob_read_cache.total_bytes()
+        );
     }
 }
 

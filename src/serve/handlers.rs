@@ -1281,7 +1281,7 @@ mod tests {
     use crate::git::GitContext;
     use crate::platform::Platform;
     use crate::serve::state::{
-        BlobLocatorCache, KvPendingStore, KvPublishedIndex, UploadSessionStore,
+        BlobLocatorCache, BlobReadCache, KvPendingStore, KvPublishedIndex, UploadSessionStore,
     };
     use crate::tag_utils::TagResolver;
     use std::sync::Arc;
@@ -1306,6 +1306,16 @@ mod tests {
             kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
             kv_recent_misses: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            blob_read_cache: Arc::new(
+                BlobReadCache::new_at(
+                    std::env::temp_dir().join(format!(
+                        "boringcache-handler-blob-cache-{}",
+                        uuid::Uuid::new_v4()
+                    )),
+                    2 * 1024 * 1024 * 1024,
+                )
+                .expect("blob read cache"),
+            ),
         }
     }
 
