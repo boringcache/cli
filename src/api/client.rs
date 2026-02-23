@@ -1869,6 +1869,17 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_conflict_metadata_returns_none_for_unrecognized_payload() {
+        let body = r#"{
+            "message": "publish conflict",
+            "status": "conflict",
+            "details": ["retry later"]
+        }"#;
+
+        assert!(parse_conflict_metadata(body).is_none());
+    }
+
+    #[test]
     fn test_is_route_not_found_body_ignores_json_detail_substrings() {
         let body = r#"{"message":"cache miss","details":["routing error for digest path"]}"#;
         assert!(!is_route_not_found_body(body));
