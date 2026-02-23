@@ -9,10 +9,10 @@ BINARY="${BINARY:-./target/release/boringcache}"
 PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}"
 TMP_ROOT="${TMPDIR:-/tmp}/boringcache-kv-bench"
 BINARY_DIR="${TMP_ROOT}/bin"
-TMP_BINARY="${BINARY_DIR}/boringcache"
 TARGET_ROOT="${TMP_ROOT}/targets"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 LOG_DIR="${LOG_DIR:-${TMP_ROOT}/logs-${RUN_ID}}"
+TMP_BINARY="${BINARY_DIR}/boringcache-${RUN_ID}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-2}"
 CARGO_CMD="${CARGO_CMD:-cargo build --release --locked}"
 RUST_LOG_LEVEL="${RUST_LOG_LEVEL:-info}"
@@ -20,9 +20,16 @@ SETTLE_SECS="${SETTLE_SECS:-10}"
 RUN_STRESS="${RUN_STRESS:-1}"
 RUN_SCOPED_TAGS="${RUN_SCOPED_TAGS:-0}"
 SCCACHE_BACKEND="${SCCACHE_BACKEND:-proxy}"
+PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
+PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
 
 if [[ "$SCCACHE_BACKEND" != "proxy" && "$SCCACHE_BACKEND" != "local" ]]; then
   echo "ERROR: SCCACHE_BACKEND must be 'proxy' or 'local'"
+  exit 1
+fi
+
+if ! [[ "$PARALLEL_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: PARALLEL_JOBS must be a positive integer"
   exit 1
 fi
 
@@ -68,6 +75,7 @@ stop_proxy() {
 cleanup() {
   stop_proxy
   sccache --stop-server >/dev/null 2>&1 || true
+  rm -f "$TMP_BINARY" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -95,6 +103,13 @@ start_proxy() {
   local tag="$1"
   local log_file="$2"
   stop_proxy
+  local listeners
+  listeners="$(lsof -nP -iTCP:${PROXY_PORT} -sTCP:LISTEN 2>/dev/null || true)"
+  if [[ -n "$listeners" ]]; then
+    echo "ERROR: proxy port ${PROXY_PORT} is already in use" | tee -a "$log_file"
+    echo "$listeners" | tee -a "$log_file"
+    exit 1
+  fi
   {
     echo ""
     echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} ==="
@@ -112,13 +127,23 @@ start_proxy() {
 
 ensure_proxy_ready() {
   local log_file="$1"
-  for _ in $(seq 1 20); do
-    if curl -fsS "${PROXY_URL}/v2/" >/dev/null; then
+  local attempts
+  attempts="$((PROXY_READY_TIMEOUT_SECS / PROXY_READY_POLL_SECS))"
+  if (( attempts < 1 )); then
+    attempts=1
+  fi
+  for _ in $(seq 1 "$attempts"); do
+    if curl -fsS --max-time 2 "${PROXY_URL}/v2/" >/dev/null; then
       return 0
     fi
-    sleep 1
+    if [[ -n "${PROXY_PID:-}" ]] && ! kill -0 "$PROXY_PID" >/dev/null 2>&1; then
+      echo "ERROR: proxy exited before readiness check completed"
+      tail -n 120 "$log_file" || true
+      exit 1
+    fi
+    sleep "$PROXY_READY_POLL_SECS"
   done
-  echo "ERROR: proxy failed to start"
+  echo "ERROR: proxy failed to become ready within ${PROXY_READY_TIMEOUT_SECS}s"
   tail -n 120 "$log_file" || true
   exit 1
 }
@@ -208,11 +233,13 @@ print_stats_summary() {
 count_pattern() {
   local file="$1"
   local pattern="$2"
+  local count
   if command -v rg >/dev/null 2>&1; then
-    rg -c "$pattern" "$file" || true
+    count="$(rg -c "$pattern" "$file" 2>/dev/null || true)"
   else
-    grep -c "$pattern" "$file" || true
+    count="$(grep -c "$pattern" "$file" 2>/dev/null || true)"
   fi
+  echo "${count:-0}"
 }
 
 format_delta() {
@@ -286,7 +313,7 @@ phase_efficacy() {
 }
 
 phase_stress() {
-  local phase_dir proxy_log lock_waits warm_sum avg
+  local phase_dir proxy_log lock_waits warm_sum avg prewarm_sum prewarm_avg
   phase_dir="${LOG_DIR}/stress"
   proxy_log="${phase_dir}/proxy.log"
   mkdir -p "$phase_dir"
@@ -307,7 +334,11 @@ phase_stress() {
   echo ""
   echo "Running stress prewarm pass..."
   reset_sccache
-  run_build "stress-prewarm" "${TARGET_ROOT}/stress-prewarm" "${phase_dir}/prewarm.log"
+  prewarm_sum=0
+  for i in $(seq 1 "$PARALLEL_JOBS"); do
+    run_build "stress-prewarm-${i}" "${TARGET_ROOT}/stress-job-${i}" "${phase_dir}/prewarm-${i}.log"
+    prewarm_sum="$((prewarm_sum + $(cat "${phase_dir}/prewarm-${i}.log.seconds")))"
+  done
   sccache --show-stats >"${phase_dir}/prewarm-sccache-stats.txt" 2>&1
   print_stats_summary "Stress prewarm stats" "${phase_dir}/prewarm-sccache-stats.txt"
 
@@ -337,7 +368,8 @@ phase_stress() {
     stop_proxy
   fi
 
-  STRESS_PREWARM_SECONDS="$(cat "${phase_dir}/prewarm.log.seconds")"
+  prewarm_avg="$((prewarm_sum / PARALLEL_JOBS))"
+  STRESS_PREWARM_SECONDS="$prewarm_avg"
   warm_sum=0
   lock_waits=0
   for i in $(seq 1 "$PARALLEL_JOBS"); do
