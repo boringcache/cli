@@ -356,6 +356,10 @@ impl KvPublishedIndex {
     pub fn cache_entry_id(&self) -> Option<&str> {
         self.cache_entry_id.as_deref()
     }
+
+    pub fn entries_snapshot(&self) -> HashMap<String, BlobDescriptor> {
+        self.entries.clone()
+    }
 }
 
 pub fn ref_tag(name: &str, reference: &str) -> String {

@@ -965,18 +965,26 @@ async fn do_flush(
     let flush_started_at = std::time::Instant::now();
     let tag = state.registry_root_tag.trim().to_string();
 
-    let existing_count;
-    let mut entries = match load_existing_index(state, &tag).await {
-        Ok((existing, _, _)) => {
-            existing_count = existing.len();
-            existing
-        }
+    let published_snapshot = {
+        let published = state.kv_published_index.read().await;
+        published.entries_snapshot()
+    };
+
+    let backend_entries = match load_existing_index(state, &tag).await {
+        Ok((existing, _, _)) => existing,
         Err(e) => {
             log::warn!("KV flush: failed to load existing index: {e:?}");
-            existing_count = 0;
             BTreeMap::new()
         }
     };
+    let (mut entries, used_published_fallback) =
+        select_flush_base_entries(backend_entries, published_snapshot);
+    let existing_count = entries.len();
+    if used_published_fallback {
+        eprintln!(
+            "KV flush: backend index empty, using published snapshot with {existing_count} entries"
+        );
+    }
     entries.extend(pending_entries.iter().map(|(k, v)| (k.clone(), v.clone())));
     let total_count = entries.len();
     eprintln!(
@@ -1095,6 +1103,16 @@ async fn do_flush(
     );
 
     Ok((entries, save_response.cache_entry_id))
+}
+
+fn select_flush_base_entries(
+    backend_entries: BTreeMap<String, BlobDescriptor>,
+    published_entries: HashMap<String, BlobDescriptor>,
+) -> (BTreeMap<String, BlobDescriptor>, bool) {
+    if backend_entries.is_empty() && !published_entries.is_empty() {
+        return (published_entries.into_iter().collect(), true);
+    }
+    (backend_entries, false)
 }
 
 #[derive(Default)]
@@ -1245,5 +1263,48 @@ mod tests {
         let error = anyhow::anyhow!("HTTP 400 from backend: invalid payload");
         let classified = classify_flush_error(&error, "save failed");
         assert!(matches!(classified, FlushError::Permanent(_)));
+    }
+
+    #[test]
+    fn select_flush_base_entries_uses_backend_when_available() {
+        let mut backend = BTreeMap::new();
+        backend.insert(
+            "k1".to_string(),
+            BlobDescriptor {
+                digest: "sha256:111".to_string(),
+                size_bytes: 10,
+            },
+        );
+        let mut published = HashMap::new();
+        published.insert(
+            "k2".to_string(),
+            BlobDescriptor {
+                digest: "sha256:222".to_string(),
+                size_bytes: 20,
+            },
+        );
+
+        let (selected, used_fallback) = select_flush_base_entries(backend.clone(), published);
+        assert!(!used_fallback);
+        assert_eq!(selected.len(), backend.len());
+        assert!(selected.contains_key("k1"));
+    }
+
+    #[test]
+    fn select_flush_base_entries_falls_back_to_published_when_backend_empty() {
+        let backend = BTreeMap::new();
+        let mut published = HashMap::new();
+        published.insert(
+            "k2".to_string(),
+            BlobDescriptor {
+                digest: "sha256:222".to_string(),
+                size_bytes: 20,
+            },
+        );
+
+        let (selected, used_fallback) = select_flush_base_entries(backend, published);
+        assert!(used_fallback);
+        assert_eq!(selected.len(), 1);
+        assert!(selected.contains_key("k2"));
     }
 }
