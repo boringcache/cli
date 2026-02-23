@@ -152,14 +152,14 @@ jobs:
             -e BORINGCACHE_API_TOKEN=${{ secrets.BORINGCACHE_API_TOKEN }} \
             rust:${{ env.RUST_VERSION }}-bookworm \
             sh -c '
-              set -euo pipefail
+              set -eu
               PROXY_PID=""
 
               cleanup() {
                 if command -v sccache >/dev/null 2>&1; then
                   sccache --stop-server >/dev/null 2>&1 || true
                 fi
-                if [[ -n "${PROXY_PID}" ]]; then
+                if [ -n "${PROXY_PID}" ]; then
                   kill "${PROXY_PID}" >/dev/null 2>&1 || true
                   wait "${PROXY_PID}" >/dev/null 2>&1 || true
                 fi
@@ -423,7 +423,7 @@ jobs:
             -e BORINGCACHE_API_TOKEN=${{ secrets.BORINGCACHE_API_TOKEN }} \
             ${{ matrix.container }} \
             sh -c '
-              set -euo pipefail
+              set -eu
               PROXY_PID=""
 
               # Install build dependencies based on container type
@@ -478,7 +478,7 @@ jobs:
               echo "=== sccache stats ==="
               sccache --show-stats || true
               sccache --stop-server >/dev/null 2>&1 || true
-              if [[ -n "${PROXY_PID}" ]]; then
+              if [ -n "${PROXY_PID}" ]; then
                 kill "${PROXY_PID}" >/dev/null 2>&1 || true
                 wait "${PROXY_PID}" >/dev/null 2>&1 || true
               fi
