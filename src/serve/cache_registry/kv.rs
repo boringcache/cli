@@ -32,6 +32,11 @@ const KV_TRANSIENT_BACKOFF_MS: u64 = 2_000;
 const KV_TRANSIENT_JITTER_MS: u64 = 2_000;
 const KV_TRANSIENT_WRITE_PATH_BACKOFF_MS: u64 = 20_000;
 const KV_TRANSIENT_WRITE_PATH_JITTER_MS: u64 = 5_000;
+const KV_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+const KV_EMPTY_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+const KV_BLOB_UPLOAD_MAX_ATTEMPTS: u32 = 3;
+const KV_BLOB_UPLOAD_RETRY_BASE_MS: u64 = 300;
+const KV_BLOB_UPLOAD_RETRY_MAX_MS: u64 = 1_500;
 
 fn kv_miss_cache_key(registry_root_tag: &str, scoped_key: &str) -> String {
     format!("{}\u{0}{}", registry_root_tag.trim(), scoped_key)
@@ -313,6 +318,92 @@ async fn clear_tag_misses(state: &AppState, registry_root_tag: &str) {
     misses.retain(|key, expires_at| *expires_at > now && !key.starts_with(&prefix));
 }
 
+fn kv_blob_upload_retry_delay(attempt: u32) -> std::time::Duration {
+    let exponent = attempt.saturating_sub(1);
+    let backoff = KV_BLOB_UPLOAD_RETRY_BASE_MS.saturating_mul(2_u64.pow(exponent));
+    std::time::Duration::from_millis(backoff.min(KV_BLOB_UPLOAD_RETRY_MAX_MS))
+}
+
+fn is_retryable_blob_upload_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("http 408")
+        || lower.contains("http 429")
+        || lower.contains("http 500")
+        || lower.contains("http 502")
+        || lower.contains("http 503")
+        || lower.contains("http 504")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("connection reset")
+        || lower.contains("broken pipe")
+        || lower.contains("connection refused")
+        || lower.contains("temporarily unavailable")
+}
+
+async fn lookup_published_blob(
+    state: &AppState,
+    scoped_key: &str,
+) -> Option<(BlobDescriptor, String, Option<String>)> {
+    let published = state.kv_published_index.read().await;
+    let (blob, cache_entry_id) = published.get(scoped_key)?;
+    let blob = blob.clone();
+    let cache_entry_id = cache_entry_id.to_string();
+    let cached_url = published.download_url(&blob.digest).map(str::to_string);
+    Some((blob, cache_entry_id, cached_url))
+}
+
+async fn populate_sizes_from_published(
+    state: &AppState,
+    scoped_keys: &[String],
+    sizes: &mut HashMap<String, u64>,
+) {
+    let published = state.kv_published_index.read().await;
+    for scoped in scoped_keys {
+        if sizes.contains_key(scoped) {
+            continue;
+        }
+        if let Some((blob, _)) = published.get(scoped) {
+            sizes.insert(scoped.clone(), blob.size_bytes);
+        }
+    }
+}
+
+async fn should_refresh_published_index_for_lookup(state: &AppState) -> bool {
+    let now = std::time::Instant::now();
+    let published = state.kv_published_index.read().await;
+    if !published.is_complete() {
+        return true;
+    }
+    let Some(last_refresh_at) = published.last_refresh_at() else {
+        return true;
+    };
+    let refresh_interval = if published.entry_count() == 0 {
+        KV_EMPTY_INDEX_REFRESH_INTERVAL
+    } else {
+        KV_INDEX_REFRESH_INTERVAL
+    };
+    now.duration_since(last_refresh_at) >= refresh_interval
+}
+
+async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), RegistryError> {
+    let tag = state.registry_root_tag.trim().to_string();
+    let (entries, cache_entry_id, _) = load_existing_index(state, &tag).await?;
+
+    {
+        let mut published = state.kv_published_index.write().await;
+        if entries.is_empty() {
+            published.set_empty();
+        } else if let Some(cache_entry_id) = cache_entry_id {
+            published.update(entries.into_iter().collect(), cache_entry_id);
+        } else {
+            published.set_empty();
+        }
+    }
+    clear_tag_misses(state, &tag).await;
+
+    Ok(())
+}
+
 pub(crate) async fn get_or_head_kv_object(
     state: &AppState,
     namespace: KvNamespace,
@@ -340,22 +431,18 @@ pub(crate) async fn get_or_head_kv_object(
         }
     }
 
+    if let Some((blob, cache_entry_id, cached_url)) =
+        lookup_published_blob(state, &scoped_key).await
     {
-        let published = state.kv_published_index.read().await;
-        if let Some((blob, cache_entry_id)) = published.get(&scoped_key) {
-            let blob = blob.clone();
-            let cache_entry_id = cache_entry_id.to_string();
-            let cached_url = published.download_url(&blob.digest).map(|s| s.to_string());
-            drop(published);
-            return serve_backend_blob(
-                state,
-                &cache_entry_id,
-                &blob,
-                cached_url.as_deref(),
-                is_head,
-            )
-            .await;
-        }
+        clear_kv_miss(state, &miss_key).await;
+        return serve_backend_blob(
+            state,
+            &cache_entry_id,
+            &blob,
+            cached_url.as_deref(),
+            is_head,
+        )
+        .await;
     }
 
     if is_recent_kv_miss(state, &miss_key).await {
@@ -368,40 +455,40 @@ pub(crate) async fn get_or_head_kv_object(
         return Err(RegistryError::not_found("Cache key not found"));
     }
 
-    let tag = state.registry_root_tag.trim().to_string();
-    let hit = match resolve_hit(state, &tag).await {
-        Ok(hit) => hit,
-        Err(error) if error.status == StatusCode::NOT_FOUND => {
-            mark_kv_miss(state, &miss_key).await;
-            return Err(RegistryError::not_found("Cache key not found"));
-        }
-        Err(error) => return Err(error),
-    };
-
-    let pointer = fetch_pointer(state, &hit).await?;
-    let cache_entry_id = hit
-        .cache_entry_id
-        .ok_or_else(|| RegistryError::internal("Cache hit is missing cache_entry_id"))?;
-    let entries_from_pointer = pointer_entries_by_key(&pointer);
-    let blob = match select_blob_for_key(&pointer, &scoped_key)? {
-        Some(blob) => blob,
-        None => {
-            mark_kv_miss(state, &miss_key).await;
-            return Err(RegistryError::not_found("Cache key not found"));
-        }
-    };
-
-    clear_kv_miss(state, &miss_key).await;
+    if let Some((blob, cache_entry_id, cached_url)) =
+        lookup_published_blob(state, &scoped_key).await
     {
-        let mut published = state.kv_published_index.write().await;
-        if entries_from_pointer.is_empty() {
-            published.insert(scoped_key.clone(), blob.clone(), cache_entry_id.clone());
-        } else {
-            published.update(entries_from_pointer, cache_entry_id.clone());
-        }
+        clear_kv_miss(state, &miss_key).await;
+        return serve_backend_blob(
+            state,
+            &cache_entry_id,
+            &blob,
+            cached_url.as_deref(),
+            is_head,
+        )
+        .await;
     }
 
-    serve_backend_blob(state, &cache_entry_id, &blob, None, is_head).await
+    if should_refresh_published_index_for_lookup(state).await {
+        refresh_published_index_for_lookup(state).await?;
+    }
+
+    if let Some((blob, cache_entry_id, cached_url)) =
+        lookup_published_blob(state, &scoped_key).await
+    {
+        clear_kv_miss(state, &miss_key).await;
+        return serve_backend_blob(
+            state,
+            &cache_entry_id,
+            &blob,
+            cached_url.as_deref(),
+            is_head,
+        )
+        .await;
+    }
+
+    mark_kv_miss(state, &miss_key).await;
+    Err(RegistryError::not_found("Cache key not found"))
 }
 
 async fn serve_local_blob(
@@ -461,34 +548,24 @@ pub(crate) async fn resolve_kv_entries(
         return Ok(sizes);
     }
 
-    {
-        let published = state.kv_published_index.read().await;
-        for scoped in &scoped_keys {
-            if !sizes.contains_key(scoped) {
-                if let Some((blob, _)) = published.get(scoped) {
-                    sizes.insert(scoped.clone(), blob.size_bytes);
-                }
-            }
-        }
-    }
+    populate_sizes_from_published(state, &scoped_keys, &mut sizes).await;
 
     if sizes.len() == scoped_keys.len() {
         return Ok(sizes);
     }
 
-    let tag = state.registry_root_tag.trim().to_string();
-    if let Ok(hit) = resolve_hit(state, &tag).await {
-        if let Ok(pointer) = fetch_pointer(state, &hit).await {
-            for entry in &pointer.entries {
-                if !matches!(entry.entry_type, EntryType::File) {
-                    continue;
-                }
-                if scoped_keys.contains(&entry.path) && !sizes.contains_key(&entry.path) {
-                    sizes.insert(entry.path.clone(), entry.size_bytes);
-                }
-            }
-        }
+    let _lookup_guard = state.kv_lookup_lock.lock().await;
+
+    populate_sizes_from_published(state, &scoped_keys, &mut sizes).await;
+    if sizes.len() == scoped_keys.len() {
+        return Ok(sizes);
     }
+
+    if should_refresh_published_index_for_lookup(state).await {
+        refresh_published_index_for_lookup(state).await?;
+    }
+
+    populate_sizes_from_published(state, &scoped_keys, &mut sizes).await;
 
     Ok(sizes)
 }
@@ -537,60 +614,6 @@ async fn fetch_pointer(
 
     crate::cas_file::parse_pointer(&pointer_bytes)
         .map_err(|e| RegistryError::internal(format!("Invalid file CAS pointer: {e}")))
-}
-
-fn select_blob_for_key(
-    pointer: &crate::cas_file::FilePointer,
-    key: &str,
-) -> Result<Option<BlobDescriptor>, RegistryError> {
-    for entry in &pointer.entries {
-        if !matches!(entry.entry_type, EntryType::File) || entry.path != key {
-            continue;
-        }
-        let digest = entry.digest.clone().ok_or_else(|| {
-            RegistryError::internal(format!(
-                "Cache pointer entry is missing digest: {}",
-                entry.path
-            ))
-        })?;
-        return Ok(Some(BlobDescriptor {
-            digest,
-            size_bytes: entry.size_bytes,
-        }));
-    }
-
-    if pointer.entries.is_empty() {
-        if let Some(blob) = pointer.blobs.first() {
-            return Ok(Some(BlobDescriptor {
-                digest: blob.digest.clone(),
-                size_bytes: blob.size_bytes,
-            }));
-        }
-    }
-
-    Ok(None)
-}
-
-fn pointer_entries_by_key(
-    pointer: &crate::cas_file::FilePointer,
-) -> HashMap<String, BlobDescriptor> {
-    let mut entries = HashMap::new();
-    for entry in &pointer.entries {
-        if !matches!(entry.entry_type, EntryType::File) {
-            continue;
-        }
-        let Some(digest) = &entry.digest else {
-            continue;
-        };
-        entries.insert(
-            entry.path.clone(),
-            BlobDescriptor {
-                digest: digest.clone(),
-                size_bytes: entry.size_bytes,
-            },
-        );
-    }
-    entries
 }
 
 fn build_index_pointer(
@@ -858,6 +881,10 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
             preload_download_urls(state, &cache_entry_id).await;
         }
         Ok(_) => {
+            {
+                let mut published = state.kv_published_index.write().await;
+                published.set_empty();
+            }
             eprintln!("KV index preload: no existing entries");
         }
         Err(e) => {
@@ -901,7 +928,20 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             eprintln!("KV index refresh: {count} entries loaded");
             preload_download_urls(state, &cache_entry_id).await;
         }
-        Ok(_) => {}
+        Ok(_) => {
+            let had_entries = {
+                let published = state.kv_published_index.read().await;
+                published.entry_count() > 0
+            };
+            {
+                let mut published = state.kv_published_index.write().await;
+                published.set_empty();
+            }
+            clear_tag_misses(state, &tag).await;
+            if had_entries {
+                eprintln!("KV index refresh: cleared stale entries (no backend index)");
+            }
+        }
         Err(e) => {
             log::warn!("KV index refresh failed: {e:?}");
         }
@@ -1175,6 +1215,11 @@ async fn upload_blobs(
         missing_local_count: 0,
     };
 
+    let blobs_by_digest: HashMap<String, BlobDescriptor> = blobs
+        .iter()
+        .map(|blob| (blob.digest.clone(), blob.clone()))
+        .collect();
+
     for upload in &upload_plan.upload_urls {
         let blob_path = match local_blob_paths.get(&upload.digest) {
             Some(path) => path,
@@ -1187,17 +1232,92 @@ async fn upload_blobs(
                 continue;
             }
         };
-        let progress = TransferProgress::new_noop();
-        crate::multipart_upload::upload_via_single_url(
-            blob_path.as_path(),
-            &upload.url,
-            &progress,
-            state.api_client.transfer_client(),
-            &upload.headers,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to upload blob {}: {e}", upload.digest))?;
-        stats.uploaded_count = stats.uploaded_count.saturating_add(1);
+        let mut upload_url = upload.url.clone();
+        let mut upload_headers = upload.headers.clone();
+        let mut completed = false;
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 1..=KV_BLOB_UPLOAD_MAX_ATTEMPTS {
+            let progress = TransferProgress::new_noop();
+            match crate::multipart_upload::upload_via_single_url(
+                blob_path.as_path(),
+                &upload_url,
+                &progress,
+                state.api_client.transfer_client(),
+                &upload_headers,
+            )
+            .await
+            {
+                Ok(_) => {
+                    stats.uploaded_count = stats.uploaded_count.saturating_add(1);
+                    completed = true;
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt >= KV_BLOB_UPLOAD_MAX_ATTEMPTS {
+                        break;
+                    }
+
+                    let retryable = last_error
+                        .as_ref()
+                        .map(|err| is_retryable_blob_upload_error(&err.to_string()))
+                        .unwrap_or(false);
+                    if !retryable {
+                        break;
+                    }
+
+                    if let Some(blob) = blobs_by_digest.get(&upload.digest) {
+                        match state
+                            .api_client
+                            .blob_upload_urls(
+                                &state.workspace,
+                                cache_entry_id,
+                                std::slice::from_ref(blob),
+                            )
+                            .await
+                        {
+                            Ok(retry_plan) => {
+                                if retry_plan
+                                    .already_present
+                                    .iter()
+                                    .any(|d| d == &upload.digest)
+                                {
+                                    stats.already_present_count =
+                                        stats.already_present_count.saturating_add(1);
+                                    completed = true;
+                                    break;
+                                }
+                                if let Some(fresh_upload) = retry_plan
+                                    .upload_urls
+                                    .iter()
+                                    .find(|item| item.digest == upload.digest)
+                                {
+                                    upload_url = fresh_upload.url.clone();
+                                    upload_headers = fresh_upload.headers.clone();
+                                }
+                            }
+                            Err(stage_error) => {
+                                log::warn!(
+                                    "KV batch flush: failed to refresh upload URL for {}: {stage_error}",
+                                    upload.digest
+                                );
+                            }
+                        }
+                    }
+
+                    tokio::time::sleep(kv_blob_upload_retry_delay(attempt)).await;
+                }
+            }
+        }
+
+        if !completed {
+            let error = last_error.unwrap_or_else(|| anyhow::anyhow!("unknown blob upload error"));
+            return Err(anyhow::anyhow!(
+                "Failed to upload blob {}: {error}",
+                upload.digest
+            ));
+        }
     }
 
     Ok(stats)

@@ -287,6 +287,8 @@ pub struct KvPublishedIndex {
     entries: HashMap<String, BlobDescriptor>,
     cache_entry_id: Option<String>,
     download_urls: HashMap<String, CachedUrl>,
+    complete: bool,
+    last_refresh_at: Option<Instant>,
 }
 
 impl KvPublishedIndex {
@@ -294,6 +296,8 @@ impl KvPublishedIndex {
         self.entries = entries;
         self.cache_entry_id = Some(cache_entry_id);
         self.download_urls.clear();
+        self.complete = true;
+        self.last_refresh_at = Some(Instant::now());
     }
 
     pub fn insert(&mut self, scoped_key: String, blob: BlobDescriptor, cache_entry_id: String) {
@@ -304,6 +308,16 @@ impl KvPublishedIndex {
         }
 
         self.entries.insert(scoped_key, blob);
+        self.complete = false;
+        self.last_refresh_at = Some(Instant::now());
+    }
+
+    pub fn set_empty(&mut self) {
+        self.entries.clear();
+        self.cache_entry_id = None;
+        self.download_urls.clear();
+        self.complete = true;
+        self.last_refresh_at = Some(Instant::now());
     }
 
     pub fn set_download_urls(&mut self, urls: HashMap<String, String>) {
@@ -355,6 +369,14 @@ impl KvPublishedIndex {
 
     pub fn cache_entry_id(&self) -> Option<&str> {
         self.cache_entry_id.as_deref()
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    pub fn last_refresh_at(&self) -> Option<Instant> {
+        self.last_refresh_at
     }
 
     pub fn entries_snapshot(&self) -> HashMap<String, BlobDescriptor> {
