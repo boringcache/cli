@@ -41,7 +41,7 @@ jobs:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
       BORINGCACHE_TRANSFER_HTTP2: ${{ matrix.http2 }}
-      RUN_SCOPED_TAGS: "0"
+      RUN_SCOPED_TAGS: "1"
       RUN_STRESS: "1"
       PARALLEL_JOBS: "2"
       SETTLE_SECS: "5"
