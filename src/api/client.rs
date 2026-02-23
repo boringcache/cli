@@ -16,6 +16,7 @@ const BLOB_CHECK_BATCH_MAX: usize = 10_000;
 const BLOB_URL_BATCH_MAX: usize = 2_000;
 const API_VERSION_V1: &str = "v1";
 const API_VERSION_V2: &str = "v2";
+const FALLBACK_API_BASE_URL: &str = "https://api.boringcache.com";
 const ROUTE_KEY_WORKSPACES: &str = "workspaces";
 const ROUTE_KEY_CACHE_LIST: &str = "cache_list";
 const ROUTE_KEY_CACHE_RESTORE: &str = "cache_restore";
@@ -500,6 +501,7 @@ impl ApiClient {
                     .unwrap_or_else(|| {
                         format_error_message(status, &url, parsed_payload.as_ref(), &error_body)
                     });
+                let message = append_conflict_metadata(message, &error_body);
 
                 BoringCacheError::CacheConflict(message).into()
             }
@@ -1059,31 +1061,25 @@ impl ApiClient {
                     cache: PublishFinalizePayload,
                 }
 
-                let publish_mode =
-                    if request.blob_count.is_some() || request.blob_total_size_bytes.is_some() {
-                        "cas"
-                    } else {
-                        "replace"
-                    };
+                let publish_mode = determine_publish_mode(request);
 
                 let if_match = if publish_mode == "cas" {
                     if capabilities.tag_pointer_v2 {
                         match self.tag_pointer_v2(workspace, tag).await? {
                             Some(pointer) => Some(pointer.version),
-                            None => capabilities
-                                .cas_publish_bootstrap_if_match
-                                .clone()
-                                .or_else(|| Some("0".to_string())),
+                            None => capabilities.cas_publish_bootstrap_if_match.clone(),
                         }
                     } else {
-                        capabilities
-                            .cas_publish_bootstrap_if_match
-                            .clone()
-                            .or_else(|| Some("0".to_string()))
+                        capabilities.cas_publish_bootstrap_if_match.clone()
                     }
                 } else {
                     None
                 };
+                if publish_mode == "cas" && if_match.is_none() {
+                    anyhow::bail!(
+                        "CAS publish requires server bootstrap If-Match capability or existing pointer version"
+                    );
+                }
 
                 let encoded_tag = urlencoding::encode(tag);
                 let endpoint = self
@@ -1248,7 +1244,7 @@ impl ApiClient {
         workspace: &str,
         entries: &[String],
     ) -> Result<Option<super::models::cache::RestoreResponse>> {
-        use crate::api::models::cache::{RestorePendingResponse, RestoreResponse};
+        use crate::api::models::cache::RestoreResponse;
 
         ensure!(
             !entries.is_empty(),
@@ -1271,23 +1267,7 @@ impl ApiClient {
                     self.mark_v2_fallback_route(ROUTE_KEY_CACHE_RESTORE).await;
                     self.get_response_with_base(&self.v1_base_url, &url).await?
                 } else {
-                    if !body.is_empty() {
-                        if let Ok(restore_response) = serde_json::from_str::<RestoreResponse>(&body)
-                        {
-                            return Ok(Some(restore_response));
-                        }
-
-                        if let Ok(pending_response) =
-                            serde_json::from_str::<RestorePendingResponse>(&body)
-                        {
-                            if pending_response.pending
-                                || pending_response.status.as_deref() == Some("pending")
-                            {
-                                return Err(BoringCacheError::CachePending.into());
-                            }
-                        }
-                    }
-                    return Ok(None);
+                    return parse_restore_not_found_body(&body);
                 }
             } else {
                 v2_response
@@ -1306,21 +1286,7 @@ impl ApiClient {
 
         if status == StatusCode::NOT_FOUND {
             let body = response.text().await.unwrap_or_default();
-            if !body.is_empty() {
-                if let Ok(restore_response) = serde_json::from_str::<RestoreResponse>(&body) {
-                    return Ok(Some(restore_response));
-                }
-
-                if let Ok(pending_response) = serde_json::from_str::<RestorePendingResponse>(&body)
-                {
-                    if pending_response.pending
-                        || pending_response.status.as_deref() == Some("pending")
-                    {
-                        return Err(BoringCacheError::CachePending.into());
-                    }
-                }
-            }
-            return Ok(None);
+            return parse_restore_not_found_body(&body);
         }
 
         if !status.is_success() {
@@ -1405,6 +1371,27 @@ struct ParsedError {
     details: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ConflictMetadata {
+    version: Option<String>,
+    cache_entry_id: Option<String>,
+    tag: Option<String>,
+}
+
+fn determine_publish_mode(request: &crate::api::models::cache::ConfirmRequest) -> &'static str {
+    match request.storage_mode.as_deref() {
+        Some(mode) if mode.eq_ignore_ascii_case("cas") => "cas",
+        Some(_) => "replace",
+        None => {
+            if request.blob_count.is_some() || request.blob_total_size_bytes.is_some() {
+                "cas"
+            } else {
+                "replace"
+            }
+        }
+    }
+}
+
 fn parse_error_payload(body: &str) -> Option<ParsedError> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
 
@@ -1436,16 +1423,111 @@ fn parse_error_payload(body: &str) -> Option<ParsedError> {
     })
 }
 
+fn parse_restore_not_found_body(
+    body: &str,
+) -> Result<Option<crate::api::models::cache::RestoreResponse>> {
+    use crate::api::models::cache::{RestorePendingResponse, RestoreResponse};
+
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if let Ok(restore_response) = serde_json::from_str::<RestoreResponse>(trimmed) {
+        return Ok(Some(restore_response));
+    }
+
+    if let Ok(pending_response) = serde_json::from_str::<RestorePendingResponse>(trimmed) {
+        if pending_response.pending || pending_response.status.as_deref() == Some("pending") {
+            return Err(BoringCacheError::CachePending.into());
+        }
+    }
+
+    Ok(None)
+}
+
+fn parse_conflict_metadata(body: &str) -> Option<ConflictMetadata> {
+    fn object_field<'a>(
+        value: &'a serde_json::Value,
+        field: &str,
+    ) -> Option<&'a serde_json::Value> {
+        value.as_object()?.get(field)
+    }
+
+    fn string_at_path(value: &serde_json::Value, path: &[&str]) -> Option<String> {
+        let mut current = value;
+        for segment in path {
+            current = object_field(current, segment)?;
+        }
+        current.as_str().map(|s| s.to_string())
+    }
+
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let version = string_at_path(&value, &["current_pointer", "version"])
+        .or_else(|| string_at_path(&value, &["current", "version"]))
+        .or_else(|| string_at_path(&value, &["conflict", "version"]))
+        .or_else(|| string_at_path(&value, &["version"]))
+        .or_else(|| string_at_path(&value, &["current_version"]));
+    let cache_entry_id = string_at_path(&value, &["current_pointer", "cache_entry_id"])
+        .or_else(|| string_at_path(&value, &["current", "cache_entry_id"]))
+        .or_else(|| string_at_path(&value, &["conflict", "cache_entry_id"]))
+        .or_else(|| string_at_path(&value, &["cache_entry_id"]))
+        .or_else(|| string_at_path(&value, &["current_cache_entry_id"]));
+    let tag = string_at_path(&value, &["current_pointer", "tag"])
+        .or_else(|| string_at_path(&value, &["current", "tag"]))
+        .or_else(|| string_at_path(&value, &["conflict", "tag"]))
+        .or_else(|| string_at_path(&value, &["tag"]))
+        .or_else(|| string_at_path(&value, &["current_tag"]));
+
+    let metadata = ConflictMetadata {
+        version,
+        cache_entry_id,
+        tag,
+    };
+
+    if metadata.version.is_none() && metadata.cache_entry_id.is_none() && metadata.tag.is_none() {
+        return None;
+    }
+
+    Some(metadata)
+}
+
+fn append_conflict_metadata(message: String, body: &str) -> String {
+    let Some(metadata) = parse_conflict_metadata(body) else {
+        return message;
+    };
+
+    let mut lines = Vec::new();
+    if let Some(version) = metadata.version {
+        lines.push(format!("current_version={version}"));
+    }
+    if let Some(cache_entry_id) = metadata.cache_entry_id {
+        lines.push(format!("current_cache_entry_id={cache_entry_id}"));
+    }
+    if let Some(tag) = metadata.tag {
+        lines.push(format!("current_tag={tag}"));
+    }
+
+    if lines.is_empty() {
+        message
+    } else {
+        format!("{message}\n{}", lines.join("\n"))
+    }
+}
+
 fn is_route_not_found_body(body: &str) -> bool {
     let trimmed = body.trim();
     if trimmed.is_empty() {
-        return true;
+        return false;
     }
 
     parse_error_payload(trimmed).is_some_and(|parsed| {
         let message = parsed.message.to_ascii_lowercase();
         message.contains("route not found") || message.contains("routing error")
-    })
+    }) || {
+        let lower = trimmed.to_ascii_lowercase();
+        lower.contains("route not found") || lower.contains("routing error")
+    }
 }
 
 fn format_error_message(
@@ -1489,13 +1571,21 @@ fn dedupe_strings(values: Vec<String>) -> Vec<String> {
 }
 
 fn derive_api_base_urls(configured_base_url: &str) -> (String, String) {
-    let trimmed = configured_base_url.trim().trim_end_matches('/').to_string();
-    if trimmed.is_empty() {
-        let default_v2 = crate::config::Config::default_api_url_value().to_string();
-        return derive_api_base_urls(&default_v2);
-    }
-
-    let lower = trimmed.to_ascii_lowercase();
+    let configured = configured_base_url.trim().trim_end_matches('/');
+    let default = crate::config::Config::default_api_url_value()
+        .trim()
+        .trim_end_matches('/');
+    let base = if configured.is_empty() {
+        if default.is_empty() {
+            FALLBACK_API_BASE_URL
+        } else {
+            default
+        }
+    } else {
+        configured
+    };
+    let trimmed = base.to_string();
+    let lower = base.to_ascii_lowercase();
     let v1_suffix = format!("/{}", API_VERSION_V1);
     let v2_suffix = format!("/{}", API_VERSION_V2);
 
@@ -1700,6 +1790,13 @@ mod tests {
     }
 
     #[test]
+    fn test_derive_api_base_urls_from_empty_input_uses_default_base() {
+        let (v1, v2) = derive_api_base_urls("   ");
+        assert_eq!(v1, "https://api.boringcache.com/v1");
+        assert_eq!(v2, "https://api.boringcache.com/v2");
+    }
+
+    #[test]
     fn test_default_base_url_matches_config() {
         let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
         let _guard = mutex.lock().unwrap();
@@ -1765,6 +1862,61 @@ mod tests {
         let url = reqwest::Url::parse("https://api.boringcache.com/v1/test").unwrap();
         let message = format_error_message(StatusCode::BAD_REQUEST, &url, None, "plain error body");
         assert!(message.contains("plain error body"));
+    }
+
+    #[test]
+    fn test_is_route_not_found_body_empty_is_false() {
+        assert!(!is_route_not_found_body(""));
+        assert!(!is_route_not_found_body("   "));
+    }
+
+    #[test]
+    fn test_parse_conflict_metadata_prefers_current_pointer() {
+        let body = r#"{
+            "message": "publish conflict",
+            "current_pointer": {
+                "version": "42",
+                "cache_entry_id": "entry-xyz",
+                "tag": "main-tag"
+            }
+        }"#;
+
+        let metadata = parse_conflict_metadata(body).expect("metadata should parse");
+        assert_eq!(metadata.version.as_deref(), Some("42"));
+        assert_eq!(metadata.cache_entry_id.as_deref(), Some("entry-xyz"));
+        assert_eq!(metadata.tag.as_deref(), Some("main-tag"));
+    }
+
+    #[test]
+    fn test_append_conflict_metadata_includes_pointer_details() {
+        let message = append_conflict_metadata(
+            "Tag publish conflict".to_string(),
+            r#"{"current_version":"9","current_cache_entry_id":"entry-9"}"#,
+        );
+
+        assert!(message.contains("Tag publish conflict"));
+        assert!(message.contains("current_version=9"));
+        assert!(message.contains("current_cache_entry_id=entry-9"));
+    }
+
+    #[test]
+    fn test_determine_publish_mode_prefers_explicit_storage_mode() {
+        let request = cache::ConfirmRequest {
+            manifest_digest: "sha256:abc".to_string(),
+            manifest_size: 1,
+            manifest_etag: None,
+            archive_size: Some(1),
+            archive_etag: None,
+            blob_count: Some(5),
+            blob_total_size_bytes: Some(100),
+            file_count: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            storage_mode: Some("archive".to_string()),
+            tag: None,
+        };
+
+        assert_eq!(determine_publish_mode(&request), "replace");
     }
 
     #[tokio::test]
