@@ -37,6 +37,15 @@ Use this skill when work touches any of the following:
   - `cargo clippy -- -D warnings`
   - `cargo test`
 
+## API v2 Hardening Memory (2026-02-23 Follow-up)
+
+- Do not treat empty `404` bodies as route-missing by default for restore paths. Empty-body `404` can be a legitimate miss response.
+- Keep route fallback detection strict: only fall back to v1 on explicit routing-error signals.
+- Preserve publish conflict metadata in client errors (`current_version`, `current_cache_entry_id`, `current_tag`) so rebase/retry loops can inspect conflict state.
+- Avoid recursive API-base derivation logic; always use a non-recursive fallback base.
+- Confirm publish-mode selection should prefer explicit `ConfirmRequest.storage_mode` over inferred blob fields.
+- For CAS publish, require an explicit `If-Match` source (pointer version or server-provided bootstrap capability). Do not silently invent fallback semantics.
+
 ## Performance Triage Flow
 
 1. Confirm tag strategy first.
