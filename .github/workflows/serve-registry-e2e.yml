@@ -139,6 +139,24 @@ jobs:
             fi
           }
 
+          fetch_manifest_with_retry() {
+            local tag="$1"
+            local manifest_file="$2"
+            local attempts="${3:-20}"
+            local url="http://127.0.0.1:${PORT}/v2/boringcache-e2e/cache/manifests/${tag}"
+            local accept_header="Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
+
+            for _ in $(seq 1 "${attempts}"); do
+              if curl -fsS -H "${accept_header}" "${url}" -o "${manifest_file}"; then
+                return 0
+              fi
+              sleep 1
+            done
+
+            echo "manifest did not become readable for tag ${tag} after ${attempts}s"
+            return 1
+          }
+
           docker buildx create \
             --name "${BUILDER}" \
             --driver docker-container \
@@ -201,10 +219,7 @@ jobs:
           for tag in "${CACHE_TAG}" "${CACHE_TAG_ALIAS}"; do
             manifest_file="manifest-${tag}.json"
             LOG_FILES+=("${manifest_file}")
-            curl -fsS \
-              -H "Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
-              "http://127.0.0.1:${PORT}/v2/boringcache-e2e/cache/manifests/${tag}" \
-              -o "${manifest_file}"
+            fetch_manifest_with_retry "${tag}" "${manifest_file}"
           done
 
           # Hard fail on known historical export/finalize signatures.
