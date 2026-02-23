@@ -236,7 +236,7 @@ fn test_workspaces_command_without_auth() {
 fn test_api_url_env_var() {
     use std::env;
 
-    env::set_var("BORINGCACHE_API_URL", "https://custom.api.com/v1");
+    env::set_var("BORINGCACHE_API_URL", "https://custom.api.com");
 
     let output = run_cli_command(&["workspaces"]);
 

@@ -81,7 +81,7 @@ async fn test_save_uses_archive_layout_for_generic_directory() {
 
     let mut server = Server::new_async().await;
     let _save_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches")
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
         .match_header("authorization", "Bearer test-token-123")
         .match_body(Matcher::PartialJson(json!({
             "cache": {
@@ -139,7 +139,7 @@ async fn test_save_uses_bazel_layout_for_bazel_cache() {
 
     let mut server = Server::new_async().await;
     let _save_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches")
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
         .match_header("authorization", "Bearer test-token-123")
         .match_body(Matcher::PartialJson(json!({
             "cache": {
@@ -207,7 +207,7 @@ async fn test_save_uses_oci_layout_for_oci_cache() {
 
     let mut server = Server::new_async().await;
     let _save_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches")
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
         .match_header("authorization", "Bearer test-token-123")
         .match_body(Matcher::PartialJson(json!({
             "cache": {
@@ -308,7 +308,7 @@ async fn test_save_requests_upload_urls_for_existing_cas_blobs() {
     let manifest_upload_url = format!("{}/manifest-upload", server.url());
 
     let save_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches")
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
         .match_header("authorization", "Bearer test-token-123")
         .match_body(Matcher::Any)
         .with_status(201)
@@ -333,7 +333,7 @@ async fn test_save_requests_upload_urls_for_existing_cas_blobs() {
         .await;
 
     let check_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches/blobs/check")
+        .mock("POST", "/v2/workspaces/test/workspace/caches/blobs/check")
         .match_header("authorization", "Bearer test-token-123")
         .match_body(Matcher::PartialJson(json!({
             "blobs": [
@@ -362,7 +362,7 @@ async fn test_save_requests_upload_urls_for_existing_cas_blobs() {
     let upload_urls_mock = server
         .mock(
             "POST",
-            "/workspaces/test/workspace/caches/blobs/upload-urls",
+            "/v2/workspaces/test/workspace/caches/blobs/upload-urls",
         )
         .match_header("authorization", "Bearer test-token-123")
         .match_body(Matcher::PartialJson(json!({
@@ -396,7 +396,7 @@ async fn test_save_requests_upload_urls_for_existing_cas_blobs() {
     let confirm_mock = server
         .mock(
             "PATCH",
-            "/workspaces/test/workspace/caches/entry-oci-attach",
+            "/v2/workspaces/test/workspace/caches/entry-oci-attach",
         )
         .match_header("authorization", "Bearer test-token-123")
         .with_status(200)
@@ -468,7 +468,7 @@ async fn test_restore_materializes_file_cas_layout() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -501,7 +501,7 @@ async fn test_restore_materializes_file_cas_layout() {
     let _download_urls_mock = server
         .mock(
             "POST",
-            "/workspaces/test/workspace/caches/blobs/download-urls",
+            "/v2/workspaces/test/workspace/caches/blobs/download-urls",
         )
         .match_body(Matcher::PartialJson(json!({
             "cache_entry_id": "restore-file-entry",
@@ -608,7 +608,7 @@ async fn test_restore_materializes_bazel_layout() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -641,7 +641,7 @@ async fn test_restore_materializes_bazel_layout() {
     let _download_urls_mock = server
         .mock(
             "POST",
-            "/workspaces/test/workspace/caches/blobs/download-urls",
+            "/v2/workspaces/test/workspace/caches/blobs/download-urls",
         )
         .match_body(Matcher::PartialJson(json!({
             "cache_entry_id": "restore-bazel-entry"
@@ -738,7 +738,7 @@ async fn test_restore_materializes_oci_layout() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -771,7 +771,7 @@ async fn test_restore_materializes_oci_layout() {
     let _download_urls_mock = server
         .mock(
             "POST",
-            "/workspaces/test/workspace/caches/blobs/download-urls",
+            "/v2/workspaces/test/workspace/caches/blobs/download-urls",
         )
         .match_body(Matcher::PartialJson(json!({
             "cache_entry_id": "restore-oci-entry",

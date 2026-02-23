@@ -118,21 +118,29 @@ async fn test_auth_workflow_success() {
     let mut server = Server::new_async().await;
 
     let _mock = server
-        .mock("POST", "/auth/validate")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
                 "valid": true,
                 "user": {
-                    "id": 1,
+                    "id": "1",
                     "name": "Test User",
                     "email": "test@example.com"
                 },
                 "organization": {
-                    "id": 1,
+                    "id": "1",
                     "name": "Test Org",
                     "slug": "test-org"
+                },
+                "workspace": null,
+                "token": {
+                    "id": "tok_123",
+                    "name": "CI Token",
+                    "scope_type": "organization",
+                    "scopes": ["read", "write"],
+                    "expires_in_days": 90
                 }
             })
             .to_string(),
@@ -149,10 +157,9 @@ async fn test_auth_workflow_success() {
         .output()
         .expect("Failed to execute command");
 
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("success") || stdout.contains("authenticated"));
-    }
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("success") || stdout.contains("authenticated"));
 
     env::remove_var("BORINGCACHE_API_URL");
 }
@@ -167,7 +174,7 @@ async fn test_auth_workflow_invalid_token() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(401)
         .with_body(json!({"error": "Invalid token"}).to_string())
         .create_async()
@@ -209,7 +216,7 @@ async fn test_workspaces_workflow_success() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -223,7 +230,7 @@ async fn test_workspaces_workflow_success() {
         .await;
 
     let _workspaces_mock = server
-        .mock("GET", "/workspaces")
+        .mock("GET", "/v2/workspaces")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -295,7 +302,7 @@ async fn test_restore_warns_on_invalid_signature_with_encrypted_manifest() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -360,7 +367,7 @@ async fn test_restore_warns_on_invalid_signature_with_encrypted_manifest() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -416,7 +423,7 @@ async fn test_restore_warns_on_invalid_signature_with_encrypted_manifest() {
         .await;
 
     let _metrics_mock = server
-        .mock("POST", "/workspaces/test/workspace/metrics")
+        .mock("POST", "/v2/workspaces/test/workspace/metrics")
         .with_status(200)
         .with_body("{}")
         .create_async()
@@ -467,7 +474,7 @@ async fn test_restore_passphrase_manifest_requires_passphrase() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -510,7 +517,7 @@ async fn test_restore_passphrase_manifest_requires_passphrase() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -578,7 +585,7 @@ async fn test_save_workflow_success() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -592,7 +599,7 @@ async fn test_save_workflow_success() {
         .await;
 
     let _upload_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches")
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
         .match_body(Matcher::PartialJson(json!({
             "caches": [
                 {"tag": "test-save-tag"}
@@ -619,7 +626,7 @@ async fn test_save_workflow_success() {
         .await;
 
     let _metrics_mock = server
-        .mock("POST", "/workspaces/test/workspace/metrics")
+        .mock("POST", "/v2/workspaces/test/workspace/metrics")
         .with_status(201)
         .with_body(json!({"status": "success", "metric_id": "metric-456"}).to_string())
         .create_async()
@@ -683,7 +690,7 @@ async fn test_restore_workflow_cache_not_found() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -699,7 +706,7 @@ async fn test_restore_workflow_cache_not_found() {
     let _check_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?tags=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?tags=.*$".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -764,7 +771,7 @@ async fn test_metrics_workflow() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -850,7 +857,7 @@ async fn test_restore_exit_codes() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -866,7 +873,7 @@ async fn test_restore_exit_codes() {
     let _miss_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?tags=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?tags=.*$".to_string()),
         )
         .with_status(200)
         .with_body(
@@ -924,7 +931,7 @@ async fn test_restore_fail_on_cache_miss_flag() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -943,7 +950,7 @@ async fn test_restore_fail_on_cache_miss_flag() {
     let _cache_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1020,7 +1027,7 @@ async fn test_restore_fail_on_cache_miss_with_partial_hits() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -1040,7 +1047,7 @@ async fn test_restore_fail_on_cache_miss_with_partial_hits() {
     let _cache_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1128,7 +1135,7 @@ async fn test_restore_lookup_only_flag() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -1148,7 +1155,7 @@ async fn test_restore_lookup_only_flag() {
     let _cache_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1239,7 +1246,7 @@ async fn test_restore_lookup_only_all_found() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -1259,7 +1266,7 @@ async fn test_restore_lookup_only_all_found() {
     let _cache_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1349,7 +1356,7 @@ async fn test_save_workflow_with_force_flag() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -1363,7 +1370,7 @@ async fn test_save_workflow_with_force_flag() {
         .await;
 
     let _check_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches/check")
+        .mock("POST", "/v2/workspaces/test/workspace/caches/check")
         .with_status(200)
         .with_body(
             json!({
@@ -1383,7 +1390,7 @@ async fn test_save_workflow_with_force_flag() {
     let saved_tag = format!("test-force-tag-{}", platform_suffix);
 
     let _save_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches")
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
         .match_body(Matcher::PartialJson(json!({
             "cache": {
                 "force": true
@@ -1415,7 +1422,7 @@ async fn test_save_workflow_with_force_flag() {
         .mock(
             "POST",
             mockito::Matcher::Regex(
-                r"/workspaces/test/workspace/caches/test-force-tag-.*/confirm".to_string(),
+                r"/v2/workspaces/test/workspace/caches/test-force-tag-.*/confirm".to_string(),
             ),
         )
         .with_status(200)
@@ -1424,7 +1431,7 @@ async fn test_save_workflow_with_force_flag() {
         .await;
 
     let _metrics_mock = server
-        .mock("POST", "/workspaces/test/workspace/metrics")
+        .mock("POST", "/v2/workspaces/test/workspace/metrics")
         .with_status(201)
         .with_body(json!({"status": "success", "metric_id": "metric-789"}).to_string())
         .create_async()
@@ -1485,7 +1492,7 @@ async fn test_save_workflow_without_force_flag_skips_existing() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -1499,7 +1506,7 @@ async fn test_save_workflow_without_force_flag_skips_existing() {
         .await;
 
     let _check_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches/check")
+        .mock("POST", "/v2/workspaces/test/workspace/caches/check")
         .with_status(200)
         .with_body(
             json!({
@@ -1516,14 +1523,14 @@ async fn test_save_workflow_without_force_flag_skips_existing() {
         .await;
 
     let save_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches")
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
         .expect(0)
         .with_status(201)
         .create_async()
         .await;
 
     let _metrics_mock = server
-        .mock("POST", "/workspaces/test/workspace/metrics")
+        .mock("POST", "/v2/workspaces/test/workspace/metrics")
         .with_status(201)
         .with_body(json!({"status": "success"}).to_string())
         .create_async()
@@ -1586,7 +1593,7 @@ async fn test_save_workflow_digest_lookup_binds_tag() {
     let mut server = Server::new_async().await;
 
     let _auth_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -1600,7 +1607,7 @@ async fn test_save_workflow_digest_lookup_binds_tag() {
         .await;
 
     let _tag_check_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches/check")
+        .mock("POST", "/v2/workspaces/test/workspace/caches/check")
         .match_body(Matcher::Regex(
             r#"^\{"manifest_checks":\[\{"tag":"test-digest-tag","manifest_root_digest":"[^"]+"\}\]\}$"#
                 .to_string(),
@@ -1620,7 +1627,7 @@ async fn test_save_workflow_digest_lookup_binds_tag() {
         .await;
 
     let _digest_check_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches/check")
+        .mock("POST", "/v2/workspaces/test/workspace/caches/check")
         .match_body(Matcher::Regex(
             r#"^\{"manifest_checks":\[\{"tag":"test-digest-tag","manifest_root_digest":"[^"]+","lookup":"digest"\}\]\}$"#
                 .to_string(),
@@ -1645,7 +1652,7 @@ async fn test_save_workflow_digest_lookup_binds_tag() {
     let _confirm_mock = server
         .mock(
             "PATCH",
-            "/workspaces/test/workspace/caches/existing-entry-123",
+            "/v2/workspaces/test/workspace/caches/existing-entry-123",
         )
         .match_body(Matcher::PartialJson(json!({
             "cache": {
@@ -1665,7 +1672,7 @@ async fn test_save_workflow_digest_lookup_binds_tag() {
         .await;
 
     let _save_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches")
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
         .expect(0)
         .with_status(201)
         .create_async()

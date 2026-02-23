@@ -156,7 +156,7 @@ async fn test_manifest_hit_returns_decoded_index_json() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -214,7 +214,7 @@ async fn test_manifest_miss_returns_404() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -252,7 +252,7 @@ async fn test_manifest_head_returns_headers_no_body() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -333,7 +333,7 @@ async fn test_blob_get_after_manifest_resolution() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -360,7 +360,7 @@ async fn test_blob_get_after_manifest_resolution() {
         .await;
 
     let _download_urls_mock = server
-        .mock("POST", "/workspaces/org/repo/caches/blobs/download-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -437,7 +437,7 @@ async fn test_index_manifest_detected_as_index_type() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -507,7 +507,7 @@ async fn test_manifest_put_skips_alias_confirm_when_alias_save_exists() {
     let alias_tag = digest_tag(&manifest_digest);
 
     let primary_save_mock = server
-        .mock("POST", "/workspaces/org/repo/caches")
+        .mock("POST", "/v2/workspaces/org/repo/caches")
         .match_header("authorization", "Bearer test-token")
         .match_body(Matcher::PartialJson(json!({
             "cache": {
@@ -543,7 +543,7 @@ async fn test_manifest_put_skips_alias_confirm_when_alias_save_exists() {
         .await;
 
     let primary_confirm_mock = server
-        .mock("PATCH", "/workspaces/org/repo/caches/entry-primary")
+        .mock("PATCH", "/v2/workspaces/org/repo/caches/entry-primary")
         .match_header("authorization", "Bearer test-token")
         .match_body(Matcher::PartialJson(json!({
             "cache": {
@@ -564,7 +564,7 @@ async fn test_manifest_put_skips_alias_confirm_when_alias_save_exists() {
         .await;
 
     let alias_save_mock = server
-        .mock("POST", "/workspaces/org/repo/caches")
+        .mock("POST", "/v2/workspaces/org/repo/caches")
         .match_header("authorization", "Bearer test-token")
         .match_body(Matcher::PartialJson(json!({
             "cache": {
@@ -592,7 +592,7 @@ async fn test_manifest_put_skips_alias_confirm_when_alias_save_exists() {
         .await;
 
     let alias_confirm_mock = server
-        .mock("PATCH", "/workspaces/org/repo/caches/entry-alias")
+        .mock("PATCH", "/v2/workspaces/org/repo/caches/entry-alias")
         .expect(0)
         .create_async()
         .await;
@@ -1107,7 +1107,7 @@ async fn test_multi_segment_name_manifest() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1211,7 +1211,7 @@ async fn test_put_upload_accepts_empty_body_when_blob_already_exists_remote() {
 
     let blob_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let _check_mock = server
-        .mock("POST", "/workspaces/org/repo/caches/blobs/check")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
         .match_header("authorization", "Bearer test-token")
         .match_body(Matcher::PartialJson(json!({
             "blobs": [{
@@ -1294,7 +1294,7 @@ async fn test_blob_proxy_returns_error_on_storage_failure() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1321,7 +1321,7 @@ async fn test_blob_proxy_returns_error_on_storage_failure() {
         .await;
 
     let _download_urls_mock = server
-        .mock("POST", "/workspaces/org/repo/caches/blobs/download-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1385,7 +1385,7 @@ async fn test_bazel_cas_put_head_get_round_trip() {
     let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
 
     let _save_mock = server
-        .mock("POST", "/workspaces/org/repo/caches")
+        .mock("POST", "/v2/workspaces/org/repo/caches")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1408,7 +1408,7 @@ async fn test_bazel_cas_put_head_get_round_trip() {
         .await;
 
     let _blob_upload_urls_mock = server
-        .mock("POST", "/workspaces/org/repo/caches/blobs/upload-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/upload-urls")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1443,7 +1443,7 @@ async fn test_bazel_cas_put_head_get_round_trip() {
         .await;
 
     let _confirm_mock = server
-        .mock("PATCH", "/workspaces/org/repo/caches/entry-bazel-kv")
+        .mock("PATCH", "/v2/workspaces/org/repo/caches/entry-bazel-kv")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1473,7 +1473,7 @@ async fn test_bazel_cas_put_head_get_round_trip() {
     let _restore_head_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1530,7 +1530,7 @@ async fn test_bazel_cas_put_head_get_round_trip() {
     let _restore_get_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1557,7 +1557,7 @@ async fn test_bazel_cas_put_head_get_round_trip() {
         .await;
 
     let _download_urls_mock = server
-        .mock("POST", "/workspaces/org/repo/caches/blobs/download-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1636,7 +1636,7 @@ async fn test_sccache_put_head_get_round_trip() {
     let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
 
     let _save_mock = server
-        .mock("POST", "/workspaces/org/repo/caches")
+        .mock("POST", "/v2/workspaces/org/repo/caches")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1659,7 +1659,7 @@ async fn test_sccache_put_head_get_round_trip() {
         .await;
 
     let _blob_upload_urls_mock = server
-        .mock("POST", "/workspaces/org/repo/caches/blobs/upload-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/upload-urls")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1694,7 +1694,7 @@ async fn test_sccache_put_head_get_round_trip() {
         .await;
 
     let _confirm_mock = server
-        .mock("PATCH", "/workspaces/org/repo/caches/entry-sccache-kv")
+        .mock("PATCH", "/v2/workspaces/org/repo/caches/entry-sccache-kv")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1724,7 +1724,7 @@ async fn test_sccache_put_head_get_round_trip() {
     let _restore_head_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1781,7 +1781,7 @@ async fn test_sccache_put_head_get_round_trip() {
     let _restore_get_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1808,7 +1808,7 @@ async fn test_sccache_put_head_get_round_trip() {
         .await;
 
     let _download_urls_mock = server
-        .mock("POST", "/workspaces/org/repo/caches/blobs/download-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1905,7 +1905,7 @@ async fn test_sccache_miss_is_temporarily_cached_to_reduce_backend_lookups() {
     let restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .expect(1)
         .with_status(200)
@@ -2016,7 +2016,7 @@ async fn test_gradle_put_get_round_trip() {
     let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
 
     let _save_mock = server
-        .mock("POST", "/workspaces/org/repo/caches")
+        .mock("POST", "/v2/workspaces/org/repo/caches")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2039,7 +2039,7 @@ async fn test_gradle_put_get_round_trip() {
         .await;
 
     let _blob_upload_urls_mock = server
-        .mock("POST", "/workspaces/org/repo/caches/blobs/upload-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/upload-urls")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2074,7 +2074,7 @@ async fn test_gradle_put_get_round_trip() {
         .await;
 
     let _confirm_mock = server
-        .mock("PATCH", "/workspaces/org/repo/caches/entry-gradle-kv")
+        .mock("PATCH", "/v2/workspaces/org/repo/caches/entry-gradle-kv")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2104,7 +2104,7 @@ async fn test_gradle_put_get_round_trip() {
     let _restore_get_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2131,7 +2131,7 @@ async fn test_gradle_put_get_round_trip() {
         .await;
 
     let _download_urls_mock = server
-        .mock("POST", "/workspaces/org/repo/caches/blobs/download-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2328,7 +2328,7 @@ async fn test_turborepo_put_head_get_round_trip() {
     let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
 
     let _save_mock = server
-        .mock("POST", "/workspaces/org/repo/caches")
+        .mock("POST", "/v2/workspaces/org/repo/caches")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2351,7 +2351,7 @@ async fn test_turborepo_put_head_get_round_trip() {
         .await;
 
     let _blob_upload_urls_mock = server
-        .mock("POST", "/workspaces/org/repo/caches/blobs/upload-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/upload-urls")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2386,7 +2386,7 @@ async fn test_turborepo_put_head_get_round_trip() {
         .await;
 
     let _confirm_mock = server
-        .mock("PATCH", "/workspaces/org/repo/caches/entry-turbo-kv")
+        .mock("PATCH", "/v2/workspaces/org/repo/caches/entry-turbo-kv")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2420,7 +2420,7 @@ async fn test_turborepo_put_head_get_round_trip() {
     let _restore_head_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2463,7 +2463,7 @@ async fn test_turborepo_put_head_get_round_trip() {
     let _restore_get_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2490,7 +2490,7 @@ async fn test_turborepo_put_head_get_round_trip() {
         .await;
 
     let _download_urls_mock = server
-        .mock("POST", "/workspaces/org/repo/caches/blobs/download-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2597,7 +2597,7 @@ async fn test_turborepo_query_artifacts_returns_metadata_map() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")

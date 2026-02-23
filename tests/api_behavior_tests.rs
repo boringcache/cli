@@ -133,7 +133,7 @@ async fn test_restore_retries_on_404_with_pending_body() {
     let mut server = Server::new_async().await;
 
     let _session_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -149,7 +149,7 @@ async fn test_restore_retries_on_404_with_pending_body() {
     let _pending_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(404)
         .with_header("content-type", "application/json")
@@ -213,7 +213,7 @@ async fn test_restore_retries_on_pending_entries_in_response() {
     let mut server = Server::new_async().await;
 
     let _session_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -229,7 +229,7 @@ async fn test_restore_retries_on_pending_entries_in_response() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -282,7 +282,7 @@ async fn test_restore_retries_on_storage_backend_unavailable() {
     let mut server = Server::new_async().await;
 
     let _session_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -298,7 +298,7 @@ async fn test_restore_retries_on_storage_backend_unavailable() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -351,7 +351,7 @@ async fn test_restore_handles_207_multi_status() {
     let mut server = Server::new_async().await;
 
     let _session_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -367,7 +367,7 @@ async fn test_restore_handles_207_multi_status() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(207)
         .with_header("content-type", "application/json")
@@ -421,7 +421,7 @@ async fn test_restore_handles_404_with_restore_response_body() {
     let mut server = Server::new_async().await;
 
     let _session_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -437,7 +437,7 @@ async fn test_restore_handles_404_with_restore_response_body() {
     let _restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
         )
         .with_status(404)
         .with_header("content-type", "application/json")
@@ -488,7 +488,7 @@ async fn test_save_exits_gracefully_on_409_conflict() {
     let mut server = Server::new_async().await;
 
     let _session_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -502,7 +502,7 @@ async fn test_save_exits_gracefully_on_409_conflict() {
         .await;
 
     let _check_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches/check")
+        .mock("POST", "/v2/workspaces/test/workspace/caches/check")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -518,7 +518,7 @@ async fn test_save_exits_gracefully_on_409_conflict() {
         .await;
 
     let conflict_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches")
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
         .with_status(409)
         .with_header("content-type", "application/json")
         .with_body(
@@ -587,7 +587,7 @@ async fn test_save_skips_wait_on_pending() {
     let mut server = Server::new_async().await;
 
     let _session_mock = server
-        .mock("GET", "/session")
+        .mock("GET", "/v2/session")
         .with_status(200)
         .with_body(
             json!({
@@ -601,7 +601,7 @@ async fn test_save_skips_wait_on_pending() {
         .await;
 
     let _check_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches/check")
+        .mock("POST", "/v2/workspaces/test/workspace/caches/check")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -617,7 +617,7 @@ async fn test_save_skips_wait_on_pending() {
         .await;
 
     let _pending_mock = server
-        .mock("POST", "/workspaces/test/workspace/caches")
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
         .with_status(423)
         .with_header("content-type", "application/json")
         .with_body(
