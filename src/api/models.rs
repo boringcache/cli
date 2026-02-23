@@ -415,6 +415,11 @@ pub mod cache {
     }
 
     #[derive(Debug, Serialize)]
+    pub struct BlobStageRequest {
+        pub blobs: Vec<BlobDescriptor>,
+    }
+
+    #[derive(Debug, Serialize)]
     pub struct BlobUploadUrlsRequest {
         pub cache_entry_id: String,
         pub blobs: Vec<BlobDescriptor>,

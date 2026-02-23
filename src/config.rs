@@ -11,7 +11,7 @@ use crate::error::BoringCacheError;
 
 const CONFIG_DIR_NAME: &str = ".boringcache";
 const CONFIG_FILE_NAME: &str = "config.json";
-pub const DEFAULT_API_URL: &str = "https://api.boringcache.com/v1";
+pub const DEFAULT_API_URL: &str = "https://api.boringcache.com";
 
 pub fn env_var(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.trim().is_empty())
