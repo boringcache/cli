@@ -95,4 +95,7 @@ cargo test
 
 ## Skills
 
-This repo does not define local skills. Use the global skill list when applicable.
+Local skills:
+- `cli-sccache-release-ops`: BoringCache CLI performance and release playbook for sccache proxy behavior, workflow tag conventions, benchmark regression checks, and release execution. (file: `skills/cli-sccache-release-ops/SKILL.md`)
+
+Use global skills when they are a better match than this local playbook.
