@@ -26,11 +26,44 @@ use super::error::RegistryError;
 const KV_MISS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 const KV_CONFLICT_BACKOFF_MS: u64 = 5_000;
 const KV_CONFLICT_JITTER_MS: u64 = 3_000;
+const KV_CONFLICT_IN_PROGRESS_BACKOFF_MS: u64 = 30_000;
+const KV_CONFLICT_IN_PROGRESS_JITTER_MS: u64 = 10_000;
 const KV_TRANSIENT_BACKOFF_MS: u64 = 2_000;
 const KV_TRANSIENT_JITTER_MS: u64 = 2_000;
+const KV_TRANSIENT_WRITE_PATH_BACKOFF_MS: u64 = 20_000;
+const KV_TRANSIENT_WRITE_PATH_JITTER_MS: u64 = 5_000;
 
 fn kv_miss_cache_key(registry_root_tag: &str, scoped_key: &str) -> String {
     format!("{}\u{0}{}", registry_root_tag.trim(), scoped_key)
+}
+
+fn conflict_backoff_window(message: &str) -> (u64, u64) {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("another cache upload is in progress")
+        || lower.contains("cache upload in progress")
+    {
+        (
+            KV_CONFLICT_IN_PROGRESS_BACKOFF_MS,
+            KV_CONFLICT_IN_PROGRESS_JITTER_MS,
+        )
+    } else {
+        (KV_CONFLICT_BACKOFF_MS, KV_CONFLICT_JITTER_MS)
+    }
+}
+
+fn transient_backoff_window(message: &str) -> (u64, u64) {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("save_entry failed")
+        || lower.contains("blob upload failed")
+        || lower.contains("confirm failed")
+    {
+        (
+            KV_TRANSIENT_WRITE_PATH_BACKOFF_MS,
+            KV_TRANSIENT_WRITE_PATH_JITTER_MS,
+        )
+    } else {
+        (KV_TRANSIENT_BACKOFF_MS, KV_TRANSIENT_JITTER_MS)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -780,16 +813,16 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
             let mut pending = state.kv_pending.write().await;
             pending.restore(pending_entries, pending_blob_paths);
             drop(pending);
-            set_next_flush_at_with_jitter(state, KV_CONFLICT_BACKOFF_MS, KV_CONFLICT_JITTER_MS)
-                .await;
+            let (base_ms, jitter_ms) = conflict_backoff_window(&msg);
+            set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
             FlushResult::Conflict
         }
         Err(FlushError::Transient(msg)) => {
             eprintln!("KV batch flush failed: {msg}");
             let mut pending = state.kv_pending.write().await;
             pending.restore(pending_entries, pending_blob_paths);
-            set_next_flush_at_with_jitter(state, KV_TRANSIENT_BACKOFF_MS, KV_TRANSIENT_JITTER_MS)
-                .await;
+            let (base_ms, jitter_ms) = transient_backoff_window(&msg);
+            set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
             FlushResult::Error
         }
         Err(FlushError::Permanent(msg)) => {
@@ -1256,6 +1289,21 @@ mod tests {
         let error = anyhow::anyhow!("HTTP 412 from backend: precondition failed");
         let classified = classify_flush_error(&error, "confirm failed");
         assert!(matches!(classified, FlushError::Conflict(_)));
+    }
+
+    #[test]
+    fn conflict_backoff_window_is_longer_for_in_progress_conflicts() {
+        let (base, jitter) =
+            conflict_backoff_window("save_entry failed: another cache upload is in progress");
+        assert_eq!(base, KV_CONFLICT_IN_PROGRESS_BACKOFF_MS);
+        assert_eq!(jitter, KV_CONFLICT_IN_PROGRESS_JITTER_MS);
+    }
+
+    #[test]
+    fn transient_backoff_window_is_longer_for_write_path_failures() {
+        let (base, jitter) = transient_backoff_window("confirm failed: Server error (500)");
+        assert_eq!(base, KV_TRANSIENT_WRITE_PATH_BACKOFF_MS);
+        assert_eq!(jitter, KV_TRANSIENT_WRITE_PATH_JITTER_MS);
     }
 
     #[test]

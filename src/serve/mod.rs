@@ -173,20 +173,57 @@ pub async fn run_server(
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    if let Some(_flush_guard) = cache_registry::try_schedule_flush(&state) {
-        eprintln!("Shutdown: flushing pending KV entries");
-        cache_registry::flush_kv_index(&state).await;
-    } else {
-        eprintln!("Shutdown: waiting for in-flight KV flush");
-        let _running_flush = state.kv_flush_lock.lock().await;
-        drop(_running_flush);
-        if let Some(_flush_guard) = cache_registry::try_schedule_flush(&state) {
-            eprintln!("Shutdown: running follow-up KV flush");
-            cache_registry::flush_kv_index(&state).await;
-        }
-    }
+    eprintln!("Shutdown: flushing pending KV entries");
+    flush_pending_on_shutdown(&state).await;
 
     Ok(())
+}
+
+async fn flush_pending_on_shutdown(state: &AppState) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+
+    loop {
+        let pending_entries = {
+            let pending = state.kv_pending.read().await;
+            pending.entry_count()
+        };
+        if pending_entries == 0 {
+            return;
+        }
+
+        if let Some(_flush_guard) = cache_registry::try_schedule_flush(state) {
+            match cache_registry::flush_kv_index(state).await {
+                cache_registry::FlushResult::Ok | cache_registry::FlushResult::Permanent => {
+                    let mut gate = state.kv_next_flush_at.write().await;
+                    *gate = None;
+                }
+                cache_registry::FlushResult::Conflict | cache_registry::FlushResult::Error => {}
+            }
+        } else {
+            let _running_flush = state.kv_flush_lock.lock().await;
+            drop(_running_flush);
+        }
+
+        if std::time::Instant::now() >= deadline {
+            let pending_entries = {
+                let pending = state.kv_pending.read().await;
+                pending.entry_count()
+            };
+            eprintln!(
+                "Shutdown: flush timeout reached with {pending_entries} pending entries remaining"
+            );
+            return;
+        }
+
+        let delay = {
+            let gate = state.kv_next_flush_at.read().await;
+            match *gate {
+                Some(next) => next.saturating_duration_since(std::time::Instant::now()),
+                None => std::time::Duration::from_secs(1),
+            }
+        };
+        tokio::time::sleep(delay.min(std::time::Duration::from_secs(10))).await;
+    }
 }
 
 async fn shutdown_signal() {
