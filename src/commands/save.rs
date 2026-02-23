@@ -678,7 +678,7 @@ async fn save_single_archive_entry(
         Err(err) => {
             let bc_error = err.downcast_ref::<crate::error::BoringCacheError>();
 
-            if let Some(crate::error::BoringCacheError::CacheConflict(message)) = bc_error {
+            if let Some(message) = bc_error.and_then(|e| e.conflict_message()) {
                 create_step.complete()?;
                 progress_warning(&reporter, format!("  Conflict: {}", message));
                 progress_info(

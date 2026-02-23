@@ -688,7 +688,8 @@ fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
 
     let is_conflict = error
         .downcast_ref::<BoringCacheError>()
-        .is_some_and(|bc| matches!(bc, BoringCacheError::CacheConflict(_)))
+        .and_then(BoringCacheError::conflict_message)
+        .is_some()
         || lower.contains("another cache upload is in progress");
     let conflict_status = lower.contains("http 409") || lower.contains("http 412");
     let conflict_hint = lower.contains("precondition failed")

@@ -1,5 +1,12 @@
 use std::fmt;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConflictMetadata {
+    pub current_version: Option<String>,
+    pub current_cache_entry_id: Option<String>,
+    pub current_tag: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum BoringCacheError {
     ConfigNotFound,
@@ -10,9 +17,45 @@ pub enum BoringCacheError {
     ConnectionError(String),
     CacheMiss,
     CachePending,
-    CacheConflict(String),
+    CacheConflict {
+        message: String,
+        metadata: Option<ConflictMetadata>,
+    },
     WorkspaceNotFound(String),
     AuthenticationFailed(String),
+}
+
+impl BoringCacheError {
+    pub fn cache_conflict(message: impl Into<String>) -> Self {
+        Self::CacheConflict {
+            message: message.into(),
+            metadata: None,
+        }
+    }
+
+    pub fn cache_conflict_with_metadata(
+        message: impl Into<String>,
+        metadata: ConflictMetadata,
+    ) -> Self {
+        Self::CacheConflict {
+            message: message.into(),
+            metadata: Some(metadata),
+        }
+    }
+
+    pub fn conflict_message(&self) -> Option<&str> {
+        match self {
+            Self::CacheConflict { message, .. } => Some(message),
+            _ => None,
+        }
+    }
+
+    pub fn conflict_metadata(&self) -> Option<&ConflictMetadata> {
+        match self {
+            Self::CacheConflict { metadata, .. } => metadata.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for BoringCacheError {
@@ -32,7 +75,7 @@ impl fmt::Display for BoringCacheError {
             BoringCacheError::ConnectionError(msg) => write!(f, "{msg}"),
             BoringCacheError::CacheMiss => write!(f, "Cache miss"),
             BoringCacheError::CachePending => write!(f, "Cache upload in progress"),
-            BoringCacheError::CacheConflict(msg) => write!(f, "{msg}"),
+            BoringCacheError::CacheConflict { message, .. } => write!(f, "{message}"),
             BoringCacheError::WorkspaceNotFound(workspace) => {
                 write!(f, "Workspace '{workspace}' not found")
             }
@@ -120,7 +163,7 @@ mod tests {
         let ws_err = BoringCacheError::WorkspaceNotFound("my-workspace".to_string());
         assert!(ws_err.to_string().contains("my-workspace"));
 
-        let conflict_err = BoringCacheError::CacheConflict("tag already claimed".to_string());
+        let conflict_err = BoringCacheError::cache_conflict("tag already claimed");
         assert!(conflict_err.to_string().contains("tag already claimed"));
 
         let auth_err = BoringCacheError::AuthenticationFailed("invalid token".to_string());

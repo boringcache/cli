@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::error::BoringCacheError;
+use crate::error::{BoringCacheError, ConflictMetadata};
 use crate::retry_resume::RetryConfig;
 use crate::types::Result;
 use anyhow::{ensure, Context};
@@ -501,9 +501,12 @@ impl ApiClient {
                     .unwrap_or_else(|| {
                         format_error_message(status, &url, parsed_payload.as_ref(), &error_body)
                     });
-                let message = append_conflict_metadata(message, &error_body);
-
-                BoringCacheError::CacheConflict(message).into()
+                match parse_conflict_metadata(&error_body) {
+                    Some(metadata) => {
+                        BoringCacheError::cache_conflict_with_metadata(message, metadata).into()
+                    }
+                    None => BoringCacheError::cache_conflict(message).into(),
+                }
             }
             StatusCode::LOCKED => BoringCacheError::CachePending.into(),
             StatusCode::INTERNAL_SERVER_ERROR => {
@@ -1371,13 +1374,6 @@ struct ParsedError {
     details: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ConflictMetadata {
-    version: Option<String>,
-    cache_entry_id: Option<String>,
-    tag: Option<String>,
-}
-
 fn determine_publish_mode(request: &crate::api::models::cache::ConfirmRequest) -> &'static str {
     match request.storage_mode.as_deref() {
         Some(mode) if mode.eq_ignore_ascii_case("cas") => "cas",
@@ -1463,56 +1459,36 @@ fn parse_conflict_metadata(body: &str) -> Option<ConflictMetadata> {
     }
 
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let version = string_at_path(&value, &["current_pointer", "version"])
+    let current_version = string_at_path(&value, &["current_pointer", "version"])
         .or_else(|| string_at_path(&value, &["current", "version"]))
         .or_else(|| string_at_path(&value, &["conflict", "version"]))
         .or_else(|| string_at_path(&value, &["version"]))
         .or_else(|| string_at_path(&value, &["current_version"]));
-    let cache_entry_id = string_at_path(&value, &["current_pointer", "cache_entry_id"])
+    let current_cache_entry_id = string_at_path(&value, &["current_pointer", "cache_entry_id"])
         .or_else(|| string_at_path(&value, &["current", "cache_entry_id"]))
         .or_else(|| string_at_path(&value, &["conflict", "cache_entry_id"]))
         .or_else(|| string_at_path(&value, &["cache_entry_id"]))
         .or_else(|| string_at_path(&value, &["current_cache_entry_id"]));
-    let tag = string_at_path(&value, &["current_pointer", "tag"])
+    let current_tag = string_at_path(&value, &["current_pointer", "tag"])
         .or_else(|| string_at_path(&value, &["current", "tag"]))
         .or_else(|| string_at_path(&value, &["conflict", "tag"]))
         .or_else(|| string_at_path(&value, &["tag"]))
         .or_else(|| string_at_path(&value, &["current_tag"]));
 
     let metadata = ConflictMetadata {
-        version,
-        cache_entry_id,
-        tag,
+        current_version,
+        current_cache_entry_id,
+        current_tag,
     };
 
-    if metadata.version.is_none() && metadata.cache_entry_id.is_none() && metadata.tag.is_none() {
+    if metadata.current_version.is_none()
+        && metadata.current_cache_entry_id.is_none()
+        && metadata.current_tag.is_none()
+    {
         return None;
     }
 
     Some(metadata)
-}
-
-fn append_conflict_metadata(message: String, body: &str) -> String {
-    let Some(metadata) = parse_conflict_metadata(body) else {
-        return message;
-    };
-
-    let mut lines = Vec::new();
-    if let Some(version) = metadata.version {
-        lines.push(format!("current_version={version}"));
-    }
-    if let Some(cache_entry_id) = metadata.cache_entry_id {
-        lines.push(format!("current_cache_entry_id={cache_entry_id}"));
-    }
-    if let Some(tag) = metadata.tag {
-        lines.push(format!("current_tag={tag}"));
-    }
-
-    if lines.is_empty() {
-        message
-    } else {
-        format!("{message}\n{}", lines.join("\n"))
-    }
 }
 
 fn is_route_not_found_body(body: &str) -> bool {
@@ -1524,9 +1500,11 @@ fn is_route_not_found_body(body: &str) -> bool {
     parse_error_payload(trimmed).is_some_and(|parsed| {
         let message = parsed.message.to_ascii_lowercase();
         message.contains("route not found") || message.contains("routing error")
-    }) || {
+    }) || if serde_json::from_str::<serde_json::Value>(trimmed).is_err() {
         let lower = trimmed.to_ascii_lowercase();
         lower.contains("route not found") || lower.contains("routing error")
+    } else {
+        false
     }
 }
 
@@ -1882,21 +1860,18 @@ mod tests {
         }"#;
 
         let metadata = parse_conflict_metadata(body).expect("metadata should parse");
-        assert_eq!(metadata.version.as_deref(), Some("42"));
-        assert_eq!(metadata.cache_entry_id.as_deref(), Some("entry-xyz"));
-        assert_eq!(metadata.tag.as_deref(), Some("main-tag"));
+        assert_eq!(metadata.current_version.as_deref(), Some("42"));
+        assert_eq!(
+            metadata.current_cache_entry_id.as_deref(),
+            Some("entry-xyz")
+        );
+        assert_eq!(metadata.current_tag.as_deref(), Some("main-tag"));
     }
 
     #[test]
-    fn test_append_conflict_metadata_includes_pointer_details() {
-        let message = append_conflict_metadata(
-            "Tag publish conflict".to_string(),
-            r#"{"current_version":"9","current_cache_entry_id":"entry-9"}"#,
-        );
-
-        assert!(message.contains("Tag publish conflict"));
-        assert!(message.contains("current_version=9"));
-        assert!(message.contains("current_cache_entry_id=entry-9"));
+    fn test_is_route_not_found_body_ignores_json_detail_substrings() {
+        let body = r#"{"message":"cache miss","details":["routing error for digest path"]}"#;
+        assert!(!is_route_not_found_body(body));
     }
 
     #[test]
