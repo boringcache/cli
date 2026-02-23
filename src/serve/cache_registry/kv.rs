@@ -1255,6 +1255,42 @@ async fn do_flush(
     };
 
     if save_response.exists {
+        let mut pending_blob_by_digest: HashMap<String, u64> = HashMap::new();
+        for blob in pending_entries.values() {
+            pending_blob_by_digest
+                .entry(blob.digest.clone())
+                .or_insert(blob.size_bytes);
+        }
+        let pending_blobs: Vec<BlobDescriptor> = pending_blob_by_digest
+            .into_iter()
+            .map(|(digest, size_bytes)| BlobDescriptor { digest, size_bytes })
+            .collect();
+
+        if !pending_blobs.is_empty() {
+            match upload_blobs(
+                state,
+                &save_response.cache_entry_id,
+                &pending_blobs,
+                pending_blob_paths,
+            )
+            .await
+            {
+                Ok(heal_stats) => {
+                    if heal_stats.uploaded_count > 0 || heal_stats.missing_local_count > 0 {
+                        eprintln!(
+                            "KV flush: exists=true blob reconcile uploaded={} already_present={} missing_local={}",
+                            heal_stats.uploaded_count,
+                            heal_stats.already_present_count,
+                            heal_stats.missing_local_count
+                        );
+                    }
+                }
+                Err(error) => {
+                    log::warn!("KV flush: exists=true blob reconcile failed: {error}");
+                }
+            }
+        }
+
         eprintln!("KV flush: save_entry returned exists=true ({total_count} entries, {blob_count} blobs, digest={manifest_root_digest})");
         return Ok((entries, save_response.cache_entry_id));
     }

@@ -70,7 +70,10 @@ pub async fn run_server(
         }
     }
 
-    cache_registry::preload_kv_index(&state).await;
+    let preload_state = state.clone();
+    tokio::spawn(async move {
+        cache_registry::preload_kv_index(&preload_state).await;
+    });
 
     let refresh_state = state.clone();
     tokio::spawn(async move {
