@@ -27,10 +27,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [local, proxy]
+        include:
+          - backend: local
+            sccache_backend: local
+            http2: "0"
+          - backend: proxy
+            sccache_backend: proxy
+            http2: "0"
+          - backend: proxy-h2
+            sccache_backend: proxy
+            http2: "1"
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
+      BORINGCACHE_TRANSFER_HTTP2: ${{ matrix.http2 }}
       RUN_SCOPED_TAGS: "0"
       RUN_STRESS: "1"
       PARALLEL_JOBS: "2"
@@ -45,7 +55,7 @@ jobs:
         id: gate
         run: |
           set -euo pipefail
-          if [[ "${{ matrix.backend }}" == "proxy" && -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+          if [[ "${{ matrix.sccache_backend }}" == "proxy" && -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "Skipping proxy benchmark: BORINGCACHE_API_TOKEN is not configured."
           else
@@ -75,13 +85,13 @@ jobs:
       - name: Run benchmark
         if: steps.gate.outputs.run == 'true'
         env:
-          SCCACHE_BACKEND: ${{ matrix.backend }}
+          SCCACHE_BACKEND: ${{ matrix.sccache_backend }}
         run: |
           set -euo pipefail
-          LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/${SCCACHE_BACKEND}"
+          LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}"
           mkdir -p "$LOG_DIR"
           BRANCH_SLUG="${GITHUB_REF_NAME//\//-}"
-          TAG="gha-sccache-${SCCACHE_BACKEND}-rust-${RUST_VERSION}-${BRANCH_SLUG}"
+          TAG="gha-sccache-${{ matrix.backend }}-rust-${RUST_VERSION}-${BRANCH_SLUG}"
           BINARY="${GITHUB_WORKSPACE}/target/release/boringcache" \
           WORKSPACE="${GITHUB_REPOSITORY}" \
           LOG_DIR="$LOG_DIR" \
@@ -90,11 +100,9 @@ jobs:
 
       - name: Extract metrics
         if: steps.gate.outputs.run == 'true'
-        env:
-          SCCACHE_BACKEND: ${{ matrix.backend }}
         run: |
           set -euo pipefail
-          log_dir="${GITHUB_WORKSPACE}/benchmark-logs/${SCCACHE_BACKEND}"
+          log_dir="${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}"
           cold="$(cat "${log_dir}/efficacy/cold.log.seconds")"
           warm="$(cat "${log_dir}/efficacy/warm.log.seconds")"
           rust_hit_rate="$(awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
@@ -106,7 +114,7 @@ jobs:
             proxy_conflicts="$(grep -c "tag conflict" "${log_dir}/efficacy/proxy.log" || true)"
           fi
           {
-            echo "backend=${SCCACHE_BACKEND}"
+            echo "backend=${{ matrix.backend }}"
             echo "cold_seconds=${cold}"
             echo "warm_seconds=${warm}"
             echo "warm_rust_hit_rate=${rust_hit_rate:-0}"
@@ -136,28 +144,33 @@ jobs:
       - name: Write summary
         run: |
           set -euo pipefail
-          echo "# SCCache Local vs Proxy" >> "$GITHUB_STEP_SUMMARY"
+          echo "# SCCache Benchmark" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Backend | Cold (s) | Warm (s) | Warm Rust hit rate | Warm avg cache read hit (s) | Proxy 429 | Proxy conflicts |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---------|----------|----------|--------------------|-----------------------------|-----------|-----------------|" >> "$GITHUB_STEP_SUMMARY"
 
           local_warm=""
           proxy_warm=""
+          proxy_h2_warm=""
           for metrics in artifacts/sccache-benchmark-*/metrics.env; do
             [[ -f "$metrics" ]] || continue
             # shellcheck disable=SC1090
             source "$metrics"
             echo "| ${backend} | ${cold_seconds} | ${warm_seconds} | ${warm_rust_hit_rate}% | ${warm_avg_cache_read_hit} | ${proxy_429} | ${proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
-            if [[ "$backend" == "local" ]]; then
-              local_warm="$warm_seconds"
-            elif [[ "$backend" == "proxy" ]]; then
-              proxy_warm="$warm_seconds"
-            fi
+            case "$backend" in
+              local)    local_warm="$warm_seconds" ;;
+              proxy)    proxy_warm="$warm_seconds" ;;
+              proxy-h2) proxy_h2_warm="$warm_seconds" ;;
+            esac
           done
 
-          if [[ -n "$local_warm" && -n "$proxy_warm" ]]; then
-            delta="$(awk -v p="$proxy_warm" -v l="$local_warm" 'BEGIN { printf "%.2f", p-l }')"
-            pct="$(awk -v p="$proxy_warm" -v l="$local_warm" 'BEGIN { if (l <= 0) { print "0.00" } else { printf "%.2f", ((p-l)/l)*100 } }')"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Warm delta (proxy - local): ${delta}s (${pct}%)" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          for label_var in "proxy:$proxy_warm" "proxy-h2:$proxy_h2_warm"; do
+            label="${label_var%%:*}"
+            pw="${label_var#*:}"
+            if [[ -n "$local_warm" && -n "$pw" ]]; then
+              delta="$(awk -v p="$pw" -v l="$local_warm" 'BEGIN { printf "%.2f", p-l }')"
+              pct="$(awk -v p="$pw" -v l="$local_warm" 'BEGIN { if (l <= 0) { print "0.00" } else { printf "%.2f", ((p-l)/l)*100 } }')"
+              echo "- Warm delta (${label} - local): ${delta}s (${pct}%)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
