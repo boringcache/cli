@@ -17,15 +17,6 @@ const BLOB_URL_BATCH_MAX: usize = 2_000;
 const API_VERSION_V1: &str = "v1";
 const API_VERSION_V2: &str = "v2";
 const FALLBACK_API_BASE_URL: &str = "https://api.boringcache.com";
-const ROUTE_KEY_WORKSPACES: &str = "workspaces";
-const ROUTE_KEY_CACHE_LIST: &str = "cache_list";
-const ROUTE_KEY_CACHE_RESTORE: &str = "cache_restore";
-const ROUTE_KEY_SESSION: &str = "session";
-const ROUTE_KEY_MANIFEST_CHECK: &str = "manifest_check";
-const ROUTE_KEY_METRICS: &str = "metrics";
-const ROUTE_KEY_PREFLIGHT: &str = "preflight";
-const ROUTE_KEY_DELETE: &str = "delete";
-const ROUTE_KEY_MULTIPART_COMPLETE: &str = "multipart_complete";
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct CapabilityResponse {
@@ -37,8 +28,6 @@ struct CapabilityResponse {
 struct CapabilityFlags {
     #[serde(default)]
     blob_stage_v2: bool,
-    #[serde(default)]
-    tag_pointer_v2: bool,
     #[serde(default)]
     tag_publish_v2: bool,
     #[serde(default)]
@@ -69,7 +58,6 @@ pub struct ApiClient {
     v2_base_url: String,
     auth_token: Option<String>,
     capabilities: Arc<RwLock<Option<CapabilityFlags>>>,
-    v2_fallback_routes: Arc<RwLock<HashSet<String>>>,
 }
 
 impl ApiClient {
@@ -126,7 +114,6 @@ impl ApiClient {
             v2_base_url,
             auth_token,
             capabilities: Arc::new(RwLock::new(None)),
-            v2_fallback_routes: Arc::new(RwLock::new(HashSet::new())),
         };
 
         debug!(
@@ -240,58 +227,6 @@ impl ApiClient {
         self.send_authenticated_request(self.client.get(&url)).await
     }
 
-    async fn use_v1_fallback_route(&self, route_key: &str) -> bool {
-        self.v2_fallback_routes.read().await.contains(route_key)
-    }
-
-    async fn mark_v2_fallback_route(&self, route_key: &str) {
-        self.v2_fallback_routes
-            .write()
-            .await
-            .insert(route_key.to_string());
-    }
-
-    fn should_fallback_to_v1(status: StatusCode) -> bool {
-        matches!(
-            status,
-            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
-        )
-    }
-
-    async fn get_response_with_v2_fallback(
-        &self,
-        route_key: &str,
-        endpoint: &str,
-    ) -> Result<Response> {
-        if self.use_v1_fallback_route(route_key).await {
-            return self
-                .get_response_with_base(&self.v1_base_url, endpoint)
-                .await;
-        }
-
-        let response = self
-            .get_response_with_base(&self.v2_base_url, endpoint)
-            .await?;
-        if Self::should_fallback_to_v1(response.status()) {
-            self.mark_v2_fallback_route(route_key).await;
-            return self
-                .get_response_with_base(&self.v1_base_url, endpoint)
-                .await;
-        }
-
-        Ok(response)
-    }
-
-    async fn get_with_v2_fallback<T>(&self, route_key: &str, endpoint: &str) -> Result<T>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        let response = self
-            .get_response_with_v2_fallback(route_key, endpoint)
-            .await?;
-        self.parse_json_response(response).await
-    }
-
     pub async fn post<T, R>(&self, endpoint: &str, body: &T) -> Result<R>
     where
         T: Serialize,
@@ -340,31 +275,6 @@ impl ApiClient {
         debug!("POST {}", url);
         self.send_authenticated_request(self.client.post(&url).json(body))
             .await
-    }
-
-    async fn post_with_v2_fallback<T, R>(
-        &self,
-        route_key: &str,
-        endpoint: &str,
-        body: &T,
-    ) -> Result<R>
-    where
-        T: Serialize,
-        R: for<'de> Deserialize<'de>,
-    {
-        if self.use_v1_fallback_route(route_key).await {
-            return self.post_v1(endpoint, body).await;
-        }
-
-        let response = self
-            .post_response_with_base(&self.v2_base_url, endpoint, body)
-            .await?;
-        if Self::should_fallback_to_v1(response.status()) {
-            self.mark_v2_fallback_route(route_key).await;
-            return self.post_v1(endpoint, body).await;
-        }
-
-        self.parse_json_response(response).await
     }
 
     pub async fn put<T, R>(&self, endpoint: &str, body: &T) -> Result<R>
@@ -715,8 +625,7 @@ impl ApiClient {
         let body = super::models::cache::ManifestCheckBatchRequest {
             manifest_checks: checks.to_vec(),
         };
-        self.post_with_v2_fallback(ROUTE_KEY_MANIFEST_CHECK, &endpoint, &body)
-            .await
+        self.post_v2(&endpoint, &body).await
     }
 
     pub async fn check_blobs(
@@ -744,7 +653,10 @@ impl ApiClient {
             let chunk = chunk.to_vec();
             let semaphore = semaphore.clone();
             tasks.push(tokio::spawn(async move {
-                let _permit = semaphore.acquire().await.unwrap();
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Blob check semaphore closed: {e}"))?;
                 let body = super::models::cache::BlobCheckRequest { blobs: chunk };
                 client
                     .post_v2::<_, super::models::cache::BlobCheckResponse>(&endpoint, &body)
@@ -764,31 +676,13 @@ impl ApiClient {
     pub async fn blob_upload_urls(
         &self,
         workspace: &str,
-        cache_entry_id: &str,
+        _cache_entry_id: &str,
         blobs: &[super::models::cache::BlobDescriptor],
     ) -> Result<super::models::cache::BlobUploadUrlsResponse> {
-        ensure!(
-            !cache_entry_id.trim().is_empty(),
-            "cache_entry_id must not be empty"
-        );
         ensure!(!blobs.is_empty(), "blobs cannot be empty");
-        let capabilities = self.get_capabilities().await;
-        let use_v2 = capabilities.blob_stage_v2;
-        let endpoint = if use_v2 {
-            self.workspace_endpoint(workspace, "caches/blobs/stage")?
-        } else {
-            self.workspace_endpoint(workspace, "caches/blobs/upload-urls")?
-        };
+        let endpoint = self.workspace_endpoint(workspace, "caches/blobs/stage")?;
         if blobs.len() <= BLOB_URL_BATCH_MAX {
-            if use_v2 {
-                let body = super::models::cache::BlobStageRequest {
-                    blobs: blobs.to_vec(),
-                };
-                return self.post_v2(&endpoint, &body).await;
-            }
-
-            let body = super::models::cache::BlobUploadUrlsRequest {
-                cache_entry_id: cache_entry_id.to_string(),
+            let body = super::models::cache::BlobStageRequest {
                 blobs: blobs.to_vec(),
             };
             return self.post_v2(&endpoint, &body).await;
@@ -803,28 +697,16 @@ impl ApiClient {
             let client = self.clone();
             let endpoint = endpoint.clone();
             let chunk = chunk.to_vec();
-            let cache_entry_id = cache_entry_id.to_string();
             let semaphore = semaphore.clone();
             tasks.push(tokio::spawn(async move {
-                let _permit = semaphore.acquire().await.unwrap();
-                if use_v2 {
-                    let body = super::models::cache::BlobStageRequest { blobs: chunk };
-                    client
-                        .post_v2::<_, super::models::cache::BlobUploadUrlsResponse>(
-                            &endpoint, &body,
-                        )
-                        .await
-                } else {
-                    let body = super::models::cache::BlobUploadUrlsRequest {
-                        cache_entry_id,
-                        blobs: chunk,
-                    };
-                    client
-                        .post_v2::<_, super::models::cache::BlobUploadUrlsResponse>(
-                            &endpoint, &body,
-                        )
-                        .await
-                }
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Blob stage semaphore closed: {e}"))?;
+                let body = super::models::cache::BlobStageRequest { blobs: chunk };
+                client
+                    .post_v2::<_, super::models::cache::BlobUploadUrlsResponse>(&endpoint, &body)
+                    .await
             }));
         }
 
@@ -874,7 +756,10 @@ impl ApiClient {
             let cache_entry_id = cache_entry_id.to_string();
             let semaphore = semaphore.clone();
             tasks.push(tokio::spawn(async move {
-                let _permit = semaphore.acquire().await.unwrap();
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Blob download URL semaphore closed: {e}"))?;
                 let body = super::models::cache::BlobDownloadUrlsRequest {
                     cache_entry_id,
                     blobs: chunk,
@@ -924,29 +809,6 @@ impl ApiClient {
         self.post_v2(&endpoint, &payload).await
     }
 
-    pub async fn preflight_entry(
-        &self,
-        workspace: &str,
-        tag: &str,
-        entry: &super::models::cache::PreflightRequest,
-    ) -> Result<super::models::cache::SaveResponse> {
-        ensure!(!tag.trim().is_empty(), "Tag must not be empty");
-
-        let encoded_tag = urlencoding::encode(tag);
-        let endpoint =
-            self.workspace_endpoint(workspace, &format!("caches/{encoded_tag}/preflight"))?;
-        debug!(
-            "preflight_entry workspace={} tag={} endpoint={}",
-            workspace, tag, endpoint
-        );
-        if let Ok(body) = serde_json::to_string(entry) {
-            debug!("POST {} body={}", endpoint, body);
-        }
-
-        self.post_with_v2_fallback(ROUTE_KEY_PREFLIGHT, &endpoint, entry)
-            .await
-    }
-
     pub async fn delete(
         &self,
         workspace: &str,
@@ -961,24 +823,10 @@ impl ApiClient {
 
         let endpoint = self.workspace_endpoint(workspace, "caches")?;
         let body = Body { entries: tags };
-        let response = if self.use_v1_fallback_route(ROUTE_KEY_DELETE).await {
-            let url = self.build_v1_url(&endpoint);
-            self.send_authenticated_request(self.client.delete(&url).json(&body))
-                .await?
-        } else {
-            let v2_url = self.build_v2_url(&endpoint);
-            let v2_response = self
-                .send_authenticated_request(self.client.delete(&v2_url).json(&body))
-                .await?;
-            if Self::should_fallback_to_v1(v2_response.status()) {
-                self.mark_v2_fallback_route(ROUTE_KEY_DELETE).await;
-                let v1_url = self.build_v1_url(&endpoint);
-                self.send_authenticated_request(self.client.delete(&v1_url).json(&body))
-                    .await?
-            } else {
-                v2_response
-            }
-        };
+        let v2_url = self.build_v2_url(&endpoint);
+        let response = self
+            .send_authenticated_request(self.client.delete(&v2_url).json(&body))
+            .await?;
 
         if response.status().is_success() {
             self.parse_json_response(response).await
@@ -1038,108 +886,86 @@ impl ApiClient {
         cache_entry_id: &str,
         request: &super::models::cache::ConfirmRequest,
     ) -> Result<super::models::cache::CacheConfirmResponse> {
-        let capabilities = self.get_capabilities().await;
-        if capabilities.tag_publish_v2 {
-            if let Some(tag) = request.tag.as_deref() {
-                #[derive(Serialize)]
-                struct PublishFinalizePayload {
-                    manifest_digest: String,
-                    manifest_size: u64,
-                    #[serde(skip_serializing_if = "Option::is_none")]
-                    manifest_etag: Option<String>,
-                    #[serde(skip_serializing_if = "Option::is_none")]
-                    archive_size: Option<u64>,
-                    #[serde(skip_serializing_if = "Option::is_none")]
-                    archive_etag: Option<String>,
-                    #[serde(skip_serializing_if = "Option::is_none")]
-                    blob_count: Option<u64>,
-                    #[serde(skip_serializing_if = "Option::is_none")]
-                    blob_total_size_bytes: Option<u64>,
-                }
-
-                #[derive(Serialize)]
-                struct PublishPayload {
-                    cache_entry_id: String,
-                    publish_mode: String,
-                    cache: PublishFinalizePayload,
-                }
-
-                let publish_mode = determine_publish_mode(request);
-
-                let if_match = if publish_mode == "cas" {
-                    if capabilities.tag_pointer_v2 {
-                        match self.tag_pointer_v2(workspace, tag).await? {
-                            Some(pointer) => Some(pointer.version),
-                            None => capabilities.cas_publish_bootstrap_if_match.clone(),
-                        }
-                    } else {
-                        capabilities.cas_publish_bootstrap_if_match.clone()
-                    }
-                } else {
-                    None
-                };
-                if publish_mode == "cas" && if_match.is_none() {
-                    anyhow::bail!(
-                        "CAS publish requires server bootstrap If-Match capability or existing pointer version"
-                    );
-                }
-
-                let encoded_tag = urlencoding::encode(tag);
-                let endpoint = self
-                    .workspace_endpoint(workspace, &format!("caches/tags/{encoded_tag}/publish"))?;
-
-                let response: TagPointer = self
-                    .put_v2_with_if_match(
-                        &endpoint,
-                        &PublishPayload {
-                            cache_entry_id: cache_entry_id.to_string(),
-                            publish_mode: publish_mode.to_string(),
-                            cache: PublishFinalizePayload {
-                                manifest_digest: request.manifest_digest.clone(),
-                                manifest_size: request.manifest_size,
-                                manifest_etag: request.manifest_etag.clone(),
-                                archive_size: request.archive_size,
-                                archive_etag: request.archive_etag.clone(),
-                                blob_count: request.blob_count,
-                                blob_total_size_bytes: request.blob_total_size_bytes,
-                            },
-                        },
-                        if_match.as_deref(),
-                    )
-                    .await?;
-
-                return Ok(super::models::cache::CacheConfirmResponse {
-                    status: response
-                        .status
-                        .clone()
-                        .unwrap_or_else(|| "ready".to_string()),
-                    cache_entry_id: response.cache_entry_id.clone(),
-                    uploaded_at: response.uploaded_at,
-                    tag: None,
-                    tag_status: response.status,
-                    signature: None,
-                    signing_public_key: None,
-                    signed_at: None,
-                });
-            }
-        }
-
-        let endpoint = format!(
-            "{}/{}",
-            self.workspace_endpoint(workspace, "caches")?,
-            cache_entry_id
-        );
-        debug!(
-            "confirm workspace={} cache_entry_id={} endpoint={}",
-            workspace, cache_entry_id, endpoint
-        );
+        let tag = request
+            .tag
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Confirm request is missing tag for publish"))?;
 
         #[derive(Serialize)]
-        struct Payload<'a> {
-            cache: &'a super::models::cache::ConfirmRequest,
+        struct PublishFinalizePayload {
+            manifest_digest: String,
+            manifest_size: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            manifest_etag: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            archive_size: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            archive_etag: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            blob_count: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            blob_total_size_bytes: Option<u64>,
         }
 
-        self.patch_v2(&endpoint, &Payload { cache: request }).await
+        #[derive(Serialize)]
+        struct PublishPayload {
+            cache_entry_id: String,
+            publish_mode: String,
+            cache: PublishFinalizePayload,
+        }
+
+        let capabilities = self.get_capabilities().await;
+        let publish_mode = determine_publish_mode(request);
+        let if_match = if publish_mode == "cas" {
+            match self.tag_pointer_v2(workspace, tag).await? {
+                Some(pointer) => Some(pointer.version),
+                None => capabilities.cas_publish_bootstrap_if_match.clone(),
+            }
+        } else {
+            None
+        };
+        if publish_mode == "cas" && if_match.is_none() {
+            anyhow::bail!(
+                "CAS publish requires server bootstrap If-Match capability or existing pointer version"
+            );
+        }
+
+        let encoded_tag = urlencoding::encode(tag);
+        let endpoint =
+            self.workspace_endpoint(workspace, &format!("caches/tags/{encoded_tag}/publish"))?;
+        let response: TagPointer = self
+            .put_v2_with_if_match(
+                &endpoint,
+                &PublishPayload {
+                    cache_entry_id: cache_entry_id.to_string(),
+                    publish_mode: publish_mode.to_string(),
+                    cache: PublishFinalizePayload {
+                        manifest_digest: request.manifest_digest.clone(),
+                        manifest_size: request.manifest_size,
+                        manifest_etag: request.manifest_etag.clone(),
+                        archive_size: request.archive_size,
+                        archive_etag: request.archive_etag.clone(),
+                        blob_count: request.blob_count,
+                        blob_total_size_bytes: request.blob_total_size_bytes,
+                    },
+                },
+                if_match.as_deref(),
+            )
+            .await?;
+
+        Ok(super::models::cache::CacheConfirmResponse {
+            status: response
+                .status
+                .clone()
+                .unwrap_or_else(|| "ready".to_string()),
+            cache_entry_id: response.cache_entry_id.clone(),
+            uploaded_at: response.uploaded_at,
+            tag: None,
+            tag_status: response.status,
+            signature: None,
+            signing_public_key: None,
+            signed_at: None,
+        })
     }
 
     pub async fn complete_multipart(
@@ -1166,12 +992,8 @@ impl ApiClient {
             multipart: &'a super::models::cache::CompleteMultipartRequest,
         }
 
-        self.post_with_v2_fallback(
-            ROUTE_KEY_MULTIPART_COMPLETE,
-            &endpoint,
-            &Payload { multipart: request },
-        )
-        .await
+        self.post_v2(&endpoint, &Payload { multipart: request })
+            .await
     }
 
     fn map_restore_result(
@@ -1257,25 +1079,7 @@ impl ApiClient {
         let entries_param = entries.join(",");
         let base = self.workspace_endpoint(workspace, "caches")?;
         let url = format!("{}?entries={}", base, urlencoding::encode(&entries_param));
-        let response = if self.use_v1_fallback_route(ROUTE_KEY_CACHE_RESTORE).await {
-            self.get_response_with_base(&self.v1_base_url, &url).await?
-        } else {
-            let v2_response = self.get_response_with_base(&self.v2_base_url, &url).await?;
-            if v2_response.status() == StatusCode::METHOD_NOT_ALLOWED {
-                self.mark_v2_fallback_route(ROUTE_KEY_CACHE_RESTORE).await;
-                self.get_response_with_base(&self.v1_base_url, &url).await?
-            } else if v2_response.status() == StatusCode::NOT_FOUND {
-                let body = v2_response.text().await.unwrap_or_default();
-                if is_route_not_found_body(&body) {
-                    self.mark_v2_fallback_route(ROUTE_KEY_CACHE_RESTORE).await;
-                    self.get_response_with_base(&self.v1_base_url, &url).await?
-                } else {
-                    return parse_restore_not_found_body(&body);
-                }
-            } else {
-                v2_response
-            }
-        };
+        let response = self.get_response_with_base(&self.v2_base_url, &url).await?;
 
         let status = response.status();
 
@@ -1305,8 +1109,7 @@ impl ApiClient {
     }
 
     pub async fn list_workspaces(&self) -> Result<Vec<super::models::Workspace>> {
-        self.get_with_v2_fallback(ROUTE_KEY_WORKSPACES, "workspaces")
-            .await
+        self.get_v2("workspaces").await
     }
 
     pub async fn list(
@@ -1330,12 +1133,11 @@ impl ApiClient {
             url.push_str(&params.join("&"));
         }
 
-        self.get_with_v2_fallback(ROUTE_KEY_CACHE_LIST, &url).await
+        self.get_v2(&url).await
     }
 
     pub async fn get_session_info(&self) -> Result<super::models::SessionInfo> {
-        self.get_with_v2_fallback(ROUTE_KEY_SESSION, "session")
-            .await
+        self.get_v2("session").await
     }
 
     pub async fn validate_token(&self, _token: &str) -> Result<super::models::SessionInfo> {
@@ -1359,9 +1161,7 @@ impl ApiClient {
         params: super::models::MetricsParams,
     ) -> Result<()> {
         let url = self.workspace_endpoint(workspace, "metrics")?;
-        let _response: serde_json::Value = self
-            .post_with_v2_fallback(ROUTE_KEY_METRICS, &url, &params)
-            .await?;
+        let _response: serde_json::Value = self.post_v2(&url, &params).await?;
         Ok(())
     }
 }
@@ -1489,23 +1289,6 @@ fn parse_conflict_metadata(body: &str) -> Option<ConflictMetadata> {
     }
 
     Some(metadata)
-}
-
-fn is_route_not_found_body(body: &str) -> bool {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    parse_error_payload(trimmed).is_some_and(|parsed| {
-        let message = parsed.message.to_ascii_lowercase();
-        message.contains("route not found") || message.contains("routing error")
-    }) || if serde_json::from_str::<serde_json::Value>(trimmed).is_err() {
-        let lower = trimmed.to_ascii_lowercase();
-        lower.contains("route not found") || lower.contains("routing error")
-    } else {
-        false
-    }
 }
 
 fn format_error_message(
@@ -1714,7 +1497,6 @@ mod tests {
             v2_base_url: "https://api.example.com/v2".to_string(),
             auth_token: None,
             capabilities: Arc::new(RwLock::new(None)),
-            v2_fallback_routes: Arc::new(RwLock::new(std::collections::HashSet::new())),
         };
 
         assert_eq!(
@@ -1843,12 +1625,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_route_not_found_body_empty_is_false() {
-        assert!(!is_route_not_found_body(""));
-        assert!(!is_route_not_found_body("   "));
-    }
-
-    #[test]
     fn test_parse_conflict_metadata_prefers_current_pointer() {
         let body = r#"{
             "message": "publish conflict",
@@ -1877,12 +1653,6 @@ mod tests {
         }"#;
 
         assert!(parse_conflict_metadata(body).is_none());
-    }
-
-    #[test]
-    fn test_is_route_not_found_body_ignores_json_detail_substrings() {
-        let body = r#"{"message":"cache miss","details":["routing error for digest path"]}"#;
-        assert!(!is_route_not_found_body(body));
     }
 
     #[test]
@@ -2126,7 +1896,7 @@ mod tests {
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("POST", "/v2/workspaces/ns/ws/caches/blobs/upload-urls")
+            .mock("POST", "/v2/workspaces/ns/ws/caches/blobs/stage")
             .match_header("authorization", "Bearer test-token")
             .match_header("content-type", "application/json")
             .expect(2)
@@ -2214,95 +1984,6 @@ mod tests {
             .await
             .expect("blob download urls should succeed");
         assert_eq!(response.download_urls.len(), 2);
-
-        mock.assert_async().await;
-
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        }
-        std::env::remove_var("BORINGCACHE_API_URL");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn test_preflight_request_body() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let guard_result = mutex.lock();
-        let _guard = match guard_result {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-
-        if !networking_available() {
-            eprintln!("skipping test_preflight_request_body: networking disabled in sandbox");
-            return;
-        }
-
-        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
-
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("POST", "/v2/workspaces/ns/ws/caches/my-tag/preflight")
-            .match_header("authorization", "Bearer test-token")
-            .match_header("content-type", "application/json")
-            .match_body(Matcher::PartialJson(json!({
-                "manifest_root_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "compression_algorithm": "zstd",
-                "storage_mode": "cas",
-                "blob_count": 3,
-                "blob_total_size_bytes": 300
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                r#"{"tag":"my-tag","cache_entry_id":"entry-1","exists":false,"storage_mode":"cas","blob_count":3,"blob_total_size_bytes":300,"cas_layout":"file-v1","manifest_upload_url":"https://example.com/upload","archive_urls":[],"upload_headers":{}}"#,
-            )
-            .create_async()
-            .await;
-
-        std::env::set_var("BORINGCACHE_API_URL", server.url());
-
-        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
-            .expect("client should initialize");
-
-        let response = client
-            .preflight_entry(
-                "ns/ws",
-                "my-tag",
-                &cache::PreflightRequest {
-                    manifest_root_digest:
-                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                            .to_string(),
-                    compression_algorithm: "zstd".to_string(),
-                    storage_mode: Some("cas".to_string()),
-                    blob_count: Some(3),
-                    blob_total_size_bytes: Some(300),
-                    cas_layout: Some("file-v1".to_string()),
-                    manifest_format_version: Some(1),
-                    total_size_bytes: 300,
-                    uncompressed_size: None,
-                    compressed_size: None,
-                    file_count: Some(3),
-                    expected_manifest_digest: Some(
-                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                            .to_string(),
-                    ),
-                    expected_manifest_size: Some(1024),
-                    force: None,
-                    ci_provider: Some("github-actions".to_string()),
-                    encrypted: None,
-                    encryption_algorithm: None,
-                    encryption_recipient_hint: None,
-                },
-            )
-            .await
-            .expect("preflight should succeed");
-
-        assert!(!response.exists);
-        assert_eq!(response.storage_mode.as_deref(), Some("cas"));
-        assert_eq!(response.cas_layout.as_deref(), Some("file-v1"));
 
         mock.assert_async().await;
 

@@ -124,7 +124,10 @@ pub async fn upload_via_part_urls(
         let upload_headers = upload_headers.clone();
 
         let task = tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|e| anyhow::anyhow!("Multipart upload semaphore closed: {e}"))?;
 
             let (etag, metrics) = upload_single_part(
                 &archive_path,

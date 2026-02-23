@@ -5,13 +5,15 @@ pub mod routes;
 pub mod state;
 
 use anyhow::Result;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use crate::api::client::ApiClient;
 use crate::serve::state::{
-    AppState, BlobLocatorCache, KvPendingStore, KvPublishedIndex, UploadSessionStore,
+    unix_time_ms_now, AppState, BlobLocatorCache, KvPendingStore, KvPublishedIndex,
+    UploadSessionStore,
 };
 use crate::tag_utils::TagResolver;
 
@@ -34,8 +36,8 @@ pub async fn run_server(
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
         kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
-        kv_lookup_lock: Arc::new(tokio::sync::Mutex::new(())),
-        kv_last_put: Arc::new(RwLock::new(None)),
+        kv_lookup_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_next_flush_at: Arc::new(RwLock::new(None)),
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
@@ -138,10 +140,8 @@ pub async fn run_server(
                 {
                     true
                 } else {
-                    let last_put = flush_state.kv_last_put.read().await;
-                    last_put
-                        .map(|t| t.elapsed() >= std::time::Duration::from_secs(10))
-                        .unwrap_or(false)
+                    let last_put_ms = flush_state.kv_last_put.load(Ordering::Acquire);
+                    last_put_ms > 0 && unix_time_ms_now().saturating_sub(last_put_ms) >= 10_000
                 }
             };
 

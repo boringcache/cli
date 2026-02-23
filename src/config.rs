@@ -97,12 +97,8 @@ impl Config {
             enabled: true,
             recipient: recipient.to_string(),
         };
-        if self.workspace_encryption.is_none() {
-            self.workspace_encryption = Some(HashMap::new());
-        }
         self.workspace_encryption
-            .as_mut()
-            .unwrap()
+            .get_or_insert_with(HashMap::new)
             .insert(workspace.to_string(), encryption);
     }
 

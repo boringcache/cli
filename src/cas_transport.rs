@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, Semaphore};
 
 use crate::progress::TransferProgress;
 use crate::telemetry::StorageMetrics;
@@ -19,6 +19,7 @@ pub(crate) async fn upload_payload(
     content_type: &str,
     upload_headers: &HashMap<String, String>,
 ) -> Result<Option<String>> {
+    let payload = axum::body::Bytes::copy_from_slice(data);
     let response = send_transfer_request_with_retry("Manifest upload", || async {
         let mut request = client.put(url).timeout(std::time::Duration::from_secs(300));
 
@@ -34,7 +35,7 @@ pub(crate) async fn upload_payload(
         }
 
         request
-            .body(data.to_vec())
+            .body(payload.clone())
             .send()
             .await
             .with_context(|| format!("Failed to send upload request (URL: {})", url))
@@ -78,10 +79,15 @@ pub(crate) async fn download_blob_file(
     }
 
     if expected_size >= PARALLEL_DOWNLOAD_THRESHOLD {
-        let result = download_parallel(client, url, file_path, expected_size, progress).await?;
-        if let Some(digest) = expected_digest {
-            verify_blob_digest(file_path, digest).await?;
-        }
+        let result = download_parallel(
+            client,
+            url,
+            file_path,
+            expected_size,
+            progress,
+            expected_digest,
+        )
+        .await?;
         return Ok(result);
     }
 
@@ -97,6 +103,7 @@ pub(crate) async fn download_blob_file(
     .await
 }
 
+#[cfg(test)]
 async fn verify_blob_digest(file_path: &Path, expected_digest: &str) -> Result<()> {
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncReadExt;
@@ -208,6 +215,7 @@ async fn download_parallel(
     file_path: &Path,
     total_size: u64,
     progress: Option<&TransferProgress>,
+    expected_digest: Option<&str>,
 ) -> Result<(u64, StorageMetrics)> {
     let probe = send_transfer_request_with_retry("Range probe", || async {
         Ok(client
@@ -264,6 +272,13 @@ async fn download_parallel(
     drop(file);
 
     let semaphore = Arc::new(Semaphore::new(concurrency));
+    let (digest_tx, digest_task) = if expected_digest.is_some() {
+        let (tx, rx) = mpsc::channel::<(u64, axum::body::Bytes)>(concurrency * 16);
+        let task = tokio::spawn(hash_parallel_download_stream(rx, total_size));
+        (Some(tx), Some(task))
+    } else {
+        (None, None)
+    };
     let mut tasks = Vec::with_capacity(num_parts as usize);
 
     for part_idx in 0..num_parts {
@@ -276,10 +291,14 @@ async fn download_parallel(
         let file_path = file_path.to_path_buf();
         let semaphore = semaphore.clone();
         let progress = progress.cloned();
+        let digest_tx = digest_tx.clone();
         let part_num = part_idx + 1;
 
         let task = tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|e| anyhow::anyhow!("Parallel download semaphore closed: {e}"))?;
             download_range(
                 &client,
                 &url,
@@ -288,6 +307,7 @@ async fn download_parallel(
                 end,
                 this_part_size,
                 progress.as_ref(),
+                digest_tx,
             )
             .await
             .with_context(|| {
@@ -300,6 +320,7 @@ async fn download_parallel(
 
         tasks.push(task);
     }
+    drop(digest_tx);
 
     let mut total_downloaded = 0u64;
     let mut errors: Vec<String> = Vec::new();
@@ -326,9 +347,54 @@ async fn download_parallel(
         );
     }
 
+    if let (Some(task), Some(expected_digest)) = (digest_task, expected_digest) {
+        let actual = task.await.context("Parallel digest task panicked")??;
+        let expected = expected_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(expected_digest);
+        if actual != expected {
+            anyhow::bail!(
+                "Blob integrity check failed for {}: expected sha256:{}, got sha256:{}",
+                file_path.display(),
+                expected,
+                actual,
+            );
+        }
+    }
+
     Ok((total_downloaded, first_storage_metrics.unwrap_or_default()))
 }
 
+async fn hash_parallel_download_stream(
+    mut receiver: mpsc::Receiver<(u64, axum::body::Bytes)>,
+    expected_size: u64,
+) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    let mut next_offset = 0u64;
+    let mut pending: BTreeMap<u64, axum::body::Bytes> = BTreeMap::new();
+
+    while let Some((offset, chunk)) = receiver.recv().await {
+        pending.insert(offset, chunk);
+        while let Some(chunk) = pending.remove(&next_offset) {
+            hasher.update(&chunk);
+            next_offset = next_offset.saturating_add(chunk.len() as u64);
+        }
+    }
+
+    if next_offset != expected_size {
+        anyhow::bail!(
+            "Parallel digest stream incomplete: expected {}, got {}",
+            expected_size,
+            next_offset
+        );
+    }
+
+    Ok(hex::encode(hasher.finalize()))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn download_range(
     client: &reqwest::Client,
     url: &str,
@@ -337,6 +403,7 @@ pub(crate) async fn download_range(
     end: u64,
     expected_size: u64,
     progress: Option<&TransferProgress>,
+    digest_tx: Option<mpsc::Sender<(u64, axum::body::Bytes)>>,
 ) -> Result<(u64, StorageMetrics)> {
     let response = send_transfer_request_with_retry("Range download", || async {
         Ok(client
@@ -385,6 +452,12 @@ pub(crate) async fn download_range(
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
         let len = chunk.len();
+        let write_offset = start + bytes_written;
+        if let Some(tx) = &digest_tx {
+            tx.send((write_offset, chunk.clone()))
+                .await
+                .map_err(|_| anyhow::anyhow!("Parallel digest channel closed"))?;
+        }
         writer.write_all(&chunk).await?;
         bytes_written += len as u64;
 

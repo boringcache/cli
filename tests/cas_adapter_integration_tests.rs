@@ -274,12 +274,10 @@ async fn test_save_uses_oci_layout_for_oci_cache() {
 }
 
 #[tokio::test]
-async fn test_save_requests_upload_urls_for_existing_cas_blobs() {
+async fn test_save_skips_stage_for_existing_cas_blobs() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {
-        eprintln!(
-            "skipping test_save_requests_upload_urls_for_existing_cas_blobs: networking disabled"
-        );
+        eprintln!("skipping test_save_skips_stage_for_existing_cas_blobs: networking disabled");
         return;
     }
 
@@ -360,13 +358,9 @@ async fn test_save_requests_upload_urls_for_existing_cas_blobs() {
         .await;
 
     let upload_urls_mock = server
-        .mock(
-            "POST",
-            "/v2/workspaces/test/workspace/caches/blobs/upload-urls",
-        )
+        .mock("POST", "/v2/workspaces/test/workspace/caches/blobs/stage")
         .match_header("authorization", "Bearer test-token-123")
         .match_body(Matcher::PartialJson(json!({
-            "cache_entry_id": "entry-oci-attach",
             "blobs": [
                 {
                     "digest": blob_digest,
@@ -383,6 +377,26 @@ async fn test_save_requests_upload_urls_for_existing_cas_blobs() {
             })
             .to_string(),
         )
+        .expect(0)
+        .create_async()
+        .await;
+
+    let pointer_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/test/workspace/caches/tags/oci-attach-tag/pointer",
+        )
+        .match_header("authorization", "Bearer test-token-123")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "7",
+                "cache_entry_id": "entry-previous",
+                "status": "ready"
+            })
+            .to_string(),
+        )
         .create_async()
         .await;
 
@@ -395,14 +409,16 @@ async fn test_save_requests_upload_urls_for_existing_cas_blobs() {
 
     let confirm_mock = server
         .mock(
-            "PATCH",
-            "/v2/workspaces/test/workspace/caches/entry-oci-attach",
+            "PUT",
+            "/v2/workspaces/test/workspace/caches/tags/oci-attach-tag/publish",
         )
         .match_header("authorization", "Bearer test-token-123")
+        .match_header("if-match", "7")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
+                "version": "7",
                 "cache_entry_id": "entry-oci-attach",
                 "status": "ready",
                 "uploaded_at": "2026-02-16T00:00:00Z",
@@ -430,6 +446,7 @@ async fn test_save_requests_upload_urls_for_existing_cas_blobs() {
     save_mock.assert_async().await;
     check_mock.assert_async().await;
     upload_urls_mock.assert_async().await;
+    pointer_mock.assert_async().await;
     manifest_upload_mock.assert_async().await;
     confirm_mock.assert_async().await;
     clear_env();

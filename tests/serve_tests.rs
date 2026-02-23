@@ -49,8 +49,8 @@ async fn setup(
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
         kv_flush_lock: Arc::new(Mutex::new(())),
-        kv_lookup_lock: Arc::new(Mutex::new(())),
-        kv_last_put: Arc::new(RwLock::new(None)),
+        kv_lookup_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_next_flush_at: Arc::new(RwLock::new(None)),
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
@@ -542,18 +542,40 @@ async fn test_manifest_put_skips_alias_confirm_when_alias_save_exists() {
         .create_async()
         .await;
 
-    let primary_confirm_mock = server
-        .mock("PATCH", "/v2/workspaces/org/repo/caches/entry-primary")
+    let primary_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&primary_tag)
+    );
+    let primary_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&primary_tag)
+    );
+    let primary_pointer_mock = server
+        .mock("GET", primary_pointer_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_body(Matcher::PartialJson(json!({
-            "cache": {
-                "tag": primary_tag
-            }
-        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
+                "version": "3",
+                "cache_entry_id": "entry-primary",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let primary_confirm_mock = server
+        .mock("PUT", primary_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "3")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "3",
                 "status": "ok",
                 "cache_entry_id": "entry-primary"
             })
@@ -591,8 +613,12 @@ async fn test_manifest_put_skips_alias_confirm_when_alias_save_exists() {
         .create_async()
         .await;
 
+    let alias_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&alias_tag)
+    );
     let alias_confirm_mock = server
-        .mock("PATCH", "/v2/workspaces/org/repo/caches/entry-alias")
+        .mock("PUT", alias_publish_path.as_str())
         .expect(0)
         .create_async()
         .await;
@@ -613,6 +639,7 @@ async fn test_manifest_put_skips_alias_confirm_when_alias_save_exists() {
 
     primary_save_mock.assert_async().await;
     pointer_upload_mock.assert_async().await;
+    primary_pointer_mock.assert_async().await;
     primary_confirm_mock.assert_async().await;
     alias_save_mock.assert_async().await;
     alias_confirm_mock.assert_async().await;
@@ -1408,7 +1435,7 @@ async fn test_bazel_cas_put_head_get_round_trip() {
         .await;
 
     let _blob_upload_urls_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/upload-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/stage")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1442,13 +1469,37 @@ async fn test_bazel_cas_put_head_get_round_trip() {
         .create_async()
         .await;
 
-    let _confirm_mock = server
-        .mock("PATCH", "/v2/workspaces/org/repo/caches/entry-bazel-kv")
+    let _pointer_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/org/repo/caches/tags/registry/pointer",
+        )
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
+                "version": "9",
+                "cache_entry_id": "entry-bazel-kv",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _confirm_mock = server
+        .mock(
+            "PUT",
+            "/v2/workspaces/org/repo/caches/tags/registry/publish",
+        )
+        .match_header("if-match", "9")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "9",
                 "status": "confirmed",
                 "cache_entry_id": "entry-bazel-kv"
             })
@@ -1659,7 +1710,7 @@ async fn test_sccache_put_head_get_round_trip() {
         .await;
 
     let _blob_upload_urls_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/upload-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/stage")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1693,13 +1744,37 @@ async fn test_sccache_put_head_get_round_trip() {
         .create_async()
         .await;
 
-    let _confirm_mock = server
-        .mock("PATCH", "/v2/workspaces/org/repo/caches/entry-sccache-kv")
+    let _pointer_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/org/repo/caches/tags/registry/pointer",
+        )
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
+                "version": "11",
+                "cache_entry_id": "entry-sccache-kv",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _confirm_mock = server
+        .mock(
+            "PUT",
+            "/v2/workspaces/org/repo/caches/tags/registry/publish",
+        )
+        .match_header("if-match", "11")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "11",
                 "status": "confirmed",
                 "cache_entry_id": "entry-sccache-kv"
             })
@@ -2039,7 +2114,7 @@ async fn test_gradle_put_get_round_trip() {
         .await;
 
     let _blob_upload_urls_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/upload-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/stage")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2073,13 +2148,37 @@ async fn test_gradle_put_get_round_trip() {
         .create_async()
         .await;
 
-    let _confirm_mock = server
-        .mock("PATCH", "/v2/workspaces/org/repo/caches/entry-gradle-kv")
+    let _pointer_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/org/repo/caches/tags/registry/pointer",
+        )
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
+                "version": "13",
+                "cache_entry_id": "entry-gradle-kv",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _confirm_mock = server
+        .mock(
+            "PUT",
+            "/v2/workspaces/org/repo/caches/tags/registry/publish",
+        )
+        .match_header("if-match", "13")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "13",
                 "status": "confirmed",
                 "cache_entry_id": "entry-gradle-kv"
             })
@@ -2351,7 +2450,7 @@ async fn test_turborepo_put_head_get_round_trip() {
         .await;
 
     let _blob_upload_urls_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/upload-urls")
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/stage")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2385,13 +2484,37 @@ async fn test_turborepo_put_head_get_round_trip() {
         .create_async()
         .await;
 
-    let _confirm_mock = server
-        .mock("PATCH", "/v2/workspaces/org/repo/caches/entry-turbo-kv")
+    let _pointer_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/org/repo/caches/tags/registry/pointer",
+        )
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
+                "version": "15",
+                "cache_entry_id": "entry-turbo-kv",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _confirm_mock = server
+        .mock(
+            "PUT",
+            "/v2/workspaces/org/repo/caches/tags/registry/publish",
+        )
+        .match_header("if-match", "15")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "15",
                 "status": "confirmed",
                 "cache_entry_id": "entry-turbo-kv"
             })

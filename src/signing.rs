@@ -32,11 +32,11 @@ pub fn load_signing_key(path: &Path) -> Result<SigningKey> {
     let decoded = if let Ok(s) = std::str::from_utf8(&contents) {
         let trimmed = s.trim();
         if trimmed.starts_with("ed25519:") {
-            base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                trimmed.strip_prefix("ed25519:").unwrap(),
-            )
-            .context("Failed to decode base64 signing key")?
+            let encoded = trimmed
+                .strip_prefix("ed25519:")
+                .ok_or_else(|| anyhow::anyhow!("Invalid ed25519 signing key prefix"))?;
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+                .context("Failed to decode base64 signing key")?
         } else {
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, trimmed)
                 .context("Failed to decode base64 signing key")?
@@ -81,7 +81,9 @@ pub fn save_signing_key(key: &SigningKey, path: &Path) -> Result<()> {
 
 pub fn parse_public_key(key_str: &str) -> Result<VerifyingKey> {
     let key_data = if key_str.starts_with("ed25519:") {
-        key_str.strip_prefix("ed25519:").unwrap()
+        key_str
+            .strip_prefix("ed25519:")
+            .ok_or_else(|| anyhow::anyhow!("Invalid public key prefix"))?
     } else {
         key_str
     };

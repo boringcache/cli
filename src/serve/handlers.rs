@@ -12,6 +12,7 @@ use std::time::Duration;
 use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
 use crate::cas_transport::upload_payload;
+use crate::multipart_upload::upload_via_single_url;
 use crate::serve::error::OciError;
 use crate::serve::state::{
     digest_tag, ref_tag_for_input, AppState, BlobLocatorEntry, UploadSession,
@@ -620,6 +621,7 @@ async fn start_upload(
                 id: session_id.clone(),
                 name: name.clone(),
                 temp_path,
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
                 bytes_received: body_size,
                 finalized_digest: Some(digest_param.clone()),
                 finalized_size: Some(body_size),
@@ -641,6 +643,7 @@ async fn start_upload(
         id: session_id.clone(),
         name: name.clone(),
         temp_path,
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
         bytes_received: body_size,
         finalized_digest: None,
         finalized_size: None,
@@ -664,23 +667,34 @@ async fn patch_upload(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, OciError> {
-    let mut sessions = state.upload_sessions.write().await;
-    let session = sessions
-        .get_mut(&uuid)
-        .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
+    let (temp_path, session_write_lock) = {
+        let sessions = state.upload_sessions.read().await;
+        let session = sessions
+            .get(&uuid)
+            .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
+        (session.temp_path.clone(), session.write_lock.clone())
+    };
+    let _session_guard = session_write_lock.lock().await;
 
-    let write_offset = parse_upload_offset(&headers).unwrap_or(session.bytes_received);
-    if write_offset > session.bytes_received {
+    let bytes_before = {
+        let sessions = state.upload_sessions.read().await;
+        let session = sessions
+            .get(&uuid)
+            .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
+        session.bytes_received
+    };
+
+    let write_offset = parse_upload_offset(&headers).unwrap_or(bytes_before);
+    if write_offset > bytes_before {
         return Err(OciError::digest_invalid(format!(
-            "upload offset {write_offset} exceeds current size {}",
-            session.bytes_received
+            "upload offset {write_offset} exceeds current size {bytes_before}"
         )));
     }
 
     use tokio::io::AsyncSeekExt;
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
-        .open(&session.temp_path)
+        .open(&temp_path)
         .await
         .map_err(|e| OciError::internal(format!("Failed to open temp file: {e}")))?;
     file.seek(std::io::SeekFrom::Start(write_offset))
@@ -688,6 +702,18 @@ async fn patch_upload(
         .map_err(|e| OciError::internal(format!("Failed to seek temp file: {e}")))?;
 
     let bytes_written = write_body_to_file(body, &mut file).await?;
+    drop(file);
+
+    let mut sessions = state.upload_sessions.write().await;
+    let session = sessions
+        .get_mut(&uuid)
+        .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
+    if write_offset > session.bytes_received {
+        return Err(OciError::digest_invalid(format!(
+            "upload offset {write_offset} exceeds current size {}",
+            session.bytes_received
+        )));
+    }
     let written_until = write_offset.saturating_add(bytes_written);
     if written_until > session.bytes_received {
         session.bytes_received = written_until;
@@ -723,7 +749,16 @@ async fn put_upload(
         .ok_or_else(|| OciError::digest_invalid("missing digest query parameter"))?
         .clone();
 
-    let (temp_path, bytes_before, write_offset) = {
+    let (temp_path, session_write_lock) = {
+        let sessions = state.upload_sessions.read().await;
+        let session = sessions
+            .get(&uuid)
+            .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
+        (session.temp_path.clone(), session.write_lock.clone())
+    };
+    let _session_guard = session_write_lock.lock().await;
+
+    let (bytes_before, write_offset) = {
         let sessions = state.upload_sessions.read().await;
         let session = sessions
             .get(&uuid)
@@ -735,7 +770,7 @@ async fn put_upload(
                 "upload offset {write_offset} exceeds current size {bytes_before}"
             )));
         }
-        (session.temp_path.clone(), bytes_before, write_offset)
+        (bytes_before, write_offset)
     };
 
     use tokio::io::AsyncSeekExt;
@@ -1066,17 +1101,12 @@ async fn put_manifest(
                         let _permit = semaphore.acquire().await.map_err(|e| {
                             OciError::internal(format!("Blob upload semaphore closed: {e}"))
                         })?;
-                        let blob_data = tokio::fs::read(&temp_path).await.map_err(|e| {
-                            OciError::internal(format!(
-                                "Failed to read blob temp file for {}: {}",
-                                digest, e
-                            ))
-                        })?;
-                        upload_payload(
-                            &transfer_client,
+                        let progress = crate::progress::TransferProgress::new_noop();
+                        upload_via_single_url(
+                            temp_path.as_path(),
                             &upload_url,
-                            &blob_data,
-                            "application/octet-stream",
+                            &progress,
+                            &transfer_client,
                             &upload_headers,
                         )
                         .await
@@ -1270,8 +1300,8 @@ mod tests {
             upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
             kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
             kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
-            kv_lookup_lock: Arc::new(tokio::sync::Mutex::new(())),
-            kv_last_put: Arc::new(RwLock::new(None)),
+            kv_lookup_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             kv_next_flush_at: Arc::new(RwLock::new(None)),
             kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
@@ -1334,6 +1364,7 @@ mod tests {
                 id: "filled-session".to_string(),
                 name: "cache".to_string(),
                 temp_path: filled_path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
                 bytes_received: 16,
                 finalized_digest: Some(digest.clone()),
                 finalized_size: Some(16),
@@ -1343,6 +1374,7 @@ mod tests {
                 id: "empty-session".to_string(),
                 name: "cache".to_string(),
                 temp_path: empty_path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
                 bytes_received: 0,
                 finalized_digest: None,
                 finalized_size: None,

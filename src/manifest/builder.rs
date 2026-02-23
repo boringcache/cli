@@ -25,9 +25,16 @@ pub struct ManifestDraft {
     pub entry_count: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashAlgorithm {
+    Blake3,
+    Sha256,
+}
+
 pub struct ManifestBuilder<'a> {
     root: &'a Path,
     exclude_patterns: Vec<String>,
+    hash_algorithm: HashAlgorithm,
 }
 
 impl<'a> ManifestBuilder<'a> {
@@ -35,11 +42,17 @@ impl<'a> ManifestBuilder<'a> {
         Self {
             root,
             exclude_patterns: Vec::new(),
+            hash_algorithm: HashAlgorithm::Blake3,
         }
     }
 
     pub fn with_exclude_patterns(mut self, patterns: Vec<String>) -> Self {
         self.exclude_patterns = patterns;
+        self
+    }
+
+    pub fn with_hash_algorithm(mut self, hash_algorithm: HashAlgorithm) -> Self {
+        self.hash_algorithm = hash_algorithm;
         self
     }
 
@@ -50,7 +63,7 @@ impl<'a> ManifestBuilder<'a> {
         if root_metadata.is_file() {
             let size = root_metadata.len();
             let executable = Some(is_executable(&root_metadata));
-            let hash = Some(calculate_file_hash(self.root)?);
+            let hash = Some(calculate_file_hash(self.root, self.hash_algorithm)?);
 
             let filename = self
                 .root
@@ -119,6 +132,7 @@ impl<'a> ManifestBuilder<'a> {
             .collect();
 
         let raw_size = AtomicU64::new(0);
+        let hash_algorithm = self.hash_algorithm;
 
         let descriptors: Result<Vec<FileDescriptor>> = paths
             .par_iter()
@@ -168,7 +182,7 @@ impl<'a> ManifestBuilder<'a> {
                 };
 
                 let hash = if entry_type == EntryType::File {
-                    Some(calculate_file_hash(absolute_path)?)
+                    Some(calculate_file_hash(absolute_path, hash_algorithm)?)
                 } else {
                     None
                 };
@@ -299,7 +313,7 @@ fn matches_glob(text: &str, pattern: &str) -> bool {
     false
 }
 
-fn calculate_file_hash(path: &Path) -> Result<String> {
+fn calculate_file_hash(path: &Path, hash_algorithm: HashAlgorithm) -> Result<String> {
     use std::io::{BufReader, Read};
 
     const BUFFER_SIZE: usize = 1024 * 1024;
@@ -307,18 +321,34 @@ fn calculate_file_hash(path: &Path) -> Result<String> {
     let file = fs::File::open(path)
         .with_context(|| format!("Failed to open {} for hashing", path.display()))?;
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
-    let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0u8; BUFFER_SIZE];
 
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
+    match hash_algorithm {
+        HashAlgorithm::Blake3 => {
+            let mut hasher = blake3::Hasher::new();
+            loop {
+                let read = reader.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(format!("blake3:{}", hasher.finalize().to_hex()))
         }
-        hasher.update(&buffer[..read]);
-    }
+        HashAlgorithm::Sha256 => {
+            use sha2::{Digest, Sha256};
 
-    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+            let mut hasher = Sha256::new();
+            loop {
+                let read = reader.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(format!("sha256:{:x}", hasher.finalize()))
+        }
+    }
 }
 
 #[cfg(unix)]

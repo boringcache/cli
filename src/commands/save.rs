@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Error, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task;
 
@@ -139,25 +140,44 @@ async fn execute_batch_save_inner(
     let mut failed_attempts = 0usize;
     let mut errors: Vec<anyhow::Error> = Vec::new();
 
+    let max_concurrent = crate::commands::utils::get_optimal_concurrency(total_entries, "save");
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent.max(1)));
+    let mut tasks = Vec::with_capacity(total_entries);
+
     for (position, (tag, expanded_path)) in prepared_entries.into_iter().enumerate() {
-        match save_single_entry(
-            api_client.clone(),
-            workspace.clone(),
-            tag.clone(),
-            expanded_path.clone(),
-            verbose,
-            force,
-            position,
-            total_entries,
-            exclude.clone(),
-            encrypt,
-            recipient.clone(),
-        )
-        .await
-        {
-            Ok(_status) => {
-                successful_saves += 1;
-            }
+        let api_client = api_client.clone();
+        let workspace = workspace.clone();
+        let exclude = exclude.clone();
+        let recipient = recipient.clone();
+        let semaphore = semaphore.clone();
+        let task = tokio::spawn(async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|e| anyhow!("Save worker semaphore closed: {e}"))?;
+            let result = save_single_entry(
+                api_client,
+                workspace,
+                tag.clone(),
+                expanded_path,
+                verbose,
+                force,
+                position,
+                total_entries,
+                exclude,
+                encrypt,
+                recipient,
+            )
+            .await;
+            Ok::<(String, Result<SaveStatus>), anyhow::Error>((tag, result))
+        });
+        tasks.push(task);
+    }
+
+    for task in tasks {
+        let (tag, result) = task.await.context("Batch save task panicked")??;
+        match result {
+            Ok(_status) => successful_saves += 1,
             Err(err) => {
                 failed_attempts += 1;
                 errors.push(err.context(format!("Failed to save {}", tag)));
@@ -931,11 +951,7 @@ async fn save_single_archive_entry(
             }
         }
 
-        let is_multipart = save_response.get_upload_id().is_some();
-
-        if is_multipart {
-            let upload_id = save_response.get_upload_id().unwrap();
-
+        if let Some(upload_id) = save_response.get_upload_id() {
             log::info!(
                 "Using multipart upload: {} parts, upload_id={}",
                 archive_urls.len(),
@@ -1332,9 +1348,9 @@ async fn save_single_file_entry(
         Some(format!("{} missing", missing_blobs.len())),
     )?;
     let upload_started = Instant::now();
-    if !blobs.is_empty() {
+    if !missing_blobs.is_empty() {
         let upload_plan = api_client
-            .blob_upload_urls(&workspace, &save_response.cache_entry_id, &blobs)
+            .blob_upload_urls(&workspace, &save_response.cache_entry_id, &missing_blobs)
             .await
             .context("Failed to request CAS blob upload URLs")?;
 
@@ -1376,7 +1392,10 @@ async fn save_single_file_entry(
                 let progress = progress.clone();
                 let transfer_client = transfer_client.clone();
                 let task = tokio::spawn(async move {
-                    let _permit = semaphore.acquire().await.unwrap();
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .map_err(|e| anyhow!("CAS upload semaphore closed: {e}"))?;
                     let (_etag, metrics) = upload_via_single_url(
                         &blob_path,
                         &upload_url,
@@ -1673,9 +1692,9 @@ async fn save_single_oci_entry(
         Some(format!("{} missing", missing_blobs.len())),
     )?;
     let upload_started = Instant::now();
-    if !blobs.is_empty() {
+    if !missing_blobs.is_empty() {
         let upload_plan = api_client
-            .blob_upload_urls(&workspace, &save_response.cache_entry_id, &blobs)
+            .blob_upload_urls(&workspace, &save_response.cache_entry_id, &missing_blobs)
             .await
             .context("Failed to request CAS blob upload URLs")?;
 
@@ -1717,7 +1736,10 @@ async fn save_single_oci_entry(
                 let progress = progress.clone();
                 let transfer_client = transfer_client.clone();
                 let task = tokio::spawn(async move {
-                    let _permit = semaphore.acquire().await.unwrap();
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .map_err(|e| anyhow!("CAS upload semaphore closed: {e}"))?;
                     let (_etag, metrics) = upload_via_single_url(
                         &file_path,
                         &upload_url,

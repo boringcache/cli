@@ -651,7 +651,10 @@ async fn execute_batch_restore_inner(
         let passphrase_cache = passphrase_cache.clone();
 
         let task = tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|e| anyhow!("Restore semaphore closed: {e}"))?;
             process_restore(
                 api_client,
                 reporter,
@@ -1624,7 +1627,10 @@ async fn process_restore_oci(
             let progress = progress.clone();
             let client = transfer_client.clone();
             let task = tokio::spawn(async move {
-                let _permit = semaphore.acquire().await.unwrap();
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| anyhow!("Restore blob download semaphore closed: {e}"))?;
                 crate::cas_transport::download_blob_file(
                     &client,
                     &url,
@@ -1894,7 +1900,10 @@ async fn process_restore_file(
             let progress = progress.clone();
             let client = transfer_client.clone();
             let task = tokio::spawn(async move {
-                let _permit = semaphore.acquire().await.unwrap();
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| anyhow!("Restore blob download semaphore closed: {e}"))?;
                 crate::cas_transport::download_blob_file(
                     &client,
                     &url,
@@ -1938,56 +1947,162 @@ async fn process_restore_file(
             .with_context(|| format!("Failed to create {}", destination.display()))?;
     }
 
+    #[derive(Clone)]
+    struct FileMaterializeJob {
+        destination: std::path::PathBuf,
+        source_blob: std::path::PathBuf,
+        executable: bool,
+    }
+
+    #[derive(Clone)]
+    struct FileLinkJob {
+        destination: std::path::PathBuf,
+        primary_destination: std::path::PathBuf,
+        source_blob: std::path::PathBuf,
+        executable: bool,
+    }
+
+    let mut primary_jobs: Vec<FileMaterializeJob> = Vec::new();
+    let mut link_jobs: Vec<FileLinkJob> = Vec::new();
+    let mut symlink_jobs: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut primary_by_key: HashMap<(String, bool), std::path::PathBuf> = HashMap::new();
+
     for entry in &pointer.entries {
         match entry.entry_type {
             crate::manifest::EntryType::Dir => {}
             crate::manifest::EntryType::File => {
                 let destination = crate::cas_file::safe_join(target_root, &entry.path)?;
-                if let Some(parent) = destination.parent() {
-                    fs::create_dir_all(parent)
-                        .await
-                        .with_context(|| format!("Failed to create {}", parent.display()))?;
-                }
-                remove_path_if_exists(&destination).await?;
                 let digest = entry
                     .digest
                     .as_ref()
                     .ok_or_else(|| anyhow!("File entry missing digest for {}", entry.path))?;
-                let blob_path = blob_path_by_digest
+                let source_blob = blob_path_by_digest
                     .get(digest)
-                    .ok_or_else(|| anyhow!("Missing downloaded blob for digest {}", digest))?;
-                fs::copy(blob_path, &destination).await.with_context(|| {
-                    format!(
-                        "Failed to materialize {} from {}",
-                        destination.display(),
-                        blob_path.display()
-                    )
-                })?;
-
-                #[cfg(unix)]
-                if entry.executable == Some(true) {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = fs::metadata(&destination).await?.permissions();
-                    perms.set_mode(perms.mode() | 0o111);
-                    fs::set_permissions(&destination, perms).await?;
+                    .ok_or_else(|| anyhow!("Missing downloaded blob for digest {}", digest))?
+                    .clone();
+                let executable = entry.executable == Some(true);
+                let key = (digest.clone(), executable);
+                if let Some(primary_destination) = primary_by_key.get(&key) {
+                    link_jobs.push(FileLinkJob {
+                        destination,
+                        primary_destination: primary_destination.clone(),
+                        source_blob,
+                        executable,
+                    });
+                } else {
+                    primary_by_key.insert(key, destination.clone());
+                    primary_jobs.push(FileMaterializeJob {
+                        destination,
+                        source_blob,
+                        executable,
+                    });
                 }
             }
             crate::manifest::EntryType::Symlink => {
                 let destination = crate::cas_file::safe_join(target_root, &entry.path)?;
-                if let Some(parent) = destination.parent() {
-                    fs::create_dir_all(parent)
-                        .await
-                        .with_context(|| format!("Failed to create {}", parent.display()))?;
-                }
-                remove_path_if_exists(&destination).await?;
                 let link_target = entry
                     .target
                     .as_ref()
                     .ok_or_else(|| anyhow!("Symlink entry missing target for {}", entry.path))?
                     .clone();
-                create_symlink(&destination, link_target).await?;
+                symlink_jobs.push((destination, link_target));
             }
         }
+    }
+
+    let file_job_count = primary_jobs.len().max(link_jobs.len()).max(1);
+    let max_concurrent = crate::commands::utils::get_optimal_concurrency(file_job_count, "restore");
+    let semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
+
+    let mut tasks = Vec::with_capacity(primary_jobs.len());
+    for job in primary_jobs {
+        let semaphore = semaphore.clone();
+        let task = tokio::spawn(async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|e| anyhow!("Restore materialize semaphore closed: {e}"))?;
+            if let Some(parent) = job.destination.parent() {
+                fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("Failed to create {}", parent.display()))?;
+            }
+            remove_path_if_exists(&job.destination).await?;
+            fs::copy(&job.source_blob, &job.destination)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to materialize {} from {}",
+                        job.destination.display(),
+                        job.source_blob.display()
+                    )
+                })?;
+            #[cfg(unix)]
+            if job.executable {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&job.destination).await?.permissions();
+                perms.set_mode(perms.mode() | 0o111);
+                fs::set_permissions(&job.destination, perms).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        });
+        tasks.push(task);
+    }
+    for task in tasks {
+        task.await.context("Primary materialize task panicked")??;
+    }
+
+    let mut link_tasks = Vec::with_capacity(link_jobs.len());
+    for job in link_jobs {
+        let semaphore = semaphore.clone();
+        let task = tokio::spawn(async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|e| anyhow!("Restore materialize semaphore closed: {e}"))?;
+            if let Some(parent) = job.destination.parent() {
+                fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("Failed to create {}", parent.display()))?;
+            }
+            remove_path_if_exists(&job.destination).await?;
+            match fs::hard_link(&job.primary_destination, &job.destination).await {
+                Ok(_) => Ok::<(), anyhow::Error>(()),
+                Err(_) => {
+                    fs::copy(&job.source_blob, &job.destination)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Failed to materialize {} from {}",
+                                job.destination.display(),
+                                job.source_blob.display()
+                            )
+                        })?;
+                    #[cfg(unix)]
+                    if job.executable {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mut perms = fs::metadata(&job.destination).await?.permissions();
+                        perms.set_mode(perms.mode() | 0o111);
+                        fs::set_permissions(&job.destination, perms).await?;
+                    }
+                    Ok(())
+                }
+            }
+        });
+        link_tasks.push(task);
+    }
+    for task in link_tasks {
+        task.await.context("Link materialize task panicked")??;
+    }
+
+    for (destination, link_target) in symlink_jobs {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        remove_path_if_exists(&destination).await?;
+        create_symlink(&destination, link_target).await?;
     }
 
     materialize_step.complete()?;
@@ -2235,7 +2350,10 @@ pub(crate) async fn download_archive(
         let part_num = part_idx + 1;
 
         let task = tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|e| anyhow!("Archive download semaphore closed: {e}"))?;
             crate::cas_transport::download_range(
                 &client,
                 &url,
@@ -2244,6 +2362,7 @@ pub(crate) async fn download_archive(
                 end,
                 this_part_size,
                 progress.as_ref(),
+                None,
             )
             .await
             .with_context(|| {

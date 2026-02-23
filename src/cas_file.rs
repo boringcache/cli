@@ -2,7 +2,6 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 const FORMAT_VERSION: u32 = 1;
@@ -55,6 +54,7 @@ pub fn scan_path(path: &Path, exclude_patterns: Vec<String>) -> Result<FileLayou
     let root_is_file = root.is_file();
     let draft = crate::manifest::ManifestBuilder::new(&root)
         .with_exclude_patterns(exclude_patterns)
+        .with_hash_algorithm(crate::manifest::builder::HashAlgorithm::Sha256)
         .build()?;
 
     let mut blob_by_digest: HashMap<String, FileBlobSource> = HashMap::new();
@@ -67,8 +67,9 @@ pub fn scan_path(path: &Path, exclude_patterns: Vec<String>) -> Result<FileLayou
             } else {
                 root.join(&descriptor.path)
             };
-            let digest_hex = sha256_hex_file(&absolute_path)?;
-            let digest = format!("sha256:{digest_hex}");
+            let digest = descriptor.hash.clone().ok_or_else(|| {
+                anyhow!("Missing SHA-256 digest for file entry {}", descriptor.path)
+            })?;
             let size_bytes = descriptor.size;
 
             match blob_by_digest.get(&digest) {
@@ -248,30 +249,6 @@ fn validate_relative_path(relative: &str) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn sha256_hex_file(path: &Path) -> Result<String> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open {} for hashing", path.display()))?;
-    let mut reader = std::io::BufReader::with_capacity(1024 * 1024, file);
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-
-    let digest = hasher.finalize();
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write;
-        let _ = write!(output, "{:02x}", byte);
-    }
-    Ok(output)
 }
 
 #[cfg(test)]

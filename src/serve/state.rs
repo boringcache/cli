@@ -2,12 +2,12 @@ use crate::api::client::ApiClient;
 use crate::api::models::cache::BlobDescriptor;
 use crate::cas_oci::sha256_hex;
 use crate::tag_utils::TagResolver;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -20,8 +20,8 @@ pub struct AppState {
     pub upload_sessions: Arc<RwLock<UploadSessionStore>>,
     pub kv_pending: Arc<RwLock<KvPendingStore>>,
     pub kv_flush_lock: Arc<Mutex<()>>,
-    pub kv_lookup_lock: Arc<Mutex<()>>,
-    pub kv_last_put: Arc<RwLock<Option<Instant>>>,
+    pub kv_lookup_inflight: Arc<std::sync::Mutex<HashMap<String, Arc<Notify>>>>,
+    pub kv_last_put: Arc<AtomicU64>,
     pub kv_next_flush_at: Arc<RwLock<Option<Instant>>>,
     pub kv_flush_scheduled: Arc<AtomicBool>,
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
@@ -63,6 +63,7 @@ pub struct UploadSession {
     pub id: String,
     pub name: String,
     pub temp_path: PathBuf,
+    pub write_lock: Arc<Mutex<()>>,
     pub bytes_received: u64,
     pub finalized_digest: Option<String>,
     pub finalized_size: Option<u64>,
@@ -116,6 +117,15 @@ impl UploadSessionStore {
 pub const MAX_SPOOL_BYTES: u64 = 512 * 1024 * 1024;
 pub const FLUSH_BLOB_THRESHOLD: usize = 500;
 pub const FLUSH_SIZE_THRESHOLD: u64 = 256 * 1024 * 1024;
+
+pub(crate) fn unix_time_ms_now() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 #[derive(Default)]
 pub struct KvPendingStore {
@@ -284,7 +294,7 @@ struct CachedUrl {
 
 #[derive(Default)]
 pub struct KvPublishedIndex {
-    entries: HashMap<String, BlobDescriptor>,
+    entries: Arc<HashMap<String, BlobDescriptor>>,
     cache_entry_id: Option<String>,
     download_urls: HashMap<String, CachedUrl>,
     complete: bool,
@@ -293,27 +303,39 @@ pub struct KvPublishedIndex {
 
 impl KvPublishedIndex {
     pub fn update(&mut self, entries: HashMap<String, BlobDescriptor>, cache_entry_id: String) {
-        self.entries = entries;
+        let now = Instant::now();
+        let cache_entry_changed = self.cache_entry_id.as_deref() != Some(cache_entry_id.as_str());
+        let active_digests: HashSet<String> =
+            entries.values().map(|blob| blob.digest.clone()).collect();
+        self.entries = Arc::new(entries);
         self.cache_entry_id = Some(cache_entry_id);
-        self.download_urls.clear();
+        if cache_entry_changed {
+            self.download_urls.clear();
+        } else {
+            self.download_urls.retain(|digest, cached| {
+                cached.expires_at > now && active_digests.contains(digest)
+            });
+        }
         self.complete = true;
-        self.last_refresh_at = Some(Instant::now());
+        self.last_refresh_at = Some(now);
     }
 
     pub fn insert(&mut self, scoped_key: String, blob: BlobDescriptor, cache_entry_id: String) {
-        if self.cache_entry_id.as_deref() != Some(cache_entry_id.as_str()) {
-            self.entries.clear();
+        let cache_entry_changed = self.cache_entry_id.as_deref() != Some(cache_entry_id.as_str());
+        if cache_entry_changed {
             self.download_urls.clear();
             self.cache_entry_id = Some(cache_entry_id);
+            self.entries = Arc::new(HashMap::new());
         }
 
-        self.entries.insert(scoped_key, blob);
+        let entries = Arc::make_mut(&mut self.entries);
+        entries.insert(scoped_key, blob);
         self.complete = false;
         self.last_refresh_at = Some(Instant::now());
     }
 
     pub fn set_empty(&mut self) {
-        self.entries.clear();
+        self.entries = Arc::new(HashMap::new());
         self.cache_entry_id = None;
         self.download_urls.clear();
         self.complete = true;
@@ -379,7 +401,11 @@ impl KvPublishedIndex {
         self.last_refresh_at
     }
 
-    pub fn entries_snapshot(&self) -> HashMap<String, BlobDescriptor> {
+    pub fn touch_refresh(&mut self) {
+        self.last_refresh_at = Some(Instant::now());
+    }
+
+    pub fn entries_snapshot(&self) -> Arc<HashMap<String, BlobDescriptor>> {
         self.entries.clone()
     }
 }
@@ -458,6 +484,7 @@ mod tests {
             id: "empty".to_string(),
             name: "img".to_string(),
             temp_path: PathBuf::from("/tmp/empty"),
+            write_lock: Arc::new(Mutex::new(())),
             bytes_received: 0,
             finalized_digest: Some("sha256:abc".to_string()),
             finalized_size: Some(0),
@@ -468,6 +495,7 @@ mod tests {
             id: "filled".to_string(),
             name: "img".to_string(),
             temp_path: PathBuf::from("/tmp/filled"),
+            write_lock: Arc::new(Mutex::new(())),
             bytes_received: 0,
             finalized_digest: Some("sha256:abc".to_string()),
             finalized_size: Some(128),

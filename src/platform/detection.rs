@@ -301,7 +301,9 @@ impl Platform {
             return false;
         }
 
-        let arch = parts.last().unwrap();
+        let Some(arch) = parts.last() else {
+            return false;
+        };
         let valid_arch = ["x86_64", "arm64", "arm32", "x86"];
         if !valid_arch.contains(arch) {
             return false;

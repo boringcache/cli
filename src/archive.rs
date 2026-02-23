@@ -350,7 +350,7 @@ fn extract_parallel(
             let callback = progress_callback.clone();
             thread::spawn(move || loop {
                 let job = {
-                    let guard = rx.lock().unwrap();
+                    let guard = rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     guard.recv()
                 };
 
