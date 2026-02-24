@@ -79,7 +79,7 @@ jobs:
 
           while true; do
             RUN_STATUS="$(gh run view "${RUN_ID}" --repo "${{ github.repository }}" --json status --jq '.status')"
-            RUN_CONCLUSION="$(gh run view "${RUN_ID}" --repo "${{ github.repository }}" --json conclusion --jq '.conclusion // \"\"')"
+            RUN_CONCLUSION="$(gh run view "${RUN_ID}" --repo "${{ github.repository }}" --json conclusion --jq '.conclusion // ""')"
             if [[ "${RUN_STATUS}" == "completed" ]]; then
               if [[ "${RUN_CONCLUSION}" != "success" ]]; then
                 echo "'CLI CI' completed with conclusion=${RUN_CONCLUSION} for commit ${TARGET_SHA}."
