@@ -53,19 +53,48 @@ jobs:
           echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
           echo "Checking CLI CI runs for SHA: ${TARGET_SHA}"
 
-          RUN_ID="$(gh run list \
-            --repo "${{ github.repository }}" \
-            --workflow "CLI CI" \
-            --json databaseId,headSha,status,conclusion \
-            --limit 200 \
-            --jq ".[] | select(.headSha==\"${TARGET_SHA}\" and .status==\"completed\" and .conclusion==\"success\") | .databaseId" \
-            | head -n1)"
+          WAIT_TIMEOUT_SECS=10800
+          POLL_SECS=30
+          DEADLINE_EPOCH="$(( $(date +%s) + WAIT_TIMEOUT_SECS ))"
 
-          if [[ -z "${RUN_ID}" ]]; then
-            echo "No successful 'CLI CI' workflow run found for commit ${TARGET_SHA}."
-            echo "Run CLI CI on main for this commit before creating/pushing a release tag."
-            exit 1
-          fi
+          RUN_ID=""
+          while [[ -z "${RUN_ID}" ]]; do
+            RUN_ID="$(gh run list \
+              --repo "${{ github.repository }}" \
+              --workflow "CLI CI" \
+              --json databaseId,headSha,status,conclusion \
+              --limit 200 \
+              --jq ".[] | select(.headSha==\"${TARGET_SHA}\") | .databaseId" \
+              | head -n1)"
+            if [[ -n "${RUN_ID}" ]]; then
+              break
+            fi
+            if [[ "$(date +%s)" -ge "${DEADLINE_EPOCH}" ]]; then
+              echo "Timed out waiting for a 'CLI CI' run to start for commit ${TARGET_SHA}."
+              exit 1
+            fi
+            echo "Waiting for CLI CI run to start for ${TARGET_SHA}..."
+            sleep "${POLL_SECS}"
+          done
+
+          while true; do
+            RUN_STATUS="$(gh run view "${RUN_ID}" --repo "${{ github.repository }}" --json status --jq '.status')"
+            RUN_CONCLUSION="$(gh run view "${RUN_ID}" --repo "${{ github.repository }}" --json conclusion --jq '.conclusion // \"\"')"
+            if [[ "${RUN_STATUS}" == "completed" ]]; then
+              if [[ "${RUN_CONCLUSION}" != "success" ]]; then
+                echo "'CLI CI' completed with conclusion=${RUN_CONCLUSION} for commit ${TARGET_SHA}."
+                exit 1
+              fi
+              break
+            fi
+            if [[ "$(date +%s)" -ge "${DEADLINE_EPOCH}" ]]; then
+              echo "Timed out waiting for 'CLI CI' completion for commit ${TARGET_SHA}."
+              exit 1
+            fi
+            echo "Waiting for CLI CI completion (run ${RUN_ID}, status=${RUN_STATUS})..."
+            sleep "${POLL_SECS}"
+          done
+
           echo "ci_run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
 
           JOBS_JSON="$(gh run view "${RUN_ID}" --repo "${{ github.repository }}" --json jobs)"
