@@ -20,6 +20,7 @@ use crate::serve::state::{
 use crate::tag_utils::TagResolver;
 
 const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
+const OCI_PREFETCH_BLOB_URL_LIMIT: usize = 128;
 const EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS: usize = 20;
 const EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS: u64 = 75;
 const EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS: usize = 3;
@@ -202,7 +203,7 @@ async fn get_manifest(
     reference: String,
 ) -> Result<Response, OciError> {
     let (manifest_bytes, content_type, digest) =
-        resolve_manifest(&state, &name, &reference).await?;
+        resolve_manifest(&state, &name, &reference, method == Method::GET).await?;
 
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, "Docker-Content-Digest", &digest)?;
@@ -229,6 +230,7 @@ async fn resolve_manifest(
     state: &AppState,
     name: &str,
     reference: &str,
+    prefetch_blob_urls: bool,
 ) -> Result<(Vec<u8>, String, String), OciError> {
     let tags = if reference.starts_with("sha256:") {
         vec![digest_tag(reference)]
@@ -291,27 +293,35 @@ async fn resolve_manifest(
         .index_json_bytes()
         .map_err(|e| OciError::internal(format!("Failed to decode index_json: {e}")))?;
 
-    let blob_descriptors: Vec<BlobDescriptor> = pointer
-        .blobs
-        .iter()
-        .map(|blob| BlobDescriptor {
-            digest: blob.digest.clone(),
-            size_bytes: blob.size_bytes,
-        })
-        .collect();
+    let should_prefetch_blob_urls =
+        prefetch_blob_urls && pointer.blobs.len() <= OCI_PREFETCH_BLOB_URL_LIMIT;
     let mut prefetched_urls: HashMap<String, String> = HashMap::new();
-    if !blob_descriptors.is_empty() {
-        if let Ok(response) = state
-            .api_client
-            .blob_download_urls(&state.workspace, cache_entry_id, &blob_descriptors)
-            .await
-        {
-            for entry in response.download_urls {
-                prefetched_urls.insert(entry.digest, entry.url);
+    if should_prefetch_blob_urls {
+        let blob_descriptors: Vec<BlobDescriptor> = pointer
+            .blobs
+            .iter()
+            .map(|blob| BlobDescriptor {
+                digest: blob.digest.clone(),
+                size_bytes: blob.size_bytes,
+            })
+            .collect();
+        if !blob_descriptors.is_empty() {
+            if let Ok(response) = state
+                .api_client
+                .blob_download_urls(&state.workspace, cache_entry_id, &blob_descriptors)
+                .await
+            {
+                for entry in response.download_urls {
+                    prefetched_urls.insert(entry.digest, entry.url);
+                }
             }
         }
     }
-    let prefetched_at = std::time::Instant::now();
+    let prefetched_at = if should_prefetch_blob_urls {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
 
     {
         let mut locator = state.blob_locator.write().await;
@@ -324,7 +334,9 @@ async fn resolve_manifest(
                     cache_entry_id: cache_entry_id.clone(),
                     size_bytes: blob.size_bytes,
                     download_url: download_url.clone(),
-                    download_url_cached_at: download_url.as_ref().map(|_| prefetched_at),
+                    download_url_cached_at: download_url
+                        .as_ref()
+                        .and_then(|_| prefetched_at),
                 },
             );
         }
