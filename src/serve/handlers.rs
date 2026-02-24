@@ -20,10 +20,10 @@ use crate::serve::state::{
 use crate::tag_utils::TagResolver;
 
 const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
-const EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS: usize = 4;
-const EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS: u64 = 25;
-const EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS: usize = 2;
-const EMPTY_FINALIZE_REMOTE_RETRY_DELAY_MS: u64 = 50;
+const EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS: usize = 20;
+const EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS: u64 = 75;
+const EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS: usize = 3;
+const EMPTY_FINALIZE_REMOTE_RETRY_DELAY_MS: u64 = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EmptyFinalizeReuse {
