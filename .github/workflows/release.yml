@@ -361,8 +361,11 @@ jobs:
               fi
 
               if command -v boringcache >/dev/null 2>&1; then
+                CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+                CARGO_REGISTRY_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-cargo-registry-${{ matrix.name }}:${CARGO_HOME_DIR}/registry"
+                CARGO_GIT_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-cargo-git-${{ matrix.name }}:${CARGO_HOME_DIR}/git"
                 TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-target-${{ matrix.name }}:/workspace/target"
-                boringcache restore ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git || true
+                boringcache restore ${{ github.repository }} "${CARGO_REGISTRY_CACHE_KEY},${CARGO_GIT_CACHE_KEY},${TARGET_CACHE_KEY}" --no-platform --no-git || true
               fi
 
               # Add target
@@ -382,8 +385,11 @@ jobs:
               echo "=== sccache stats ==="
               sccache --show-stats 2>/dev/null || true
               if command -v boringcache >/dev/null 2>&1; then
+                CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+                CARGO_REGISTRY_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-cargo-registry-${{ matrix.name }}:${CARGO_HOME_DIR}/registry"
+                CARGO_GIT_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-cargo-git-${{ matrix.name }}:${CARGO_HOME_DIR}/git"
                 TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-target-${{ matrix.name }}:/workspace/target"
-                boringcache save ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git || true
+                boringcache save ${{ github.repository }} "${CARGO_REGISTRY_CACHE_KEY},${CARGO_GIT_CACHE_KEY},${TARGET_CACHE_KEY}" --no-platform --no-git || true
               fi
             '
 
