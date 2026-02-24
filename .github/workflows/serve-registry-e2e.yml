@@ -33,7 +33,7 @@ jobs:
           cache-tag: "rust-1.89-e2e-registry"
           sccache: "true"
           sccache-mode: "proxy"
-          cache-target: "false"
+          cache-target: "true"
 
       - name: Validate configuration
         run: |
@@ -335,7 +335,7 @@ jobs:
           cache-tag: "rust-1.89-e2e-adapter"
           sccache: "true"
           sccache-mode: "proxy"
-          cache-target: "false"
+          cache-target: "true"
 
       - name: Validate configuration
         run: |
