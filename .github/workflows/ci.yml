@@ -68,16 +68,27 @@ jobs:
             boringcache cache-registry ${{ github.repository }} "rust-${{ env.RUST_VERSION }}-sccache-native-test" \
               --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
             PROXY_PID=$!
+            PROXY_READY=0
             for _ in $(seq 1 30); do
-              curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1 && break
+              if curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1; then
+                PROXY_READY=1
+                break
+              fi
               sleep 0.5
             done
-            export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
-            export RUSTC_WRAPPER=sccache
-            echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
-            sccache --stop-server >/dev/null 2>&1 || true
-            sccache --start-server || true
-            sccache --zero-stats >/dev/null 2>&1 || true
+            if [[ "${PROXY_READY}" == "1" ]]; then
+              export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
+              export RUSTC_WRAPPER=sccache
+              echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
+              sccache --stop-server >/dev/null 2>&1 || true
+              sccache --start-server || true
+              sccache --zero-stats >/dev/null 2>&1 || true
+            else
+              echo "sccache proxy not ready; continuing without remote cache backend"
+              kill "${PROXY_PID}" >/dev/null 2>&1 || true
+              wait "${PROXY_PID}" >/dev/null 2>&1 || true
+              PROXY_PID=""
+            fi
           fi
 
           export CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target"
@@ -179,15 +190,26 @@ jobs:
                   boringcache cache-registry ${{ github.repository }} "rust-${{ env.RUST_VERSION }}-sccache-docker-test" \
                     --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
                   PROXY_PID=$!
+                  PROXY_READY=0
                   for _ in $(seq 1 30); do
-                    curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1 && break
+                    if curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1; then
+                      PROXY_READY=1
+                      break
+                    fi
                     sleep 0.5
                   done
-                  export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
-                  export RUSTC_WRAPPER=sccache
-                  echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
-                  sccache --start-server || true
-                  sccache --zero-stats >/dev/null 2>&1 || true
+                  if [ "${PROXY_READY}" = "1" ]; then
+                    export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
+                    export RUSTC_WRAPPER=sccache
+                    echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
+                    sccache --start-server || true
+                    sccache --zero-stats >/dev/null 2>&1 || true
+                  else
+                    echo "sccache proxy not ready; continuing without remote cache backend"
+                    kill "${PROXY_PID}" >/dev/null 2>&1 || true
+                    wait "${PROXY_PID}" >/dev/null 2>&1 || true
+                    PROXY_PID=""
+                  fi
                 fi
               fi
 
@@ -460,14 +482,25 @@ jobs:
                   boringcache cache-registry ${{ github.repository }} "rust-${{ env.RUST_VERSION }}-sccache-${{ matrix.name }}" \
                     --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
                   PROXY_PID=$!
+                  PROXY_READY=0
                   for _ in $(seq 1 30); do
-                    curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1 && break
+                    if curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1; then
+                      PROXY_READY=1
+                      break
+                    fi
                     sleep 0.5
                   done
-                  export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
-                  export RUSTC_WRAPPER=sccache
-                  echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
-                  sccache --start-server || true
+                  if [ "${PROXY_READY}" = "1" ]; then
+                    export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
+                    export RUSTC_WRAPPER=sccache
+                    echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
+                    sccache --start-server || true
+                  else
+                    echo "sccache proxy not ready; continuing without remote cache backend"
+                    kill "${PROXY_PID}" >/dev/null 2>&1 || true
+                    wait "${PROXY_PID}" >/dev/null 2>&1 || true
+                    PROXY_PID=""
+                  fi
                 fi
               fi
 

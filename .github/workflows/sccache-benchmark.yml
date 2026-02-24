@@ -62,16 +62,33 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Setup Rust
+      - name: Setup Rust (BoringCache)
+        id: boringcache-rust
         if: steps.gate.outputs.run == 'true'
+        continue-on-error: true
+        uses: boringcache/rust-action@v1
+        with:
+          workspace: ${{ github.repository }}
+          rust-version: ${{ env.RUST_VERSION }}
+          cache-tag: "rust-${{ env.RUST_VERSION }}-sccache-benchmark-${{ matrix.backend }}"
+          sccache: "true"
+          sccache-mode: ${{ matrix.sccache_backend }}
+          cache-target: "true"
+
+      - name: Setup Rust (Fallback)
+        if: steps.gate.outputs.run == 'true' && steps.boringcache-rust.outcome == 'failure'
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
-      - name: Install sccache
+      - name: Ensure sccache present
         if: steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --version
+            exit 0
+          fi
           url="https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
           curl -fsSL "$url" | tar xz -C /tmp
           sudo mv "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache

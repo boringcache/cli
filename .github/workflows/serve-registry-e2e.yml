@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 30
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
-      BORINGCACHE_API_URL: "https://api.boringcache.com/v1"
+      BORINGCACHE_API_URL: "https://api.boringcache.com"
       WORKSPACE: "boringcache/cli"
       CACHE_TAG_PREFIX: "boringcache-cli"
       REGISTRY_ROOT_TAG_PREFIX: "boringcache-cli-registry"
@@ -25,7 +25,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: Setup Rust (BoringCache)
+        id: boringcache-rust-registry
+        continue-on-error: true
         uses: boringcache/rust-action@v1
         with:
           workspace: ${{ env.WORKSPACE }}
@@ -34,6 +36,12 @@ jobs:
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "true"
+
+      - name: Setup Rust (Fallback)
+        if: steps.boringcache-rust-registry.outcome == 'failure'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89"
 
       - name: Validate configuration
         run: |
@@ -318,7 +326,7 @@ jobs:
     timeout-minutes: 20
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
-      BORINGCACHE_API_URL: "https://api.boringcache.com/v1"
+      BORINGCACHE_API_URL: "https://api.boringcache.com"
       WORKSPACE: "boringcache/cli"
       REGISTRY_ROOT_TAG_PREFIX: "boringcache-cli-adapter-registry"
       PORT: "5001"
@@ -327,7 +335,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: Setup Rust (BoringCache)
+        id: boringcache-rust-adapter
+        continue-on-error: true
         uses: boringcache/rust-action@v1
         with:
           workspace: ${{ env.WORKSPACE }}
@@ -336,6 +346,12 @@ jobs:
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "true"
+
+      - name: Setup Rust (Fallback)
+        if: steps.boringcache-rust-adapter.outcome == 'failure'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89"
 
       - name: Validate configuration
         run: |
