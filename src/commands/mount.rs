@@ -30,6 +30,27 @@ enum RestoreAction {
     NoRemoteCache,
 }
 
+fn signature_subject_tag<'a>(
+    hit: &'a crate::api::models::cache::CacheResolutionEntry,
+    manifest_tag: Option<&'a str>,
+) -> &'a str {
+    hit.signature_tag
+        .as_deref()
+        .or(manifest_tag)
+        .or(hit.primary_tag.as_deref())
+        .unwrap_or(hit.tag.as_str())
+}
+
+fn signature_display_tag<'a>(
+    hit: &'a crate::api::models::cache::CacheResolutionEntry,
+    fallback: &'a str,
+) -> &'a str {
+    hit.signature_tag
+        .as_deref()
+        .or(hit.primary_tag.as_deref())
+        .unwrap_or(fallback)
+}
+
 pub async fn execute(
     workspace: String,
     tag_path: String,
@@ -428,6 +449,7 @@ async fn initial_restore(
         return Ok(RestoreAction::NoRemoteCache);
     }
 
+    let signature_tag = signature_subject_tag(hit, Some(manifest.tag.as_str()));
     match (&hit.workspace_signing_public_key, &hit.server_signature) {
         (Some(workspace_key), Some(server_sig)) => {
             match crate::signing::parse_public_key(workspace_key)
@@ -435,7 +457,7 @@ async fn initial_restore(
                     crate::signing::signature_from_base64(server_sig).map(|sig| (pk, sig))
                 })
                 .and_then(|(pk, sig)| {
-                    let data = format!("{}:{}", manifest.tag.as_str(), manifest.root.digest);
+                    let data = format!("{}:{}", signature_tag, manifest.root.digest);
                     crate::signing::verify_signature(data.as_bytes(), &sig, &pk)
                 }) {
                 Ok(()) => {
@@ -449,15 +471,17 @@ async fn initial_restore(
             }
         }
         (Some(_), None) => {
+            let display_tag = signature_display_tag(hit, manifest.tag.as_str());
             ui::warn(&format!(
                 "Server signature missing for {}; authenticity not verified",
-                manifest.tag.as_str()
+                display_tag
             ));
         }
         (None, Some(_)) => {
+            let display_tag = signature_display_tag(hit, manifest.tag.as_str());
             ui::warn(&format!(
                 "Workspace signing key missing for {}; cannot verify server signature",
-                manifest.tag.as_str()
+                display_tag
             ));
         }
         (None, None) => {}
@@ -666,6 +690,7 @@ async fn initial_restore_oci(
 
     let pointer = crate::cas_oci::parse_pointer(&pointer_bytes)?;
 
+    let signature_tag = signature_subject_tag(hit, None);
     match (&hit.workspace_signing_public_key, &hit.server_signature) {
         (Some(workspace_key), Some(server_sig)) => {
             match crate::signing::parse_public_key(workspace_key)
@@ -673,7 +698,7 @@ async fn initial_restore_oci(
                     crate::signing::signature_from_base64(server_sig).map(|sig| (pk, sig))
                 })
                 .and_then(|(pk, sig)| {
-                    let data = format!("{}:{}", hit.tag.as_str(), remote_manifest_digest);
+                    let data = format!("{}:{}", signature_tag, remote_manifest_digest);
                     crate::signing::verify_signature(data.as_bytes(), &sig, &pk)
                 }) {
                 Ok(()) => {
@@ -687,15 +712,17 @@ async fn initial_restore_oci(
             }
         }
         (Some(_), None) => {
+            let display_tag = signature_display_tag(hit, hit.tag.as_str());
             ui::warn(&format!(
                 "Server signature missing for {}; authenticity not verified",
-                hit.tag.as_str()
+                display_tag
             ));
         }
         (None, Some(_)) => {
+            let display_tag = signature_display_tag(hit, hit.tag.as_str());
             ui::warn(&format!(
                 "Workspace signing key missing for {}; cannot verify server signature",
-                hit.tag.as_str()
+                display_tag
             ));
         }
         (None, None) => {}
@@ -907,6 +934,7 @@ async fn initial_restore_file(
 
     let pointer = crate::cas_file::parse_pointer(&pointer_bytes)?;
 
+    let signature_tag = signature_subject_tag(hit, None);
     match (&hit.workspace_signing_public_key, &hit.server_signature) {
         (Some(workspace_key), Some(server_sig)) => {
             match crate::signing::parse_public_key(workspace_key)
@@ -914,7 +942,7 @@ async fn initial_restore_file(
                     crate::signing::signature_from_base64(server_sig).map(|sig| (pk, sig))
                 })
                 .and_then(|(pk, sig)| {
-                    let data = format!("{}:{}", hit.tag.as_str(), remote_manifest_digest);
+                    let data = format!("{}:{}", signature_tag, remote_manifest_digest);
                     crate::signing::verify_signature(data.as_bytes(), &sig, &pk)
                 }) {
                 Ok(()) => {
@@ -928,15 +956,17 @@ async fn initial_restore_file(
             }
         }
         (Some(_), None) => {
+            let display_tag = signature_display_tag(hit, hit.tag.as_str());
             ui::warn(&format!(
                 "Server signature missing for {}; authenticity not verified",
-                hit.tag.as_str()
+                display_tag
             ));
         }
         (None, Some(_)) => {
+            let display_tag = signature_display_tag(hit, hit.tag.as_str());
             ui::warn(&format!(
                 "Workspace signing key missing for {}; cannot verify server signature",
-                hit.tag.as_str()
+                display_tag
             ));
         }
         (None, None) => {}

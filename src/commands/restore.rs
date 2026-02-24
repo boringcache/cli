@@ -42,6 +42,24 @@ fn is_entry_retryable(entry: &CacheResolutionEntry) -> bool {
     false
 }
 
+fn signature_subject_tag<'a>(
+    hit: &'a CacheResolutionEntry,
+    manifest_tag: Option<&'a str>,
+) -> &'a str {
+    hit.signature_tag
+        .as_deref()
+        .or(manifest_tag)
+        .or(hit.primary_tag.as_deref())
+        .unwrap_or(hit.tag.as_str())
+}
+
+fn signature_display_tag<'a>(hit: &'a CacheResolutionEntry, fallback: &'a str) -> &'a str {
+    hit.signature_tag
+        .as_deref()
+        .or(hit.primary_tag.as_deref())
+        .unwrap_or(fallback)
+}
+
 #[derive(Debug)]
 struct RestorePreflightCheck {
     valid_specs: Vec<RestoreSpec>,
@@ -1182,10 +1200,11 @@ async fn process_restore_archive(
         }
     }
 
+    let signature_tag = signature_subject_tag(&hit, Some(manifest.tag.as_str()));
     match (&hit.workspace_signing_public_key, &hit.server_signature) {
         (Some(workspace_key), Some(server_sig)) => {
             match verify_server_signature(
-                &manifest.tag,
+                signature_tag,
                 &manifest.root.digest,
                 workspace_key,
                 server_sig,
@@ -1207,15 +1226,17 @@ async fn process_restore_archive(
             }
         }
         (Some(_), None) => {
+            let display_tag = signature_display_tag(&hit, manifest.tag.as_str());
             ui::warn(&format!(
                 "Server signature missing for {}; authenticity not verified",
-                manifest.tag.as_str()
+                display_tag
             ));
         }
         (None, Some(_)) => {
+            let display_tag = signature_display_tag(&hit, manifest.tag.as_str());
             ui::warn(&format!(
                 "Workspace signing key missing for {}; cannot verify server signature",
-                manifest.tag.as_str()
+                display_tag
             ));
         }
         (None, None) => {}
@@ -1530,10 +1551,11 @@ async fn process_restore_oci(
     }
     fetch_step.complete()?;
 
+    let signature_tag = signature_subject_tag(&hit, None);
     match (&hit.workspace_signing_public_key, &hit.server_signature) {
         (Some(workspace_key), Some(server_sig)) => {
             if let Err(err) = verify_server_signature(
-                &hit.tag,
+                signature_tag,
                 &resolved_manifest_root_digest,
                 workspace_key,
                 server_sig,
@@ -1542,15 +1564,17 @@ async fn process_restore_oci(
             }
         }
         (Some(_), None) => {
+            let display_tag = signature_display_tag(&hit, hit.tag.as_str());
             ui::warn(&format!(
                 "Server signature missing for {}; authenticity not verified",
-                hit.tag
+                display_tag
             ));
         }
         (None, Some(_)) => {
+            let display_tag = signature_display_tag(&hit, hit.tag.as_str());
             ui::warn(&format!(
                 "Workspace signing key missing for {}; cannot verify server signature",
-                hit.tag
+                display_tag
             ));
         }
         (None, None) => {}
@@ -1808,10 +1832,11 @@ async fn process_restore_file(
     }
     fetch_step.complete()?;
 
+    let signature_tag = signature_subject_tag(&hit, None);
     match (&hit.workspace_signing_public_key, &hit.server_signature) {
         (Some(workspace_key), Some(server_sig)) => {
             if let Err(err) = verify_server_signature(
-                &hit.tag,
+                signature_tag,
                 &resolved_manifest_root_digest,
                 workspace_key,
                 server_sig,
@@ -1820,15 +1845,17 @@ async fn process_restore_file(
             }
         }
         (Some(_), None) => {
+            let display_tag = signature_display_tag(&hit, hit.tag.as_str());
             ui::warn(&format!(
                 "Server signature missing for {}; authenticity not verified",
-                hit.tag
+                display_tag
             ));
         }
         (None, Some(_)) => {
+            let display_tag = signature_display_tag(&hit, hit.tag.as_str());
             ui::warn(&format!(
                 "Workspace signing key missing for {}; cannot verify server signature",
-                hit.tag
+                display_tag
             ));
         }
         (None, None) => {}

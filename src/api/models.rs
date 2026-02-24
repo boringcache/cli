@@ -232,11 +232,17 @@ pub mod cache {
         pub file_count: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub compression_algorithm: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub signature_tag: Option<String>,
     }
 
     #[derive(Debug, Deserialize, Serialize, Clone)]
     pub struct RestoreResult {
         pub tag: String,
+        #[serde(default)]
+        pub primary_tag: Option<String>,
+        #[serde(default)]
+        pub signature_tag: Option<String>,
         pub status: String,
         #[serde(default)]
         pub cache_entry_id: Option<String>,
@@ -466,6 +472,8 @@ pub mod cache {
     #[derive(Debug, Clone)]
     pub struct CacheResolutionEntry {
         pub tag: String,
+        pub primary_tag: Option<String>,
+        pub signature_tag: Option<String>,
         pub status: String,
         pub cache_entry_id: Option<String>,
         pub manifest_url: Option<String>,
