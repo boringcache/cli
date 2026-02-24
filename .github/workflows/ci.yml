@@ -191,6 +191,11 @@ jobs:
                 fi
               fi
 
+              if command -v boringcache >/dev/null 2>&1; then
+                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-docker-target-ci-bookworm:/workspace/target"
+                boringcache restore ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git || true
+              fi
+
               # Build with timing
               START_TIME=$(date +%s%N)
               cargo build --locked
@@ -215,6 +220,11 @@ jobs:
               printf "compile_requests,cache_hits,cache_misses,rust_hit_rate\n%s,%s,%s,%s\n" \
                 "${COMPILE_REQUESTS}" "${CACHE_HITS}" "${CACHE_MISSES}" "${RUST_HIT_RATE}" \
                 > benchmark-results/docker-target-run${{ matrix.run }}-stats.csv
+
+              if command -v boringcache >/dev/null 2>&1; then
+                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-docker-target-ci-bookworm:/workspace/target"
+                boringcache save ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git || true
+              fi
             '
 
       - name: Upload results
@@ -461,6 +471,11 @@ jobs:
                 fi
               fi
 
+              if command -v boringcache >/dev/null 2>&1; then
+                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-docker-build-target-${{ matrix.name }}:/workspace/target"
+                boringcache restore ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git || true
+              fi
+
               # Add target
               rustup target add ${{ matrix.target }}
 
@@ -477,6 +492,10 @@ jobs:
 
               echo "=== sccache stats ==="
               sccache --show-stats || true
+              if command -v boringcache >/dev/null 2>&1; then
+                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-docker-build-target-${{ matrix.name }}:/workspace/target"
+                boringcache save ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git || true
+              fi
               sccache --stop-server >/dev/null 2>&1 || true
               if [ -n "${PROXY_PID}" ]; then
                 kill "${PROXY_PID}" >/dev/null 2>&1 || true

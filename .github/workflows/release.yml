@@ -315,6 +315,11 @@ jobs:
                 fi
               fi
 
+              if command -v boringcache >/dev/null 2>&1; then
+                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-target-${{ matrix.name }}:/workspace/target"
+                boringcache restore ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git || true
+              fi
+
               # Add target
               rustup target add ${{ matrix.target }}
 
@@ -331,6 +336,10 @@ jobs:
 
               echo "=== sccache stats ==="
               sccache --show-stats 2>/dev/null || true
+              if command -v boringcache >/dev/null 2>&1; then
+                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-target-${{ matrix.name }}:/workspace/target"
+                boringcache save ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git || true
+              fi
             '
 
       # Native builds for Ubuntu/macOS/Windows
