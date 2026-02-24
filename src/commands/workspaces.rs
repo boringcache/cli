@@ -2,12 +2,53 @@ use crate::api::ApiClient;
 use crate::progress::format_bytes;
 use crate::ui;
 use anyhow::Result;
+use serde::Serialize;
 
-pub async fn execute() -> Result<()> {
+#[derive(Debug, Serialize)]
+struct WorkspaceSummary {
+    id: Option<String>,
+    slug: String,
+    name: String,
+    description: Option<String>,
+    cache_entries_count: u32,
+    total_cache_size: u64,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspacesSummary {
+    total: usize,
+    workspaces: Vec<WorkspaceSummary>,
+}
+
+pub async fn execute(json_output: bool) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let workspaces = api_client.list_workspaces().await?;
+    let mut sorted_workspaces = api_client.list_workspaces().await?;
+    sorted_workspaces.sort_by(|a, b| a.name.cmp(&b.name));
 
-    if workspaces.is_empty() {
+    if json_output {
+        let summary = WorkspacesSummary {
+            total: sorted_workspaces.len(),
+            workspaces: sorted_workspaces
+                .into_iter()
+                .map(|workspace| WorkspaceSummary {
+                    id: workspace.id,
+                    slug: workspace.slug,
+                    name: workspace.name,
+                    description: workspace.description,
+                    cache_entries_count: workspace.cache_entries_count,
+                    total_cache_size: workspace.total_cache_size,
+                    created_at: workspace.created_at,
+                    updated_at: workspace.updated_at,
+                })
+                .collect(),
+        };
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    if sorted_workspaces.is_empty() {
         ui::info("No workspaces found");
         return Ok(());
     }
@@ -18,9 +59,6 @@ pub async fn execute() -> Result<()> {
         "ID", "NAME", "ENTRIES", "SIZE"
     ));
     ui::info(&"-".repeat(60));
-
-    let mut sorted_workspaces = workspaces;
-    sorted_workspaces.sort_by(|a, b| a.name.cmp(&b.name));
 
     for workspace in &sorted_workspaces {
         let id = workspace.id.as_ref().unwrap_or(&workspace.slug);

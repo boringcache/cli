@@ -74,10 +74,10 @@ jobs:
                 break
               fi
               if [[ "$(date +%s)" -ge "${DEADLINE_EPOCH}" ]]; then
-                echo "Timed out waiting for '${workflow_name}' to start for commit ${TARGET_SHA}."
+                echo "Timed out waiting for '${workflow_name}' to start for commit ${TARGET_SHA}." >&2
                 exit 1
               fi
-              echo "Waiting for ${workflow_name} run to start for ${TARGET_SHA}..."
+              echo "Waiting for ${workflow_name} run to start for ${TARGET_SHA}..." >&2
               sleep "${POLL_SECS}"
             done
 
@@ -87,16 +87,16 @@ jobs:
               run_conclusion="$(gh run view "${run_id}" --repo "${{ github.repository }}" --json conclusion --jq '.conclusion // ""')"
               if [[ "${run_status}" == "completed" ]]; then
                 if [[ "${run_conclusion}" != "success" ]]; then
-                  echo "'${workflow_name}' completed with conclusion=${run_conclusion} for commit ${TARGET_SHA}."
+                  echo "'${workflow_name}' completed with conclusion=${run_conclusion} for commit ${TARGET_SHA}." >&2
                   exit 1
                 fi
                 break
               fi
               if [[ "$(date +%s)" -ge "${DEADLINE_EPOCH}" ]]; then
-                echo "Timed out waiting for '${workflow_name}' completion for commit ${TARGET_SHA}."
+                echo "Timed out waiting for '${workflow_name}' completion for commit ${TARGET_SHA}." >&2
                 exit 1
               fi
-              echo "Waiting for ${workflow_name} completion (run ${run_id}, status=${run_status})..."
+              echo "Waiting for ${workflow_name} completion (run ${run_id}, status=${run_status})..." >&2
               sleep "${POLL_SECS}"
             done
 
@@ -117,12 +117,12 @@ jobs:
                 fi
               fi
               if [[ "${attempt}" -lt "${attempts}" ]]; then
-                echo "Retrying jobs payload fetch for run ${run_id} (${attempt}/${attempts})..."
+                echo "Retrying jobs payload fetch for run ${run_id} (${attempt}/${attempts})..." >&2
                 sleep "${delay_secs}"
               fi
             done
 
-            echo "Failed to fetch valid jobs payload for run ${run_id}."
+            echo "Failed to fetch valid jobs payload for run ${run_id}." >&2
             exit 1
           }
 

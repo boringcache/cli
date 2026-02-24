@@ -1,16 +1,43 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use std::time::Instant;
 
 use crate::api::ApiClient;
 use crate::progress::format_bytes;
 use crate::ui;
 
+#[derive(Debug, Serialize)]
+struct LsEntrySummary {
+    id: String,
+    manifest_root_digest: String,
+    tag: Option<String>,
+    status: String,
+    total_size_bytes: u64,
+    uncompressed_size: Option<u64>,
+    compressed_size: Option<u64>,
+    file_count: Option<u32>,
+    compression_algorithm: String,
+    created_at: String,
+    uploaded_at: Option<String>,
+    encrypted: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct LsSummary {
+    workspace: String,
+    total: u32,
+    page: u32,
+    limit: u32,
+    entries: Vec<LsEntrySummary>,
+}
+
 pub async fn execute(
     workspace_option: Option<String>,
     limit: Option<u32>,
     page: Option<u32>,
     verbose: bool,
+    json_output: bool,
 ) -> Result<()> {
     let workspace = crate::commands::utils::get_workspace_name(workspace_option)?;
     let start_time = Instant::now();
@@ -22,7 +49,46 @@ pub async fn execute(
 
     let response = api_client.list(&workspace, limit, page).await?;
 
-    if response.entries.is_empty() {
+    let mut entries = response.entries;
+    entries.sort_by(|a, b| {
+        let a_time = a.uploaded_at.as_ref().unwrap_or(&a.created_at);
+        let b_time = b.uploaded_at.as_ref().unwrap_or(&b.created_at);
+        b_time.cmp(a_time)
+    });
+
+    if json_output {
+        let summary = LsSummary {
+            workspace: workspace.clone(),
+            total: response.total,
+            page: response.page,
+            limit: response.limit,
+            entries: entries
+                .into_iter()
+                .map(|entry| LsEntrySummary {
+                    status: if entry.uploaded_at.is_some() {
+                        "ready".to_string()
+                    } else {
+                        "pending".to_string()
+                    },
+                    id: entry.id,
+                    manifest_root_digest: entry.manifest_root_digest,
+                    tag: entry.tag,
+                    total_size_bytes: entry.total_size_bytes,
+                    uncompressed_size: entry.uncompressed_size,
+                    compressed_size: entry.compressed_size,
+                    file_count: entry.file_count,
+                    compression_algorithm: entry.compression_algorithm,
+                    created_at: entry.created_at,
+                    uploaded_at: entry.uploaded_at,
+                    encrypted: entry.encrypted,
+                })
+                .collect(),
+        };
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    if entries.is_empty() {
         ui::info(&format!(
             "No cache entries found for workspace: {workspace}"
         ));
@@ -43,13 +109,6 @@ pub async fn execute(
         );
         println!("{}", "-".repeat(76));
     }
-
-    let mut entries = response.entries;
-    entries.sort_by(|a, b| {
-        let a_time = a.uploaded_at.as_ref().unwrap_or(&a.created_at);
-        let b_time = b.uploaded_at.as_ref().unwrap_or(&b.created_at);
-        b_time.cmp(a_time)
-    });
 
     for entry in &entries {
         let tag_value = entry

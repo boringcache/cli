@@ -166,6 +166,9 @@ pub enum Commands {
 
         #[arg(long, default_value = "1")]
         page: u32,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
     },
 
     Config {
@@ -185,7 +188,10 @@ pub enum Commands {
         identity_output: Option<String>,
     },
 
-    Workspaces,
+    Workspaces {
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
 
     #[command(
         name = "docker-registry",
@@ -226,9 +232,20 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum ConfigSubcommand {
-    Get { key: String },
+    Get {
+        key: String,
 
-    Set { key: String, value: String },
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
 
-    List,
+    Set {
+        key: String,
+        value: String,
+    },
+
+    List {
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
 }

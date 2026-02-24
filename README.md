@@ -134,6 +134,11 @@ Use `--fail-on-cache-miss` to fail on misses and `--fail-on-cache-error` to fail
 ### `ls [WORKSPACE]`
 List cache entries.
 
+```bash
+boringcache ls my-org/ws
+boringcache ls my-org/ws --json
+```
+
 ### `mount <WORKSPACE> <TAG:PATH>`
 Watch a directory and sync changes to remote cache in real-time.
 
@@ -210,8 +215,20 @@ By default, tags are git-aware.
 ### `workspaces`
 List available workspaces.
 
+```bash
+boringcache workspaces
+boringcache workspaces --json
+```
+
 ### `config <ACTION>`
 Manage configuration: `list`, `get <key>`, `set <key> <value>`
+
+```bash
+boringcache config list
+boringcache config list --json
+boringcache config get default_workspace
+boringcache config get default_workspace --json
+```
 
 ### `setup-encryption [WORKSPACE]`
 Generate an Age keypair and configure automatic encryption for a workspace.

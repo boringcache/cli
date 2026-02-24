@@ -297,9 +297,9 @@ async fn main() -> Result<()> {
             use commands::config::ConfigAction;
 
             let config_action = match action {
-                ConfigSubcommand::Get { key } => ConfigAction::Get { key },
+                ConfigSubcommand::Get { key, json } => ConfigAction::Get { key, json },
                 ConfigSubcommand::Set { key, value } => ConfigAction::Set { key, value },
-                ConfigSubcommand::List => ConfigAction::List,
+                ConfigSubcommand::List { json } => ConfigAction::List { json },
             };
 
             commands::config::execute(config_action).await
@@ -308,12 +308,13 @@ async fn main() -> Result<()> {
             workspace,
             limit,
             page,
-        } => commands::ls::execute(workspace, Some(limit), Some(page), cli.verbose).await,
+            json,
+        } => commands::ls::execute(workspace, Some(limit), Some(page), cli.verbose, json).await,
         cli::Commands::SetupEncryption {
             workspace,
             identity_output,
         } => commands::setup_encryption::execute(workspace, identity_output).await,
-        cli::Commands::Workspaces => commands::workspaces::execute().await,
+        cli::Commands::Workspaces { json } => commands::workspaces::execute(json).await,
         cli::Commands::Serve {
             workspace,
             tag,

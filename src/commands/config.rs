@@ -1,31 +1,77 @@
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::config::Config;
 use crate::ui;
 
 pub async fn execute(action: ConfigAction) -> Result<()> {
     match action {
-        ConfigAction::Get { key } => get_config_value(key),
+        ConfigAction::Get { key, json } => get_config_value(key, json),
         ConfigAction::Set { key, value } => set_config_value(key, value),
-        ConfigAction::List => list_config(),
+        ConfigAction::List { json } => list_config(json),
     }
 }
 
 #[derive(Debug)]
 pub enum ConfigAction {
-    Get { key: String },
+    Get { key: String, json: bool },
     Set { key: String, value: String },
-    List,
+    List { json: bool },
 }
 
-fn get_config_value(key: String) -> Result<()> {
+#[derive(Debug, Serialize)]
+struct ConfigGetOutput {
+    key: String,
+    value: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigListOutput {
+    api_url: String,
+    token_preview: String,
+    default_workspace: Option<String>,
+}
+
+fn get_config_value(key: String, json_output: bool) -> Result<()> {
     let config = Config::load()?;
 
     match key.as_str() {
-        "api_url" | "api-url" => ui::info(&config.api_url),
-        "token" => ui::info(&config.token),
+        "api_url" | "api-url" => {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&ConfigGetOutput {
+                        key: "api_url".to_string(),
+                        value: Some(config.api_url),
+                    })?
+                );
+            } else {
+                ui::info(&config.api_url);
+            }
+        }
+        "token" => {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&ConfigGetOutput {
+                        key: "token".to_string(),
+                        value: Some(config.token),
+                    })?
+                );
+            } else {
+                ui::info(&config.token);
+            }
+        }
         "default_workspace" | "default-workspace" => {
-            if let Some(workspace) = config.default_workspace {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&ConfigGetOutput {
+                        key: "default_workspace".to_string(),
+                        value: config.default_workspace,
+                    })?
+                );
+            } else if let Some(workspace) = config.default_workspace {
                 ui::info(&workspace);
             } else {
                 ui::info("(not set)");
@@ -84,16 +130,29 @@ fn set_config_value(key: String, value: String) -> Result<()> {
     Ok(())
 }
 
-fn list_config() -> Result<()> {
+fn list_config(json_output: bool) -> Result<()> {
     let config = Config::load()?;
+    let token_preview = format!(
+        "{}...{}",
+        &config.token[..8.min(config.token.len())],
+        &config.token[config.token.len().saturating_sub(4)..]
+    );
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ConfigListOutput {
+                api_url: config.api_url,
+                token_preview,
+                default_workspace: config.default_workspace,
+            })?
+        );
+        return Ok(());
+    }
 
     ui::info("BoringCache Configuration:");
     ui::info(&format!("  api_url: {}", config.api_url));
-    ui::info(&format!(
-        "  token: {}...{}",
-        &config.token[..8.min(config.token.len())],
-        &config.token[config.token.len().saturating_sub(4)..]
-    ));
+    ui::info(&format!("  token: {token_preview}"));
     ui::info(&format!(
         "  default_workspace: {}",
         config.default_workspace.as_deref().unwrap_or("(not set)")

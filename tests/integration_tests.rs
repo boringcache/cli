@@ -147,6 +147,38 @@ fn test_workspaces_command_help() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Usage: boringcache workspaces"));
+    assert!(stdout.contains("--json"));
+    assert!(stdout.contains("Output in JSON format"));
+}
+
+#[test]
+fn test_ls_command_json_flag_help() {
+    let output = run_cli_command(&["ls", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--json"));
+    assert!(stdout.contains("Output in JSON format"));
+}
+
+#[test]
+fn test_config_get_json_flag_help() {
+    let output = run_cli_command(&["config", "get", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--json"));
+    assert!(stdout.contains("Output in JSON format"));
+}
+
+#[test]
+fn test_config_list_json_flag_help() {
+    let output = run_cli_command(&["config", "list", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--json"));
+    assert!(stdout.contains("Output in JSON format"));
 }
 
 #[test]
