@@ -112,11 +112,13 @@ pub async fn oci_dispatch(
     body: Body,
 ) -> Result<Response, OciError> {
     let request_method = method.clone();
+    let request_path = format!("/v2/{path}");
     let fail_on_cache_error = state.fail_on_cache_error;
     let route = match parse_oci_path(&path) {
         Some(route) => route,
         None => return Err(OciError::name_unknown("not found")),
     };
+    eprintln!("OCI {} {}", request_method, request_path);
 
     let response = match route.clone() {
         OciRoute::Manifest { name, reference } => match method {
@@ -141,20 +143,41 @@ pub async fn oci_dispatch(
     };
 
     match response {
-        Ok(response) => Ok(response),
+        Ok(response) => {
+            let response_status = response.status();
+            if request_method != Method::GET
+                && request_method != Method::HEAD
+                && !response_status.is_success()
+            {
+                eprintln!(
+                    "OCI {} {} -> {}",
+                    request_method, request_path, response_status
+                );
+            }
+            Ok(response)
+        }
         Err(error) => {
-            if fail_on_cache_error || !error.status().is_server_error() {
+            let error_status = error.status();
+            if fail_on_cache_error || !error_status.is_server_error() {
+                eprintln!(
+                    "OCI {} {} -> {}",
+                    request_method, request_path, error_status
+                );
                 return Err(error);
             }
             if request_method != Method::GET && request_method != Method::HEAD {
+                eprintln!(
+                    "OCI {} {} -> {}",
+                    request_method, request_path, error_status
+                );
                 return Err(error);
             }
-            log::warn!(
-                "Best-effort OCI fallback on {} /v2/{} ({})",
-                request_method,
-                path,
-                error.status()
+            let warning = format!(
+                "Best-effort OCI fallback on {} {} ({})",
+                request_method, request_path, error_status
             );
+            eprintln!("{warning}");
+            log::warn!("{warning}");
             best_effort_oci_read_response(&route)
         }
     }
@@ -1278,12 +1301,18 @@ async fn put_manifest(
             )
             .await
             {
-                log::warn!(
+                if state.fail_on_cache_error {
+                    return Err(OciError::internal(format!(
+                        "Alias write failed for {alias_tag} (workspace={}): {error}",
+                        state.workspace
+                    )));
+                }
+                let warning = format!(
                     "Alias write skipped for {} (workspace={}): {}",
-                    alias_tag,
-                    state.workspace,
-                    error
+                    alias_tag, state.workspace, error
                 );
+                eprintln!("{warning}");
+                log::warn!("{warning}");
             }
         }
 
@@ -1297,12 +1326,14 @@ async fn put_manifest(
         if state.fail_on_cache_error || !error.status().is_server_error() {
             return Err(error);
         }
-        log::warn!(
+        let warning = format!(
             "Best-effort OCI manifest publish fallback on {}:{} ({})",
             name,
             reference,
             error.status()
         );
+        eprintln!("{warning}");
+        log::warn!("{warning}");
     }
 
     let mut headers = HeaderMap::new();

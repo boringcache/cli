@@ -397,6 +397,33 @@ async fn clear_tag_misses(state: &AppState, registry_root_tag: &str) {
     misses.retain(|key, expires_at| *expires_at > now && !key.starts_with(&prefix));
 }
 
+fn kv_root_tags_from_values(
+    registry_root_tag: &str,
+    primary_human_tag: Option<&str>,
+) -> Vec<String> {
+    let mut tags = vec![registry_root_tag.trim().to_string()];
+    if let Some(primary_human_tag) = primary_human_tag {
+        let primary_human_tag = primary_human_tag.trim();
+        if !primary_human_tag.is_empty() && !tags.iter().any(|tag| tag == primary_human_tag) {
+            tags.push(primary_human_tag.to_string());
+        }
+    }
+    tags
+}
+
+fn kv_root_tags(state: &AppState) -> Vec<String> {
+    kv_root_tags_from_values(
+        &state.registry_root_tag,
+        state.configured_human_tags.first().map(String::as_str),
+    )
+}
+
+async fn clear_root_tag_misses(state: &AppState) {
+    for tag in kv_root_tags(state) {
+        clear_tag_misses(state, &tag).await;
+    }
+}
+
 fn kv_blob_upload_retry_delay(attempt: u32) -> std::time::Duration {
     let exponent = attempt.saturating_sub(1);
     let backoff = KV_BLOB_UPLOAD_RETRY_BASE_MS.saturating_mul(2_u64.pow(exponent));
@@ -465,8 +492,7 @@ async fn should_refresh_published_index_for_lookup(state: &AppState) -> bool {
 }
 
 async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), RegistryError> {
-    let tag = state.registry_root_tag.trim().to_string();
-    let (entries, cache_entry_id, _) = load_existing_index(state, &tag).await?;
+    let (entries, cache_entry_id, _) = load_existing_index_with_fallback(state).await?;
 
     {
         let mut published = state.kv_published_index.write().await;
@@ -478,7 +504,7 @@ async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), Regi
             published.set_empty();
         }
     }
-    clear_tag_misses(state, &tag).await;
+    clear_root_tag_misses(state).await;
 
     Ok(())
 }
@@ -957,7 +983,7 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
                 let mut published = state.kv_published_index.write().await;
                 published.update(merged_entries.into_iter().collect(), cache_entry_id.clone());
             }
-            clear_tag_misses(state, &state.registry_root_tag).await;
+            clear_root_tag_misses(state).await;
             state.kv_last_put.store(0, Ordering::Release);
 
             eprintln!(
@@ -1000,8 +1026,7 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
 }
 
 pub(crate) async fn preload_kv_index(state: &AppState) {
-    let tag = state.registry_root_tag.trim().to_string();
-    match load_existing_index(state, &tag).await {
+    match load_existing_index_with_fallback(state).await {
         Ok((entries, Some(cache_entry_id), _manifest_root_digest)) if !entries.is_empty() => {
             let count = entries.len();
             {
@@ -1012,7 +1037,7 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
                 }
                 published.update(entries.into_iter().collect(), cache_entry_id.clone());
             }
-            clear_tag_misses(state, &tag).await;
+            clear_root_tag_misses(state).await;
             eprintln!("KV index preloaded: {count} entries, resolving download URLs...");
             preload_download_urls(state, &cache_entry_id).await;
             let preload_state = state.clone();
@@ -1038,17 +1063,25 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         return;
     }
 
-    let tag = state.registry_root_tag.trim().to_string();
-    let live_hit = match resolve_hit(state, &tag).await {
-        Ok(hit) => Some(hit),
-        Err(error) if error.status == StatusCode::NOT_FOUND => None,
-        Err(error) => {
-            log::warn!("KV index refresh failed during resolve: {error:?}");
-            return;
+    let mut live_hit: Option<(String, CacheResolutionEntry)> = None;
+    for candidate_tag in kv_root_tags(state) {
+        match resolve_hit(state, &candidate_tag).await {
+            Ok(hit) => {
+                if candidate_tag != state.registry_root_tag.trim() {
+                    eprintln!("KV root fallback hit: refreshing from legacy tag {candidate_tag}");
+                }
+                live_hit = Some((candidate_tag, hit));
+                break;
+            }
+            Err(error) if error.status == StatusCode::NOT_FOUND => {}
+            Err(error) => {
+                log::warn!("KV index refresh failed during resolve: {error:?}");
+                return;
+            }
         }
-    };
+    }
 
-    let Some(hit) = live_hit else {
+    let Some((tag, hit)) = live_hit else {
         let had_entries = {
             let published = state.kv_published_index.read().await;
             published.entry_count() > 0
@@ -1057,7 +1090,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             let mut published = state.kv_published_index.write().await;
             published.set_empty();
         }
-        clear_tag_misses(state, &tag).await;
+        clear_root_tag_misses(state).await;
         if had_entries {
             eprintln!("KV index refresh: cleared stale entries (no backend index)");
         }
@@ -1135,7 +1168,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             let mut published = state.kv_published_index.write().await;
             published.set_empty();
         }
-        clear_tag_misses(state, &tag).await;
+        clear_root_tag_misses(state).await;
         if had_entries {
             eprintln!("KV index refresh: cleared stale entries (empty pointer)");
         }
@@ -1147,7 +1180,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         let mut published = state.kv_published_index.write().await;
         published.update(entries, cache_entry_id.clone());
     }
-    clear_tag_misses(state, &tag).await;
+    clear_root_tag_misses(state).await;
     eprintln!("KV index refresh: {count} entries loaded");
     preload_download_urls(state, &cache_entry_id).await;
     let preload_state = state.clone();
@@ -1415,7 +1448,7 @@ async fn do_flush(
         published.entries_snapshot()
     };
 
-    let backend_entries = match load_existing_index(state, &tag).await {
+    let backend_entries = match load_existing_index_with_fallback(state).await {
         Ok((existing, _, _)) => existing,
         Err(e) => {
             log::warn!("KV flush: failed to load existing index: {e:?}");
@@ -1854,6 +1887,30 @@ async fn load_existing_index(
     Ok((map, cache_entry_id, manifest_root_digest))
 }
 
+async fn load_existing_index_with_fallback(
+    state: &AppState,
+) -> Result<
+    (
+        BTreeMap<String, BlobDescriptor>,
+        Option<String>,
+        Option<String>,
+    ),
+    RegistryError,
+> {
+    let tags = kv_root_tags(state);
+    for (idx, tag) in tags.iter().enumerate() {
+        let (entries, cache_entry_id, manifest_root_digest) =
+            load_existing_index(state, tag).await?;
+        if cache_entry_id.is_some() || !entries.is_empty() {
+            if idx > 0 {
+                eprintln!("KV root fallback hit: loaded legacy tag {tag}");
+            }
+            return Ok((entries, cache_entry_id, manifest_root_digest));
+        }
+    }
+    Ok((BTreeMap::new(), None, None))
+}
+
 async fn write_body_to_temp_file(body: Body) -> Result<(PathBuf, u64, String), RegistryError> {
     let temp_dir = std::env::temp_dir().join("boringcache-kv-blobs");
     tokio::fs::create_dir_all(&temp_dir)
@@ -1964,5 +2021,26 @@ mod tests {
         assert!(used_fallback);
         assert_eq!(selected.len(), 1);
         assert!(selected.contains_key("k2"));
+    }
+
+    #[test]
+    fn kv_root_tags_include_legacy_human_root_when_distinct() {
+        let tags = kv_root_tags_from_values("bc_registry_root_v2_abc", Some("grpc-bazel"));
+        assert_eq!(
+            tags,
+            vec![
+                "bc_registry_root_v2_abc".to_string(),
+                "grpc-bazel".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn kv_root_tags_skip_empty_or_duplicate_legacy_root() {
+        let duplicate = kv_root_tags_from_values("grpc-bazel", Some("grpc-bazel"));
+        assert_eq!(duplicate, vec!["grpc-bazel".to_string()]);
+
+        let empty = kv_root_tags_from_values("grpc-bazel", Some(" "));
+        assert_eq!(empty, vec!["grpc-bazel".to_string()]);
     }
 }
