@@ -16,9 +16,76 @@ env:
   SCCACHE_VERSION: "v0.13.0"
 
 jobs:
+  require-cli-ci:
+    name: Require CLI CI Success
+    runs-on: ubuntu-latest
+    outputs:
+      ci_run_id: ${{ steps.gate.outputs.ci_run_id }}
+      target_sha: ${{ steps.gate.outputs.target_sha }}
+
+    steps:
+      - name: Checkout code (for tag SHA resolution)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify CLI CI passed for tagged commit
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            echo "unsupported trigger for release gate: ${{ github.event_name }}"
+            exit 1
+          fi
+
+          TARGET_SHA="$(git rev-list -n 1 "${TAG}" 2>/dev/null || true)"
+          if [[ -z "${TARGET_SHA}" ]]; then
+            echo "failed to resolve target SHA for tag ${TAG}"
+            exit 1
+          fi
+          echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Checking CLI CI runs for SHA: ${TARGET_SHA}"
+
+          RUN_ID="$(gh run list \
+            --repo "${{ github.repository }}" \
+            --workflow "CLI CI" \
+            --json databaseId,headSha,status,conclusion \
+            --limit 200 \
+            --jq ".[] | select(.headSha==\"${TARGET_SHA}\" and .status==\"completed\" and .conclusion==\"success\") | .databaseId" \
+            | head -n1)"
+
+          if [[ -z "${RUN_ID}" ]]; then
+            echo "No successful 'CLI CI' workflow run found for commit ${TARGET_SHA}."
+            echo "Run CLI CI on main for this commit before creating/pushing a release tag."
+            exit 1
+          fi
+          echo "ci_run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+
+          JOBS_JSON="$(gh run view "${RUN_ID}" --repo "${{ github.repository }}" --json jobs)"
+          for prefix in "Test CLI (BoringCache)" "Test Docker"; do
+            TOTAL="$(printf '%s' "${JOBS_JSON}" | jq --arg p "${prefix}" '[.jobs[] | select(.name | startswith($p))] | length')"
+            OK="$(printf '%s' "${JOBS_JSON}" | jq --arg p "${prefix}" '[.jobs[] | select(.name | startswith($p) and .conclusion=="success")] | length')"
+            if [[ "${TOTAL}" -eq 0 ]]; then
+              echo "Required CI jobs missing for prefix: ${prefix}"
+              exit 1
+            fi
+            if [[ "${TOTAL}" -ne "${OK}" ]]; then
+              echo "Required CI jobs not all successful for prefix: ${prefix} (${OK}/${TOTAL})"
+              exit 1
+            fi
+          done
+
   # Build CLI binaries for multiple platforms
   build-cli:
     name: Build CLI - ${{ matrix.name }}
+    needs: [require-cli-ci]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -333,7 +400,7 @@ jobs:
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build-cli]
+    needs: [require-cli-ci, build-cli, test-cli]
     outputs:
       tag: ${{ steps.get_tag.outputs.tag }}
 
@@ -506,7 +573,7 @@ jobs:
             ```
 
             ---
-            **Full Changelog**: https://github.com/${{ github.repository }}/compare/v1.0.3...${{ steps.get_tag.outputs.tag }}
+            **Releases**: https://github.com/${{ github.repository }}/releases
           draft: false
           prerelease: false
 
@@ -595,6 +662,7 @@ jobs:
   test-cli:
     name: Test CLI
     runs-on: ubuntu-latest
+    needs: [require-cli-ci]
 
     steps:
       - name: Checkout code

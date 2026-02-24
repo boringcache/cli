@@ -311,7 +311,7 @@ jobs:
 
 The action accepts these inputs:
 - `token` - BoringCache API token (sets `BORINGCACHE_API_TOKEN` env var)
-- `version` - Version to install (default: `v1.1.0`)
+- `version` - Version to install (default: latest release)
 - `verify-checksum` - Verify SHA256 checksum (default: `true`)
 - `skip-cache` - Skip tool cache, always download fresh (default: `false`)
 

@@ -86,7 +86,7 @@ jobs:
           start_proxy() {
             local log_file="$1"
             LOG_FILES+=("$log_file")
-            ./target/debug/boringcache docker-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git > "${log_file}" 2>&1 &
+            ./target/debug/boringcache docker-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git --fail-on-cache-error > "${log_file}" 2>&1 &
             SERVE_PID=$!
 
             local ready=0
@@ -374,7 +374,7 @@ jobs:
           trap cleanup EXIT
 
           start_proxy() {
-            ./target/debug/boringcache docker-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git > "${ADAPTER_PROXY_LOG}" 2>&1 &
+            ./target/debug/boringcache docker-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git --fail-on-cache-error > "${ADAPTER_PROXY_LOG}" 2>&1 &
             SERVE_PID=$!
 
             local ready=0
