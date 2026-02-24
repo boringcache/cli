@@ -256,6 +256,26 @@ fn test_restore_fail_on_cache_miss_flag_help() {
 }
 
 #[test]
+fn test_restore_fail_on_cache_error_flag_help() {
+    let output = run_cli_command(&["restore", "--help"]);
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--fail-on-cache-error"));
+    assert!(stdout.contains("Exit with error if restore encounters cache/backend failures"));
+}
+
+#[test]
+fn test_save_fail_on_cache_error_flag_help() {
+    let output = run_cli_command(&["save", "--help"]);
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--fail-on-cache-error"));
+    assert!(stdout.contains("Exit with error if save encounters cache/backend failures"));
+}
+
+#[test]
 fn test_restore_lookup_only_flag_help() {
     let output = run_cli_command(&["restore", "--help"]);
     assert!(output.status.success());
@@ -307,6 +327,42 @@ fn test_restore_flags_can_be_combined() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
+    assert!(stderr.contains("auth") || stderr.contains("token") || stderr.contains("config"));
+}
+
+#[test]
+fn test_restore_fail_on_cache_error_requires_auth() {
+    let output = run_cli_command_isolated(&[
+        "restore",
+        "test/workspace",
+        "some-cache",
+        "--fail-on-cache-error",
+    ]);
+
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("auth") || stderr.contains("token") || stderr.contains("config"));
+}
+
+#[test]
+fn test_save_fail_on_cache_error_requires_auth() {
+    use std::fs;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let payload_path = temp_dir.path().join("payload.txt");
+    fs::write(&payload_path, b"test").expect("Failed to write payload");
+
+    let output = run_cli_command_isolated(&[
+        "save",
+        "test/workspace",
+        &format!("cache-key:{}", payload_path.display()),
+        "--fail-on-cache-error",
+    ]);
+
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("auth") || stderr.contains("token") || stderr.contains("config"));
 }
 

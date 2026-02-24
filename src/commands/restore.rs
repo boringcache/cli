@@ -318,8 +318,9 @@ pub async fn execute_batch_restore(
     fail_on_cache_miss: bool,
     lookup_only: bool,
     identity: Option<String>,
+    fail_on_cache_error: bool,
 ) -> Result<()> {
-    execute_batch_restore_inner(
+    if let Err(err) = execute_batch_restore_inner(
         workspace_option,
         tag_path_pairs,
         verbose,
@@ -328,8 +329,16 @@ pub async fn execute_batch_restore(
         fail_on_cache_miss,
         lookup_only,
         identity,
+        fail_on_cache_error,
     )
     .await
+    {
+        if fail_on_cache_miss || fail_on_cache_error {
+            return Err(err);
+        }
+        ui::warn(&format!("{:#}", err));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -342,6 +351,7 @@ async fn execute_batch_restore_inner(
     fail_on_cache_miss: bool,
     lookup_only: bool,
     identity: Option<String>,
+    fail_on_cache_error: bool,
 ) -> Result<()> {
     let workspace = crate::commands::utils::get_workspace_name(workspace_option)?;
 
@@ -510,9 +520,13 @@ async fn execute_batch_restore_inner(
                 reporter.step_complete(session_id.clone(), 1, step_start.elapsed())?;
 
                 if is_pending {
-                    reporter.warning("Cache upload still in progress after retries".to_string())?;
+                    let warning_message = "Cache upload still in progress after retries";
+                    reporter.warning(warning_message.to_string())?;
                     drop(reporter);
                     progress_system.shutdown()?;
+                    if fail_on_cache_error {
+                        anyhow::bail!(warning_message);
+                    }
                     return Ok(());
                 }
 
@@ -520,11 +534,17 @@ async fn execute_batch_restore_inner(
                     reporter.warning(format!("Cache unavailable: {}", err))?;
                     drop(reporter);
                     progress_system.shutdown()?;
+                    if fail_on_cache_error {
+                        return Err(err);
+                    }
                     return Ok(());
                 }
                 reporter.warning(format!("Cache restore failed: {}", err))?;
                 drop(reporter);
                 progress_system.shutdown()?;
+                if fail_on_cache_error {
+                    return Err(err);
+                }
                 return Ok(());
             }
         }
@@ -777,7 +797,11 @@ async fn execute_batch_restore_inner(
         }
     }
 
-    let _ = finalize_restore_outcome(restore_errors, skipped_entries);
+    if fail_on_cache_error {
+        finalize_restore_outcome(restore_errors, skipped_entries)?;
+    } else {
+        let _ = finalize_restore_outcome(restore_errors, skipped_entries);
+    }
 
     if !misses.is_empty() {
         ui::warn(&format!("Missing cache entries: {}", misses.join(", ")));

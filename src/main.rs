@@ -195,6 +195,7 @@ async fn main() -> Result<()> {
             no_git,
             exclude,
             recipient,
+            fail_on_cache_error,
         } => {
             let tag_path_strings = path_tag_pairs
                 .split(',')
@@ -212,6 +213,7 @@ async fn main() -> Result<()> {
                 force,
                 exclude,
                 recipient,
+                fail_on_cache_error,
             )
             .await
         }
@@ -223,6 +225,7 @@ async fn main() -> Result<()> {
             lookup_only,
             no_git,
             identity,
+            fail_on_cache_error,
         } => {
             let tag_path_strings = tag_path_pairs
                 .split(',')
@@ -240,6 +243,7 @@ async fn main() -> Result<()> {
                 fail_on_cache_miss,
                 lookup_only,
                 identity,
+                fail_on_cache_error,
             )
             .await
         }

@@ -77,6 +77,12 @@ pub enum Commands {
 
         #[arg(long, help = "Age recipient public key for encryption (age1...)")]
         recipient: Option<String>,
+
+        #[arg(
+            long,
+            help = "Exit with error if save encounters cache/backend failures"
+        )]
+        fail_on_cache_error: bool,
     },
 
     Restore {
@@ -103,6 +109,12 @@ pub enum Commands {
 
         #[arg(long, help = "Path to Age identity file for decryption")]
         identity: Option<String>,
+
+        #[arg(
+            long,
+            help = "Exit with error if restore encounters cache/backend failures"
+        )]
+        fail_on_cache_error: bool,
     },
 
     Check {

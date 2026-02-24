@@ -1126,6 +1126,108 @@ async fn test_restore_fail_on_cache_miss_with_partial_hits() {
 }
 
 #[tokio::test]
+async fn test_restore_fail_on_cache_error_flag() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!("skipping test_restore_fail_on_cache_error_flag: networking disabled in sandbox");
+        return;
+    }
+    let mut server = Server::new_async().await;
+
+    let _auth_mock = server
+        .mock("GET", "/v2/session")
+        .with_status(200)
+        .with_body(
+            json!({
+                "user": {"name": "Test User", "email": "test@example.com"},
+                "organization": {"name": "Test Org"},
+                "token": {"expires_in_days": 90}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let platform_suffix = platform_tag_suffix();
+    let hit_tag = format!("error-cache-{}", platform_suffix);
+
+    let _cache_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": hit_tag,
+                "cache_entry_id": "entry-123",
+                "manifest_url": format!("{}/manifest-error", server.url()),
+                "archive_urls": [format!("{}/archive-error", server.url())],
+                "chunks": [],
+                "metadata": null,
+                "status": "hit"
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _manifest_mock = server
+        .mock("GET", "/manifest-error")
+        .with_status(500)
+        .with_body("storage unavailable")
+        .create_async()
+        .await;
+
+    env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config_dir = temp_dir.path().join(".boringcache");
+    fs::create_dir(&config_dir).expect("Failed to create config dir");
+    fs::write(
+        config_dir.join("config.json"),
+        json!({
+            "token": "test-token-123",
+            "api_url": server.url()
+        })
+        .to_string(),
+    )
+    .expect("Failed to write config");
+
+    env::set_var("HOME", temp_dir.path());
+
+    let restore_target = temp_dir.path().join("restore-target");
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "restore",
+            "test/workspace",
+            &format!("error-cache:{}", restore_target.display()),
+            "--fail-on-cache-error",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        !output.status.success(),
+        "Expected non-zero exit code with --fail-on-cache-error on backend failure"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Restore failed")
+            || stderr.contains("Failed to download")
+            || stderr.contains("cache/backend"),
+        "Unexpected stderr: {}",
+        stderr
+    );
+
+    env::remove_var("BORINGCACHE_API_URL");
+    env::remove_var("HOME");
+}
+
+#[tokio::test]
 async fn test_restore_lookup_only_flag() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {

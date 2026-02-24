@@ -37,6 +37,7 @@ pub async fn execute_batch_save(
     force: bool,
     exclude: Vec<String>,
     recipient: Option<String>,
+    fail_on_cache_error: bool,
 ) -> Result<()> {
     if let Err(err) = execute_batch_save_inner(
         workspace,
@@ -50,6 +51,9 @@ pub async fn execute_batch_save(
     )
     .await
     {
+        if fail_on_cache_error {
+            return Err(err);
+        }
         ui::warn(&format!("{:#}", err));
     }
     Ok(())
