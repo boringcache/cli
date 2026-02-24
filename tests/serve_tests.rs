@@ -504,7 +504,7 @@ async fn test_tag_mapping_deterministic() {
 }
 
 #[tokio::test]
-async fn test_manifest_put_skips_alias_confirm_when_alias_save_exists() {
+async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
 
@@ -624,9 +624,42 @@ async fn test_manifest_put_skips_alias_confirm_when_alias_save_exists() {
         "/v2/workspaces/org/repo/caches/tags/{}/publish",
         urlencoding::encode(&alias_tag)
     );
+    let alias_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&alias_tag)
+    );
+    let alias_pointer_mock = server
+        .mock("GET", alias_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "5",
+                "cache_entry_id": "entry-alias",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
     let alias_confirm_mock = server
         .mock("PUT", alias_publish_path.as_str())
-        .expect(0)
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "5")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "5",
+                "status": "ok",
+                "cache_entry_id": "entry-alias"
+            })
+            .to_string(),
+        )
+        .expect(1)
         .create_async()
         .await;
 
@@ -649,6 +682,7 @@ async fn test_manifest_put_skips_alias_confirm_when_alias_save_exists() {
     primary_pointer_mock.assert_async().await;
     primary_confirm_mock.assert_async().await;
     alias_save_mock.assert_async().await;
+    alias_pointer_mock.assert_async().await;
     alias_confirm_mock.assert_async().await;
 }
 

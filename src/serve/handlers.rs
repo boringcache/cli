@@ -345,10 +345,6 @@ async fn bind_alias_tag(
         .await
         .map_err(|e| format!("save_entry failed: {e}"))?;
 
-    if alias_save.exists {
-        return Ok(());
-    }
-
     let alias_confirm = ConfirmRequest {
         manifest_digest: manifest_root_digest.to_string(),
         manifest_size,
