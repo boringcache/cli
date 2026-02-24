@@ -20,6 +20,17 @@ use crate::serve::state::{
 use crate::tag_utils::TagResolver;
 
 const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
+const EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS: usize = 4;
+const EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS: u64 = 25;
+const EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS: usize = 2;
+const EMPTY_FINALIZE_REMOTE_RETRY_DELAY_MS: u64 = 50;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EmptyFinalizeReuse {
+    Local,
+    Remote,
+    Missing,
+}
 
 fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) -> Result<(), OciError> {
     let header_name = axum::http::header::HeaderName::from_bytes(name.as_bytes())
@@ -616,12 +627,81 @@ async fn read_file_digest_and_size(path: &std::path::Path) -> Result<(u64, Strin
     Ok((size, digest))
 }
 
+async fn has_non_empty_local_blob(state: &AppState, digest: &str) -> bool {
+    let sessions = state.upload_sessions.read().await;
+    sessions
+        .find_by_digest(digest)
+        .map(|session| session.finalized_size.unwrap_or(session.bytes_received) > 0)
+        .unwrap_or(false)
+}
+
+async fn has_remote_blob(state: &AppState, digest: &str) -> Result<bool, OciError> {
+    let check = state
+        .api_client
+        .check_blobs(
+            &state.workspace,
+            &[BlobDescriptor {
+                digest: digest.to_string(),
+                size_bytes: 0,
+            }],
+        )
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to check blob existence: {e}")))?;
+
+    Ok(check
+        .results
+        .iter()
+        .any(|result| result.digest == digest && result.exists))
+}
+
+async fn resolve_empty_finalize_reuse(
+    state: &AppState,
+    digest: &str,
+) -> Result<EmptyFinalizeReuse, OciError> {
+    for attempt in 0..EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS {
+        if has_non_empty_local_blob(state, digest).await {
+            return Ok(EmptyFinalizeReuse::Local);
+        }
+        if attempt + 1 < EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS)).await;
+        }
+    }
+
+    for attempt in 0..EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS {
+        if has_remote_blob(state, digest).await? {
+            return Ok(EmptyFinalizeReuse::Remote);
+        }
+        if attempt + 1 < EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(EMPTY_FINALIZE_REMOTE_RETRY_DELAY_MS)).await;
+        }
+    }
+
+    Ok(EmptyFinalizeReuse::Missing)
+}
+
 async fn start_upload(
     state: AppState,
     name: String,
     params: HashMap<String, String>,
     body: Body,
 ) -> Result<Response, OciError> {
+    if let Some(mount_digest) = params.get("mount") {
+        if !cas_oci::is_valid_sha256_digest(mount_digest) {
+            return Err(OciError::digest_invalid(format!(
+                "unsupported mount digest format: {mount_digest}"
+            )));
+        }
+
+        if has_non_empty_local_blob(&state, mount_digest).await {
+            let location = format!("/v2/{name}/blobs/{mount_digest}");
+            let mut headers = HeaderMap::new();
+            insert_header(&mut headers, "Location", &location)?;
+            insert_header(&mut headers, "Docker-Content-Digest", mount_digest)?;
+            insert_header(&mut headers, "Content-Length", "0")?;
+            return Ok((StatusCode::CREATED, headers, Body::empty()).into_response());
+        }
+    }
+
     let session_id = uuid::Uuid::new_v4().to_string();
 
     let temp_dir = std::env::temp_dir().join("boringcache-uploads");
@@ -859,67 +939,46 @@ async fn put_upload(
         finalized_size = bytes_before;
     }
 
-    let allow_local_reuse = if actual_digest != digest_param && file_size == 0 {
-        let sessions = state.upload_sessions.read().await;
-        sessions
-            .find_by_digest(&digest_param)
-            .map(|session| session.finalized_size.unwrap_or(session.bytes_received) > 0)
-            .unwrap_or(false)
-    } else {
-        false
-    };
-
-    let allow_remote_reuse = actual_digest != digest_param && file_size == 0 && !allow_local_reuse;
-    if allow_local_reuse {
-        log::debug!(
-            "OCI finalize accepted local blob reuse: name={} upload={} digest={} bytes_before={} bytes_written={} write_offset={}",
-            name,
-            uuid,
-            digest_param,
-            bytes_before,
-            bytes_written,
-            write_offset
-        );
-    } else if allow_remote_reuse {
-        let check = state
-            .api_client
-            .check_blobs(
-                &state.workspace,
-                &[BlobDescriptor {
-                    digest: digest_param.clone(),
-                    size_bytes: 0,
-                }],
-            )
-            .await
-            .map_err(|e| OciError::internal(format!("Failed to check blob existence: {e}")))?;
-        let exists = check
-            .results
-            .iter()
-            .any(|result| result.digest == digest_param && result.exists);
-        if !exists {
-            log::warn!(
-                "OCI finalize digest mismatch (empty payload fallback failed): name={} upload={} expected={} actual={} bytes_before={} bytes_written={} write_offset={}",
-                name,
-                uuid,
-                digest_param,
-                actual_digest,
-                bytes_before,
-                bytes_written,
-                write_offset
-            );
-            return Err(OciError::digest_invalid(format!(
-                "expected {digest_param}, got {actual_digest}"
-            )));
+    if actual_digest != digest_param && file_size == 0 {
+        match resolve_empty_finalize_reuse(&state, &digest_param).await? {
+            EmptyFinalizeReuse::Local => {
+                log::debug!(
+                    "OCI finalize accepted local blob reuse: name={} upload={} digest={} bytes_before={} bytes_written={} write_offset={}",
+                    name,
+                    uuid,
+                    digest_param,
+                    bytes_before,
+                    bytes_written,
+                    write_offset
+                );
+            }
+            EmptyFinalizeReuse::Remote => {
+                log::debug!(
+                    "OCI finalize accepted remote blob reuse: name={} upload={} digest={} bytes_before={} bytes_written={} write_offset={}",
+                    name,
+                    uuid,
+                    digest_param,
+                    bytes_before,
+                    bytes_written,
+                    write_offset
+                );
+            }
+            EmptyFinalizeReuse::Missing => {
+                log::warn!(
+                    "OCI finalize digest mismatch (empty payload fallback failed): name={} upload={} expected={} actual={} bytes_before={} bytes_written={} write_offset={}",
+                    name,
+                    uuid,
+                    digest_param,
+                    actual_digest,
+                    bytes_before,
+                    bytes_written,
+                    write_offset
+                );
+                return Err(OciError::digest_invalid(format!(
+                    "expected {digest_param}, got {actual_digest}"
+                )));
+            }
         }
-        log::debug!(
-            "OCI finalize accepted remote blob reuse: name={} upload={} digest={} bytes_before={} bytes_written={} write_offset={}",
-            name,
-            uuid,
-            digest_param,
-            bytes_before,
-            bytes_written,
-            write_offset
-        );
     } else if actual_digest != digest_param {
         log::warn!(
             "OCI finalize digest mismatch: name={} upload={} expected={} actual={} bytes_before={} bytes_written={} write_offset={} file_size={}",
@@ -1467,6 +1526,101 @@ mod tests {
         assert_eq!(empty.finalized_digest.as_deref(), Some(digest.as_str()));
 
         let _ = tokio::fs::remove_file(&filled_path).await;
+        let _ = tokio::fs::remove_file(&empty_path).await;
+    }
+
+    #[tokio::test]
+    async fn start_upload_mount_returns_created_for_existing_local_digest() {
+        let state = test_state();
+        let digest = cas_oci::prefixed_sha256_digest(b"mount-existing");
+        let filled_path = write_temp_upload_file(b"mount-existing").await;
+
+        {
+            let mut sessions = state.upload_sessions.write().await;
+            sessions.create(UploadSession {
+                id: "filled-session".to_string(),
+                name: "cache".to_string(),
+                temp_path: filled_path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
+                bytes_received: 14,
+                finalized_digest: Some(digest.clone()),
+                finalized_size: Some(14),
+                created_at: Instant::now(),
+            });
+        }
+
+        let mut params = HashMap::new();
+        params.insert("mount".to_string(), digest.clone());
+        params.insert("from".to_string(), "cache".to_string());
+
+        let response = start_upload(state, "cache".to_string(), params, Body::empty())
+            .await
+            .expect("start upload mount should reuse local blob");
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let _ = tokio::fs::remove_file(&filled_path).await;
+    }
+
+    #[tokio::test]
+    async fn put_upload_retries_local_reuse_before_remote_lookup() {
+        let state = test_state();
+        let digest = cas_oci::prefixed_sha256_digest(b"delayed payload");
+        let delayed_path = write_temp_upload_file(b"delayed payload").await;
+        let empty_path = write_temp_upload_file(&[]).await;
+
+        {
+            let mut sessions = state.upload_sessions.write().await;
+            sessions.create(UploadSession {
+                id: "delayed-session".to_string(),
+                name: "cache".to_string(),
+                temp_path: delayed_path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
+                bytes_received: 0,
+                finalized_digest: None,
+                finalized_size: None,
+                created_at: Instant::now(),
+            });
+            sessions.create(UploadSession {
+                id: "empty-session".to_string(),
+                name: "cache".to_string(),
+                temp_path: empty_path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
+                bytes_received: 0,
+                finalized_digest: None,
+                finalized_size: None,
+                created_at: Instant::now(),
+            });
+        }
+
+        let state_for_finalize = state.clone();
+        let digest_for_finalize = digest.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let mut sessions = state_for_finalize.upload_sessions.write().await;
+            let session = sessions
+                .get_mut("delayed-session")
+                .expect("delayed session exists");
+            session.bytes_received = 15;
+            session.finalized_size = Some(15);
+            session.finalized_digest = Some(digest_for_finalize);
+        });
+
+        let mut params = HashMap::new();
+        params.insert("digest".to_string(), digest.clone());
+        let response = put_upload(
+            state,
+            "cache".to_string(),
+            "empty-session".to_string(),
+            params,
+            HeaderMap::new(),
+            Body::empty(),
+        )
+        .await
+        .expect("empty finalize should reuse delayed local digest");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let _ = tokio::fs::remove_file(&delayed_path).await;
         let _ = tokio::fs::remove_file(&empty_path).await;
     }
 
