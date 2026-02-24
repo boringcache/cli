@@ -46,6 +46,7 @@ async fn dispatch_with_path(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, RegistryError> {
+    let request_method = method.clone();
     let normalized_path = normalize_path(&path);
     let route = match route::detect_route(&method, &normalized_path) {
         Ok(r) => r,
@@ -55,7 +56,7 @@ async fn dispatch_with_path(
         Err(e) => return Err(e),
     };
 
-    match route {
+    let response = match route {
         route::RegistryRoute::BazelAc { digest_hex } => {
             bazel::handle_ac(&state, method, &digest_hex, body).await
         }
@@ -77,9 +78,43 @@ async fn dispatch_with_path(
             sccache::handle_object(&state, method, &key_path, body).await
         }
         route::RegistryRoute::SccacheMkcol => sccache::handle_mkcol(method),
+    };
+
+    match response {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            if state.fail_on_cache_error || !error.status.is_server_error() {
+                return Err(error);
+            }
+            log::warn!(
+                "Best-effort cache-registry fallback on {} {} ({})",
+                request_method,
+                normalized_path,
+                error.status
+            );
+            Ok(best_effort_cache_registry_response(&request_method))
+        }
     }
 }
 
 fn normalize_path(path: &str) -> String {
     path.trim_matches('/').to_string()
+}
+
+fn best_effort_cache_registry_response(method: &Method) -> Response {
+    let status = if *method == Method::GET || *method == Method::HEAD {
+        StatusCode::NOT_FOUND
+    } else if *method == Method::PUT {
+        StatusCode::OK
+    } else if *method == Method::POST || *method == Method::PATCH {
+        StatusCode::ACCEPTED
+    } else if *method == Method::DELETE {
+        StatusCode::NO_CONTENT
+    } else if method.as_str() == "MKCOL" {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+
+    (status, Body::empty()).into_response()
 }

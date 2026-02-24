@@ -182,7 +182,9 @@ The proxy translates OCI Distribution API calls into BoringCache CAS operations.
 
 The proxy binds to `127.0.0.1` by default. Use `--host 0.0.0.0` when the BuildKit daemon runs in a separate container (e.g., `docker-container` driver).
 
-`docker-registry` / `serve` / `cache-registry` do not currently have a `--fail-on-cache-error` flag. They are long-running proxy commands, and strictness is enforced by client behavior or e2e assertions.
+`docker-registry` / `serve` / `cache-registry` support `--fail-on-cache-error`.
+- Default (flag off): best-effort cache behavior. Backend/cache `5xx` failures are downgraded to miss-like read responses and non-fatal write responses where possible.
+- Strict (flag on): backend/cache errors are returned as-is to clients (for example `500`), which is useful in CI/e2e when you want cache-path regressions to fail fast.
 
 ### `delete <WORKSPACE> <TAGS>`
 Delete cache entries by tag.

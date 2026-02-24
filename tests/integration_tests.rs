@@ -157,6 +157,7 @@ fn test_docker_registry_alias_help() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Usage: boringcache docker-registry"));
     assert!(stdout.contains("cache registry proxy"));
+    assert!(stdout.contains("--fail-on-cache-error"));
 }
 
 #[test]
@@ -167,6 +168,7 @@ fn test_serve_compat_alias_help() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Usage: boringcache docker-registry"));
     assert!(stdout.contains("cache registry proxy"));
+    assert!(stdout.contains("--fail-on-cache-error"));
 }
 
 #[test]
@@ -177,6 +179,7 @@ fn test_cache_registry_alias_help() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Usage: boringcache docker-registry"));
     assert!(stdout.contains("cache registry proxy"));
+    assert!(stdout.contains("--fail-on-cache-error"));
 }
 
 #[test]

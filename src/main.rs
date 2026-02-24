@@ -321,7 +321,19 @@ async fn main() -> Result<()> {
             host,
             no_platform,
             no_git,
-        } => commands::serve::execute(workspace, tag, host, port, no_platform, no_git).await,
+            fail_on_cache_error,
+        } => {
+            commands::serve::execute(
+                workspace,
+                tag,
+                host,
+                port,
+                no_platform,
+                no_git,
+                fail_on_cache_error,
+            )
+            .await
+        }
     };
 
     handle_result(result)

@@ -30,6 +30,7 @@ fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) -> Re
     Ok(())
 }
 
+#[derive(Clone)]
 enum OciRoute {
     Manifest { name: String, reference: String },
     Blob { name: String, digest: String },
@@ -99,27 +100,64 @@ pub async fn oci_dispatch(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, OciError> {
-    match parse_oci_path(&path) {
-        Some(OciRoute::Manifest { name, reference }) => match method {
+    let request_method = method.clone();
+    let fail_on_cache_error = state.fail_on_cache_error;
+    let route = match parse_oci_path(&path) {
+        Some(route) => route,
+        None => return Err(OciError::name_unknown("not found")),
+    };
+
+    let response = match route.clone() {
+        OciRoute::Manifest { name, reference } => match method {
             Method::GET | Method::HEAD => get_manifest(method, state, name, reference).await,
             Method::PUT => put_manifest(state, name, reference, body).await,
             _ => Err(OciError::unsupported("method not allowed")),
         },
-        Some(OciRoute::Blob { name, digest }) => match method {
+        OciRoute::Blob { name, digest } => match method {
             Method::GET | Method::HEAD => get_blob(method, state, name, digest).await,
             _ => Err(OciError::unsupported("method not allowed")),
         },
-        Some(OciRoute::BlobUploadStart { name }) => match method {
+        OciRoute::BlobUploadStart { name } => match method {
             Method::POST => start_upload(state, name, params, body).await,
             _ => Err(OciError::unsupported("method not allowed")),
         },
-        Some(OciRoute::BlobUpload { name, uuid }) => match method {
+        OciRoute::BlobUpload { name, uuid } => match method {
             Method::PATCH => patch_upload(state, name, uuid, headers, body).await,
             Method::PUT => put_upload(state, name, uuid, params, headers, body).await,
             Method::DELETE => delete_upload(state, uuid).await,
             _ => Err(OciError::unsupported("method not allowed")),
         },
-        None => Err(OciError::name_unknown("not found")),
+    };
+
+    match response {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            if fail_on_cache_error || !error.status().is_server_error() {
+                return Err(error);
+            }
+            if request_method != Method::GET && request_method != Method::HEAD {
+                return Err(error);
+            }
+            log::warn!(
+                "Best-effort OCI fallback on {} /v2/{} ({})",
+                request_method,
+                path,
+                error.status()
+            );
+            best_effort_oci_read_response(&route)
+        }
+    }
+}
+
+fn best_effort_oci_read_response(route: &OciRoute) -> Result<Response, OciError> {
+    match route {
+        OciRoute::Manifest { name, reference } => {
+            Err(OciError::manifest_unknown(format!("{name}:{reference}")))
+        }
+        OciRoute::Blob { name, digest } => Err(OciError::blob_unknown(format!("{name}@{digest}"))),
+        OciRoute::BlobUploadStart { .. } | OciRoute::BlobUpload { .. } => {
+            Err(OciError::name_unknown("not found"))
+        }
     }
 }
 
@@ -1044,147 +1082,168 @@ async fn put_manifest(
         encryption_recipient_hint: None,
     };
 
-    let save_response = state
-        .api_client
-        .save_entry(&state.workspace, &save_request)
-        .await
-        .map_err(|e| OciError::internal(format!("save_entry failed: {e}")))?;
+    let persist_result: Result<(), OciError> = async {
+        let save_response = state
+            .api_client
+            .save_entry(&state.workspace, &save_request)
+            .await
+            .map_err(|e| OciError::internal(format!("save_entry failed: {e}")))?;
 
-    if !save_response.exists {
-        if !blob_descriptors.is_empty() {
-            let upload_plan = state
-                .api_client
-                .blob_upload_urls(
-                    &state.workspace,
-                    &save_response.cache_entry_id,
-                    &blob_descriptors,
-                )
-                .await
-                .map_err(|e| OciError::internal(format!("blob_upload_urls failed: {e}")))?;
+        if !save_response.exists {
+            if !blob_descriptors.is_empty() {
+                let upload_plan = state
+                    .api_client
+                    .blob_upload_urls(
+                        &state.workspace,
+                        &save_response.cache_entry_id,
+                        &blob_descriptors,
+                    )
+                    .await
+                    .map_err(|e| OciError::internal(format!("blob_upload_urls failed: {e}")))?;
 
-            let upload_jobs = {
-                let sessions = state.upload_sessions.read().await;
-                let mut jobs = Vec::with_capacity(upload_plan.upload_urls.len());
-                for upload_url_info in &upload_plan.upload_urls {
-                    let session = sessions
-                        .find_by_digest(&upload_url_info.digest)
-                        .ok_or_else(|| {
-                            OciError::internal(format!(
-                                "No upload session for blob {}",
-                                upload_url_info.digest
-                            ))
-                        })?;
-                    jobs.push((
-                        upload_url_info.digest.clone(),
-                        session.temp_path.clone(),
-                        upload_url_info.url.clone(),
-                        upload_url_info.headers.clone(),
-                    ));
+                let upload_jobs = {
+                    let sessions = state.upload_sessions.read().await;
+                    let mut jobs = Vec::with_capacity(upload_plan.upload_urls.len());
+                    for upload_url_info in &upload_plan.upload_urls {
+                        let session = sessions
+                            .find_by_digest(&upload_url_info.digest)
+                            .ok_or_else(|| {
+                                OciError::internal(format!(
+                                    "No upload session for blob {}",
+                                    upload_url_info.digest
+                                ))
+                            })?;
+                        jobs.push((
+                            upload_url_info.digest.clone(),
+                            session.temp_path.clone(),
+                            upload_url_info.url.clone(),
+                            upload_url_info.headers.clone(),
+                        ));
+                    }
+                    jobs
+                };
+
+                if !upload_jobs.is_empty() {
+                    let max_concurrent = adaptive_blob_upload_concurrency(upload_jobs.len());
+                    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+                    let transfer_client = state.api_client.transfer_client().clone();
+                    let mut tasks = Vec::with_capacity(upload_jobs.len());
+
+                    for (digest, temp_path, upload_url, upload_headers) in upload_jobs {
+                        let semaphore = semaphore.clone();
+                        let transfer_client = transfer_client.clone();
+                        let task = tokio::spawn(async move {
+                            let _permit = semaphore.acquire().await.map_err(|e| {
+                                OciError::internal(format!("Blob upload semaphore closed: {e}"))
+                            })?;
+                            let progress = crate::progress::TransferProgress::new_noop();
+                            upload_via_single_url(
+                                temp_path.as_path(),
+                                &upload_url,
+                                &progress,
+                                &transfer_client,
+                                &upload_headers,
+                            )
+                            .await
+                            .map_err(|e| {
+                                OciError::internal(format!(
+                                    "Blob upload failed for {}: {}",
+                                    digest, e
+                                ))
+                            })?;
+                            Ok::<(), OciError>(())
+                        });
+                        tasks.push(task);
+                    }
+
+                    for task in tasks {
+                        task.await.map_err(|e| {
+                            OciError::internal(format!("Blob upload task failed: {e}"))
+                        })??;
+                    }
                 }
-                jobs
-            };
+            }
 
-            if !upload_jobs.is_empty() {
-                let max_concurrent = adaptive_blob_upload_concurrency(upload_jobs.len());
-                let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-                let transfer_client = state.api_client.transfer_client().clone();
-                let mut tasks = Vec::with_capacity(upload_jobs.len());
+            let manifest_upload_url = save_response
+                .manifest_upload_url
+                .as_ref()
+                .ok_or_else(|| OciError::internal("Missing manifest_upload_url"))?;
 
-                for (digest, temp_path, upload_url, upload_headers) in upload_jobs {
-                    let semaphore = semaphore.clone();
-                    let transfer_client = transfer_client.clone();
-                    let task = tokio::spawn(async move {
-                        let _permit = semaphore.acquire().await.map_err(|e| {
-                            OciError::internal(format!("Blob upload semaphore closed: {e}"))
-                        })?;
-                        let progress = crate::progress::TransferProgress::new_noop();
-                        upload_via_single_url(
-                            temp_path.as_path(),
-                            &upload_url,
-                            &progress,
-                            &transfer_client,
-                            &upload_headers,
-                        )
-                        .await
-                        .map_err(|e| {
-                            OciError::internal(format!("Blob upload failed for {}: {}", digest, e))
-                        })?;
-                        Ok::<(), OciError>(())
-                    });
-                    tasks.push(task);
-                }
+            upload_payload(
+                state.api_client.transfer_client(),
+                manifest_upload_url,
+                &pointer_bytes,
+                "application/cbor",
+                &save_response.upload_headers,
+            )
+            .await
+            .map_err(|e| OciError::internal(format!("Pointer upload failed: {e}")))?;
+        }
 
-                for task in tasks {
-                    task.await.map_err(|e| {
-                        OciError::internal(format!("Blob upload task failed: {e}"))
-                    })??;
-                }
+        let confirm_request = ConfirmRequest {
+            manifest_digest: manifest_root_digest.clone(),
+            manifest_size: pointer_bytes.len() as u64,
+            manifest_etag: None,
+            archive_size: None,
+            archive_etag: None,
+            blob_count: Some(blob_count),
+            blob_total_size_bytes: Some(blob_total_size_bytes),
+            file_count: Some(blob_count.min(u32::MAX as u64) as u32),
+            uncompressed_size: None,
+            compressed_size: None,
+            storage_mode: Some("cas".to_string()),
+            tag: Some(tag.clone()),
+        };
+
+        state
+            .api_client
+            .confirm(
+                &state.workspace,
+                &save_response.cache_entry_id,
+                &confirm_request,
+            )
+            .await
+            .map_err(|e| OciError::internal(format!("confirm failed: {e}")))?;
+
+        let alias_tags =
+            alias_tags_for_manifest(&tag, &manifest_digest, &state.configured_human_tags);
+        for alias_tag in alias_tags {
+            if let Err(error) = bind_alias_tag(
+                &state,
+                &alias_tag,
+                &manifest_root_digest,
+                pointer_bytes.len() as u64,
+                blob_count,
+                blob_total_size_bytes,
+                total_size_bytes,
+            )
+            .await
+            {
+                log::warn!(
+                    "Alias write skipped for {} (workspace={}): {}",
+                    alias_tag,
+                    state.workspace,
+                    error
+                );
             }
         }
 
-        let manifest_upload_url = save_response
-            .manifest_upload_url
-            .as_ref()
-            .ok_or_else(|| OciError::internal("Missing manifest_upload_url"))?;
-
-        upload_payload(
-            state.api_client.transfer_client(),
-            manifest_upload_url,
-            &pointer_bytes,
-            "application/cbor",
-            &save_response.upload_headers,
-        )
-        .await
-        .map_err(|e| OciError::internal(format!("Pointer upload failed: {e}")))?;
+        Ok(())
     }
-
-    let confirm_request = ConfirmRequest {
-        manifest_digest: manifest_root_digest.clone(),
-        manifest_size: pointer_bytes.len() as u64,
-        manifest_etag: None,
-        archive_size: None,
-        archive_etag: None,
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        file_count: Some(blob_count.min(u32::MAX as u64) as u32),
-        uncompressed_size: None,
-        compressed_size: None,
-        storage_mode: Some("cas".to_string()),
-        tag: Some(tag.clone()),
-    };
-
-    state
-        .api_client
-        .confirm(
-            &state.workspace,
-            &save_response.cache_entry_id,
-            &confirm_request,
-        )
-        .await
-        .map_err(|e| OciError::internal(format!("confirm failed: {e}")))?;
+    .await;
 
     cleanup_blob_sessions(&state, &blob_descriptors).await;
 
-    let alias_tags = alias_tags_for_manifest(&tag, &manifest_digest, &state.configured_human_tags);
-    for alias_tag in alias_tags {
-        if let Err(error) = bind_alias_tag(
-            &state,
-            &alias_tag,
-            &manifest_root_digest,
-            pointer_bytes.len() as u64,
-            blob_count,
-            blob_total_size_bytes,
-            total_size_bytes,
-        )
-        .await
-        {
-            log::warn!(
-                "Alias write skipped for {} (workspace={}): {}",
-                alias_tag,
-                state.workspace,
-                error
-            );
+    if let Err(error) = persist_result {
+        if state.fail_on_cache_error || !error.status().is_server_error() {
+            return Err(error);
         }
+        log::warn!(
+            "Best-effort OCI manifest publish fallback on {}:{} ({})",
+            name,
+            reference,
+            error.status()
+        );
     }
 
     let mut headers = HeaderMap::new();
@@ -1292,6 +1351,7 @@ mod tests {
             tag_resolver: TagResolver::new(None, GitContext::default(), false),
             configured_human_tags: Vec::new(),
             registry_root_tag: "registry".to_string(),
+            fail_on_cache_error: true,
             blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
             upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
             kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),

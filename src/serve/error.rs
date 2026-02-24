@@ -62,6 +62,10 @@ impl OciError {
     pub fn name_unknown(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "NAME_UNKNOWN", detail)
     }
+
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
 }
 
 impl IntoResponse for OciError {

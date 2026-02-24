@@ -11,6 +11,7 @@ pub async fn execute(
     port: u16,
     no_platform: bool,
     no_git: bool,
+    fail_on_cache_error: bool,
 ) -> Result<()> {
     ensure!(
         workspace.contains('/'),
@@ -45,6 +46,7 @@ pub async fn execute(
         tag_resolver,
         configured_human_tags,
         registry_root_tag,
+        fail_on_cache_error,
     )
     .await
 }

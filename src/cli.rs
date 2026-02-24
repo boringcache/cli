@@ -215,6 +215,12 @@ pub enum Commands {
 
         #[arg(long, help = "Disable automatic git suffix for internal cache tags")]
         no_git: bool,
+
+        #[arg(
+            long,
+            help = "Return strict backend/cache errors instead of best-effort cache responses"
+        )]
+        fail_on_cache_error: bool,
     },
 }
 

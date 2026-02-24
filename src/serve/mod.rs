@@ -17,6 +17,7 @@ use crate::serve::state::{
 };
 use crate::tag_utils::TagResolver;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     api_client: ApiClient,
     workspace: String,
@@ -25,6 +26,7 @@ pub async fn run_server(
     tag_resolver: TagResolver,
     configured_human_tags: Vec<String>,
     registry_root_tag: String,
+    fail_on_cache_error: bool,
 ) -> Result<()> {
     let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
     let state = AppState {
@@ -33,6 +35,7 @@ pub async fn run_server(
         tag_resolver,
         configured_human_tags,
         registry_root_tag,
+        fail_on_cache_error,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -59,6 +62,14 @@ pub async fn run_server(
         );
     }
     eprintln!("  Registry Root Tag: {}", state.registry_root_tag);
+    eprintln!(
+        "  Strict Cache Errors: {}",
+        if state.fail_on_cache_error {
+            "enabled"
+        } else {
+            "disabled (best-effort)"
+        }
+    );
     eprintln!("  OCI: --cache-from/--cache-to type=registry,ref={host}:{port}/CACHE_NAME:TAG");
     eprintln!("  Bazel HTTP: http://{host}:{port}/ac/{{sha256}} and /cas/{{sha256}}");
     eprintln!("  Gradle HTTP: http://{host}:{port}/cache/{{cache-key}}");

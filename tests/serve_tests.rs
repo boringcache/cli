@@ -45,6 +45,7 @@ async fn setup(
         tag_resolver: TagResolver::new(None, GitContext::default(), false),
         configured_human_tags: Vec::new(),
         registry_root_tag: "registry".to_string(),
+        fail_on_cache_error: true,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -1439,6 +1440,132 @@ async fn test_blob_proxy_returns_error_on_storage_failure() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(parsed["errors"][0]["code"], "INTERNAL_ERROR");
+}
+
+#[tokio::test]
+async fn test_blob_proxy_best_effort_returns_404_on_storage_failure() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.fail_on_cache_error = false;
+
+    let blob_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let index_json =
+        br#"{"schemaVersion":2,"config":{"digest":"sha256:cc","size":10},"layers":[]}"#;
+    let pointer_bytes = make_pointer(index_json, &[(blob_digest, 100)]);
+    let tag = ref_tag("img", "v1");
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": tag,
+                "status": "hit",
+                "cache_entry_id": "entry-err",
+                "manifest_url": format!("{}/pointers/entry-err", server.url()),
+                "manifest_root_digest": cas_oci::prefixed_sha256_digest(&pointer_bytes),
+                "storage_mode": "cas",
+                "cas_layout": "oci-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _pointer_mock = server
+        .mock("GET", "/pointers/entry-err")
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let _download_urls_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": blob_digest,
+                    "url": format!("{}/blobs/{}", server.url(), blob_digest),
+                }],
+                "missing": [],
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _blob_mock = server
+        .mock("GET", format!("/blobs/{}", blob_digest).as_str())
+        .with_status(403)
+        .with_body("Forbidden - signed URL expired")
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let _ = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri("/v2/img/manifests/v1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri(format!("/v2/img/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["errors"][0]["code"], "BLOB_UNKNOWN");
+}
+
+#[tokio::test]
+async fn test_cache_registry_best_effort_returns_miss_on_backend_error() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.fail_on_cache_error = false;
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(500)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":"backend unavailable"}"#)
+        .create_async()
+        .await;
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/cache/cache-key-1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
