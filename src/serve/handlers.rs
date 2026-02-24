@@ -334,9 +334,7 @@ async fn resolve_manifest(
                     cache_entry_id: cache_entry_id.clone(),
                     size_bytes: blob.size_bytes,
                     download_url: download_url.clone(),
-                    download_url_cached_at: download_url
-                        .as_ref()
-                        .and(prefetched_at),
+                    download_url_cached_at: download_url.as_ref().and(prefetched_at),
                 },
             );
         }
