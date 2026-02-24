@@ -336,7 +336,7 @@ async fn resolve_manifest(
                     download_url: download_url.clone(),
                     download_url_cached_at: download_url
                         .as_ref()
-                        .and_then(|_| prefetched_at),
+                        .and(prefetched_at),
                 },
             );
         }
