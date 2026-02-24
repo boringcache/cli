@@ -57,11 +57,11 @@ pub async fn run_server(
     eprintln!("  Workspace: {workspace}");
     if !state.configured_human_tags.is_empty() {
         eprintln!(
-            "  OCI Human Tag Aliases: {}",
+            "  OCI Human Tags: {}",
             state.configured_human_tags.join(", ")
         );
     }
-    eprintln!("  Registry Root Tag: {}", state.registry_root_tag);
+    eprintln!("  Internal Registry Root Tag: {}", state.registry_root_tag);
     eprintln!(
         "  Strict Cache Errors: {}",
         if state.fail_on_cache_error {

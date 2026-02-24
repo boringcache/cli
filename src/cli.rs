@@ -203,7 +203,7 @@ pub enum Commands {
         workspace: String,
 
         #[arg(
-            help = "Cache tag root (first tag). Optional extra comma-separated tags become OCI human aliases"
+            help = "Comma-separated cache tags. All are human-facing OCI aliases; the first is the primary display tag"
         )]
         tag: String,
 
@@ -213,13 +213,10 @@ pub enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
 
-        #[arg(
-            long,
-            help = "Disable automatic platform suffix for internal cache tags"
-        )]
+        #[arg(long, help = "Disable automatic platform suffix for cache tags")]
         no_platform: bool,
 
-        #[arg(long, help = "Disable automatic git suffix for internal cache tags")]
+        #[arg(long, help = "Disable automatic git suffix for cache tags")]
         no_git: bool,
 
         #[arg(

@@ -159,8 +159,10 @@ Run a local cache registry proxy for native integrations:
 Aliases: `serve`, `cache-registry`
 
 `TAG` uses this format:
-- first tag is the shared registry root tag for Bazel/Gradle/Turborepo/sccache
-- optional additional comma-separated tags are OCI human aliases
+- pass one or more comma-separated human tags
+- all passed tags are human-facing OCI aliases
+- the first tag is the primary alias shown in the UI
+- Bazel/Gradle/Turborepo/sccache use an internal root tag derived from the first human tag
 
 ```bash
 boringcache docker-registry my-org/ws registry-cache --port 5000
@@ -168,7 +170,7 @@ boringcache docker-registry my-org/ws registry-cache --port 5000
 boringcache serve my-org/ws registry-cache --port 5000
 # same command via explicit multi-protocol alias
 boringcache cache-registry my-org/ws registry-cache --port 5000
-# with explicit OCI human aliases
+# with multiple OCI human aliases (first is primary in UI)
 boringcache cache-registry my-org/ws registry-cache,docker-main,docker-stable --port 5000
 # when BORINGCACHE_DEFAULT_WORKSPACE is set
 boringcache cache-registry registry-cache --port 5000
