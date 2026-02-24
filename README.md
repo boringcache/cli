@@ -109,9 +109,12 @@ Save cache entries using `tag:path` format.
 boringcache save my-org/ws "deps:node_modules"
 boringcache save my-org/ws "deps:node_modules,build:dist" --force
 boringcache save my-org/ws "gems:vendor/bundle" --exclude "*.out"
+# strict mode: fail command on cache/backend errors
+boringcache save my-org/ws "deps:node_modules" --fail-on-cache-error
 ```
 
 Use `--force` to overwrite existing entries. Use `--exclude` to skip files matching glob patterns.
+By default, cache/backend save errors are warn-only (non-fatal). Use `--fail-on-cache-error` for strict behavior.
 
 ### `restore <WORKSPACE> <TAG:PATH,...>`
 Restore cache entries. Path controls local extraction directory.
@@ -119,7 +122,14 @@ Restore cache entries. Path controls local extraction directory.
 ```bash
 boringcache restore my-org/ws "deps:node_modules"
 boringcache restore my-org/ws "deps:./node_modules,build:./dist"
+# strict miss handling
+boringcache restore my-org/ws "deps:node_modules" --fail-on-cache-miss
+# strict backend/cache-error handling
+boringcache restore my-org/ws "deps:node_modules" --fail-on-cache-error
 ```
+
+By default, restore cache/backend errors are warn-only (non-fatal).
+Use `--fail-on-cache-miss` to fail on misses and `--fail-on-cache-error` to fail on cache/backend failures.
 
 ### `ls [WORKSPACE]`
 List cache entries.
@@ -171,6 +181,8 @@ docker buildx build \
 The proxy translates OCI Distribution API calls into BoringCache CAS operations. BuildKit's `type=registry` supports lazy blob resolution — only the manifest is fetched on cache hit, and individual layers are pulled only if needed. This avoids downloading the entire cache upfront, which `type=local` cannot do.
 
 The proxy binds to `127.0.0.1` by default. Use `--host 0.0.0.0` when the BuildKit daemon runs in a separate container (e.g., `docker-container` driver).
+
+`docker-registry` / `serve` / `cache-registry` do not currently have a `--fail-on-cache-error` flag. They are long-running proxy commands, and strictness is enforced by client behavior or e2e assertions.
 
 ### `delete <WORKSPACE> <TAGS>`
 Delete cache entries by tag.
