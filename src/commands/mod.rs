@@ -2,6 +2,7 @@ pub mod auth;
 pub mod check;
 pub mod config;
 pub mod delete;
+pub mod go_cacheprog;
 pub mod ls;
 pub mod mount;
 pub mod restore;

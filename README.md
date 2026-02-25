@@ -153,8 +153,10 @@ Run a local cache registry proxy for native integrations:
 - OCI registry (`/v2/*`) for BuildKit `type=registry`
 - Bazel HTTP cache (`/ac/*`, `/cas/*`)
 - Gradle HTTP build cache (`/cache/*`)
+- Nx remote cache (`/v1/cache/*`)
 - Turborepo remote cache (`/v8/artifacts/*`)
 - sccache WebDAV-style paths (`/<prefix>/a/b/c/<key>`)
+- Go cache object API (`/gocache/*`) via `go-cacheprog`
 
 Aliases: `serve`, `cache-registry`
 
@@ -162,7 +164,7 @@ Aliases: `serve`, `cache-registry`
 - pass one or more comma-separated human tags
 - all passed tags are human-facing OCI aliases
 - the first tag is the primary alias shown in the UI
-- Bazel/Gradle/Turborepo/sccache use an internal root tag derived from the first human tag
+- Bazel/Gradle/Nx/Turborepo/sccache/Go use an internal root tag derived from the first human tag
 
 ```bash
 boringcache docker-registry my-org/ws registry-cache --port 5000
@@ -186,6 +188,20 @@ docker buildx build \
 ```
 
 The proxy translates OCI Distribution API calls into BoringCache CAS operations. BuildKit's `type=registry` supports lazy blob resolution — only the manifest is fetched on cache hit, and individual layers are pulled only if needed. This avoids downloading the entire cache upfront, which `type=local` cannot do.
+
+Nx self-hosted remote cache:
+
+```bash
+NX_SELF_HOSTED_REMOTE_CACHE_SERVER=http://127.0.0.1:5000 \
+NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN=token \
+nx affected --target=build
+```
+
+Go build cache with `GOCACHEPROG`:
+
+```bash
+GOCACHEPROG="boringcache go-cacheprog --endpoint http://127.0.0.1:5000" go build ./...
+```
 
 The proxy binds to `127.0.0.1` by default. Use `--host 0.0.0.0` when the BuildKit daemon runs in a separate container (e.g., `docker-container` driver).
 

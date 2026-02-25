@@ -335,6 +335,9 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        cli::Commands::GoCacheProg { endpoint, token } => {
+            commands::go_cacheprog::execute(endpoint, token, cli.verbose).await
+        }
     };
 
     handle_result(result)

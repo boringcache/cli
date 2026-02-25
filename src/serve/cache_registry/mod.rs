@@ -7,8 +7,10 @@ use crate::serve::state::AppState;
 
 mod bazel;
 mod error;
+mod go_cache;
 mod gradle;
 mod kv;
+mod nx;
 mod route;
 mod sccache;
 mod turborepo;
@@ -66,6 +68,13 @@ async fn dispatch_with_path(
         route::RegistryRoute::Gradle { cache_key } => {
             gradle::handle(&state, method, &cache_key, body).await
         }
+        route::RegistryRoute::NxArtifact { hash } => {
+            nx::handle_artifact(&state, method, &headers, &hash, body).await
+        }
+        route::RegistryRoute::NxTerminalOutput { hash } => {
+            nx::handle_terminal_output(&state, method, &headers, &hash, body).await
+        }
+        route::RegistryRoute::NxQuery => nx::handle_query(&state, method, &headers, body).await,
         route::RegistryRoute::TurborepoStatus => turborepo::handle_status(method, &headers),
         route::RegistryRoute::TurborepoArtifact { hash } => {
             turborepo::handle_artifact(&state, method, &headers, &hash, body).await
@@ -78,6 +87,9 @@ async fn dispatch_with_path(
             sccache::handle_object(&state, method, &key_path, body).await
         }
         route::RegistryRoute::SccacheMkcol => sccache::handle_mkcol(method),
+        route::RegistryRoute::GoCacheObject { action_hex } => {
+            go_cache::handle_action(&state, method, &action_hex, body).await
+        }
     };
 
     match response {

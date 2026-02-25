@@ -73,8 +73,11 @@ pub async fn run_server(
     eprintln!("  OCI: --cache-from/--cache-to type=registry,ref={host}:{port}/CACHE_NAME:TAG");
     eprintln!("  Bazel HTTP: http://{host}:{port}/ac/{{sha256}} and /cas/{{sha256}}");
     eprintln!("  Gradle HTTP: http://{host}:{port}/cache/{{cache-key}}");
+    eprintln!("  Nx Cache: http://{host}:{port}/v1/cache/{{hash}}");
     eprintln!("  Turborepo: http://{host}:{port}/v8/artifacts/{{hash}}");
     eprintln!("  sccache WebDAV: http://{host}:{port}/<prefix>/a/b/c/<key>");
+    eprintln!("  Go cache object API: http://{host}:{port}/gocache/{{action-id}}");
+    eprintln!("  GOCACHEPROG helper: boringcache go-cacheprog --endpoint http://{host}:{port}");
     eprintln!(
         "  Blob Read Cache: {} (max {} bytes)",
         state.blob_read_cache.cache_dir().display(),

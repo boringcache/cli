@@ -128,17 +128,24 @@ pub(crate) enum KvNamespace {
     BazelAc,
     BazelCas,
     Gradle,
+    Nx,
+    NxTerminalOutput,
     Turborepo,
     Sccache,
+    GoCache,
 }
 
 impl KvNamespace {
     pub(crate) fn normalize_key(self, key: &str) -> String {
         match self {
-            KvNamespace::BazelAc | KvNamespace::BazelCas | KvNamespace::Gradle => {
-                key.to_ascii_lowercase()
-            }
-            KvNamespace::Turborepo | KvNamespace::Sccache => key.to_string(),
+            KvNamespace::BazelAc
+            | KvNamespace::BazelCas
+            | KvNamespace::Gradle
+            | KvNamespace::GoCache => key.to_ascii_lowercase(),
+            KvNamespace::Nx
+            | KvNamespace::NxTerminalOutput
+            | KvNamespace::Turborepo
+            | KvNamespace::Sccache => key.to_string(),
         }
     }
 
@@ -147,8 +154,11 @@ impl KvNamespace {
             KvNamespace::BazelAc => "bazel_ac",
             KvNamespace::BazelCas => "bazel_cas",
             KvNamespace::Gradle => "gradle",
+            KvNamespace::Nx => "nx",
+            KvNamespace::NxTerminalOutput => "nx_terminal",
             KvNamespace::Turborepo => "turbo",
             KvNamespace::Sccache => "sccache",
+            KvNamespace::GoCache => "go_cache",
         }
     }
 
@@ -399,23 +409,34 @@ async fn clear_tag_misses(state: &AppState, registry_root_tag: &str) {
 
 fn kv_root_tags_from_values(
     registry_root_tag: &str,
-    primary_human_tag: Option<&str>,
+    configured_human_tags: &[String],
 ) -> Vec<String> {
     let mut tags = vec![registry_root_tag.trim().to_string()];
-    if let Some(primary_human_tag) = primary_human_tag {
-        let primary_human_tag = primary_human_tag.trim();
-        if !primary_human_tag.is_empty() && !tags.iter().any(|tag| tag == primary_human_tag) {
-            tags.push(primary_human_tag.to_string());
+    for human_tag in configured_human_tags {
+        let human_tag = human_tag.trim();
+        if !human_tag.is_empty() && !tags.iter().any(|tag| tag == human_tag) {
+            tags.push(human_tag.to_string());
         }
     }
     tags
 }
 
 fn kv_root_tags(state: &AppState) -> Vec<String> {
-    kv_root_tags_from_values(
-        &state.registry_root_tag,
-        state.configured_human_tags.first().map(String::as_str),
-    )
+    kv_root_tags_from_values(&state.registry_root_tag, &state.configured_human_tags)
+}
+
+fn kv_alias_tags_from_values(
+    registry_root_tag: &str,
+    configured_human_tags: &[String],
+) -> Vec<String> {
+    kv_root_tags_from_values(registry_root_tag, configured_human_tags)
+        .into_iter()
+        .skip(1)
+        .collect()
+}
+
+fn kv_alias_tags(state: &AppState) -> Vec<String> {
+    kv_alias_tags_from_values(&state.registry_root_tag, &state.configured_human_tags)
 }
 
 async fn clear_root_tag_misses(state: &AppState) {
@@ -1548,6 +1569,16 @@ async fn do_flush(
             }
         }
 
+        bind_kv_alias_tags(
+            state,
+            &manifest_root_digest,
+            expected_manifest_size,
+            blob_count,
+            blob_total_size_bytes,
+            file_count,
+        )
+        .await?;
+
         eprintln!("KV flush: save_entry returned exists=true ({total_count} entries, {blob_count} blobs, digest={manifest_root_digest})");
         return Ok((entries, save_response.cache_entry_id));
     }
@@ -1582,7 +1613,7 @@ async fn do_flush(
     .map_err(|e| classify_flush_error(&e, "manifest upload failed"))?;
 
     let confirm_request = ConfirmRequest {
-        manifest_digest: manifest_root_digest,
+        manifest_digest: manifest_root_digest.clone(),
         manifest_size: expected_manifest_size,
         manifest_etag: None,
         archive_size: None,
@@ -1606,6 +1637,16 @@ async fn do_flush(
         .await
         .map_err(|e| classify_flush_error(&e, "confirm failed"))?;
 
+    bind_kv_alias_tags(
+        state,
+        &manifest_root_digest,
+        expected_manifest_size,
+        blob_count,
+        blob_total_size_bytes,
+        file_count,
+    )
+    .await?;
+
     eprintln!(
         "KV flush summary: entries={} unique_blobs={} uploaded={} already_present={} skipped_local={} bytes={} duration_ms={}",
         total_count,
@@ -1618,6 +1659,96 @@ async fn do_flush(
     );
 
     Ok((entries, save_response.cache_entry_id))
+}
+
+async fn bind_kv_alias_tag(
+    state: &AppState,
+    alias_tag: &str,
+    manifest_root_digest: &str,
+    manifest_size: u64,
+    blob_count: u64,
+    blob_total_size_bytes: u64,
+    file_count: u32,
+) -> anyhow::Result<()> {
+    let alias_request = SaveRequest {
+        tag: alias_tag.to_string(),
+        manifest_root_digest: manifest_root_digest.to_string(),
+        compression_algorithm: "zstd".to_string(),
+        storage_mode: Some("cas".to_string()),
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        cas_layout: Some("file-v1".to_string()),
+        manifest_format_version: Some(1),
+        total_size_bytes: blob_total_size_bytes,
+        uncompressed_size: None,
+        compressed_size: None,
+        file_count: Some(file_count),
+        expected_manifest_digest: Some(manifest_root_digest.to_string()),
+        expected_manifest_size: Some(manifest_size),
+        force: None,
+        use_multipart: None,
+        ci_provider: None,
+        encrypted: None,
+        encryption_algorithm: None,
+        encryption_recipient_hint: None,
+    };
+
+    let alias_save = state
+        .api_client
+        .save_entry(&state.workspace, &alias_request)
+        .await?;
+
+    let alias_confirm = ConfirmRequest {
+        manifest_digest: manifest_root_digest.to_string(),
+        manifest_size,
+        manifest_etag: None,
+        archive_size: None,
+        archive_etag: None,
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        file_count: Some(file_count),
+        uncompressed_size: None,
+        compressed_size: None,
+        storage_mode: Some("cas".to_string()),
+        tag: Some(alias_tag.to_string()),
+    };
+
+    state
+        .api_client
+        .confirm(&state.workspace, &alias_save.cache_entry_id, &alias_confirm)
+        .await?;
+
+    Ok(())
+}
+
+async fn bind_kv_alias_tags(
+    state: &AppState,
+    manifest_root_digest: &str,
+    manifest_size: u64,
+    blob_count: u64,
+    blob_total_size_bytes: u64,
+    file_count: u32,
+) -> Result<(), FlushError> {
+    for alias_tag in kv_alias_tags(state) {
+        if let Err(error) = bind_kv_alias_tag(
+            state,
+            &alias_tag,
+            manifest_root_digest,
+            manifest_size,
+            blob_count,
+            blob_total_size_bytes,
+            file_count,
+        )
+        .await
+        {
+            if state.fail_on_cache_error {
+                let stage = format!("alias bind failed for tag {alias_tag}");
+                return Err(classify_flush_error(&error, &stage));
+            }
+            log::warn!("KV flush: alias bind failed for tag {alias_tag}: {error}");
+        }
+    }
+    Ok(())
 }
 
 fn select_flush_base_entries(
@@ -2025,7 +2156,8 @@ mod tests {
 
     #[test]
     fn kv_root_tags_include_legacy_human_root_when_distinct() {
-        let tags = kv_root_tags_from_values("bc_registry_root_v2_abc", Some("grpc-bazel"));
+        let tags =
+            kv_root_tags_from_values("bc_registry_root_v2_abc", &[String::from("grpc-bazel")]);
         assert_eq!(
             tags,
             vec![
@@ -2037,10 +2169,42 @@ mod tests {
 
     #[test]
     fn kv_root_tags_skip_empty_or_duplicate_legacy_root() {
-        let duplicate = kv_root_tags_from_values("grpc-bazel", Some("grpc-bazel"));
+        let duplicate = kv_root_tags_from_values(
+            "grpc-bazel",
+            &[String::from("grpc-bazel"), String::from(" ")],
+        );
         assert_eq!(duplicate, vec!["grpc-bazel".to_string()]);
 
-        let empty = kv_root_tags_from_values("grpc-bazel", Some(" "));
+        let empty = kv_root_tags_from_values("grpc-bazel", &[String::from(" ")]);
         assert_eq!(empty, vec!["grpc-bazel".to_string()]);
+    }
+
+    #[test]
+    fn kv_root_tags_include_all_distinct_human_aliases() {
+        let tags = kv_root_tags_from_values(
+            "bc_registry_root_v2_abc",
+            &[
+                String::from("alias-a"),
+                String::from("alias-b"),
+                String::from("alias-a"),
+            ],
+        );
+        assert_eq!(
+            tags,
+            vec![
+                "bc_registry_root_v2_abc".to_string(),
+                "alias-a".to_string(),
+                "alias-b".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn kv_alias_tags_exclude_internal_root_tag() {
+        let aliases = kv_alias_tags_from_values(
+            "bc_registry_root_v2_abc",
+            &[String::from("alias-a"), String::from("alias-b")],
+        );
+        assert_eq!(aliases, vec!["alias-a".to_string(), "alias-b".to_string()]);
     }
 }

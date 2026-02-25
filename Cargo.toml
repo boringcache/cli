@@ -19,7 +19,7 @@ path = "src/lib.rs"
 clap = { version = "4.5", features = ["derive", "env"] }
 
 # Async runtime - optimized features only (removes ~50-70KB by avoiding unused features)
-tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "fs", "io-util", "process", "sync", "signal", "net"] }
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "fs", "io-util", "io-std", "process", "sync", "signal", "net"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 
 # HTTP client - minimal features (removes TLS backends, cookies, gzip)

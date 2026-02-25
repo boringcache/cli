@@ -7,12 +7,16 @@ pub(crate) enum RegistryRoute {
     BazelAc { digest_hex: String },
     BazelCas { digest_hex: String },
     Gradle { cache_key: String },
+    NxArtifact { hash: String },
+    NxTerminalOutput { hash: String },
+    NxQuery,
     TurborepoStatus,
     TurborepoArtifact { hash: String },
     TurborepoQueryArtifacts,
     TurborepoEvents,
     SccacheObject { key_path: String },
     SccacheMkcol,
+    GoCacheObject { action_hex: String },
 }
 
 pub(crate) fn detect_route(method: &Method, path: &str) -> Result<RegistryRoute, RegistryError> {
@@ -38,6 +42,10 @@ pub(crate) fn detect_route(method: &Method, path: &str) -> Result<RegistryRoute,
         return Ok(route);
     }
 
+    if let Some(route) = parse_nx_route(&components)? {
+        return Ok(route);
+    }
+
     if let Some(cache_key) = parse_gradle_path(&components) {
         return Ok(RegistryRoute::Gradle { cache_key });
     }
@@ -50,6 +58,10 @@ pub(crate) fn detect_route(method: &Method, path: &str) -> Result<RegistryRoute,
         return Ok(RegistryRoute::SccacheObject {
             key_path: path.to_string(),
         });
+    }
+
+    if let Some(action_hex) = parse_go_cache_path(&components)? {
+        return Ok(RegistryRoute::GoCacheObject { action_hex });
     }
 
     Err(RegistryError::not_found("Route not found"))
@@ -93,6 +105,44 @@ fn parse_gradle_path(components: &[&str]) -> Option<String> {
     Some(cache_key.to_string())
 }
 
+fn parse_nx_hash(raw: &str) -> Result<String, RegistryError> {
+    if raw.is_empty()
+        || !raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(RegistryError::bad_request(
+            "Nx cache hash must contain only [A-Za-z0-9_-]",
+        ));
+    }
+    Ok(raw.to_string())
+}
+
+fn parse_nx_route(components: &[&str]) -> Result<Option<RegistryRoute>, RegistryError> {
+    if path_ends_with(components, &["v1", "cache"]) {
+        return Ok(Some(RegistryRoute::NxQuery));
+    }
+
+    if components.len() >= 4
+        && components[components.len() - 4] == "v1"
+        && components[components.len() - 3] == "cache"
+        && components[components.len() - 1] == "terminalOutputs"
+    {
+        let hash = parse_nx_hash(components[components.len() - 2])?;
+        return Ok(Some(RegistryRoute::NxTerminalOutput { hash }));
+    }
+
+    if components.len() >= 3
+        && components[components.len() - 3] == "v1"
+        && components[components.len() - 2] == "cache"
+    {
+        let hash = parse_nx_hash(components[components.len() - 1])?;
+        return Ok(Some(RegistryRoute::NxArtifact { hash }));
+    }
+
+    Ok(None)
+}
+
 fn parse_turbo_artifact_path(components: &[&str]) -> Option<String> {
     if components.len() < 2 {
         return None;
@@ -131,6 +181,27 @@ fn looks_like_sccache_key_path(components: &[&str]) -> bool {
         && shard_a.eq_ignore_ascii_case(&key[0..1])
         && shard_b.eq_ignore_ascii_case(&key[1..2])
         && shard_c.eq_ignore_ascii_case(&key[2..3])
+}
+
+fn parse_go_action_id(raw: &str) -> Result<String, RegistryError> {
+    if raw.len() != 64 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(RegistryError::bad_request(
+            "Go cache action id must be a 64-character hex digest",
+        ));
+    }
+    Ok(raw.to_ascii_lowercase())
+}
+
+fn parse_go_cache_path(components: &[&str]) -> Result<Option<String>, RegistryError> {
+    if components.len() < 2 {
+        return Ok(None);
+    }
+    let marker = components[components.len() - 2];
+    if marker != "gocache" {
+        return Ok(None);
+    }
+    let action_hex = parse_go_action_id(components[components.len() - 1])?;
+    Ok(Some(action_hex))
 }
 
 fn path_components(path: &str) -> Vec<&str> {
@@ -266,6 +337,54 @@ mod tests {
                 cache_key: "cache-key-1".to_string()
             }
         );
+    }
+
+    #[test]
+    fn detect_route_accepts_nx_artifact_path() {
+        let route = detect_route(&Method::GET, "v1/cache/nx_hash-1").unwrap();
+        assert_eq!(
+            route,
+            RegistryRoute::NxArtifact {
+                hash: "nx_hash-1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn detect_route_accepts_nx_terminal_output_path() {
+        let route = detect_route(&Method::GET, "v1/cache/nxhash/terminalOutputs").unwrap();
+        assert_eq!(
+            route,
+            RegistryRoute::NxTerminalOutput {
+                hash: "nxhash".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn detect_route_accepts_nx_query_path() {
+        let route = detect_route(&Method::POST, "v1/cache").unwrap();
+        assert_eq!(route, RegistryRoute::NxQuery);
+    }
+
+    #[test]
+    fn detect_route_rejects_invalid_nx_hash() {
+        let error = detect_route(&Method::GET, "v1/cache/hash.with.dot").unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn detect_route_accepts_go_cache_path() {
+        let action_hex =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+        let route = detect_route(&Method::GET, &format!("foo/gocache/{action_hex}")).unwrap();
+        assert_eq!(route, RegistryRoute::GoCacheObject { action_hex });
+    }
+
+    #[test]
+    fn detect_route_rejects_invalid_go_cache_path() {
+        let error = detect_route(&Method::GET, "gocache/not-hex").unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
     }
 
     #[test]

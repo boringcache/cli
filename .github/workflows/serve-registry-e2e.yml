@@ -55,6 +55,11 @@ jobs:
             exit 1
           fi
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+
       - name: Build CLI
         run: cargo build --bin boringcache
 
@@ -365,11 +370,178 @@ jobs:
             exit 1
           fi
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+
       - name: Build CLI
         run: cargo build --bin boringcache
 
       - name: Validate workspace access
         run: ./target/debug/boringcache ls "${WORKSPACE}" --limit 1
+
+      - name: Run CLI core command e2e
+        run: |
+          set -euo pipefail
+
+          CLI="./target/debug/boringcache"
+          mkdir -p cli-command-e2e
+          CLI_LOG_DIR="cli-command-e2e"
+          CLI_HOME="$(mktemp -d)"
+          export HOME="${CLI_HOME}"
+
+          "${CLI}" auth --token "${BORINGCACHE_API_TOKEN}" > "${CLI_LOG_DIR}/auth.log"
+          "${CLI}" config set default_workspace "${WORKSPACE}" > "${CLI_LOG_DIR}/config-set-workspace.log"
+          "${CLI}" config set api_url "${BORINGCACHE_API_URL}" > "${CLI_LOG_DIR}/config-set-api-url.log"
+          "${CLI}" config get default_workspace > "${CLI_LOG_DIR}/config-get-default-workspace.log"
+          grep -q "${WORKSPACE}" "${CLI_LOG_DIR}/config-get-default-workspace.log"
+          "${CLI}" config list --json > "${CLI_LOG_DIR}/config-list.json"
+          "${CLI}" workspaces --json > "${CLI_LOG_DIR}/workspaces.json"
+          "${CLI}" ls --limit 1 --json > "${CLI_LOG_DIR}/ls.json"
+
+          TAG_ROOT="cli-cmd-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          TAG_DIR="${TAG_ROOT}-dir"
+          TAG_FILE="${TAG_ROOT}-file"
+          TAG_MOUNT="${TAG_ROOT}-mount"
+          SRC_DIR="${CLI_LOG_DIR}/src"
+          RESTORE_DIR="${CLI_LOG_DIR}/restore-dir"
+          SINGLE_FILE="${CLI_LOG_DIR}/single.txt"
+          RESTORE_FILE="${CLI_LOG_DIR}/restore-file.txt"
+          MOUNT_SRC_DIR="${CLI_LOG_DIR}/mount-src"
+          MOUNT_WATCH_DIR="${CLI_LOG_DIR}/mount-watch"
+          MOUNT_RESTORE_DIR="${CLI_LOG_DIR}/mount-restore"
+          MOUNT_LOG="${CLI_LOG_DIR}/mount.log"
+          IDENTITY_FILE="${CLI_LOG_DIR}/age-identity.txt"
+          MISSING_TAG="${TAG_ROOT}-missing"
+
+          mkdir -p "${SRC_DIR}"
+          printf 'cli-e2e-dir-%s\n' "${GITHUB_SHA}" > "${SRC_DIR}/a.txt"
+          printf 'cli-e2e-nested-%s\n' "${GITHUB_RUN_ID}" > "${SRC_DIR}/nested.txt"
+          printf 'cli-e2e-file-%s\n' "${GITHUB_RUN_ATTEMPT}" > "${SINGLE_FILE}"
+
+          "${CLI}" save --no-platform --no-git "${WORKSPACE}" "${TAG_DIR}:${SRC_DIR},${TAG_FILE}:${SINGLE_FILE}" > "${CLI_LOG_DIR}/save.log"
+          save_visible=0
+          for _ in $(seq 1 10); do
+            if "${CLI}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/check-hit.log" 2>&1; then
+              save_visible=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${save_visible}" != "1" ]]; then
+            echo "saved tags did not become visible in time"
+            cat "${CLI_LOG_DIR}/check-hit.log"
+            exit 1
+          fi
+          "${CLI}" restore --no-platform --no-git "${WORKSPACE}" "${TAG_DIR}:${RESTORE_DIR},${TAG_FILE}:${RESTORE_FILE}" > "${CLI_LOG_DIR}/restore.log"
+
+          cmp -s "${SRC_DIR}/a.txt" "${RESTORE_DIR}/a.txt"
+          cmp -s "${SRC_DIR}/nested.txt" "${RESTORE_DIR}/nested.txt"
+          cmp -s "${SINGLE_FILE}" "${RESTORE_FILE}"
+
+          if "${CLI}" restore --no-platform --no-git --lookup-only --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/missing-target" > "${CLI_LOG_DIR}/restore-miss.log" 2>&1; then
+            echo "expected lookup-only miss to fail with --fail-on-cache-miss"
+            cat "${CLI_LOG_DIR}/restore-miss.log"
+            exit 1
+          fi
+
+          "${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/delete.log"
+          deleted_confirmed=0
+          for _ in $(seq 1 10); do
+            if "${CLI}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/check-after-delete.log" 2>&1; then
+              sleep 1
+              continue
+            fi
+            deleted_confirmed=1
+            break
+          done
+          if [[ "${deleted_confirmed}" != "1" ]]; then
+            echo "deleted tags were still visible after retries"
+            cat "${CLI_LOG_DIR}/check-after-delete.log"
+            exit 1
+          fi
+
+          "${CLI}" setup-encryption "${WORKSPACE}" --identity-output "${IDENTITY_FILE}" > "${CLI_LOG_DIR}/setup-encryption.log"
+          if [[ ! -f "${IDENTITY_FILE}" ]]; then
+            echo "setup-encryption did not create identity file"
+            exit 1
+          fi
+          if [[ "$(stat -c '%a' "${IDENTITY_FILE}")" != "600" ]]; then
+            echo "identity file permissions are not 0600"
+            stat -c '%a %n' "${IDENTITY_FILE}"
+            exit 1
+          fi
+
+          mkdir -p "${MOUNT_SRC_DIR}"
+          printf 'mount-initial-%s\n' "${GITHUB_SHA}" > "${MOUNT_SRC_DIR}/file.txt"
+          "${CLI}" save --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_SRC_DIR}" > "${CLI_LOG_DIR}/mount-save.log"
+
+          "${CLI}" ls "${WORKSPACE}" --limit 50 --json > "${CLI_LOG_DIR}/ls-after-encryption.json"
+          TAG_MOUNT="${TAG_MOUNT}" LS_JSON_PATH="${CLI_LOG_DIR}/ls-after-encryption.json" python3 - <<'PY'
+import json
+import os
+import sys
+
+target = os.environ["TAG_MOUNT"]
+entries = json.load(open(os.environ["LS_JSON_PATH"], "r", encoding="utf-8")).get("entries", [])
+for entry in entries:
+    if entry.get("tag") == target:
+        if entry.get("encrypted") is True:
+            sys.exit(0)
+        print(f"tag {target} found but encrypted=false", file=sys.stderr)
+        sys.exit(1)
+print(f"tag {target} not found in ls output", file=sys.stderr)
+sys.exit(1)
+PY
+
+          MOUNT_PID=""
+          cleanup_mount() {
+            set +e
+            if [[ -n "${MOUNT_PID:-}" ]] && kill -0 "${MOUNT_PID}" >/dev/null 2>&1; then
+              kill -INT "${MOUNT_PID}" >/dev/null 2>&1 || true
+              wait "${MOUNT_PID}" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup_mount EXIT
+
+          "${CLI}" mount "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_WATCH_DIR}" --identity "${IDENTITY_FILE}" --verbose > "${MOUNT_LOG}" 2>&1 &
+          MOUNT_PID=$!
+
+          mount_ready=0
+          for _ in $(seq 1 30); do
+            if ! kill -0 "${MOUNT_PID}" >/dev/null 2>&1; then
+              echo "mount exited before readiness"
+              cat "${MOUNT_LOG}"
+              exit 1
+            fi
+            if grep -q "Watching" "${MOUNT_LOG}"; then
+              mount_ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${mount_ready}" != "1" ]]; then
+            echo "mount did not reach watch state in time"
+            cat "${MOUNT_LOG}"
+            exit 1
+          fi
+
+          printf 'mount-updated-%s\n' "${GITHUB_RUN_ID}" >> "${MOUNT_WATCH_DIR}/file.txt"
+          sleep 2
+          kill -INT "${MOUNT_PID}" >/dev/null 2>&1 || true
+          if ! wait "${MOUNT_PID}"; then
+            echo "mount exited with non-zero status"
+            cat "${MOUNT_LOG}"
+            exit 1
+          fi
+          MOUNT_PID=""
+          trap - EXIT
+
+          "${CLI}" restore --no-platform --no-git --identity "${IDENTITY_FILE}" "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_RESTORE_DIR}" > "${CLI_LOG_DIR}/mount-restore.log"
+          grep -q "mount-updated-${GITHUB_RUN_ID}" "${MOUNT_RESTORE_DIR}/file.txt"
+
+          "${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}" > "${CLI_LOG_DIR}/mount-delete.log"
 
       - name: Run adapter protocol e2e checks
         run: |
@@ -461,6 +633,28 @@ jobs:
           run_http "200" adapter-e2e/gradle-get.bin "http://127.0.0.1:${PORT}/cache/${gradle_key}"
           assert_file_equals adapter-e2e/gradle.bin adapter-e2e/gradle-get.bin
 
+          # Nx adapter
+          nx_hash=$(printf 'nx-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
+          nx_auth="authorization: Bearer nx-token-${GITHUB_RUN_ID}"
+          printf 'nx-e2e-%s\n' "${nx_hash}" > adapter-e2e/nx.bin
+
+          run_http "200" adapter-e2e/nx-put.txt -X PUT -H "${nx_auth}" --data-binary @adapter-e2e/nx.bin "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}"
+          run_http "200" adapter-e2e/nx-head.txt -I -H "${nx_auth}" "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}"
+          run_http "200" adapter-e2e/nx-get.bin -H "${nx_auth}" "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}"
+          assert_file_equals adapter-e2e/nx.bin adapter-e2e/nx-get.bin
+
+          printf 'nx-terminal-output-%s\n' "${nx_hash}" > adapter-e2e/nx-terminal.txt
+          run_http "200" adapter-e2e/nx-terminal-put.txt -X PUT -H "${nx_auth}" --data-binary @adapter-e2e/nx-terminal.txt "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}/terminalOutputs"
+          run_http "200" adapter-e2e/nx-terminal-get.txt -H "${nx_auth}" "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}/terminalOutputs"
+          assert_file_equals adapter-e2e/nx-terminal.txt adapter-e2e/nx-terminal-get.txt
+
+          cat > adapter-e2e/nx-query.json <<EOF
+          {"hashes":["${nx_hash}","deadbeef"]}
+          EOF
+          run_http "200" adapter-e2e/nx-query-response.json -X POST -H "${nx_auth}" -H "content-type: application/json" --data @adapter-e2e/nx-query.json "http://127.0.0.1:${PORT}/v1/cache"
+          grep -q '"misses"' adapter-e2e/nx-query-response.json
+          grep -q 'deadbeef' adapter-e2e/nx-query-response.json
+
           # Turborepo adapter
           turbo_hash=$(printf 'turbo-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
           turbo_auth="authorization: Bearer turbo-token-${GITHUB_RUN_ID}"
@@ -503,6 +697,42 @@ jobs:
           run_http "200" adapter-e2e/sccache-get.bin "http://127.0.0.1:${PORT}/${sccache_path}"
           assert_file_equals adapter-e2e/sccache.bin adapter-e2e/sccache-get.bin
 
+          # Go cache object adapter
+          go_action=$(printf 'go-action-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
+          printf 'go-e2e-%s\n' "${go_action}" > adapter-e2e/go.bin
+          run_http "201" adapter-e2e/go-put.txt -X PUT --data-binary @adapter-e2e/go.bin "http://127.0.0.1:${PORT}/gocache/${go_action}"
+          run_http "200" adapter-e2e/go-head.txt -I "http://127.0.0.1:${PORT}/gocache/${go_action}"
+          run_http "200" adapter-e2e/go-get.bin "http://127.0.0.1:${PORT}/gocache/${go_action}"
+          assert_file_equals adapter-e2e/go.bin adapter-e2e/go-get.bin
+
+          # Go GOCACHEPROG adapter e2e
+          mkdir -p adapter-e2e/go-prog
+          cat > adapter-e2e/go-prog/go.mod <<'EOF'
+          module example.com/boringcache-go-prog
+
+          go 1.25
+          EOF
+          cat > adapter-e2e/go-prog/main.go <<'EOF'
+          package main
+
+          import "fmt"
+
+          func main() {
+            fmt.Println("boringcache-go-e2e")
+          }
+          EOF
+          GOCACHEPROG_CMD="./target/debug/boringcache go-cacheprog --endpoint http://127.0.0.1:${PORT} --verbose"
+          (
+            cd adapter-e2e/go-prog
+            GOCACHE="$(mktemp -d)" GOCACHEPROG="${GOCACHEPROG_CMD}" go build ./... 2> ../go-build-1.log
+          )
+          (
+            cd adapter-e2e/go-prog
+            GOCACHE="$(mktemp -d)" GOCACHEPROG="${GOCACHEPROG_CMD}" go build ./... 2> ../go-build-2.log
+          )
+          grep -q 'go-cacheprog put ok' adapter-e2e/go-build-1.log
+          grep -q 'go-cacheprog get hit' adapter-e2e/go-build-2.log
+
           # Fail fast on known proxy failures
           declare -a BAD_PATTERNS=(
             'INTERNAL_ERROR'
@@ -526,3 +756,4 @@ jobs:
           name: serve-registry-adapter-e2e-logs
           path: |
             adapter-e2e/**
+            cli-command-e2e/**

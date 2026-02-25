@@ -195,7 +195,7 @@ pub enum Commands {
 
     #[command(
         name = "docker-registry",
-        about = "Run a local cache registry proxy backed by BoringCache (OCI + Bazel + Gradle + Turborepo + sccache)",
+        about = "Run a local cache registry proxy backed by BoringCache (OCI + Bazel + Gradle + Nx + Turborepo + sccache + Go)",
         visible_aliases = ["serve", "cache-registry"]
     )]
     Serve {
@@ -224,6 +224,26 @@ pub enum Commands {
             help = "Return strict backend/cache errors instead of best-effort cache responses"
         )]
         fail_on_cache_error: bool,
+    },
+
+    #[command(
+        name = "go-cacheprog",
+        about = "Run a GOCACHEPROG adapter that reads/writes through a BoringCache cache-registry endpoint"
+    )]
+    GoCacheProg {
+        #[arg(
+            long,
+            env = "BORINGCACHE_GOCACHEPROG_ENDPOINT",
+            help = "Cache-registry base URL (example: http://127.0.0.1:5000)"
+        )]
+        endpoint: String,
+
+        #[arg(
+            long,
+            env = "BORINGCACHE_GOCACHEPROG_TOKEN",
+            help = "Optional bearer token for cache-registry requests"
+        )]
+        token: Option<String>,
     },
 }
 

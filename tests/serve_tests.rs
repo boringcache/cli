@@ -2790,6 +2790,220 @@ async fn test_gradle_rejects_unsupported_method() {
 }
 
 #[tokio::test]
+async fn test_nx_requires_bearer_auth() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v1/cache/hash1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_nx_put_head_get_round_trip() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let hash = "nxhash123";
+    let payload = b"nx-cache-payload";
+
+    let app = build_router(state.clone());
+    let put_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v1/cache/{hash}"))
+            .header("authorization", "Bearer token")
+            .body(Body::from(payload.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_response.status(), StatusCode::OK);
+
+    let app = build_router(state.clone());
+    let head_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/v1/cache/{hash}"))
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(head_response.status(), StatusCode::OK);
+    let expected_content_length = payload.len().to_string();
+    assert_eq!(
+        head_response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some(expected_content_length.as_str())
+    );
+
+    let app = build_router(state);
+    let get_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v1/cache/{hash}"))
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(get_body.as_ref(), payload);
+}
+
+#[tokio::test]
+async fn test_nx_query_returns_misses() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let hash = "nxtaskhash1";
+    let payload = b"nx-query-payload";
+
+    let app = build_router(state.clone());
+    let put_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v1/cache/{hash}"))
+            .header("authorization", "Bearer token")
+            .body(Body::from(payload.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_response.status(), StatusCode::OK);
+    {
+        let mut published = state.kv_published_index.write().await;
+        published.set_empty();
+    }
+
+    let app = build_router(state);
+    let query_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/cache")
+            .header("authorization", "Bearer token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "hashes": [hash, "deadbeef"]
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(query_response.status(), StatusCode::OK);
+    let body = query_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["misses"], json!(["deadbeef"]));
+}
+
+#[tokio::test]
+async fn test_go_cache_put_head_get_round_trip() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let action = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let payload = b"go-cache-payload";
+
+    let app = build_router(state.clone());
+    let put_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/gocache/{action}"))
+            .body(Body::from(payload.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_response.status(), StatusCode::CREATED);
+
+    let app = build_router(state.clone());
+    let head_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/gocache/{action}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(head_response.status(), StatusCode::OK);
+    let expected_content_length = payload.len().to_string();
+    assert_eq!(
+        head_response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some(expected_content_length.as_str())
+    );
+
+    let app = build_router(state);
+    let get_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/gocache/{action}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(get_body.as_ref(), payload);
+}
+
+#[tokio::test]
+async fn test_go_cache_rejects_invalid_action_id() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/gocache/not-hex")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn test_turborepo_status_requires_bearer_auth() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
