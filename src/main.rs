@@ -2,6 +2,7 @@ use anyhow::Result;
 use boring_cache_cli::{
     cli, commands,
     config::{self, Config},
+    exit_code::ExitCodeError,
     ui,
 };
 use clap::{CommandFactory, Parser};
@@ -31,6 +32,10 @@ fn long_option_requires_value(command: &str, option: &str) -> bool {
     match command {
         "save" => matches!(option, "--exclude" | "--recipient"),
         "restore" => matches!(option, "--identity"),
+        "run" | "exec" => matches!(
+            option,
+            "--exclude" | "--recipient" | "--identity" | "--proxy" | "--host" | "--port"
+        ),
         "ls" => matches!(option, "--limit" | "--page"),
         "serve" | "docker-registry" | "cache-registry" => matches!(option, "--host" | "--port"),
         _ => false,
@@ -39,6 +44,7 @@ fn long_option_requires_value(command: &str, option: &str) -> bool {
 
 fn short_option_requires_value(command: &str, option: &str) -> bool {
     match command {
+        "run" | "exec" => option == "-p" || (option.starts_with("-p") && option.len() > 2),
         "serve" | "docker-registry" | "cache-registry" => {
             option == "-p" || (option.starts_with("-p") && option.len() > 2)
         }
@@ -119,6 +125,8 @@ async fn main() -> Result<()> {
             command.as_str(),
             "save"
                 | "restore"
+                | "run"
+                | "exec"
                 | "delete"
                 | "check"
                 | "ls"
@@ -134,6 +142,22 @@ async fn main() -> Result<()> {
                 "save" | "restore" => {
                     positional_args.len() == 1 && positional_args[0].1.contains(':')
                 }
+                "run" | "exec" => {
+                    let separator_idx = args[2..].iter().position(|arg| arg == "--");
+                    let pre_separator: Vec<_> = positional_args
+                        .iter()
+                        .filter(|(idx, _)| separator_idx.is_none_or(|sep| *idx < sep))
+                        .collect();
+                    if pre_separator.len() == 1 && pre_separator[0].1.contains(':') {
+                        true
+                    } else {
+                        pre_separator.is_empty()
+                            && args[2..]
+                                .iter()
+                                .take_while(|arg| *arg != "--")
+                                .any(|arg| arg == "--proxy" || arg.starts_with("--proxy="))
+                    }
+                }
 
                 "delete" | "check" => {
                     positional_args.len() == 1 && !positional_args[0].1.contains('/')
@@ -147,7 +171,24 @@ async fn main() -> Result<()> {
 
             if needs_workspace_injection {
                 if let Some(default_workspace) = resolve_default_workspace() {
-                    if command == "ls" || positional_args.is_empty() {
+                    if command == "run" || command == "exec" {
+                        let separator_idx = args[2..].iter().position(|arg| arg == "--");
+                        let pre_separator: Vec<_> = positional_args
+                            .iter()
+                            .filter(|(idx, _)| separator_idx.is_none_or(|sep| *idx < sep))
+                            .collect();
+
+                        if let Some((index, _)) = pre_separator.first() {
+                            args.insert(index + 2, default_workspace);
+                        } else if let Some(separator_idx) = separator_idx {
+                            args.insert(separator_idx + 2, default_workspace);
+                        } else if positional_args.is_empty() {
+                            args.push(default_workspace);
+                        } else {
+                            let first_pos_idx = positional_args[0].0 + 2;
+                            args.insert(first_pos_idx, default_workspace);
+                        }
+                    } else if command == "ls" || positional_args.is_empty() {
                         args.push(default_workspace);
                     } else {
                         let first_pos_idx = positional_args[0].0 + 2;
@@ -244,6 +285,58 @@ async fn main() -> Result<()> {
                 lookup_only,
                 identity,
                 fail_on_cache_error,
+            )
+            .await
+        }
+        cli::Commands::Run {
+            workspace,
+            tag_path_pairs,
+            no_platform,
+            no_git,
+            force,
+            exclude,
+            recipient,
+            identity,
+            proxy,
+            host,
+            port,
+            save_on_failure,
+            skip_restore,
+            skip_save,
+            fail_on_cache_error,
+            fail_on_cache_miss,
+            dry_run,
+            command,
+        } => {
+            let tag_path_strings = tag_path_pairs
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+
+            let effective_workspace = resolve_effective_workspace(&workspace);
+
+            commands::run::execute(
+                effective_workspace,
+                tag_path_strings,
+                cli.verbose,
+                no_platform,
+                no_git,
+                force,
+                exclude,
+                recipient,
+                identity,
+                proxy,
+                host,
+                port,
+                save_on_failure,
+                skip_restore,
+                skip_save,
+                fail_on_cache_error,
+                fail_on_cache_miss,
+                dry_run,
+                command,
             )
             .await
         }
@@ -347,6 +440,13 @@ fn handle_result(result: Result<()>) -> Result<()> {
     match result {
         Ok(()) => Ok(()),
         Err(e) => {
+            if let Some(exit_code_error) = e.downcast_ref::<ExitCodeError>() {
+                if let Some(message) = exit_code_error.message() {
+                    ui::error(message);
+                }
+                std::process::exit(exit_code_error.code());
+            }
+
             if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
                 match io_err.kind() {
                     std::io::ErrorKind::BrokenPipe => {

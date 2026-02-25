@@ -6,6 +6,7 @@ pub mod go_cacheprog;
 pub mod ls;
 pub mod mount;
 pub mod restore;
+pub mod run;
 pub mod save;
 pub mod serve;
 pub mod setup_encryption;

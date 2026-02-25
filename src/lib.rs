@@ -11,6 +11,7 @@ pub mod commands;
 pub mod config;
 pub mod encryption;
 pub mod error;
+pub mod exit_code;
 pub mod git;
 pub mod manifest;
 pub mod multipart_upload;

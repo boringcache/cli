@@ -4,11 +4,11 @@ pub mod handlers;
 pub mod routes;
 pub mod state;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 
 use crate::api::client::ApiClient;
 use crate::serve::state::{
@@ -16,6 +16,25 @@ use crate::serve::state::{
     UploadSessionStore, DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
 };
 use crate::tag_utils::TagResolver;
+
+pub struct ServeHandle {
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    server_task: tokio::task::JoinHandle<Result<()>>,
+    pub port: u16,
+}
+
+impl ServeHandle {
+    pub async fn shutdown_and_flush(mut self) -> Result<()> {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+
+        self.server_task
+            .await
+            .context("Cache registry server task panicked")??;
+        Ok(())
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_server(
@@ -28,6 +47,90 @@ pub async fn run_server(
     registry_root_tag: String,
     fail_on_cache_error: bool,
 ) -> Result<()> {
+    let (state, listener) = build_server_runtime(
+        api_client,
+        workspace,
+        host,
+        port,
+        tag_resolver,
+        configured_human_tags,
+        registry_root_tag,
+        fail_on_cache_error,
+    )
+    .await?;
+
+    spawn_maintenance_tasks(&state);
+    let router = routes::build_router(state.clone());
+
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    eprintln!("Shutdown: flushing pending KV entries");
+    flush_pending_on_shutdown(&state).await;
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn start_server_background(
+    api_client: ApiClient,
+    workspace: String,
+    host: String,
+    port: u16,
+    tag_resolver: TagResolver,
+    configured_human_tags: Vec<String>,
+    registry_root_tag: String,
+    fail_on_cache_error: bool,
+) -> Result<ServeHandle> {
+    let (state, listener) = build_server_runtime(
+        api_client,
+        workspace,
+        host,
+        port,
+        tag_resolver,
+        configured_human_tags,
+        registry_root_tag,
+        fail_on_cache_error,
+    )
+    .await?;
+
+    spawn_maintenance_tasks(&state);
+    let router = routes::build_router(state.clone());
+    let bound_port = listener
+        .local_addr()
+        .context("Failed to determine proxy port")?
+        .port();
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal_with_channel(shutdown_rx))
+            .await?;
+
+        eprintln!("Shutdown: flushing pending KV entries");
+        flush_pending_on_shutdown(&state).await;
+        Ok(())
+    });
+
+    Ok(ServeHandle {
+        shutdown_tx: Some(shutdown_tx),
+        server_task,
+        port: bound_port,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_server_runtime(
+    api_client: ApiClient,
+    workspace: String,
+    host: String,
+    port: u16,
+    tag_resolver: TagResolver,
+    configured_human_tags: Vec<String>,
+    registry_root_tag: String,
+    fail_on_cache_error: bool,
+) -> Result<(AppState, TcpListener)> {
     let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
     let state = AppState {
         api_client,
@@ -49,7 +152,6 @@ pub async fn run_server(
         blob_read_cache,
     };
 
-    let router = routes::build_router(state.clone());
     let addr = format!("{host}:{port}");
     let listener = TcpListener::bind(&addr).await?;
 
@@ -91,6 +193,10 @@ pub async fn run_server(
         }
     }
 
+    Ok((state, listener))
+}
+
+fn spawn_maintenance_tasks(state: &AppState) {
     let preload_state = state.clone();
     tokio::spawn(async move {
         cache_registry::preload_kv_index(&preload_state).await;
@@ -192,15 +298,6 @@ pub async fn run_server(
             }
         }
     });
-
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-
-    eprintln!("Shutdown: flushing pending KV entries");
-    flush_pending_on_shutdown(&state).await;
-
-    Ok(())
 }
 
 fn blob_read_cache_max_bytes() -> u64 {
@@ -285,6 +382,39 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+
+    eprintln!("\nShutting down...");
+}
+
+async fn shutdown_signal_with_channel(mut shutdown_rx: oneshot::Receiver<()>) {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            log::warn!("Failed to install Ctrl+C handler: {error}");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                log::warn!("Failed to install SIGTERM handler: {error}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+        _ = &mut shutdown_rx => {},
     }
 
     eprintln!("\nShutting down...");

@@ -5,6 +5,34 @@ use crate::cas_oci::sha256_hex;
 use crate::git::GitContext;
 use crate::tag_utils::TagResolver;
 
+pub struct ProxyServerHandle {
+    handle: crate::serve::ServeHandle,
+    endpoint_host: String,
+    port: u16,
+    primary_human_tag: String,
+}
+
+impl ProxyServerHandle {
+    pub fn endpoint_host(&self) -> &str {
+        &self.endpoint_host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn cache_ref(&self) -> String {
+        format!(
+            "{}:{}/cache:{}",
+            self.endpoint_host, self.port, self.primary_human_tag
+        )
+    }
+
+    pub async fn shutdown_and_flush(self) -> Result<()> {
+        self.handle.shutdown_and_flush().await
+    }
+}
+
 pub async fn execute(
     workspace: String,
     tag: String,
@@ -50,6 +78,64 @@ pub async fn execute(
         fail_on_cache_error,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn start_proxy_background(
+    workspace: String,
+    tag: String,
+    host: String,
+    port: u16,
+    no_platform: bool,
+    no_git: bool,
+    fail_on_cache_error: bool,
+) -> Result<ProxyServerHandle> {
+    ensure!(
+        workspace.contains('/'),
+        "Workspace must be in org/project format"
+    );
+
+    let api_client = ApiClient::new()?;
+    let platform = if no_platform {
+        None
+    } else {
+        Some(crate::platform::Platform::detect()?)
+    };
+    let git_enabled = !no_git && !crate::git::is_git_disabled_by_env();
+    let git_context = if git_enabled {
+        GitContext::detect()
+    } else {
+        GitContext::default()
+    };
+    let tag_resolver = TagResolver::new(platform, git_context, git_enabled);
+    let (registry_root_tag, configured_human_tags) =
+        resolve_registry_tag_config(&tag_resolver, &tag)?;
+
+    let primary_human_tag = configured_human_tags[0].clone();
+    let endpoint_host = if host == "0.0.0.0" {
+        "127.0.0.1".to_string()
+    } else {
+        host.clone()
+    };
+
+    let handle = crate::serve::start_server_background(
+        api_client,
+        workspace,
+        host,
+        port,
+        tag_resolver,
+        configured_human_tags,
+        registry_root_tag,
+        fail_on_cache_error,
+    )
+    .await?;
+
+    Ok(ProxyServerHandle {
+        port: handle.port,
+        handle,
+        endpoint_host,
+        primary_human_tag,
+    })
 }
 
 fn resolve_registry_tag_config(

@@ -117,6 +117,87 @@ pub enum Commands {
         fail_on_cache_error: bool,
     },
 
+    #[command(
+        name = "run",
+        visible_alias = "exec",
+        about = "Wrap restore -> command -> save in one invocation"
+    )]
+    Run {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: String,
+
+        #[arg(help = "One or more tag:path pairs (comma-separated)")]
+        tag_path_pairs: Option<String>,
+
+        #[arg(
+            long,
+            alias = "cross-os",
+            help = "Disable automatic platform suffix for tags"
+        )]
+        no_platform: bool,
+
+        #[arg(
+            long,
+            help = "Disable automatic git-based tag suffixing and fallback restore logic"
+        )]
+        no_git: bool,
+
+        #[arg(long, help = "Force save even if cache entry already exists on server")]
+        force: bool,
+
+        #[arg(
+            long,
+            help = "Exclude files matching patterns (comma-separated, can be repeated)",
+            value_delimiter = ','
+        )]
+        exclude: Vec<String>,
+
+        #[arg(long, help = "Age recipient public key for encryption (age1...)")]
+        recipient: Option<String>,
+
+        #[arg(long, help = "Path to Age identity file for decryption")]
+        identity: Option<String>,
+
+        #[arg(
+            long,
+            help = "Start cache-registry proxy with the provided tag around command execution"
+        )]
+        proxy: Option<String>,
+
+        #[arg(short, long, default_value = "5000")]
+        port: u16,
+
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        #[arg(long, help = "Run save phase even if command exits non-zero")]
+        save_on_failure: bool,
+
+        #[arg(long, help = "Skip restore phase")]
+        skip_restore: bool,
+
+        #[arg(long, help = "Skip save phase")]
+        skip_save: bool,
+
+        #[arg(
+            long,
+            help = "Exit with error if cache operations encounter backend failures"
+        )]
+        fail_on_cache_error: bool,
+
+        #[arg(
+            long,
+            help = "Exit with error if cache entry is not found (before running command)"
+        )]
+        fail_on_cache_miss: bool,
+
+        #[arg(long, help = "Print restore/save commands without executing")]
+        dry_run: bool,
+
+        #[arg(last = true, required = true, help = "Command to execute (after --)")]
+        command: Vec<String>,
+    },
+
     Check {
         #[arg(help = "Workspace name (org/project or user/project)")]
         workspace: String,
