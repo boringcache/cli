@@ -325,16 +325,21 @@ jobs:
             manifest-*.json
 
   serve-registry-adapter-e2e:
-    name: Adapter Protocol E2E
+    name: Adapter Protocol E2E (${{ matrix.suite }})
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [cli-core, bazel, gradle, nx, turbo, sccache, go]
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_API_URL: "https://api.boringcache.com"
       WORKSPACE: "boringcache/cli"
       REGISTRY_ROOT_TAG_PREFIX: "boringcache-cli-adapter-registry"
       PORT: "5001"
+      SUITE: ${{ matrix.suite }}
 
     steps:
       - name: Checkout code
@@ -347,7 +352,7 @@ jobs:
         with:
           workspace: ${{ env.WORKSPACE }}
           rust-version: "1.89"
-          cache-tag: "rust-1.89-e2e-adapter"
+          cache-tag: "rust-1.89-e2e-adapter-${{ matrix.suite }}"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "true"
@@ -382,6 +387,7 @@ jobs:
         run: ./target/debug/boringcache ls "${WORKSPACE}" --limit 1
 
       - name: Run CLI core command e2e
+        if: matrix.suite == 'cli-core'
         run: |
           set -euo pipefail
 
@@ -532,14 +538,15 @@ jobs:
 
           "${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}" > "${CLI_LOG_DIR}/mount-delete.log"
 
-      - name: Run adapter protocol e2e checks
+      - name: Run adapter protocol suite e2e
+        if: matrix.suite != 'cli-core'
         run: |
           set -euo pipefail
 
           mkdir -p adapter-e2e
-          REGISTRY_ROOT_TAG="${REGISTRY_ROOT_TAG_PREFIX}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          REGISTRY_ROOT_TAG="${REGISTRY_ROOT_TAG_PREFIX}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SUITE}"
           SERVE_PID=""
-          ADAPTER_PROXY_LOG="adapter-e2e/adapter-proxy.log"
+          ADAPTER_PROXY_LOG="adapter-e2e/adapter-proxy-${SUITE}.log"
 
           cleanup() {
             set +e
@@ -602,127 +609,129 @@ jobs:
 
           start_proxy
 
-          # Bazel HTTP cache adapter
-          bazel_key=$(printf 'bazel-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
-          printf 'bazel-e2e-%s\n' "${bazel_key}" > adapter-e2e/bazel.bin
-          run_http "200" adapter-e2e/bazel-cas-put.txt -X PUT --data-binary @adapter-e2e/bazel.bin "http://127.0.0.1:${PORT}/cas/${bazel_key}"
-          run_http "200" adapter-e2e/bazel-cas-head.txt -I "http://127.0.0.1:${PORT}/cas/${bazel_key}"
-          run_http "200" adapter-e2e/bazel-cas-get.bin "http://127.0.0.1:${PORT}/cas/${bazel_key}"
-          assert_file_equals adapter-e2e/bazel.bin adapter-e2e/bazel-cas-get.bin
+          case "${SUITE}" in
+            bazel)
+              bazel_key=$(printf 'bazel-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
+              printf 'bazel-e2e-%s\n' "${bazel_key}" > adapter-e2e/bazel.bin
+              run_http "200" adapter-e2e/bazel-cas-put.txt -X PUT --data-binary @adapter-e2e/bazel.bin "http://127.0.0.1:${PORT}/cas/${bazel_key}"
+              run_http "200" adapter-e2e/bazel-cas-head.txt -I "http://127.0.0.1:${PORT}/cas/${bazel_key}"
+              run_http "200" adapter-e2e/bazel-cas-get.bin "http://127.0.0.1:${PORT}/cas/${bazel_key}"
+              assert_file_equals adapter-e2e/bazel.bin adapter-e2e/bazel-cas-get.bin
 
-          run_http "200" adapter-e2e/bazel-ac-put.txt -X PUT --data-binary @adapter-e2e/bazel.bin "http://127.0.0.1:${PORT}/ac/${bazel_key}"
-          run_http "200" adapter-e2e/bazel-ac-get.bin "http://127.0.0.1:${PORT}/ac/${bazel_key}"
-          assert_file_equals adapter-e2e/bazel.bin adapter-e2e/bazel-ac-get.bin
+              run_http "200" adapter-e2e/bazel-ac-put.txt -X PUT --data-binary @adapter-e2e/bazel.bin "http://127.0.0.1:${PORT}/ac/${bazel_key}"
+              run_http "200" adapter-e2e/bazel-ac-get.bin "http://127.0.0.1:${PORT}/ac/${bazel_key}"
+              assert_file_equals adapter-e2e/bazel.bin adapter-e2e/bazel-ac-get.bin
+              ;;
+            gradle)
+              gradle_key="gradle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:7}"
+              printf 'gradle-e2e-%s\n' "${gradle_key}" > adapter-e2e/gradle.bin
+              run_http "200" adapter-e2e/gradle-put.txt -X PUT --data-binary @adapter-e2e/gradle.bin "http://127.0.0.1:${PORT}/cache/${gradle_key}"
+              run_http "200" adapter-e2e/gradle-head.txt -I "http://127.0.0.1:${PORT}/cache/${gradle_key}"
+              run_http "200" adapter-e2e/gradle-get.bin "http://127.0.0.1:${PORT}/cache/${gradle_key}"
+              assert_file_equals adapter-e2e/gradle.bin adapter-e2e/gradle-get.bin
+              ;;
+            nx)
+              nx_hash=$(printf 'nx-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
+              nx_auth="authorization: Bearer nx-token-${GITHUB_RUN_ID}"
+              printf 'nx-e2e-%s\n' "${nx_hash}" > adapter-e2e/nx.bin
+              run_http "200" adapter-e2e/nx-put.txt -X PUT -H "${nx_auth}" --data-binary @adapter-e2e/nx.bin "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}"
+              run_http "200" adapter-e2e/nx-head.txt -I -H "${nx_auth}" "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}"
+              run_http "200" adapter-e2e/nx-get.bin -H "${nx_auth}" "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}"
+              assert_file_equals adapter-e2e/nx.bin adapter-e2e/nx-get.bin
 
-          # Gradle HTTP cache adapter
-          gradle_key="gradle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:7}"
-          printf 'gradle-e2e-%s\n' "${gradle_key}" > adapter-e2e/gradle.bin
-          run_http "200" adapter-e2e/gradle-put.txt -X PUT --data-binary @adapter-e2e/gradle.bin "http://127.0.0.1:${PORT}/cache/${gradle_key}"
-          run_http "200" adapter-e2e/gradle-head.txt -I "http://127.0.0.1:${PORT}/cache/${gradle_key}"
-          run_http "200" adapter-e2e/gradle-get.bin "http://127.0.0.1:${PORT}/cache/${gradle_key}"
-          assert_file_equals adapter-e2e/gradle.bin adapter-e2e/gradle-get.bin
+              printf 'nx-terminal-output-%s\n' "${nx_hash}" > adapter-e2e/nx-terminal.txt
+              run_http "200" adapter-e2e/nx-terminal-put.txt -X PUT -H "${nx_auth}" --data-binary @adapter-e2e/nx-terminal.txt "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}/terminalOutputs"
+              run_http "200" adapter-e2e/nx-terminal-get.txt -H "${nx_auth}" "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}/terminalOutputs"
+              assert_file_equals adapter-e2e/nx-terminal.txt adapter-e2e/nx-terminal-get.txt
 
-          # Nx adapter
-          nx_hash=$(printf 'nx-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
-          nx_auth="authorization: Bearer nx-token-${GITHUB_RUN_ID}"
-          printf 'nx-e2e-%s\n' "${nx_hash}" > adapter-e2e/nx.bin
+              cat > adapter-e2e/nx-query.json <<EOF
+              {"hashes":["${nx_hash}","deadbeef"]}
+              EOF
+              run_http "200" adapter-e2e/nx-query-response.json -X POST -H "${nx_auth}" -H "content-type: application/json" --data @adapter-e2e/nx-query.json "http://127.0.0.1:${PORT}/v1/cache"
+              grep -q '"misses"' adapter-e2e/nx-query-response.json
+              grep -q 'deadbeef' adapter-e2e/nx-query-response.json
+              ;;
+            turbo)
+              turbo_hash=$(printf 'turbo-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
+              turbo_auth="authorization: Bearer turbo-token-${GITHUB_RUN_ID}"
+              printf 'turbo-e2e-%s\n' "${turbo_hash}" > adapter-e2e/turbo.bin
 
-          run_http "200" adapter-e2e/nx-put.txt -X PUT -H "${nx_auth}" --data-binary @adapter-e2e/nx.bin "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}"
-          run_http "200" adapter-e2e/nx-head.txt -I -H "${nx_auth}" "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}"
-          run_http "200" adapter-e2e/nx-get.bin -H "${nx_auth}" "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}"
-          assert_file_equals adapter-e2e/nx.bin adapter-e2e/nx-get.bin
+              run_http "200" adapter-e2e/turbo-status.json -H "${turbo_auth}" "http://127.0.0.1:${PORT}/v8/artifacts/status"
+              grep -q '"status":"enabled"' adapter-e2e/turbo-status.json
+              run_http "202" adapter-e2e/turbo-put.json -X PUT -H "${turbo_auth}" --data-binary @adapter-e2e/turbo.bin "http://127.0.0.1:${PORT}/v8/artifacts/${turbo_hash}"
+              grep -q '"urls"' adapter-e2e/turbo-put.json
+              run_http "200" adapter-e2e/turbo-head.txt -I -H "${turbo_auth}" "http://127.0.0.1:${PORT}/v8/artifacts/${turbo_hash}"
+              run_http "200" adapter-e2e/turbo-get.bin -H "${turbo_auth}" "http://127.0.0.1:${PORT}/v8/artifacts/${turbo_hash}"
+              assert_file_equals adapter-e2e/turbo.bin adapter-e2e/turbo-get.bin
 
-          printf 'nx-terminal-output-%s\n' "${nx_hash}" > adapter-e2e/nx-terminal.txt
-          run_http "200" adapter-e2e/nx-terminal-put.txt -X PUT -H "${nx_auth}" --data-binary @adapter-e2e/nx-terminal.txt "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}/terminalOutputs"
-          run_http "200" adapter-e2e/nx-terminal-get.txt -H "${nx_auth}" "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}/terminalOutputs"
-          assert_file_equals adapter-e2e/nx-terminal.txt adapter-e2e/nx-terminal-get.txt
+              cat > adapter-e2e/turbo-query.json <<EOF
+              {"hashes":["${turbo_hash}","deadbeef"]}
+              EOF
+              run_http "200" adapter-e2e/turbo-query-response.json -X POST -H "${turbo_auth}" -H "content-type: application/json" --data @adapter-e2e/turbo-query.json "http://127.0.0.1:${PORT}/v8/artifacts"
+              grep -q "\"${turbo_hash}\"" adapter-e2e/turbo-query-response.json
+              grep -q '"size"' adapter-e2e/turbo-query-response.json
 
-          cat > adapter-e2e/nx-query.json <<EOF
-          {"hashes":["${nx_hash}","deadbeef"]}
-          EOF
-          run_http "200" adapter-e2e/nx-query-response.json -X POST -H "${nx_auth}" -H "content-type: application/json" --data @adapter-e2e/nx-query.json "http://127.0.0.1:${PORT}/v1/cache"
-          grep -q '"misses"' adapter-e2e/nx-query-response.json
-          grep -q 'deadbeef' adapter-e2e/nx-query-response.json
+              cat > adapter-e2e/turbo-events.json <<EOF
+              [{"sessionId":"e2e","source":"REMOTE","event":"HIT","hash":"${turbo_hash}","duration":7}]
+              EOF
+              run_http "200" adapter-e2e/turbo-events-response.txt -X POST -H "${turbo_auth}" -H "content-type: application/json" --data @adapter-e2e/turbo-events.json "http://127.0.0.1:${PORT}/v8/artifacts/events"
+              ;;
+            sccache)
+              sccache_key=$(printf 'sccache-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
+              shard_a="${sccache_key:0:1}"
+              shard_b="${sccache_key:1:1}"
+              shard_c="${sccache_key:2:1}"
+              sccache_prefix="sccache-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              sccache_path="${sccache_prefix}/${shard_a}/${shard_b}/${shard_c}/${sccache_key}"
+              printf 'sccache-e2e-%s\n' "${sccache_key}" > adapter-e2e/sccache.bin
 
-          # Turborepo adapter
-          turbo_hash=$(printf 'turbo-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
-          turbo_auth="authorization: Bearer turbo-token-${GITHUB_RUN_ID}"
-          printf 'turbo-e2e-%s\n' "${turbo_hash}" > adapter-e2e/turbo.bin
+              run_http "201" adapter-e2e/sccache-mkcol.txt -X MKCOL "http://127.0.0.1:${PORT}/${sccache_prefix}/${shard_a}/${shard_b}/${shard_c}"
+              run_http "201" adapter-e2e/sccache-put.txt -X PUT --data-binary @adapter-e2e/sccache.bin "http://127.0.0.1:${PORT}/${sccache_path}"
+              run_http "200" adapter-e2e/sccache-head.txt -I "http://127.0.0.1:${PORT}/${sccache_path}"
+              run_http "200" adapter-e2e/sccache-get.bin "http://127.0.0.1:${PORT}/${sccache_path}"
+              assert_file_equals adapter-e2e/sccache.bin adapter-e2e/sccache-get.bin
+              ;;
+            go)
+              go_action=$(printf 'go-action-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
+              printf 'go-e2e-%s\n' "${go_action}" > adapter-e2e/go.bin
+              run_http "201" adapter-e2e/go-put.txt -X PUT --data-binary @adapter-e2e/go.bin "http://127.0.0.1:${PORT}/gocache/${go_action}"
+              run_http "200" adapter-e2e/go-head.txt -I "http://127.0.0.1:${PORT}/gocache/${go_action}"
+              run_http "200" adapter-e2e/go-get.bin "http://127.0.0.1:${PORT}/gocache/${go_action}"
+              assert_file_equals adapter-e2e/go.bin adapter-e2e/go-get.bin
 
-          run_http "200" adapter-e2e/turbo-status.json -H "${turbo_auth}" "http://127.0.0.1:${PORT}/v8/artifacts/status"
-          grep -q '"status":"enabled"' adapter-e2e/turbo-status.json
+              mkdir -p adapter-e2e/go-prog
+              cat > adapter-e2e/go-prog/go.mod <<'EOF'
+              module example.com/boringcache-go-prog
 
-          run_http "202" adapter-e2e/turbo-put.json -X PUT -H "${turbo_auth}" --data-binary @adapter-e2e/turbo.bin "http://127.0.0.1:${PORT}/v8/artifacts/${turbo_hash}"
-          grep -q '"urls"' adapter-e2e/turbo-put.json
+              go 1.25
+              EOF
+              cat > adapter-e2e/go-prog/main.go <<'EOF'
+              package main
 
-          run_http "200" adapter-e2e/turbo-head.txt -I -H "${turbo_auth}" "http://127.0.0.1:${PORT}/v8/artifacts/${turbo_hash}"
-          run_http "200" adapter-e2e/turbo-get.bin -H "${turbo_auth}" "http://127.0.0.1:${PORT}/v8/artifacts/${turbo_hash}"
-          assert_file_equals adapter-e2e/turbo.bin adapter-e2e/turbo-get.bin
+              import "fmt"
 
-          cat > adapter-e2e/turbo-query.json <<EOF
-          {"hashes":["${turbo_hash}","deadbeef"]}
-          EOF
-          run_http "200" adapter-e2e/turbo-query-response.json -X POST -H "${turbo_auth}" -H "content-type: application/json" --data @adapter-e2e/turbo-query.json "http://127.0.0.1:${PORT}/v8/artifacts"
-          grep -q "\"${turbo_hash}\"" adapter-e2e/turbo-query-response.json
-          grep -q '"size"' adapter-e2e/turbo-query-response.json
+              func main() {
+                fmt.Println("boringcache-go-e2e")
+              }
+              EOF
+              GOCACHEPROG_CMD="./target/debug/boringcache go-cacheprog --endpoint http://127.0.0.1:${PORT} --verbose"
+              (
+                cd adapter-e2e/go-prog
+                GOCACHE="$(mktemp -d)" GOCACHEPROG="${GOCACHEPROG_CMD}" go build ./... 2> ../go-build-1.log
+              )
+              (
+                cd adapter-e2e/go-prog
+                GOCACHE="$(mktemp -d)" GOCACHEPROG="${GOCACHEPROG_CMD}" go build ./... 2> ../go-build-2.log
+              )
+              grep -q 'go-cacheprog put ok' adapter-e2e/go-build-1.log
+              grep -q 'go-cacheprog get hit' adapter-e2e/go-build-2.log
+              ;;
+            *)
+              echo "unknown suite: ${SUITE}"
+              exit 1
+              ;;
+          esac
 
-          cat > adapter-e2e/turbo-events.json <<EOF
-          [{"sessionId":"e2e","source":"REMOTE","event":"HIT","hash":"${turbo_hash}","duration":7}]
-          EOF
-          run_http "200" adapter-e2e/turbo-events-response.txt -X POST -H "${turbo_auth}" -H "content-type: application/json" --data @adapter-e2e/turbo-events.json "http://127.0.0.1:${PORT}/v8/artifacts/events"
-
-          # sccache adapter
-          sccache_key=$(printf 'sccache-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
-          shard_a="${sccache_key:0:1}"
-          shard_b="${sccache_key:1:1}"
-          shard_c="${sccache_key:2:1}"
-          sccache_prefix="sccache-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          sccache_path="${sccache_prefix}/${shard_a}/${shard_b}/${shard_c}/${sccache_key}"
-          printf 'sccache-e2e-%s\n' "${sccache_key}" > adapter-e2e/sccache.bin
-
-          run_http "201" adapter-e2e/sccache-mkcol.txt -X MKCOL "http://127.0.0.1:${PORT}/${sccache_prefix}/${shard_a}/${shard_b}/${shard_c}"
-          run_http "201" adapter-e2e/sccache-put.txt -X PUT --data-binary @adapter-e2e/sccache.bin "http://127.0.0.1:${PORT}/${sccache_path}"
-          run_http "200" adapter-e2e/sccache-head.txt -I "http://127.0.0.1:${PORT}/${sccache_path}"
-          run_http "200" adapter-e2e/sccache-get.bin "http://127.0.0.1:${PORT}/${sccache_path}"
-          assert_file_equals adapter-e2e/sccache.bin adapter-e2e/sccache-get.bin
-
-          # Go cache object adapter
-          go_action=$(printf 'go-action-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
-          printf 'go-e2e-%s\n' "${go_action}" > adapter-e2e/go.bin
-          run_http "201" adapter-e2e/go-put.txt -X PUT --data-binary @adapter-e2e/go.bin "http://127.0.0.1:${PORT}/gocache/${go_action}"
-          run_http "200" adapter-e2e/go-head.txt -I "http://127.0.0.1:${PORT}/gocache/${go_action}"
-          run_http "200" adapter-e2e/go-get.bin "http://127.0.0.1:${PORT}/gocache/${go_action}"
-          assert_file_equals adapter-e2e/go.bin adapter-e2e/go-get.bin
-
-          # Go GOCACHEPROG adapter e2e
-          mkdir -p adapter-e2e/go-prog
-          cat > adapter-e2e/go-prog/go.mod <<'EOF'
-          module example.com/boringcache-go-prog
-
-          go 1.25
-          EOF
-          cat > adapter-e2e/go-prog/main.go <<'EOF'
-          package main
-
-          import "fmt"
-
-          func main() {
-            fmt.Println("boringcache-go-e2e")
-          }
-          EOF
-          GOCACHEPROG_CMD="./target/debug/boringcache go-cacheprog --endpoint http://127.0.0.1:${PORT} --verbose"
-          (
-            cd adapter-e2e/go-prog
-            GOCACHE="$(mktemp -d)" GOCACHEPROG="${GOCACHEPROG_CMD}" go build ./... 2> ../go-build-1.log
-          )
-          (
-            cd adapter-e2e/go-prog
-            GOCACHE="$(mktemp -d)" GOCACHEPROG="${GOCACHEPROG_CMD}" go build ./... 2> ../go-build-2.log
-          )
-          grep -q 'go-cacheprog put ok' adapter-e2e/go-build-1.log
-          grep -q 'go-cacheprog get hit' adapter-e2e/go-build-2.log
-
-          # Fail fast on known proxy failures
           declare -a BAD_PATTERNS=(
             'INTERNAL_ERROR'
             'panic'
@@ -742,7 +751,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: serve-registry-adapter-e2e-logs
+          name: serve-registry-adapter-e2e-logs-${{ matrix.suite }}
           path: |
             adapter-e2e/**
             cli-command-e2e/**
