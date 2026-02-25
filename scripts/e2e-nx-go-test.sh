@@ -4,7 +4,8 @@ set -euo pipefail
 WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-}}"
 PORT="${PORT:-5057}"
 HOST="${HOST:-127.0.0.1}"
-REGISTRY_ROOT_TAG="${REGISTRY_ROOT_TAG:-e2e-all-$(date +%Y%m%d%H%M%S)}"
+TAG_PREFIX="${TAG_PREFIX:-bc-e2e-cli}"
+REGISTRY_ROOT_TAG="${REGISTRY_ROOT_TAG:-${TAG_PREFIX}-all-$(date -u +%Y%m%d%H%M%S)}"
 LOG_DIR="${LOG_DIR:-/tmp/boringcache-all-protocols-e2e-$(date +%Y%m%d-%H%M%S)}"
 RUN_SCCACHE="${RUN_SCCACHE:-0}"
 RUN_DOCKER="${RUN_DOCKER:-0}"
@@ -366,7 +367,7 @@ COPY payload.txt .
 RUN sha256sum payload.txt > payload.sha
 DOCKER
     printf 'docker-%s\n' "${REGISTRY_ROOT_TAG}" > "${DOCKER_DIR}/payload.txt"
-    DOCKER_CACHE_REF="localhost:${PORT}/boringcache-e2e/cache:${REGISTRY_ROOT_TAG}-docker"
+    DOCKER_CACHE_REF="localhost:${PORT}/boringcache-e2e/cache:${REGISTRY_ROOT_TAG}-docker-buildkit"
     docker buildx build --progress=plain \
       --cache-from "type=registry,ref=${DOCKER_CACHE_REF}" \
       --cache-to "type=registry,ref=${DOCKER_CACHE_REF},mode=max" \

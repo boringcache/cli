@@ -17,8 +17,7 @@ jobs:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_API_URL: "https://api.boringcache.com"
       WORKSPACE: "boringcache/cli"
-      CACHE_TAG_PREFIX: "boringcache-cli"
-      REGISTRY_ROOT_TAG_PREFIX: "boringcache-cli-registry"
+      E2E_TAG_PREFIX: "bc-e2e-cli"
       PORT: "5000"
 
     steps:
@@ -32,7 +31,7 @@ jobs:
         with:
           workspace: ${{ env.WORKSPACE }}
           rust-version: "1.89"
-          cache-tag: "rust-1.89-e2e-registry"
+          cache-tag: "bc-e2e-cli-rust-docker-buildkit"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "true"
@@ -78,11 +77,11 @@ jobs:
 
           # Intentionally run-scoped for isolated protocol/e2e coverage.
           BUILDER="bc-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          CACHE_TAG="${CACHE_TAG_PREFIX}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          CACHE_TAG="${E2E_TAG_PREFIX}-docker-buildkit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           CACHE_REF="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG}"
           CACHE_TAG_ALIAS="${CACHE_TAG}-alias"
           CACHE_REF_ALIAS="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG_ALIAS}"
-          REGISTRY_ROOT_TAG="${REGISTRY_ROOT_TAG_PREFIX}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          REGISTRY_ROOT_TAG="${E2E_TAG_PREFIX}-docker-buildkit-registry-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           SERVE_PID=""
           declare -a LOG_FILES=()
 
@@ -370,7 +369,7 @@ jobs:
         with:
           workspace: ${{ env.WORKSPACE }}
           rust-version: "1.89"
-          cache-tag: "rust-1.89-e2e-cli-core"
+          cache-tag: "bc-e2e-cli-rust-cli-core"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "true"
@@ -409,7 +408,9 @@ jobs:
           CLI_HOME="$(mktemp -d)"
           export HOME="${CLI_HOME}"
 
-          "${CLI}" auth --token "${BORINGCACHE_API_TOKEN}" > "${CLI_LOG_DIR}/auth.log"
+          AUTH_TOKEN="${BORINGCACHE_API_TOKEN}"
+          "${CLI}" auth --token "${AUTH_TOKEN}" > "${CLI_LOG_DIR}/auth.log"
+          unset BORINGCACHE_API_TOKEN BORINGCACHE_DEFAULT_WORKSPACE
           "${CLI}" config set default_workspace "${WORKSPACE}" > "${CLI_LOG_DIR}/config-set-workspace.log"
           "${CLI}" config set api_url "${BORINGCACHE_API_URL}" > "${CLI_LOG_DIR}/config-set-api-url.log"
           "${CLI}" config get default_workspace > "${CLI_LOG_DIR}/config-get-default-workspace.log"
@@ -418,7 +419,7 @@ jobs:
           "${CLI}" workspaces --json > "${CLI_LOG_DIR}/workspaces.json"
           "${CLI}" ls --limit 1 --json > "${CLI_LOG_DIR}/ls.json"
 
-          TAG_ROOT="cli-cmd-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          TAG_ROOT="bc-e2e-cli-core-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           TAG_DIR="${TAG_ROOT}-dir"
           TAG_FILE="${TAG_ROOT}-file"
           TAG_MOUNT="${TAG_ROOT}-mount"
@@ -571,7 +572,7 @@ jobs:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_API_URL: "https://api.boringcache.com"
       WORKSPACE: "boringcache/cli"
-      REGISTRY_ROOT_TAG_PREFIX: "boringcache-cli-adapter-registry"
+      E2E_TAG_PREFIX: "bc-e2e-cli"
       PORT: "5001"
       SUITE: ${{ matrix.suite }}
 
@@ -586,7 +587,7 @@ jobs:
         with:
           workspace: ${{ env.WORKSPACE }}
           rust-version: "1.89"
-          cache-tag: "rust-1.89-e2e-adapter-${{ matrix.suite }}"
+          cache-tag: "bc-e2e-cli-rust-adapter-${{ matrix.suite }}"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "true"
@@ -625,7 +626,7 @@ jobs:
           set -euo pipefail
 
           mkdir -p adapter-e2e
-          REGISTRY_ROOT_TAG="${REGISTRY_ROOT_TAG_PREFIX}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SUITE}"
+          REGISTRY_ROOT_TAG="${E2E_TAG_PREFIX}-adapter-${SUITE}-registry-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           SERVE_PID=""
           ADAPTER_PROXY_LOG="adapter-e2e/adapter-proxy-${SUITE}.log"
 
@@ -777,7 +778,8 @@ jobs:
               mkdir -p adapter-e2e/go-prog
               printf 'module example.com/boringcache-go-prog\n\ngo 1.25\n' > adapter-e2e/go-prog/go.mod
               printf 'package main\n\nimport "fmt"\n\nfunc main() {\n  fmt.Println("boringcache-go-e2e")\n}\n' > adapter-e2e/go-prog/main.go
-              GOCACHEPROG_CMD="./target/debug/boringcache go-cacheprog --endpoint http://127.0.0.1:${PORT} --verbose"
+              CLI_BIN="${GITHUB_WORKSPACE}/target/debug/boringcache"
+              GOCACHEPROG_CMD="${CLI_BIN} go-cacheprog --endpoint http://127.0.0.1:${PORT} --verbose"
               (
                 cd adapter-e2e/go-prog
                 GOCACHE="$(mktemp -d)" GOCACHEPROG="${GOCACHEPROG_CMD}" go build ./... 2> ../go-build-1.log

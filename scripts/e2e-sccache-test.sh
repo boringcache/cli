@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROXY_PORT="${PROXY_PORT:-5050}"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
-TAG_BASE="${TAG:-e2e-kv-batch-test}"
+TAG_BASE="${TAG:-bc-e2e-cli-sccache}"
 WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-boringcache/testing2}}"
 BINARY="${BINARY:-./target/release/boringcache}"
 PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}"
