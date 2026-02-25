@@ -1,6 +1,6 @@
 [package]
 name = "boring_cache_cli"
-version = "1.7.2"
+version = "1.8.0"
 edition = "2021"
 authors = ["BoringCache Team"]
 description = "High-performance cache management CLI for CI/CD workflows"
