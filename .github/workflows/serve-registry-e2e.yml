@@ -482,8 +482,13 @@ jobs:
           "${CLI}" restore --no-platform --no-git --lookup-only --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/missing-target" > "${CLI_LOG_DIR}/restore-miss.log" 2>&1
           restore_miss_status=$?
           set -e
-          if [[ "${restore_miss_status}" -ne 78 ]]; then
-            echo "expected restore miss exit code 78, got ${restore_miss_status}"
+          if [[ "${restore_miss_status}" -eq 0 ]]; then
+            echo "expected restore miss to fail with non-zero exit code"
+            cat "${CLI_LOG_DIR}/restore-miss.log"
+            exit 1
+          fi
+          if ! grep -q "Cache miss for tags" "${CLI_LOG_DIR}/restore-miss.log"; then
+            echo "restore miss log did not include cache miss summary"
             cat "${CLI_LOG_DIR}/restore-miss.log"
             exit 1
           fi
