@@ -478,8 +478,12 @@ jobs:
           cmp -s "${SRC_DIR}/nested.txt" "${RESTORE_DIR}/nested.txt"
           cmp -s "${SINGLE_FILE}" "${RESTORE_FILE_DIR}/single.txt"
 
-          if "${CLI}" restore --no-platform --no-git --lookup-only --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/missing-target" > "${CLI_LOG_DIR}/restore-miss.log" 2>&1; then
-            echo "expected lookup-only miss to fail with --fail-on-cache-miss"
+          set +e
+          "${CLI}" restore --no-platform --no-git --lookup-only --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/missing-target" > "${CLI_LOG_DIR}/restore-miss.log" 2>&1
+          restore_miss_status=$?
+          set -e
+          if [[ "${restore_miss_status}" -ne 78 ]]; then
+            echo "expected restore miss exit code 78, got ${restore_miss_status}"
             cat "${CLI_LOG_DIR}/restore-miss.log"
             exit 1
           fi
@@ -499,6 +503,63 @@ jobs:
             cat "${CLI_LOG_DIR}/check-after-delete.log"
             exit 1
           fi
+
+          RUN_TAG="${TAG_ROOT}-run"
+          RUN_PROXY_TAG="${TAG_ROOT}-run-proxy"
+          RUN_SEED_DIR="${CLI_LOG_DIR}/run-seed"
+          RUN_TARGET_DIR="${CLI_LOG_DIR}/run-target"
+          RUN_VERIFY_DIR="${CLI_LOG_DIR}/run-verify"
+          RUN_MISS_SENTINEL="${CLI_LOG_DIR}/run-miss-sentinel.txt"
+
+          mkdir -p "${RUN_SEED_DIR}"
+          printf 'run-warm-cache-%s\n' "${GITHUB_SHA}" > "${RUN_SEED_DIR}/restored.txt"
+          "${CLI}" save --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}:${RUN_SEED_DIR}" > "${CLI_LOG_DIR}/run-seed-save.log"
+
+          run_seed_visible=0
+          for _ in $(seq 1 10); do
+            if "${CLI}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-seed-check.log" 2>&1; then
+              run_seed_visible=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${run_seed_visible}" != "1" ]]; then
+            echo "run seed tag did not become visible in time"
+            cat "${CLI_LOG_DIR}/run-seed-check.log"
+            exit 1
+          fi
+
+          run_archive_script='[ "$(cat "$1/restored.txt")" = "run-warm-cache-'"${GITHUB_SHA}"'" ] || exit 27
+printf "run-generated-%s\n" "'"${GITHUB_RUN_ID}"'" > "$1/generated.txt"'
+          "${CLI}" run --no-platform --no-git --fail-on-cache-error "${WORKSPACE}" "${RUN_TAG}:${RUN_TARGET_DIR}" -- sh -ec "${run_archive_script}" _ "${RUN_TARGET_DIR}" > "${CLI_LOG_DIR}/run-archive.log"
+
+          "${CLI}" restore --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}:${RUN_VERIFY_DIR}" > "${CLI_LOG_DIR}/run-verify-restore.log"
+          grep -q "run-generated-${GITHUB_RUN_ID}" "${RUN_VERIFY_DIR}/generated.txt"
+
+          set +e
+          "${CLI}" run --no-platform --no-git --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/run-missing-target" -- sh -ec 'printf "unexpected-run\n" > "$1"' _ "${RUN_MISS_SENTINEL}" > "${CLI_LOG_DIR}/run-miss.log" 2>&1
+          run_miss_status=$?
+          set -e
+          if [[ "${run_miss_status}" -ne 78 ]]; then
+            echo "expected run miss exit code 78, got ${run_miss_status}"
+            cat "${CLI_LOG_DIR}/run-miss.log"
+            exit 1
+          fi
+          if [[ -f "${RUN_MISS_SENTINEL}" ]]; then
+            echo "run child command executed despite fail-on-cache-miss"
+            cat "${CLI_LOG_DIR}/run-miss.log"
+            exit 1
+          fi
+
+          run_proxy_script='endpoint="${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}"
+[ -n "${endpoint}" ] || exit 31
+[ "${TURBO_API:-}" = "${endpoint}" ] || exit 32
+expected_ref="127.0.0.1:$1/cache:$2"
+[ "$3" = "${expected_ref}" ] || exit 33
+curl -fsS --max-time 2 "${endpoint}/v2/" >/dev/null || exit 34'
+          "${CLI}" run "${WORKSPACE}" --proxy "${RUN_PROXY_TAG}" --no-platform --no-git --host 127.0.0.1 --port 0 -- sh -ec "${run_proxy_script}" _ "{PORT}" "${RUN_PROXY_TAG}" "{CACHE_REF}" > "${CLI_LOG_DIR}/run-proxy.log"
+
+          "${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-delete.log"
 
           "${CLI}" setup-encryption "${WORKSPACE}" --identity-output "${IDENTITY_FILE}" > "${CLI_LOG_DIR}/setup-encryption.log"
           if [[ ! -f "${IDENTITY_FILE}" ]]; then
@@ -559,6 +620,11 @@ jobs:
           kill -INT "${MOUNT_PID}" >/dev/null 2>&1 || true
           if ! wait "${MOUNT_PID}"; then
             echo "mount exited with non-zero status"
+            cat "${MOUNT_LOG}"
+            exit 1
+          fi
+          if grep -q "Final sync failed" "${MOUNT_LOG}"; then
+            echo "mount reported final sync failure"
             cat "${MOUNT_LOG}"
             exit 1
           fi
