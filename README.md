@@ -257,6 +257,9 @@ Go build cache with `GOCACHEPROG`:
 GOCACHEPROG="boringcache go-cacheprog --endpoint http://127.0.0.1:5000" go build ./...
 ```
 
+Nx/Turborepo protocol auth on the local proxy validates only the presence and shape of the `Authorization: Bearer <token>` header.
+Workspace authentication and authorization are enforced by the BoringCache backend token configured for the CLI.
+
 The proxy binds to `127.0.0.1` by default. Use `--host 0.0.0.0` when the BuildKit daemon runs in a separate container (e.g., `docker-container` driver).
 
 `docker-registry` / `serve` / `cache-registry` support `--fail-on-cache-error`.

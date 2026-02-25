@@ -53,25 +53,34 @@ enum OciRoute {
 fn parse_oci_path(path: &str) -> Option<OciRoute> {
     let path = path.strip_prefix('/').unwrap_or(path);
 
-    if let Some(idx) = path.find("/blobs/uploads") {
+    if let Some(idx) = path.rfind("/blobs/uploads/") {
         let name = &path[..idx];
-        let rest = &path[idx + "/blobs/uploads".len()..];
-        if name.is_empty() {
-            return None;
+        let uuid = &path[idx + "/blobs/uploads/".len()..];
+        if !name.is_empty() && !uuid.is_empty() {
+            return Some(OciRoute::BlobUpload {
+                name: name.to_string(),
+                uuid: uuid.to_string(),
+            });
         }
-        return match rest {
-            "" | "/" => Some(OciRoute::BlobUploadStart {
-                name: name.to_string(),
-            }),
-            _ if rest.starts_with('/') => Some(OciRoute::BlobUpload {
-                name: name.to_string(),
-                uuid: rest.trim_start_matches('/').to_string(),
-            }),
-            _ => None,
-        };
     }
 
-    if let Some(idx) = path.find("/blobs/") {
+    if let Some(name) = path.strip_suffix("/blobs/uploads") {
+        if !name.is_empty() {
+            return Some(OciRoute::BlobUploadStart {
+                name: name.to_string(),
+            });
+        }
+    }
+
+    if let Some(name) = path.strip_suffix("/blobs/uploads/") {
+        if !name.is_empty() {
+            return Some(OciRoute::BlobUploadStart {
+                name: name.to_string(),
+            });
+        }
+    }
+
+    if let Some(idx) = path.rfind("/blobs/") {
         let name = &path[..idx];
         let digest = &path[idx + "/blobs/".len()..];
         if !name.is_empty() && !digest.is_empty() {
@@ -82,7 +91,7 @@ fn parse_oci_path(path: &str) -> Option<OciRoute> {
         }
     }
 
-    if let Some(idx) = path.find("/manifests/") {
+    if let Some(idx) = path.rfind("/manifests/") {
         let name = &path[..idx];
         let reference = &path[idx + "/manifests/".len()..];
         if !name.is_empty() && !reference.is_empty() {
@@ -136,6 +145,7 @@ pub async fn oci_dispatch(
             _ => Err(OciError::unsupported("method not allowed")),
         },
         OciRoute::BlobUpload { name, uuid } => match method {
+            Method::GET => get_upload_status(state, name, uuid).await,
             Method::PATCH => patch_upload(state, name, uuid, headers, body).await,
             Method::PUT => put_upload(state, name, uuid, params, headers, body).await,
             Method::DELETE => delete_upload(state, uuid).await,
@@ -190,8 +200,9 @@ fn best_effort_oci_read_response(route: &OciRoute) -> Result<Response, OciError>
             Err(OciError::manifest_unknown(format!("{name}:{reference}")))
         }
         OciRoute::Blob { name, digest } => Err(OciError::blob_unknown(format!("{name}@{digest}"))),
-        OciRoute::BlobUploadStart { .. } | OciRoute::BlobUpload { .. } => {
-            Err(OciError::name_unknown("not found"))
+        OciRoute::BlobUploadStart { .. } => Err(OciError::name_unknown("not found")),
+        OciRoute::BlobUpload { name, uuid } => {
+            Err(OciError::blob_upload_unknown(format!("{name}:{uuid}")))
         }
     }
 }
@@ -348,11 +359,10 @@ async fn resolve_manifest(
 
 fn scoped_restore_tags(tag_resolver: &TagResolver, name: &str, reference: &str) -> Vec<String> {
     let scoped_input = format!("{name}:{reference}");
-    tag_resolver
-        .restore_tag_candidates(&scoped_input)
-        .into_iter()
-        .map(|candidate| ref_tag_for_input(&candidate))
-        .collect()
+    let scoped = tag_resolver
+        .effective_save_tag(&scoped_input)
+        .unwrap_or(scoped_input);
+    vec![ref_tag_for_input(&scoped)]
 }
 
 fn scoped_save_tag(
@@ -775,7 +785,7 @@ async fn start_upload(
                 created_at: std::time::Instant::now(),
             });
 
-            let location = format!("/v2/{name}/blobs/uploads/{session_id}");
+            let location = format!("/v2/{name}/blobs/{digest_param}");
             let mut headers = HeaderMap::new();
             insert_header(&mut headers, "Location", &location)?;
             insert_header(&mut headers, "Docker-Upload-UUID", &session_id)?;
@@ -805,6 +815,35 @@ async fn start_upload(
     insert_header(&mut headers, "Content-Length", "0")?;
 
     Ok((StatusCode::ACCEPTED, headers, Body::empty()).into_response())
+}
+
+async fn get_upload_status(
+    state: AppState,
+    _name: String,
+    uuid: String,
+) -> Result<Response, OciError> {
+    let (name, bytes_received) = {
+        let sessions = state.upload_sessions.read().await;
+        let session = sessions
+            .get(&uuid)
+            .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
+        (session.name.clone(), session.bytes_received)
+    };
+
+    let end = if bytes_received == 0 {
+        0
+    } else {
+        bytes_received - 1
+    };
+    let location = format!("/v2/{name}/blobs/uploads/{uuid}");
+    let range = format!("0-{end}");
+    let mut headers = HeaderMap::new();
+    insert_header(&mut headers, "Location", &location)?;
+    insert_header(&mut headers, "Docker-Upload-UUID", &uuid)?;
+    insert_header(&mut headers, "Range", &range)?;
+    insert_header(&mut headers, "Content-Length", "0")?;
+
+    Ok((StatusCode::NO_CONTENT, headers, Body::empty()).into_response())
 }
 
 async fn patch_upload(
@@ -1697,6 +1736,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_blob_upload_uuid_uses_last_upload_marker() {
+        match parse_oci_path("org/blobs/uploads/cache/blobs/uploads/some-uuid-here") {
+            Some(OciRoute::BlobUpload { name, uuid }) => {
+                assert_eq!(name, "org/blobs/uploads/cache");
+                assert_eq!(uuid, "some-uuid-here");
+            }
+            _ => panic!("expected BlobUpload"),
+        }
+    }
+
+    #[test]
+    fn parse_blob_route_uses_last_blob_marker() {
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let path = format!("org/blobs/cache/blobs/{digest}");
+        match parse_oci_path(&path) {
+            Some(OciRoute::Blob {
+                name,
+                digest: parsed_digest,
+            }) => {
+                assert_eq!(name, "org/blobs/cache");
+                assert_eq!(parsed_digest, digest);
+            }
+            _ => panic!("expected Blob"),
+        }
+    }
+
+    #[test]
     fn parse_leading_slash_stripped() {
         match parse_oci_path("/my-cache/manifests/v1") {
             Some(OciRoute::Manifest { name, reference }) => {
@@ -1853,7 +1919,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_restore_tags_include_default_branch_fallback() {
+    fn scoped_restore_tags_use_single_effective_tag() {
         let resolver = TagResolver::new(
             None,
             GitContext {
@@ -1868,10 +1934,7 @@ mod tests {
         let tags = scoped_restore_tags(&resolver, "buildkit-cache", "main");
         assert_eq!(
             tags,
-            vec![
-                ref_tag_for_input("buildkit-cache:main-branch-feature-x"),
-                ref_tag_for_input("buildkit-cache:main"),
-            ]
+            vec![ref_tag_for_input("buildkit-cache:main-branch-feature-x")]
         );
     }
 

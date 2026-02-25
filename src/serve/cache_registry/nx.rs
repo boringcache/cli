@@ -15,7 +15,7 @@ pub(crate) async fn handle_artifact(
     hash: &str,
     body: Body,
 ) -> Result<Response, RegistryError> {
-    turborepo::ensure_bearer_auth(headers)?;
+    turborepo::ensure_proxy_bearer_header(headers)?;
     match method {
         Method::PUT => {
             let _ = put_kv_object(state, KvNamespace::Nx, hash, body, StatusCode::OK).await?;
@@ -37,7 +37,7 @@ pub(crate) async fn handle_terminal_output(
     hash: &str,
     body: Body,
 ) -> Result<Response, RegistryError> {
-    turborepo::ensure_bearer_auth(headers)?;
+    turborepo::ensure_proxy_bearer_header(headers)?;
     match method {
         Method::PUT => {
             let _ = put_kv_object(
@@ -71,7 +71,7 @@ pub(crate) async fn handle_query(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Response, RegistryError> {
-    turborepo::ensure_bearer_auth(headers)?;
+    turborepo::ensure_proxy_bearer_header(headers)?;
     if method != Method::POST {
         return Err(RegistryError::method_not_allowed(
             "Nx cache query endpoint supports POST",

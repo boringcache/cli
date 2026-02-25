@@ -141,6 +141,26 @@ async fn test_nonexistent_route_returns_404() {
 }
 
 #[tokio::test]
+async fn test_unknown_put_route_returns_404() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/unknown-protocol/path")
+            .body(Body::from("payload"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn test_manifest_hit_returns_decoded_index_json() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
@@ -1098,6 +1118,33 @@ async fn test_upload_start_and_finalize() {
         .to_string();
     assert!(location.contains(&uuid));
 
+    let app = build_router(state.clone());
+    let status_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v2/my-cache/blobs/uploads/{uuid}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status_response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        status_response
+            .headers()
+            .get("Docker-Upload-UUID")
+            .and_then(|value| value.to_str().ok()),
+        Some(uuid.as_str())
+    );
+    assert_eq!(
+        status_response
+            .headers()
+            .get("Range")
+            .and_then(|value| value.to_str().ok()),
+        Some("0-0")
+    );
+
     let chunk_data = b"test blob data";
     let app = build_router(state.clone());
     let response = tower::ServiceExt::oneshot(
@@ -1460,6 +1507,13 @@ async fn test_monolithic_upload() {
             .unwrap(),
         digest
     );
+    assert_eq!(
+        response
+            .headers()
+            .get("Location")
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("/v2/my-cache/blobs/{digest}").as_str())
+    );
 }
 
 #[tokio::test]
@@ -1491,6 +1545,13 @@ async fn test_large_monolithic_upload_over_two_megabytes() {
             .to_str()
             .unwrap(),
         digest
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("Location")
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("/v2/my-cache/blobs/{digest}").as_str())
     );
 }
 

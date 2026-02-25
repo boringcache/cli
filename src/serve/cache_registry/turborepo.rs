@@ -12,7 +12,7 @@ pub(crate) fn handle_status(
     method: Method,
     headers: &HeaderMap,
 ) -> Result<Response, RegistryError> {
-    ensure_bearer_auth(headers)?;
+    ensure_proxy_bearer_header(headers)?;
     if method == Method::GET {
         Ok((
             StatusCode::OK,
@@ -34,7 +34,7 @@ pub(crate) async fn handle_artifact(
     hash: &str,
     body: Body,
 ) -> Result<Response, RegistryError> {
-    ensure_bearer_auth(headers)?;
+    ensure_proxy_bearer_header(headers)?;
     match method {
         Method::PUT => {
             let _ = put_kv_object(
@@ -67,7 +67,7 @@ pub(crate) async fn handle_query_artifacts(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Response, RegistryError> {
-    ensure_bearer_auth(headers)?;
+    ensure_proxy_bearer_header(headers)?;
     if method != Method::POST {
         return Err(RegistryError::method_not_allowed(
             "Turborepo artifact query endpoint supports POST",
@@ -80,7 +80,7 @@ pub(crate) fn handle_events(
     method: Method,
     headers: &HeaderMap,
 ) -> Result<Response, RegistryError> {
-    ensure_bearer_auth(headers)?;
+    ensure_proxy_bearer_header(headers)?;
     if method != Method::POST {
         return Err(RegistryError::method_not_allowed(
             "Turborepo events endpoint supports POST",
@@ -89,7 +89,7 @@ pub(crate) fn handle_events(
     Ok((StatusCode::OK, Body::empty()).into_response())
 }
 
-pub(crate) fn ensure_bearer_auth(headers: &HeaderMap) -> Result<(), RegistryError> {
+pub(crate) fn ensure_proxy_bearer_header(headers: &HeaderMap) -> Result<(), RegistryError> {
     let value = headers.get("authorization").ok_or_else(|| {
         RegistryError::new(StatusCode::UNAUTHORIZED, "Missing Authorization header")
     })?;
@@ -176,17 +176,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ensure_bearer_auth_accepts_lowercase_scheme() {
+    fn ensure_proxy_bearer_header_accepts_lowercase_scheme() {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", HeaderValue::from_static("bearer token"));
-        assert!(ensure_bearer_auth(&headers).is_ok());
+        assert!(ensure_proxy_bearer_header(&headers).is_ok());
     }
 
     #[test]
-    fn ensure_bearer_auth_rejects_missing_token() {
+    fn ensure_proxy_bearer_header_rejects_missing_token() {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", HeaderValue::from_static("Bearer "));
-        let error = ensure_bearer_auth(&headers).unwrap_err();
+        let error = ensure_proxy_bearer_header(&headers).unwrap_err();
         assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn ensure_proxy_bearer_header_accepts_arbitrary_non_empty_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer any-non-empty-token"),
+        );
+        assert!(ensure_proxy_bearer_header(&headers).is_ok());
     }
 }
