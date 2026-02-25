@@ -1541,12 +1541,9 @@ async fn sync_to_remote_archive(
             ));
         }
 
-        (encrypted_path.to_path_buf(), encrypted_size)
+        (encrypted_path, encrypted_size)
     } else {
-        (
-            archive_info.archive_path.to_path_buf(),
-            archive_info.compressed_size,
-        )
+        (archive_info.archive_path, archive_info.compressed_size)
     };
 
     let encryption_metadata = if encrypt {
@@ -1656,7 +1653,7 @@ async fn sync_to_remote_archive(
 
     let archive_etag = if let Some(upload_id) = save_response.get_upload_id() {
         let (uploaded_parts, _storage_metrics) = crate::multipart_upload::upload_via_part_urls(
-            &final_archive_path,
+            final_archive_path.as_ref(),
             archive_urls,
             &progress,
             transfer_client,
@@ -1677,7 +1674,7 @@ async fn sync_to_remote_archive(
         Some(complete_response.archive_etag)
     } else {
         let (etag, _storage_metrics) = crate::multipart_upload::upload_via_single_url(
-            &final_archive_path,
+            final_archive_path.as_ref(),
             &archive_urls[0],
             &progress,
             transfer_client,
