@@ -9,7 +9,7 @@ on:
 
 jobs:
   serve-registry-e2e:
-    name: BuildKit Registry E2E
+    name: Adapter Protocol E2E (docker-buildkit)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -144,6 +144,31 @@ jobs:
               e2e-context 2>&1 | tee "${log_file}"
           }
 
+          is_transient_registry_export_error() {
+            local log_file="$1"
+            grep -Eq \
+              'expected sha256:.*got sha256:e3b0|error writing layer blob|unexpected status from PUT request.*400 Bad Request' \
+              "${log_file}"
+          }
+
+          run_build_with_retry() {
+            local log_file="$1"
+            shift
+            local attempts=3
+            local attempt
+            for attempt in $(seq 1 "${attempts}"); do
+              if run_build "${log_file}" "$@"; then
+                return 0
+              fi
+              if [[ "${attempt}" -lt "${attempts}" ]] && is_transient_registry_export_error "${log_file}"; then
+                echo "transient registry export error on attempt ${attempt}/${attempts}; retrying..."
+                sleep 3
+                continue
+              fi
+              return 1
+            done
+          }
+
           create_builder() {
             docker buildx create \
               --name "${BUILDER}" \
@@ -248,16 +273,16 @@ jobs:
 
           # Phase 1: seed + warm + no-cache re-export against one tag.
           start_proxy "serve-initial.log"
-          run_build "first-build.log" \
+          run_build_with_retry "first-build.log" \
             --cache-from "type=registry,ref=${CACHE_REF}" \
             --cache-to "type=registry,ref=${CACHE_REF},mode=max"
           reset_builder
-          run_build "second-build.log" \
+          run_build_with_retry "second-build.log" \
             --cache-from "type=registry,ref=${CACHE_REF}" \
             --cache-to "type=registry,ref=${CACHE_REF},mode=max"
           assert_cached "second-build.log"
           assert_registry_import_succeeded "second-build.log"
-          run_build "third-build-reexport.log" \
+          run_build_with_retry "third-build-reexport.log" \
             --no-cache \
             --cache-to "type=registry,ref=${CACHE_REF},mode=max"
           stop_proxy
@@ -265,16 +290,16 @@ jobs:
           # Phase 2: restart proxy, verify cache still resolves, then alias tag finalize path.
           start_proxy "serve-restart.log"
           reset_builder
-          run_build "fourth-build-after-restart.log" \
+          run_build_with_retry "fourth-build-after-restart.log" \
             --cache-from "type=registry,ref=${CACHE_REF}" \
             --cache-to "type=registry,ref=${CACHE_REF},mode=max"
           assert_cached "fourth-build-after-restart.log"
           assert_registry_import_succeeded "fourth-build-after-restart.log"
-          run_build "fifth-build-alias-export.log" \
+          run_build_with_retry "fifth-build-alias-export.log" \
             --cache-from "type=registry,ref=${CACHE_REF}" \
             --cache-to "type=registry,ref=${CACHE_REF_ALIAS},mode=max"
           assert_registry_import_succeeded "fifth-build-alias-export.log"
-          run_build "sixth-build-alias-warm.log" \
+          run_build_with_retry "sixth-build-alias-warm.log" \
             --cache-from "type=registry,ref=${CACHE_REF_ALIAS}" \
             --cache-to "type=registry,ref=${CACHE_REF_ALIAS},mode=max"
           assert_cached "sixth-build-alias-warm.log"
@@ -324,41 +349,34 @@ jobs:
             sixth-build-alias-warm.log
             manifest-*.json
 
-  serve-registry-adapter-e2e:
-    name: Adapter Protocol E2E (${{ matrix.suite }})
+  serve-registry-cli-core-e2e:
+    name: CLI Core E2E
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [cli-core, bazel, gradle, nx, turbo, sccache, go]
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_API_URL: "https://api.boringcache.com"
       WORKSPACE: "boringcache/cli"
-      REGISTRY_ROOT_TAG_PREFIX: "boringcache-cli-adapter-registry"
-      PORT: "5001"
-      SUITE: ${{ matrix.suite }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Rust (BoringCache)
-        id: boringcache-rust-adapter
+        id: boringcache-rust-cli-core
         continue-on-error: true
         uses: boringcache/rust-action@v1
         with:
           workspace: ${{ env.WORKSPACE }}
           rust-version: "1.89"
-          cache-tag: "rust-1.89-e2e-adapter-${{ matrix.suite }}"
+          cache-tag: "rust-1.89-e2e-cli-core"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "true"
 
       - name: Setup Rust (Fallback)
-        if: steps.boringcache-rust-adapter.outcome == 'failure'
+        if: steps.boringcache-rust-cli-core.outcome == 'failure'
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.89"
@@ -375,11 +393,6 @@ jobs:
             exit 1
           fi
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.25.x"
-
       - name: Build CLI
         run: cargo build --bin boringcache
 
@@ -387,7 +400,6 @@ jobs:
         run: ./target/debug/boringcache ls "${WORKSPACE}" --limit 1
 
       - name: Run CLI core command e2e
-        if: matrix.suite == 'cli-core'
         run: |
           set -euo pipefail
 
@@ -538,8 +550,77 @@ jobs:
 
           "${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}" > "${CLI_LOG_DIR}/mount-delete.log"
 
+      - name: Upload CLI core E2E logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serve-registry-cli-core-e2e-logs
+          path: |
+            cli-command-e2e/**
+
+  serve-registry-adapter-e2e:
+    name: Adapter Protocol E2E (${{ matrix.suite }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [bazel, gradle, nx, turbo, sccache, go]
+    env:
+      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+      BORINGCACHE_API_URL: "https://api.boringcache.com"
+      WORKSPACE: "boringcache/cli"
+      REGISTRY_ROOT_TAG_PREFIX: "boringcache-cli-adapter-registry"
+      PORT: "5001"
+      SUITE: ${{ matrix.suite }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (BoringCache)
+        id: boringcache-rust-adapter
+        continue-on-error: true
+        uses: boringcache/rust-action@v1
+        with:
+          workspace: ${{ env.WORKSPACE }}
+          rust-version: "1.89"
+          cache-tag: "rust-1.89-e2e-adapter-${{ matrix.suite }}"
+          sccache: "true"
+          sccache-mode: "proxy"
+          cache-target: "true"
+
+      - name: Setup Rust (Fallback)
+        if: steps.boringcache-rust-adapter.outcome == 'failure'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89"
+
+      - name: Validate configuration
+        run: |
+          set -euo pipefail
+          if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+            echo "BORINGCACHE_API_TOKEN secret is required"
+            exit 1
+          fi
+          if [[ -z "${WORKSPACE:-}" ]]; then
+            echo "WORKSPACE is not set"
+            exit 1
+          fi
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+
+      - name: Build CLI
+        run: cargo build --bin boringcache
+
+      - name: Validate workspace access
+        run: ./target/debug/boringcache ls "${WORKSPACE}" --limit 1
+
       - name: Run adapter protocol suite e2e
-        if: matrix.suite != 'cli-core'
         run: |
           set -euo pipefail
 
@@ -644,9 +725,7 @@ jobs:
               run_http "200" adapter-e2e/nx-terminal-get.txt -H "${nx_auth}" "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}/terminalOutputs"
               assert_file_equals adapter-e2e/nx-terminal.txt adapter-e2e/nx-terminal-get.txt
 
-              cat > adapter-e2e/nx-query.json <<EOF
-              {"hashes":["${nx_hash}","deadbeef"]}
-              EOF
+              printf '{"hashes":["%s","deadbeef"]}\n' "${nx_hash}" > adapter-e2e/nx-query.json
               run_http "200" adapter-e2e/nx-query-response.json -X POST -H "${nx_auth}" -H "content-type: application/json" --data @adapter-e2e/nx-query.json "http://127.0.0.1:${PORT}/v1/cache"
               grep -q '"misses"' adapter-e2e/nx-query-response.json
               grep -q 'deadbeef' adapter-e2e/nx-query-response.json
@@ -664,16 +743,12 @@ jobs:
               run_http "200" adapter-e2e/turbo-get.bin -H "${turbo_auth}" "http://127.0.0.1:${PORT}/v8/artifacts/${turbo_hash}"
               assert_file_equals adapter-e2e/turbo.bin adapter-e2e/turbo-get.bin
 
-              cat > adapter-e2e/turbo-query.json <<EOF
-              {"hashes":["${turbo_hash}","deadbeef"]}
-              EOF
+              printf '{"hashes":["%s","deadbeef"]}\n' "${turbo_hash}" > adapter-e2e/turbo-query.json
               run_http "200" adapter-e2e/turbo-query-response.json -X POST -H "${turbo_auth}" -H "content-type: application/json" --data @adapter-e2e/turbo-query.json "http://127.0.0.1:${PORT}/v8/artifacts"
               grep -q "\"${turbo_hash}\"" adapter-e2e/turbo-query-response.json
               grep -q '"size"' adapter-e2e/turbo-query-response.json
 
-              cat > adapter-e2e/turbo-events.json <<EOF
-              [{"sessionId":"e2e","source":"REMOTE","event":"HIT","hash":"${turbo_hash}","duration":7}]
-              EOF
+              printf '[{"sessionId":"e2e","source":"REMOTE","event":"HIT","hash":"%s","duration":7}]\n' "${turbo_hash}" > adapter-e2e/turbo-events.json
               run_http "200" adapter-e2e/turbo-events-response.txt -X POST -H "${turbo_auth}" -H "content-type: application/json" --data @adapter-e2e/turbo-events.json "http://127.0.0.1:${PORT}/v8/artifacts/events"
               ;;
             sccache)
@@ -700,20 +775,8 @@ jobs:
               assert_file_equals adapter-e2e/go.bin adapter-e2e/go-get.bin
 
               mkdir -p adapter-e2e/go-prog
-              cat > adapter-e2e/go-prog/go.mod <<'EOF'
-              module example.com/boringcache-go-prog
-
-              go 1.25
-              EOF
-              cat > adapter-e2e/go-prog/main.go <<'EOF'
-              package main
-
-              import "fmt"
-
-              func main() {
-                fmt.Println("boringcache-go-e2e")
-              }
-              EOF
+              printf 'module example.com/boringcache-go-prog\n\ngo 1.25\n' > adapter-e2e/go-prog/go.mod
+              printf 'package main\n\nimport "fmt"\n\nfunc main() {\n  fmt.Println("boringcache-go-e2e")\n}\n' > adapter-e2e/go-prog/main.go
               GOCACHEPROG_CMD="./target/debug/boringcache go-cacheprog --endpoint http://127.0.0.1:${PORT} --verbose"
               (
                 cd adapter-e2e/go-prog
@@ -754,4 +817,3 @@ jobs:
           name: serve-registry-adapter-e2e-logs-${{ matrix.suite }}
           path: |
             adapter-e2e/**
-            cli-command-e2e/**
