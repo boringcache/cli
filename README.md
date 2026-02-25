@@ -131,6 +131,36 @@ boringcache restore my-org/ws "deps:node_modules" --fail-on-cache-error
 By default, restore cache/backend errors are warn-only (non-fatal).
 Use `--fail-on-cache-miss` to fail on misses and `--fail-on-cache-error` to fail on cache/backend failures.
 
+### `run [WORKSPACE] [TAG:PATH,...] -- <COMMAND...>` (alias: `exec`)
+Run cache restore/save around a command in one invocation.
+
+Modes:
+- Archive mode: provide `TAG:PATH` pairs (`restore -> command -> save`)
+- Proxy mode: provide `--proxy <TAG>` only (starts cache-registry proxy around the command)
+- Combined mode: provide both pairs and `--proxy`
+
+```bash
+# archive mode
+boringcache run my-org/ws "deps:node_modules" -- npm ci
+
+# proxy mode
+boringcache run my-org/ws --proxy registry-cache -- nx run-many --target=build
+
+# combined mode
+boringcache run my-org/ws "deps:node_modules" --proxy registry-cache -- npm run build
+```
+
+Behavior notes:
+- Cache misses/errors are warn-only by default (child command still runs).
+- `--fail-on-cache-miss` fails before running the child command (run exits `78`).
+- `--fail-on-cache-error` makes cache/backend failures strict (run exits `78` when cache flow fails and child would otherwise succeed).
+- Child exit code is preserved for normal command failures.
+- Command-not-found returns `127`.
+
+Proxy injection details:
+- Environment variables are injected for supported clients (`NX_*`, `TURBO_*`, `GOCACHEPROG`, `SCCACHE_*`).
+- Command args support placeholders: `{PORT}` and `{CACHE_REF}`.
+
 ### `ls [WORKSPACE]`
 List cache entries.
 
