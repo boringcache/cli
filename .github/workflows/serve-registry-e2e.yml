@@ -478,22 +478,11 @@ jobs:
           "${CLI}" save --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_SRC_DIR}" > "${CLI_LOG_DIR}/mount-save.log"
 
           "${CLI}" ls "${WORKSPACE}" --limit 50 --json > "${CLI_LOG_DIR}/ls-after-encryption.json"
-          TAG_MOUNT="${TAG_MOUNT}" LS_JSON_PATH="${CLI_LOG_DIR}/ls-after-encryption.json" python3 - <<'PY'
-import json
-import os
-import sys
-
-target = os.environ["TAG_MOUNT"]
-entries = json.load(open(os.environ["LS_JSON_PATH"], "r", encoding="utf-8")).get("entries", [])
-for entry in entries:
-    if entry.get("tag") == target:
-        if entry.get("encrypted") is True:
-            sys.exit(0)
-        print(f"tag {target} found but encrypted=false", file=sys.stderr)
-        sys.exit(1)
-print(f"tag {target} not found in ls output", file=sys.stderr)
-sys.exit(1)
-PY
+          if ! jq -e --arg tag "${TAG_MOUNT}" '.entries[]? | select(.tag == $tag and .encrypted == true)' "${CLI_LOG_DIR}/ls-after-encryption.json" >/dev/null; then
+            echo "encrypted entry for ${TAG_MOUNT} was not visible in ls output"
+            cat "${CLI_LOG_DIR}/ls-after-encryption.json"
+            exit 1
+          fi
 
           MOUNT_PID=""
           cleanup_mount() {
