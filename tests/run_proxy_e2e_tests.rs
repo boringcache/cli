@@ -20,37 +20,16 @@ fn free_port() -> u16 {
     port
 }
 
-fn python3_available() -> bool {
-    Command::new("python3")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
 #[test]
 fn test_run_proxy_injects_env_and_substitutes_placeholders() {
-    if !python3_available() {
-        eprintln!(
-            "skipping test_run_proxy_injects_env_and_substitutes_placeholders: python3 missing"
-        );
-        return;
-    }
-
     let temp_dir = TempDir::new().expect("temp dir");
     let port = free_port().to_string();
-    let script = r#"import os, sys, urllib.request
-expected_endpoint = f"http://127.0.0.1:{sys.argv[1]}"
-if os.environ.get("NX_SELF_HOSTED_REMOTE_CACHE_SERVER") != expected_endpoint:
-    raise SystemExit(2)
-if os.environ.get("TURBO_API") != expected_endpoint:
-    raise SystemExit(3)
-expected_ref = f"127.0.0.1:{sys.argv[1]}/cache:main"
-if sys.argv[2] != expected_ref:
-    raise SystemExit(4)
-with urllib.request.urlopen(expected_endpoint + "/v2/") as response:
-    if response.status != 200:
-        raise SystemExit(5)
+    let script = r#"expected_endpoint="http://127.0.0.1:$1"
+expected_ref="127.0.0.1:$1/cache:main"
+[ "${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}" = "$expected_endpoint" ] || exit 2
+[ "${TURBO_API:-}" = "$expected_endpoint" ] || exit 3
+[ "${2:-}" = "$expected_ref" ] || exit 4
+curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 5
 "#;
 
     let output = Command::new(cli_binary())
@@ -66,9 +45,10 @@ with urllib.request.urlopen(expected_endpoint + "/v2/") as response:
             "--port",
             &port,
             "--",
-            "python3",
-            "-c",
+            "sh",
+            "-ec",
             script,
+            "_",
             "{PORT}",
             "{CACHE_REF}",
         ])
@@ -126,24 +106,13 @@ fn test_run_proxy_propagates_child_exit_code() {
 
 #[test]
 fn test_run_combined_archive_and_proxy_mode_executes_child() {
-    if !python3_available() {
-        eprintln!(
-            "skipping test_run_combined_archive_and_proxy_mode_executes_child: python3 missing"
-        );
-        return;
-    }
-
     let temp_dir = TempDir::new().expect("temp dir");
     let cache_dir = temp_dir.path().join("cache");
     std::fs::create_dir_all(&cache_dir).expect("create cache dir");
     let port = free_port().to_string();
-    let script = r#"import os, sys, urllib.request
-expected_endpoint = f"http://127.0.0.1:{sys.argv[1]}"
-if os.environ.get("NX_SELF_HOSTED_REMOTE_CACHE_SERVER") != expected_endpoint:
-    raise SystemExit(2)
-with urllib.request.urlopen(expected_endpoint + "/v2/") as response:
-    if response.status != 200:
-        raise SystemExit(3)
+    let script = r#"expected_endpoint="http://127.0.0.1:$1"
+[ "${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}" = "$expected_endpoint" ] || exit 2
+curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 3
 "#;
 
     let pair = format!("deps:{}", cache_dir.display());
@@ -163,9 +132,10 @@ with urllib.request.urlopen(expected_endpoint + "/v2/") as response:
             "--port",
             &port,
             "--",
-            "python3",
-            "-c",
+            "sh",
+            "-ec",
             script,
+            "_",
             "{PORT}",
         ])
         .env("HOME", temp_dir.path())
