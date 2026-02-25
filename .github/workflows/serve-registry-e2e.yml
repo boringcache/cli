@@ -408,6 +408,25 @@ jobs:
           CLI_HOME="$(mktemp -d)"
           export HOME="${CLI_HOME}"
 
+          dump_cli_debug_logs() {
+            set +e
+            echo "=== CLI core debug logs ==="
+            if [[ -d "${CLI_LOG_DIR}" ]]; then
+              shopt -s nullglob
+              for log_file in "${CLI_LOG_DIR}"/*.log "${CLI_LOG_DIR}"/*.json; do
+                echo "--- ${log_file} ---"
+                tail -n 200 "${log_file}" || true
+              done
+              shopt -u nullglob
+            fi
+            if [[ -f "${MOUNT_LOG:-}" ]]; then
+              echo "--- ${MOUNT_LOG} ---"
+              tail -n 200 "${MOUNT_LOG}" || true
+            fi
+            echo "=== End CLI core debug logs ==="
+          }
+          trap dump_cli_debug_logs ERR
+
           AUTH_TOKEN="${BORINGCACHE_API_TOKEN}"
           "${CLI}" auth --token "${AUTH_TOKEN}" > "${CLI_LOG_DIR}/auth.log"
           unset BORINGCACHE_API_TOKEN BORINGCACHE_DEFAULT_WORKSPACE
@@ -426,7 +445,7 @@ jobs:
           SRC_DIR="${CLI_LOG_DIR}/src"
           RESTORE_DIR="${CLI_LOG_DIR}/restore-dir"
           SINGLE_FILE="${CLI_LOG_DIR}/single.txt"
-          RESTORE_FILE="${CLI_LOG_DIR}/restore-file.txt"
+          RESTORE_FILE_DIR="${CLI_LOG_DIR}/restore-file"
           MOUNT_SRC_DIR="${CLI_LOG_DIR}/mount-src"
           MOUNT_WATCH_DIR="${CLI_LOG_DIR}/mount-watch"
           MOUNT_RESTORE_DIR="${CLI_LOG_DIR}/mount-restore"
@@ -453,11 +472,11 @@ jobs:
             cat "${CLI_LOG_DIR}/check-hit.log"
             exit 1
           fi
-          "${CLI}" restore --no-platform --no-git "${WORKSPACE}" "${TAG_DIR}:${RESTORE_DIR},${TAG_FILE}:${RESTORE_FILE}" > "${CLI_LOG_DIR}/restore.log"
+          "${CLI}" restore --no-platform --no-git "${WORKSPACE}" "${TAG_DIR}:${RESTORE_DIR},${TAG_FILE}:${RESTORE_FILE_DIR}" > "${CLI_LOG_DIR}/restore.log"
 
           cmp -s "${SRC_DIR}/a.txt" "${RESTORE_DIR}/a.txt"
           cmp -s "${SRC_DIR}/nested.txt" "${RESTORE_DIR}/nested.txt"
-          cmp -s "${SINGLE_FILE}" "${RESTORE_FILE}"
+          cmp -s "${SINGLE_FILE}" "${RESTORE_FILE_DIR}/single.txt"
 
           if "${CLI}" restore --no-platform --no-git --lookup-only --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/missing-target" > "${CLI_LOG_DIR}/restore-miss.log" 2>&1; then
             echo "expected lookup-only miss to fail with --fail-on-cache-miss"
@@ -630,6 +649,25 @@ jobs:
           SERVE_PID=""
           ADAPTER_PROXY_LOG="adapter-e2e/adapter-proxy-${SUITE}.log"
 
+          dump_adapter_debug_logs() {
+            set +e
+            echo "=== Adapter debug logs (${SUITE}) ==="
+            if [[ -f "${ADAPTER_PROXY_LOG}" ]]; then
+              echo "--- ${ADAPTER_PROXY_LOG} ---"
+              tail -n 200 "${ADAPTER_PROXY_LOG}" || true
+            fi
+            if [[ -d adapter-e2e ]]; then
+              shopt -s nullglob
+              for log_file in adapter-e2e/*.log adapter-e2e/*.txt adapter-e2e/*.json; do
+                echo "--- ${log_file} ---"
+                tail -n 200 "${log_file}" || true
+              done
+              shopt -u nullglob
+            fi
+            echo "=== End adapter debug logs (${SUITE}) ==="
+          }
+          trap dump_adapter_debug_logs ERR
+
           cleanup() {
             set +e
             if [[ -n "${SERVE_PID:-}" ]]; then
@@ -788,6 +826,8 @@ jobs:
                 cd adapter-e2e/go-prog
                 GOCACHE="$(mktemp -d)" GOCACHEPROG="${GOCACHEPROG_CMD}" go build ./... 2> ../go-build-2.log
               )
+              tail -n 80 adapter-e2e/go-build-1.log
+              tail -n 80 adapter-e2e/go-build-2.log
               grep -q 'go-cacheprog put ok' adapter-e2e/go-build-1.log
               grep -q 'go-cacheprog get hit' adapter-e2e/go-build-2.log
               ;;
