@@ -146,14 +146,14 @@ jobs:
           is_transient_registry_export_error() {
             local log_file="$1"
             grep -Eq \
-              'expected sha256:.*got sha256:e3b0|error writing layer blob|unexpected status from PUT request.*400 Bad Request' \
+              'expected sha256:.*got sha256:e3b0|error writing layer blob|error writing manifest blob|unexpected status from PUT request.*(400 Bad Request|500 Internal Server Error)|Alias write failed .*confirm failed: Server error \(500\)' \
               "${log_file}"
           }
 
           run_build_with_retry() {
             local log_file="$1"
             shift
-            local attempts=3
+            local attempts=4
             local attempt
             for attempt in $(seq 1 "${attempts}"); do
               if run_build "${log_file}" "$@"; then
@@ -161,7 +161,7 @@ jobs:
               fi
               if [[ "${attempt}" -lt "${attempts}" ]] && is_transient_registry_export_error "${log_file}"; then
                 echo "transient registry export error on attempt ${attempt}/${attempts}; retrying..."
-                sleep 3
+                sleep $((attempt * 3))
                 continue
               fi
               return 1
