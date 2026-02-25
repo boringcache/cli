@@ -64,6 +64,7 @@ fn test_cli_help() {
     assert!(stdout.contains("mount"));
     assert!(stdout.contains("save"));
     assert!(stdout.contains("restore"));
+    assert!(stdout.contains("run"));
     assert!(stdout.contains("workspaces"));
 }
 
@@ -138,6 +139,25 @@ fn test_restore_command_help() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Usage: boringcache restore"));
     assert!(stdout.contains("TAG_PATH_PAIRS") || stdout.contains("tag:path"));
+}
+
+#[test]
+fn test_run_command_help() {
+    let output = run_cli_command(&["run", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: boringcache run"));
+    assert!(stdout.contains("TAG_PATH_PAIRS") || stdout.contains("tag:path"));
+}
+
+#[test]
+fn test_exec_alias_help() {
+    let output = run_cli_command(&["exec", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: boringcache run"));
 }
 
 #[test]

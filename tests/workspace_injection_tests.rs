@@ -232,6 +232,119 @@ fn test_restore_with_default_workspace_and_fail_on_cache_miss() {
 }
 
 #[test]
+fn test_run_with_default_workspace_and_command_separator() {
+    let cli = cli_binary();
+    let cli = cli.to_str().expect("CLI path must be valid UTF-8");
+    let output = run_cli_with_default_workspace(&[
+        "run",
+        "--skip-restore",
+        "--skip-save",
+        "test-tag:/tmp/test",
+        "--",
+        cli,
+        "--version",
+    ]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("required arguments were not provided")
+            && !stderr.contains("<WORKSPACE>")
+            && !stderr.contains("<TAG_PATH_PAIRS>")
+    );
+    assert!(
+        output.status.success(),
+        "Expected run command to execute child successfully, stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_exec_alias_with_default_workspace_and_command_separator() {
+    let cli = cli_binary();
+    let cli = cli.to_str().expect("CLI path must be valid UTF-8");
+    let output = run_cli_with_default_workspace(&[
+        "exec",
+        "--skip-restore",
+        "--skip-save",
+        "test-tag:/tmp/test",
+        "--",
+        cli,
+        "--version",
+    ]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("required arguments were not provided")
+            && !stderr.contains("<WORKSPACE>")
+            && !stderr.contains("<TAG_PATH_PAIRS>")
+    );
+    assert!(
+        output.status.success(),
+        "Expected exec alias to execute child successfully, stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_run_with_value_option_before_tag_path_injects_workspace() {
+    let cli = cli_binary();
+    let cli = cli.to_str().expect("CLI path must be valid UTF-8");
+    let output = run_cli_with_default_workspace(&[
+        "run",
+        "--exclude",
+        "node_modules",
+        "--skip-restore",
+        "--skip-save",
+        "test-tag:/tmp/test",
+        "--",
+        cli,
+        "--version",
+    ]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("required arguments were not provided")
+            && !stderr.contains("<WORKSPACE>")
+            && !stderr.contains("<TAG_PATH_PAIRS>"),
+        "Expected workspace injection for run with value-taking options, got: {}",
+        stderr
+    );
+    assert!(
+        output.status.success(),
+        "Expected run command to execute child successfully, stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_run_proxy_only_with_default_workspace_injects_workspace() {
+    let cli = cli_binary();
+    let cli = cli.to_str().expect("CLI path must be valid UTF-8");
+    let output = run_cli_with_default_workspace(&[
+        "run",
+        "--proxy",
+        "main",
+        "--port",
+        "0",
+        "--",
+        cli,
+        "--version",
+    ]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("required arguments were not provided") && !stderr.contains("<WORKSPACE>"),
+        "Expected workspace injection for proxy-only run mode, got: {}",
+        stderr
+    );
+    assert!(
+        output.status.success(),
+        "Expected proxy-only run command to execute child successfully, stderr: {}",
+        stderr
+    );
+}
+
+#[test]
 fn test_delete_with_default_workspace() {
     let output = run_cli_with_default_workspace(&["delete", "test/workspace", "test-tag"]);
 
