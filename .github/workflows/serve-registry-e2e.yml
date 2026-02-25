@@ -277,8 +277,7 @@ jobs:
             --cache-to "type=registry,ref=${CACHE_REF},mode=max"
           reset_builder
           run_build_with_retry "second-build.log" \
-            --cache-from "type=registry,ref=${CACHE_REF}" \
-            --cache-to "type=registry,ref=${CACHE_REF},mode=max"
+            --cache-from "type=registry,ref=${CACHE_REF}"
           assert_cached "second-build.log"
           assert_registry_import_succeeded "second-build.log"
           run_build_with_retry "third-build-reexport.log" \
@@ -290,8 +289,7 @@ jobs:
           start_proxy "serve-restart.log"
           reset_builder
           run_build_with_retry "fourth-build-after-restart.log" \
-            --cache-from "type=registry,ref=${CACHE_REF}" \
-            --cache-to "type=registry,ref=${CACHE_REF},mode=max"
+            --cache-from "type=registry,ref=${CACHE_REF}"
           assert_cached "fourth-build-after-restart.log"
           assert_registry_import_succeeded "fourth-build-after-restart.log"
           run_build_with_retry "fifth-build-alias-export.log" \
@@ -299,8 +297,7 @@ jobs:
             --cache-to "type=registry,ref=${CACHE_REF_ALIAS},mode=max"
           assert_registry_import_succeeded "fifth-build-alias-export.log"
           run_build_with_retry "sixth-build-alias-warm.log" \
-            --cache-from "type=registry,ref=${CACHE_REF_ALIAS}" \
-            --cache-to "type=registry,ref=${CACHE_REF_ALIAS},mode=max"
+            --cache-from "type=registry,ref=${CACHE_REF_ALIAS}"
           assert_cached "sixth-build-alias-warm.log"
           assert_registry_import_succeeded "sixth-build-alias-warm.log"
 
