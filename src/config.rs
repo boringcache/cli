@@ -17,6 +17,22 @@ pub fn env_var(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.trim().is_empty())
 }
 
+fn env_api_token() -> Option<String> {
+    if let Some(token) = env_var("BORINGCACHE_API_TOKEN") {
+        return Some(token);
+    }
+
+    let token_file = env_var("BORINGCACHE_TOKEN_FILE")?;
+    let token = fs::read_to_string(token_file).ok()?;
+    let token = token.trim().to_string();
+
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspaceEncryption {
     pub enabled: bool,
@@ -46,7 +62,7 @@ impl Config {
     }
 
     pub fn load() -> Result<Self> {
-        if let Some(env_token) = env_var("BORINGCACHE_API_TOKEN") {
+        if let Some(env_token) = env_api_token() {
             let api_url =
                 env_var("BORINGCACHE_API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string());
             let mut config = Config {
@@ -267,6 +283,39 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn new(key: &'static str) -> Self {
+            Self {
+                key,
+                original: std::env::var(key).ok(),
+            }
+        }
+
+        fn set(&self, value: Option<&str>) {
+            if let Some(value) = value {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(ref value) = self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn test_default_api_url() {
@@ -348,5 +397,33 @@ mod tests {
     fn test_get_api_url_with_override() {
         let result = Config::get_api_url(Some("https://custom.api.com".to_string()));
         assert_eq!(result.unwrap(), "https://custom.api.com");
+    }
+
+    #[test]
+    fn test_env_api_token_uses_token_file_when_api_token_missing() {
+        let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
+        let token_file_guard = EnvVarGuard::new("BORINGCACHE_TOKEN_FILE");
+        let temp_dir = TempDir::new().unwrap();
+        let token_path = temp_dir.path().join("token.txt");
+        fs::write(&token_path, "token-from-file\n").unwrap();
+
+        api_token_guard.set(None);
+        token_file_guard.set(Some(token_path.to_str().unwrap()));
+
+        assert_eq!(env_api_token().as_deref(), Some("token-from-file"));
+    }
+
+    #[test]
+    fn test_env_api_token_prefers_api_token_env() {
+        let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
+        let token_file_guard = EnvVarGuard::new("BORINGCACHE_TOKEN_FILE");
+        let temp_dir = TempDir::new().unwrap();
+        let token_path = temp_dir.path().join("token.txt");
+        fs::write(&token_path, "token-from-file").unwrap();
+
+        api_token_guard.set(Some("token-from-env"));
+        token_file_guard.set(Some(token_path.to_str().unwrap()));
+
+        assert_eq!(env_api_token().as_deref(), Some("token-from-env"));
     }
 }
