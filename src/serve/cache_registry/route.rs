@@ -7,6 +7,7 @@ pub(crate) enum RegistryRoute {
     BazelAc { digest_hex: String },
     BazelCas { digest_hex: String },
     Gradle { cache_key: String },
+    Maven { cache_key: String },
     NxArtifact { hash: String },
     NxTerminalOutput { hash: String },
     NxQuery,
@@ -48,6 +49,10 @@ pub(crate) fn detect_route(method: &Method, path: &str) -> Result<RegistryRoute,
 
     if let Some(cache_key) = parse_gradle_path(&components) {
         return Ok(RegistryRoute::Gradle { cache_key });
+    }
+
+    if let Some(cache_key) = parse_maven_path(&components) {
+        return Ok(RegistryRoute::Maven { cache_key });
     }
 
     if method.as_str() == "MKCOL" {
@@ -103,6 +108,30 @@ fn parse_gradle_path(components: &[&str]) -> Option<String> {
         return None;
     }
     Some(cache_key.to_string())
+}
+
+fn parse_maven_path(components: &[&str]) -> Option<String> {
+    if components.len() < 5 {
+        return None;
+    }
+    let version = components[components.len() - 5];
+    if !is_maven_protocol_version(version) {
+        return None;
+    }
+    let group_id = components[components.len() - 4];
+    let artifact_id = components[components.len() - 3];
+    let checksum = components[components.len() - 2];
+    let filename = components[components.len() - 1];
+    if group_id.is_empty() || artifact_id.is_empty() || checksum.is_empty() || filename.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{version}/{group_id}/{artifact_id}/{checksum}/{filename}"
+    ))
+}
+
+fn is_maven_protocol_version(version: &str) -> bool {
+    version == "v1" || version == "v1.1"
 }
 
 fn parse_nx_hash(raw: &str) -> Result<String, RegistryError> {
@@ -307,6 +336,36 @@ mod tests {
     }
 
     #[test]
+    fn detect_route_accepts_maven_v11_path() {
+        let route = detect_route(
+            &Method::GET,
+            "v1.1/com.example/app/abcdef1234567890/buildinfo.xml",
+        )
+        .unwrap();
+        assert_eq!(
+            route,
+            RegistryRoute::Maven {
+                cache_key: "v1.1/com.example/app/abcdef1234567890/buildinfo.xml".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn detect_route_accepts_maven_v1_path() {
+        let route = detect_route(
+            &Method::GET,
+            "v1/com.example/app/abcdef1234567890/buildinfo.xml",
+        )
+        .unwrap();
+        assert_eq!(
+            route,
+            RegistryRoute::Maven {
+                cache_key: "v1/com.example/app/abcdef1234567890/buildinfo.xml".to_string()
+            }
+        );
+    }
+
+    #[test]
     fn detect_route_accepts_prefixed_bazel_path() {
         let route = detect_route(
             &Method::GET,
@@ -337,6 +396,31 @@ mod tests {
                 cache_key: "cache-key-1".to_string()
             }
         );
+    }
+
+    #[test]
+    fn detect_route_accepts_prefixed_maven_path() {
+        let route = detect_route(
+            &Method::GET,
+            "foo/bar/v1/com.example/app/abcdef1234567890/buildinfo.xml",
+        )
+        .unwrap();
+        assert_eq!(
+            route,
+            RegistryRoute::Maven {
+                cache_key: "v1/com.example/app/abcdef1234567890/buildinfo.xml".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn detect_route_rejects_maven_path_with_unsupported_protocol_version() {
+        let error = detect_route(
+            &Method::GET,
+            "v2/com.example/app/abcdef1234567890/buildinfo.xml",
+        )
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
     }
 
     #[test]

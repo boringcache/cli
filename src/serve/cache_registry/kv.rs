@@ -128,6 +128,7 @@ pub(crate) enum KvNamespace {
     BazelAc,
     BazelCas,
     Gradle,
+    Maven,
     Nx,
     NxTerminalOutput,
     Turborepo,
@@ -142,7 +143,8 @@ impl KvNamespace {
             | KvNamespace::BazelCas
             | KvNamespace::Gradle
             | KvNamespace::GoCache => key.to_ascii_lowercase(),
-            KvNamespace::Nx
+            KvNamespace::Maven
+            | KvNamespace::Nx
             | KvNamespace::NxTerminalOutput
             | KvNamespace::Turborepo
             | KvNamespace::Sccache => key.to_string(),
@@ -154,6 +156,7 @@ impl KvNamespace {
             KvNamespace::BazelAc => "bazel_ac",
             KvNamespace::BazelCas => "bazel_cas",
             KvNamespace::Gradle => "gradle",
+            KvNamespace::Maven => "maven",
             KvNamespace::Nx => "nx",
             KvNamespace::NxTerminalOutput => "nx_terminal",
             KvNamespace::Turborepo => "turbo",

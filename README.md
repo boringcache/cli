@@ -153,6 +153,7 @@ Run a local cache registry proxy for native integrations:
 - OCI registry (`/v2/*`) for BuildKit `type=registry`
 - Bazel HTTP cache (`/ac/*`, `/cas/*`)
 - Gradle HTTP build cache (`/cache/*`)
+- Maven build cache extension (`/v1.1/{groupId}/{artifactId}/{checksum}/{filename}`, with `v1` compatibility)
 - Nx remote cache (`/v1/cache/*`)
 - Turborepo remote cache (`/v8/artifacts/*`)
 - sccache WebDAV-style paths (`/<prefix>/a/b/c/<key>`)
@@ -164,7 +165,7 @@ Aliases: `serve`, `cache-registry`
 - pass one or more comma-separated human tags
 - all passed tags are human-facing OCI aliases
 - the first tag is the primary alias shown in the UI
-- Bazel/Gradle/Nx/Turborepo/sccache/Go use an internal root tag derived from the first human tag
+- Bazel/Gradle/Maven/Nx/Turborepo/sccache/Go use an internal root tag derived from the first human tag
 
 ```bash
 boringcache docker-registry my-org/ws registry-cache --port 5000
@@ -196,6 +197,29 @@ NX_SELF_HOSTED_REMOTE_CACHE_SERVER=http://127.0.0.1:5000 \
 NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN=token \
 nx affected --target=build
 ```
+
+Maven build cache extension remote cache:
+
+```xml
+<!-- .mvn/maven-build-cache-config.xml -->
+<cache xmlns="http://maven.apache.org/BUILD-CACHE-CONFIG/1.2.0"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://maven.apache.org/BUILD-CACHE-CONFIG/1.2.0 https://maven.apache.org/xsd/build-cache-config-1.2.0.xsd">
+  <configuration>
+    <remote enabled="true" saveToRemote="true" transport="resolver" id="cache">
+      <url>http://127.0.0.1:5000</url>
+    </remote>
+  </configuration>
+</cache>
+```
+
+Enable the Maven build cache extension in your project (`pom.xml` or `.mvn/extensions.xml`), then run Maven normally:
+
+```bash
+mvn package
+```
+
+The proxy supports Maven remote cache protocol paths for both `v1.1` (current) and `v1` (compatibility).
 
 Go build cache with `GOCACHEPROG`:
 

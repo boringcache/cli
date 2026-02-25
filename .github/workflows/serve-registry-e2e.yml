@@ -651,7 +651,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [bazel, gradle, nx, turbo, sccache, go]
+        suite: [bazel, gradle, maven, nx, turbo, sccache, go]
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_API_URL: "https://api.boringcache.com"
@@ -814,6 +814,21 @@ jobs:
               run_http "200" adapter-e2e/gradle-head.txt -I "http://127.0.0.1:${PORT}/cache/${gradle_key}"
               run_http "200" adapter-e2e/gradle-get.bin "http://127.0.0.1:${PORT}/cache/${gradle_key}"
               assert_file_equals adapter-e2e/gradle.bin adapter-e2e/gradle-get.bin
+              ;;
+            maven)
+              maven_checksum=$(printf 'maven-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
+              maven_path="v1.1/com.example/adapter-e2e/${maven_checksum}/buildinfo.xml"
+              maven_v1_path="v1/com.example/adapter-e2e/${maven_checksum}/lookupinfo.xml"
+              printf 'maven-e2e-%s\n' "${maven_checksum}" > adapter-e2e/maven.bin
+              run_http "200" adapter-e2e/maven-put.txt -X PUT --data-binary @adapter-e2e/maven.bin "http://127.0.0.1:${PORT}/${maven_path}"
+              run_http "200" adapter-e2e/maven-head.txt -I "http://127.0.0.1:${PORT}/${maven_path}"
+              run_http "200" adapter-e2e/maven-get.bin "http://127.0.0.1:${PORT}/${maven_path}"
+              assert_file_equals adapter-e2e/maven.bin adapter-e2e/maven-get.bin
+
+              run_http "200" adapter-e2e/maven-v1-put.txt -X PUT --data-binary @adapter-e2e/maven.bin "http://127.0.0.1:${PORT}/${maven_v1_path}"
+              run_http "200" adapter-e2e/maven-v1-head.txt -I "http://127.0.0.1:${PORT}/${maven_v1_path}"
+              run_http "200" adapter-e2e/maven-v1-get.bin "http://127.0.0.1:${PORT}/${maven_v1_path}"
+              assert_file_equals adapter-e2e/maven.bin adapter-e2e/maven-v1-get.bin
               ;;
             nx)
               nx_hash=$(printf 'nx-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')

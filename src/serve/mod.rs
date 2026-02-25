@@ -175,6 +175,9 @@ async fn build_server_runtime(
     eprintln!("  OCI: --cache-from/--cache-to type=registry,ref={host}:{port}/CACHE_NAME:TAG");
     eprintln!("  Bazel HTTP: http://{host}:{port}/ac/{{sha256}} and /cas/{{sha256}}");
     eprintln!("  Gradle HTTP: http://{host}:{port}/cache/{{cache-key}}");
+    eprintln!(
+        "  Maven cache: http://{host}:{port}/v1.1/{{groupId}}/{{artifactId}}/{{checksum}}/{{filename}} (also /v1/...)"
+    );
     eprintln!("  Nx Cache: http://{host}:{port}/v1/cache/{{hash}}");
     eprintln!("  Turborepo: http://{host}:{port}/v8/artifacts/{{hash}}");
     eprintln!("  sccache WebDAV: http://{host}:{port}/<prefix>/a/b/c/<key>");

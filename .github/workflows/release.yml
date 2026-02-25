@@ -551,7 +551,7 @@ jobs:
             ## BoringCache CLI Release ${{ steps.get_tag.outputs.tag }}
 
             ### 🚀 What's New
-            - Unified `cache-registry` command with native OCI + Bazel + Gradle + Nx + Turborepo + sccache + Go support
+            - Unified `cache-registry` command with native OCI + Bazel + Gradle + Maven + Nx + Turborepo + sccache + Go support
             - `docker-registry` now requires an explicit root tag (`<WORKSPACE> <TAG>`), with optional extra comma tags as OCI human aliases
             - Cross-platform support: Linux (AMD64/ARM64), macOS (Apple Silicon), Windows (AMD64)
             - Zstd-compressed tar archives with optional age encryption

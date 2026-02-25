@@ -10,6 +10,7 @@ mod error;
 mod go_cache;
 mod gradle;
 mod kv;
+mod maven;
 mod nx;
 mod route;
 mod sccache;
@@ -67,6 +68,9 @@ async fn dispatch_with_path(
         }
         route::RegistryRoute::Gradle { cache_key } => {
             gradle::handle(&state, method, &cache_key, body).await
+        }
+        route::RegistryRoute::Maven { cache_key } => {
+            maven::handle(&state, method, &cache_key, body).await
         }
         route::RegistryRoute::NxArtifact { hash } => {
             nx::handle_artifact(&state, method, &headers, &hash, body).await
