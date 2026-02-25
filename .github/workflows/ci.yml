@@ -13,33 +13,6 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  run-command-e2e:
-    name: Run Command E2E
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust (BoringCache)
-        id: boringcache-rust-e2e
-        continue-on-error: true
-        uses: boringcache/rust-action@v1
-        with:
-          workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-ci-run-e2e"
-          sccache: "false"
-          cache-target: "true"
-
-      - name: Setup Rust (Fallback)
-        if: steps.boringcache-rust-e2e.outcome == 'failure'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-
-      - name: Run run-command e2e tests
-        run: cargo test --locked --test run_command_tests --test run_proxy_e2e_tests -- --nocapture
-
   test-boringcache:
     name: Test CLI (BoringCache)
     runs-on: ubuntu-latest

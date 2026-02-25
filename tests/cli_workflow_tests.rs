@@ -681,6 +681,267 @@ async fn test_save_workflow_success() {
 }
 
 #[tokio::test]
+async fn test_run_workflow_restore_then_save_lifecycle_success() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!(
+            "skipping test_run_workflow_restore_then_save_lifecycle_success: networking disabled in sandbox"
+        );
+        return;
+    }
+    let mut server = Server::new_async().await;
+
+    let _auth_mock = server
+        .mock("GET", "/v2/session")
+        .with_status(200)
+        .with_body(
+            json!({
+                "user": {"name": "Test User", "email": "test@example.com"},
+                "organization": {"name": "Test Org"},
+                "token": {"expires_in_days": 90}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config_dir = temp_dir.path().join(".boringcache");
+    fs::create_dir(&config_dir).expect("Failed to create config dir");
+    fs::write(
+        config_dir.join("config.json"),
+        json!({
+            "token": "test-token-123",
+            "api_url": server.url()
+        })
+        .to_string(),
+    )
+    .expect("Failed to write config");
+    env::set_var("HOME", temp_dir.path());
+
+    let seed_dir = temp_dir.path().join("seed-cache");
+    fs::create_dir(&seed_dir).expect("Failed to create seed dir");
+    fs::write(seed_dir.join("restored.txt"), "warm-cache").expect("Failed to write seed file");
+
+    let (manifest, manifest_bytes, archive_bytes) =
+        build_manifest_and_archive(&seed_dir, "run-cache-tag", None).await;
+    let manifest_url = format!("{}/manifest-run", server.url());
+    let archive_url = format!("{}/archive-run", server.url());
+
+    let restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([
+                {
+                    "tag": "run-cache-tag",
+                    "status": "hit",
+                    "cache_entry_id": "restore-entry-1",
+                    "manifest_url": manifest_url,
+                    "archive_urls": [archive_url],
+                    "manifest_root_digest": manifest.root.digest,
+                    "metadata": {
+                        "total_size_bytes": archive_bytes.len(),
+                        "uncompressed_size": manifest.summary.raw_size,
+                        "compressed_size": archive_bytes.len(),
+                        "file_count": manifest.summary.file_count,
+                        "compression_algorithm": "zstd"
+                    }
+                }
+            ])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let manifest_mock = server
+        .mock("GET", "/manifest-run")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(manifest_bytes)
+        .create_async()
+        .await;
+
+    let archive_len = archive_bytes.len().to_string();
+    let archive_head_mock = server
+        .mock("HEAD", "/archive-run")
+        .with_status(200)
+        .with_header("content-length", archive_len.as_str())
+        .create_async()
+        .await;
+
+    let archive_get_mock = server
+        .mock("GET", "/archive-run")
+        .with_status(200)
+        .with_header("content-length", archive_len.as_str())
+        .with_body(archive_bytes)
+        .create_async()
+        .await;
+
+    let check_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches/check")
+        .expect(2)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "tag": "run-cache-tag",
+                    "exists": false
+                }]
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "features": {
+                    "tag_publish_v2": true
+                }
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let save_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": "run-cache-tag"
+            }
+        })))
+        .with_status(201)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "run-cache-tag",
+                "cache_entry_id": "save-entry-1",
+                "exists": false,
+                "archive_upload_url": format!("{}/upload-archive-run", server.url()),
+                "manifest_upload_url": format!("{}/upload-manifest-run", server.url())
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let archive_upload_mock = server
+        .mock("PUT", "/upload-archive-run")
+        .with_status(200)
+        .with_header("etag", "archive-etag")
+        .create_async()
+        .await;
+
+    let manifest_upload_mock = server
+        .mock("PUT", "/upload-manifest-run")
+        .with_status(200)
+        .with_header("etag", "manifest-etag")
+        .create_async()
+        .await;
+
+    let publish_mock = server
+        .mock(
+            "PUT",
+            "/v2/workspaces/test/workspace/caches/tags/run-cache-tag/publish",
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "v1",
+                "status": "ready",
+                "cache_entry_id": "save-entry-1",
+                "uploaded_at": "2026-02-25T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _metrics_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/metrics")
+        .with_status(201)
+        .with_body(json!({"status": "ok"}).to_string())
+        .create_async()
+        .await;
+
+    let target_dir = temp_dir.path().join("run-target");
+    let target_dir_str = target_dir.to_string_lossy().to_string();
+    let tag_path = format!("run-cache-tag:{}", target_dir_str);
+    let script = r#"[ "$(cat "$1/restored.txt")" = "warm-cache" ] || exit 27
+printf 'created-by-run\n' > "$1/generated.txt"
+"#;
+
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "run",
+            "test/workspace",
+            tag_path.as_str(),
+            "--no-platform",
+            "--no-git",
+            "--fail-on-cache-error",
+            "--",
+            "sh",
+            "-ec",
+            script,
+            "_",
+            target_dir_str.as_str(),
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute run command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        eprintln!("STDOUT: {}", stdout);
+        eprintln!("STDERR: {}", stderr);
+    }
+
+    assert!(
+        output.status.success(),
+        "run command should succeed with restore+save lifecycle"
+    );
+    assert_eq!(
+        fs::read_to_string(target_dir.join("restored.txt")).expect("Failed to read restored file"),
+        "warm-cache"
+    );
+    assert_eq!(
+        fs::read_to_string(target_dir.join("generated.txt"))
+            .expect("Failed to read generated file"),
+        "created-by-run\n"
+    );
+
+    restore_mock.assert_async().await;
+    manifest_mock.assert_async().await;
+    archive_head_mock.assert_async().await;
+    archive_get_mock.assert_async().await;
+    check_mock.assert_async().await;
+    capabilities_mock.assert_async().await;
+    save_mock.assert_async().await;
+    archive_upload_mock.assert_async().await;
+    manifest_upload_mock.assert_async().await;
+    publish_mock.assert_async().await;
+
+    env::remove_var("BORINGCACHE_API_URL");
+    env::remove_var("HOME");
+}
+
+#[tokio::test]
 async fn test_restore_workflow_cache_not_found() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {
