@@ -172,14 +172,20 @@ pub async fn oci_dispatch(
             if fail_on_cache_error || !error_status.is_server_error() {
                 eprintln!(
                     "OCI {} {} -> {} ({})",
-                    request_method, request_path, error_status, error.message()
+                    request_method,
+                    request_path,
+                    error_status,
+                    error.message()
                 );
                 return Err(error);
             }
             if request_method != Method::GET && request_method != Method::HEAD {
                 eprintln!(
                     "OCI {} {} -> {} ({})",
-                    request_method, request_path, error_status, error.message()
+                    request_method,
+                    request_path,
+                    error_status,
+                    error.message()
                 );
                 return Err(error);
             }
