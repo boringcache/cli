@@ -551,8 +551,11 @@ jobs:
             ## BoringCache CLI Release ${{ steps.get_tag.outputs.tag }}
 
             ### 🚀 What's New
+            - `run` command: transactional cache wrapper (restore → exec → save) with signal handling and correct exit codes
+            - Maven cache-registry adapter support
+            - `BORINGCACHE_TOKEN_FILE` env var: read API token from a file path (useful in Docker builds with secret mounts)
+            - `delete` now also purges proxy/cache-registry internal data for the deleted tag
             - Unified `cache-registry` command with native OCI + Bazel + Gradle + Maven + Nx + Turborepo + sccache + Go support
-            - `docker-registry` now requires an explicit root tag (`<WORKSPACE> <TAG>`), with optional extra comma tags as OCI human aliases
             - Cross-platform support: Linux (AMD64/ARM64), macOS (Apple Silicon), Windows (AMD64)
             - Zstd-compressed tar archives with optional age encryption
             - Streaming I/O for large caches

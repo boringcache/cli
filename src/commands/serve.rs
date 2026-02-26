@@ -161,7 +161,7 @@ fn resolve_registry_tag_config(
     Ok((registry_root_tag, configured_human_tags))
 }
 
-fn internal_registry_root_tag(primary_human_tag: &str) -> String {
+pub(crate) fn internal_registry_root_tag(primary_human_tag: &str) -> String {
     format!(
         "bc_registry_root_v2_{}",
         sha256_hex(primary_human_tag.as_bytes())

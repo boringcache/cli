@@ -2,8 +2,56 @@ use anyhow::{anyhow, Result};
 use std::time::Instant;
 
 use crate::api::ApiClient;
+use crate::cas_oci::sha256_hex;
 use crate::progress::{Summary, System as ProgressSystem};
 use crate::ui;
+
+pub(crate) fn proxy_internal_root_tag(human_tag: &str) -> String {
+    format!("bc_registry_root_v2_{}", sha256_hex(human_tag.as_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_root_tag_matches_serve_derivation() {
+        let tag = "grpc-bazel-remote-cache-ubuntu-24-x86_64";
+        let root = proxy_internal_root_tag(tag);
+        assert!(root.starts_with("bc_registry_root_v2_"));
+        assert_eq!(root.len(), "bc_registry_root_v2_".len() + 64);
+    }
+
+    #[test]
+    fn proxy_root_tag_is_deterministic() {
+        let a = proxy_internal_root_tag("my-cache-tag");
+        let b = proxy_internal_root_tag("my-cache-tag");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn proxy_root_tag_differs_for_different_human_tags() {
+        let a = proxy_internal_root_tag("tag-a");
+        let b = proxy_internal_root_tag("tag-b");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn proxy_root_tag_matches_serve_internal_root_tag() {
+        let tags = [
+            "grpc-bazel-remote-cache",
+            "sccache-rust1.89",
+            "nx-main-ubuntu-24-x86_64",
+        ];
+        for tag in tags {
+            assert_eq!(
+                proxy_internal_root_tag(tag),
+                crate::commands::serve::internal_registry_root_tag(tag),
+                "delete and serve must derive identical internal root tags for '{tag}'"
+            );
+        }
+    }
+}
 
 pub async fn execute(
     workspace_option: Option<String>,
@@ -51,16 +99,17 @@ pub async fn execute(
         None,
     )?;
 
-    let delete_result = api_client
-        .delete(&workspace, std::slice::from_ref(&platform_tag))
-        .await;
+    let proxy_root_tag = proxy_internal_root_tag(&platform_tag);
+    let tags_to_delete = vec![platform_tag.clone(), proxy_root_tag.clone()];
+
+    let delete_result = api_client.delete(&workspace, &tags_to_delete).await;
 
     match delete_result {
-        Ok(mut results) => {
+        Ok(results) => {
             reporter.step_complete(session_id.clone(), 2, step_start.elapsed())?;
 
             let response = results
-                .drain(..)
+                .iter()
                 .find(|item| item.tag == platform_tag)
                 .ok_or_else(|| {
                     anyhow!(
@@ -68,6 +117,10 @@ pub async fn execute(
                         platform_tag
                     )
                 })?;
+
+            let proxy_deleted = results
+                .iter()
+                .any(|item| item.tag == proxy_root_tag && item.status == "deleted");
 
             match response.status.as_str() {
                 "deleted" => {
@@ -82,7 +135,9 @@ pub async fn execute(
                     drop(reporter);
                     progress_system.shutdown()?;
 
-                    if verbose {
+                    if proxy_deleted {
+                        ui::info("Cache entry and proxy data deleted");
+                    } else if verbose {
                         ui::info("Background cleanup scheduled for storage objects");
                     } else {
                         ui::info("Cache entry deleted");
@@ -93,10 +148,14 @@ pub async fn execute(
                     drop(reporter);
                     progress_system.shutdown()?;
 
-                    ui::warn(&format!("No cache entry found for tag: {}", platform_tag));
-                    if verbose {
-                        if let Some(error) = response.error {
-                            ui::info(&error);
+                    if proxy_deleted {
+                        ui::info("Proxy data deleted");
+                    } else {
+                        ui::warn(&format!("No cache entry found for tag: {}", platform_tag));
+                        if verbose {
+                            if let Some(error) = &response.error {
+                                ui::info(error);
+                            }
                         }
                     }
                     Ok(())
@@ -107,6 +166,7 @@ pub async fn execute(
 
                     let message = response
                         .error
+                        .clone()
                         .unwrap_or_else(|| "Unknown error while deleting cache".to_string());
                     Err(anyhow!(message))
                 }
