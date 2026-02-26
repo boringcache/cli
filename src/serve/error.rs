@@ -66,6 +66,14 @@ impl OciError {
     pub(crate) fn status(&self) -> StatusCode {
         self.status
     }
+
+    pub(crate) fn message(&self) -> &str {
+        self.body
+            .errors
+            .first()
+            .map(|e| e.message.as_str())
+            .unwrap_or("unknown")
+    }
 }
 
 impl IntoResponse for OciError {

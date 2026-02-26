@@ -171,15 +171,15 @@ pub async fn oci_dispatch(
             let error_status = error.status();
             if fail_on_cache_error || !error_status.is_server_error() {
                 eprintln!(
-                    "OCI {} {} -> {}",
-                    request_method, request_path, error_status
+                    "OCI {} {} -> {} ({})",
+                    request_method, request_path, error_status, error.message()
                 );
                 return Err(error);
             }
             if request_method != Method::GET && request_method != Method::HEAD {
                 eprintln!(
-                    "OCI {} {} -> {}",
-                    request_method, request_path, error_status
+                    "OCI {} {} -> {} ({})",
+                    request_method, request_path, error_status, error.message()
                 );
                 return Err(error);
             }
@@ -968,7 +968,16 @@ async fn put_upload(
     file.seek(std::io::SeekFrom::Start(write_offset))
         .await
         .map_err(|e| OciError::internal(format!("Failed to seek temp file: {e}")))?;
-    let bytes_written = write_body_to_file(body, &mut file).await?;
+    let bytes_written = match write_body_to_file(body, &mut file).await {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!(
+                "OCI PUT body stream error: upload={} digest={} error={} bytes_before={} write_offset={}",
+                uuid, digest_param, e.message(), bytes_before, write_offset
+            );
+            0
+        }
+    };
     if write_offset == 0 && bytes_before > 0 && bytes_written > 0 {
         file.set_len(bytes_written)
             .await
@@ -1036,12 +1045,10 @@ async fn put_upload(
                 );
             }
             EmptyFinalizeReuse::Missing => {
-                log::warn!(
-                    "OCI finalize digest mismatch (empty payload fallback failed): name={} upload={} expected={} actual={} bytes_before={} bytes_written={} write_offset={}",
-                    name,
+                eprintln!(
+                    "OCI finalize empty payload (no local/remote reuse): upload={} digest={} bytes_before={} bytes_written={} write_offset={}",
                     uuid,
                     digest_param,
-                    actual_digest,
                     bytes_before,
                     bytes_written,
                     write_offset
