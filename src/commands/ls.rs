@@ -98,16 +98,16 @@ pub async fn execute(
     println!();
     if verbose {
         println!(
-            "{:<24} {:<20} {:<12} {:<16} {:<12}",
-            "TAG", "STATUS", "SIZE", "UPLOADED", "COMPRESSION"
+            "{:<24} {:<20} {:<14} {:<14} {:<16} {:<12}",
+            "TAG", "STATUS", "STORED", "UNCOMPRESSED", "UPLOADED", "COMPRESSION"
         );
-        println!("{}", "-".repeat(90));
+        println!("{}", "-".repeat(104));
     } else {
         println!(
-            "{:<24} {:<20} {:<12} {:<16}",
-            "TAG", "STATUS", "SIZE", "UPLOADED"
+            "{:<24} {:<20} {:<14} {:<14} {:<16}",
+            "TAG", "STATUS", "STORED", "UNCOMPRESSED", "UPLOADED"
         );
-        println!("{}", "-".repeat(76));
+        println!("{}", "-".repeat(92));
     }
 
     for entry in &entries {
@@ -127,25 +127,31 @@ pub async fn execute(
             "pending"
         };
         let status = build_status_string(base_status, entry.encrypted);
-        let size = format_bytes(entry.total_size_bytes);
+        let stored = format_bytes(entry.total_size_bytes);
+        let uncompressed = entry
+            .uncompressed_size
+            .map(|s| format_bytes(s))
+            .unwrap_or_else(|| "-".to_string());
         let created = format_created_at(entry.uploaded_at.as_ref().or(Some(&entry.created_at)));
 
         if verbose {
             let compression = entry.compression_algorithm.as_str();
             println!(
-                "{tag:<24} {status:<20} {size:<12} {created:<16} {compression:<12}",
+                "{tag:<24} {status:<20} {stored:<14} {uncompressed:<14} {created:<16} {compression:<12}",
                 tag = tag,
                 status = status,
-                size = size,
+                stored = stored,
+                uncompressed = uncompressed,
                 created = created,
                 compression = compression,
             );
         } else {
             println!(
-                "{tag:<24} {status:<20} {size:<12} {created:<16}",
+                "{tag:<24} {status:<20} {stored:<14} {uncompressed:<14} {created:<16}",
                 tag = tag,
                 status = status,
-                size = size,
+                stored = stored,
+                uncompressed = uncompressed,
                 created = created
             );
         }

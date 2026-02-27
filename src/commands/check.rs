@@ -216,10 +216,18 @@ async fn execute_inner(
         ui::blank_line();
         for result in &check_results {
             let status_icon = if result.status == "hit" { "+" } else { "-" };
-            let size_info = if let Some(size) = result.size {
-                format!(" ({})", crate::progress::format_bytes(size))
-            } else {
-                String::new()
+            let size_info = match (result.compressed_size, result.size) {
+                (Some(compressed), Some(uncompressed)) if compressed < uncompressed => {
+                    format!(
+                        " ({} stored, {} uncompressed)",
+                        crate::progress::format_bytes(compressed),
+                        crate::progress::format_bytes(uncompressed)
+                    )
+                }
+                (Some(size), _) | (_, Some(size)) => {
+                    format!(" ({})", crate::progress::format_bytes(size))
+                }
+                _ => String::new(),
             };
 
             if result.tag != result.requested_tag {
