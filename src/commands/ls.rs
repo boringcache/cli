@@ -130,7 +130,7 @@ pub async fn execute(
         let stored = format_bytes(entry.total_size_bytes);
         let uncompressed = entry
             .uncompressed_size
-            .map(|s| format_bytes(s))
+            .map(format_bytes)
             .unwrap_or_else(|| "-".to_string());
         let created = format_created_at(entry.uploaded_at.as_ref().or(Some(&entry.created_at)));
 
