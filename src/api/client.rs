@@ -1403,7 +1403,7 @@ fn build_api_client_with_headers(headers: Option<reqwest::header::HeaderMap>) ->
         .unwrap_or(false);
 
     let mut builder = reqwest::Client::builder()
-        .pool_max_idle_per_host(64)
+        .pool_max_idle_per_host(256)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .redirect(reqwest::redirect::Policy::limited(4))
@@ -1440,7 +1440,7 @@ fn build_transfer_client_with_headers(
         .unwrap_or(false);
 
     let mut builder = reqwest::Client::builder()
-        .pool_max_idle_per_host(64)
+        .pool_max_idle_per_host(256)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .tcp_nodelay(true)

@@ -55,7 +55,7 @@ async fn setup(
         kv_next_flush_at: Arc::new(RwLock::new(None)),
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
-        kv_recent_misses: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        kv_recent_misses: Arc::new(dashmap::DashMap::new()),
         blob_read_cache: Arc::new(
             BlobReadCache::new_at(
                 temp_home.path().join("blob-read-cache"),

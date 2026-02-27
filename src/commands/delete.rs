@@ -10,49 +10,6 @@ pub(crate) fn proxy_internal_root_tag(human_tag: &str) -> String {
     format!("bc_registry_root_v2_{}", sha256_hex(human_tag.as_bytes()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn proxy_root_tag_matches_serve_derivation() {
-        let tag = "grpc-bazel-remote-cache-ubuntu-24-x86_64";
-        let root = proxy_internal_root_tag(tag);
-        assert!(root.starts_with("bc_registry_root_v2_"));
-        assert_eq!(root.len(), "bc_registry_root_v2_".len() + 64);
-    }
-
-    #[test]
-    fn proxy_root_tag_is_deterministic() {
-        let a = proxy_internal_root_tag("my-cache-tag");
-        let b = proxy_internal_root_tag("my-cache-tag");
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn proxy_root_tag_differs_for_different_human_tags() {
-        let a = proxy_internal_root_tag("tag-a");
-        let b = proxy_internal_root_tag("tag-b");
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn proxy_root_tag_matches_serve_internal_root_tag() {
-        let tags = [
-            "grpc-bazel-remote-cache",
-            "sccache-rust1.89",
-            "nx-main-ubuntu-24-x86_64",
-        ];
-        for tag in tags {
-            assert_eq!(
-                proxy_internal_root_tag(tag),
-                crate::commands::serve::internal_registry_root_tag(tag),
-                "delete and serve must derive identical internal root tags for '{tag}'"
-            );
-        }
-    }
-}
-
 pub async fn execute(
     workspace_option: Option<String>,
     tag: String,
@@ -177,6 +134,49 @@ pub async fn execute(
             drop(reporter);
             progress_system.shutdown()?;
             Err(err)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_root_tag_matches_serve_derivation() {
+        let tag = "grpc-bazel-remote-cache-ubuntu-24-x86_64";
+        let root = proxy_internal_root_tag(tag);
+        assert!(root.starts_with("bc_registry_root_v2_"));
+        assert_eq!(root.len(), "bc_registry_root_v2_".len() + 64);
+    }
+
+    #[test]
+    fn proxy_root_tag_is_deterministic() {
+        let a = proxy_internal_root_tag("my-cache-tag");
+        let b = proxy_internal_root_tag("my-cache-tag");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn proxy_root_tag_differs_for_different_human_tags() {
+        let a = proxy_internal_root_tag("tag-a");
+        let b = proxy_internal_root_tag("tag-b");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn proxy_root_tag_matches_serve_internal_root_tag() {
+        let tags = [
+            "grpc-bazel-remote-cache",
+            "sccache-rust1.89",
+            "nx-main-ubuntu-24-x86_64",
+        ];
+        for tag in tags {
+            assert_eq!(
+                proxy_internal_root_tag(tag),
+                crate::commands::serve::internal_registry_root_tag(tag),
+                "delete and serve must derive identical internal root tags for '{tag}'"
+            );
         }
     }
 }

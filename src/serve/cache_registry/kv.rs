@@ -218,10 +218,7 @@ pub(crate) async fn put_kv_object(
             || pending.total_spool_bytes() >= crate::serve::state::FLUSH_SIZE_THRESHOLD;
         (redundant, should_flush)
     };
-    {
-        let mut misses = state.kv_recent_misses.write().await;
-        misses.remove(&miss_key);
-    }
+    state.kv_recent_misses.remove(&miss_key);
     if let Some(redundant_path) = redundant {
         let _ = tokio::fs::remove_file(&redundant_path).await;
     }
@@ -318,12 +315,32 @@ async fn serve_backend_blob(
     let (download_url, from_cache) = if let Some(url) = cached_url {
         (url.to_string(), true)
     } else {
-        let resolved = resolve_download_url(state, cache_entry_id, blob).await?;
-        {
-            let mut published = state.kv_published_index.write().await;
-            published.set_download_url(blob.digest.clone(), resolved.clone());
+        let flight_key = format!("url:{}", blob.digest);
+        match begin_lookup_flight(state, flight_key) {
+            LookupFlight::Follower(notify) => {
+                notify.notified().await;
+                let published = state.kv_published_index.read().await;
+                if let Some(url) = published.download_url(&blob.digest) {
+                    (url.to_string(), true)
+                } else {
+                    drop(published);
+                    let resolved = resolve_download_url(state, cache_entry_id, blob).await?;
+                    {
+                        let mut published = state.kv_published_index.write().await;
+                        published.set_download_url(blob.digest.clone(), resolved.clone());
+                    }
+                    (resolved, false)
+                }
+            }
+            LookupFlight::Leader(_url_flight) => {
+                let resolved = resolve_download_url(state, cache_entry_id, blob).await?;
+                {
+                    let mut published = state.kv_published_index.write().await;
+                    published.set_download_url(blob.digest.clone(), resolved.clone());
+                }
+                (resolved, false)
+            }
         }
-        (resolved, false)
     };
 
     let download_result = state
@@ -338,10 +355,6 @@ async fn serve_backend_blob(
         && (download_result.status() == StatusCode::FORBIDDEN
             || download_result.status() == StatusCode::NOT_FOUND)
     {
-        {
-            let mut published = state.kv_published_index.write().await;
-            published.invalidate_download_url(&blob.digest);
-        }
         let fresh_url = resolve_download_url(state, cache_entry_id, blob).await?;
         {
             let mut published = state.kv_published_index.write().await;
@@ -368,46 +381,35 @@ async fn serve_backend_blob(
     Ok((StatusCode::OK, response_headers, body).into_response())
 }
 
-async fn is_recent_kv_miss(state: &AppState, scoped_key: &str) -> bool {
+fn is_recent_kv_miss(state: &AppState, scoped_key: &str) -> bool {
     let now = std::time::Instant::now();
-    {
-        let misses = state.kv_recent_misses.read().await;
-        match misses.get(scoped_key).copied() {
-            Some(expires_at) if expires_at > now => return true,
-            Some(_) => {}
-            None => return false,
-        }
-    }
-
-    let mut misses = state.kv_recent_misses.write().await;
-    match misses.get(scoped_key).copied() {
-        Some(expires_at) if expires_at <= now => {
-            misses.remove(scoped_key);
+    match state.kv_recent_misses.get(scoped_key) {
+        Some(entry) if *entry.value() > now => true,
+        Some(_) => {
+            state.kv_recent_misses.remove(scoped_key);
             false
         }
-        Some(_) => true,
         None => false,
     }
 }
 
-async fn mark_kv_miss(state: &AppState, scoped_key: &str) {
-    let mut misses = state.kv_recent_misses.write().await;
-    misses.insert(
+fn mark_kv_miss(state: &AppState, scoped_key: &str) {
+    state.kv_recent_misses.insert(
         scoped_key.to_string(),
         std::time::Instant::now() + KV_MISS_CACHE_TTL,
     );
 }
 
-async fn clear_kv_miss(state: &AppState, scoped_key: &str) {
-    let mut misses = state.kv_recent_misses.write().await;
-    misses.remove(scoped_key);
+fn clear_kv_miss(state: &AppState, scoped_key: &str) {
+    state.kv_recent_misses.remove(scoped_key);
 }
 
-async fn clear_tag_misses(state: &AppState, registry_root_tag: &str) {
+fn clear_tag_misses(state: &AppState, registry_root_tag: &str) {
     let prefix = format!("{}\u{0}", registry_root_tag.trim());
     let now = std::time::Instant::now();
-    let mut misses = state.kv_recent_misses.write().await;
-    misses.retain(|key, expires_at| *expires_at > now && !key.starts_with(&prefix));
+    state
+        .kv_recent_misses
+        .retain(|key, expires_at| *expires_at > now && !key.starts_with(&prefix));
 }
 
 fn kv_root_tags_from_values(
@@ -442,9 +444,9 @@ fn kv_alias_tags(state: &AppState) -> Vec<String> {
     kv_alias_tags_from_values(&state.registry_root_tag, &state.configured_human_tags)
 }
 
-async fn clear_root_tag_misses(state: &AppState) {
+fn clear_root_tag_misses(state: &AppState) {
     for tag in kv_root_tags(state) {
-        clear_tag_misses(state, &tag).await;
+        clear_tag_misses(state, &tag);
     }
 }
 
@@ -528,7 +530,7 @@ async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), Regi
             published.set_empty();
         }
     }
-    clear_root_tag_misses(state).await;
+    clear_root_tag_misses(state);
 
     Ok(())
 }
@@ -563,7 +565,7 @@ pub(crate) async fn get_or_head_kv_object(
     if let Some((blob, cache_entry_id, cached_url)) =
         lookup_published_blob(state, &scoped_key).await
     {
-        clear_kv_miss(state, &miss_key).await;
+        clear_kv_miss(state, &miss_key);
         return serve_backend_blob(
             state,
             &cache_entry_id,
@@ -574,7 +576,7 @@ pub(crate) async fn get_or_head_kv_object(
         .await;
     }
 
-    if is_recent_kv_miss(state, &miss_key).await {
+    if is_recent_kv_miss(state, &miss_key) {
         return Err(RegistryError::not_found("Cache key not found"));
     }
 
@@ -584,7 +586,7 @@ pub(crate) async fn get_or_head_kv_object(
             if let Some((blob, cache_entry_id, cached_url)) =
                 lookup_published_blob(state, &scoped_key).await
             {
-                clear_kv_miss(state, &miss_key).await;
+                clear_kv_miss(state, &miss_key);
                 return serve_backend_blob(
                     state,
                     &cache_entry_id,
@@ -597,14 +599,14 @@ pub(crate) async fn get_or_head_kv_object(
             Err(RegistryError::not_found("Cache key not found"))
         }
         LookupFlight::Leader(_lookup_flight) => {
-            if is_recent_kv_miss(state, &miss_key).await {
+            if is_recent_kv_miss(state, &miss_key) {
                 return Err(RegistryError::not_found("Cache key not found"));
             }
 
             if let Some((blob, cache_entry_id, cached_url)) =
                 lookup_published_blob(state, &scoped_key).await
             {
-                clear_kv_miss(state, &miss_key).await;
+                clear_kv_miss(state, &miss_key);
                 return serve_backend_blob(
                     state,
                     &cache_entry_id,
@@ -622,7 +624,7 @@ pub(crate) async fn get_or_head_kv_object(
             if let Some((blob, cache_entry_id, cached_url)) =
                 lookup_published_blob(state, &scoped_key).await
             {
-                clear_kv_miss(state, &miss_key).await;
+                clear_kv_miss(state, &miss_key);
                 return serve_backend_blob(
                     state,
                     &cache_entry_id,
@@ -633,7 +635,7 @@ pub(crate) async fn get_or_head_kv_object(
                 .await;
             }
 
-            mark_kv_miss(state, &miss_key).await;
+            mark_kv_miss(state, &miss_key);
             Err(RegistryError::not_found("Cache key not found"))
         }
     }
@@ -1007,7 +1009,7 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
                 let mut published = state.kv_published_index.write().await;
                 published.update(merged_entries.into_iter().collect(), cache_entry_id.clone());
             }
-            clear_root_tag_misses(state).await;
+            clear_root_tag_misses(state);
             state.kv_last_put.store(0, Ordering::Release);
 
             eprintln!(
@@ -1061,7 +1063,7 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
                 }
                 published.update(entries.into_iter().collect(), cache_entry_id.clone());
             }
-            clear_root_tag_misses(state).await;
+            clear_root_tag_misses(state);
             eprintln!("KV index preloaded: {count} entries, resolving download URLs...");
             preload_download_urls(state, &cache_entry_id).await;
             let preload_state = state.clone();
@@ -1114,7 +1116,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             let mut published = state.kv_published_index.write().await;
             published.set_empty();
         }
-        clear_root_tag_misses(state).await;
+        clear_root_tag_misses(state);
         if had_entries {
             eprintln!("KV index refresh: cleared stale entries (no backend index)");
         }
@@ -1192,7 +1194,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             let mut published = state.kv_published_index.write().await;
             published.set_empty();
         }
-        clear_root_tag_misses(state).await;
+        clear_root_tag_misses(state);
         if had_entries {
             eprintln!("KV index refresh: cleared stale entries (empty pointer)");
         }
@@ -1204,7 +1206,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         let mut published = state.kv_published_index.write().await;
         published.update(entries, cache_entry_id.clone());
     }
-    clear_root_tag_misses(state).await;
+    clear_root_tag_misses(state);
     eprintln!("KV index refresh: {count} entries loaded");
     preload_download_urls(state, &cache_entry_id).await;
     let preload_state = state.clone();
@@ -2047,9 +2049,6 @@ async fn load_existing_index_with_fallback(
 
 async fn write_body_to_temp_file(body: Body) -> Result<(PathBuf, u64, String), RegistryError> {
     let temp_dir = std::env::temp_dir().join("boringcache-kv-blobs");
-    tokio::fs::create_dir_all(&temp_dir)
-        .await
-        .map_err(|e| RegistryError::internal(format!("Failed to create temp dir: {e}")))?;
     let path = temp_dir.join(uuid::Uuid::new_v4().to_string());
 
     let mut file = tokio::fs::File::create(&path)

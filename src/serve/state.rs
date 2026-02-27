@@ -2,6 +2,7 @@ use crate::api::client::ApiClient;
 use crate::api::models::cache::BlobDescriptor;
 use crate::cas_oci::sha256_hex;
 use crate::tag_utils::TagResolver;
+use dashmap::DashMap;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -27,7 +28,7 @@ pub struct AppState {
     pub kv_next_flush_at: Arc<RwLock<Option<Instant>>>,
     pub kv_flush_scheduled: Arc<AtomicBool>,
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
-    pub kv_recent_misses: Arc<RwLock<HashMap<String, Instant>>>,
+    pub kv_recent_misses: Arc<DashMap<String, Instant>>,
     pub blob_read_cache: Arc<BlobReadCache>,
 }
 
@@ -722,10 +723,6 @@ impl KvPublishedIndex {
         let expires_at = Instant::now() + DOWNLOAD_URL_TTL;
         self.download_urls
             .insert(digest, CachedUrl { url, expires_at });
-    }
-
-    pub fn invalidate_download_url(&mut self, digest: &str) {
-        self.download_urls.remove(digest);
     }
 
     pub fn get(&self, scoped_key: &str) -> Option<(&BlobDescriptor, &str)> {

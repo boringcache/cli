@@ -5,6 +5,7 @@ pub mod routes;
 pub mod state;
 
 use anyhow::{Context, Result};
+use axum::serve::ListenerExt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -62,6 +63,9 @@ pub async fn run_server(
     spawn_maintenance_tasks(&state);
     let router = routes::build_router(state.clone());
 
+    let listener = listener.tap_io(|tcp_stream| {
+        let _ = tcp_stream.set_nodelay(true);
+    });
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -102,6 +106,9 @@ pub async fn start_server_background(
         .context("Failed to determine proxy port")?
         .port();
 
+    let listener = listener.tap_io(|tcp_stream| {
+        let _ = tcp_stream.set_nodelay(true);
+    });
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let server_task = tokio::spawn(async move {
         axum::serve(listener, router)
@@ -148,7 +155,7 @@ async fn build_server_runtime(
         kv_next_flush_at: Arc::new(RwLock::new(None)),
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
-        kv_recent_misses: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        kv_recent_misses: Arc::new(dashmap::DashMap::new()),
         blob_read_cache,
     };
 
@@ -195,6 +202,9 @@ async fn build_server_runtime(
             let _ = tokio::fs::remove_dir_all(&stale_dir).await;
         }
     }
+    tokio::fs::create_dir_all(std::env::temp_dir().join("boringcache-kv-blobs"))
+        .await
+        .context("Failed to create KV temp dir")?;
 
     Ok((state, listener))
 }

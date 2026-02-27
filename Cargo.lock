@@ -314,6 +314,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "ctrlc",
+ "dashmap",
  "dirs",
  "ed25519-dalek",
  "filetime",
