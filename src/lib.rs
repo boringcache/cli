@@ -15,6 +15,7 @@ pub mod exit_code;
 pub mod git;
 pub mod manifest;
 pub mod multipart_upload;
+pub mod optimize;
 pub mod platform;
 pub mod progress;
 pub mod retry_resume;

@@ -92,6 +92,9 @@ notify = "8.2"
 notify-debouncer-mini = "0.7"
 ctrlc = "3.5"
 
+# Diff generation for optimize command
+similar = "2"
+
 # URL handling - minimal
 urlencoding = { version = "2.1", default-features = false }
 

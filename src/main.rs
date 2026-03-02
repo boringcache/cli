@@ -408,6 +408,12 @@ async fn main() -> Result<()> {
             identity_output,
         } => commands::setup_encryption::execute(workspace, identity_output).await,
         cli::Commands::Workspaces { json } => commands::workspaces::execute(json).await,
+        cli::Commands::Optimize {
+            path,
+            apply,
+            dry_run,
+            json,
+        } => commands::optimize::execute(path, apply, dry_run, json).await,
         cli::Commands::Serve {
             workspace,
             tag,

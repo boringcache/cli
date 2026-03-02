@@ -5,6 +5,7 @@ pub mod delete;
 pub mod go_cacheprog;
 pub mod ls;
 pub mod mount;
+pub mod optimize;
 pub mod restore;
 pub mod run;
 pub mod save;

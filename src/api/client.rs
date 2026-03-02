@@ -251,6 +251,51 @@ impl ApiClient {
         self.post_with_base(&self.v2_base_url, endpoint, body).await
     }
 
+    pub async fn optimize(
+        &self,
+        request: &super::models::optimize::OptimizeRequest,
+    ) -> Result<super::models::optimize::OptimizeResponse> {
+        self.post_v2("optimize", request).await
+    }
+
+    pub async fn create_cli_connect_session(
+        &self,
+    ) -> Result<super::models::cli_connect::CliConnectSessionCreateResponse> {
+        let url = self.build_v2_url("cli-connect/sessions");
+        debug!("POST {}", url);
+
+        let response = self
+            .send_public_request(self.client.post(&url).json(&serde_json::json!({})))
+            .await?;
+
+        self.parse_json_response(response).await
+    }
+
+    pub async fn poll_cli_connect_session(
+        &self,
+        session_id: &str,
+        poll_token: &str,
+    ) -> Result<super::models::cli_connect::CliConnectSessionPollResponse> {
+        let url = self.build_v2_url(&format!("cli-connect/sessions/{session_id}"));
+        debug!("GET {}", url);
+
+        let response = self
+            .send_public_request(
+                self.client
+                    .get(&url)
+                    .header("X-BoringCache-Connect-Token", poll_token),
+            )
+            .await?;
+
+        if response.status() == StatusCode::UNAUTHORIZED {
+            anyhow::bail!(
+                "CLI connect poll rejected. Restart optimize onboarding and approve the new session."
+            );
+        }
+
+        self.parse_json_response(response).await
+    }
+
     async fn post_with_base<T, R>(&self, base_url: &str, endpoint: &str, body: &T) -> Result<R>
     where
         T: Serialize,
@@ -333,6 +378,56 @@ impl ApiClient {
                 let token = token_clone.clone();
                 async move {
                     let request = request.header("Authorization", format!("Bearer {}", token));
+                    match request.send().await {
+                        Ok(response) => {
+                            if response.status() == StatusCode::TOO_MANY_REQUESTS
+                                || response.status() == StatusCode::SERVICE_UNAVAILABLE
+                                || response.status() == StatusCode::GATEWAY_TIMEOUT
+                            {
+                                anyhow::bail!("Transient error: {}", response.status());
+                            }
+                            Ok(response)
+                        }
+                        Err(err) if err.is_connect() => Err(BoringCacheError::ConnectionError(
+                            "ERROR: Cannot connect to BoringCache server. Please check:\n\
+                                 • Is the API URL correct? (Check with: boringcache config)\n\
+                                 • Is there a firewall blocking the connection?"
+                                .to_string(),
+                        )
+                        .into()),
+                        Err(err) if err.is_timeout() => {
+                            anyhow::bail!("Request timeout: {}", err)
+                        }
+                        Err(err) => Err(err.into()),
+                    }
+                }
+            })
+            .await
+    }
+
+    async fn send_public_request(&self, request: reqwest::RequestBuilder) -> Result<Response> {
+        if request.try_clone().is_none() {
+            return match request.send().await {
+                Ok(response) => Ok(response),
+                Err(err) if err.is_connect() => Err(BoringCacheError::ConnectionError(
+                    "ERROR: Cannot connect to BoringCache server. Please check:\n\
+                         • Is the API URL correct? (Check with: boringcache config)\n\
+                         • Is there a firewall blocking the connection?"
+                        .to_string(),
+                )
+                .into()),
+                Err(err) => Err(err.into()),
+            };
+        }
+
+        let retry_config = RetryConfig::new(false);
+        retry_config
+            .retry_with_backoff("API request", || {
+                let request = request
+                    .try_clone()
+                    .expect("Request cloneability already verified");
+
+                async move {
                     match request.send().await {
                         Ok(response) => {
                             if response.status() == StatusCode::TOO_MANY_REQUESTS
@@ -1169,6 +1264,16 @@ impl ApiClient {
         let _response: serde_json::Value = self.post_v2(&url, &params).await?;
         Ok(())
     }
+
+    pub async fn send_cache_rollups(
+        &self,
+        workspace: &str,
+        batch: super::models::cache_rollups::BatchParams,
+    ) -> Result<()> {
+        let url = self.workspace_endpoint(workspace, "cache-rollups")?;
+        let _response: serde_json::Value = self.post_v2(&url, &batch).await?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1997,6 +2102,111 @@ mod tests {
             .expect("blob download urls should succeed");
         assert_eq!(response.download_urls.len(), 2);
 
+        mock.assert_async().await;
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
+        std::env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_create_cli_connect_session_without_auth_token() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let guard_result = mutex.lock();
+        let _guard = match guard_result {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if !networking_available() {
+            eprintln!(
+                "skipping test_create_cli_connect_session_without_auth_token: networking disabled in sandbox"
+            );
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_home.path());
+        std::env::remove_var("BORINGCACHE_API_TOKEN");
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v2/cli-connect/sessions")
+            .match_header("content-type", "application/json")
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"session_id":"abc123","poll_token":"poll-secret","authorize_url":"https://boringcache.com/cli/connect/abc123","expires_at":"2026-03-02T12:00:00Z","poll_interval_seconds":3}"#,
+            )
+            .create_async()
+            .await;
+
+        std::env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new().expect("client should initialize without auth token");
+        let response = client
+            .create_cli_connect_session()
+            .await
+            .expect("cli connect session should be created");
+
+        assert_eq!(response.session_id, "abc123");
+        assert_eq!(response.poll_token, "poll-secret");
+        assert_eq!(response.poll_interval_seconds, 3);
+        mock.assert_async().await;
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
+        std::env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_poll_cli_connect_session_rejects_invalid_poll_token() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let guard_result = mutex.lock();
+        let _guard = match guard_result {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if !networking_available() {
+            eprintln!(
+                "skipping test_poll_cli_connect_session_rejects_invalid_poll_token: networking disabled in sandbox"
+            );
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_home.path());
+        std::env::remove_var("BORINGCACHE_API_TOKEN");
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v2/cli-connect/sessions/abc123")
+            .match_header("x-boringcache-connect-token", "invalid-token")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"Invalid poll token"}"#)
+            .create_async()
+            .await;
+
+        std::env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new().expect("client should initialize without auth token");
+        let error = client
+            .poll_cli_connect_session("abc123", "invalid-token")
+            .await
+            .expect_err("polling with invalid token should fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("CLI connect poll rejected"),
+            "unexpected error message: {message}"
+        );
         mock.assert_async().await;
 
         if let Some(home) = original_home {

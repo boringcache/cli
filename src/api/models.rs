@@ -591,6 +591,38 @@ pub mod workspace {
     }
 }
 
+pub mod cache_rollups {
+    use super::*;
+
+    #[derive(Debug, Serialize)]
+    pub struct BatchParams {
+        pub rollups: Vec<RollupParam>,
+        pub missed_keys: Vec<MissedKeyParam>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct RollupParam {
+        pub bucket_at: String,
+        pub tool: String,
+        pub operation: String,
+        pub result: String,
+        pub degraded: bool,
+        pub event_count: u64,
+        pub bytes_total: u64,
+        pub latency_sum_ms: u64,
+        pub latency_count: u64,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct MissedKeyParam {
+        pub key_hash: String,
+        pub tool: String,
+        pub miss_count: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub sampled_key_prefix: Option<String>,
+    }
+}
+
 pub mod metrics {
     use super::*;
 
@@ -694,8 +726,87 @@ pub mod metrics {
     }
 }
 
+pub mod optimize {
+    use super::*;
+
+    #[derive(Debug, Serialize)]
+    pub struct OptimizeFileRequest {
+        pub path: String,
+        pub content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub input_type: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct OptimizeRequest {
+        pub files: Vec<OptimizeFileRequest>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize, Clone)]
+    pub struct OptimizeChange {
+        pub description: String,
+        #[serde(default)]
+        pub before_snippet: Option<String>,
+        #[serde(default)]
+        pub after_snippet: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize, Clone)]
+    pub struct OptimizeFileResult {
+        pub path: String,
+        pub status: String,
+        #[serde(default)]
+        pub detected_type: Option<String>,
+        #[serde(default)]
+        pub optimized_content: Option<String>,
+        #[serde(default)]
+        pub changes: Vec<OptimizeChange>,
+        #[serde(default)]
+        pub explanation: Option<String>,
+        #[serde(default)]
+        pub error: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct OptimizeResponse {
+        pub results: Vec<OptimizeFileResult>,
+    }
+}
+
+pub mod cli_connect {
+    use super::*;
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct CliConnectSessionCreateResponse {
+        pub session_id: String,
+        pub poll_token: String,
+        pub authorize_url: String,
+        pub expires_at: String,
+        pub poll_interval_seconds: u64,
+    }
+
+    #[derive(Debug, Deserialize, Serialize, Clone)]
+    pub struct CliConnectWorkspace {
+        pub name: String,
+        pub slug: String,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct CliConnectSessionPollResponse {
+        pub session_id: String,
+        pub status: String,
+        pub expires_at: String,
+        #[serde(default)]
+        pub token: Option<String>,
+        #[serde(default)]
+        pub workspace: Option<CliConnectWorkspace>,
+    }
+}
+
 pub use cache::*;
+pub use cli_connect::*;
 pub use metrics::*;
+pub use optimize::*;
 pub use workspace::*;
 
 #[cfg(test)]

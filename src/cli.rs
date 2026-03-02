@@ -274,6 +274,21 @@ pub enum Commands {
         json: bool,
     },
 
+    #[command(about = "Optimize CI/CD configs to use BoringCache")]
+    Optimize {
+        #[arg(help = "Path to a specific file to optimize (scans project if omitted)")]
+        path: Option<String>,
+
+        #[arg(long, help = "Apply changes without prompting")]
+        apply: bool,
+
+        #[arg(long, help = "Show changes without applying")]
+        dry_run: bool,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
     #[command(
         name = "docker-registry",
         about = "Run a local cache registry proxy backed by BoringCache (OCI + Bazel + Gradle + Maven + Nx + Turborepo + sccache + Go)",
