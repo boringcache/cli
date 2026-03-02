@@ -161,6 +161,30 @@ Proxy injection details:
 - Environment variables are injected for supported clients (`NX_*`, `TURBO_*`, `GOCACHEPROG`, `SCCACHE_*`).
 - Command args support placeholders: `{PORT}` and `{CACHE_REF}`.
 
+### `optimize [PATH]`
+Analyze CI/CD config files and propose BoringCache migrations.
+
+```bash
+# scan common CI/CD files in the current project
+boringcache optimize
+
+# inspect one file only
+boringcache optimize .github/workflows/ci.yml --dry-run
+
+# apply low/review-risk changes non-interactively
+boringcache optimize --apply
+
+# machine-readable output
+boringcache optimize --json
+```
+
+Behavior notes:
+- Uses deterministic rewrites first for GitHub Actions, Dockerfile, CircleCI, GitLab CI, and Buildkite.
+- Falls back to AI assist for files deterministic rules cannot safely rewrite.
+- AI fallback requires auth (`BORINGCACHE_API_TOKEN` or `boringcache auth`).
+- In interactive mode, missing auth can be resolved with browser onboarding.
+- `--apply` skips high-risk path changes for safety; interactive mode can opt in after review.
+
 ### `ls [WORKSPACE]`
 List cache entries.
 
@@ -205,8 +229,8 @@ boringcache serve my-org/ws registry-cache --port 5000
 boringcache cache-registry my-org/ws registry-cache --port 5000
 # with multiple OCI human aliases (first is primary in UI)
 boringcache cache-registry my-org/ws registry-cache,docker-main,docker-stable --port 5000
-# when BORINGCACHE_DEFAULT_WORKSPACE is set
-boringcache cache-registry registry-cache --port 5000
+# workspace is required for docker-registry/serve/cache-registry
+boringcache cache-registry my-org/ws registry-cache --port 5000
 ```
 
 BuildKit connects directly to the proxy as a standard OCI registry:

@@ -25,6 +25,7 @@ const EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS: usize = 20;
 const EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS: u64 = 75;
 const EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS: usize = 3;
 const EMPTY_FINALIZE_REMOTE_RETRY_DELAY_MS: u64 = 100;
+const OCI_DEGRADED_HEADER: &str = "X-BoringCache-Cache-Degraded";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EmptyFinalizeReuse {
@@ -171,6 +172,22 @@ fn record_oci_cache_op(
     }
 }
 
+fn oci_success_rollup_result(
+    response: &Response,
+) -> (crate::serve::cache_registry::cache_ops::OpResult, bool) {
+    if response.headers().get(OCI_DEGRADED_HEADER).is_some() {
+        (
+            crate::serve::cache_registry::cache_ops::OpResult::Error,
+            true,
+        )
+    } else {
+        (
+            crate::serve::cache_registry::cache_ops::OpResult::Hit,
+            false,
+        )
+    }
+}
+
 pub async fn v2_base() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -237,11 +254,12 @@ pub async fn oci_dispatch(
                 );
             }
             if let Some(op) = maybe_cache_op {
+                let (result, degraded) = oci_success_rollup_result(&response);
                 record_oci_cache_op(
                     &state,
                     op,
-                    crate::serve::cache_registry::cache_ops::OpResult::Hit,
-                    false,
+                    result,
+                    degraded,
                     request_start.elapsed().as_millis() as u64,
                     None,
                 );
@@ -1501,6 +1519,7 @@ async fn put_manifest(
     .await;
 
     cleanup_blob_sessions(&state, &blob_descriptors).await;
+    let mut degraded_fallback = false;
 
     if let Err(error) = persist_result {
         if state.fail_on_cache_error || !error.status().is_server_error() {
@@ -1514,6 +1533,7 @@ async fn put_manifest(
         );
         eprintln!("{warning}");
         log::warn!("{warning}");
+        degraded_fallback = true;
     }
 
     let mut headers = HeaderMap::new();
@@ -1524,6 +1544,9 @@ async fn put_manifest(
         &format!("/v2/{name}/manifests/{manifest_digest}"),
     )?;
     insert_header(&mut headers, "Content-Length", "0")?;
+    if degraded_fallback {
+        insert_header(&mut headers, OCI_DEGRADED_HEADER, "1")?;
+    }
 
     Ok((StatusCode::CREATED, headers, Body::empty()).into_response())
 }
@@ -1686,6 +1709,33 @@ mod tests {
             }
             _ => panic!("expected Blob"),
         }
+    }
+
+    #[test]
+    fn oci_success_rollup_without_degraded_header_is_hit() {
+        let response = (StatusCode::CREATED, Body::empty()).into_response();
+        let (result, degraded) = oci_success_rollup_result(&response);
+        assert_eq!(
+            result,
+            crate::serve::cache_registry::cache_ops::OpResult::Hit
+        );
+        assert!(!degraded);
+    }
+
+    #[test]
+    fn oci_success_rollup_with_degraded_header_is_error() {
+        let response = (
+            StatusCode::CREATED,
+            [(OCI_DEGRADED_HEADER, "1")],
+            Body::empty(),
+        )
+            .into_response();
+        let (result, degraded) = oci_success_rollup_result(&response);
+        assert_eq!(
+            result,
+            crate::serve::cache_registry::cache_ops::OpResult::Error
+        );
+        assert!(degraded);
     }
 
     #[tokio::test]
