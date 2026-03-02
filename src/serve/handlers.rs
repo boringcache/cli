@@ -411,7 +411,11 @@ async fn resolve_manifest(
             }
         }
         let content_type = detect_manifest_content_type(&cached.index_json);
-        return Ok((cached.index_json.clone(), content_type, cached.manifest_digest.clone()));
+        return Ok((
+            cached.index_json.clone(),
+            content_type,
+            cached.manifest_digest.clone(),
+        ));
     }
 
     let entries = state

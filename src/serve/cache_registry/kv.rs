@@ -331,8 +331,7 @@ async fn serve_backend_blob(
         return Ok((StatusCode::OK, response_headers, Body::empty()).into_response());
     }
 
-    let cache_path =
-        download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
+    let cache_path = download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
     let file = tokio::fs::File::open(&cache_path)
         .await
         .map_err(|e| RegistryError::internal(format!("Failed to open cached blob: {e}")))?;
@@ -822,15 +821,11 @@ async fn stream_blob_to_file(
             .await
             .map_err(|e| RegistryError::internal(format!("Failed to download blob: {e}")))?
             .error_for_status()
-            .map_err(|e| {
-                RegistryError::internal(format!("Blob storage returned an error: {e}"))
-            })?
+            .map_err(|e| RegistryError::internal(format!("Blob storage returned an error: {e}")))?
     } else {
         response
             .error_for_status()
-            .map_err(|e| {
-                RegistryError::internal(format!("Blob storage returned an error: {e}"))
-            })?
+            .map_err(|e| RegistryError::internal(format!("Blob storage returned an error: {e}")))?
     };
 
     let mut stream = response.bytes_stream();
@@ -839,17 +834,16 @@ async fn stream_blob_to_file(
         .map_err(|e| RegistryError::internal(format!("Failed to create temp file: {e}")))?;
     let mut written = 0u64;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            RegistryError::internal(format!("Failed to read blob stream: {e}"))
-        })?;
+        let chunk = chunk
+            .map_err(|e| RegistryError::internal(format!("Failed to read blob stream: {e}")))?;
         file.write_all(&chunk).await.map_err(|e| {
             RegistryError::internal(format!("Failed to write blob to temp file: {e}"))
         })?;
         written += chunk.len() as u64;
     }
-    file.flush().await.map_err(|e| {
-        RegistryError::internal(format!("Failed to flush temp file: {e}"))
-    })?;
+    file.flush()
+        .await
+        .map_err(|e| RegistryError::internal(format!("Failed to flush temp file: {e}")))?;
 
     Ok(written)
 }
@@ -885,8 +879,7 @@ async fn download_blob_to_cache(
                 blob.size_bytes
             );
             let started = std::time::Instant::now();
-            let result =
-                do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await;
+            let result = do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await;
             log::debug!(
                 "dl flight leader done: {} {}ms ok={}",
                 short_digest(&blob.digest),
@@ -908,23 +901,14 @@ async fn download_blob_to_cache(
             let retry_key = format!("dlretry:{}", blob.digest);
             match begin_lookup_flight(state, retry_key) {
                 LookupFlight::Leader(_retry_guard) => {
-                    if let Some(cache_path) =
-                        state.blob_read_cache.get(&blob.digest).await
-                    {
+                    if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
                         return Ok(cache_path);
                     }
-                    log::debug!(
-                        "dl flight retry leader: {}",
-                        short_digest(&blob.digest)
-                    );
-                    do_download_blob_to_cache(state, cache_entry_id, blob, cached_url)
-                        .await
+                    log::debug!("dl flight retry leader: {}", short_digest(&blob.digest));
+                    do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await
                 }
                 LookupFlight::Follower(retry_notify) => {
-                    log::debug!(
-                        "dl flight retry follower: {}",
-                        short_digest(&blob.digest)
-                    );
+                    log::debug!("dl flight retry follower: {}", short_digest(&blob.digest));
                     retry_notify.notified().await;
                     state
                         .blob_read_cache
@@ -1588,7 +1572,10 @@ fn spawn_preload_blobs(state: &AppState, cache_entry_id: &str) {
         .await
         {
             Ok(()) => {}
-            Err(_) => eprintln!("KV blob preload: timed out after {}s", KV_BLOB_PRELOAD_TIMEOUT.as_secs()),
+            Err(_) => eprintln!(
+                "KV blob preload: timed out after {}s",
+                KV_BLOB_PRELOAD_TIMEOUT.as_secs()
+            ),
         }
     });
 }
