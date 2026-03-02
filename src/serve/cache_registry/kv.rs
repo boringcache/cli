@@ -177,9 +177,18 @@ pub(crate) async fn put_kv_object(
     body: Body,
     put_status: StatusCode,
 ) -> Result<Response, RegistryError> {
+    let put_start = std::time::Instant::now();
     {
         let pending = state.kv_pending.read().await;
         if pending.total_spool_bytes() >= crate::serve::state::MAX_SPOOL_BYTES {
+            state.cache_ops.record(
+                namespace.into(),
+                super::cache_ops::Op::Put,
+                super::cache_ops::OpResult::Error,
+                false,
+                0,
+                put_start.elapsed().as_millis() as u64,
+            );
             return Err(RegistryError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "KV spool budget exceeded, try again after flush",
@@ -200,6 +209,14 @@ pub(crate) async fn put_kv_object(
         if projected_spool > crate::serve::state::MAX_SPOOL_BYTES {
             drop(pending);
             let _ = tokio::fs::remove_file(&path).await;
+            state.cache_ops.record(
+                namespace.into(),
+                super::cache_ops::Op::Put,
+                super::cache_ops::OpResult::Error,
+                false,
+                0,
+                put_start.elapsed().as_millis() as u64,
+            );
             return Err(RegistryError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "KV spool budget exceeded, try again after flush",
@@ -240,6 +257,15 @@ pub(crate) async fn put_kv_object(
             });
         }
     }
+
+    state.cache_ops.record(
+        namespace.into(),
+        super::cache_ops::Op::Put,
+        super::cache_ops::OpResult::Hit,
+        false,
+        blob_size,
+        put_start.elapsed().as_millis() as u64,
+    );
 
     log::debug!("KV PUT {scoped_key}: queued ({blob_size} bytes, digest={blob_digest})");
     Ok((put_status, Body::empty()).into_response())
@@ -541,6 +567,54 @@ pub(crate) async fn get_or_head_kv_object(
     key: &str,
     is_head: bool,
 ) -> Result<Response, RegistryError> {
+    let get_start = std::time::Instant::now();
+    let result = get_or_head_kv_object_inner(state, namespace, key, is_head).await;
+    let elapsed_ms = get_start.elapsed().as_millis() as u64;
+    let tool = namespace.into();
+
+    match &result {
+        Ok(_) => {
+            state.cache_ops.record(
+                tool,
+                super::cache_ops::Op::Get,
+                super::cache_ops::OpResult::Hit,
+                false,
+                0,
+                elapsed_ms,
+            );
+        }
+        Err(e) if e.status == StatusCode::NOT_FOUND => {
+            state.cache_ops.record(
+                tool,
+                super::cache_ops::Op::Get,
+                super::cache_ops::OpResult::Miss,
+                false,
+                0,
+                elapsed_ms,
+            );
+            state.cache_ops.record_miss(tool, key);
+        }
+        Err(_) => {
+            state.cache_ops.record(
+                tool,
+                super::cache_ops::Op::Get,
+                super::cache_ops::OpResult::Error,
+                false,
+                0,
+                elapsed_ms,
+            );
+        }
+    }
+
+    result
+}
+
+async fn get_or_head_kv_object_inner(
+    state: &AppState,
+    namespace: KvNamespace,
+    key: &str,
+    is_head: bool,
+) -> Result<Response, RegistryError> {
     let scoped_key = namespace.scoped_key(key);
     let miss_key = kv_miss_cache_key(&state.registry_root_tag, &scoped_key);
 
@@ -674,6 +748,45 @@ async fn serve_local_blob(
 }
 
 pub(crate) async fn resolve_kv_entries(
+    state: &AppState,
+    namespace: KvNamespace,
+    keys: &[&str],
+) -> Result<HashMap<String, u64>, RegistryError> {
+    let query_start = std::time::Instant::now();
+    let result = resolve_kv_entries_inner(state, namespace, keys).await;
+    let elapsed_ms = query_start.elapsed().as_millis() as u64;
+    let tool = namespace.into();
+
+    if let Ok(sizes) = &result {
+        for key in keys {
+            let scoped = namespace.scoped_key(key);
+            if sizes.contains_key(&scoped) {
+                state.cache_ops.record(
+                    tool,
+                    super::cache_ops::Op::Query,
+                    super::cache_ops::OpResult::Hit,
+                    false,
+                    0,
+                    elapsed_ms,
+                );
+            } else {
+                state.cache_ops.record(
+                    tool,
+                    super::cache_ops::Op::Query,
+                    super::cache_ops::OpResult::Miss,
+                    false,
+                    0,
+                    elapsed_ms,
+                );
+                state.cache_ops.record_miss(tool, key);
+            }
+        }
+    }
+
+    result
+}
+
+async fn resolve_kv_entries_inner(
     state: &AppState,
     namespace: KvNamespace,
     keys: &[&str],

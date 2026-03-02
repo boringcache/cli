@@ -6,6 +6,7 @@ use axum::response::{IntoResponse, Response};
 use crate::serve::state::AppState;
 
 mod bazel;
+pub mod cache_ops;
 mod error;
 mod go_cache;
 mod gradle;
@@ -55,6 +56,8 @@ async fn dispatch_with_path(
         Ok(r) => r,
         Err(e) => return Err(e),
     };
+    let route_tool = tool_for_route(&route);
+    let route_instruments_cache_ops = route_instruments_cache_ops(&route);
 
     let response = match route {
         route::RegistryRoute::BazelAc { digest_hex } => {
@@ -105,9 +108,61 @@ async fn dispatch_with_path(
                 normalized_path,
                 error.status
             );
+            if let Some(tool) = route_tool.filter(|_| !route_instruments_cache_ops) {
+                let op = op_for_method(&request_method);
+                state
+                    .cache_ops
+                    .record(tool, op, cache_ops::OpResult::Error, true, 0, 0);
+            }
             Ok(best_effort_cache_registry_response(&request_method))
         }
     }
+}
+
+fn tool_for_route(route: &route::RegistryRoute) -> Option<cache_ops::Tool> {
+    match route {
+        route::RegistryRoute::TurborepoArtifact { .. }
+        | route::RegistryRoute::TurborepoQueryArtifacts
+        | route::RegistryRoute::TurborepoStatus
+        | route::RegistryRoute::TurborepoEvents => Some(cache_ops::Tool::Turborepo),
+        route::RegistryRoute::NxArtifact { .. }
+        | route::RegistryRoute::NxTerminalOutput { .. }
+        | route::RegistryRoute::NxQuery => Some(cache_ops::Tool::Nx),
+        route::RegistryRoute::BazelAc { .. } | route::RegistryRoute::BazelCas { .. } => {
+            Some(cache_ops::Tool::Bazel)
+        }
+        route::RegistryRoute::Gradle { .. } => Some(cache_ops::Tool::Gradle),
+        route::RegistryRoute::Maven { .. } => Some(cache_ops::Tool::Maven),
+        route::RegistryRoute::SccacheObject { .. } | route::RegistryRoute::SccacheMkcol => {
+            Some(cache_ops::Tool::Sccache)
+        }
+        route::RegistryRoute::GoCacheObject { .. } => Some(cache_ops::Tool::GoCache),
+    }
+}
+
+fn op_for_method(method: &Method) -> cache_ops::Op {
+    if *method == Method::GET || *method == Method::HEAD {
+        cache_ops::Op::Get
+    } else if *method == Method::PUT {
+        cache_ops::Op::Put
+    } else {
+        cache_ops::Op::Query
+    }
+}
+
+fn route_instruments_cache_ops(route: &route::RegistryRoute) -> bool {
+    matches!(
+        route,
+        route::RegistryRoute::BazelAc { .. }
+            | route::RegistryRoute::BazelCas { .. }
+            | route::RegistryRoute::Gradle { .. }
+            | route::RegistryRoute::Maven { .. }
+            | route::RegistryRoute::NxArtifact { .. }
+            | route::RegistryRoute::NxTerminalOutput { .. }
+            | route::RegistryRoute::TurborepoArtifact { .. }
+            | route::RegistryRoute::SccacheObject { .. }
+            | route::RegistryRoute::GoCacheObject { .. }
+    )
 }
 
 fn normalize_path(path: &str) -> String {

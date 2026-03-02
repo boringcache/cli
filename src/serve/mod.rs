@@ -157,6 +157,7 @@ async fn build_server_runtime(
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
         kv_recent_misses: Arc::new(dashmap::DashMap::new()),
         blob_read_cache,
+        cache_ops: Arc::new(cache_registry::cache_ops::Aggregator::new()),
     };
 
     let addr = format!("{host}:{port}");
@@ -311,6 +312,61 @@ fn spawn_maintenance_tasks(state: &AppState) {
             }
         }
     });
+
+    let ops_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            flush_cache_ops(&ops_state).await;
+        }
+    });
+}
+
+async fn flush_cache_ops(state: &AppState) {
+    if state.cache_ops.is_empty() {
+        return;
+    }
+    let (rollups, missed_keys) = state.cache_ops.drain();
+    if rollups.is_empty() && missed_keys.is_empty() {
+        return;
+    }
+    let batch = crate::api::models::cache_rollups::BatchParams {
+        rollups: rollups
+            .iter()
+            .map(|r| crate::api::models::cache_rollups::RollupParam {
+                bucket_at: chrono::DateTime::from_timestamp(r.bucket_epoch_secs as i64, 0)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default(),
+                tool: r.tool.clone(),
+                operation: r.operation.clone(),
+                result: r.result.clone(),
+                degraded: r.degraded,
+                event_count: r.event_count,
+                bytes_total: r.bytes_total,
+                latency_sum_ms: r.latency_sum_ms,
+                latency_count: r.latency_count,
+            })
+            .collect(),
+        missed_keys: missed_keys
+            .iter()
+            .map(|mk| crate::api::models::cache_rollups::MissedKeyParam {
+                key_hash: mk.key_hash.clone(),
+                tool: mk.tool.clone(),
+                miss_count: mk.miss_count,
+                sampled_key_prefix: mk.sampled_key_prefix.clone(),
+            })
+            .collect(),
+    };
+    if let Err(error) = state
+        .api_client
+        .send_cache_rollups(&state.workspace, batch)
+        .await
+    {
+        state.cache_ops.restore(rollups, missed_keys);
+        log::debug!("Cache ops flush failed: {error}");
+    }
 }
 
 fn blob_read_cache_max_bytes() -> u64 {
@@ -322,6 +378,8 @@ fn blob_read_cache_max_bytes() -> u64 {
 }
 
 async fn flush_pending_on_shutdown(state: &AppState) {
+    flush_cache_ops(state).await;
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
 
     loop {

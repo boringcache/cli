@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
@@ -105,6 +105,72 @@ fn parse_oci_path(path: &str) -> Option<OciRoute> {
     None
 }
 
+fn oci_cache_op_for_route_method(
+    route: &OciRoute,
+    method: &Method,
+) -> Option<crate::serve::cache_registry::cache_ops::Op> {
+    match route {
+        OciRoute::Manifest { .. } => {
+            if *method == Method::GET || *method == Method::HEAD {
+                Some(crate::serve::cache_registry::cache_ops::Op::Get)
+            } else if *method == Method::PUT {
+                Some(crate::serve::cache_registry::cache_ops::Op::Put)
+            } else {
+                None
+            }
+        }
+        OciRoute::Blob { .. } => {
+            if *method == Method::GET || *method == Method::HEAD {
+                Some(crate::serve::cache_registry::cache_ops::Op::Get)
+            } else {
+                None
+            }
+        }
+        OciRoute::BlobUpload { .. } => {
+            if *method == Method::PUT {
+                Some(crate::serve::cache_registry::cache_ops::Op::Put)
+            } else {
+                None
+            }
+        }
+        OciRoute::BlobUploadStart { .. } => None,
+    }
+}
+
+fn oci_miss_key(route: &OciRoute) -> Option<String> {
+    match route {
+        OciRoute::Manifest { name, reference } => Some(format!("manifest:{name}:{reference}")),
+        OciRoute::Blob { name, digest } => Some(format!("blob:{name}@{digest}")),
+        OciRoute::BlobUploadStart { .. } | OciRoute::BlobUpload { .. } => None,
+    }
+}
+
+fn record_oci_cache_op(
+    state: &AppState,
+    op: crate::serve::cache_registry::cache_ops::Op,
+    result: crate::serve::cache_registry::cache_ops::OpResult,
+    degraded: bool,
+    latency_ms: u64,
+    miss_key: Option<&str>,
+) {
+    state.cache_ops.record(
+        crate::serve::cache_registry::cache_ops::Tool::Oci,
+        op,
+        result,
+        degraded,
+        0,
+        latency_ms,
+    );
+
+    if result == crate::serve::cache_registry::cache_ops::OpResult::Miss {
+        if let Some(key) = miss_key {
+            state
+                .cache_ops
+                .record_miss(crate::serve::cache_registry::cache_ops::Tool::Oci, key);
+        }
+    }
+}
+
 pub async fn v2_base() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -123,32 +189,37 @@ pub async fn oci_dispatch(
 ) -> Result<Response, OciError> {
     let request_method = method.clone();
     let request_path = format!("/v2/{path}");
+    let request_start = Instant::now();
     let fail_on_cache_error = state.fail_on_cache_error;
     let route = match parse_oci_path(&path) {
         Some(route) => route,
         None => return Err(OciError::name_unknown("not found")),
     };
+    let maybe_cache_op = oci_cache_op_for_route_method(&route, &request_method);
+    let miss_key = oci_miss_key(&route);
     eprintln!("OCI {} {}", request_method, request_path);
 
     let response = match route.clone() {
         OciRoute::Manifest { name, reference } => match method {
-            Method::GET | Method::HEAD => get_manifest(method, state, name, reference).await,
-            Method::PUT => put_manifest(state, name, reference, body).await,
+            Method::GET | Method::HEAD => {
+                get_manifest(method, state.clone(), name, reference).await
+            }
+            Method::PUT => put_manifest(state.clone(), name, reference, body).await,
             _ => Err(OciError::unsupported("method not allowed")),
         },
         OciRoute::Blob { name, digest } => match method {
-            Method::GET | Method::HEAD => get_blob(method, state, name, digest).await,
+            Method::GET | Method::HEAD => get_blob(method, state.clone(), name, digest).await,
             _ => Err(OciError::unsupported("method not allowed")),
         },
         OciRoute::BlobUploadStart { name } => match method {
-            Method::POST => start_upload(state, name, params, body).await,
+            Method::POST => start_upload(state.clone(), name, params, body).await,
             _ => Err(OciError::unsupported("method not allowed")),
         },
         OciRoute::BlobUpload { name, uuid } => match method {
-            Method::GET => get_upload_status(state, name, uuid).await,
-            Method::PATCH => patch_upload(state, name, uuid, headers, body).await,
-            Method::PUT => put_upload(state, name, uuid, params, headers, body).await,
-            Method::DELETE => delete_upload(state, uuid).await,
+            Method::GET => get_upload_status(state.clone(), name, uuid).await,
+            Method::PATCH => patch_upload(state.clone(), name, uuid, headers, body).await,
+            Method::PUT => put_upload(state.clone(), name, uuid, params, headers, body).await,
+            Method::DELETE => delete_upload(state.clone(), uuid).await,
             _ => Err(OciError::unsupported("method not allowed")),
         },
     };
@@ -165,6 +236,16 @@ pub async fn oci_dispatch(
                     request_method, request_path, response_status
                 );
             }
+            if let Some(op) = maybe_cache_op {
+                record_oci_cache_op(
+                    &state,
+                    op,
+                    crate::serve::cache_registry::cache_ops::OpResult::Hit,
+                    false,
+                    request_start.elapsed().as_millis() as u64,
+                    None,
+                );
+            }
             Ok(response)
         }
         Err(error) => {
@@ -177,6 +258,23 @@ pub async fn oci_dispatch(
                     error_status,
                     error.message()
                 );
+                if let Some(op) = maybe_cache_op {
+                    let result = if error_status == StatusCode::NOT_FOUND
+                        && op == crate::serve::cache_registry::cache_ops::Op::Get
+                    {
+                        crate::serve::cache_registry::cache_ops::OpResult::Miss
+                    } else {
+                        crate::serve::cache_registry::cache_ops::OpResult::Error
+                    };
+                    record_oci_cache_op(
+                        &state,
+                        op,
+                        result,
+                        false,
+                        request_start.elapsed().as_millis() as u64,
+                        miss_key.as_deref(),
+                    );
+                }
                 return Err(error);
             }
             if request_method != Method::GET && request_method != Method::HEAD {
@@ -187,6 +285,16 @@ pub async fn oci_dispatch(
                     error_status,
                     error.message()
                 );
+                if let Some(op) = maybe_cache_op {
+                    record_oci_cache_op(
+                        &state,
+                        op,
+                        crate::serve::cache_registry::cache_ops::OpResult::Error,
+                        false,
+                        request_start.elapsed().as_millis() as u64,
+                        None,
+                    );
+                }
                 return Err(error);
             }
             let warning = format!(
@@ -195,6 +303,16 @@ pub async fn oci_dispatch(
             );
             eprintln!("{warning}");
             log::warn!("{warning}");
+            if let Some(op) = maybe_cache_op {
+                record_oci_cache_op(
+                    &state,
+                    op,
+                    crate::serve::cache_registry::cache_ops::OpResult::Error,
+                    true,
+                    request_start.elapsed().as_millis() as u64,
+                    None,
+                );
+            }
             best_effort_oci_read_response(&route)
         }
     }
@@ -1524,6 +1642,7 @@ mod tests {
                 )
                 .expect("blob read cache"),
             ),
+            cache_ops: Arc::new(crate::serve::cache_registry::cache_ops::Aggregator::new()),
         }
     }
 
@@ -1567,6 +1686,38 @@ mod tests {
             }
             _ => panic!("expected Blob"),
         }
+    }
+
+    #[tokio::test]
+    async fn oci_dispatch_records_blob_miss_rollup_and_missed_key() {
+        let state = test_state();
+        let result = oci_dispatch(
+            Method::GET,
+            State(state.clone()),
+            Path("cache/blobs/sha256:deadbeef".to_string()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Body::empty(),
+        )
+        .await;
+
+        let error = result.expect_err("blob should be missing");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+
+        let (rollups, missed) = state.cache_ops.drain();
+        let miss_rollup = rollups
+            .iter()
+            .find(|record| {
+                record.tool == "oci" && record.operation == "get" && record.result == "miss"
+            })
+            .expect("expected oci miss rollup");
+        assert_eq!(miss_rollup.event_count, 1);
+
+        let miss_key = missed
+            .iter()
+            .find(|record| record.tool == "oci")
+            .expect("expected oci missed key");
+        assert_eq!(miss_key.miss_count, 1);
     }
 
     #[tokio::test]

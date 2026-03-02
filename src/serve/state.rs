@@ -30,6 +30,7 @@ pub struct AppState {
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
     pub kv_recent_misses: Arc<DashMap<String, Instant>>,
     pub blob_read_cache: Arc<BlobReadCache>,
+    pub cache_ops: Arc<super::cache_registry::cache_ops::Aggregator>,
 }
 
 pub const DEFAULT_BLOB_READ_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
