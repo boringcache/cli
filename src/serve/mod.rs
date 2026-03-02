@@ -139,6 +139,10 @@ async fn build_server_runtime(
     fail_on_cache_error: bool,
 ) -> Result<(AppState, TcpListener)> {
     let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
+    let (dl_concurrency, dl_from_env) = blob_download_concurrency();
+    let (pf_concurrency, pf_from_env) = blob_prefetch_concurrency(dl_concurrency);
+    let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
+    let blob_prefetch_semaphore = Arc::new(tokio::sync::Semaphore::new(pf_concurrency));
     let state = AppState {
         api_client,
         workspace: workspace.clone(),
@@ -157,6 +161,8 @@ async fn build_server_runtime(
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
         kv_recent_misses: Arc::new(dashmap::DashMap::new()),
         blob_read_cache,
+        blob_download_semaphore,
+        blob_prefetch_semaphore,
         cache_ops: Arc::new(cache_registry::cache_ops::Aggregator::new()),
         oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
     };
@@ -196,6 +202,16 @@ async fn build_server_runtime(
         "  Blob Read Cache: {} (max {} bytes)",
         state.blob_read_cache.cache_dir().display(),
         state.blob_read_cache.max_bytes()
+    );
+    let src = |from_env: bool| if from_env { "env" } else { "auto" };
+    let pf_label = if pf_concurrency == 0 {
+        format!("disabled ({})", src(pf_from_env))
+    } else {
+        format!("{pf_concurrency} max ({})", src(pf_from_env))
+    };
+    eprintln!(
+        "  Blob Download Concurrency: {dl_concurrency} max ({}), prefetch: {pf_label}",
+        src(dl_from_env)
     );
 
     for dir_name in ["boringcache-kv-blobs", "boringcache-uploads"] {
@@ -376,6 +392,40 @@ fn blob_read_cache_max_bytes() -> u64 {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_BLOB_READ_CACHE_MAX_BYTES)
+}
+
+fn blob_download_concurrency() -> (usize, bool) {
+    if let Some(configured) = std::env::var("BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+    {
+        return (configured.clamp(1, 128), true);
+    }
+
+    use crate::platform::resources::{MemoryStrategy, SystemResources};
+    let resources = SystemResources::detect();
+    let mut n = (resources.cpu_cores * 4).clamp(4, 32);
+    if matches!(resources.memory_strategy, MemoryStrategy::Balanced) {
+        n = n.min(16);
+    }
+    (n, false)
+}
+
+fn blob_prefetch_concurrency(download_concurrency: usize) -> (usize, bool) {
+    if let Some(configured) = std::env::var("BORINGCACHE_BLOB_PREFETCH_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        return (configured.clamp(0, 16), true);
+    }
+
+    use crate::platform::resources::{MemoryStrategy, SystemResources};
+    let resources = SystemResources::detect();
+    if matches!(resources.memory_strategy, MemoryStrategy::Balanced) {
+        return (1, false);
+    }
+    ((download_concurrency / 8).clamp(1, 2), false)
 }
 
 async fn flush_pending_on_shutdown(state: &AppState) {

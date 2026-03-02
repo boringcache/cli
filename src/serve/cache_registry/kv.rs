@@ -8,7 +8,7 @@ use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
@@ -40,9 +40,11 @@ const KV_BLOB_UPLOAD_MAX_ATTEMPTS: u32 = 3;
 const KV_BLOB_UPLOAD_RETRY_BASE_MS: u64 = 300;
 const KV_BLOB_UPLOAD_RETRY_MAX_MS: u64 = 1_500;
 const KV_BLOB_UPLOAD_MAX_CONCURRENCY: usize = 16;
-const KV_BLOB_PRELOAD_MAX_CONCURRENCY: usize = 32;
+const KV_BLOB_PRELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const KV_BLOB_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const KV_BLOB_PRELOAD_MAX_BLOBS: usize = 2_000;
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
+static KV_BLOB_DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn kv_miss_cache_key(registry_root_tag: &str, scoped_key: &str) -> String {
     format!("{}\u{0}{}", registry_root_tag.trim(), scoped_key)
@@ -329,83 +331,14 @@ async fn serve_backend_blob(
         return Ok((StatusCode::OK, response_headers, Body::empty()).into_response());
     }
 
-    if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
-        match serve_local_blob(blob, &cache_path, false).await {
-            Ok(response) => return Ok(response),
-            Err(error) => {
-                log::warn!("KV blob read cache failed for {}: {:?}", blob.digest, error);
-                state.blob_read_cache.remove(&blob.digest).await;
-            }
-        }
-    }
-
-    let (download_url, from_cache) = if let Some(url) = cached_url {
-        (url.to_string(), true)
-    } else {
-        let flight_key = format!("url:{}", blob.digest);
-        match begin_lookup_flight(state, flight_key) {
-            LookupFlight::Follower(notify) => {
-                notify.notified().await;
-                let published = state.kv_published_index.read().await;
-                if let Some(url) = published.download_url(&blob.digest) {
-                    (url.to_string(), true)
-                } else {
-                    drop(published);
-                    let resolved = resolve_download_url(state, cache_entry_id, blob).await?;
-                    {
-                        let mut published = state.kv_published_index.write().await;
-                        published.set_download_url(blob.digest.clone(), resolved.clone());
-                    }
-                    (resolved, false)
-                }
-            }
-            LookupFlight::Leader(_url_flight) => {
-                let resolved = resolve_download_url(state, cache_entry_id, blob).await?;
-                {
-                    let mut published = state.kv_published_index.write().await;
-                    published.set_download_url(blob.digest.clone(), resolved.clone());
-                }
-                (resolved, false)
-            }
-        }
-    };
-
-    let download_result = state
-        .api_client
-        .transfer_client()
-        .get(&download_url)
-        .send()
+    let cache_path =
+        download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
+    let file = tokio::fs::File::open(&cache_path)
         .await
-        .map_err(|e| RegistryError::internal(format!("Failed to download blob bytes: {e}")))?;
+        .map_err(|e| RegistryError::internal(format!("Failed to open cached blob: {e}")))?;
+    let stream = ReaderStream::new(file);
 
-    if from_cache
-        && (download_result.status() == StatusCode::FORBIDDEN
-            || download_result.status() == StatusCode::NOT_FOUND)
-    {
-        let fresh_url = resolve_download_url(state, cache_entry_id, blob).await?;
-        {
-            let mut published = state.kv_published_index.write().await;
-            published.set_download_url(blob.digest.clone(), fresh_url.clone());
-        }
-        let retry_response = state
-            .api_client
-            .transfer_client()
-            .get(&fresh_url)
-            .send()
-            .await
-            .map_err(|e| RegistryError::internal(format!("Failed to download blob bytes: {e}")))?
-            .error_for_status()
-            .map_err(|e| RegistryError::internal(format!("Blob storage returned an error: {e}")))?;
-        let body = Body::from_stream(retry_response.bytes_stream());
-        return Ok((StatusCode::OK, response_headers, body).into_response());
-    }
-
-    let download_response = download_result
-        .error_for_status()
-        .map_err(|e| RegistryError::internal(format!("Blob storage returned an error: {e}")))?;
-    let body = Body::from_stream(download_response.bytes_stream());
-
-    Ok((StatusCode::OK, response_headers, body).into_response())
+    Ok((StatusCode::OK, response_headers, Body::from_stream(stream)).into_response())
 }
 
 fn is_recent_kv_miss(state: &AppState, scoped_key: &str) -> bool {
@@ -746,6 +679,267 @@ async fn serve_local_blob(
     let stream = ReaderStream::new(file);
 
     Ok((StatusCode::OK, headers, Body::from_stream(stream)).into_response())
+}
+
+async fn resolve_blob_url(
+    state: &AppState,
+    cache_entry_id: &str,
+    blob: &BlobDescriptor,
+    cached_url: Option<&str>,
+) -> Result<(String, bool), RegistryError> {
+    if let Some(url) = cached_url {
+        return Ok((url.to_string(), true));
+    }
+
+    let flight_key = format!("url:{}", blob.digest);
+    match begin_lookup_flight(state, flight_key) {
+        LookupFlight::Follower(notify) => {
+            notify.notified().await;
+            let published = state.kv_published_index.read().await;
+            if let Some(url) = published.download_url(&blob.digest) {
+                Ok((url.to_string(), true))
+            } else {
+                drop(published);
+                let resolved = resolve_download_url(state, cache_entry_id, blob).await?;
+                {
+                    let mut published = state.kv_published_index.write().await;
+                    published.set_download_url(blob.digest.clone(), resolved.clone());
+                }
+                Ok((resolved, false))
+            }
+        }
+        LookupFlight::Leader(_url_flight) => {
+            let resolved = resolve_download_url(state, cache_entry_id, blob).await?;
+            {
+                let mut published = state.kv_published_index.write().await;
+                published.set_download_url(blob.digest.clone(), resolved.clone());
+            }
+            Ok((resolved, false))
+        }
+    }
+}
+
+async fn do_download_blob_to_cache(
+    state: &AppState,
+    cache_entry_id: &str,
+    blob: &BlobDescriptor,
+    cached_url: Option<&str>,
+) -> Result<PathBuf, RegistryError> {
+    let _permit = state
+        .blob_download_semaphore
+        .acquire()
+        .await
+        .map_err(|_| RegistryError::internal("Download semaphore closed"))?;
+
+    if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
+        return Ok(cache_path);
+    }
+
+    let (url, from_cache) = resolve_blob_url(state, cache_entry_id, blob, cached_url).await?;
+
+    let digest_hex = crate::cas_file::sha256_hex(blob.digest.as_bytes());
+    let temp_suffix = KV_BLOB_DOWNLOAD_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_path = std::env::temp_dir().join(format!(
+        "boringcache-dl-{}-{}-{temp_suffix:016x}",
+        &digest_hex[..16],
+        std::process::id(),
+    ));
+    let written = match tokio::time::timeout(
+        KV_BLOB_DOWNLOAD_TIMEOUT,
+        stream_blob_to_file(state, cache_entry_id, blob, &url, from_cache, &temp_path),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(RegistryError::internal(format!(
+                "Blob download timed out after {}s",
+                KV_BLOB_DOWNLOAD_TIMEOUT.as_secs()
+            )));
+        }
+    };
+
+    if written == 0 {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(RegistryError::internal("Downloaded blob was empty"));
+    }
+
+    match state
+        .blob_read_cache
+        .promote(&blob.digest, &temp_path, written)
+        .await
+    {
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!("Blob cache promote failed for {}: {error}", blob.digest);
+        }
+    }
+
+    if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
+        return Ok(cache_path);
+    }
+
+    if tokio::fs::metadata(&temp_path).await.is_ok() {
+        return Ok(temp_path);
+    }
+
+    Err(RegistryError::internal(
+        "Blob not found after download (promote may have moved it)",
+    ))
+}
+
+async fn stream_blob_to_file(
+    state: &AppState,
+    cache_entry_id: &str,
+    blob: &BlobDescriptor,
+    url: &str,
+    from_cache: bool,
+    dest: &std::path::Path,
+) -> Result<u64, RegistryError> {
+    let response = state
+        .api_client
+        .transfer_client()
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| RegistryError::internal(format!("Failed to download blob: {e}")))?;
+
+    let response = if from_cache
+        && (response.status() == StatusCode::FORBIDDEN
+            || response.status() == StatusCode::NOT_FOUND)
+    {
+        let fresh_url = resolve_download_url(state, cache_entry_id, blob).await?;
+        {
+            let mut published = state.kv_published_index.write().await;
+            published.set_download_url(blob.digest.clone(), fresh_url.clone());
+        }
+        state
+            .api_client
+            .transfer_client()
+            .get(&fresh_url)
+            .send()
+            .await
+            .map_err(|e| RegistryError::internal(format!("Failed to download blob: {e}")))?
+            .error_for_status()
+            .map_err(|e| {
+                RegistryError::internal(format!("Blob storage returned an error: {e}"))
+            })?
+    } else {
+        response
+            .error_for_status()
+            .map_err(|e| {
+                RegistryError::internal(format!("Blob storage returned an error: {e}"))
+            })?
+    };
+
+    let mut stream = response.bytes_stream();
+    let mut file = tokio::fs::File::create(dest)
+        .await
+        .map_err(|e| RegistryError::internal(format!("Failed to create temp file: {e}")))?;
+    let mut written = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            RegistryError::internal(format!("Failed to read blob stream: {e}"))
+        })?;
+        file.write_all(&chunk).await.map_err(|e| {
+            RegistryError::internal(format!("Failed to write blob to temp file: {e}"))
+        })?;
+        written += chunk.len() as u64;
+    }
+    file.flush().await.map_err(|e| {
+        RegistryError::internal(format!("Failed to flush temp file: {e}"))
+    })?;
+
+    Ok(written)
+}
+
+fn short_digest(digest: &str) -> &str {
+    if digest.len() > 16 {
+        &digest[..16]
+    } else {
+        digest
+    }
+}
+
+async fn download_blob_to_cache(
+    state: &AppState,
+    cache_entry_id: &str,
+    blob: &BlobDescriptor,
+    cached_url: Option<&str>,
+) -> Result<PathBuf, RegistryError> {
+    if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
+        log::debug!("dl cache hit: {}", short_digest(&blob.digest));
+        return Ok(cache_path);
+    }
+
+    let flight_key = format!("dl:{}", blob.digest);
+    match begin_lookup_flight(state, flight_key) {
+        LookupFlight::Leader(_dl_guard) => {
+            if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
+                return Ok(cache_path);
+            }
+            log::debug!(
+                "dl flight leader: {} ({}B)",
+                short_digest(&blob.digest),
+                blob.size_bytes
+            );
+            let started = std::time::Instant::now();
+            let result =
+                do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await;
+            log::debug!(
+                "dl flight leader done: {} {}ms ok={}",
+                short_digest(&blob.digest),
+                started.elapsed().as_millis(),
+                result.is_ok()
+            );
+            result
+        }
+        LookupFlight::Follower(notify) => {
+            log::debug!("dl flight follower: {}", short_digest(&blob.digest));
+            notify.notified().await;
+            if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
+                return Ok(cache_path);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
+                return Ok(cache_path);
+            }
+            let retry_key = format!("dlretry:{}", blob.digest);
+            match begin_lookup_flight(state, retry_key) {
+                LookupFlight::Leader(_retry_guard) => {
+                    if let Some(cache_path) =
+                        state.blob_read_cache.get(&blob.digest).await
+                    {
+                        return Ok(cache_path);
+                    }
+                    log::debug!(
+                        "dl flight retry leader: {}",
+                        short_digest(&blob.digest)
+                    );
+                    do_download_blob_to_cache(state, cache_entry_id, blob, cached_url)
+                        .await
+                }
+                LookupFlight::Follower(retry_notify) => {
+                    log::debug!(
+                        "dl flight retry follower: {}",
+                        short_digest(&blob.digest)
+                    );
+                    retry_notify.notified().await;
+                    state
+                        .blob_read_cache
+                        .get(&blob.digest)
+                        .await
+                        .ok_or_else(|| {
+                            RegistryError::internal(format!(
+                                "Blob download failed after retry: {}",
+                                short_digest(&blob.digest)
+                            ))
+                        })
+                }
+            }
+        }
+    }
 }
 
 pub(crate) async fn resolve_kv_entries(
@@ -1132,11 +1326,7 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
             );
             drop(guard);
             preload_download_urls(state, &cache_entry_id).await;
-            let preload_state = state.clone();
-            let preload_cache_entry_id = cache_entry_id.clone();
-            tokio::spawn(async move {
-                preload_blobs(&preload_state, &preload_cache_entry_id).await;
-            });
+            spawn_preload_blobs(state, &cache_entry_id);
             FlushResult::Ok
         }
         Err(FlushError::Conflict(msg)) => {
@@ -1180,10 +1370,7 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
             clear_root_tag_misses(state);
             eprintln!("KV index preloaded: {count} entries, resolving download URLs...");
             preload_download_urls(state, &cache_entry_id).await;
-            let preload_state = state.clone();
-            tokio::spawn(async move {
-                preload_blobs(&preload_state, &cache_entry_id).await;
-            });
+            spawn_preload_blobs(state, &cache_entry_id);
         }
         Ok(_) => {
             {
@@ -1323,10 +1510,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
     clear_root_tag_misses(state);
     eprintln!("KV index refresh: {count} entries loaded");
     preload_download_urls(state, &cache_entry_id).await;
-    let preload_state = state.clone();
-    tokio::spawn(async move {
-        preload_blobs(&preload_state, &cache_entry_id).await;
-    });
+    spawn_preload_blobs(state, &cache_entry_id);
 }
 
 async fn refresh_fence_allows_update(
@@ -1393,6 +1577,22 @@ async fn refresh_fence_allows_update(
     true
 }
 
+fn spawn_preload_blobs(state: &AppState, cache_entry_id: &str) {
+    let preload_state = state.clone();
+    let preload_cache_entry_id = cache_entry_id.to_string();
+    tokio::spawn(async move {
+        match tokio::time::timeout(
+            KV_BLOB_PRELOAD_TIMEOUT,
+            preload_blobs(&preload_state, &preload_cache_entry_id),
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(_) => eprintln!("KV blob preload: timed out after {}s", KV_BLOB_PRELOAD_TIMEOUT.as_secs()),
+        }
+    });
+}
+
 async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
     let blobs = {
         let published = state.kv_published_index.read().await;
@@ -1425,22 +1625,6 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
     }
 }
 
-fn kv_blob_preload_concurrency(target_count: usize) -> usize {
-    if target_count == 0 {
-        return 1;
-    }
-
-    let configured = std::env::var("BORINGCACHE_BLOB_PRELOAD_CONCURRENCY")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(KV_BLOB_PRELOAD_MAX_CONCURRENCY);
-
-    configured
-        .min(KV_BLOB_PRELOAD_MAX_CONCURRENCY)
-        .min(target_count)
-}
-
 fn kv_blob_preload_max_blob_bytes() -> u64 {
     std::env::var("BORINGCACHE_BLOB_PRELOAD_MAX_BLOB_BYTES")
         .ok()
@@ -1457,60 +1641,35 @@ fn kv_blob_preload_max_blobs() -> usize {
         .unwrap_or(KV_BLOB_PRELOAD_MAX_BLOBS)
 }
 
+fn is_prefetch_disabled() -> bool {
+    std::env::var("BORINGCACHE_BLOB_PREFETCH_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        == Some(0)
+}
+
 async fn preload_single_blob(
     state: AppState,
     cache_entry_id: String,
     blob: BlobDescriptor,
-    mut url: String,
+    url: String,
 ) -> anyhow::Result<bool> {
     if state.blob_read_cache.get(&blob.digest).await.is_some() {
         return Ok(false);
     }
 
-    for _attempt in 0..2 {
-        let response = state
-            .api_client
-            .transfer_client()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|error| anyhow::anyhow!("download request failed: {error}"))?;
+    download_blob_to_cache(&state, &cache_entry_id, &blob, Some(&url))
+        .await
+        .map_err(|error| anyhow::anyhow!("download_blob_to_cache failed: {:?}", error))?;
 
-        if response.status() == StatusCode::FORBIDDEN || response.status() == StatusCode::NOT_FOUND
-        {
-            let fresh_url = resolve_download_url(&state, &cache_entry_id, &blob)
-                .await
-                .map_err(|error| anyhow::anyhow!("refresh download URL failed: {:?}", error))?;
-            {
-                let mut published = state.kv_published_index.write().await;
-                published.set_download_url(blob.digest.clone(), fresh_url.clone());
-            }
-            url = fresh_url;
-            continue;
-        }
-
-        let response = response
-            .error_for_status()
-            .map_err(|error| anyhow::anyhow!("download returned error status: {error}"))?;
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| anyhow::anyhow!("read blob response failed: {error}"))?;
-        if bytes.is_empty() {
-            return Ok(false);
-        }
-        let inserted = state
-            .blob_read_cache
-            .insert(&blob.digest, bytes.as_ref())
-            .await
-            .map_err(|error| anyhow::anyhow!("cache insert failed: {error}"))?;
-        return Ok(inserted);
-    }
-
-    Ok(false)
+    Ok(true)
 }
 
 pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
+    if is_prefetch_disabled() {
+        return;
+    }
+
     let max_blob_bytes = kv_blob_preload_max_blob_bytes();
     let max_blobs = kv_blob_preload_max_blobs();
     let mut candidates = {
@@ -1544,21 +1703,19 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         return;
     }
 
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(kv_blob_preload_concurrency(
-        targets.len(),
-    )));
+    let prefetch_semaphore = state.blob_prefetch_semaphore.clone();
     let mut tasks = tokio::task::JoinSet::new();
     let mut scheduled = 0usize;
     for (blob, url) in targets {
         let state = state.clone();
         let cache_entry_id = cache_entry_id.to_string();
-        let semaphore = semaphore.clone();
+        let prefetch_semaphore = prefetch_semaphore.clone();
         scheduled = scheduled.saturating_add(1);
         tasks.spawn(async move {
-            let _permit = semaphore
+            let _permit = prefetch_semaphore
                 .acquire_owned()
                 .await
-                .map_err(|error| anyhow::anyhow!("preload semaphore closed: {error}"))?;
+                .map_err(|error| anyhow::anyhow!("prefetch semaphore closed: {error}"))?;
             preload_single_blob(state, cache_entry_id, blob, url).await
         });
     }

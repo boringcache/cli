@@ -1723,6 +1723,8 @@ mod tests {
                 )
                 .expect("blob read cache"),
             ),
+            blob_download_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
+            blob_prefetch_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             cache_ops: Arc::new(crate::serve::cache_registry::cache_ops::Aggregator::new()),
             oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
         }

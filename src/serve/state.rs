@@ -30,6 +30,8 @@ pub struct AppState {
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
     pub kv_recent_misses: Arc<DashMap<String, Instant>>,
     pub blob_read_cache: Arc<BlobReadCache>,
+    pub blob_download_semaphore: Arc<tokio::sync::Semaphore>,
+    pub blob_prefetch_semaphore: Arc<tokio::sync::Semaphore>,
     pub cache_ops: Arc<super::cache_registry::cache_ops::Aggregator>,
     pub oci_manifest_cache: Arc<DashMap<String, Arc<OciManifestCacheEntry>>>,
 }
