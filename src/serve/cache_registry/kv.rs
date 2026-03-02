@@ -1348,7 +1348,7 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
 
     let entry_count = pending_entries.len();
 
-    match do_flush(state, &pending_entries, &pending_blob_paths).await {
+    let result = match do_flush(state, &pending_entries, &pending_blob_paths).await {
         Ok((merged_entries, cache_entry_id)) => {
             {
                 let mut published = state.kv_published_index.write().await;
@@ -1380,10 +1380,6 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
             let mut pending = state.kv_pending.write().await;
             pending.restore(pending_entries, pending_blob_paths);
             drop(pending);
-            {
-                let mut flushing = state.kv_flushing.write().await;
-                *flushing = None;
-            }
             let (base_ms, jitter_ms) = conflict_backoff_window(&msg);
             set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
             FlushResult::Conflict
@@ -1393,10 +1389,6 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
             let mut pending = state.kv_pending.write().await;
             pending.restore(pending_entries, pending_blob_paths);
             drop(pending);
-            {
-                let mut flushing = state.kv_flushing.write().await;
-                *flushing = None;
-            }
             let (base_ms, jitter_ms) = transient_backoff_window(&msg);
             set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
             FlushResult::Error
@@ -1404,14 +1396,17 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
         Err(FlushError::Permanent(msg)) => {
             eprintln!("KV batch flush dropped permanently: {msg}");
             cleanup_blob_files(&pending_blob_paths).await;
-            {
-                let mut flushing = state.kv_flushing.write().await;
-                *flushing = None;
-            }
             state.kv_last_put.store(0, Ordering::Release);
             FlushResult::Permanent
         }
+    };
+
+    {
+        let mut flushing = state.kv_flushing.write().await;
+        *flushing = None;
     }
+
+    result
 }
 
 pub(crate) async fn preload_kv_index(state: &AppState) {
