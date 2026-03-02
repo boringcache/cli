@@ -706,29 +706,29 @@ fn parse_cli_connect_expiry(value: &str) -> Option<DateTime<Utc>> {
 fn try_open_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
-        return Command::new("open")
+        Command::new("open")
             .arg(url)
             .status()
             .map(|status| status.success())
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
 
     #[cfg(target_os = "windows")]
     {
-        return Command::new("cmd")
+        Command::new("cmd")
             .args(["/C", "start", "", url])
             .status()
             .map(|status| status.success())
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
 
     #[cfg(target_os = "linux")]
     {
-        return Command::new("xdg-open")
+        Command::new("xdg-open")
             .arg(url)
             .status()
             .map(|status| status.success())
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]

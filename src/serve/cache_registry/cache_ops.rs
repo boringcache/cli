@@ -155,6 +155,12 @@ struct MissEntry {
     sampled_prefix: Option<String>,
 }
 
+impl Default for Aggregator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Aggregator {
     pub fn new() -> Self {
         Self {
