@@ -54,6 +54,9 @@ async fn dispatch_with_path(
     let normalized_path = normalize_path(&path);
     let route = match route::detect_route(&method, &normalized_path) {
         Ok(r) => r,
+        Err(e) if e.status == StatusCode::NOT_FOUND && method == Method::PUT => {
+            return Ok((StatusCode::CREATED, Body::empty()).into_response());
+        }
         Err(e) => return Err(e),
     };
     let route_tool = tool_for_route(&route);

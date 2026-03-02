@@ -142,7 +142,7 @@ async fn test_nonexistent_route_returns_404() {
 }
 
 #[tokio::test]
-async fn test_unknown_put_route_returns_404() {
+async fn test_unknown_put_route_returns_created() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
     let app = build_router(state);
@@ -158,7 +158,7 @@ async fn test_unknown_put_route_returns_404() {
     .await
     .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]

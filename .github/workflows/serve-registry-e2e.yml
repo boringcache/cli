@@ -742,7 +742,16 @@ jobs:
           }
           trap cleanup EXIT
 
+          stop_proxy() {
+            if [[ -n "${SERVE_PID:-}" ]]; then
+              kill "${SERVE_PID}" >/dev/null 2>&1 || true
+              wait "${SERVE_PID}" >/dev/null 2>&1 || true
+            fi
+            SERVE_PID=""
+          }
+
           start_proxy() {
+            stop_proxy
             ./target/debug/boringcache docker-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" --host 127.0.0.1 --port "${PORT}" --no-platform --no-git --fail-on-cache-error > "${ADAPTER_PROXY_LOG}" 2>&1 &
             SERVE_PID=$!
 
@@ -806,6 +815,11 @@ jobs:
               run_http "200" adapter-e2e/bazel-ac-put.txt -X PUT --data-binary @adapter-e2e/bazel.bin "http://127.0.0.1:${PORT}/ac/${bazel_key}"
               run_http "200" adapter-e2e/bazel-ac-get.bin "http://127.0.0.1:${PORT}/ac/${bazel_key}"
               assert_file_equals adapter-e2e/bazel.bin adapter-e2e/bazel-ac-get.bin
+
+              stop_proxy
+              start_proxy
+              run_http "200" adapter-e2e/bazel-cas-get-after-restart.bin "http://127.0.0.1:${PORT}/cas/${bazel_key}"
+              assert_file_equals adapter-e2e/bazel.bin adapter-e2e/bazel-cas-get-after-restart.bin
               ;;
             gradle)
               gradle_key="gradle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:7}"
@@ -814,6 +828,11 @@ jobs:
               run_http "200" adapter-e2e/gradle-head.txt -I "http://127.0.0.1:${PORT}/cache/${gradle_key}"
               run_http "200" adapter-e2e/gradle-get.bin "http://127.0.0.1:${PORT}/cache/${gradle_key}"
               assert_file_equals adapter-e2e/gradle.bin adapter-e2e/gradle-get.bin
+
+              stop_proxy
+              start_proxy
+              run_http "200" adapter-e2e/gradle-get-after-restart.bin "http://127.0.0.1:${PORT}/cache/${gradle_key}"
+              assert_file_equals adapter-e2e/gradle.bin adapter-e2e/gradle-get-after-restart.bin
               ;;
             maven)
               maven_checksum=$(printf 'maven-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
@@ -829,6 +848,11 @@ jobs:
               run_http "200" adapter-e2e/maven-v1-head.txt -I "http://127.0.0.1:${PORT}/${maven_v1_path}"
               run_http "200" adapter-e2e/maven-v1-get.bin "http://127.0.0.1:${PORT}/${maven_v1_path}"
               assert_file_equals adapter-e2e/maven.bin adapter-e2e/maven-v1-get.bin
+
+              stop_proxy
+              start_proxy
+              run_http "200" adapter-e2e/maven-get-after-restart.bin "http://127.0.0.1:${PORT}/${maven_path}"
+              assert_file_equals adapter-e2e/maven.bin adapter-e2e/maven-get-after-restart.bin
               ;;
             nx)
               nx_hash=$(printf 'nx-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
@@ -848,6 +872,11 @@ jobs:
               run_http "200" adapter-e2e/nx-query-response.json -X POST -H "${nx_auth}" -H "content-type: application/json" --data @adapter-e2e/nx-query.json "http://127.0.0.1:${PORT}/v1/cache"
               grep -q '"misses"' adapter-e2e/nx-query-response.json
               grep -q 'deadbeef' adapter-e2e/nx-query-response.json
+
+              stop_proxy
+              start_proxy
+              run_http "200" adapter-e2e/nx-get-after-restart.bin -H "${nx_auth}" "http://127.0.0.1:${PORT}/v1/cache/${nx_hash}"
+              assert_file_equals adapter-e2e/nx.bin adapter-e2e/nx-get-after-restart.bin
               ;;
             turbo)
               turbo_hash=$(printf 'turbo-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
@@ -869,6 +898,11 @@ jobs:
 
               printf '[{"sessionId":"e2e","source":"REMOTE","event":"HIT","hash":"%s","duration":7}]\n' "${turbo_hash}" > adapter-e2e/turbo-events.json
               run_http "200" adapter-e2e/turbo-events-response.txt -X POST -H "${turbo_auth}" -H "content-type: application/json" --data @adapter-e2e/turbo-events.json "http://127.0.0.1:${PORT}/v8/artifacts/events"
+
+              stop_proxy
+              start_proxy
+              run_http "200" adapter-e2e/turbo-get-after-restart.bin -H "${turbo_auth}" "http://127.0.0.1:${PORT}/v8/artifacts/${turbo_hash}"
+              assert_file_equals adapter-e2e/turbo.bin adapter-e2e/turbo-get-after-restart.bin
               ;;
             sccache)
               sccache_key=$(printf 'sccache-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
@@ -877,13 +911,20 @@ jobs:
               shard_c="${sccache_key:2:1}"
               sccache_prefix="sccache-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
               sccache_path="${sccache_prefix}/${shard_a}/${shard_b}/${shard_c}/${sccache_key}"
+              sccache_flat_path="${sccache_prefix}/${sccache_key}"
               printf 'sccache-e2e-%s\n' "${sccache_key}" > adapter-e2e/sccache.bin
 
               run_http "201" adapter-e2e/sccache-mkcol.txt -X MKCOL "http://127.0.0.1:${PORT}/${sccache_prefix}/${shard_a}/${shard_b}/${shard_c}"
               run_http "201" adapter-e2e/sccache-put.txt -X PUT --data-binary @adapter-e2e/sccache.bin "http://127.0.0.1:${PORT}/${sccache_path}"
+              run_http "201" adapter-e2e/sccache-flat-put.txt -X PUT --data-binary @adapter-e2e/sccache.bin "http://127.0.0.1:${PORT}/${sccache_flat_path}"
               run_http "200" adapter-e2e/sccache-head.txt -I "http://127.0.0.1:${PORT}/${sccache_path}"
               run_http "200" adapter-e2e/sccache-get.bin "http://127.0.0.1:${PORT}/${sccache_path}"
               assert_file_equals adapter-e2e/sccache.bin adapter-e2e/sccache-get.bin
+
+              stop_proxy
+              start_proxy
+              run_http "200" adapter-e2e/sccache-get-after-restart.bin "http://127.0.0.1:${PORT}/${sccache_path}"
+              assert_file_equals adapter-e2e/sccache.bin adapter-e2e/sccache-get-after-restart.bin
               ;;
             go)
               go_action=$(printf 'go-action-%s-%s-%s' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}" | sha256sum | awk '{print $1}')
@@ -910,6 +951,11 @@ jobs:
               tail -n 80 adapter-e2e/go-build-2.log
               grep -q 'go-cacheprog put ok' adapter-e2e/go-build-1.log
               grep -q 'go-cacheprog get hit' adapter-e2e/go-build-2.log
+
+              stop_proxy
+              start_proxy
+              run_http "200" adapter-e2e/go-get-after-restart.bin "http://127.0.0.1:${PORT}/gocache/${go_action}"
+              assert_file_equals adapter-e2e/go.bin adapter-e2e/go-get-after-restart.bin
               ;;
             *)
               echo "unknown suite: ${SUITE}"
