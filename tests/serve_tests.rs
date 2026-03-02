@@ -64,6 +64,7 @@ async fn setup(
             .expect("blob read cache"),
         ),
         cache_ops: Arc::new(boring_cache_cli::serve::cache_registry::cache_ops::Aggregator::new()),
+        oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
     };
 
     (state, temp_home, guard)

@@ -158,6 +158,7 @@ async fn build_server_runtime(
         kv_recent_misses: Arc::new(dashmap::DashMap::new()),
         blob_read_cache,
         cache_ops: Arc::new(cache_registry::cache_ops::Aggregator::new()),
+        oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
     };
 
     let addr = format!("{host}:{port}");

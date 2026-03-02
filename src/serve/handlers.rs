@@ -15,7 +15,8 @@ use crate::cas_transport::upload_payload;
 use crate::multipart_upload::upload_via_single_url;
 use crate::serve::error::OciError;
 use crate::serve::state::{
-    digest_tag, ref_tag_for_input, AppState, BlobLocatorEntry, UploadSession,
+    digest_tag, ref_tag_for_input, AppState, BlobLocatorEntry, OciManifestCacheEntry,
+    UploadSession, OCI_MANIFEST_CACHE_TTL,
 };
 use crate::tag_utils::TagResolver;
 
@@ -391,6 +392,28 @@ async fn resolve_manifest(
         scoped_restore_tags(&state.tag_resolver, name, reference)
     };
 
+    if let Some(cached) = lookup_oci_manifest_cache(state, &tags) {
+        {
+            let mut locator = state.blob_locator.write().await;
+            for blob in &cached.blobs {
+                if locator.get(&cached.name, &blob.digest).is_none() {
+                    locator.insert(
+                        &cached.name,
+                        &blob.digest,
+                        BlobLocatorEntry {
+                            cache_entry_id: cached.cache_entry_id.clone(),
+                            size_bytes: blob.size_bytes,
+                            download_url: None,
+                            download_url_cached_at: None,
+                        },
+                    );
+                }
+            }
+        }
+        let content_type = detect_manifest_content_type(&cached.index_json);
+        return Ok((cached.index_json.clone(), content_type, cached.manifest_digest.clone()));
+    }
+
     let entries = state
         .api_client
         .restore(&state.workspace, &tags)
@@ -601,6 +624,22 @@ async fn bind_alias_tag(
         .map_err(|e| format!("confirm failed: {e}"))?;
 
     Ok(())
+}
+
+fn lookup_oci_manifest_cache(
+    state: &AppState,
+    tags: &[String],
+) -> Option<Arc<OciManifestCacheEntry>> {
+    for tag in tags {
+        if let Some(entry) = state.oci_manifest_cache.get(tag) {
+            if entry.inserted_at.elapsed() < OCI_MANIFEST_CACHE_TTL {
+                return Some(Arc::clone(entry.value()));
+            }
+            drop(entry);
+            state.oci_manifest_cache.remove(tag);
+        }
+    }
+    None
 }
 
 fn detect_manifest_content_type(json_bytes: &[u8]) -> String {
@@ -1485,6 +1524,25 @@ async fn put_manifest(
             .await
             .map_err(|e| OciError::internal(format!("confirm failed: {e}")))?;
 
+        {
+            let cached = OciManifestCacheEntry {
+                index_json: manifest_body.clone(),
+                content_type: detect_manifest_content_type(&manifest_body),
+                manifest_digest: manifest_digest.clone(),
+                cache_entry_id: save_response.cache_entry_id.clone(),
+                blobs: blob_descriptors.clone(),
+                name: name.clone(),
+                inserted_at: Instant::now(),
+            };
+            let cached = Arc::new(cached);
+            state
+                .oci_manifest_cache
+                .insert(tag.clone(), Arc::clone(&cached));
+            state
+                .oci_manifest_cache
+                .insert(digest_tag(&manifest_digest), Arc::clone(&cached));
+        }
+
         let alias_tags =
             alias_tags_for_manifest(&tag, &manifest_digest, &state.configured_human_tags);
         for alias_tag in alias_tags {
@@ -1666,6 +1724,7 @@ mod tests {
                 .expect("blob read cache"),
             ),
             cache_ops: Arc::new(crate::serve::cache_registry::cache_ops::Aggregator::new()),
+            oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
         }
     }
 

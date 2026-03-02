@@ -31,10 +31,22 @@ pub struct AppState {
     pub kv_recent_misses: Arc<DashMap<String, Instant>>,
     pub blob_read_cache: Arc<BlobReadCache>,
     pub cache_ops: Arc<super::cache_registry::cache_ops::Aggregator>,
+    pub oci_manifest_cache: Arc<DashMap<String, Arc<OciManifestCacheEntry>>>,
 }
 
 pub const DEFAULT_BLOB_READ_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const OCI_MANIFEST_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 const BLOB_READ_CACHE_DIR_NAME: &str = "boringcache-blob-cache";
+
+pub struct OciManifestCacheEntry {
+    pub index_json: Vec<u8>,
+    pub content_type: String,
+    pub manifest_digest: String,
+    pub cache_entry_id: String,
+    pub blobs: Vec<BlobDescriptor>,
+    pub name: String,
+    pub inserted_at: Instant,
+}
 
 struct BlobReadInFlightGuard {
     key: String,
