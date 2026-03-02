@@ -28,6 +28,7 @@ pub struct AppState {
     pub kv_next_flush_at: Arc<RwLock<Option<Instant>>>,
     pub kv_flush_scheduled: Arc<AtomicBool>,
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
+    pub kv_flushing: Arc<RwLock<Option<KvFlushingSnapshot>>>,
     pub kv_recent_misses: Arc<DashMap<String, Instant>>,
     pub blob_read_cache: Arc<BlobReadCache>,
     pub blob_download_semaphore: Arc<tokio::sync::Semaphore>,
@@ -666,6 +667,31 @@ impl KvPendingStore {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+pub struct KvFlushingSnapshot {
+    entries: BTreeMap<String, BlobDescriptor>,
+    blob_paths: HashMap<String, PathBuf>,
+}
+
+impl KvFlushingSnapshot {
+    pub fn new(
+        entries: BTreeMap<String, BlobDescriptor>,
+        blob_paths: HashMap<String, PathBuf>,
+    ) -> Self {
+        Self {
+            entries,
+            blob_paths,
+        }
+    }
+
+    pub fn get(&self, scoped_key: &str) -> Option<&BlobDescriptor> {
+        self.entries.get(scoped_key)
+    }
+
+    pub fn blob_path(&self, digest: &str) -> Option<&PathBuf> {
+        self.blob_paths.get(digest)
     }
 }
 

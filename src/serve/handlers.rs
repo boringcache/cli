@@ -152,6 +152,7 @@ fn record_oci_cache_op(
     op: crate::serve::cache_registry::cache_ops::Op,
     result: crate::serve::cache_registry::cache_ops::OpResult,
     degraded: bool,
+    bytes: u64,
     latency_ms: u64,
     miss_key: Option<&str>,
 ) {
@@ -160,7 +161,7 @@ fn record_oci_cache_op(
         op,
         result,
         degraded,
-        0,
+        bytes,
         latency_ms,
     );
 
@@ -256,11 +257,18 @@ pub async fn oci_dispatch(
             }
             if let Some(op) = maybe_cache_op {
                 let (result, degraded) = oci_success_rollup_result(&response);
+                let bytes = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
                 record_oci_cache_op(
                     &state,
                     op,
                     result,
                     degraded,
+                    bytes,
                     request_start.elapsed().as_millis() as u64,
                     None,
                 );
@@ -290,6 +298,7 @@ pub async fn oci_dispatch(
                         op,
                         result,
                         false,
+                        0,
                         request_start.elapsed().as_millis() as u64,
                         miss_key.as_deref(),
                     );
@@ -310,6 +319,7 @@ pub async fn oci_dispatch(
                         op,
                         crate::serve::cache_registry::cache_ops::OpResult::Error,
                         false,
+                        0,
                         request_start.elapsed().as_millis() as u64,
                         None,
                     );
@@ -328,6 +338,7 @@ pub async fn oci_dispatch(
                     op,
                     crate::serve::cache_registry::cache_ops::OpResult::Error,
                     true,
+                    0,
                     request_start.elapsed().as_millis() as u64,
                     None,
                 );
@@ -1716,6 +1727,7 @@ mod tests {
             kv_next_flush_at: Arc::new(RwLock::new(None)),
             kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
+            kv_flushing: Arc::new(RwLock::new(None)),
             kv_recent_misses: Arc::new(dashmap::DashMap::new()),
             blob_read_cache: Arc::new(
                 BlobReadCache::new_at(

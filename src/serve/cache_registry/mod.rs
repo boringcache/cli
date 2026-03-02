@@ -162,8 +162,13 @@ fn route_instruments_cache_ops(route: &route::RegistryRoute) -> bool {
             | route::RegistryRoute::Maven { .. }
             | route::RegistryRoute::NxArtifact { .. }
             | route::RegistryRoute::NxTerminalOutput { .. }
+            | route::RegistryRoute::NxQuery
             | route::RegistryRoute::TurborepoArtifact { .. }
+            | route::RegistryRoute::TurborepoQueryArtifacts
+            | route::RegistryRoute::TurborepoStatus
+            | route::RegistryRoute::TurborepoEvents
             | route::RegistryRoute::SccacheObject { .. }
+            | route::RegistryRoute::SccacheMkcol
             | route::RegistryRoute::GoCacheObject { .. }
     )
 }

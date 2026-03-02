@@ -20,7 +20,7 @@ use crate::cas_transport::upload_payload;
 use crate::error::BoringCacheError;
 use crate::manifest::EntryType;
 use crate::progress::TransferProgress;
-use crate::serve::state::AppState;
+use crate::serve::state::{AppState, KvFlushingSnapshot};
 
 use super::error::RegistryError;
 
@@ -494,6 +494,15 @@ async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), Regi
     Ok(())
 }
 
+fn content_length_bytes(response: &Response) -> u64 {
+    response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 pub(crate) async fn get_or_head_kv_object(
     state: &AppState,
     namespace: KvNamespace,
@@ -506,13 +515,13 @@ pub(crate) async fn get_or_head_kv_object(
     let tool = namespace.into();
 
     match &result {
-        Ok(_) => {
+        Ok(response) => {
             state.cache_ops.record(
                 tool,
                 super::cache_ops::Op::Get,
                 super::cache_ops::OpResult::Hit,
                 false,
-                0,
+                content_length_bytes(response),
                 elapsed_ms,
             );
         }
@@ -565,6 +574,26 @@ async fn get_or_head_kv_object_inner(
             Ok(response) => return Ok(response),
             Err(e) => {
                 log::warn!("KV local blob read failed, falling back to backend: {e:?}");
+            }
+        }
+    }
+
+    let flushing_local = {
+        let flushing = state.kv_flushing.read().await;
+        flushing.as_ref().and_then(|snapshot| {
+            snapshot.get(&scoped_key).and_then(|blob| {
+                snapshot
+                    .blob_path(&blob.digest)
+                    .map(|path| (blob.clone(), path.clone()))
+            })
+        })
+    };
+
+    if let Some((blob, path)) = flushing_local {
+        match serve_local_blob(&blob, &path, is_head).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                log::warn!("KV flushing blob read failed, falling through: {e:?}");
             }
         }
     }
@@ -939,13 +968,13 @@ pub(crate) async fn resolve_kv_entries(
     if let Ok(sizes) = &result {
         for key in keys {
             let scoped = namespace.scoped_key(key);
-            if sizes.contains_key(&scoped) {
+            if let Some(&size) = sizes.get(&scoped) {
                 state.cache_ops.record(
                     tool,
                     super::cache_ops::Op::Query,
                     super::cache_ops::OpResult::Hit,
                     false,
-                    0,
+                    size,
                     elapsed_ms,
                 );
             } else {
@@ -982,6 +1011,24 @@ async fn resolve_kv_entries_inner(
         for scoped in &scoped_keys {
             if let Some(blob) = pending.get(scoped) {
                 sizes.insert(scoped.clone(), blob.size_bytes);
+            }
+        }
+    }
+
+    if sizes.len() == scoped_keys.len() {
+        return Ok(sizes);
+    }
+
+    {
+        let flushing = state.kv_flushing.read().await;
+        if let Some(snapshot) = flushing.as_ref() {
+            for scoped in &scoped_keys {
+                if sizes.contains_key(scoped) {
+                    continue;
+                }
+                if let Some(blob) = snapshot.get(scoped) {
+                    sizes.insert(scoped.clone(), blob.size_bytes);
+                }
             }
         }
     }
@@ -1288,20 +1335,35 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
         return FlushResult::Ok;
     }
 
+    {
+        let mut flushing = state.kv_flushing.write().await;
+        *flushing = Some(KvFlushingSnapshot::new(
+            pending_entries.clone(),
+            pending_blob_paths
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ));
+    }
+
     let entry_count = pending_entries.len();
 
     match do_flush(state, &pending_entries, &pending_blob_paths).await {
         Ok((merged_entries, cache_entry_id)) => {
-            let promoted =
-                promote_pending_blobs_to_read_cache(state, &pending_entries, &pending_blob_paths)
-                    .await;
-            cleanup_blob_files(&pending_blob_paths).await;
-
             {
                 let mut published = state.kv_published_index.write().await;
                 published.update(merged_entries.into_iter().collect(), cache_entry_id.clone());
             }
+            {
+                let mut flushing = state.kv_flushing.write().await;
+                *flushing = None;
+            }
             clear_root_tag_misses(state);
+
+            let promoted =
+                promote_pending_blobs_to_read_cache(state, &pending_entries, &pending_blob_paths)
+                    .await;
+            cleanup_blob_files(&pending_blob_paths).await;
             state.kv_last_put.store(0, Ordering::Release);
 
             eprintln!(
@@ -1318,6 +1380,10 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
             let mut pending = state.kv_pending.write().await;
             pending.restore(pending_entries, pending_blob_paths);
             drop(pending);
+            {
+                let mut flushing = state.kv_flushing.write().await;
+                *flushing = None;
+            }
             let (base_ms, jitter_ms) = conflict_backoff_window(&msg);
             set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
             FlushResult::Conflict
@@ -1326,6 +1392,11 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
             eprintln!("KV batch flush failed: {msg}");
             let mut pending = state.kv_pending.write().await;
             pending.restore(pending_entries, pending_blob_paths);
+            drop(pending);
+            {
+                let mut flushing = state.kv_flushing.write().await;
+                *flushing = None;
+            }
             let (base_ms, jitter_ms) = transient_backoff_window(&msg);
             set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
             FlushResult::Error
@@ -1333,6 +1404,10 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
         Err(FlushError::Permanent(msg)) => {
             eprintln!("KV batch flush dropped permanently: {msg}");
             cleanup_blob_files(&pending_blob_paths).await;
+            {
+                let mut flushing = state.kv_flushing.write().await;
+                *flushing = None;
+            }
             state.kv_last_put.store(0, Ordering::Release);
             FlushResult::Permanent
         }
