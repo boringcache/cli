@@ -391,6 +391,21 @@ phase_stress() {
     run_build "stress-parallel-${i}" "${TARGET_ROOT}/stress-job-${i}" "${phase_dir}/parallel-${i}.log" &
     build_pids+=($!)
   done
+
+  while true; do
+    all_done=true
+    for pid in "${build_pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        all_done=false
+        break
+      fi
+    done
+    if [[ "$all_done" == "true" ]]; then
+      break
+    fi
+    echo "  [heartbeat] parallel builds running... ($(date -u +%H:%M:%S))"
+    sleep 30
+  done
   for pid in "${build_pids[@]}"; do
     wait "$pid"
   done

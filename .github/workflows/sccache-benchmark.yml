@@ -45,6 +45,7 @@ jobs:
       RUN_STRESS: "1"
       PARALLEL_JOBS: "2"
       SETTLE_SECS: "5"
+      BUILD_TIMEOUT_SECS: "600"
       RUST_LOG_LEVEL: info
 
     steps:
@@ -141,7 +142,7 @@ jobs:
           } > "${log_dir}/metrics.env"
 
       - name: Upload benchmark artifacts
-        if: steps.gate.outputs.run == 'true'
+        if: always() && steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: sccache-benchmark-${{ matrix.backend }}
