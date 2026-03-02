@@ -22,6 +22,8 @@ RUN_SCOPED_TAGS="${RUN_SCOPED_TAGS:-0}"
 SCCACHE_BACKEND="${SCCACHE_BACKEND:-proxy}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
+PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-20}"
+BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-0}"
 
 if [[ "$SCCACHE_BACKEND" != "proxy" && "$SCCACHE_BACKEND" != "local" ]]; then
   echo "ERROR: SCCACHE_BACKEND must be 'proxy' or 'local'"
@@ -30,6 +32,11 @@ fi
 
 if ! [[ "$PARALLEL_JOBS" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: PARALLEL_JOBS must be a positive integer"
+  exit 1
+fi
+
+if ! [[ "$BUILD_TIMEOUT_SECS" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: BUILD_TIMEOUT_SECS must be a non-negative integer"
   exit 1
 fi
 
@@ -67,6 +74,15 @@ done
 stop_proxy() {
   if [[ -n "${PROXY_PID:-}" ]]; then
     kill "$PROXY_PID" >/dev/null 2>&1 || true
+    local deadline=$((SECONDS + PROXY_SHUTDOWN_WAIT_SECS))
+    while kill -0 "$PROXY_PID" >/dev/null 2>&1; do
+      if (( SECONDS >= deadline )); then
+        echo "WARNING: proxy ${PROXY_PID} did not exit after ${PROXY_SHUTDOWN_WAIT_SECS}s, sending SIGKILL"
+        kill -9 "$PROXY_PID" >/dev/null 2>&1 || true
+        break
+      fi
+      sleep 1
+    done
     wait "$PROXY_PID" >/dev/null 2>&1 || true
     PROXY_PID=""
   fi
@@ -164,20 +180,36 @@ run_build() {
   local target_dir="$2"
   local log_file="$3"
   local start_ts end_ts elapsed
+  echo "${label} starting..."
   rm -rf "$target_dir"
   mkdir -p "$target_dir"
   start_ts="$(date +%s)"
   if [[ "$USE_PROXY" == "1" ]]; then
-    SCCACHE_WEBDAV_ENDPOINT="${PROXY_URL}/" \
-      RUSTC_WRAPPER=sccache \
-      CARGO_INCREMENTAL=0 \
-      CARGO_TARGET_DIR="$target_dir" \
-      bash -lc "$CARGO_CMD" >"$log_file" 2>&1
+    if [[ "$BUILD_TIMEOUT_SECS" -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
+      SCCACHE_WEBDAV_ENDPOINT="${PROXY_URL}/" \
+        RUSTC_WRAPPER=sccache \
+        CARGO_INCREMENTAL=0 \
+        CARGO_TARGET_DIR="$target_dir" \
+        timeout "${BUILD_TIMEOUT_SECS}" bash -lc "$CARGO_CMD" >"$log_file" 2>&1
+    else
+      SCCACHE_WEBDAV_ENDPOINT="${PROXY_URL}/" \
+        RUSTC_WRAPPER=sccache \
+        CARGO_INCREMENTAL=0 \
+        CARGO_TARGET_DIR="$target_dir" \
+        bash -lc "$CARGO_CMD" >"$log_file" 2>&1
+    fi
   else
-    RUSTC_WRAPPER=sccache \
-      CARGO_INCREMENTAL=0 \
-      CARGO_TARGET_DIR="$target_dir" \
-      bash -lc "$CARGO_CMD" >"$log_file" 2>&1
+    if [[ "$BUILD_TIMEOUT_SECS" -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
+      RUSTC_WRAPPER=sccache \
+        CARGO_INCREMENTAL=0 \
+        CARGO_TARGET_DIR="$target_dir" \
+        timeout "${BUILD_TIMEOUT_SECS}" bash -lc "$CARGO_CMD" >"$log_file" 2>&1
+    else
+      RUSTC_WRAPPER=sccache \
+        CARGO_INCREMENTAL=0 \
+        CARGO_TARGET_DIR="$target_dir" \
+        bash -lc "$CARGO_CMD" >"$log_file" 2>&1
+    fi
   fi
   end_ts="$(date +%s)"
   elapsed="$((end_ts - start_ts))"

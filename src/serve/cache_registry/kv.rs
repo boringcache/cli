@@ -35,6 +35,7 @@ const KV_TRANSIENT_WRITE_PATH_BACKOFF_MS: u64 = 20_000;
 const KV_TRANSIENT_WRITE_PATH_JITTER_MS: u64 = 5_000;
 const KV_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 const KV_EMPTY_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+const KV_RESOLVE_NOT_FOUND_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 const KV_BLOB_UPLOAD_MAX_ATTEMPTS: u32 = 3;
 const KV_BLOB_UPLOAD_RETRY_BASE_MS: u64 = 300;
 const KV_BLOB_UPLOAD_RETRY_MAX_MS: u64 = 1_500;
@@ -544,7 +545,7 @@ async fn should_refresh_published_index_for_lookup(state: &AppState) -> bool {
 }
 
 async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), RegistryError> {
-    let (entries, cache_entry_id, _) = load_existing_index_with_fallback(state).await?;
+    let (entries, cache_entry_id, _) = load_existing_index_with_fallback(state, true).await?;
 
     {
         let mut published = state.kv_published_index.write().await;
@@ -1165,7 +1166,7 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
 }
 
 pub(crate) async fn preload_kv_index(state: &AppState) {
-    match load_existing_index_with_fallback(state).await {
+    match load_existing_index_with_fallback(state, true).await {
         Ok((entries, Some(cache_entry_id), _manifest_root_digest)) if !entries.is_empty() => {
             let count = entries.len();
             {
@@ -1204,7 +1205,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
 
     let mut live_hit: Option<(String, CacheResolutionEntry)> = None;
     for candidate_tag in kv_root_tags(state) {
-        match resolve_hit(state, &candidate_tag).await {
+        match resolve_hit_for_index_load(state, &candidate_tag, true).await {
             Ok(hit) => {
                 if candidate_tag != state.registry_root_tag.trim() {
                     eprintln!("KV root fallback hit: refreshing from legacy tag {candidate_tag}");
@@ -1336,6 +1337,19 @@ async fn refresh_fence_allows_update(
 ) -> bool {
     let live_hit = match resolve_hit(state, tag).await {
         Ok(hit) => hit,
+        Err(error) if error.status == StatusCode::NOT_FOUND => {
+            tokio::time::sleep(KV_RESOLVE_NOT_FOUND_RETRY_DELAY).await;
+            match resolve_hit(state, tag).await {
+                Ok(hit) => hit,
+                Err(error) => {
+                    log::warn!(
+                        "KV index refresh fence: live resolve failed (skipping update): {}",
+                        error.status
+                    );
+                    return false;
+                }
+            }
+        }
         Err(error) => {
             log::warn!(
                 "KV index refresh fence: live resolve failed (skipping update): {}",
@@ -1587,7 +1601,7 @@ async fn do_flush(
         published.entries_snapshot()
     };
 
-    let backend_entries = match load_existing_index_with_fallback(state).await {
+    let backend_entries = match load_existing_index_with_fallback(state, false).await {
         Ok((existing, _, _)) => existing,
         Err(e) => {
             log::warn!("KV flush: failed to load existing index: {e:?}");
@@ -2096,6 +2110,7 @@ async fn upload_blobs(
 async fn load_existing_index(
     state: &AppState,
     tag: &str,
+    retry_not_found: bool,
 ) -> Result<
     (
         BTreeMap<String, BlobDescriptor>,
@@ -2104,7 +2119,7 @@ async fn load_existing_index(
     ),
     RegistryError,
 > {
-    let hit = match resolve_hit(state, tag).await {
+    let hit = match resolve_hit_for_index_load(state, tag, retry_not_found).await {
         Ok(hit) => hit,
         Err(error) if error.status == StatusCode::NOT_FOUND => {
             return Ok((BTreeMap::new(), None, None));
@@ -2138,6 +2153,7 @@ async fn load_existing_index(
 
 async fn load_existing_index_with_fallback(
     state: &AppState,
+    retry_not_found: bool,
 ) -> Result<
     (
         BTreeMap<String, BlobDescriptor>,
@@ -2149,7 +2165,7 @@ async fn load_existing_index_with_fallback(
     let tags = kv_root_tags(state);
     for (idx, tag) in tags.iter().enumerate() {
         let (entries, cache_entry_id, manifest_root_digest) =
-            load_existing_index(state, tag).await?;
+            load_existing_index(state, tag, retry_not_found).await?;
         if cache_entry_id.is_some() || !entries.is_empty() {
             if idx > 0 {
                 eprintln!("KV root fallback hit: loaded legacy tag {tag}");
@@ -2158,6 +2174,25 @@ async fn load_existing_index_with_fallback(
         }
     }
     Ok((BTreeMap::new(), None, None))
+}
+
+async fn resolve_hit_for_index_load(
+    state: &AppState,
+    tag: &str,
+    retry_not_found: bool,
+) -> Result<CacheResolutionEntry, RegistryError> {
+    let first = resolve_hit(state, tag).await;
+    if !retry_not_found {
+        return first;
+    }
+
+    match first {
+        Err(error) if error.status == StatusCode::NOT_FOUND => {
+            tokio::time::sleep(KV_RESOLVE_NOT_FOUND_RETRY_DELAY).await;
+            resolve_hit(state, tag).await
+        }
+        other => other,
+    }
 }
 
 async fn write_body_to_temp_file(body: Body) -> Result<(PathBuf, u64, String), RegistryError> {
