@@ -40,6 +40,11 @@ pub struct AppState {
 pub const DEFAULT_BLOB_READ_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const OCI_MANIFEST_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 const BLOB_READ_CACHE_DIR_NAME: &str = "boringcache-blob-cache";
+const BLOB_READ_FLIGHT_WAIT_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(not(test))]
+const BLOB_READ_FLIGHT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const BLOB_READ_FLIGHT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub struct OciManifestCacheEntry {
     pub index_json: Vec<u8>,
@@ -57,28 +62,16 @@ struct BlobReadInFlightGuard {
     inflight: Arc<std::sync::Mutex<HashMap<String, Arc<Notify>>>>,
 }
 
-static BLOB_READ_MAP_WARN_LAST: AtomicU64 = AtomicU64::new(0);
-
 impl Drop for BlobReadInFlightGuard {
     fn drop(&mut self) {
-        let mut inflight = self
-            .inflight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inflight.remove(&self.key);
-        let remaining = inflight.len();
-        self.notify.notify_waiters();
-        if remaining > 64 {
-            let now_secs = unix_time_ms_now() / 1000;
-            let prev = BLOB_READ_MAP_WARN_LAST.load(Ordering::Relaxed);
-            if now_secs >= prev + 5
-                && BLOB_READ_MAP_WARN_LAST
-                    .compare_exchange(prev, now_secs, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-            {
-                log::warn!("blob read inflight map size: {remaining}");
-            }
+        {
+            let mut inflight = self
+                .inflight
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inflight.remove(&self.key);
         }
+        self.notify.notify_waiters();
     }
 }
 
@@ -125,6 +118,43 @@ impl BlobReadCache {
         self.total_bytes.load(Ordering::Acquire)
     }
 
+    async fn await_blob_read_flight(
+        &self,
+        key: &str,
+        notified: std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>,
+    ) -> bool {
+        let started = Instant::now();
+        match tokio::time::timeout(BLOB_READ_FLIGHT_WAIT_TIMEOUT, notified).await {
+            Ok(()) => {
+                let elapsed = started.elapsed();
+                if elapsed >= BLOB_READ_FLIGHT_WAIT_WARN_THRESHOLD {
+                    log::warn!(
+                        "blob read follower waited {}ms for key={}",
+                        elapsed.as_millis(),
+                        &key[..key.len().min(24)],
+                    );
+                }
+                true
+            }
+            Err(_) => {
+                log::warn!(
+                    "blob read follower timed out after {}ms for key={}",
+                    started.elapsed().as_millis(),
+                    &key[..key.len().min(24)],
+                );
+                false
+            }
+        }
+    }
+
+    fn clear_blob_read_inflight(&self, key: &str) {
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inflight.remove(key);
+    }
+
     pub async fn get(&self, digest: &str) -> Option<PathBuf> {
         let path = self.path_for_digest(digest)?;
         match tokio::fs::metadata(&path).await {
@@ -163,9 +193,11 @@ impl BlobReadCache {
             return Ok(false);
         }
 
-        match self.begin_inflight(key) {
+        match self.begin_inflight(key.clone()) {
             BlobReadInFlight::Follower(notify) => {
-                notify.await;
+                if !self.await_blob_read_flight(&key, notify).await {
+                    self.clear_blob_read_inflight(&key);
+                }
                 Ok(false)
             }
             BlobReadInFlight::Leader(_guard) => {
@@ -235,9 +267,11 @@ impl BlobReadCache {
             return Ok(false);
         }
 
-        match self.begin_inflight(key) {
+        match self.begin_inflight(key.clone()) {
             BlobReadInFlight::Follower(notify) => {
-                notify.await;
+                if !self.await_blob_read_flight(&key, notify).await {
+                    self.clear_blob_read_inflight(&key);
+                }
                 let _ = tokio::fs::remove_file(src_path).await;
                 Ok(false)
             }
@@ -976,5 +1010,41 @@ mod tests {
             .expect("insert call");
         assert!(!inserted);
         assert!(cache.get("not-a-digest").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn blob_read_cache_follower_timeout_clears_stale_inflight_entry() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache = BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 1024 * 1024)
+            .expect("blob cache");
+        let digest = format!("sha256:{}", "c".repeat(64));
+        let key = BlobReadCache::normalize_digest_hex(&digest).expect("normalized digest");
+
+        {
+            let mut inflight = cache
+                .inflight
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inflight.insert(key.clone(), Arc::new(Notify::new()));
+        }
+
+        let inserted = cache
+            .insert(&digest, b"stale-flight")
+            .await
+            .expect("insert");
+        assert!(!inserted);
+        {
+            let inflight = cache
+                .inflight
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(!inflight.contains_key(&key));
+        }
+
+        let inserted_after_cleanup = cache
+            .insert(&digest, b"stale-flight")
+            .await
+            .expect("insert after cleanup");
+        assert!(inserted_after_cleanup);
     }
 }

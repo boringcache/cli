@@ -33,8 +33,10 @@ const KV_TRANSIENT_BACKOFF_MS: u64 = 2_000;
 const KV_TRANSIENT_JITTER_MS: u64 = 2_000;
 const KV_TRANSIENT_WRITE_PATH_BACKOFF_MS: u64 = 20_000;
 const KV_TRANSIENT_WRITE_PATH_JITTER_MS: u64 = 5_000;
-const KV_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
-const KV_EMPTY_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+const KV_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const KV_EMPTY_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(12);
+const KV_PENDING_REFRESH_SUPPRESSION_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(12);
 const KV_RESOLVE_NOT_FOUND_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 const KV_BLOB_UPLOAD_MAX_ATTEMPTS: u32 = 3;
 const KV_BLOB_UPLOAD_RETRY_BASE_MS: u64 = 300;
@@ -46,6 +48,7 @@ const KV_BLOB_URL_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::fr
 const KV_LOOKUP_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_BLOB_PRELOAD_MAX_BLOBS: usize = 2_000;
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
+const LOOKUP_REFRESH_FLIGHT_KEY: &str = "lookup_refresh";
 static KV_BLOB_DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn kv_miss_cache_key(registry_root_tag: &str, scoped_key: &str) -> String {
@@ -67,11 +70,13 @@ struct LookupFlightGuard {
 
 impl Drop for LookupFlightGuard {
     fn drop(&mut self) {
-        let mut inflight = self
-            .inflight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inflight.remove(&self.key);
+        {
+            let mut inflight = self
+                .inflight
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inflight.remove(&self.key);
+        }
         self.notify.notify_waiters();
     }
 }
@@ -82,29 +87,45 @@ enum LookupFlight {
 }
 
 const FLIGHT_WAIT_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(1);
+const FLIGHT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn await_flight(
     state: &AppState,
     kind: &str,
     key: &str,
     notified: std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>,
-) {
+) -> bool {
     let inflight_size = state
         .kv_lookup_inflight
         .lock()
         .map(|m| m.len())
         .unwrap_or(0);
-    let start = std::time::Instant::now();
-    notified.await;
-    let elapsed = start.elapsed();
-    if elapsed >= FLIGHT_WAIT_WARN_THRESHOLD {
-        log::warn!(
-            "flight follower waited {}ms: kind={} key={} inflight_at_start={}",
-            elapsed.as_millis(),
-            kind,
-            &key[..key.len().min(24)],
-            inflight_size,
-        );
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(FLIGHT_WAIT_TIMEOUT, notified).await {
+        Ok(()) => {
+            let elapsed = started.elapsed();
+            if elapsed >= FLIGHT_WAIT_WARN_THRESHOLD {
+                log::warn!(
+                    "flight follower waited {}ms: kind={} key={} inflight_at_start={}",
+                    elapsed.as_millis(),
+                    kind,
+                    &key[..key.len().min(24)],
+                    inflight_size,
+                );
+            }
+            true
+        }
+        Err(_) => {
+            let elapsed = started.elapsed();
+            log::warn!(
+                "flight follower timed out after {}ms: kind={} key={} inflight_at_start={}",
+                elapsed.as_millis(),
+                kind,
+                &key[..key.len().min(24)],
+                inflight_size,
+            );
+            false
+        }
     }
 }
 
@@ -126,6 +147,14 @@ fn begin_lookup_flight(state: &AppState, key: String) -> LookupFlight {
         notify,
         inflight: state.kv_lookup_inflight.clone(),
     })
+}
+
+fn clear_lookup_flight_entry(state: &AppState, key: &str) {
+    let mut inflight = state
+        .kv_lookup_inflight
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    inflight.remove(key);
 }
 
 fn conflict_backoff_window(message: &str) -> (u64, u64) {
@@ -491,6 +520,10 @@ async fn populate_sizes_from_published(
 }
 
 async fn should_refresh_published_index_for_lookup(state: &AppState) -> bool {
+    if should_suppress_lookup_refresh_due_to_pending(state).await {
+        return false;
+    }
+
     let now = std::time::Instant::now();
     let published = state.kv_published_index.read().await;
     if !published.is_complete() {
@@ -505,6 +538,37 @@ async fn should_refresh_published_index_for_lookup(state: &AppState) -> bool {
         KV_INDEX_REFRESH_INTERVAL
     };
     now.duration_since(last_refresh_at) >= refresh_interval
+}
+
+async fn should_suppress_lookup_refresh_due_to_pending(state: &AppState) -> bool {
+    let has_pending_entries = {
+        let pending = state.kv_pending.read().await;
+        !pending.is_empty()
+    };
+    if !has_pending_entries {
+        return false;
+    }
+
+    let last_put_ms = state.kv_last_put.load(Ordering::Acquire);
+    if last_put_ms == 0 {
+        return false;
+    }
+
+    let now_ms = crate::serve::state::unix_time_ms_now();
+    should_suppress_lookup_refresh_due_to_pending_values(has_pending_entries, last_put_ms, now_ms)
+}
+
+fn should_suppress_lookup_refresh_due_to_pending_values(
+    has_pending_entries: bool,
+    last_put_ms: u64,
+    now_ms: u64,
+) -> bool {
+    if !has_pending_entries || last_put_ms == 0 {
+        return false;
+    }
+
+    let elapsed_ms = now_ms.saturating_sub(last_put_ms);
+    elapsed_ms < KV_PENDING_REFRESH_SUPPRESSION_WINDOW.as_millis() as u64
 }
 
 async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), RegistryError> {
@@ -540,6 +604,31 @@ async fn refresh_published_index_for_lookup_with_timeout(
                 "KV index refresh for lookup timed out after {}s",
                 KV_LOOKUP_REFRESH_TIMEOUT.as_secs()
             );
+            Ok(())
+        }
+    }
+}
+
+async fn maybe_refresh_published_index_for_lookup(state: &AppState) -> Result<(), RegistryError> {
+    if !should_refresh_published_index_for_lookup(state).await {
+        return Ok(());
+    }
+
+    let flight_key = LOOKUP_REFRESH_FLIGHT_KEY.to_string();
+    match begin_lookup_flight(state, flight_key.clone()) {
+        LookupFlight::Follower(notified) => {
+            if !await_flight(state, "refresh", &flight_key, notified).await {
+                clear_lookup_flight_entry(state, &flight_key);
+                if should_refresh_published_index_for_lookup(state).await {
+                    refresh_published_index_for_lookup_with_timeout(state).await?;
+                }
+            }
+            Ok(())
+        }
+        LookupFlight::Leader(_refresh_guard) => {
+            if should_refresh_published_index_for_lookup(state).await {
+                refresh_published_index_for_lookup_with_timeout(state).await?;
+            }
             Ok(())
         }
     }
@@ -667,65 +756,45 @@ async fn get_or_head_kv_object_inner(
         return Err(RegistryError::not_found("Cache key not found"));
     }
 
-    match begin_lookup_flight(state, miss_key.clone()) {
+    let lookup_result = match begin_lookup_flight(state, miss_key.clone()) {
         LookupFlight::Follower(notified) => {
-            await_flight(state, "kv", &miss_key, notified).await;
-            if let Some((blob, cache_entry_id, cached_url)) =
-                lookup_published_blob(state, &scoped_key).await
-            {
-                clear_kv_miss(state, &miss_key);
-                return serve_backend_blob(
-                    state,
-                    &cache_entry_id,
-                    &blob,
-                    cached_url.as_deref(),
-                    is_head,
-                )
-                .await;
+            if !await_flight(state, "kv", &miss_key, notified).await {
+                clear_lookup_flight_entry(state, &miss_key);
             }
-            Err(RegistryError::not_found("Cache key not found"))
+            lookup_published_blob(state, &scoped_key).await
         }
-        LookupFlight::Leader(_lookup_flight) => {
+        LookupFlight::Leader(_lookup_guard) => {
             if is_recent_kv_miss(state, &miss_key) {
                 return Err(RegistryError::not_found("Cache key not found"));
             }
 
-            if let Some((blob, cache_entry_id, cached_url)) =
-                lookup_published_blob(state, &scoped_key).await
-            {
-                clear_kv_miss(state, &miss_key);
-                return serve_backend_blob(
-                    state,
-                    &cache_entry_id,
-                    &blob,
-                    cached_url.as_deref(),
-                    is_head,
-                )
-                .await;
+            if let Some(found) = lookup_published_blob(state, &scoped_key).await {
+                Some(found)
+            } else {
+                maybe_refresh_published_index_for_lookup(state).await?;
+                let result = lookup_published_blob(state, &scoped_key).await;
+                if result.is_none() {
+                    mark_kv_miss(state, &miss_key);
+                }
+                result
             }
-
-            if should_refresh_published_index_for_lookup(state).await {
-                refresh_published_index_for_lookup_with_timeout(state).await?;
-            }
-
-            if let Some((blob, cache_entry_id, cached_url)) =
-                lookup_published_blob(state, &scoped_key).await
-            {
-                clear_kv_miss(state, &miss_key);
-                return serve_backend_blob(
-                    state,
-                    &cache_entry_id,
-                    &blob,
-                    cached_url.as_deref(),
-                    is_head,
-                )
-                .await;
-            }
-
-            mark_kv_miss(state, &miss_key);
-            Err(RegistryError::not_found("Cache key not found"))
+            // _lookup_guard drops here — BEFORE the download
         }
+    };
+
+    if let Some((blob, cache_entry_id, cached_url)) = lookup_result {
+        clear_kv_miss(state, &miss_key);
+        return serve_backend_blob(
+            state,
+            &cache_entry_id,
+            &blob,
+            cached_url.as_deref(),
+            is_head,
+        )
+        .await;
     }
+
+    Err(RegistryError::not_found("Cache key not found"))
 }
 
 async fn serve_local_blob(
@@ -773,19 +842,20 @@ async fn resolve_blob_url(
     let flight_key = format!("url:{}", blob.digest);
     match begin_lookup_flight(state, flight_key.clone()) {
         LookupFlight::Follower(notified) => {
-            await_flight(state, "url", &flight_key, notified).await;
+            if !await_flight(state, "url", &flight_key, notified).await {
+                clear_lookup_flight_entry(state, &flight_key);
+            }
             let published = state.kv_published_index.read().await;
             if let Some(url) = published.download_url(&blob.digest) {
-                Ok((url.to_string(), true))
-            } else {
-                drop(published);
-                let resolved = resolve_download_url(state, cache_entry_id, blob).await?;
-                {
-                    let mut published = state.kv_published_index.write().await;
-                    published.set_download_url(blob.digest.clone(), resolved.clone());
-                }
-                Ok((resolved, false))
+                return Ok((url.to_string(), true));
             }
+            drop(published);
+            let resolved = resolve_download_url(state, cache_entry_id, blob).await?;
+            {
+                let mut published = state.kv_published_index.write().await;
+                published.set_download_url(blob.digest.clone(), resolved.clone());
+            }
+            Ok((resolved, false))
         }
         LookupFlight::Leader(_url_flight) => {
             let resolved = resolve_download_url(state, cache_entry_id, blob).await?;
@@ -974,7 +1044,9 @@ async fn download_blob_to_cache(
             result
         }
         LookupFlight::Follower(notified) => {
-            await_flight(state, "dl", &flight_key, notified).await;
+            if !await_flight(state, "dl", &flight_key, notified).await {
+                clear_lookup_flight_entry(state, &flight_key);
+            }
             if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
                 return Ok(cache_path);
             }
@@ -991,7 +1063,9 @@ async fn download_blob_to_cache(
                     do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await
                 }
                 LookupFlight::Follower(retry_notified) => {
-                    await_flight(state, "dlretry", &retry_key, retry_notified).await;
+                    if !await_flight(state, "dlretry", &retry_key, retry_notified).await {
+                        clear_lookup_flight_entry(state, &retry_key);
+                    }
                     state
                         .blob_read_cache
                         .get(&blob.digest)
@@ -1099,7 +1173,9 @@ async fn resolve_kv_entries_inner(
     let sizes_key = lookup_flight_key_for_sizes(&scoped_keys);
     match begin_lookup_flight(state, sizes_key.clone()) {
         LookupFlight::Follower(notified) => {
-            await_flight(state, "sizes", &sizes_key, notified).await;
+            if !await_flight(state, "sizes", &sizes_key, notified).await {
+                clear_lookup_flight_entry(state, &sizes_key);
+            }
             populate_sizes_from_published(state, &scoped_keys, &mut sizes).await;
             Ok(sizes)
         }
@@ -1109,9 +1185,7 @@ async fn resolve_kv_entries_inner(
                 return Ok(sizes);
             }
 
-            if should_refresh_published_index_for_lookup(state).await {
-                refresh_published_index_for_lookup_with_timeout(state).await?;
-            }
+            maybe_refresh_published_index_for_lookup(state).await?;
 
             populate_sizes_from_published(state, &scoped_keys, &mut sizes).await;
             Ok(sizes)
@@ -2624,5 +2698,39 @@ mod tests {
             &[String::from("alias-a"), String::from("alias-b")],
         );
         assert_eq!(aliases, vec!["alias-a".to_string(), "alias-b".to_string()]);
+    }
+
+    #[test]
+    fn pending_refresh_suppression_applies_for_recent_local_puts() {
+        let now_ms: u64 = 100_000;
+        let last_put_ms = now_ms.saturating_sub(5_000);
+        assert!(should_suppress_lookup_refresh_due_to_pending_values(
+            true,
+            last_put_ms,
+            now_ms
+        ));
+    }
+
+    #[test]
+    fn pending_refresh_suppression_expires_after_window() {
+        let now_ms: u64 = 100_000;
+        let last_put_ms =
+            now_ms.saturating_sub(KV_PENDING_REFRESH_SUPPRESSION_WINDOW.as_millis() as u64 + 1);
+        assert!(!should_suppress_lookup_refresh_due_to_pending_values(
+            true,
+            last_put_ms,
+            now_ms
+        ));
+    }
+
+    #[test]
+    fn pending_refresh_suppression_requires_pending_entries() {
+        let now_ms: u64 = 100_000;
+        let last_put_ms = now_ms.saturating_sub(1_000);
+        assert!(!should_suppress_lookup_refresh_due_to_pending_values(
+            false,
+            last_put_ms,
+            now_ms
+        ));
     }
 }

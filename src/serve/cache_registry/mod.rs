@@ -134,10 +134,12 @@ async fn dispatch_with_path(
         Err(error) => {
             let elapsed_ms = request_start.elapsed().as_millis();
             if is_sccache_route {
-                eprintln!(
-                    "CACHE {} {} -> {} ({}ms)",
-                    request_method, request_path, error.status, elapsed_ms
-                );
+                if error.status != StatusCode::NOT_FOUND || elapsed_ms >= 500 {
+                    eprintln!(
+                        "CACHE {} {} -> {} ({}ms)",
+                        request_method, request_path, error.status, elapsed_ms
+                    );
+                }
             }
             if state.fail_on_cache_error || !error.status.is_server_error() {
                 return Err(error);
