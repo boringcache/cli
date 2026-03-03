@@ -271,8 +271,26 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup BoringCache CLI
+      - name: Setup BoringCache Docker cache
+        id: boringcache-docker-build
         if: matrix.use_docker == true
+        continue-on-error: true
+        uses: boringcache/docker-action@v1
+        with:
+          workspace: ${{ github.repository }}
+          image: boringcache-cli-release-build-${{ matrix.name }}
+          tags: latest
+          context: .
+          dockerfile: .github/docker/base-image.Dockerfile
+          build-args: |
+            BASE_IMAGE=${{ matrix.container }}
+          cache-tag: "docker-release-build-base-${{ matrix.name }}"
+          registry-tag: "docker-release-build-base-${{ matrix.name }}"
+          push: "false"
+          load: "true"
+
+      - name: Setup BoringCache CLI (Fallback)
+        if: matrix.use_docker == true && steps.boringcache-docker-build.outcome == 'failure'
         continue-on-error: true
         uses: boringcache/setup-boringcache@v1
         with:
@@ -284,6 +302,10 @@ jobs:
         if: matrix.use_docker == true
         run: |
           BC_MOUNT=""
+          DOCKER_IMAGE="${{ matrix.container }}"
+          if docker image inspect "boringcache-cli-release-build-${{ matrix.name }}:latest" >/dev/null 2>&1; then
+            DOCKER_IMAGE="boringcache-cli-release-build-${{ matrix.name }}:latest"
+          fi
           if command -v boringcache >/dev/null 2>&1; then
             BC_MOUNT="-v $(which boringcache):/usr/local/bin/boringcache:ro"
           fi
@@ -293,7 +315,7 @@ jobs:
             -w /workspace \
             -e CARGO_TARGET_DIR=/workspace/target \
             -e BORINGCACHE_API_TOKEN=${{ secrets.BORINGCACHE_API_TOKEN }} \
-            ${{ matrix.container }} \
+            "$DOCKER_IMAGE" \
             sh -c '
               set -e
 
@@ -360,22 +382,26 @@ jobs:
                 fi
               fi
 
-              if command -v boringcache >/dev/null 2>&1; then
-                CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
-                CARGO_REGISTRY_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-cargo-registry-${{ matrix.name }}:${CARGO_HOME_DIR}/registry"
-                CARGO_GIT_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-cargo-git-${{ matrix.name }}:${CARGO_HOME_DIR}/git"
-                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-target-${{ matrix.name }}:/workspace/target"
-                boringcache restore ${{ github.repository }} "${CARGO_REGISTRY_CACHE_KEY},${CARGO_GIT_CACHE_KEY},${TARGET_CACHE_KEY}" --no-platform --no-git || true
-              fi
-
               # Add target
               rustup target add ${{ matrix.target }}
 
               # Build with appropriate flags
-              if [ "${{ matrix.musl }}" = "true" ]; then
-                RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target ${{ matrix.target }}
+              if command -v boringcache >/dev/null 2>&1 && [ -n "${BORINGCACHE_API_TOKEN:-}" ]; then
+                CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+                CARGO_REGISTRY_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-cargo-registry-${{ matrix.name }}:${CARGO_HOME_DIR}/registry"
+                CARGO_GIT_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-cargo-git-${{ matrix.name }}:${CARGO_HOME_DIR}/git"
+                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-target-${{ matrix.name }}:/workspace/target"
+                if [ "${{ matrix.musl }}" = "true" ]; then
+                  boringcache run ${{ github.repository }} "${CARGO_REGISTRY_CACHE_KEY},${CARGO_GIT_CACHE_KEY},${TARGET_CACHE_KEY}" --no-platform --no-git -- sh -c "RUSTFLAGS=\"-C target-feature=+crt-static\" cargo build --release --target ${{ matrix.target }}"
+                else
+                  boringcache run ${{ github.repository }} "${CARGO_REGISTRY_CACHE_KEY},${CARGO_GIT_CACHE_KEY},${TARGET_CACHE_KEY}" --no-platform --no-git -- cargo build --release --target ${{ matrix.target }}
+                fi
               else
-                cargo build --release --target ${{ matrix.target }}
+                if [ "${{ matrix.musl }}" = "true" ]; then
+                  RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target ${{ matrix.target }}
+                else
+                  cargo build --release --target ${{ matrix.target }}
+                fi
               fi
 
               # Copy binary
@@ -384,13 +410,6 @@ jobs:
 
               echo "=== sccache stats ==="
               sccache --show-stats 2>/dev/null || true
-              if command -v boringcache >/dev/null 2>&1; then
-                CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
-                CARGO_REGISTRY_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-cargo-registry-${{ matrix.name }}:${CARGO_HOME_DIR}/registry"
-                CARGO_GIT_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-cargo-git-${{ matrix.name }}:${CARGO_HOME_DIR}/git"
-                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-target-${{ matrix.name }}:/workspace/target"
-                boringcache save ${{ github.repository }} "${CARGO_REGISTRY_CACHE_KEY},${CARGO_GIT_CACHE_KEY},${TARGET_CACHE_KEY}" --no-platform --no-git || true
-              fi
             '
 
       # Native builds for Ubuntu/macOS/Windows
@@ -667,11 +686,8 @@ jobs:
             # Authenticate
             boringcache auth --token your-api-token
 
-            # Save cache (tag:path format)
-            boringcache save my-workspace "node-deps:node_modules,build-cache:target"
-
-            # Restore cache (tag:path format)
-            boringcache restore my-workspace "node-deps:node_modules,build-cache:target"
+            # Wrap restore -> command -> save in one call
+            boringcache run my-workspace "node-deps:node_modules,build-cache:target" -- npm test
 
             # List cache entries
             boringcache ls my-workspace

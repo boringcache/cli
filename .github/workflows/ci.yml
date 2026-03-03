@@ -19,10 +19,6 @@ jobs:
     concurrency:
       group: cli-ci-native-bench-${{ github.ref_name }}
       cancel-in-progress: false
-    strategy:
-      max-parallel: 1
-      matrix:
-        run: [1, 2, 3]
 
     steps:
       - name: Checkout code
@@ -98,9 +94,9 @@ jobs:
           cargo clippy --locked -- -D warnings
           END_TIME=$(date +%s%N)
           DURATION=$(( (END_TIME - START_TIME) / 1000000 ))
-          echo "BoringCache build+test - Run ${{ matrix.run }}: ${DURATION}ms"
+          echo "BoringCache build+test: ${DURATION}ms"
           mkdir -p benchmark-results
-          echo "${DURATION}" > benchmark-results/boringcache-run${{ matrix.run }}.txt
+          echo "${DURATION}" > benchmark-results/boringcache.txt
 
           echo "=== sccache stats ==="
           SCCACHE_STATS="$(sccache --show-stats || true)"
@@ -115,7 +111,7 @@ jobs:
           RUST_HIT_RATE="${RUST_HIT_RATE:-0.00}"
           printf "compile_requests,cache_hits,cache_misses,rust_hit_rate\n%s,%s,%s,%s\n" \
             "${COMPILE_REQUESTS}" "${CACHE_HITS}" "${CACHE_MISSES}" "${RUST_HIT_RATE}" \
-            > benchmark-results/boringcache-run${{ matrix.run }}-stats.csv
+            > benchmark-results/boringcache-stats.csv
 
       - name: Check formatting
         run: cargo fmt -- --check
@@ -123,7 +119,7 @@ jobs:
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: boringcache-results-${{ matrix.run }}
+          name: boringcache-results
           path: benchmark-results/
 
   docker:
@@ -132,16 +128,30 @@ jobs:
     concurrency:
       group: cli-ci-docker-bench-${{ github.ref_name }}
       cancel-in-progress: false
-    strategy:
-      max-parallel: 1
-      matrix:
-        run: [1, 2, 3]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup BoringCache CLI
+      - name: Setup BoringCache Docker cache
+        id: boringcache-docker-test
+        continue-on-error: true
+        uses: boringcache/docker-action@v1
+        with:
+          workspace: ${{ github.repository }}
+          image: boringcache-cli-ci-docker-test
+          tags: latest
+          context: .
+          dockerfile: .github/docker/base-image.Dockerfile
+          build-args: |
+            BASE_IMAGE=rust:${{ env.RUST_VERSION }}-bookworm
+          cache-tag: "docker-ci-rust-${{ env.RUST_VERSION }}-bookworm"
+          registry-tag: "docker-ci-rust-${{ env.RUST_VERSION }}-bookworm"
+          push: "false"
+          load: "true"
+
+      - name: Setup BoringCache CLI (Fallback)
+        if: steps.boringcache-docker-test.outcome == 'failure'
         continue-on-error: true
         uses: boringcache/setup-boringcache@v1
         with:
@@ -151,6 +161,10 @@ jobs:
       - name: Build and test with timing
         run: |
           BC_MOUNT=""
+          DOCKER_IMAGE="rust:${{ env.RUST_VERSION }}-bookworm"
+          if docker image inspect "boringcache-cli-ci-docker-test:latest" >/dev/null 2>&1; then
+            DOCKER_IMAGE="boringcache-cli-ci-docker-test:latest"
+          fi
           if command -v boringcache >/dev/null 2>&1; then
             BC_MOUNT="-v $(which boringcache):/usr/local/bin/boringcache:ro"
           fi
@@ -161,7 +175,7 @@ jobs:
             -e CARGO_TARGET_DIR=/workspace/target \
             -e CARGO_INCREMENTAL=${{ env.CARGO_INCREMENTAL }} \
             -e BORINGCACHE_API_TOKEN=${{ secrets.BORINGCACHE_API_TOKEN }} \
-            rust:${{ env.RUST_VERSION }}-bookworm \
+            "$DOCKER_IMAGE" \
             sh -c '
               set -eu
               PROXY_PID=""
@@ -213,20 +227,20 @@ jobs:
                 fi
               fi
 
-              if command -v boringcache >/dev/null 2>&1; then
-                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-docker-target-ci-bookworm:/workspace/target"
-                boringcache restore ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git || true
-              fi
-
               # Build with timing
               START_TIME=$(date +%s%N)
-              cargo build --locked
-              cargo test --locked
+              if command -v boringcache >/dev/null 2>&1 && [ -n "${BORINGCACHE_API_TOKEN:-}" ]; then
+                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-docker-target-ci-bookworm:/workspace/target"
+                boringcache run ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git -- sh -c "cargo build --locked && cargo test --locked"
+              else
+                cargo build --locked
+                cargo test --locked
+              fi
               END_TIME=$(date +%s%N)
               DURATION=$(( (END_TIME - START_TIME) / 1000000 ))
-              echo "Docker target cache - Run ${{ matrix.run }}: ${DURATION}ms"
+              echo "Docker target cache: ${DURATION}ms"
               mkdir -p benchmark-results
-              echo "${DURATION}" > benchmark-results/docker-target-run${{ matrix.run }}.txt
+              echo "${DURATION}" > benchmark-results/docker-target.txt
 
               echo "=== sccache stats ==="
               SCCACHE_STATS="$(sccache --show-stats || true)"
@@ -241,18 +255,14 @@ jobs:
               RUST_HIT_RATE="${RUST_HIT_RATE:-0.00}"
               printf "compile_requests,cache_hits,cache_misses,rust_hit_rate\n%s,%s,%s,%s\n" \
                 "${COMPILE_REQUESTS}" "${CACHE_HITS}" "${CACHE_MISSES}" "${RUST_HIT_RATE}" \
-                > benchmark-results/docker-target-run${{ matrix.run }}-stats.csv
+                > benchmark-results/docker-target-stats.csv
 
-              if command -v boringcache >/dev/null 2>&1; then
-                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-docker-target-ci-bookworm:/workspace/target"
-                boringcache save ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git || true
-              fi
             '
 
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: docker-target-results-${{ matrix.run }}
+          name: docker-target-results
           path: benchmark-results/
 
   benchmark-summary:
@@ -266,106 +276,55 @@ jobs:
       - name: Download all results
         uses: actions/download-artifact@v4
         with:
-          pattern: "*-results-*"
+          pattern: "*-results*"
           merge-multiple: true
 
       - name: Generate summary
         run: |
-          echo "# Rust Build Cache Benchmark Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          set -euo pipefail
+          echo "# Rust Build Cache Benchmark Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | Status | Time (ms) | Compile Requests | Hits | Misses | Hit Rate | Rust Hit Rate |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------------|--------|-----------|------------------|------|--------|----------|---------------|" >> "$GITHUB_STEP_SUMMARY"
 
-          echo "## Native Runner (boringcache + sccache proxy)" >> $GITHUB_STEP_SUMMARY
-          echo "| Run | Time |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|------|" >> $GITHUB_STEP_SUMMARY
-          for run in 1 2 3; do
-            if [[ -f "boringcache-run${run}.txt" ]]; then
-              b=$(cat "boringcache-run${run}.txt")
-              echo "| $run | ${b}ms |" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "| $run | Missing |" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-          echo "" >> $GITHUB_STEP_SUMMARY
+          write_row() {
+            local label="$1"
+            local time_file="$2"
+            local stats_file="$3"
+            local status="Missing"
+            local time_ms="-"
+            local compile_requests="-"
+            local cache_hits="-"
+            local cache_misses="-"
+            local hit_rate="-"
+            local rust_hit_rate="-"
 
-          echo "### Native Runner Hit Stats" >> $GITHUB_STEP_SUMMARY
-          echo "| Run | Compile Requests | Hits | Misses | Hit Rate | Rust Hit Rate |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|------------------|------|--------|----------|---------------|" >> $GITHUB_STEP_SUMMARY
-          for run in 1 2 3; do
-            stats_file="boringcache-run${run}-stats.csv"
-            if [[ -f "${stats_file}" ]]; then
-              IFS=',' read -r compile_requests cache_hits cache_misses rust_hit_rate < <(tail -n 1 "${stats_file}")
+            if [[ -f "$time_file" && -f "$stats_file" ]]; then
+              status="OK"
+              time_ms="$(cat "$time_file")"
+              IFS=',' read -r compile_requests cache_hits cache_misses rust_hit_rate < <(tail -n 1 "$stats_file")
               hit_rate="0.00"
-              if [[ "${compile_requests}" -gt 0 ]]; then
-                hit_rate=$(awk -v hits="${cache_hits}" -v total="${compile_requests}" "BEGIN { printf \"%.2f\", (hits * 100) / total }")
+              if [[ "$compile_requests" -gt 0 ]]; then
+                hit_rate="$(awk -v hits="$cache_hits" -v total="$compile_requests" 'BEGIN { printf "%.2f", (hits * 100) / total }')"
               fi
               rust_hit_rate="${rust_hit_rate:-0.00}"
-              echo "| $run | ${compile_requests} | ${cache_hits} | ${cache_misses} | ${hit_rate}% | ${rust_hit_rate}% |" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "| $run | Missing | Missing | Missing | Missing | Missing |" >> $GITHUB_STEP_SUMMARY
+              echo "$label:$time_ms" >> /tmp/ci-summary-times.txt
             fi
-          done
-          echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo "## Docker (boringcache + sccache proxy)" >> $GITHUB_STEP_SUMMARY
-          echo "| Run | Time |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|------|" >> $GITHUB_STEP_SUMMARY
-          for run in 1 2 3; do
-            if [[ -f "docker-target-run${run}.txt" ]]; then
-              t=$(cat "docker-target-run${run}.txt")
-              echo "| $run | ${t}ms |" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "| $run | Missing |" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-          echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| ${label} | ${status} | ${time_ms} | ${compile_requests} | ${cache_hits} | ${cache_misses} | ${hit_rate}% | ${rust_hit_rate}% |" >> "$GITHUB_STEP_SUMMARY"
+          }
 
-          echo "### Docker Hit Stats" >> $GITHUB_STEP_SUMMARY
-          echo "| Run | Compile Requests | Hits | Misses | Hit Rate | Rust Hit Rate |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|------------------|------|--------|----------|---------------|" >> $GITHUB_STEP_SUMMARY
-          for run in 1 2 3; do
-            stats_file="docker-target-run${run}-stats.csv"
-            if [[ -f "${stats_file}" ]]; then
-              IFS=',' read -r compile_requests cache_hits cache_misses rust_hit_rate < <(tail -n 1 "${stats_file}")
-              hit_rate="0.00"
-              if [[ "${compile_requests}" -gt 0 ]]; then
-                hit_rate=$(awk -v hits="${cache_hits}" -v total="${compile_requests}" "BEGIN { printf \"%.2f\", (hits * 100) / total }")
-              fi
-              rust_hit_rate="${rust_hit_rate:-0.00}"
-              echo "| $run | ${compile_requests} | ${cache_hits} | ${cache_misses} | ${hit_rate}% | ${rust_hit_rate}% |" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "| $run | Missing | Missing | Missing | Missing | Missing |" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
-          echo "" >> $GITHUB_STEP_SUMMARY
+          : > /tmp/ci-summary-times.txt
+          write_row "Native" "boringcache.txt" "boringcache-stats.csv"
+          write_row "Docker" "docker-target.txt" "docker-target-stats.csv"
 
-          echo "## Averages" >> $GITHUB_STEP_SUMMARY
-          echo "### Native Runner" >> $GITHUB_STEP_SUMMARY
-          if [[ -f boringcache-run1.txt && -f boringcache-run2.txt && -f boringcache-run3.txt ]]; then
-            bb=$(( ($(cat boringcache-run1.txt)+$(cat boringcache-run2.txt)+$(cat boringcache-run3.txt))/3 ))
-            echo "- **Average**: ${bb}ms" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Docker" >> $GITHUB_STEP_SUMMARY
-          if [[ -f docker-target-run1.txt && -f docker-target-run2.txt && -f docker-target-run3.txt ]]; then
-            tt=$(( ($(cat docker-target-run1.txt)+$(cat docker-target-run2.txt)+$(cat docker-target-run3.txt))/3 ))
-            echo "- **Average**: ${tt}ms" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          echo "## Cold vs Warm Savings" >> $GITHUB_STEP_SUMMARY
-          if [[ -f boringcache-run1.txt && -f boringcache-run2.txt && -f boringcache-run3.txt ]]; then
-            native_cold=$(cat boringcache-run1.txt)
-            native_warm=$(( ($(cat boringcache-run2.txt)+$(cat boringcache-run3.txt))/2 ))
-            native_saved=$(( native_cold - native_warm ))
-            native_saved_pct=$(awk -v saved="${native_saved}" -v cold="${native_cold}" 'BEGIN { if (cold == 0) { print "0.00" } else { printf "%.2f", (saved * 100) / cold } }')
-            echo "- Native: cold=${native_cold}ms, warm_avg=${native_warm}ms, savings=${native_saved}ms (${native_saved_pct}%)" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [[ -f docker-target-run1.txt && -f docker-target-run2.txt && -f docker-target-run3.txt ]]; then
-            docker_cold=$(cat docker-target-run1.txt)
-            docker_warm=$(( ($(cat docker-target-run2.txt)+$(cat docker-target-run3.txt))/2 ))
-            docker_saved=$(( docker_cold - docker_warm ))
-            docker_saved_pct=$(awk -v saved="${docker_saved}" -v cold="${docker_cold}" 'BEGIN { if (cold == 0) { print "0.00" } else { printf "%.2f", (saved * 100) / cold } }')
-            echo "- Docker: cold=${docker_cold}ms, warm_avg=${docker_warm}ms, savings=${docker_saved}ms (${docker_saved_pct}%)" >> $GITHUB_STEP_SUMMARY
+          native_time="$(sed -n 's/^Native:\([0-9][0-9]*\)$/\1/p' /tmp/ci-summary-times.txt | tail -1)"
+          docker_time="$(sed -n 's/^Docker:\([0-9][0-9]*\)$/\1/p' /tmp/ci-summary-times.txt | tail -1)"
+          if [[ -n "$native_time" && -n "$docker_time" ]]; then
+            delta=$((docker_time - native_time))
+            pct="$(awk -v d="$delta" -v n="$native_time" 'BEGIN { if (n == 0) { print "0.00" } else { printf "%.2f", (d * 100) / n } }')"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Docker vs Native delta: ${delta}ms (${pct}%)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   build:
@@ -430,8 +389,26 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup BoringCache CLI
+      - name: Setup BoringCache Docker cache
+        id: boringcache-docker-build
         if: matrix.use_docker == true
+        continue-on-error: true
+        uses: boringcache/docker-action@v1
+        with:
+          workspace: ${{ github.repository }}
+          image: boringcache-cli-ci-build-${{ matrix.name }}
+          tags: latest
+          context: .
+          dockerfile: .github/docker/base-image.Dockerfile
+          build-args: |
+            BASE_IMAGE=${{ matrix.container }}
+          cache-tag: "docker-ci-build-base-${{ matrix.name }}"
+          registry-tag: "docker-ci-build-base-${{ matrix.name }}"
+          push: "false"
+          load: "true"
+
+      - name: Setup BoringCache CLI (Fallback)
+        if: matrix.use_docker == true && steps.boringcache-docker-build.outcome == 'failure'
         continue-on-error: true
         uses: boringcache/setup-boringcache@v1
         with:
@@ -443,6 +420,10 @@ jobs:
         if: matrix.use_docker == true
         run: |
           BC_MOUNT=""
+          DOCKER_IMAGE="${{ matrix.container }}"
+          if docker image inspect "boringcache-cli-ci-build-${{ matrix.name }}:latest" >/dev/null 2>&1; then
+            DOCKER_IMAGE="boringcache-cli-ci-build-${{ matrix.name }}:latest"
+          fi
           if command -v boringcache >/dev/null 2>&1; then
             BC_MOUNT="-v $(which boringcache):/usr/local/bin/boringcache:ro"
           fi
@@ -453,7 +434,7 @@ jobs:
             -e CARGO_TARGET_DIR=/workspace/target \
             -e CARGO_INCREMENTAL=${{ env.CARGO_INCREMENTAL }} \
             -e BORINGCACHE_API_TOKEN=${{ secrets.BORINGCACHE_API_TOKEN }} \
-            ${{ matrix.container }} \
+            "$DOCKER_IMAGE" \
             sh -c '
               set -eu
               PROXY_PID=""
@@ -504,19 +485,23 @@ jobs:
                 fi
               fi
 
-              if command -v boringcache >/dev/null 2>&1; then
-                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-docker-build-target-${{ matrix.name }}:/workspace/target"
-                boringcache restore ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git || true
-              fi
-
               # Add target
               rustup target add ${{ matrix.target }}
 
               # Build with appropriate flags
-              if [ "${{ matrix.musl }}" = "true" ]; then
-                RUSTFLAGS="-C target-feature=+crt-static" cargo build --locked --release --target ${{ matrix.target }}
+              if command -v boringcache >/dev/null 2>&1 && [ -n "${BORINGCACHE_API_TOKEN:-}" ]; then
+                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-docker-build-target-${{ matrix.name }}:/workspace/target"
+                if [ "${{ matrix.musl }}" = "true" ]; then
+                  boringcache run ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git -- sh -c "RUSTFLAGS=\"-C target-feature=+crt-static\" cargo build --locked --release --target ${{ matrix.target }}"
+                else
+                  boringcache run ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git -- cargo build --locked --release --target ${{ matrix.target }}
+                fi
               else
-                cargo build --locked --release --target ${{ matrix.target }}
+                if [ "${{ matrix.musl }}" = "true" ]; then
+                  RUSTFLAGS="-C target-feature=+crt-static" cargo build --locked --release --target ${{ matrix.target }}
+                else
+                  cargo build --locked --release --target ${{ matrix.target }}
+                fi
               fi
 
               # Copy binary
@@ -525,10 +510,6 @@ jobs:
 
               echo "=== sccache stats ==="
               sccache --show-stats || true
-              if command -v boringcache >/dev/null 2>&1; then
-                TARGET_CACHE_KEY="rust-${{ env.RUST_VERSION }}-docker-build-target-${{ matrix.name }}:/workspace/target"
-                boringcache save ${{ github.repository }} "$TARGET_CACHE_KEY" --no-platform --no-git || true
-              fi
               sccache --stop-server >/dev/null 2>&1 || true
               if [ -n "${PROXY_PID}" ]; then
                 kill "${PROXY_PID}" >/dev/null 2>&1 || true
