@@ -57,6 +57,8 @@ struct BlobReadInFlightGuard {
     inflight: Arc<std::sync::Mutex<HashMap<String, Arc<Notify>>>>,
 }
 
+static BLOB_READ_MAP_WARN_LAST: AtomicU64 = AtomicU64::new(0);
+
 impl Drop for BlobReadInFlightGuard {
     fn drop(&mut self) {
         let mut inflight = self
@@ -64,13 +66,25 @@ impl Drop for BlobReadInFlightGuard {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         inflight.remove(&self.key);
+        let remaining = inflight.len();
         self.notify.notify_waiters();
+        if remaining > 64 {
+            let now_secs = unix_time_ms_now() / 1000;
+            let prev = BLOB_READ_MAP_WARN_LAST.load(Ordering::Relaxed);
+            if now_secs >= prev + 5
+                && BLOB_READ_MAP_WARN_LAST
+                    .compare_exchange(prev, now_secs, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                log::warn!("blob read inflight map size: {remaining}");
+            }
+        }
     }
 }
 
 enum BlobReadInFlight {
     Leader(BlobReadInFlightGuard),
-    Follower(Arc<Notify>),
+    Follower(std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>),
 }
 
 pub struct BlobReadCache {
@@ -151,7 +165,7 @@ impl BlobReadCache {
 
         match self.begin_inflight(key) {
             BlobReadInFlight::Follower(notify) => {
-                notify.notified().await;
+                notify.await;
                 Ok(false)
             }
             BlobReadInFlight::Leader(_guard) => {
@@ -223,7 +237,7 @@ impl BlobReadCache {
 
         match self.begin_inflight(key) {
             BlobReadInFlight::Follower(notify) => {
-                notify.notified().await;
+                notify.await;
                 let _ = tokio::fs::remove_file(src_path).await;
                 Ok(false)
             }
@@ -354,7 +368,9 @@ impl BlobReadCache {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(existing) = inflight.get(&key) {
-            return BlobReadInFlight::Follower(existing.clone());
+            let mut notified = Box::pin(existing.clone().notified_owned());
+            notified.as_mut().enable();
+            return BlobReadInFlight::Follower(notified);
         }
 
         let notify = Arc::new(Notify::new());

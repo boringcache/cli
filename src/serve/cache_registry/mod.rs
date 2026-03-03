@@ -52,6 +52,11 @@ async fn dispatch_with_path(
 ) -> Result<Response, RegistryError> {
     let request_method = method.clone();
     let normalized_path = normalize_path(&path);
+    let request_path = if normalized_path.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{normalized_path}")
+    };
     let route = match route::detect_route(&method, &normalized_path) {
         Ok(r) => r,
         Err(e) if e.status == StatusCode::NOT_FOUND && method == Method::PUT => {
@@ -61,6 +66,14 @@ async fn dispatch_with_path(
     };
     let route_tool = tool_for_route(&route);
     let route_instruments_cache_ops = route_instruments_cache_ops(&route);
+    let is_sccache_route = matches!(
+        route,
+        route::RegistryRoute::SccacheObject { .. } | route::RegistryRoute::SccacheMkcol
+    );
+    let request_start = std::time::Instant::now();
+    if is_sccache_route && cache_registry_trace_enabled() {
+        eprintln!("CACHE {} {}", request_method, request_path);
+    }
 
     let response = match route {
         route::RegistryRoute::BazelAc { digest_hex } => {
@@ -100,8 +113,32 @@ async fn dispatch_with_path(
     };
 
     match response {
-        Ok(response) => Ok(response),
+        Ok(response) => {
+            let elapsed_ms = request_start.elapsed().as_millis();
+            if is_sccache_route && elapsed_ms >= 500 {
+                let status = response.status();
+                log::warn!(
+                    "CACHE {} {} -> {} ({}ms)",
+                    request_method,
+                    request_path,
+                    status,
+                    elapsed_ms
+                );
+                eprintln!(
+                    "CACHE {} {} -> {} ({}ms)",
+                    request_method, request_path, status, elapsed_ms
+                );
+            }
+            Ok(response)
+        }
         Err(error) => {
+            let elapsed_ms = request_start.elapsed().as_millis();
+            if is_sccache_route {
+                eprintln!(
+                    "CACHE {} {} -> {} ({}ms)",
+                    request_method, request_path, error.status, elapsed_ms
+                );
+            }
             if state.fail_on_cache_error || !error.status.is_server_error() {
                 return Err(error);
             }
@@ -120,6 +157,16 @@ async fn dispatch_with_path(
             Ok(best_effort_cache_registry_response(&request_method))
         }
     }
+}
+
+fn cache_registry_trace_enabled() -> bool {
+    std::env::var("BORINGCACHE_TRACE_CACHE_REGISTRY")
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
 }
 
 fn tool_for_route(route: &route::RegistryRoute) -> Option<cache_ops::Tool> {

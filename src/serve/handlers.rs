@@ -209,6 +209,7 @@ pub async fn oci_dispatch(
     let request_method = method.clone();
     let request_path = format!("/v2/{path}");
     let request_start = Instant::now();
+    eprintln!("REQUEST: {} {}", request_method, request_path);
     let fail_on_cache_error = state.fail_on_cache_error;
     let route = match parse_oci_path(&path) {
         Some(route) => route,
@@ -673,7 +674,17 @@ async fn get_blob(
     digest: String,
 ) -> Result<Response, OciError> {
     let (cache_entry_id, size_bytes, cached_download_url) = {
+        let locator_start = std::time::Instant::now();
         let locator = state.blob_locator.read().await;
+        let elapsed = locator_start.elapsed();
+        if elapsed > std::time::Duration::from_millis(100) {
+            log::warn!(
+                "blob_locator.read() took {}ms for {}/{}",
+                elapsed.as_millis(),
+                name,
+                &digest[..8]
+            );
+        }
         let entry = locator
             .get(&name, &digest)
             .ok_or_else(|| OciError::blob_unknown(format!("{name}@{digest}")))?;

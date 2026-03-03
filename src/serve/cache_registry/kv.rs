@@ -42,6 +42,8 @@ const KV_BLOB_UPLOAD_RETRY_MAX_MS: u64 = 1_500;
 const KV_BLOB_UPLOAD_MAX_CONCURRENCY: usize = 16;
 const KV_BLOB_PRELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const KV_BLOB_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const KV_BLOB_URL_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const KV_LOOKUP_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_BLOB_PRELOAD_MAX_BLOBS: usize = 2_000;
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 static KV_BLOB_DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -76,7 +78,34 @@ impl Drop for LookupFlightGuard {
 
 enum LookupFlight {
     Leader(LookupFlightGuard),
-    Follower(Arc<tokio::sync::Notify>),
+    Follower(std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>),
+}
+
+const FLIGHT_WAIT_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn await_flight(
+    state: &AppState,
+    kind: &str,
+    key: &str,
+    notified: std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>,
+) {
+    let inflight_size = state
+        .kv_lookup_inflight
+        .lock()
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let start = std::time::Instant::now();
+    notified.await;
+    let elapsed = start.elapsed();
+    if elapsed >= FLIGHT_WAIT_WARN_THRESHOLD {
+        log::warn!(
+            "flight follower waited {}ms: kind={} key={} inflight_at_start={}",
+            elapsed.as_millis(),
+            kind,
+            &key[..key.len().min(24)],
+            inflight_size,
+        );
+    }
 }
 
 fn begin_lookup_flight(state: &AppState, key: String) -> LookupFlight {
@@ -85,7 +114,9 @@ fn begin_lookup_flight(state: &AppState, key: String) -> LookupFlight {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(existing) = inflight.get(&key) {
-        return LookupFlight::Follower(existing.clone());
+        let mut notified = Box::pin(existing.clone().notified_owned());
+        notified.as_mut().enable();
+        return LookupFlight::Follower(notified);
     }
 
     let notify = Arc::new(tokio::sync::Notify::new());
@@ -494,6 +525,26 @@ async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), Regi
     Ok(())
 }
 
+async fn refresh_published_index_for_lookup_with_timeout(
+    state: &AppState,
+) -> Result<(), RegistryError> {
+    match tokio::time::timeout(
+        KV_LOOKUP_REFRESH_TIMEOUT,
+        refresh_published_index_for_lookup(state),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            log::warn!(
+                "KV index refresh for lookup timed out after {}s",
+                KV_LOOKUP_REFRESH_TIMEOUT.as_secs()
+            );
+            Ok(())
+        }
+    }
+}
+
 fn content_length_bytes(response: &Response) -> u64 {
     response
         .headers()
@@ -617,8 +668,8 @@ async fn get_or_head_kv_object_inner(
     }
 
     match begin_lookup_flight(state, miss_key.clone()) {
-        LookupFlight::Follower(notify) => {
-            notify.notified().await;
+        LookupFlight::Follower(notified) => {
+            await_flight(state, "kv", &miss_key, notified).await;
             if let Some((blob, cache_entry_id, cached_url)) =
                 lookup_published_blob(state, &scoped_key).await
             {
@@ -654,7 +705,7 @@ async fn get_or_head_kv_object_inner(
             }
 
             if should_refresh_published_index_for_lookup(state).await {
-                refresh_published_index_for_lookup(state).await?;
+                refresh_published_index_for_lookup_with_timeout(state).await?;
             }
 
             if let Some((blob, cache_entry_id, cached_url)) =
@@ -720,9 +771,9 @@ async fn resolve_blob_url(
     }
 
     let flight_key = format!("url:{}", blob.digest);
-    match begin_lookup_flight(state, flight_key) {
-        LookupFlight::Follower(notify) => {
-            notify.notified().await;
+    match begin_lookup_flight(state, flight_key.clone()) {
+        LookupFlight::Follower(notified) => {
+            await_flight(state, "url", &flight_key, notified).await;
             let published = state.kv_published_index.read().await;
             if let Some(url) = published.download_url(&blob.digest) {
                 Ok((url.to_string(), true))
@@ -753,6 +804,25 @@ async fn do_download_blob_to_cache(
     blob: &BlobDescriptor,
     cached_url: Option<&str>,
 ) -> Result<PathBuf, RegistryError> {
+    if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
+        return Ok(cache_path);
+    }
+
+    let (url, from_cache) = match tokio::time::timeout(
+        KV_BLOB_URL_RESOLVE_TIMEOUT,
+        resolve_blob_url(state, cache_entry_id, blob, cached_url),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(RegistryError::internal(format!(
+                "Blob URL resolution timed out after {}s",
+                KV_BLOB_URL_RESOLVE_TIMEOUT.as_secs()
+            )));
+        }
+    };
+
     let _permit = state
         .blob_download_semaphore
         .acquire()
@@ -762,8 +832,6 @@ async fn do_download_blob_to_cache(
     if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
         return Ok(cache_path);
     }
-
-    let (url, from_cache) = resolve_blob_url(state, cache_entry_id, blob, cached_url).await?;
 
     let digest_hex = crate::cas_file::sha256_hex(blob.digest.as_bytes());
     let temp_suffix = KV_BLOB_DOWNLOAD_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -897,29 +965,16 @@ async fn download_blob_to_cache(
     }
 
     let flight_key = format!("dl:{}", blob.digest);
-    match begin_lookup_flight(state, flight_key) {
+    match begin_lookup_flight(state, flight_key.clone()) {
         LookupFlight::Leader(_dl_guard) => {
             if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
                 return Ok(cache_path);
             }
-            log::debug!(
-                "dl flight leader: {} ({}B)",
-                short_digest(&blob.digest),
-                blob.size_bytes
-            );
-            let started = std::time::Instant::now();
             let result = do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await;
-            log::debug!(
-                "dl flight leader done: {} {}ms ok={}",
-                short_digest(&blob.digest),
-                started.elapsed().as_millis(),
-                result.is_ok()
-            );
             result
         }
-        LookupFlight::Follower(notify) => {
-            log::debug!("dl flight follower: {}", short_digest(&blob.digest));
-            notify.notified().await;
+        LookupFlight::Follower(notified) => {
+            await_flight(state, "dl", &flight_key, notified).await;
             if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
                 return Ok(cache_path);
             }
@@ -928,17 +983,15 @@ async fn download_blob_to_cache(
                 return Ok(cache_path);
             }
             let retry_key = format!("dlretry:{}", blob.digest);
-            match begin_lookup_flight(state, retry_key) {
+            match begin_lookup_flight(state, retry_key.clone()) {
                 LookupFlight::Leader(_retry_guard) => {
                     if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
                         return Ok(cache_path);
                     }
-                    log::debug!("dl flight retry leader: {}", short_digest(&blob.digest));
                     do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await
                 }
-                LookupFlight::Follower(retry_notify) => {
-                    log::debug!("dl flight retry follower: {}", short_digest(&blob.digest));
-                    retry_notify.notified().await;
+                LookupFlight::Follower(retry_notified) => {
+                    await_flight(state, "dlretry", &retry_key, retry_notified).await;
                     state
                         .blob_read_cache
                         .get(&blob.digest)
@@ -1043,9 +1096,10 @@ async fn resolve_kv_entries_inner(
         return Ok(sizes);
     }
 
-    match begin_lookup_flight(state, lookup_flight_key_for_sizes(&scoped_keys)) {
-        LookupFlight::Follower(notify) => {
-            notify.notified().await;
+    let sizes_key = lookup_flight_key_for_sizes(&scoped_keys);
+    match begin_lookup_flight(state, sizes_key.clone()) {
+        LookupFlight::Follower(notified) => {
+            await_flight(state, "sizes", &sizes_key, notified).await;
             populate_sizes_from_published(state, &scoped_keys, &mut sizes).await;
             Ok(sizes)
         }
@@ -1056,7 +1110,7 @@ async fn resolve_kv_entries_inner(
             }
 
             if should_refresh_published_index_for_lookup(state).await {
-                refresh_published_index_for_lookup(state).await?;
+                refresh_published_index_for_lookup_with_timeout(state).await?;
             }
 
             populate_sizes_from_published(state, &scoped_keys, &mut sizes).await;

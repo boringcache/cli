@@ -406,9 +406,9 @@ fn blob_download_concurrency() -> (usize, bool) {
 
     use crate::platform::resources::{MemoryStrategy, SystemResources};
     let resources = SystemResources::detect();
-    let mut n = (resources.cpu_cores * 4).clamp(4, 32);
+    let mut n = resources.max_parallel_chunks.clamp(2, 16);
     if matches!(resources.memory_strategy, MemoryStrategy::Balanced) {
-        n = n.min(16);
+        n = n.min(8);
     }
     (n, false)
 }
