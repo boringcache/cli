@@ -47,6 +47,7 @@ BUDGET_STRESS_SCCACHE_UNEXPECTED_SHUTDOWNS_MAX="${BUDGET_STRESS_SCCACHE_UNEXPECT
 BUDGET_STRESS_LOCK_WAITS_MAX="${BUDGET_STRESS_LOCK_WAITS_MAX:-}"
 BUDGET_STRESS_PROXY_429_MAX="${BUDGET_STRESS_PROXY_429_MAX:-}"
 BUDGET_STRESS_PROXY_CONFLICTS_MAX="${BUDGET_STRESS_PROXY_CONFLICTS_MAX:-}"
+BUDGET_STRESS_PROXY_HEALTH_CHECK_FAILS_MAX="${BUDGET_STRESS_PROXY_HEALTH_CHECK_FAILS_MAX:-}"
 BUDGET_STRESS_PARALLEL_AVG_SECONDS_MAX="${BUDGET_STRESS_PARALLEL_AVG_SECONDS_MAX:-}"
 
 if [[ "$SCCACHE_BACKEND" != "proxy" && "$SCCACHE_BACKEND" != "local" ]]; then
@@ -168,6 +169,7 @@ require_numeric_if_set "BUDGET_STRESS_SCCACHE_UNEXPECTED_SHUTDOWNS_MAX" "$BUDGET
 require_numeric_if_set "BUDGET_STRESS_LOCK_WAITS_MAX" "$BUDGET_STRESS_LOCK_WAITS_MAX"
 require_numeric_if_set "BUDGET_STRESS_PROXY_429_MAX" "$BUDGET_STRESS_PROXY_429_MAX"
 require_numeric_if_set "BUDGET_STRESS_PROXY_CONFLICTS_MAX" "$BUDGET_STRESS_PROXY_CONFLICTS_MAX"
+require_numeric_if_set "BUDGET_STRESS_PROXY_HEALTH_CHECK_FAILS_MAX" "$BUDGET_STRESS_PROXY_HEALTH_CHECK_FAILS_MAX"
 require_numeric_if_set "BUDGET_STRESS_PARALLEL_AVG_SECONDS_MAX" "$BUDGET_STRESS_PARALLEL_AVG_SECONDS_MAX"
 
 USE_PROXY="0"
@@ -826,6 +828,10 @@ evaluate_budgets() {
       checks=$((checks + 1))
       budget_check_max "stress proxy tag conflicts" "${STRESS_PROXY_CONFLICTS:-0}" "$BUDGET_STRESS_PROXY_CONFLICTS_MAX"
     fi
+    if [[ -n "$BUDGET_STRESS_PROXY_HEALTH_CHECK_FAILS_MAX" ]]; then
+      checks=$((checks + 1))
+      budget_check_max "stress proxy health check failures" "${STRESS_PROXY_HEALTH_CHECK_FAILS:-0}" "$BUDGET_STRESS_PROXY_HEALTH_CHECK_FAILS_MAX"
+    fi
     if [[ -n "$BUDGET_STRESS_PARALLEL_AVG_SECONDS_MAX" ]]; then
       checks=$((checks + 1))
       budget_check_max "stress parallel average seconds" "${STRESS_AVG_SECONDS:-0}" "$BUDGET_STRESS_PARALLEL_AVG_SECONDS_MAX"
@@ -912,7 +918,7 @@ phase_efficacy() {
 }
 
 phase_stress() {
-  local phase_dir proxy_log lock_waits warm_sum avg prewarm_sum prewarm_avg
+  local phase_dir proxy_log lock_waits warm_sum avg prewarm_sum prewarm_avg health_check_fails
   local parallel_req_sum parallel_hit_sum parallel_miss_sum parallel_hit_rate
   local parallel_failed all_done daemon_timeouts daemon_shutdowns
   local parallel_port_seed sccache_port_i sccache_dir_i req_i hits_i misses_i
@@ -945,8 +951,10 @@ phase_stress() {
   echo "Running stress prewarm pass..."
   reset_sccache
   prewarm_sum=0
+  health_check_fails=0
   for i in $(seq 1 "$PARALLEL_JOBS"); do
     run_build "stress-prewarm-${i}" "${TARGET_ROOT}/stress-job-${i}" "${phase_dir}/prewarm-${i}.log"
+    health_check_fails="$((health_check_fails + $(count_pattern "${phase_dir}/prewarm-${i}.log" 'proxy health check failed')))"
     prewarm_sum="$((prewarm_sum + $(cat "${phase_dir}/prewarm-${i}.log.seconds")))"
     if [[ "$USE_PROXY" == "1" && "$i" -lt "$PARALLEL_JOBS" ]]; then
       echo "Waiting for writes to settle (${SETTLE_SECS}s) before next stress prewarm build..."
@@ -1081,6 +1089,7 @@ EOF
   for i in $(seq 1 "$PARALLEL_JOBS"); do
     warm_sum="$((warm_sum + $(cat "${phase_dir}/parallel-${i}.log.seconds")))"
     lock_waits="$((lock_waits + $(count_pattern "${phase_dir}/parallel-${i}.log" 'Blocking waiting for file lock')))"
+    health_check_fails="$((health_check_fails + $(count_pattern "${phase_dir}/parallel-${i}.log" 'proxy health check failed')))"
   done
   avg="$((warm_sum / PARALLEL_JOBS))"
   STRESS_AVG_SECONDS="$avg"
@@ -1088,12 +1097,14 @@ EOF
   STRESS_RUST_HIT_RATE="$(stat_value 'Cache hits rate (Rust)' "${phase_dir}/parallel-sccache-stats.txt")"
   STRESS_RUST_HIT_RATE="${STRESS_RUST_HIT_RATE:-0}"
   STRESS_LOCK_WAITS="$lock_waits"
+  STRESS_PROXY_HEALTH_CHECK_FAILS="$health_check_fails"
   if [[ "$USE_PROXY" == "1" ]]; then
     STRESS_PROXY_429="$(count_pattern "$proxy_log" '429 Too Many Requests')"
     STRESS_PROXY_CONFLICTS="$(count_pattern "$proxy_log" 'tag conflict')"
   else
     STRESS_PROXY_429="0"
     STRESS_PROXY_CONFLICTS="0"
+    STRESS_PROXY_HEALTH_CHECK_FAILS="0"
   fi
 }
 
@@ -1133,6 +1144,7 @@ if [[ "$RUN_STRESS" == "1" ]]; then
   echo "  Local lock waits:     ${STRESS_LOCK_WAITS}"
   echo "  Proxy 429:            ${STRESS_PROXY_429:-0}"
   echo "  Proxy tag conflicts:  ${STRESS_PROXY_CONFLICTS:-0}"
+  echo "  Proxy health failures:${STRESS_PROXY_HEALTH_CHECK_FAILS:-0}"
   echo "  Logs:                 ${LOG_DIR}/stress"
 fi
 
