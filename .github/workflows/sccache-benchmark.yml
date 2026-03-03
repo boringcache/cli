@@ -5,7 +5,7 @@ on:
     branches: ["main"]
     paths:
       - "src/**"
-      - "scripts/e2e-sccache-test.sh"
+      - "scripts/e2e-*.sh"
       - ".github/workflows/sccache-benchmark.yml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -22,30 +22,59 @@ env:
 
 jobs:
   benchmark:
-    name: Benchmark (${{ matrix.backend }})
+    name: Benchmark (${{ matrix.backend }} / ${{ matrix.phase }})
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
+      max-parallel: 6
       matrix:
         include:
           - backend: local
             sccache_backend: local
             http2: "0"
+            phase: efficacy
+            run_efficacy: "1"
+            run_stress: "0"
+          - backend: local
+            sccache_backend: local
+            http2: "0"
+            phase: stress
+            run_efficacy: "0"
+            run_stress: "1"
           - backend: proxy
             sccache_backend: proxy
             http2: "0"
+            phase: efficacy
+            run_efficacy: "1"
+            run_stress: "0"
+          - backend: proxy
+            sccache_backend: proxy
+            http2: "0"
+            phase: stress
+            run_efficacy: "0"
+            run_stress: "1"
           - backend: proxy-h2
             sccache_backend: proxy
             http2: "1"
+            phase: efficacy
+            run_efficacy: "1"
+            run_stress: "0"
+          - backend: proxy-h2
+            sccache_backend: proxy
+            http2: "1"
+            phase: stress
+            run_efficacy: "0"
+            run_stress: "1"
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
       BORINGCACHE_TRANSFER_HTTP2: ${{ matrix.http2 }}
       RUN_SCOPED_TAGS: "1"
-      RUN_STRESS: "1"
       PARALLEL_JOBS: "2"
       SETTLE_SECS: "5"
-      BUILD_TIMEOUT_SECS: "600"
+      BUILD_TIMEOUT_SECS: "1200"
+      STRESS_SCCACHE_ISOLATION: "1"
       RUST_LOG_LEVEL: info
 
     steps:
@@ -71,7 +100,7 @@ jobs:
         with:
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-sccache-benchmark-${{ matrix.backend }}"
+          cache-tag: "rust-${{ env.RUST_VERSION }}-sccache-benchmark-${{ matrix.backend }}-${{ matrix.phase }}"
           sccache: "true"
           sccache-mode: ${{ matrix.sccache_backend }}
           cache-target: "true"
@@ -101,15 +130,31 @@ jobs:
         run: cargo build --release --locked
 
       - name: Run benchmark
+        id: run_benchmark
         if: steps.gate.outputs.run == 'true'
         env:
           SCCACHE_BACKEND: ${{ matrix.sccache_backend }}
+          RUN_EFFICACY: ${{ matrix.run_efficacy }}
+          RUN_STRESS: ${{ matrix.run_stress }}
         run: |
           set -euo pipefail
-          LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}"
+          if [[ "${{ matrix.phase }}" == "efficacy" ]]; then
+            export BUDGET_EFFICACY_RUST_HIT_RATE_MIN="95"
+            export BUDGET_EFFICACY_PROXY_429_MAX="0"
+            export BUDGET_EFFICACY_PROXY_CONFLICTS_MAX="0"
+          fi
+          if [[ "${{ matrix.phase }}" == "stress" ]]; then
+            export BUDGET_STRESS_RUST_HIT_RATE_MIN="70"
+            export BUDGET_STRESS_SCCACHE_STARTUP_TIMEOUTS_MAX="0"
+            export BUDGET_STRESS_SCCACHE_UNEXPECTED_SHUTDOWNS_MAX="0"
+            export BUDGET_STRESS_LOCK_WAITS_MAX="0"
+            export BUDGET_STRESS_PROXY_429_MAX="0"
+            export BUDGET_STRESS_PROXY_CONFLICTS_MAX="0"
+          fi
+          LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}"
           mkdir -p "$LOG_DIR"
           BRANCH_SLUG="${GITHUB_REF_NAME//\//-}"
-          TAG="gha-sccache-${{ matrix.backend }}-rust-${RUST_VERSION}-${BRANCH_SLUG}"
+          TAG="gha-sccache-${{ matrix.backend }}-${{ matrix.phase }}-rust-${RUST_VERSION}-${BRANCH_SLUG}"
           BINARY="${GITHUB_WORKSPACE}/target/release/boringcache" \
           WORKSPACE="${GITHUB_REPOSITORY}" \
           LOG_DIR="$LOG_DIR" \
@@ -117,41 +162,237 @@ jobs:
           ./scripts/e2e-sccache-test.sh | tee "$LOG_DIR/run.log"
 
       - name: Extract metrics
-        if: steps.gate.outputs.run == 'true'
+        if: always() && steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
-          log_dir="${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}"
-          cold="$(cat "${log_dir}/efficacy/cold.log.seconds")"
-          warm="$(cat "${log_dir}/efficacy/warm.log.seconds")"
-          rust_hit_rate="$(awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
-          avg_read_hit="$(awk '$1 == "Average" && $2 == "cache" && $3 == "read" && $4 == "hit" { print $5; exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
-          proxy_429="0"
-          proxy_conflicts="0"
-          if [[ -f "${log_dir}/efficacy/proxy.log" ]]; then
-            proxy_429="$(grep -c "429 Too Many Requests" "${log_dir}/efficacy/proxy.log" || true)"
-            proxy_conflicts="$(grep -c "tag conflict" "${log_dir}/efficacy/proxy.log" || true)"
+          log_dir="${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}"
+          phase="${{ matrix.phase }}"
+          status="${{ steps.run_benchmark.outcome }}"
+
+          cold="0"
+          warm="0"
+          warm_rust_hit_rate="0"
+          warm_avg_read_hit="0"
+          efficacy_proxy_429="0"
+          efficacy_proxy_conflicts="0"
+
+          prewarm="0"
+          parallel_avg="0"
+          parallel_rust_hit_rate="0"
+          stress_lock_waits="0"
+          stress_sccache_start_timeouts="0"
+          stress_sccache_unexpected_shutdowns="0"
+          stress_proxy_429="0"
+          stress_proxy_conflicts="0"
+
+          if [[ "$phase" == "efficacy" ]]; then
+            if [[ -f "${log_dir}/efficacy/cold.log.seconds" ]]; then
+              cold="$(cat "${log_dir}/efficacy/cold.log.seconds")"
+            fi
+            if [[ -f "${log_dir}/efficacy/warm.log.seconds" ]]; then
+              warm="$(cat "${log_dir}/efficacy/warm.log.seconds")"
+            fi
+            if [[ -f "${log_dir}/efficacy/warm-sccache-stats.txt" ]]; then
+              warm_rust_hit_rate="$(awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
+              warm_avg_read_hit="$(awk '$1 == "Average" && $2 == "cache" && $3 == "read" && $4 == "hit" { print $5; exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
+            fi
+            if [[ -f "${log_dir}/efficacy/proxy.log" ]]; then
+              efficacy_proxy_429="$(grep -c "429 Too Many Requests" "${log_dir}/efficacy/proxy.log" || true)"
+              efficacy_proxy_conflicts="$(grep -c "tag conflict" "${log_dir}/efficacy/proxy.log" || true)"
+            fi
           fi
+
+          if [[ "$phase" == "stress" ]]; then
+            prewarm_sum=0
+            parallel_sum=0
+            for i in $(seq 1 "${PARALLEL_JOBS}"); do
+              if [[ -f "${log_dir}/stress/prewarm-${i}.log.seconds" ]]; then
+                prewarm_sum=$((prewarm_sum + $(cat "${log_dir}/stress/prewarm-${i}.log.seconds")))
+              fi
+              if [[ -f "${log_dir}/stress/parallel-${i}.log.seconds" ]]; then
+                parallel_sum=$((parallel_sum + $(cat "${log_dir}/stress/parallel-${i}.log.seconds")))
+              fi
+              if [[ -f "${log_dir}/stress/parallel-${i}.log" ]]; then
+                stress_lock_waits=$((stress_lock_waits + $(grep -c "Blocking waiting for file lock" "${log_dir}/stress/parallel-${i}.log" || true)))
+              fi
+            done
+            if [[ "${PARALLEL_JOBS}" -gt 0 ]]; then
+              prewarm=$((prewarm_sum / PARALLEL_JOBS))
+              parallel_avg=$((parallel_sum / PARALLEL_JOBS))
+            fi
+            if [[ -f "${log_dir}/stress/parallel-sccache-stats.txt" ]]; then
+              parallel_rust_hit_rate="$(awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }' "${log_dir}/stress/parallel-sccache-stats.txt")"
+            fi
+            if [[ -f "${log_dir}/run.log" ]]; then
+              stress_sccache_start_timeouts="$(sed -n 's/^[[:space:]]*sccache start timeouts:[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "${log_dir}/run.log" | tail -1)"
+              stress_sccache_unexpected_shutdowns="$(sed -n 's/^[[:space:]]*sccache unexpected shutdowns:[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "${log_dir}/run.log" | tail -1)"
+            fi
+            if [[ -f "${log_dir}/stress/proxy.log" ]]; then
+              stress_proxy_429="$(grep -c "429 Too Many Requests" "${log_dir}/stress/proxy.log" || true)"
+              stress_proxy_conflicts="$(grep -c "tag conflict" "${log_dir}/stress/proxy.log" || true)"
+            fi
+          fi
+
+          warm_rust_hit_rate="${warm_rust_hit_rate:-0}"
+          warm_avg_read_hit="${warm_avg_read_hit:-0}"
+          parallel_rust_hit_rate="${parallel_rust_hit_rate:-0}"
+          stress_sccache_start_timeouts="${stress_sccache_start_timeouts:-0}"
+          stress_sccache_unexpected_shutdowns="${stress_sccache_unexpected_shutdowns:-0}"
+
           {
             echo "backend=${{ matrix.backend }}"
+            echo "phase=${phase}"
+            echo "status=${status}"
             echo "cold_seconds=${cold}"
             echo "warm_seconds=${warm}"
-            echo "warm_rust_hit_rate=${rust_hit_rate:-0}"
-            echo "warm_avg_cache_read_hit=${avg_read_hit:-0}"
-            echo "proxy_429=${proxy_429}"
-            echo "proxy_tag_conflicts=${proxy_conflicts}"
+            echo "warm_rust_hit_rate=${warm_rust_hit_rate}"
+            echo "warm_avg_cache_read_hit=${warm_avg_read_hit}"
+            echo "efficacy_proxy_429=${efficacy_proxy_429}"
+            echo "efficacy_proxy_tag_conflicts=${efficacy_proxy_conflicts}"
+            echo "prewarm_seconds=${prewarm}"
+            echo "parallel_avg_seconds=${parallel_avg}"
+            echo "parallel_rust_hit_rate=${parallel_rust_hit_rate}"
+            echo "stress_lock_waits=${stress_lock_waits}"
+            echo "stress_sccache_start_timeouts=${stress_sccache_start_timeouts}"
+            echo "stress_sccache_unexpected_shutdowns=${stress_sccache_unexpected_shutdowns}"
+            echo "stress_proxy_429=${stress_proxy_429}"
+            echo "stress_proxy_tag_conflicts=${stress_proxy_conflicts}"
           } > "${log_dir}/metrics.env"
 
       - name: Upload benchmark artifacts
         if: always() && steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: sccache-benchmark-${{ matrix.backend }}
-          path: benchmark-logs/${{ matrix.backend }}
+          name: sccache-benchmark-${{ matrix.backend }}-${{ matrix.phase }}
+          path: benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}
+
+  adapter-e2e:
+    name: Adapter E2E (${{ matrix.leg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - leg: adapters-http
+            needs_sccache: "false"
+          - leg: dual-proxy
+            needs_sccache: "true"
+    env:
+      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+      BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
+      RUN_SCOPED_TAGS: "1"
+      SETTLE_SECS: "5"
+      BUILD_TIMEOUT_SECS: "1800"
+      RUST_LOG_LEVEL: warn
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Gate adapter leg
+        id: gate
+        run: |
+          set -euo pipefail
+          if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping adapter leg: BORINGCACHE_API_TOKEN is not configured."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Rust (BoringCache)
+        id: boringcache-rust
+        if: steps.gate.outputs.run == 'true'
+        continue-on-error: true
+        uses: boringcache/rust-action@v1
+        with:
+          workspace: ${{ github.repository }}
+          rust-version: ${{ env.RUST_VERSION }}
+          cache-tag: "rust-${{ env.RUST_VERSION }}-adapter-e2e-${{ matrix.leg }}"
+          sccache: "true"
+          sccache-mode: "local"
+          cache-target: "true"
+
+      - name: Setup Rust (Fallback)
+        if: steps.gate.outputs.run == 'true' && steps.boringcache-rust.outcome == 'failure'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Ensure sccache present
+        if: steps.gate.outputs.run == 'true' && matrix.needs_sccache == 'true'
+        run: |
+          set -euo pipefail
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --version
+            exit 0
+          fi
+          url="https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL "$url" | tar xz -C /tmp
+          sudo mv "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
+          sudo chmod +x /usr/local/bin/sccache
+          sccache --version
+
+      - name: Build CLI binary
+        if: steps.gate.outputs.run == 'true'
+        run: cargo build --release --locked
+
+      - name: Run adapter leg
+        id: run_adapter
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          LEG="${{ matrix.leg }}"
+          LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/adapter-${LEG}"
+          mkdir -p "$LOG_DIR"
+          TAG="gha-adapter-${LEG}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          BIN_PATH="${GITHUB_WORKSPACE}/target/release/boringcache"
+          case "$LEG" in
+            adapters-http)
+              BINARY="$BIN_PATH" \
+              LOG_DIR="$LOG_DIR" \
+              TAG="$TAG" \
+              ./scripts/e2e-all-adapters-http-test.sh | tee "$LOG_DIR/run.log"
+              ;;
+            dual-proxy)
+              BINARY="$BIN_PATH" \
+              LOG_DIR="$LOG_DIR" \
+              TAG="$TAG" \
+              ./scripts/e2e-dual-proxy-contention-test.sh | tee "$LOG_DIR/run.log"
+              ;;
+            *)
+              echo "Unknown adapter leg: $LEG"
+              exit 1
+              ;;
+          esac
+
+      - name: Extract adapter metrics
+        if: always() && steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          LEG="${{ matrix.leg }}"
+          LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/adapter-${LEG}"
+          status="${{ steps.run_adapter.outcome }}"
+          {
+            echo "leg=${LEG}"
+            echo "status=${status}"
+          } > "${LOG_DIR}/adapter-metrics.env"
+
+      - name: Upload adapter artifacts
+        if: always() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sccache-benchmark-adapter-${{ matrix.leg }}
+          path: benchmark-logs/adapter-${{ matrix.leg }}
 
   benchmark-summary:
     name: SCCache Benchmark Summary
     runs-on: ubuntu-latest
-    needs: benchmark
+    needs:
+      - benchmark
+      - adapter-e2e
     if: always()
     steps:
       - name: Download artifacts
@@ -164,22 +405,31 @@ jobs:
           set -euo pipefail
           echo "# SCCache Benchmark" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Backend | Cold (s) | Warm (s) | Warm Rust hit rate | Warm avg cache read hit (s) | Proxy 429 | Proxy conflicts |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---------|----------|----------|--------------------|-----------------------------|-----------|-----------------|" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "## Efficacy (cold/warm)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Backend | Status | Cold (s) | Warm (s) | Warm Rust hit rate | Warm avg cache read hit (s) | Proxy 429 | Proxy conflicts |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|--------|----------|----------|--------------------|-----------------------------|-----------|-----------------|" >> "$GITHUB_STEP_SUMMARY"
 
           local_warm=""
           proxy_warm=""
           proxy_h2_warm=""
-          for metrics in artifacts/sccache-benchmark-*/metrics.env; do
-            [[ -f "$metrics" ]] || continue
+
+          mapfile -t metric_files < <(find artifacts -type f -name metrics.env | sort)
+          for metrics in "${metric_files[@]}"; do
             # shellcheck disable=SC1090
             source "$metrics"
-            echo "| ${backend} | ${cold_seconds} | ${warm_seconds} | ${warm_rust_hit_rate}% | ${warm_avg_cache_read_hit} | ${proxy_429} | ${proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
-            case "$backend" in
-              local)    local_warm="$warm_seconds" ;;
-              proxy)    proxy_warm="$warm_seconds" ;;
-              proxy-h2) proxy_h2_warm="$warm_seconds" ;;
-            esac
+            if [[ "${phase}" != "efficacy" ]]; then
+              continue
+            fi
+            echo "| ${backend} | ${status} | ${cold_seconds} | ${warm_seconds} | ${warm_rust_hit_rate}% | ${warm_avg_cache_read_hit} | ${efficacy_proxy_429} | ${efficacy_proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "${status}" == "success" ]]; then
+              case "$backend" in
+                local) local_warm="$warm_seconds" ;;
+                proxy) proxy_warm="$warm_seconds" ;;
+                proxy-h2) proxy_h2_warm="$warm_seconds" ;;
+              esac
+            fi
           done
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -191,4 +441,53 @@ jobs:
               pct="$(awk -v p="$pw" -v l="$local_warm" 'BEGIN { if (l <= 0) { print "0.00" } else { printf "%.2f", ((p-l)/l)*100 } }')"
               echo "- Warm delta (${label} - local): ${delta}s (${pct}%)" >> "$GITHUB_STEP_SUMMARY"
             fi
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Stress (prewarm/parallel)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Backend | Status | Prewarm avg (s) | Parallel avg (s) | Parallel Rust hit rate | sccache start timeouts | sccache unexpected shutdowns | Lock waits | Proxy 429 | Proxy conflicts |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|--------|-----------------|------------------|------------------------|------------------------|------------------------------|-----------|-----------|-----------------|" >> "$GITHUB_STEP_SUMMARY"
+
+          local_parallel=""
+          proxy_parallel=""
+          proxy_h2_parallel=""
+
+          for metrics in "${metric_files[@]}"; do
+            # shellcheck disable=SC1090
+            source "$metrics"
+            if [[ "${phase}" != "stress" ]]; then
+              continue
+            fi
+            echo "| ${backend} | ${status} | ${prewarm_seconds} | ${parallel_avg_seconds} | ${parallel_rust_hit_rate}% | ${stress_sccache_start_timeouts} | ${stress_sccache_unexpected_shutdowns} | ${stress_lock_waits} | ${stress_proxy_429} | ${stress_proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "${status}" == "success" ]]; then
+              case "$backend" in
+                local) local_parallel="$parallel_avg_seconds" ;;
+                proxy) proxy_parallel="$parallel_avg_seconds" ;;
+                proxy-h2) proxy_h2_parallel="$parallel_avg_seconds" ;;
+              esac
+            fi
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          for label_var in "proxy:$proxy_parallel" "proxy-h2:$proxy_h2_parallel"; do
+            label="${label_var%%:*}"
+            pv="${label_var#*:}"
+            if [[ -n "$local_parallel" && -n "$pv" ]]; then
+              delta="$(awk -v p="$pv" -v l="$local_parallel" 'BEGIN { printf "%.2f", p-l }')"
+              pct="$(awk -v p="$pv" -v l="$local_parallel" 'BEGIN { if (l <= 0) { print "0.00" } else { printf "%.2f", ((p-l)/l)*100 } }')"
+              echo "- Parallel avg delta (${label} - local): ${delta}s (${pct}%)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Adapter E2E" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Leg | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+          mapfile -t adapter_metric_files < <(find artifacts -type f -name adapter-metrics.env | sort)
+          for metrics in "${adapter_metric_files[@]}"; do
+            # shellcheck disable=SC1090
+            source "$metrics"
+            echo "| ${leg} | ${status} |" >> "$GITHUB_STEP_SUMMARY"
           done
