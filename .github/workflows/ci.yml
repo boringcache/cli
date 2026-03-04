@@ -150,8 +150,7 @@ jobs:
           push: "false"
           load: "true"
 
-      - name: Setup BoringCache CLI (Fallback)
-        if: steps.boringcache-docker-test.outcome == 'failure'
+      - name: Setup BoringCache CLI (Host Binary For Docker)
         continue-on-error: true
         uses: boringcache/setup-boringcache@v1
         with:
@@ -407,8 +406,8 @@ jobs:
           push: "false"
           load: "true"
 
-      - name: Setup BoringCache CLI (Fallback)
-        if: matrix.use_docker == true && steps.boringcache-docker-build.outcome == 'failure'
+      - name: Setup BoringCache CLI (Host Binary For Docker)
+        if: matrix.use_docker == true
         continue-on-error: true
         uses: boringcache/setup-boringcache@v1
         with:
