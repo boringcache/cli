@@ -57,6 +57,7 @@ const KV_RESOLVE_HIT_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 const KV_FETCH_POINTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_BLOB_PRELOAD_MAX_BLOBS: usize = 2_000;
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
+const KV_BLOB_PRELOAD_SKIP_USED_PCT: u64 = 95;
 const LOOKUP_REFRESH_FLIGHT_KEY: &str = "lookup_refresh";
 static KV_BLOB_DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1993,6 +1994,13 @@ fn kv_blob_preload_max_blobs() -> usize {
     KV_BLOB_PRELOAD_MAX_BLOBS
 }
 
+fn should_skip_blob_preload(used_bytes: u64, max_bytes: u64) -> bool {
+    if max_bytes == 0 {
+        return true;
+    }
+    used_bytes.saturating_mul(100) >= max_bytes.saturating_mul(KV_BLOB_PRELOAD_SKIP_USED_PCT)
+}
+
 async fn preload_single_blob(
     state: AppState,
     cache_entry_id: String,
@@ -2018,6 +2026,16 @@ async fn preload_single_blob(
 pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
     let max_blob_bytes = kv_blob_preload_max_blob_bytes();
     let max_blobs = kv_blob_preload_max_blobs();
+    let cache_used = state.blob_read_cache.total_bytes();
+    let cache_max = state.blob_read_cache.max_bytes();
+    if should_skip_blob_preload(cache_used, cache_max) {
+        eprintln!(
+            "KV blob preload: skipped, cache near capacity used={} max={}",
+            cache_used, cache_max
+        );
+        return;
+    }
+    let mut preload_budget = cache_max.saturating_sub(cache_used);
     let mut candidates = {
         let published = state.kv_published_index.read().await;
         let mut values = Vec::new();
@@ -2025,8 +2043,13 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
             if blob.size_bytes == 0 || blob.size_bytes > max_blob_bytes {
                 continue;
             }
+            if blob.size_bytes > preload_budget {
+                continue;
+            }
             if let Some(url) = published.download_url(&blob.digest) {
+                let blob_size = blob.size_bytes;
                 values.push((blob, url.to_string()));
+                preload_budget = preload_budget.saturating_sub(blob_size);
             }
             if values.len() >= max_blobs {
                 break;
@@ -3112,5 +3135,18 @@ mod tests {
 
         assert_eq!(queue_depth.load(Ordering::Acquire), 1);
         assert_eq!(enqueue_deferred.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn should_skip_blob_preload_when_cache_is_near_capacity() {
+        assert!(should_skip_blob_preload(95, 100));
+        assert!(should_skip_blob_preload(190, 200));
+        assert!(!should_skip_blob_preload(94, 100));
+    }
+
+    #[test]
+    fn should_skip_blob_preload_when_cache_capacity_is_invalid() {
+        assert!(should_skip_blob_preload(0, 0));
+        assert!(should_skip_blob_preload(10, 0));
     }
 }
