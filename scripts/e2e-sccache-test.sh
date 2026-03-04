@@ -17,6 +17,7 @@ PARALLEL_JOBS="${PARALLEL_JOBS:-2}"
 CARGO_CMD="${CARGO_CMD:-cargo build --release --locked}"
 RUST_LOG_LEVEL="${RUST_LOG_LEVEL:-${RUST_LOG:-info}}"
 SCCACHE_LOG_LEVEL="${SCCACHE_LOG_LEVEL:-${SCCACHE_LOG:-}}"
+STRESS_PREWARM_FIXED_TARGET_DIR="${STRESS_PREWARM_FIXED_TARGET_DIR:-1}"
 SETTLE_SECS="${SETTLE_SECS:-10}"
 RUN_STRESS="${RUN_STRESS:-1}"
 RUN_EFFICACY="${RUN_EFFICACY:-1}"
@@ -37,6 +38,7 @@ SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT:-$((4200 + (RANDOM % 2000)))}"
 SCCACHE_DIR="${SCCACHE_DIR:-${TMP_ROOT}/sccache-${RUN_ID}}"
 STRESS_SCCACHE_PORT_BASE="${STRESS_SCCACHE_PORT_BASE:-$((SCCACHE_SERVER_PORT + 100))}"
 STRESS_SCCACHE_ISOLATION="${STRESS_SCCACHE_ISOLATION:-0}"
+STRESS_PREWARM_TARGET_DIR="${STRESS_PREWARM_TARGET_DIR:-${TARGET_ROOT}/stress-prewarm-stable}"
 PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
 BUDGET_EFFICACY_RUST_HIT_RATE_MIN="${BUDGET_EFFICACY_RUST_HIT_RATE_MIN:-}"
 BUDGET_EFFICACY_PROXY_429_MAX="${BUDGET_EFFICACY_PROXY_429_MAX:-}"
@@ -127,6 +129,11 @@ fi
 
 if [[ "$STRESS_SCCACHE_ISOLATION" != "0" && "$STRESS_SCCACHE_ISOLATION" != "1" ]]; then
   echo "ERROR: STRESS_SCCACHE_ISOLATION must be 0 or 1"
+  exit 1
+fi
+
+if [[ "$STRESS_PREWARM_FIXED_TARGET_DIR" != "0" && "$STRESS_PREWARM_FIXED_TARGET_DIR" != "1" ]]; then
+  echo "ERROR: STRESS_PREWARM_FIXED_TARGET_DIR must be 0 or 1"
   exit 1
 fi
 
@@ -363,6 +370,11 @@ else
 fi
 echo "Stress sccache isolation: ${STRESS_SCCACHE_ISOLATION}"
 echo "Stress sccache base port: ${STRESS_SCCACHE_PORT_BASE}"
+if [[ "$STRESS_PREWARM_FIXED_TARGET_DIR" == "1" ]]; then
+  echo "Stress prewarm target mode: fixed (${STRESS_PREWARM_TARGET_DIR})"
+else
+  echo "Stress prewarm target mode: per-job (${TARGET_ROOT}/stress-job-<n>)"
+fi
 echo "Build heartbeat: ${BUILD_HEARTBEAT_SECS}s"
 echo "Build warn threshold: ${BUILD_WARN_SECS}s"
 echo "Build stall threshold: ${BUILD_STALL_WARN_SECS}s"
@@ -918,6 +930,12 @@ phase_efficacy() {
   EFFICACY_RUST_HIT_RATE="${EFFICACY_RUST_HIT_RATE:-0}"
   EFFICACY_AVG_READ_HIT="$(stat_value 'Average cache read hit' "${phase_dir}/warm-sccache-stats.txt")"
   EFFICACY_AVG_READ_HIT="${EFFICACY_AVG_READ_HIT:-0}"
+  EFFICACY_WARM_REQUESTS="$(stat_value 'Compile requests' "${phase_dir}/warm-sccache-stats.txt")"
+  EFFICACY_WARM_HITS="$(stat_value 'Cache hits' "${phase_dir}/warm-sccache-stats.txt")"
+  EFFICACY_WARM_MISSES="$(stat_value 'Cache misses' "${phase_dir}/warm-sccache-stats.txt")"
+  EFFICACY_WARM_REQUESTS="${EFFICACY_WARM_REQUESTS:-0}"
+  EFFICACY_WARM_HITS="${EFFICACY_WARM_HITS:-0}"
+  EFFICACY_WARM_MISSES="${EFFICACY_WARM_MISSES:-0}"
   if [[ "$USE_PROXY" == "1" ]]; then
     EFFICACY_PROXY_429="$(count_pattern "$proxy_log" '429 Too Many Requests')"
     EFFICACY_PROXY_CONFLICTS="$(count_pattern "$proxy_log" 'tag conflict')"
@@ -932,6 +950,7 @@ phase_stress() {
   local parallel_req_sum parallel_hit_sum parallel_miss_sum parallel_hit_rate
   local parallel_failed all_done daemon_timeouts daemon_shutdowns
   local parallel_port_seed sccache_port_i sccache_dir_i req_i hits_i misses_i
+  local prewarm_target_dir prewarm_stats_file
   local -a build_pids=()
   local -a stress_sccache_ports=()
   local -a stress_sccache_dirs=()
@@ -963,9 +982,19 @@ phase_stress() {
   prewarm_sum=0
   health_check_fails=0
   for i in $(seq 1 "$PARALLEL_JOBS"); do
-    run_build "stress-prewarm-${i}" "${TARGET_ROOT}/stress-job-${i}" "${phase_dir}/prewarm-${i}.log"
+    if [[ "$STRESS_PREWARM_FIXED_TARGET_DIR" == "1" ]]; then
+      prewarm_target_dir="${STRESS_PREWARM_TARGET_DIR}"
+    else
+      prewarm_target_dir="${TARGET_ROOT}/stress-job-${i}"
+    fi
+    run_build "stress-prewarm-${i}" "${prewarm_target_dir}" "${phase_dir}/prewarm-${i}.log"
     health_check_fails="$((health_check_fails + $(count_pattern "${phase_dir}/prewarm-${i}.log" 'proxy health check failed')))"
     prewarm_sum="$((prewarm_sum + $(cat "${phase_dir}/prewarm-${i}.log.seconds")))"
+    prewarm_stats_file="${phase_dir}/prewarm-${i}-sccache-stats.txt"
+    SCCACHE_SERVER_PORT="$SCCACHE_SERVER_PORT" \
+      SCCACHE_DIR="$SCCACHE_DIR" \
+      sccache --show-stats >"${prewarm_stats_file}" 2>&1
+    print_stats_summary "Stress prewarm stats pass ${i}" "${prewarm_stats_file}"
     if [[ "$USE_PROXY" == "1" && "$i" -lt "$PARALLEL_JOBS" ]]; then
       echo "Waiting for writes to settle (${SETTLE_SECS}s) before next stress prewarm build..."
       sleep "$SETTLE_SECS"
@@ -1106,6 +1135,18 @@ EOF
   STRESS_DELTA="$(format_delta "$STRESS_PREWARM_SECONDS" "$STRESS_AVG_SECONDS")"
   STRESS_RUST_HIT_RATE="$(stat_value 'Cache hits rate (Rust)' "${phase_dir}/parallel-sccache-stats.txt")"
   STRESS_RUST_HIT_RATE="${STRESS_RUST_HIT_RATE:-0}"
+  STRESS_PREWARM_REQUESTS="$(stat_value 'Compile requests' "${phase_dir}/prewarm-sccache-stats.txt")"
+  STRESS_PREWARM_HITS="$(stat_value 'Cache hits' "${phase_dir}/prewarm-sccache-stats.txt")"
+  STRESS_PREWARM_MISSES="$(stat_value 'Cache misses' "${phase_dir}/prewarm-sccache-stats.txt")"
+  STRESS_PARALLEL_REQUESTS="$(stat_value 'Compile requests' "${phase_dir}/parallel-sccache-stats.txt")"
+  STRESS_PARALLEL_HITS="$(stat_value 'Cache hits' "${phase_dir}/parallel-sccache-stats.txt")"
+  STRESS_PARALLEL_MISSES="$(stat_value 'Cache misses' "${phase_dir}/parallel-sccache-stats.txt")"
+  STRESS_PREWARM_REQUESTS="${STRESS_PREWARM_REQUESTS:-0}"
+  STRESS_PREWARM_HITS="${STRESS_PREWARM_HITS:-0}"
+  STRESS_PREWARM_MISSES="${STRESS_PREWARM_MISSES:-0}"
+  STRESS_PARALLEL_REQUESTS="${STRESS_PARALLEL_REQUESTS:-0}"
+  STRESS_PARALLEL_HITS="${STRESS_PARALLEL_HITS:-0}"
+  STRESS_PARALLEL_MISSES="${STRESS_PARALLEL_MISSES:-0}"
   STRESS_LOCK_WAITS="$lock_waits"
   STRESS_PROXY_HEALTH_CHECK_FAILS="$health_check_fails"
   if [[ "$USE_PROXY" == "1" ]]; then
@@ -1133,6 +1174,7 @@ if [[ "$RUN_EFFICACY" == "1" ]]; then
   echo "  Warm:                 ${EFFICACY_WARM_SECONDS}s"
   echo "  Delta (cold-warm):    ${EFFICACY_DELTA}"
   echo "  Warm Rust hit rate:   ${EFFICACY_RUST_HIT_RATE}%"
+  echo "  Warm req/hit/miss:    ${EFFICACY_WARM_REQUESTS}/${EFFICACY_WARM_HITS}/${EFFICACY_WARM_MISSES}"
   echo "  Warm avg read hit:    ${EFFICACY_AVG_READ_HIT}s"
   echo "  Proxy 429:            ${EFFICACY_PROXY_429:-0}"
   echo "  Proxy tag conflicts:  ${EFFICACY_PROXY_CONFLICTS:-0}"
@@ -1148,6 +1190,8 @@ if [[ "$RUN_STRESS" == "1" ]]; then
   done
   echo "  Parallel avg:         ${STRESS_AVG_SECONDS}s"
   echo "  Delta (prewarm-avg):  ${STRESS_DELTA}"
+  echo "  Prewarm req/hit/miss: ${STRESS_PREWARM_REQUESTS}/${STRESS_PREWARM_HITS}/${STRESS_PREWARM_MISSES}"
+  echo "  Parallel req/hit/miss:${STRESS_PARALLEL_REQUESTS}/${STRESS_PARALLEL_HITS}/${STRESS_PARALLEL_MISSES}"
   echo "  Parallel Rust hit:    ${STRESS_RUST_HIT_RATE}%"
   echo "  sccache start timeouts: ${STRESS_SCCACHE_STARTUP_TIMEOUTS:-0}"
   echo "  sccache unexpected shutdowns: ${STRESS_SCCACHE_UNEXPECTED_SHUTDOWNS:-0}"
