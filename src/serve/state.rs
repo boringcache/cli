@@ -222,6 +222,7 @@ pub struct BlobReadCache {
     inflight: Arc<DashMap<String, Arc<Notify>>>,
     storage_index: Arc<DashMap<String, BlobReadStorageEntry>>,
     segment_state: Arc<Mutex<BlobReadSegmentState>>,
+    append_lock: Arc<Mutex<()>>,
     evict_lock: Arc<Mutex<()>>,
 }
 
@@ -251,6 +252,7 @@ impl BlobReadCache {
             inflight: Arc::new(DashMap::new()),
             storage_index,
             segment_state: Arc::new(Mutex::new(segment_state)),
+            append_lock: Arc::new(Mutex::new(())),
             evict_lock: Arc::new(Mutex::new(())),
         })
     }
@@ -473,6 +475,7 @@ impl BlobReadCache {
         digest_hex: &str,
         data: &[u8],
     ) -> io::Result<Option<BlobReadStorageEntry>> {
+        let _append_guard = self.append_lock.lock().await;
         let data_len = data.len() as u64;
         let (segment_id, path, data_offset) = self.prepare_segment_write(data_len).await?;
 
@@ -503,6 +506,7 @@ impl BlobReadCache {
         src_path: &Path,
         size_bytes: u64,
     ) -> io::Result<Option<BlobReadStorageEntry>> {
+        let _append_guard = self.append_lock.lock().await;
         let (segment_id, path, data_offset) = self.prepare_segment_write(size_bytes).await?;
 
         let mut dst = tokio::fs::OpenOptions::new()
@@ -1447,6 +1451,103 @@ mod tests {
             .await
             .expect("read cached bytes");
         assert_eq!(bytes, b"hello-world");
+    }
+
+    #[tokio::test]
+    async fn blob_read_cache_concurrent_insert_round_trip_integrity() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache = Arc::new(
+            BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 16 * 1024 * 1024)
+                .expect("blob cache"),
+        );
+
+        let mut tasks = Vec::new();
+        for idx in 0..64u64 {
+            let cache = Arc::clone(&cache);
+            tasks.push(tokio::spawn(async move {
+                let digest = format!("sha256:{:064x}", idx + 1);
+                let payload = format!("blob-{idx}-{}", "x".repeat(1024)).into_bytes();
+                let inserted = cache.insert(&digest, &payload).await.expect("insert");
+                assert!(inserted);
+                (digest, payload)
+            }));
+        }
+
+        let mut expected = Vec::new();
+        for task in tasks {
+            expected.push(task.await.expect("task"));
+        }
+
+        for (digest, payload) in expected {
+            let handle = cache.get_handle(&digest).await.expect("cache hit");
+            let mut file = tokio::fs::File::open(handle.path())
+                .await
+                .expect("open cached bytes");
+            if handle.offset() > 0 {
+                use tokio::io::AsyncSeekExt;
+                file.seek(std::io::SeekFrom::Start(handle.offset()))
+                    .await
+                    .expect("seek cached bytes");
+            }
+            use tokio::io::AsyncReadExt;
+            let mut bytes = vec![0u8; handle.size_bytes() as usize];
+            file.read_exact(&mut bytes)
+                .await
+                .expect("read cached bytes");
+            assert_eq!(bytes, payload);
+        }
+    }
+
+    #[tokio::test]
+    async fn blob_read_cache_concurrent_promote_round_trip_integrity() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache = Arc::new(
+            BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 16 * 1024 * 1024)
+                .expect("blob cache"),
+        );
+
+        let mut tasks = Vec::new();
+        for idx in 0..64u64 {
+            let cache = Arc::clone(&cache);
+            let source_path = temp_dir.path().join(format!("source-{idx}"));
+            let payload = format!("promote-{idx}-{}", "y".repeat(1024)).into_bytes();
+            tokio::fs::write(&source_path, &payload)
+                .await
+                .expect("source write");
+            tasks.push(tokio::spawn(async move {
+                let digest = format!("sha256:{:064x}", idx + 1000);
+                let promoted = cache
+                    .promote(&digest, &source_path, payload.len() as u64)
+                    .await
+                    .expect("promote");
+                assert!(promoted);
+                (digest, payload)
+            }));
+        }
+
+        let mut expected = Vec::new();
+        for task in tasks {
+            expected.push(task.await.expect("task"));
+        }
+
+        for (digest, payload) in expected {
+            let handle = cache.get_handle(&digest).await.expect("cache hit");
+            let mut file = tokio::fs::File::open(handle.path())
+                .await
+                .expect("open cached bytes");
+            if handle.offset() > 0 {
+                use tokio::io::AsyncSeekExt;
+                file.seek(std::io::SeekFrom::Start(handle.offset()))
+                    .await
+                    .expect("seek cached bytes");
+            }
+            use tokio::io::AsyncReadExt;
+            let mut bytes = vec![0u8; handle.size_bytes() as usize];
+            file.read_exact(&mut bytes)
+                .await
+                .expect("read cached bytes");
+            assert_eq!(bytes, payload);
+        }
     }
 
     #[tokio::test]
