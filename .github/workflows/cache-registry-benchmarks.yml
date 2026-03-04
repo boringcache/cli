@@ -1,4 +1,4 @@
-name: SCCache Benchmark
+name: Cache Registry Benchmarks
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
     paths:
       - "src/**"
       - "scripts/e2e-*.sh"
-      - ".github/workflows/sccache-benchmark.yml"
+      - ".github/workflows/cache-registry-benchmarks.yml"
       - "Cargo.toml"
       - "Cargo.lock"
   workflow_dispatch:
@@ -21,9 +21,46 @@ env:
   SCCACHE_VERSION: "v0.13.0"
 
 jobs:
+  build-cli-binary:
+    name: Build CLI Binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (BoringCache)
+        id: boringcache-rust
+        continue-on-error: true
+        uses: boringcache/rust-action@v1
+        with:
+          workspace: ${{ github.repository }}
+          rust-version: ${{ env.RUST_VERSION }}
+          cache-tag: "rust-${{ env.RUST_VERSION }}-cache-registry-bench-build"
+          sccache: "true"
+          sccache-mode: "local"
+          cache-target: "true"
+
+      - name: Setup Rust (Fallback)
+        if: steps.boringcache-rust.outcome == 'failure'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Build CLI binary
+        run: cargo build --release --locked
+
+      - name: Upload CLI binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: boringcache-cli-release-linux-amd64
+          path: target/release/boringcache
+          if-no-files-found: error
+
   benchmark:
     name: Benchmark (${{ matrix.backend }} / ${{ matrix.phase }})
     runs-on: ubuntu-latest
+    needs: build-cli-binary
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -102,7 +139,7 @@ jobs:
         with:
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-sccache-benchmark-${{ matrix.backend }}-${{ matrix.phase }}"
+          cache-tag: "rust-${{ env.RUST_VERSION }}-cache-registry-bench-${{ matrix.backend }}-${{ matrix.phase }}"
           sccache: "true"
           sccache-mode: ${{ matrix.sccache_backend }}
           cache-target: "true"
@@ -127,9 +164,16 @@ jobs:
           sudo chmod +x /usr/local/bin/sccache
           sccache --version
 
-      - name: Build CLI binary
+      - name: Download prebuilt CLI binary
         if: steps.gate.outputs.run == 'true'
-        run: cargo build --release --locked
+        uses: actions/download-artifact@v4
+        with:
+          name: boringcache-cli-release-linux-amd64
+          path: ${{ runner.temp }}/boringcache-bin
+
+      - name: Prepare CLI binary
+        if: steps.gate.outputs.run == 'true'
+        run: chmod +x "${RUNNER_TEMP}/boringcache-bin/boringcache"
 
       - name: Run benchmark
         id: run_benchmark
@@ -156,8 +200,8 @@ jobs:
           LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}"
           mkdir -p "$LOG_DIR"
           BRANCH_SLUG="${GITHUB_REF_NAME//\//-}"
-          TAG="gha-sccache-${{ matrix.backend }}-${{ matrix.phase }}-rust-${RUST_VERSION}-${BRANCH_SLUG}"
-          BINARY="${GITHUB_WORKSPACE}/target/release/boringcache" \
+          TAG="gha-cache-registry-${{ matrix.backend }}-${{ matrix.phase }}-rust-${RUST_VERSION}-${BRANCH_SLUG}"
+          BINARY="${RUNNER_TEMP}/boringcache-bin/boringcache" \
           WORKSPACE="${GITHUB_REPOSITORY}" \
           LOG_DIR="$LOG_DIR" \
           TAG="$TAG" \
@@ -265,12 +309,13 @@ jobs:
         if: always() && steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: sccache-benchmark-${{ matrix.backend }}-${{ matrix.phase }}
+          name: cache-registry-benchmark-${{ matrix.backend }}-${{ matrix.phase }}
           path: benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}
 
   adapter-e2e:
     name: Adapter E2E (${{ matrix.leg }})
     runs-on: ubuntu-latest
+    needs: build-cli-binary
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -337,9 +382,16 @@ jobs:
           sudo chmod +x /usr/local/bin/sccache
           sccache --version
 
-      - name: Build CLI binary
+      - name: Download prebuilt CLI binary
         if: steps.gate.outputs.run == 'true'
-        run: cargo build --release --locked
+        uses: actions/download-artifact@v4
+        with:
+          name: boringcache-cli-release-linux-amd64
+          path: ${{ runner.temp }}/boringcache-bin
+
+      - name: Prepare CLI binary
+        if: steps.gate.outputs.run == 'true'
+        run: chmod +x "${RUNNER_TEMP}/boringcache-bin/boringcache"
 
       - name: Run adapter leg
         id: run_adapter
@@ -350,7 +402,7 @@ jobs:
           LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/adapter-${LEG}"
           mkdir -p "$LOG_DIR"
           TAG="gha-adapter-${LEG}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          BIN_PATH="${GITHUB_WORKSPACE}/target/release/boringcache"
+          BIN_PATH="${RUNNER_TEMP}/boringcache-bin/boringcache"
           case "$LEG" in
             adapters-http)
               BINARY="$BIN_PATH" \
@@ -386,11 +438,11 @@ jobs:
         if: always() && steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: sccache-benchmark-adapter-${{ matrix.leg }}
+          name: cache-registry-benchmark-adapter-${{ matrix.leg }}
           path: benchmark-logs/adapter-${{ matrix.leg }}
 
   benchmark-summary:
-    name: SCCache Benchmark Summary
+    name: Cache Registry Benchmark Summary
     runs-on: ubuntu-latest
     needs:
       - benchmark
@@ -405,7 +457,7 @@ jobs:
       - name: Write summary
         run: |
           set -euo pipefail
-          echo "# SCCache Benchmark" >> "$GITHUB_STEP_SUMMARY"
+          echo "# Cache Registry Benchmarks" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           echo "## Efficacy (cold/warm)" >> "$GITHUB_STEP_SUMMARY"
