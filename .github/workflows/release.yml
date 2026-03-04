@@ -289,13 +289,15 @@ jobs:
           push: "false"
           load: "true"
 
-      - name: Setup BoringCache CLI (Host Binary For Docker)
+      - name: Copy BoringCache CLI for Docker mount
         if: matrix.use_docker == true
-        continue-on-error: true
-        uses: boringcache/setup-boringcache@v1
-        with:
-          token: ${{ secrets.BORINGCACHE_API_TOKEN }}
-          platform: ${{ matrix.musl && 'alpine-amd64' || 'linux-amd64' }}
+        run: |
+          set -eu
+          if command -v boringcache >/dev/null 2>&1; then
+            cp "$(command -v boringcache)" "${RUNNER_TEMP}/boringcache-bin"
+            chmod +x "${RUNNER_TEMP}/boringcache-bin"
+            echo "BORINGCACHE_BIN_PATH=${RUNNER_TEMP}/boringcache-bin" >> "${GITHUB_ENV}"
+          fi
 
       # Docker builds for Debian/Alpine
       - name: Build in Docker container
@@ -306,8 +308,10 @@ jobs:
           if docker image inspect "boringcache-cli-release-build-${{ matrix.name }}:latest" >/dev/null 2>&1; then
             DOCKER_IMAGE="boringcache-cli-release-build-${{ matrix.name }}:latest"
           fi
-          if command -v boringcache >/dev/null 2>&1; then
-            BC_MOUNT="-v $(which boringcache):/usr/local/bin/boringcache:ro"
+          if [ -n "${BORINGCACHE_BIN_PATH:-}" ] && [ -f "${BORINGCACHE_BIN_PATH}" ]; then
+            BC_MOUNT="-v ${BORINGCACHE_BIN_PATH}:/usr/local/bin/boringcache:ro"
+          elif command -v boringcache >/dev/null 2>&1; then
+            BC_MOUNT="-v $(command -v boringcache):/usr/local/bin/boringcache:ro"
           fi
           docker run --rm \
             -v "$PWD:/workspace" \
@@ -386,7 +390,7 @@ jobs:
               rustup target add ${{ matrix.target }}
 
               # Build with appropriate flags
-              if command -v boringcache >/dev/null 2>&1 && [ -n "${BORINGCACHE_API_TOKEN:-}" ]; then
+              if boringcache --version >/dev/null 2>&1 && [ -n "${BORINGCACHE_API_TOKEN:-}" ]; then
                 CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
                 CARGO_REGISTRY_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-cargo-registry-${{ matrix.name }}:${CARGO_HOME_DIR}/registry"
                 CARGO_GIT_CACHE_KEY="rust-${{ env.RUST_VERSION }}-release-cargo-git-${{ matrix.name }}:${CARGO_HOME_DIR}/git"
