@@ -1888,7 +1888,6 @@ mod tests {
             registry_root_tag: "registry".to_string(),
             fail_on_cache_error: true,
             kv_manifest_warm_enabled: true,
-            write_mode: crate::serve::state::WriteMode::WriteBack,
             blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
             upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
             kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),

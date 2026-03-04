@@ -37,12 +37,6 @@ pub fn diagnostics_enabled() -> bool {
     env_bool("BORINGCACHE_DEBUG_DIAGNOSTICS").unwrap_or(false)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WriteMode {
-    WriteBack,
-    WriteThrough,
-}
-
 #[derive(Clone)]
 pub struct AppState {
     pub api_client: ApiClient,
@@ -52,7 +46,6 @@ pub struct AppState {
     pub registry_root_tag: String,
     pub fail_on_cache_error: bool,
     pub kv_manifest_warm_enabled: bool,
-    pub write_mode: WriteMode,
     pub blob_locator: Arc<RwLock<BlobLocatorCache>>,
     pub upload_sessions: Arc<RwLock<UploadSessionStore>>,
     pub kv_pending: Arc<RwLock<KvPendingStore>>,

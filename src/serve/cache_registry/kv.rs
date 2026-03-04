@@ -21,7 +21,7 @@ use crate::cas_transport::upload_payload;
 use crate::error::BoringCacheError;
 use crate::manifest::EntryType;
 use crate::progress::TransferProgress;
-use crate::serve::state::{diagnostics_enabled, env_bool, AppState, KvFlushingSnapshot, WriteMode};
+use crate::serve::state::{diagnostics_enabled, env_bool, AppState, KvFlushingSnapshot};
 
 use super::error::RegistryError;
 
@@ -50,7 +50,6 @@ const KV_BLOB_URL_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::fr
 const KV_LOOKUP_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_PUT_BODY_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const KV_PUT_BODY_SLOW_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
-const KV_WRITE_THROUGH_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const KV_RESOLVE_HIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_FETCH_POINTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_BLOB_PRELOAD_MAX_BLOBS: usize = 2_000;
@@ -336,44 +335,21 @@ pub(crate) async fn put_kv_object(
         .kv_last_put
         .store(crate::serve::state::unix_time_ms_now(), Ordering::Release);
 
-    let flush_result = match state.write_mode {
-        WriteMode::WriteBack => {
-            put_probe.stage("flush_gate_wait");
-            let gated = {
-                let gate = state.kv_next_flush_at.read().await;
-                gate.is_some_and(|t| std::time::Instant::now() < t)
-            };
-            put_probe.stage("flush_gate_checked");
-            if should_flush && !gated {
-                if let Some(flush_guard) = try_schedule_flush(state) {
-                    put_probe.stage("flush_spawned");
-                    let flush_state = state.clone();
-                    tokio::spawn(async move {
-                        let _flush_guard = flush_guard;
-                        flush_kv_index(&flush_state).await;
-                    });
-                }
-            }
-            Ok(())
-        }
-        WriteMode::WriteThrough => {
-            put_probe.stage("flush_sync_wait");
-            let result = flush_write_through(state).await;
-            put_probe.stage("flush_sync_done");
-            result
-        }
+    put_probe.stage("flush_gate_wait");
+    let gated = {
+        let gate = state.kv_next_flush_at.read().await;
+        gate.is_some_and(|t| std::time::Instant::now() < t)
     };
-
-    if let Err(error) = flush_result {
-        state.cache_ops.record(
-            namespace.into(),
-            super::cache_ops::Op::Put,
-            super::cache_ops::OpResult::Error,
-            false,
-            0,
-            put_start.elapsed().as_millis() as u64,
-        );
-        return Err(error);
+    put_probe.stage("flush_gate_checked");
+    if should_flush && !gated {
+        if let Some(flush_guard) = try_schedule_flush(state) {
+            put_probe.stage("flush_spawned");
+            let flush_state = state.clone();
+            tokio::spawn(async move {
+                let _flush_guard = flush_guard;
+                flush_kv_index(&flush_state).await;
+            });
+        }
     }
 
     state.cache_ops.record(
@@ -386,54 +362,8 @@ pub(crate) async fn put_kv_object(
     );
 
     put_probe.stage("respond");
-    let write_mode = match state.write_mode {
-        WriteMode::WriteBack => "queued",
-        WriteMode::WriteThrough => "flushed",
-    };
-    log::debug!("KV PUT {scoped_key}: {write_mode} ({blob_size} bytes, digest={blob_digest})");
+    log::debug!("KV PUT {scoped_key}: queued ({blob_size} bytes, digest={blob_digest})");
     Ok((put_status, Body::empty()).into_response())
-}
-
-fn write_through_flush_timeout() -> std::time::Duration {
-    std::env::var("BORINGCACHE_KV_WRITE_THROUGH_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(|secs| std::time::Duration::from_secs(secs.clamp(1, 300)))
-        .unwrap_or(KV_WRITE_THROUGH_FLUSH_TIMEOUT)
-}
-
-async fn flush_write_through(state: &AppState) -> Result<(), RegistryError> {
-    let timeout = write_through_flush_timeout();
-    let flush_state = state.clone();
-    let flush_task = tokio::spawn(async move { flush_kv_index(&flush_state).await });
-    let flush_result = tokio::time::timeout(timeout, flush_task)
-        .await
-        .map_err(|_| {
-            RegistryError::new(
-                StatusCode::GATEWAY_TIMEOUT,
-                format!("write_through flush timed out after {}s", timeout.as_secs()),
-            )
-        })?
-        .map_err(|error| {
-            RegistryError::internal(format!("write_through flush task failed: {error}"))
-        })?;
-
-    match flush_result {
-        FlushResult::Ok => Ok(()),
-        FlushResult::Conflict => Err(RegistryError::new(
-            StatusCode::CONFLICT,
-            "write_through flush conflicted, retry request",
-        )),
-        FlushResult::Error => Err(RegistryError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "write_through flush failed, retry request",
-        )),
-        FlushResult::Permanent => Err(RegistryError::new(
-            StatusCode::BAD_GATEWAY,
-            "write_through flush failed permanently",
-        )),
-    }
 }
 
 async fn resolve_download_url(

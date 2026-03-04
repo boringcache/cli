@@ -14,8 +14,7 @@ use tokio::sync::{oneshot, RwLock};
 use crate::api::client::ApiClient;
 use crate::serve::state::{
     diagnostics_enabled, env_bool, unix_time_ms_now, AppState, BlobLocatorCache, BlobReadCache,
-    KvPendingStore, KvPublishedIndex, UploadSessionStore, WriteMode,
-    DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
+    KvPendingStore, KvPublishedIndex, UploadSessionStore, DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
 };
 use crate::tag_utils::TagResolver;
 
@@ -199,7 +198,6 @@ async fn build_server_runtime(
 ) -> Result<(AppState, TcpListener)> {
     let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
     let (kv_warm_enabled, kv_warm_from_env) = kv_manifest_warm_enabled();
-    let write_mode = WriteMode::WriteBack;
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
     let (pf_concurrency, pf_from_env) = blob_prefetch_concurrency(dl_concurrency);
     let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
@@ -212,7 +210,6 @@ async fn build_server_runtime(
         registry_root_tag,
         fail_on_cache_error,
         kv_manifest_warm_enabled: kv_warm_enabled,
-        write_mode,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
