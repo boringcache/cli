@@ -52,6 +52,7 @@ pub struct AppState {
     pub kv_flush_lock: Arc<Mutex<()>>,
     pub kv_lookup_inflight: Arc<DashMap<String, Arc<Notify>>>,
     pub kv_last_put: Arc<AtomicU64>,
+    pub kv_backlog_rejects: Arc<AtomicU64>,
     pub kv_next_flush_at: Arc<RwLock<Option<Instant>>>,
     pub kv_flush_scheduled: Arc<AtomicBool>,
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
@@ -612,6 +613,7 @@ impl UploadSessionStore {
 pub const MAX_SPOOL_BYTES: u64 = 512 * 1024 * 1024;
 pub const FLUSH_BLOB_THRESHOLD: usize = 500;
 pub const FLUSH_SIZE_THRESHOLD: u64 = 256 * 1024 * 1024;
+pub const KV_BACKLOG_POLICY: &str = "reject_when_spool_full";
 
 pub(crate) fn unix_time_ms_now() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -627,6 +629,7 @@ pub struct KvPendingStore {
     entries: BTreeMap<String, BlobDescriptor>,
     blob_refs: HashMap<String, BlobRef>,
     total_spool_bytes: u64,
+    oldest_entry_unix_ms: Option<u64>,
 }
 
 struct BlobRef {
@@ -642,6 +645,7 @@ impl KvPendingStore {
         blob: BlobDescriptor,
         temp_path: PathBuf,
     ) -> Option<PathBuf> {
+        let was_empty = self.entries.is_empty();
         if let Some(old) = self.entries.get(&scoped_key) {
             if old.digest == blob.digest {
                 return Some(temp_path);
@@ -657,10 +661,11 @@ impl KvPendingStore {
             None => {
                 if self.total_spool_bytes + blob.size_bytes > MAX_SPOOL_BYTES {
                     log::warn!(
-                        "KV spool budget exceeded ({} + {} > {}), dropping oldest",
+                        "KV spool budget exceeded before insert ({} + {} > {}, policy={})",
                         self.total_spool_bytes,
                         blob.size_bytes,
-                        MAX_SPOOL_BYTES
+                        MAX_SPOOL_BYTES,
+                        KV_BACKLOG_POLICY
                     );
                 }
                 self.total_spool_bytes += blob.size_bytes;
@@ -677,6 +682,9 @@ impl KvPendingStore {
         };
 
         self.entries.insert(scoped_key, blob);
+        if was_empty && !self.entries.is_empty() {
+            self.oldest_entry_unix_ms = Some(unix_time_ms_now());
+        }
         redundant_path
     }
 
@@ -713,6 +721,7 @@ impl KvPendingStore {
             .map(|(digest, bref)| (digest, bref.path))
             .collect();
         self.total_spool_bytes = 0;
+        self.oldest_entry_unix_ms = None;
         (entries, blob_paths)
     }
 
@@ -721,6 +730,7 @@ impl KvPendingStore {
         entries: BTreeMap<String, BlobDescriptor>,
         blob_paths: HashMap<String, PathBuf>,
     ) -> Vec<PathBuf> {
+        let was_empty = self.entries.is_empty();
         let mut cleanup_paths = Vec::new();
         let mut restore_refcounts: HashMap<String, u32> = HashMap::new();
         for (key, blob) in &entries {
@@ -762,6 +772,9 @@ impl KvPendingStore {
                 cleanup_paths.push(path.clone());
             }
         }
+        if was_empty && !self.entries.is_empty() {
+            self.oldest_entry_unix_ms = Some(unix_time_ms_now());
+        }
         cleanup_paths
     }
 
@@ -775,6 +788,11 @@ impl KvPendingStore {
 
     pub fn total_spool_bytes(&self) -> u64 {
         self.total_spool_bytes
+    }
+
+    pub fn oldest_entry_age_ms(&self, now_ms: u64) -> Option<u64> {
+        self.oldest_entry_unix_ms
+            .map(|oldest| now_ms.saturating_sub(oldest))
     }
 
     pub fn is_empty(&self) -> bool {

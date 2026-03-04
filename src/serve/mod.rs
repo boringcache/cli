@@ -15,6 +15,7 @@ use crate::api::client::ApiClient;
 use crate::serve::state::{
     diagnostics_enabled, env_bool, unix_time_ms_now, AppState, BlobLocatorCache, BlobReadCache,
     KvPendingStore, KvPublishedIndex, UploadSessionStore, DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
+    KV_BACKLOG_POLICY,
 };
 use crate::tag_utils::TagResolver;
 
@@ -216,6 +217,7 @@ async fn build_server_runtime(
         kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
         kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
         kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_next_flush_at: Arc::new(RwLock::new(None)),
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
@@ -286,6 +288,7 @@ async fn build_server_runtime(
         },
         src(kv_warm_from_env)
     );
+    eprintln!("  KV backlog policy: {KV_BACKLOG_POLICY}");
     for dir_name in ["boringcache-kv-blobs", "boringcache-uploads"] {
         let stale_dir = std::env::temp_dir().join(dir_name);
         if stale_dir.exists() {
@@ -312,13 +315,26 @@ fn spawn_maintenance_tasks(state: &AppState) {
                 interval.tick().await;
                 let ts = chrono::Utc::now().format("%H:%M:%S");
                 eprintln!("HEARTBEAT ts={ts} phase=tick");
-                let pending_count = {
+                let (pending_count, pending_bytes, pending_oldest_ms) = {
+                    let now_ms = unix_time_ms_now();
                     let p = heartbeat_state.kv_pending.read().await;
-                    p.entry_count()
+                    (
+                        p.entry_count(),
+                        p.total_spool_bytes(),
+                        p.oldest_entry_age_ms(now_ms).unwrap_or(0),
+                    )
                 };
                 let published_count = {
                     let p = heartbeat_state.kv_published_index.read().await;
                     p.entry_count()
+                };
+                let flush_gate_delay_ms = {
+                    let gate = heartbeat_state.kv_next_flush_at.read().await;
+                    gate.map(|next| {
+                        next.saturating_duration_since(std::time::Instant::now())
+                            .as_millis() as u64
+                    })
+                    .unwrap_or(0)
                 };
                 let flights = heartbeat_state.kv_lookup_inflight.len();
                 let cache_bytes = heartbeat_state.blob_read_cache.total_bytes();
@@ -326,9 +342,14 @@ fn spawn_maintenance_tasks(state: &AppState) {
                 let (inflight, total) = cache_registry::request_counters();
                 let cache_ops_queue_depth = heartbeat_state.cache_ops.queue_depth();
                 let cache_ops_dropped_total = heartbeat_state.cache_ops.dropped_events_total();
+                let backlog_rejects = heartbeat_state.kv_backlog_rejects.load(Ordering::Acquire);
                 eprintln!(
-                    "HEARTBEAT ts={ts} reqs={total} inflight={inflight} pending={} published={} flights={} cache_bytes={} breaker={} ops_q={} ops_drop={}",
+                    "HEARTBEAT ts={ts} reqs={total} inflight={inflight} pending={} pending_bytes={} pending_oldest_ms={} flush_gate_ms={} backlog_rejects={} published={} flights={} cache_bytes={} breaker={} ops_q={} ops_drop={}",
                     pending_count,
+                    pending_bytes,
+                    pending_oldest_ms,
+                    flush_gate_delay_ms,
+                    backlog_rejects,
                     published_count,
                     flights,
                     cache_bytes,

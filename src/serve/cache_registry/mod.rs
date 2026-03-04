@@ -12,6 +12,8 @@ use crate::serve::state::{diagnostics_enabled, env_bool, AppState};
 
 static INFLIGHT_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_REQUESTS: AtomicU64 = AtomicU64::new(0);
+const SLOW_REQUEST_WARN_MS: u128 = 2_000;
+const PUT_SLOW_WARN_MS: u64 = 2_000;
 tokio::task_local! {
     static REQUEST_SEQ: u64;
 }
@@ -114,7 +116,20 @@ impl PutProbeGuard {
 impl Drop for PutProbeGuard {
     fn drop(&mut self) {
         if let Some(seq) = self.seq {
-            put_progress_map().remove(&seq);
+            if let Some((_, progress)) = put_progress_map().remove(&seq) {
+                let age_ms = unix_time_ms_now().saturating_sub(progress.started_ms);
+                if age_ms >= PUT_SLOW_WARN_MS {
+                    log::warn!(
+                        "slow_kv_put seq={} age_ms={} stage={} bytes_read={} bytes_written={} key={}",
+                        seq,
+                        age_ms,
+                        progress.stage,
+                        progress.bytes_read,
+                        progress.bytes_written,
+                        progress.scoped_key,
+                    );
+                }
+            }
         }
     }
 }
@@ -285,6 +300,16 @@ async fn dispatch_with_path(
     match response {
         Ok(response) => {
             let elapsed_ms = request_start.elapsed().as_millis();
+            if elapsed_ms >= SLOW_REQUEST_WARN_MS {
+                log::warn!(
+                    "slow_cache_registry_request method={} path={} status={} elapsed_ms={} inflight={}",
+                    request_method,
+                    request_path,
+                    response.status(),
+                    elapsed_ms,
+                    INFLIGHT_REQUESTS.load(Ordering::Relaxed),
+                );
+            }
             if is_sccache_route && sccache_request_log_enabled() {
                 let status = response.status();
                 eprintln!("REQ#{seq} {request_method} {request_path} -> {status} ({elapsed_ms}ms)",);
@@ -293,6 +318,16 @@ async fn dispatch_with_path(
         }
         Err(error) => {
             let elapsed_ms = request_start.elapsed().as_millis();
+            if elapsed_ms >= SLOW_REQUEST_WARN_MS {
+                log::warn!(
+                    "slow_cache_registry_request method={} path={} status={} elapsed_ms={} inflight={}",
+                    request_method,
+                    request_path,
+                    error.status,
+                    elapsed_ms,
+                    INFLIGHT_REQUESTS.load(Ordering::Relaxed),
+                );
+            }
             if is_sccache_route && sccache_request_log_enabled() {
                 if error.status.is_server_error() {
                     let compact = error

@@ -21,7 +21,9 @@ use crate::cas_transport::upload_payload;
 use crate::error::BoringCacheError;
 use crate::manifest::EntryType;
 use crate::progress::TransferProgress;
-use crate::serve::state::{diagnostics_enabled, env_bool, AppState, KvFlushingSnapshot};
+use crate::serve::state::{
+    diagnostics_enabled, env_bool, AppState, KvFlushingSnapshot, KV_BACKLOG_POLICY,
+};
 
 use super::error::RegistryError;
 
@@ -263,6 +265,7 @@ pub(crate) async fn put_kv_object(
     {
         let pending = state.kv_pending.read().await;
         if pending.total_spool_bytes() >= crate::serve::state::MAX_SPOOL_BYTES {
+            state.kv_backlog_rejects.fetch_add(1, Ordering::AcqRel);
             state.cache_ops.record(
                 namespace.into(),
                 super::cache_ops::Op::Put,
@@ -273,7 +276,7 @@ pub(crate) async fn put_kv_object(
             );
             return Err(RegistryError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "KV spool budget exceeded, try again after flush",
+                format!("KV spool budget exceeded ({KV_BACKLOG_POLICY}), try again after flush"),
             ));
         }
     }
@@ -292,6 +295,7 @@ pub(crate) async fn put_kv_object(
         if projected_spool > crate::serve::state::MAX_SPOOL_BYTES {
             drop(pending);
             let _ = tokio::fs::remove_file(&path).await;
+            state.kv_backlog_rejects.fetch_add(1, Ordering::AcqRel);
             state.cache_ops.record(
                 namespace.into(),
                 super::cache_ops::Op::Put,
@@ -302,7 +306,7 @@ pub(crate) async fn put_kv_object(
             );
             return Err(RegistryError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "KV spool budget exceeded, try again after flush",
+                format!("KV spool budget exceeded ({KV_BACKLOG_POLICY}), try again after flush"),
             ));
         }
 
