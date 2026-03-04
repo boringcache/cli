@@ -199,7 +199,7 @@ async fn build_server_runtime(
 ) -> Result<(AppState, TcpListener)> {
     let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
     let (kv_warm_enabled, kv_warm_from_env) = kv_manifest_warm_enabled();
-    let (write_mode, write_mode_from_env) = kv_write_mode();
+    let write_mode = WriteMode::WriteBack;
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
     let (pf_concurrency, pf_from_env) = blob_prefetch_concurrency(dl_concurrency);
     let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
@@ -289,15 +289,6 @@ async fn build_server_runtime(
         },
         src(kv_warm_from_env)
     );
-    eprintln!(
-        "  KV write mode: {} ({})",
-        match state.write_mode {
-            WriteMode::WriteBack => "write_back",
-            WriteMode::WriteThrough => "write_through",
-        },
-        src(write_mode_from_env)
-    );
-
     for dir_name in ["boringcache-kv-blobs", "boringcache-uploads"] {
         let stale_dir = std::env::temp_dir().join(dir_name);
         if stale_dir.exists() {
@@ -547,27 +538,6 @@ fn kv_manifest_warm_enabled() -> (bool, bool) {
     }
 
     (true, false)
-}
-
-fn kv_write_mode() -> (WriteMode, bool) {
-    let Some(raw_mode) = std::env::var("BORINGCACHE_KV_WRITE_MODE").ok() else {
-        return (WriteMode::WriteBack, false);
-    };
-
-    let normalized = raw_mode.trim().to_ascii_lowercase();
-    let mode = match normalized.as_str() {
-        "write_back" | "write-back" | "wb" => Some(WriteMode::WriteBack),
-        "write_through" | "write-through" | "wt" => Some(WriteMode::WriteThrough),
-        _ => None,
-    };
-
-    match mode {
-        Some(mode) => (mode, true),
-        None => {
-            log::warn!("Invalid BORINGCACHE_KV_WRITE_MODE={raw_mode}; defaulting to write_back");
-            (WriteMode::WriteBack, false)
-        }
-    }
 }
 
 fn blob_download_concurrency() -> (usize, bool) {

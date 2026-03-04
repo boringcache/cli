@@ -22,10 +22,8 @@ SETTLE_SECS="${SETTLE_SECS:-10}"
 RUN_STRESS="${RUN_STRESS:-1}"
 RUN_EFFICACY="${RUN_EFFICACY:-1}"
 RUN_SCOPED_TAGS="${RUN_SCOPED_TAGS:-0}"
-RUN_DURABILITY="${RUN_DURABILITY:-0}"
 SCCACHE_BACKEND="${SCCACHE_BACKEND:-proxy}"
 BLOB_PREFETCH_CONCURRENCY="${BORINGCACHE_BLOB_PREFETCH_CONCURRENCY:-1}"
-KV_WRITE_MODE="${KV_WRITE_MODE:-${BORINGCACHE_KV_WRITE_MODE:-write_back}}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
 PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-20}"
@@ -76,11 +74,6 @@ fi
 
 if [[ "$RUN_EFFICACY" == "0" && "$RUN_STRESS" == "0" ]]; then
   echo "ERROR: at least one phase must be enabled (RUN_EFFICACY=1 and/or RUN_STRESS=1)"
-  exit 1
-fi
-
-if [[ "$RUN_DURABILITY" != "0" && "$RUN_DURABILITY" != "1" ]]; then
-  echo "ERROR: RUN_DURABILITY must be 0 or 1"
   exit 1
 fi
 
@@ -158,25 +151,6 @@ if [[ "$BLOB_PREFETCH_CONCURRENCY" == "0" ]]; then
   echo "WARNING: blob prefetch is disabled (BORINGCACHE_BLOB_PREFETCH_CONCURRENCY=0); proxy warm performance may lag local sccache."
 fi
 
-case "$KV_WRITE_MODE" in
-  write_back|write-back|wb)
-    KV_WRITE_MODE_NORMALIZED="write_back"
-    ;;
-  write_through|write-through|wt)
-    KV_WRITE_MODE_NORMALIZED="write_through"
-    ;;
-  *)
-    echo "ERROR: KV_WRITE_MODE/BORINGCACHE_KV_WRITE_MODE must be one of: write_back, write-through, write_through, wb, wt"
-    exit 1
-    ;;
-esac
-
-if [[ "$RUN_DURABILITY" == "1" ]]; then
-  KV_WRITE_MODE_NORMALIZED="write_through"
-fi
-
-export BORINGCACHE_KV_WRITE_MODE="$KV_WRITE_MODE_NORMALIZED"
-
 is_number() {
   [[ "$1" =~ ^-?[0-9]+([.][0-9]+)?$ ]]
 }
@@ -211,18 +185,12 @@ if [[ "$SCCACHE_BACKEND" == "proxy" ]]; then
 fi
 
 TAG_SUFFIX=""
-WRITE_MODE_TAG_SUFFIX=""
 if [[ "$RUN_SCOPED_TAGS" == "1" ]]; then
   TAG_SUFFIX="-${RUN_ID}"
-  if [[ "$KV_WRITE_MODE_NORMALIZED" == "write_through" ]]; then
-    WRITE_MODE_TAG_SUFFIX="-wt"
-  else
-    WRITE_MODE_TAG_SUFFIX="-wb"
-  fi
 fi
 
-EFFICACY_TAG="${EFFICACY_TAG:-${TAG_BASE}-stable${WRITE_MODE_TAG_SUFFIX}${TAG_SUFFIX}}"
-STRESS_TAG="${STRESS_TAG:-${TAG_BASE}-stress${WRITE_MODE_TAG_SUFFIX}${TAG_SUFFIX}}"
+EFFICACY_TAG="${EFFICACY_TAG:-${TAG_BASE}-stable${TAG_SUFFIX}}"
+STRESS_TAG="${STRESS_TAG:-${TAG_BASE}-stress${TAG_SUFFIX}}"
 
 PROXY_PID=""
 INTERRUPTED="0"
@@ -392,7 +360,6 @@ echo "Parallel jobs: $PARALLEL_JOBS"
 echo "Run efficacy phase: ${RUN_EFFICACY}"
 echo "Run stress phase: ${RUN_STRESS}"
 echo "Run-scoped tags: $RUN_SCOPED_TAGS"
-echo "Run durability mode: ${RUN_DURABILITY}"
 echo "sccache backend: $SCCACHE_BACKEND"
 echo "sccache server port: $SCCACHE_SERVER_PORT"
 echo "sccache dir: $SCCACHE_DIR"
@@ -417,7 +384,6 @@ if [[ -n "$BLOB_PREFETCH_CONCURRENCY" ]]; then
 else
   echo "Blob prefetch concurrency: auto (default)"
 fi
-echo "KV write mode: ${BORINGCACHE_KV_WRITE_MODE:-write_back}"
 echo "Cargo command: $CARGO_CMD"
 echo "Logs: $LOG_DIR"
 echo "sccache control log: ${LOG_DIR}/sccache-control.log"
@@ -506,7 +472,6 @@ start_proxy() {
   if [[ -n "$BLOB_PREFETCH_CONCURRENCY" ]]; then
     BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
       BORINGCACHE_BLOB_PREFETCH_CONCURRENCY="$BLOB_PREFETCH_CONCURRENCY" \
-      BORINGCACHE_KV_WRITE_MODE="$KV_WRITE_MODE_NORMALIZED" \
       RUST_LOG="$RUST_LOG_LEVEL" \
       "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
       --host "$PROXY_HOST" \
@@ -515,7 +480,6 @@ start_proxy() {
       --no-git >>"$log_file" 2>&1 &
   else
     BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
-      BORINGCACHE_KV_WRITE_MODE="$KV_WRITE_MODE_NORMALIZED" \
       RUST_LOG="$RUST_LOG_LEVEL" \
       "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
       --host "$PROXY_HOST" \
