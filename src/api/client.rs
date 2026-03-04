@@ -1540,9 +1540,7 @@ fn build_transfer_client_with_headers(
     let is_test_mode = std::env::var("BORINGCACHE_TEST_MODE")
         .map(|value| value == "1")
         .unwrap_or(false);
-    let use_http2 = std::env::var("BORINGCACHE_TRANSFER_HTTP2")
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false);
+    let use_http2 = transfer_http2_enabled();
 
     let mut builder = reqwest::Client::builder()
         .pool_max_idle_per_host(256)
@@ -1576,6 +1574,17 @@ fn build_transfer_client_with_headers(
     builder
         .build()
         .context("Failed to build transfer HTTP client")
+}
+
+fn transfer_http2_enabled() -> bool {
+    let Ok(raw) = std::env::var("BORINGCACHE_TRANSFER_HTTP2") else {
+        return true;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "no" | "off" => false,
+        "1" | "true" | "yes" | "on" => true,
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -1636,6 +1645,39 @@ mod tests {
 
         let larger = api_batch_concurrency(32);
         assert!((1..=32).contains(&larger));
+    }
+
+    #[test]
+    fn test_transfer_http2_enabled_defaults_true() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+
+        std::env::remove_var("BORINGCACHE_TRANSFER_HTTP2");
+        assert!(transfer_http2_enabled());
+    }
+
+    #[test]
+    fn test_transfer_http2_enabled_respects_false_values() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+
+        for value in ["0", "false", "FALSE", "no", "off"] {
+            std::env::set_var("BORINGCACHE_TRANSFER_HTTP2", value);
+            assert!(!transfer_http2_enabled(), "value {value} should disable h2");
+        }
+        std::env::remove_var("BORINGCACHE_TRANSFER_HTTP2");
+    }
+
+    #[test]
+    fn test_transfer_http2_enabled_respects_true_and_unknown_values() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+
+        for value in ["1", "true", "TRUE", "yes", "on", "unexpected"] {
+            std::env::set_var("BORINGCACHE_TRANSFER_HTTP2", value);
+            assert!(transfer_http2_enabled(), "value {value} should enable h2");
+        }
+        std::env::remove_var("BORINGCACHE_TRANSFER_HTTP2");
     }
 
     #[test]
