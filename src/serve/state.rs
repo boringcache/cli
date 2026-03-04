@@ -485,7 +485,6 @@ impl BlobReadCache {
         tokio::io::AsyncWriteExt::write_all(&mut file, &header).await?;
         tokio::io::AsyncWriteExt::write_all(&mut file, data).await?;
         tokio::io::AsyncWriteExt::flush(&mut file).await?;
-        file.sync_data().await?;
         drop(file);
 
         let written = BLOB_READ_SEGMENT_HEADER_BYTES as u64 + data_len;
@@ -519,7 +518,6 @@ impl BlobReadCache {
             return Ok(None);
         }
         tokio::io::AsyncWriteExt::flush(&mut dst).await?;
-        dst.sync_data().await?;
         drop(dst);
 
         let written = BLOB_READ_SEGMENT_HEADER_BYTES as u64 + copied;
