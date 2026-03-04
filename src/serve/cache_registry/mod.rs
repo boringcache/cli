@@ -192,6 +192,7 @@ mod turborepo;
 
 pub use error::RegistryError;
 pub(crate) use kv::cleanup_expired_kv_misses;
+pub(crate) use kv::enqueue_replication_flush_hint;
 pub(crate) use kv::flush_kv_index;
 pub(crate) use kv::preload_kv_index;
 pub(crate) use kv::refresh_kv_index;
@@ -240,10 +241,16 @@ async fn dispatch_with_path(
     };
     let route_tool = tool_for_route(&route);
     let route_instruments_cache_ops = route_instruments_cache_ops(&route);
+    let is_sccache_connect_route = matches!(route, route::RegistryRoute::SccacheMkcol);
     let is_sccache_route = matches!(
         route,
         route::RegistryRoute::SccacheObject { .. } | route::RegistryRoute::SccacheMkcol
     );
+    if is_sccache_connect_route {
+        state
+            .cache_ops
+            .record_session_connect(cache_ops::Tool::Sccache);
+    }
     let request_start = std::time::Instant::now();
     let inflight = INFLIGHT_REQUESTS.fetch_add(1, Ordering::Relaxed) + 1;
     let seq = TOTAL_REQUESTS.fetch_add(1, Ordering::Relaxed);

@@ -9,17 +9,18 @@ use axum::serve::ListenerExt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::api::client::ApiClient;
 use crate::serve::state::{
     diagnostics_enabled, env_bool, unix_time_ms_now, AppState, BlobLocatorCache, BlobReadCache,
-    KvPendingStore, KvPublishedIndex, UploadSessionStore, DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
-    KV_BACKLOG_POLICY,
+    KvPendingStore, KvPublishedIndex, KvReplicationWork, UploadSessionStore,
+    DEFAULT_BLOB_READ_CACHE_MAX_BYTES, KV_BACKLOG_POLICY, KV_REPLICATION_WORK_QUEUE_CAPACITY,
 };
 use crate::tag_utils::TagResolver;
 
 const KV_REFRESH_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const KV_REPLICATION_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 fn spawn_runtime_watchdog(
     cache_ops: Arc<cache_registry::cache_ops::Aggregator>,
@@ -107,7 +108,7 @@ pub async fn run_server(
     registry_root_tag: String,
     fail_on_cache_error: bool,
 ) -> Result<()> {
-    let (state, listener) = build_server_runtime(
+    let (state, listener, replication_rx) = build_server_runtime(
         api_client,
         workspace,
         host,
@@ -119,7 +120,7 @@ pub async fn run_server(
     )
     .await?;
 
-    spawn_maintenance_tasks(&state);
+    spawn_maintenance_tasks(&state, replication_rx);
     let router = routes::build_router(state.clone());
 
     let listener = listener.tap_io(|tcp_stream| {
@@ -146,7 +147,7 @@ pub async fn start_server_background(
     registry_root_tag: String,
     fail_on_cache_error: bool,
 ) -> Result<ServeHandle> {
-    let (state, listener) = build_server_runtime(
+    let (state, listener, replication_rx) = build_server_runtime(
         api_client,
         workspace,
         host,
@@ -158,7 +159,7 @@ pub async fn start_server_background(
     )
     .await?;
 
-    spawn_maintenance_tasks(&state);
+    spawn_maintenance_tasks(&state, replication_rx);
     let router = routes::build_router(state.clone());
     let bound_port = listener
         .local_addr()
@@ -196,11 +197,13 @@ async fn build_server_runtime(
     configured_human_tags: Vec<String>,
     registry_root_tag: String,
     fail_on_cache_error: bool,
-) -> Result<(AppState, TcpListener)> {
+) -> Result<(AppState, TcpListener, mpsc::Receiver<KvReplicationWork>)> {
     let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
     let (kv_warm_enabled, kv_warm_from_env) = kv_manifest_warm_enabled();
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
     let (pf_concurrency, pf_from_env) = blob_prefetch_concurrency(dl_concurrency);
+    let (kv_replication_work_tx, kv_replication_work_rx) =
+        mpsc::channel(KV_REPLICATION_WORK_QUEUE_CAPACITY);
     let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
     let blob_prefetch_semaphore = Arc::new(tokio::sync::Semaphore::new(pf_concurrency));
     let state = AppState {
@@ -218,6 +221,13 @@ async fn build_server_runtime(
         kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
         kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_enqueue_deferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_flush_ok: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_flush_conflict: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_flush_error: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_flush_permanent: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_queue_depth: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_work_tx,
         kv_next_flush_at: Arc::new(RwLock::new(None)),
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
@@ -279,6 +289,7 @@ async fn build_server_runtime(
         "  Blob Download Concurrency: {dl_concurrency} max ({}), prefetch: {pf_label}",
         src(dl_from_env)
     );
+    eprintln!("  Replication queue: {KV_REPLICATION_WORK_QUEUE_CAPACITY} (bounded)");
     eprintln!(
         "  Manifest warm: {} ({})",
         if state.kv_manifest_warm_enabled {
@@ -299,10 +310,13 @@ async fn build_server_runtime(
         .await
         .context("Failed to create KV temp dir")?;
 
-    Ok((state, listener))
+    Ok((state, listener, kv_replication_work_rx))
 }
 
-fn spawn_maintenance_tasks(state: &AppState) {
+fn spawn_maintenance_tasks(
+    state: &AppState,
+    mut replication_rx: mpsc::Receiver<KvReplicationWork>,
+) {
     let diagnostics = diagnostics_enabled();
     spawn_runtime_watchdog(state.cache_ops.clone(), diagnostics);
 
@@ -343,13 +357,38 @@ fn spawn_maintenance_tasks(state: &AppState) {
                 let cache_ops_queue_depth = heartbeat_state.cache_ops.queue_depth();
                 let cache_ops_dropped_total = heartbeat_state.cache_ops.dropped_events_total();
                 let backlog_rejects = heartbeat_state.kv_backlog_rejects.load(Ordering::Acquire);
+                let replication_deferred = heartbeat_state
+                    .kv_replication_enqueue_deferred
+                    .load(Ordering::Acquire);
+                let replication_queue_depth = heartbeat_state
+                    .kv_replication_queue_depth
+                    .load(Ordering::Acquire);
+                let replication_flush_ok = heartbeat_state
+                    .kv_replication_flush_ok
+                    .load(Ordering::Acquire);
+                let replication_flush_conflict = heartbeat_state
+                    .kv_replication_flush_conflict
+                    .load(Ordering::Acquire);
+                let replication_flush_error = heartbeat_state
+                    .kv_replication_flush_error
+                    .load(Ordering::Acquire);
+                let replication_flush_permanent = heartbeat_state
+                    .kv_replication_flush_permanent
+                    .load(Ordering::Acquire);
                 eprintln!(
-                    "HEARTBEAT ts={ts} reqs={total} inflight={inflight} pending={} pending_bytes={} pending_oldest_ms={} flush_gate_ms={} backlog_rejects={} published={} flights={} cache_bytes={} breaker={} ops_q={} ops_drop={}",
+                    "HEARTBEAT ts={ts} reqs={total} inflight={inflight} pending={} pending_bytes={} pending_oldest_ms={} flush_gate_ms={} backlog_rejects={} repl_q={} repl_q_max={} repl_deferred={} repl_ok={} repl_conflict={} repl_error={} repl_permanent={} published={} flights={} cache_bytes={} breaker={} ops_q={} ops_drop={}",
                     pending_count,
                     pending_bytes,
                     pending_oldest_ms,
                     flush_gate_delay_ms,
                     backlog_rejects,
+                    replication_queue_depth,
+                    KV_REPLICATION_WORK_QUEUE_CAPACITY,
+                    replication_deferred,
+                    replication_flush_ok,
+                    replication_flush_conflict,
+                    replication_flush_error,
+                    replication_flush_permanent,
                     published_count,
                     flights,
                     cache_bytes,
@@ -414,75 +453,45 @@ fn spawn_maintenance_tasks(state: &AppState) {
         }
     });
 
-    let flush_state = state.clone();
+    let replication_state = state.clone();
     tokio::spawn(async move {
-        use crate::serve::state::{FLUSH_BLOB_THRESHOLD, FLUSH_SIZE_THRESHOLD};
-        use rand::Rng;
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-        interval.tick().await;
         let mut consecutive_failures: u32 = 0;
+        while let Some(work) = replication_rx.recv().await {
+            decrement_replication_queue_depth(&replication_state);
+            let mut urgent = matches!(work, KvReplicationWork::FlushHint { urgent: true });
+            while let Ok(extra) = replication_rx.try_recv() {
+                decrement_replication_queue_depth(&replication_state);
+                if matches!(extra, KvReplicationWork::FlushHint { urgent: true }) {
+                    urgent = true;
+                }
+            }
+            process_replication_work(&replication_state, urgent, &mut consecutive_failures).await;
+        }
+    });
+
+    let sweep_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(KV_REPLICATION_SWEEP_INTERVAL);
+        interval.tick().await;
         loop {
             interval.tick().await;
-
-            {
-                let gate = flush_state.kv_next_flush_at.read().await;
-                if let Some(next) = *gate {
-                    if std::time::Instant::now() < next {
-                        continue;
-                    }
-                }
-            }
-
-            if consecutive_failures > 0 {
-                let base_secs: u64 = match consecutive_failures {
-                    1 => 2,
-                    2 => 5,
-                    3 => 15,
-                    4 => 30,
-                    _ => 60,
-                };
-                let jitter_ms: u64 = rand::thread_rng().gen_range(0..3000);
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    base_secs * 1000 + jitter_ms,
-                ))
-                .await;
-            }
-
-            let should_flush = {
-                let pending = flush_state.kv_pending.read().await;
-                if pending.is_empty() {
-                    false
-                } else if pending.blob_count() >= FLUSH_BLOB_THRESHOLD
-                    || pending.total_spool_bytes() >= FLUSH_SIZE_THRESHOLD
-                {
-                    true
-                } else {
-                    let last_put_ms = flush_state.kv_last_put.load(Ordering::Acquire);
-                    last_put_ms > 0 && unix_time_ms_now().saturating_sub(last_put_ms) >= 10_000
-                }
+            let pending_count = {
+                let pending = sweep_state.kv_pending.read().await;
+                pending.entry_count()
             };
-
-            if should_flush {
-                let Some(_flush_guard) = cache_registry::try_schedule_flush(&flush_state) else {
-                    continue;
-                };
-                match cache_registry::flush_kv_index(&flush_state).await {
-                    cache_registry::FlushResult::Ok => {
-                        consecutive_failures = 0;
-                        let mut gate = flush_state.kv_next_flush_at.write().await;
-                        *gate = None;
-                    }
-                    cache_registry::FlushResult::Conflict => {}
-                    cache_registry::FlushResult::Error => {
-                        consecutive_failures = consecutive_failures.saturating_add(1);
-                    }
-                    cache_registry::FlushResult::Permanent => {
-                        consecutive_failures = 0;
-                        let mut gate = flush_state.kv_next_flush_at.write().await;
-                        *gate = None;
-                    }
-                }
+            if pending_count == 0 {
+                continue;
             }
+
+            if sweep_state
+                .kv_replication_queue_depth
+                .load(Ordering::Acquire)
+                > 0
+            {
+                continue;
+            }
+
+            let _ = cache_registry::enqueue_replication_flush_hint(&sweep_state, false, false);
         }
     });
 
@@ -497,12 +506,102 @@ fn spawn_maintenance_tasks(state: &AppState) {
     });
 }
 
+fn decrement_replication_queue_depth(state: &AppState) {
+    let _ = state.kv_replication_queue_depth.fetch_update(
+        Ordering::AcqRel,
+        Ordering::Acquire,
+        |depth| Some(depth.saturating_sub(1)),
+    );
+}
+
+async fn should_flush_pending(state: &AppState, urgent: bool) -> bool {
+    use crate::serve::state::{FLUSH_BLOB_THRESHOLD, FLUSH_SIZE_THRESHOLD};
+
+    let pending = state.kv_pending.read().await;
+    if pending.is_empty() {
+        return false;
+    }
+    if urgent {
+        return true;
+    }
+    if pending.blob_count() >= FLUSH_BLOB_THRESHOLD
+        || pending.total_spool_bytes() >= FLUSH_SIZE_THRESHOLD
+    {
+        return true;
+    }
+
+    let last_put_ms = state.kv_last_put.load(Ordering::Acquire);
+    last_put_ms > 0 && unix_time_ms_now().saturating_sub(last_put_ms) >= 10_000
+}
+
+async fn process_replication_work(state: &AppState, urgent: bool, consecutive_failures: &mut u32) {
+    {
+        let gate = state.kv_next_flush_at.read().await;
+        if let Some(next) = *gate {
+            if std::time::Instant::now() < next {
+                return;
+            }
+        }
+    }
+
+    if *consecutive_failures > 0 {
+        use rand::Rng;
+        let base_secs: u64 = match *consecutive_failures {
+            1 => 2,
+            2 => 5,
+            3 => 15,
+            4 => 30,
+            _ => 60,
+        };
+        let jitter_ms: u64 = rand::thread_rng().gen_range(0..3000);
+        tokio::time::sleep(std::time::Duration::from_millis(
+            base_secs * 1000 + jitter_ms,
+        ))
+        .await;
+    }
+
+    if !should_flush_pending(state, urgent).await {
+        return;
+    }
+
+    let Some(_flush_guard) = cache_registry::try_schedule_flush(state) else {
+        return;
+    };
+    match cache_registry::flush_kv_index(state).await {
+        cache_registry::FlushResult::Ok => {
+            *consecutive_failures = 0;
+            let mut gate = state.kv_next_flush_at.write().await;
+            *gate = None;
+            state.kv_replication_flush_ok.fetch_add(1, Ordering::AcqRel);
+        }
+        cache_registry::FlushResult::Conflict => {
+            state
+                .kv_replication_flush_conflict
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        cache_registry::FlushResult::Error => {
+            *consecutive_failures = consecutive_failures.saturating_add(1);
+            state
+                .kv_replication_flush_error
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        cache_registry::FlushResult::Permanent => {
+            *consecutive_failures = 0;
+            let mut gate = state.kv_next_flush_at.write().await;
+            *gate = None;
+            state
+                .kv_replication_flush_permanent
+                .fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+
 async fn flush_cache_ops(state: &AppState) {
     if state.cache_ops.is_empty() {
         return;
     }
-    let (rollups, missed_keys) = state.cache_ops.drain();
-    if rollups.is_empty() && missed_keys.is_empty() {
+    let (rollups, missed_keys, sessions) = state.cache_ops.drain();
+    if rollups.is_empty() && missed_keys.is_empty() && sessions.is_empty() {
         return;
     }
     let batch = crate::api::models::cache_rollups::BatchParams {
@@ -512,6 +611,7 @@ async fn flush_cache_ops(state: &AppState) {
                 bucket_at: chrono::DateTime::from_timestamp(r.bucket_epoch_secs as i64, 0)
                     .map(|dt| dt.to_rfc3339())
                     .unwrap_or_default(),
+                session_id: r.session_id.clone(),
                 tool: r.tool.clone(),
                 operation: r.operation.clone(),
                 result: r.result.clone(),
@@ -531,13 +631,37 @@ async fn flush_cache_ops(state: &AppState) {
                 sampled_key_prefix: mk.sampled_key_prefix.clone(),
             })
             .collect(),
+        sessions: sessions
+            .iter()
+            .map(|session| crate::api::models::cache_rollups::SessionParam {
+                session_id: session.session_id.clone(),
+                tool: session.tool.clone(),
+                session_duration_ms: session.session_duration_ms,
+                hit_count: session.hit_count,
+                miss_count: session.miss_count,
+                error_count: session.error_count,
+                bytes_read: session.bytes_read,
+                bytes_written: session.bytes_written,
+                top_missed_keys: session
+                    .top_missed_keys
+                    .iter()
+                    .map(
+                        |miss| crate::api::models::cache_rollups::SessionMissedKeyParam {
+                            key_hash: miss.key_hash.clone(),
+                            miss_count: miss.miss_count,
+                            sampled_key_prefix: miss.sampled_key_prefix.clone(),
+                        },
+                    )
+                    .collect(),
+            })
+            .collect(),
     };
     if let Err(error) = state
         .api_client
         .send_cache_rollups(&state.workspace, batch)
         .await
     {
-        state.cache_ops.restore(rollups, missed_keys);
+        state.cache_ops.restore(rollups, missed_keys, sessions);
         log::debug!("Cache ops flush failed: {error}");
     }
 }

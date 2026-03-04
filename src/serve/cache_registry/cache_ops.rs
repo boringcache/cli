@@ -1,13 +1,17 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::OnceLock;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::kv::KvNamespace;
 
 const BUCKET_SECONDS: u64 = 10;
+const SESSION_IDLE_SECS: u64 = 10;
+const SESSION_TOP_MISSED_KEYS: usize = 5;
+const SCCACHE_MISS_SAMPLE_MASK: u64 = 0x0F;
+const SCCACHE_MISSED_KEY_CAP: usize = 2_048;
+const SCCACHE_SESSION_MISSED_KEY_CAP: usize = 256;
 const DEFAULT_CACHE_OPS_QUEUE_CAPACITY: usize = 32_768;
 const MIN_CACHE_OPS_QUEUE_CAPACITY: usize = 1_024;
 const MAX_CACHE_OPS_QUEUE_CAPACITY: usize = 262_144;
@@ -123,9 +127,10 @@ impl OpResult {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BucketKey {
     epoch_secs: u64,
+    session_id: String,
     tool: Tool,
     op: Op,
     result: OpResult,
@@ -158,29 +163,132 @@ struct MissEntry {
     sampled_prefix: Option<String>,
 }
 
+#[derive(Debug)]
+struct SessionMissEntry {
+    key_hash: String,
+    count: u64,
+    sampled_prefix: Option<String>,
+}
+
+#[derive(Debug)]
+struct SessionState {
+    id: String,
+    tool: Tool,
+    started_at_secs: u64,
+    last_event_secs: u64,
+    hit_count: u64,
+    miss_count: u64,
+    error_count: u64,
+    bytes_read: u64,
+    bytes_written: u64,
+    missed_keys: HashMap<String, SessionMissEntry>,
+}
+
 #[derive(Default)]
 struct AggregateState {
     buckets: HashMap<BucketKey, BucketCounters>,
     missed_keys: HashMap<(String, Tool), MissEntry>,
+    missed_key_cardinality: HashMap<Tool, usize>,
+    active_sessions: HashMap<Tool, SessionState>,
+    completed_sessions: Vec<SessionRecord>,
+    next_session_seq: HashMap<Tool, u64>,
+}
+
+impl SessionState {
+    fn new(id: String, tool: Tool, started_at_secs: u64) -> Self {
+        Self {
+            id,
+            tool,
+            started_at_secs,
+            last_event_secs: started_at_secs,
+            hit_count: 0,
+            miss_count: 0,
+            error_count: 0,
+            bytes_read: 0,
+            bytes_written: 0,
+            missed_keys: HashMap::new(),
+        }
+    }
+
+    fn record_event(&mut self, op: Op, result: OpResult, bytes: u64) {
+        match result {
+            OpResult::Hit => self.hit_count = self.hit_count.saturating_add(1),
+            OpResult::Miss => self.miss_count = self.miss_count.saturating_add(1),
+            OpResult::Error => self.error_count = self.error_count.saturating_add(1),
+        }
+
+        if result == OpResult::Hit {
+            match op {
+                Op::Get => self.bytes_read = self.bytes_read.saturating_add(bytes),
+                Op::Put => self.bytes_written = self.bytes_written.saturating_add(bytes),
+                Op::Query => {}
+            }
+        }
+    }
+
+    fn into_record(mut self, ended_at_secs: u64) -> SessionRecord {
+        let ended_at = ended_at_secs.max(self.last_event_secs);
+        self.last_event_secs = ended_at;
+        let session_duration_ms = ended_at
+            .saturating_sub(self.started_at_secs)
+            .saturating_mul(1000);
+
+        let mut top_missed_keys: Vec<SessionMissedKeyRecord> = self
+            .missed_keys
+            .drain()
+            .map(|(_, entry)| SessionMissedKeyRecord {
+                key_hash: entry.key_hash,
+                miss_count: entry.count,
+                sampled_key_prefix: entry.sampled_prefix,
+            })
+            .collect();
+        top_missed_keys.sort_by(|left, right| {
+            right
+                .miss_count
+                .cmp(&left.miss_count)
+                .then_with(|| left.key_hash.cmp(&right.key_hash))
+        });
+        top_missed_keys.truncate(SESSION_TOP_MISSED_KEYS);
+
+        SessionRecord {
+            session_id: self.id,
+            tool: self.tool.as_str().to_string(),
+            session_duration_ms,
+            hit_count: self.hit_count,
+            miss_count: self.miss_count,
+            error_count: self.error_count,
+            bytes_read: self.bytes_read,
+            bytes_written: self.bytes_written,
+            top_missed_keys,
+        }
+    }
 }
 
 enum CacheOpEvent {
-    Record {
-        epoch_secs: u64,
-        tool: Tool,
-        op: Op,
-        result: OpResult,
-        degraded: bool,
-        bytes: u64,
-        latency_ms: u64,
-    },
+    Record(RecordEvent),
     Miss {
+        event_epoch_secs: u64,
         tool: Tool,
         raw_key: String,
+    },
+    SessionConnect {
+        event_epoch_secs: u64,
+        tool: Tool,
     },
     Barrier {
         ack: mpsc::Sender<()>,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecordEvent {
+    event_epoch_secs: u64,
+    tool: Tool,
+    op: Op,
+    result: OpResult,
+    degraded: bool,
+    bytes: u64,
+    latency_ms: u64,
 }
 
 #[derive(Clone)]
@@ -247,33 +355,26 @@ impl Aggregator {
     ) {
         while let Ok(event) = rx.recv() {
             match event {
-                CacheOpEvent::Record {
-                    epoch_secs,
-                    tool,
-                    op,
-                    result,
-                    degraded,
-                    bytes,
-                    latency_ms,
-                } => {
+                CacheOpEvent::Record(record) => {
                     let mut guard = Self::lock_state_arc(&state);
-                    Self::apply_record_to_state(
-                        &mut guard,
-                        BucketKey {
-                            epoch_secs,
-                            tool,
-                            op,
-                            result,
-                            degraded,
-                        },
-                        bytes,
-                        latency_ms,
-                    );
+                    Self::apply_record_event(&mut guard, record);
                     queued_events.fetch_sub(1, Ordering::AcqRel);
                 }
-                CacheOpEvent::Miss { tool, raw_key } => {
+                CacheOpEvent::Miss {
+                    event_epoch_secs,
+                    tool,
+                    raw_key,
+                } => {
                     let mut guard = Self::lock_state_arc(&state);
-                    Self::apply_miss_to_state(&mut guard, tool, &raw_key);
+                    Self::apply_miss_event(&mut guard, event_epoch_secs, tool, &raw_key);
+                    queued_events.fetch_sub(1, Ordering::AcqRel);
+                }
+                CacheOpEvent::SessionConnect {
+                    event_epoch_secs,
+                    tool,
+                } => {
+                    let mut guard = Self::lock_state_arc(&state);
+                    Self::apply_session_connect_event(&mut guard, event_epoch_secs, tool);
                     queued_events.fetch_sub(1, Ordering::AcqRel);
                 }
                 CacheOpEvent::Barrier { ack } => {
@@ -338,67 +439,212 @@ impl Aggregator {
     fn apply_event_direct(&self, event: CacheOpEvent) {
         let mut guard = self.lock_state();
         match event {
-            CacheOpEvent::Record {
-                epoch_secs,
+            CacheOpEvent::Record(record) => Self::apply_record_event(&mut guard, record),
+            CacheOpEvent::Miss {
+                event_epoch_secs,
                 tool,
-                op,
-                result,
-                degraded,
-                bytes,
-                latency_ms,
+                raw_key,
             } => {
-                Self::apply_record_to_state(
-                    &mut guard,
-                    BucketKey {
-                        epoch_secs,
-                        tool,
-                        op,
-                        result,
-                        degraded,
-                    },
-                    bytes,
-                    latency_ms,
-                );
+                Self::apply_miss_event(&mut guard, event_epoch_secs, tool, &raw_key);
             }
-            CacheOpEvent::Miss { tool, raw_key } => {
-                Self::apply_miss_to_state(&mut guard, tool, &raw_key);
-            }
+            CacheOpEvent::SessionConnect {
+                event_epoch_secs,
+                tool,
+            } => Self::apply_session_connect_event(&mut guard, event_epoch_secs, tool),
             CacheOpEvent::Barrier { .. } => {}
         }
     }
 
-    fn apply_record_to_state(
-        state: &mut AggregateState,
-        key: BucketKey,
-        bytes: u64,
-        latency_ms: u64,
-    ) {
+    fn apply_record_event(state: &mut AggregateState, event: RecordEvent) {
+        Self::close_idle_sessions_for_tool(state, event.tool, event.event_epoch_secs);
+        let session_id = Self::ensure_active_session(state, event.tool, event.event_epoch_secs);
+        if let Some(session) = state.active_sessions.get_mut(&event.tool) {
+            session.last_event_secs = event.event_epoch_secs;
+            session.record_event(event.op, event.result, event.bytes);
+        }
+
+        let key = BucketKey {
+            epoch_secs: bucket_epoch(event.event_epoch_secs),
+            session_id,
+            tool: event.tool,
+            op: event.op,
+            result: event.result,
+            degraded: event.degraded,
+        };
+
         let counters = state.buckets.entry(key).or_default();
 
         counters.event_count = counters.event_count.saturating_add(1);
-        counters.bytes_total = counters.bytes_total.saturating_add(bytes);
-        if latency_ms > 0 {
-            counters.latency_sum_ms = counters.latency_sum_ms.saturating_add(latency_ms);
+        counters.bytes_total = counters.bytes_total.saturating_add(event.bytes);
+        if event.latency_ms > 0 {
+            counters.latency_sum_ms = counters.latency_sum_ms.saturating_add(event.latency_ms);
             counters.latency_count = counters.latency_count.saturating_add(1);
         }
     }
 
-    fn apply_miss_to_state(state: &mut AggregateState, tool: Tool, raw_key: &str) {
-        let key_hash = crate::cas_oci::sha256_hex(raw_key.as_bytes());
-        let map_key = (key_hash.clone(), tool);
-        let prefix = raw_key.get(..32).unwrap_or(raw_key).to_string();
+    fn apply_session_connect_event(state: &mut AggregateState, event_epoch_secs: u64, tool: Tool) {
+        Self::close_idle_sessions_for_tool(state, tool, event_epoch_secs);
+        let _ = Self::ensure_active_session(state, tool, event_epoch_secs);
+    }
 
-        state
-            .missed_keys
-            .entry(map_key)
-            .and_modify(|entry| {
-                entry.count = entry.count.saturating_add(1);
-            })
-            .or_insert(MissEntry {
-                key_hash,
+    fn apply_miss_event(
+        state: &mut AggregateState,
+        event_epoch_secs: u64,
+        tool: Tool,
+        raw_key: &str,
+    ) {
+        Self::close_idle_sessions_for_tool(state, tool, event_epoch_secs);
+        let _ = Self::ensure_active_session(state, tool, event_epoch_secs);
+        let key_hash = crate::cas_oci::sha256_hex(raw_key.as_bytes());
+        let prefix = raw_key.get(..32).unwrap_or(raw_key).to_string();
+        Self::record_global_miss_key(state, tool, &key_hash, &prefix);
+        if let Some(session) = state.active_sessions.get_mut(&tool) {
+            session.last_event_secs = event_epoch_secs;
+            Self::record_session_miss_key(session, tool, &key_hash, &prefix);
+        }
+    }
+
+    fn record_global_miss_key(
+        state: &mut AggregateState,
+        tool: Tool,
+        key_hash: &str,
+        prefix: &str,
+    ) {
+        let map_key = (key_hash.to_string(), tool);
+        if let Some(entry) = state.missed_keys.get_mut(&map_key) {
+            entry.count = entry.count.saturating_add(1);
+            return;
+        }
+
+        if tool == Tool::Sccache {
+            let current = state
+                .missed_key_cardinality
+                .get(&tool)
+                .copied()
+                .unwrap_or(0);
+            if current >= SCCACHE_MISSED_KEY_CAP {
+                return;
+            }
+        }
+
+        state.missed_keys.insert(
+            map_key,
+            MissEntry {
+                key_hash: key_hash.to_string(),
                 count: 1,
-                sampled_prefix: Some(prefix),
-            });
+                sampled_prefix: Some(prefix.to_string()),
+            },
+        );
+        *state.missed_key_cardinality.entry(tool).or_default() += 1;
+    }
+
+    fn record_session_miss_key(
+        session: &mut SessionState,
+        tool: Tool,
+        key_hash: &str,
+        prefix: &str,
+    ) {
+        if let Some(entry) = session.missed_keys.get_mut(key_hash) {
+            entry.count = entry.count.saturating_add(1);
+            return;
+        }
+
+        if tool == Tool::Sccache && session.missed_keys.len() >= SCCACHE_SESSION_MISSED_KEY_CAP {
+            return;
+        }
+
+        session.missed_keys.insert(
+            key_hash.to_string(),
+            SessionMissEntry {
+                key_hash: key_hash.to_string(),
+                count: 1,
+                sampled_prefix: Some(prefix.to_string()),
+            },
+        );
+    }
+
+    fn ensure_active_session(
+        state: &mut AggregateState,
+        tool: Tool,
+        event_epoch_secs: u64,
+    ) -> String {
+        if let Some(session) = state.active_sessions.get_mut(&tool) {
+            session.last_event_secs = event_epoch_secs;
+            return session.id.clone();
+        }
+
+        let seq = state.next_session_seq.entry(tool).or_insert(0);
+        *seq = seq.saturating_add(1);
+        let session_id = format!("{}-{}-{}", tool.as_str(), event_epoch_secs, *seq);
+        state.active_sessions.insert(
+            tool,
+            SessionState::new(session_id.clone(), tool, event_epoch_secs),
+        );
+        session_id
+    }
+
+    fn close_idle_sessions(state: &mut AggregateState, now_secs: u64) {
+        let tools_to_close: Vec<(Tool, u64)> = state
+            .active_sessions
+            .iter()
+            .filter_map(|(tool, session)| {
+                if now_secs.saturating_sub(session.last_event_secs) >= SESSION_IDLE_SECS {
+                    Some((
+                        *tool,
+                        session.last_event_secs.saturating_add(SESSION_IDLE_SECS),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (tool, ended_at_secs) in tools_to_close {
+            Self::finalize_session(state, tool, ended_at_secs);
+        }
+    }
+
+    fn close_idle_sessions_for_tool(state: &mut AggregateState, tool: Tool, now_secs: u64) {
+        let ended_at_secs = state.active_sessions.get(&tool).and_then(|session| {
+            if now_secs.saturating_sub(session.last_event_secs) >= SESSION_IDLE_SECS {
+                Some(session.last_event_secs.saturating_add(SESSION_IDLE_SECS))
+            } else {
+                None
+            }
+        });
+        if let Some(ended_at_secs) = ended_at_secs {
+            Self::finalize_session(state, tool, ended_at_secs);
+        }
+    }
+
+    fn finalize_session(state: &mut AggregateState, tool: Tool, ended_at_secs: u64) {
+        let Some(session) = state.active_sessions.remove(&tool) else {
+            return;
+        };
+        let record = session.into_record(ended_at_secs);
+        Self::emit_session_summary(&record);
+        state.completed_sessions.push(record);
+    }
+
+    fn emit_session_summary(record: &SessionRecord) {
+        let duration_secs = record.session_duration_ms / 1000;
+        let miss_denom = record.hit_count.saturating_add(record.miss_count);
+        let hit_rate = if miss_denom == 0 {
+            100.0
+        } else {
+            (record.hit_count as f64 / miss_denom as f64) * 100.0
+        };
+        eprintln!(
+            "SESSION tool={} session_id={} duration={}s hits={} misses={} errors={} hit_rate={:.1}% bytes_read={} bytes_written={}",
+            record.tool,
+            record.session_id,
+            duration_secs,
+            record.hit_count,
+            record.miss_count,
+            record.error_count,
+            hit_rate,
+            crate::progress::format_bytes(record.bytes_read),
+            crate::progress::format_bytes(record.bytes_written),
+        );
     }
 
     pub(crate) fn record(
@@ -410,21 +656,37 @@ impl Aggregator {
         bytes: u64,
         latency_ms: u64,
     ) {
-        let event = CacheOpEvent::Record {
-            epoch_secs: bucket_epoch(now_epoch_secs()),
+        let event_epoch_secs = now_epoch_secs();
+        let event = CacheOpEvent::Record(RecordEvent {
+            event_epoch_secs,
             tool,
             op,
             result,
             degraded,
             bytes,
             latency_ms,
+        });
+        if let Some(event) = self.enqueue_event(event) {
+            self.apply_event_direct(event);
+        }
+    }
+
+    pub(crate) fn record_session_connect(&self, tool: Tool) {
+        let event = CacheOpEvent::SessionConnect {
+            event_epoch_secs: now_epoch_secs(),
+            tool,
         };
         if let Some(event) = self.enqueue_event(event) {
             self.apply_event_direct(event);
         }
     }
 
-    pub(crate) fn restore(&self, rollups: Vec<RollupRecord>, missed_keys: Vec<MissedKeyRecord>) {
+    pub(crate) fn restore(
+        &self,
+        rollups: Vec<RollupRecord>,
+        missed_keys: Vec<MissedKeyRecord>,
+        sessions: Vec<SessionRecord>,
+    ) {
         self.flush_async_events();
         let mut state = self.lock_state();
 
@@ -441,6 +703,7 @@ impl Aggregator {
 
             let key = BucketKey {
                 epoch_secs: rollup.bucket_epoch_secs,
+                session_id: rollup.session_id.clone(),
                 tool,
                 op,
                 result,
@@ -461,28 +724,34 @@ impl Aggregator {
                 continue;
             };
 
-            state
-                .missed_keys
-                .entry((miss.key_hash.clone(), tool))
-                .and_modify(|entry| {
-                    entry.count = entry.count.saturating_add(miss.miss_count);
-                    if entry.sampled_prefix.is_none() {
-                        entry.sampled_prefix = miss.sampled_key_prefix.clone();
-                    }
-                })
-                .or_insert(MissEntry {
-                    key_hash: miss.key_hash,
-                    count: miss.miss_count,
-                    sampled_prefix: miss.sampled_key_prefix,
-                });
+            let map_key = (miss.key_hash.clone(), tool);
+            if let Some(entry) = state.missed_keys.get_mut(&map_key) {
+                entry.count = entry.count.saturating_add(miss.miss_count);
+                if entry.sampled_prefix.is_none() {
+                    entry.sampled_prefix = miss.sampled_key_prefix.clone();
+                }
+            } else {
+                state.missed_keys.insert(
+                    map_key,
+                    MissEntry {
+                        key_hash: miss.key_hash,
+                        count: miss.miss_count,
+                        sampled_prefix: miss.sampled_key_prefix,
+                    },
+                );
+            }
         }
+        Self::rebuild_missed_key_cardinality(&mut state);
+
+        state.completed_sessions.extend(sessions);
     }
 
     pub(crate) fn record_miss(&self, tool: Tool, raw_key: &str) {
-        if tool == Tool::Sccache && !track_sccache_miss_keys_enabled() {
+        if tool == Tool::Sccache && !should_track_sccache_miss_key(raw_key) {
             return;
         }
         let event = CacheOpEvent::Miss {
+            event_epoch_secs: now_epoch_secs(),
             tool,
             raw_key: raw_key.to_string(),
         };
@@ -491,9 +760,10 @@ impl Aggregator {
         }
     }
 
-    pub(crate) fn drain(&self) -> (Vec<RollupRecord>, Vec<MissedKeyRecord>) {
+    pub(crate) fn drain(&self) -> (Vec<RollupRecord>, Vec<MissedKeyRecord>, Vec<SessionRecord>) {
         self.flush_async_events();
         let mut state = self.lock_state();
+        Self::close_idle_sessions(&mut state, now_epoch_secs());
 
         let drained_buckets = std::mem::take(&mut state.buckets);
         let mut rollups = Vec::with_capacity(drained_buckets.len());
@@ -503,6 +773,7 @@ impl Aggregator {
             }
             rollups.push(RollupRecord {
                 bucket_epoch_secs: key.epoch_secs,
+                session_id: key.session_id,
                 tool: key.tool.as_str().to_string(),
                 operation: key.op.as_str().to_string(),
                 result: key.result.as_str().to_string(),
@@ -515,6 +786,7 @@ impl Aggregator {
         }
 
         let drained_missed_keys = std::mem::take(&mut state.missed_keys);
+        state.missed_key_cardinality.clear();
         let mut missed = Vec::with_capacity(drained_missed_keys.len());
         for ((_, tool), entry) in drained_missed_keys {
             missed.push(MissedKeyRecord {
@@ -525,15 +797,25 @@ impl Aggregator {
             });
         }
 
-        (rollups, missed)
+        let sessions = std::mem::take(&mut state.completed_sessions);
+
+        (rollups, missed, sessions)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         if self.queued_events.load(Ordering::Acquire) > 0 {
             return false;
         }
+        let now_secs = now_epoch_secs();
         let state = self.lock_state();
-        state.buckets.is_empty() && state.missed_keys.is_empty()
+        let has_idle_session_to_close = state
+            .active_sessions
+            .values()
+            .any(|session| now_secs.saturating_sub(session.last_event_secs) >= SESSION_IDLE_SECS);
+        state.buckets.is_empty()
+            && state.missed_keys.is_empty()
+            && state.completed_sessions.is_empty()
+            && !has_idle_session_to_close
     }
 
     pub(crate) fn queue_depth(&self) -> u64 {
@@ -542,6 +824,13 @@ impl Aggregator {
 
     pub(crate) fn dropped_events_total(&self) -> u64 {
         self.dropped_events.load(Ordering::Acquire)
+    }
+
+    fn rebuild_missed_key_cardinality(state: &mut AggregateState) {
+        state.missed_key_cardinality.clear();
+        for (_, tool) in state.missed_keys.keys() {
+            *state.missed_key_cardinality.entry(*tool).or_default() += 1;
+        }
     }
 }
 
@@ -553,19 +842,25 @@ fn cache_ops_queue_capacity() -> usize {
         .unwrap_or(DEFAULT_CACHE_OPS_QUEUE_CAPACITY)
 }
 
-fn track_sccache_miss_keys_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("BORINGCACHE_CACHE_OPS_TRACK_SCCACHE_MISSES")
-            .ok()
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
+fn should_track_sccache_miss_key(raw_key: &str) -> bool {
+    fnv1a64(raw_key.as_bytes()) & SCCACHE_MISS_SAMPLE_MASK == 0
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct RollupRecord {
     pub bucket_epoch_secs: u64,
+    pub session_id: String,
     pub tool: String,
     pub operation: String,
     pub result: String,
@@ -582,6 +877,26 @@ pub(crate) struct MissedKeyRecord {
     pub tool: String,
     pub miss_count: u64,
     pub sampled_key_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct SessionMissedKeyRecord {
+    pub key_hash: String,
+    pub miss_count: u64,
+    pub sampled_key_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct SessionRecord {
+    pub session_id: String,
+    pub tool: String,
+    pub session_duration_ms: u64,
+    pub hit_count: u64,
+    pub miss_count: u64,
+    pub error_count: u64,
+    pub bytes_read: u64,
+    pub bytes_written: u64,
+    pub top_missed_keys: Vec<SessionMissedKeyRecord>,
 }
 
 #[cfg(test)]
@@ -607,15 +922,17 @@ mod tests {
 
         assert!(!agg.is_empty());
 
-        let (rollups, missed) = agg.drain();
+        let (rollups, missed, sessions) = agg.drain();
         assert!(agg.is_empty());
         assert!(missed.is_empty());
+        assert!(sessions.is_empty());
         assert!(!rollups.is_empty());
 
         let turbo = rollups
             .iter()
             .find(|r| r.tool == "turborepo")
             .expect("turborepo rollup");
+        assert!(!turbo.session_id.is_empty());
         assert_eq!(turbo.event_count, 2);
         assert_eq!(turbo.bytes_total, 3072);
         assert_eq!(turbo.latency_sum_ms, 15);
@@ -641,7 +958,8 @@ mod tests {
         agg.record_miss(Tool::Turborepo, "some-cache-key");
         agg.record_miss(Tool::Turborepo, "other-key");
 
-        let (_, missed) = agg.drain();
+        let (_, missed, sessions) = agg.drain();
+        assert!(sessions.is_empty());
         assert_eq!(missed.len(), 2);
 
         let some_key = missed
@@ -653,19 +971,71 @@ mod tests {
     }
 
     #[test]
+    fn sccache_record_miss_uses_deterministic_sampling() {
+        let agg = Aggregator::new();
+        let mut expected = 0_u64;
+        let keys: Vec<String> = (0..512)
+            .map(|index| format!("sccache-key-{index}"))
+            .collect();
+        for key in &keys {
+            if should_track_sccache_miss_key(key) {
+                expected = expected.saturating_add(1);
+            }
+            agg.record_miss(Tool::Sccache, key);
+        }
+
+        let (_, missed, sessions) = agg.drain();
+        assert!(sessions.is_empty());
+        let observed = missed
+            .iter()
+            .filter(|entry| entry.tool == "sccache")
+            .map(|entry| entry.miss_count)
+            .sum::<u64>();
+        assert_eq!(observed, expected);
+        assert!(observed > 0);
+        assert!(observed < keys.len() as u64);
+    }
+
+    #[test]
+    fn sccache_miss_key_tracking_caps_unique_keys() {
+        let mut state = AggregateState::default();
+        Aggregator::apply_session_connect_event(&mut state, 100, Tool::Sccache);
+
+        for index in 0..(SCCACHE_MISSED_KEY_CAP + 64) {
+            let key = format!("sccache-cap-key-{index}");
+            Aggregator::apply_miss_event(&mut state, 100, Tool::Sccache, &key);
+        }
+
+        let tracked_global = state
+            .missed_keys
+            .keys()
+            .filter(|(_, tool)| *tool == Tool::Sccache)
+            .count();
+        assert_eq!(tracked_global, SCCACHE_MISSED_KEY_CAP);
+
+        let session = state
+            .active_sessions
+            .get(&Tool::Sccache)
+            .expect("active sccache session");
+        assert_eq!(session.missed_keys.len(), SCCACHE_SESSION_MISSED_KEY_CAP);
+    }
+
+    #[test]
     fn drain_clears_state() {
         let agg = Aggregator::new();
         agg.record(Tool::Bazel, Op::Get, OpResult::Miss, false, 0, 1);
         agg.record_miss(Tool::Bazel, "key");
 
-        let (rollups, missed) = agg.drain();
+        let (rollups, missed, sessions) = agg.drain();
         assert_eq!(rollups.len(), 1);
         assert_eq!(missed.len(), 1);
+        assert!(sessions.is_empty());
         assert!(agg.is_empty());
 
-        let (rollups2, missed2) = agg.drain();
+        let (rollups2, missed2, sessions2) = agg.drain();
         assert!(rollups2.is_empty());
         assert!(missed2.is_empty());
+        assert!(sessions2.is_empty());
     }
 
     #[test]
@@ -674,7 +1044,8 @@ mod tests {
         agg.record(Tool::Turborepo, Op::Get, OpResult::Hit, false, 100, 5);
         agg.record(Tool::Turborepo, Op::Get, OpResult::Hit, true, 100, 5);
 
-        let (rollups, _) = agg.drain();
+        let (rollups, _, sessions) = agg.drain();
+        assert!(sessions.is_empty());
         assert_eq!(rollups.len(), 2);
 
         let normal = rollups.iter().find(|r| !r.degraded).unwrap();
@@ -702,15 +1073,16 @@ mod tests {
         let agg = Aggregator::new();
         agg.record(Tool::Turborepo, Op::Get, OpResult::Hit, false, 100, 5);
         agg.record_miss(Tool::Turborepo, "cache-key");
-        let (rollups, missed) = agg.drain();
+        let (rollups, missed, sessions) = agg.drain();
 
         assert!(agg.is_empty());
-        agg.restore(rollups.clone(), missed.clone());
+        agg.restore(rollups.clone(), missed.clone(), sessions.clone());
         assert!(!agg.is_empty());
 
-        let (restored_rollups, restored_missed) = agg.drain();
+        let (restored_rollups, restored_missed, restored_sessions) = agg.drain();
         assert_eq!(restored_rollups.len(), rollups.len());
         assert_eq!(restored_missed.len(), missed.len());
+        assert_eq!(restored_sessions.len(), sessions.len());
 
         let restored_turbo = restored_rollups
             .iter()
@@ -725,5 +1097,52 @@ mod tests {
             .find(|r| r.tool == "turborepo")
             .expect("restored miss");
         assert_eq!(restored_miss.miss_count, 1);
+    }
+
+    #[test]
+    fn session_rollup_contains_duration_and_top_missed_keys() {
+        let mut state = AggregateState::default();
+        Aggregator::apply_session_connect_event(&mut state, 100, Tool::Sccache);
+        Aggregator::apply_record_event(
+            &mut state,
+            RecordEvent {
+                event_epoch_secs: 100,
+                tool: Tool::Sccache,
+                op: Op::Get,
+                result: OpResult::Hit,
+                degraded: false,
+                bytes: 48 * 1024 * 1024,
+                latency_ms: 5,
+            },
+        );
+        Aggregator::apply_record_event(
+            &mut state,
+            RecordEvent {
+                event_epoch_secs: 101,
+                tool: Tool::Sccache,
+                op: Op::Get,
+                result: OpResult::Miss,
+                degraded: false,
+                bytes: 0,
+                latency_ms: 2,
+            },
+        );
+        Aggregator::apply_miss_event(&mut state, 101, Tool::Sccache, "missing-key-a");
+        Aggregator::apply_miss_event(&mut state, 101, Tool::Sccache, "missing-key-a");
+        Aggregator::apply_miss_event(&mut state, 101, Tool::Sccache, "missing-key-b");
+        Aggregator::close_idle_sessions(&mut state, 112);
+
+        assert!(state.active_sessions.is_empty());
+        assert_eq!(state.completed_sessions.len(), 1);
+        let session = &state.completed_sessions[0];
+        assert_eq!(session.tool, "sccache");
+        assert_eq!(session.hit_count, 1);
+        assert_eq!(session.miss_count, 1);
+        assert_eq!(session.error_count, 0);
+        assert_eq!(session.bytes_read, 48 * 1024 * 1024);
+        assert_eq!(session.bytes_written, 0);
+        assert_eq!(session.session_duration_ms, 11_000);
+        assert_eq!(session.top_missed_keys.len(), 2);
+        assert_eq!(session.top_missed_keys[0].miss_count, 2);
     }
 }

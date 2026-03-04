@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::io::ReaderStream;
 
 use crate::api::models::cache::{
@@ -22,7 +23,8 @@ use crate::error::BoringCacheError;
 use crate::manifest::EntryType;
 use crate::progress::TransferProgress;
 use crate::serve::state::{
-    diagnostics_enabled, env_bool, AppState, KvFlushingSnapshot, KV_BACKLOG_POLICY,
+    diagnostics_enabled, env_bool, AppState, KvFlushingSnapshot, KvReplicationWork,
+    KV_BACKLOG_POLICY,
 };
 
 use super::error::RegistryError;
@@ -338,21 +340,9 @@ pub(crate) async fn put_kv_object(
         .kv_last_put
         .store(crate::serve::state::unix_time_ms_now(), Ordering::Release);
 
-    put_probe.stage("flush_gate_wait");
-    let gated = {
-        let gate = state.kv_next_flush_at.read().await;
-        gate.is_some_and(|t| std::time::Instant::now() < t)
-    };
-    put_probe.stage("flush_gate_checked");
-    if should_flush && !gated {
-        if let Some(flush_guard) = try_schedule_flush(state) {
-            put_probe.stage("flush_spawned");
-            let flush_state = state.clone();
-            tokio::spawn(async move {
-                let _flush_guard = flush_guard;
-                flush_kv_index(&flush_state).await;
-            });
-        }
+    put_probe.stage("replication_enqueue");
+    if !enqueue_replication_flush_hint(state, should_flush, true) {
+        put_probe.stage("replication_deferred");
     }
 
     state.cache_ops.record(
@@ -367,6 +357,47 @@ pub(crate) async fn put_kv_object(
     put_probe.stage("respond");
     log::debug!("KV PUT {scoped_key}: queued ({blob_size} bytes, digest={blob_digest})");
     Ok((put_status, Body::empty()).into_response())
+}
+
+pub(crate) fn enqueue_replication_flush_hint(
+    state: &AppState,
+    urgent: bool,
+    count_deferred: bool,
+) -> bool {
+    try_enqueue_replication_work(
+        &state.kv_replication_work_tx,
+        &state.kv_replication_queue_depth,
+        &state.kv_replication_enqueue_deferred,
+        urgent,
+        count_deferred,
+    )
+}
+
+fn try_enqueue_replication_work(
+    replication_work_tx: &tokio::sync::mpsc::Sender<KvReplicationWork>,
+    replication_queue_depth: &AtomicU64,
+    replication_enqueue_deferred: &AtomicU64,
+    urgent: bool,
+    count_deferred: bool,
+) -> bool {
+    match replication_work_tx.try_send(KvReplicationWork::FlushHint { urgent }) {
+        Ok(()) => {
+            replication_queue_depth.fetch_add(1, Ordering::AcqRel);
+            true
+        }
+        Err(TrySendError::Full(_)) => {
+            if count_deferred {
+                replication_enqueue_deferred.fetch_add(1, Ordering::AcqRel);
+            }
+            false
+        }
+        Err(TrySendError::Closed(_)) => {
+            if count_deferred {
+                replication_enqueue_deferred.fetch_add(1, Ordering::AcqRel);
+            }
+            false
+        }
+    }
 }
 
 async fn resolve_download_url(
@@ -2785,6 +2816,7 @@ async fn write_body_to_temp_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn classify_flush_error_treats_precondition_failed_as_conflict() {
@@ -2944,5 +2976,55 @@ mod tests {
             last_put_ms,
             now_ms
         ));
+    }
+
+    #[test]
+    fn replication_enqueue_marks_deferred_when_channel_is_full() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let queue_depth = AtomicU64::new(0);
+        let enqueue_deferred = AtomicU64::new(0);
+
+        assert!(try_enqueue_replication_work(
+            &tx,
+            &queue_depth,
+            &enqueue_deferred,
+            false,
+            true
+        ));
+        assert!(!try_enqueue_replication_work(
+            &tx,
+            &queue_depth,
+            &enqueue_deferred,
+            false,
+            true
+        ));
+
+        assert_eq!(queue_depth.load(Ordering::Acquire), 1);
+        assert_eq!(enqueue_deferred.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn replication_enqueue_does_not_increment_deferred_when_not_counted() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let queue_depth = AtomicU64::new(0);
+        let enqueue_deferred = AtomicU64::new(0);
+
+        assert!(try_enqueue_replication_work(
+            &tx,
+            &queue_depth,
+            &enqueue_deferred,
+            false,
+            true
+        ));
+        assert!(!try_enqueue_replication_work(
+            &tx,
+            &queue_depth,
+            &enqueue_deferred,
+            false,
+            false
+        ));
+
+        assert_eq!(queue_depth.load(Ordering::Acquire), 1);
+        assert_eq!(enqueue_deferred.load(Ordering::Acquire), 0);
     }
 }

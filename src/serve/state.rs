@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 
 fn parse_env_bool(raw: &str) -> Option<bool> {
     if raw == "1"
@@ -53,6 +53,13 @@ pub struct AppState {
     pub kv_lookup_inflight: Arc<DashMap<String, Arc<Notify>>>,
     pub kv_last_put: Arc<AtomicU64>,
     pub kv_backlog_rejects: Arc<AtomicU64>,
+    pub kv_replication_enqueue_deferred: Arc<AtomicU64>,
+    pub kv_replication_flush_ok: Arc<AtomicU64>,
+    pub kv_replication_flush_conflict: Arc<AtomicU64>,
+    pub kv_replication_flush_error: Arc<AtomicU64>,
+    pub kv_replication_flush_permanent: Arc<AtomicU64>,
+    pub kv_replication_queue_depth: Arc<AtomicU64>,
+    pub kv_replication_work_tx: mpsc::Sender<KvReplicationWork>,
     pub kv_next_flush_at: Arc<RwLock<Option<Instant>>>,
     pub kv_flush_scheduled: Arc<AtomicBool>,
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
@@ -614,6 +621,12 @@ pub const MAX_SPOOL_BYTES: u64 = 512 * 1024 * 1024;
 pub const FLUSH_BLOB_THRESHOLD: usize = 500;
 pub const FLUSH_SIZE_THRESHOLD: u64 = 256 * 1024 * 1024;
 pub const KV_BACKLOG_POLICY: &str = "reject_when_spool_full";
+pub const KV_REPLICATION_WORK_QUEUE_CAPACITY: usize = 5_000;
+
+#[derive(Clone, Copy, Debug)]
+pub enum KvReplicationWork {
+    FlushHint { urgent: bool },
+}
 
 pub(crate) fn unix_time_ms_now() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};

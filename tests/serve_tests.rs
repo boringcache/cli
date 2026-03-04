@@ -40,6 +40,9 @@ async fn setup(
 
     let api_client =
         ApiClient::new_with_token_override(Some("test-token".to_string())).expect("API client");
+    let (kv_replication_work_tx, _kv_replication_work_rx) = tokio::sync::mpsc::channel(
+        boring_cache_cli::serve::state::KV_REPLICATION_WORK_QUEUE_CAPACITY,
+    );
 
     let state = AppState {
         api_client,
@@ -56,6 +59,13 @@ async fn setup(
         kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
         kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_enqueue_deferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_flush_ok: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_flush_conflict: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_flush_error: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_flush_permanent: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_queue_depth: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_work_tx,
         kv_next_flush_at: Arc::new(RwLock::new(None)),
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
