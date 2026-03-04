@@ -720,10 +720,22 @@ stat_value() {
       awk '$1 == "Cache" && $2 == "misses" && $3 ~ /^[0-9]+$/ { print $3; exit }' "$file"
       ;;
     "Cache hits rate")
-      awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" { print $(NF-1); exit }' "$file"
+      awk '
+        $1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 != "(Rust)" {
+          if ($4 == "-") { print 0; exit }
+          if ($NF == "%") { print $(NF-1); exit }
+          print $4; exit
+        }
+      ' "$file"
       ;;
     "Cache hits rate (Rust)")
-      awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }' "$file"
+      awk '
+        $1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" {
+          if ($5 == "-") { print 0; exit }
+          if ($NF == "%") { print $(NF-1); exit }
+          print $5; exit
+        }
+      ' "$file"
       ;;
     "Average cache read hit")
       awk '$1 == "Average" && $2 == "cache" && $3 == "read" && $4 == "hit" { print $5; exit }' "$file"
