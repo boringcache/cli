@@ -199,8 +199,16 @@ mkdir -p "${MOUNT_SRC_DIR}"
 printf 'mount-initial-%s\n' "${RUN_SHA}" > "${MOUNT_SRC_DIR}/file.txt"
 "${CLI}" save --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_SRC_DIR}" > "${CLI_LOG_DIR}/mount-save.log"
 
-"${CLI}" ls "${WORKSPACE}" --limit 50 --json > "${CLI_LOG_DIR}/ls-after-encryption.json"
-if ! jq -e --arg tag "${TAG_MOUNT}" '.entries[]? | select(.tag == $tag and .encrypted == true)' "${CLI_LOG_DIR}/ls-after-encryption.json" >/dev/null; then
+encrypted_visible=0
+for _ in $(seq 1 10); do
+  "${CLI}" ls "${WORKSPACE}" --limit 500 --json > "${CLI_LOG_DIR}/ls-after-encryption.json"
+  if jq -e --arg tag "${TAG_MOUNT}" '.entries[]? | select(.tag == $tag and .encrypted == true)' "${CLI_LOG_DIR}/ls-after-encryption.json" >/dev/null; then
+    encrypted_visible=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${encrypted_visible}" != "1" ]]; then
   echo "encrypted entry for ${TAG_MOUNT} was not visible in ls output"
   cat "${CLI_LOG_DIR}/ls-after-encryption.json"
   exit 1
