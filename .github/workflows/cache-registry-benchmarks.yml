@@ -72,44 +72,27 @@ jobs:
         include:
           - backend: local
             sccache_backend: local
-            http2: "0"
             phase: efficacy
             run_efficacy: "1"
             run_stress: "0"
           - backend: local
             sccache_backend: local
-            http2: "0"
             phase: stress
             run_efficacy: "0"
             run_stress: "1"
           - backend: proxy
             sccache_backend: proxy
-            http2: "0"
             phase: efficacy
             run_efficacy: "1"
             run_stress: "0"
           - backend: proxy
             sccache_backend: proxy
-            http2: "0"
-            phase: stress
-            run_efficacy: "0"
-            run_stress: "1"
-          - backend: proxy-h2
-            sccache_backend: proxy
-            http2: "1"
-            phase: efficacy
-            run_efficacy: "1"
-            run_stress: "0"
-          - backend: proxy-h2
-            sccache_backend: proxy
-            http2: "1"
             phase: stress
             run_efficacy: "0"
             run_stress: "1"
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
-      BORINGCACHE_TRANSFER_HTTP2: ${{ matrix.http2 }}
       RUN_SCOPED_TAGS: "1"
       PARALLEL_JOBS: "2"
       SETTLE_SECS: "5"
@@ -492,7 +475,6 @@ jobs:
 
           local_warm=""
           proxy_warm=""
-          proxy_h2_warm=""
 
           mapfile -t metric_files < <(find artifacts -type f -name metrics.env | sort)
           for metrics in "${metric_files[@]}"; do
@@ -506,21 +488,16 @@ jobs:
               case "$backend" in
                 local) local_warm="$warm_seconds" ;;
                 proxy) proxy_warm="$warm_seconds" ;;
-                proxy-h2) proxy_h2_warm="$warm_seconds" ;;
               esac
             fi
           done
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          for label_var in "proxy:$proxy_warm" "proxy-h2:$proxy_h2_warm"; do
-            label="${label_var%%:*}"
-            pw="${label_var#*:}"
-            if [[ -n "$local_warm" && -n "$pw" ]]; then
-              delta="$(awk -v p="$pw" -v l="$local_warm" 'BEGIN { printf "%.2f", p-l }')"
-              pct="$(awk -v p="$pw" -v l="$local_warm" 'BEGIN { if (l <= 0) { print "0.00" } else { printf "%.2f", ((p-l)/l)*100 } }')"
-              echo "- Warm delta (${label} - local): ${delta}s (${pct}%)" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
+          if [[ -n "$local_warm" && -n "$proxy_warm" ]]; then
+            delta="$(awk -v p="$proxy_warm" -v l="$local_warm" 'BEGIN { printf "%.2f", p-l }')"
+            pct="$(awk -v p="$proxy_warm" -v l="$local_warm" 'BEGIN { if (l <= 0) { print "0.00" } else { printf "%.2f", ((p-l)/l)*100 } }')"
+            echo "- Warm delta (proxy - local): ${delta}s (${pct}%)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "## Stress (prewarm/parallel)" >> "$GITHUB_STEP_SUMMARY"
@@ -530,7 +507,6 @@ jobs:
 
           local_parallel=""
           proxy_parallel=""
-          proxy_h2_parallel=""
 
           for metrics in "${metric_files[@]}"; do
             # shellcheck disable=SC1090
@@ -543,21 +519,16 @@ jobs:
               case "$backend" in
                 local) local_parallel="$parallel_avg_seconds" ;;
                 proxy) proxy_parallel="$parallel_avg_seconds" ;;
-                proxy-h2) proxy_h2_parallel="$parallel_avg_seconds" ;;
               esac
             fi
           done
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          for label_var in "proxy:$proxy_parallel" "proxy-h2:$proxy_h2_parallel"; do
-            label="${label_var%%:*}"
-            pv="${label_var#*:}"
-            if [[ -n "$local_parallel" && -n "$pv" ]]; then
-              delta="$(awk -v p="$pv" -v l="$local_parallel" 'BEGIN { printf "%.2f", p-l }')"
-              pct="$(awk -v p="$pv" -v l="$local_parallel" 'BEGIN { if (l <= 0) { print "0.00" } else { printf "%.2f", ((p-l)/l)*100 } }')"
-              echo "- Parallel avg delta (${label} - local): ${delta}s (${pct}%)" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
+          if [[ -n "$local_parallel" && -n "$proxy_parallel" ]]; then
+            delta="$(awk -v p="$proxy_parallel" -v l="$local_parallel" 'BEGIN { printf "%.2f", p-l }')"
+            pct="$(awk -v p="$proxy_parallel" -v l="$local_parallel" 'BEGIN { if (l <= 0) { print "0.00" } else { printf "%.2f", ((p-l)/l)*100 } }')"
+            echo "- Parallel avg delta (proxy - local): ${delta}s (${pct}%)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "## Adapter E2E" >> "$GITHUB_STEP_SUMMARY"
