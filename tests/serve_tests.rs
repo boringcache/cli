@@ -50,13 +50,14 @@ async fn setup(
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
         kv_flush_lock: Arc::new(Mutex::new(())),
-        kv_lookup_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
         kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_next_flush_at: Arc::new(RwLock::new(None)),
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
         kv_flushing: Arc::new(RwLock::new(None)),
         kv_recent_misses: Arc::new(dashmap::DashMap::new()),
+        kv_miss_generations: Arc::new(dashmap::DashMap::new()),
         blob_read_cache: Arc::new(
             BlobReadCache::new_at(
                 temp_home.path().join("blob-read-cache"),
@@ -64,10 +65,12 @@ async fn setup(
             )
             .expect("blob read cache"),
         ),
+        blob_download_max_concurrency: 16,
         blob_download_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
         blob_prefetch_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         cache_ops: Arc::new(boring_cache_cli::serve::cache_registry::cache_ops::Aggregator::new()),
         oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
+        backend_breaker: Arc::new(boring_cache_cli::serve::state::BackendCircuitBreaker::new()),
     };
 
     (state, temp_home, guard)

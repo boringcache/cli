@@ -11,6 +11,32 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, Notify, RwLock};
 
+fn parse_env_bool(raw: &str) -> Option<bool> {
+    if raw == "1"
+        || raw.eq_ignore_ascii_case("true")
+        || raw.eq_ignore_ascii_case("yes")
+        || raw.eq_ignore_ascii_case("on")
+    {
+        return Some(true);
+    }
+    if raw == "0"
+        || raw.eq_ignore_ascii_case("false")
+        || raw.eq_ignore_ascii_case("no")
+        || raw.eq_ignore_ascii_case("off")
+    {
+        return Some(false);
+    }
+    None
+}
+
+pub fn env_bool(name: &str) -> Option<bool> {
+    std::env::var(name).ok().as_deref().and_then(parse_env_bool)
+}
+
+pub fn diagnostics_enabled() -> bool {
+    env_bool("BORINGCACHE_DEBUG_DIAGNOSTICS").unwrap_or(false)
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub api_client: ApiClient,
@@ -23,18 +49,56 @@ pub struct AppState {
     pub upload_sessions: Arc<RwLock<UploadSessionStore>>,
     pub kv_pending: Arc<RwLock<KvPendingStore>>,
     pub kv_flush_lock: Arc<Mutex<()>>,
-    pub kv_lookup_inflight: Arc<std::sync::Mutex<HashMap<String, Arc<Notify>>>>,
+    pub kv_lookup_inflight: Arc<DashMap<String, Arc<Notify>>>,
     pub kv_last_put: Arc<AtomicU64>,
     pub kv_next_flush_at: Arc<RwLock<Option<Instant>>>,
     pub kv_flush_scheduled: Arc<AtomicBool>,
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
     pub kv_flushing: Arc<RwLock<Option<KvFlushingSnapshot>>>,
     pub kv_recent_misses: Arc<DashMap<String, Instant>>,
+    pub kv_miss_generations: Arc<DashMap<String, u64>>,
     pub blob_read_cache: Arc<BlobReadCache>,
+    pub blob_download_max_concurrency: usize,
     pub blob_download_semaphore: Arc<tokio::sync::Semaphore>,
     pub blob_prefetch_semaphore: Arc<tokio::sync::Semaphore>,
     pub cache_ops: Arc<super::cache_registry::cache_ops::Aggregator>,
     pub oci_manifest_cache: Arc<DashMap<String, Arc<OciManifestCacheEntry>>>,
+    pub backend_breaker: Arc<BackendCircuitBreaker>,
+}
+
+const BACKEND_BREAKER_OPEN_DURATION_MS: u64 = 8_000;
+const BACKEND_BREAKER_FAILURE_THRESHOLD: u32 = 3;
+
+pub struct BackendCircuitBreaker {
+    open_until: AtomicU64,
+    consecutive_failures: std::sync::atomic::AtomicU32,
+}
+
+impl BackendCircuitBreaker {
+    pub fn new() -> Self {
+        Self {
+            open_until: AtomicU64::new(0),
+            consecutive_failures: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        let until = self.open_until.load(Ordering::Acquire);
+        until > 0 && unix_time_ms_now() < until
+    }
+
+    pub fn record_success(&self) {
+        self.consecutive_failures.store(0, Ordering::Release);
+        self.open_until.store(0, Ordering::Release);
+    }
+
+    pub fn record_failure(&self) {
+        let prev = self.consecutive_failures.fetch_add(1, Ordering::AcqRel);
+        if prev + 1 >= BACKEND_BREAKER_FAILURE_THRESHOLD {
+            let until = unix_time_ms_now() + BACKEND_BREAKER_OPEN_DURATION_MS;
+            self.open_until.store(until, Ordering::Release);
+        }
+    }
 }
 
 pub const DEFAULT_BLOB_READ_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -59,18 +123,12 @@ pub struct OciManifestCacheEntry {
 struct BlobReadInFlightGuard {
     key: String,
     notify: Arc<Notify>,
-    inflight: Arc<std::sync::Mutex<HashMap<String, Arc<Notify>>>>,
+    inflight: Arc<DashMap<String, Arc<Notify>>>,
 }
 
 impl Drop for BlobReadInFlightGuard {
     fn drop(&mut self) {
-        {
-            let mut inflight = self
-                .inflight
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            inflight.remove(&self.key);
-        }
+        self.inflight.remove(&self.key);
         self.notify.notify_waiters();
     }
 }
@@ -84,7 +142,7 @@ pub struct BlobReadCache {
     cache_dir: PathBuf,
     total_bytes: AtomicU64,
     max_bytes: u64,
-    inflight: Arc<std::sync::Mutex<HashMap<String, Arc<Notify>>>>,
+    inflight: Arc<DashMap<String, Arc<Notify>>>,
     evict_lock: Arc<Mutex<()>>,
 }
 
@@ -101,7 +159,7 @@ impl BlobReadCache {
             cache_dir,
             total_bytes: AtomicU64::new(total_bytes),
             max_bytes: max_bytes.max(1),
-            inflight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            inflight: Arc::new(DashMap::new()),
             evict_lock: Arc::new(Mutex::new(())),
         })
     }
@@ -148,11 +206,7 @@ impl BlobReadCache {
     }
 
     fn clear_blob_read_inflight(&self, key: &str) {
-        let mut inflight = self
-            .inflight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inflight.remove(key);
+        self.inflight.remove(key);
     }
 
     pub async fn get(&self, digest: &str) -> Option<PathBuf> {
@@ -397,23 +451,22 @@ impl BlobReadCache {
     }
 
     fn begin_inflight(&self, key: String) -> BlobReadInFlight {
-        let mut inflight = self
-            .inflight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = inflight.get(&key) {
-            let mut notified = Box::pin(existing.clone().notified_owned());
-            notified.as_mut().enable();
-            return BlobReadInFlight::Follower(notified);
+        match self.inflight.entry(key.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(existing) => {
+                let mut notified = Box::pin(existing.get().clone().notified_owned());
+                notified.as_mut().enable();
+                BlobReadInFlight::Follower(notified)
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let notify = Arc::new(Notify::new());
+                entry.insert(notify.clone());
+                BlobReadInFlight::Leader(BlobReadInFlightGuard {
+                    key,
+                    notify,
+                    inflight: self.inflight.clone(),
+                })
+            }
         }
-
-        let notify = Arc::new(Notify::new());
-        inflight.insert(key.clone(), notify.clone());
-        BlobReadInFlight::Leader(BlobReadInFlightGuard {
-            key,
-            notify,
-            inflight: self.inflight.clone(),
-        })
     }
 
     fn path_and_key_for_digest(&self, digest: &str) -> Option<(PathBuf, String)> {
@@ -660,7 +713,8 @@ impl KvPendingStore {
         &mut self,
         entries: BTreeMap<String, BlobDescriptor>,
         blob_paths: HashMap<String, PathBuf>,
-    ) {
+    ) -> Vec<PathBuf> {
+        let mut cleanup_paths = Vec::new();
         let mut restore_refcounts: HashMap<String, u32> = HashMap::new();
         for (key, blob) in &entries {
             if let std::collections::btree_map::Entry::Vacant(e) = self.entries.entry(key.clone()) {
@@ -674,7 +728,7 @@ impl KvPendingStore {
                 match self.blob_refs.get_mut(digest) {
                     Some(existing) => {
                         existing.refcount += count;
-                        let _ = std::fs::remove_file(path);
+                        cleanup_paths.push(path.clone());
                     }
                     None => {
                         let size = entries
@@ -698,9 +752,10 @@ impl KvPendingStore {
 
         for (digest, path) in &blob_paths {
             if !restore_refcounts.contains_key(digest) {
-                let _ = std::fs::remove_file(path);
+                cleanup_paths.push(path.clone());
             }
         }
+        cleanup_paths
     }
 
     pub fn entry_count(&self) -> usize {
@@ -1021,11 +1076,7 @@ mod tests {
         let key = BlobReadCache::normalize_digest_hex(&digest).expect("normalized digest");
 
         {
-            let mut inflight = cache
-                .inflight
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            inflight.insert(key.clone(), Arc::new(Notify::new()));
+            cache.inflight.insert(key.clone(), Arc::new(Notify::new()));
         }
 
         let inserted = cache
@@ -1033,13 +1084,7 @@ mod tests {
             .await
             .expect("insert");
         assert!(!inserted);
-        {
-            let inflight = cache
-                .inflight
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            assert!(!inflight.contains_key(&key));
-        }
+        assert!(!cache.inflight.contains_key(&key));
 
         let inserted_after_cleanup = cache
             .insert(&digest, b"stale-flight")

@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 
@@ -20,7 +21,7 @@ use crate::cas_transport::upload_payload;
 use crate::error::BoringCacheError;
 use crate::manifest::EntryType;
 use crate::progress::TransferProgress;
-use crate::serve::state::{AppState, KvFlushingSnapshot};
+use crate::serve::state::{diagnostics_enabled, env_bool, AppState, KvFlushingSnapshot};
 
 use super::error::RegistryError;
 
@@ -42,17 +43,52 @@ const KV_BLOB_UPLOAD_MAX_ATTEMPTS: u32 = 3;
 const KV_BLOB_UPLOAD_RETRY_BASE_MS: u64 = 300;
 const KV_BLOB_UPLOAD_RETRY_MAX_MS: u64 = 1_500;
 const KV_BLOB_UPLOAD_MAX_CONCURRENCY: usize = 16;
+const KV_BLOB_UPLOAD_MIN_CONCURRENCY: usize = 1;
 const KV_BLOB_PRELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-const KV_BLOB_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const KV_BLOB_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const KV_BLOB_URL_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_LOOKUP_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const KV_PUT_BODY_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const KV_PUT_BODY_SLOW_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
+const KV_RESOLVE_HIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const KV_FETCH_POINTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_BLOB_PRELOAD_MAX_BLOBS: usize = 2_000;
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 const LOOKUP_REFRESH_FLIGHT_KEY: &str = "lookup_refresh";
 static KV_BLOB_DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn kv_miss_cache_key(registry_root_tag: &str, scoped_key: &str) -> String {
-    format!("{}\u{0}{}", registry_root_tag.trim(), scoped_key)
+fn kv_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_bool("BORINGCACHE_KV_TRACE").unwrap_or_else(diagnostics_enabled))
+}
+
+fn kv_trace(namespace: KvNamespace, scoped_key: &str, stage: &str) {
+    if !kv_trace_enabled() || !matches!(namespace, KvNamespace::Sccache) {
+        return;
+    }
+    let truncated = scoped_key.get(..96).unwrap_or(scoped_key);
+    eprintln!("KV TRACE stage={stage} key={truncated}");
+}
+
+fn kv_miss_generation(state: &AppState, registry_root_tag: &str) -> u64 {
+    state
+        .kv_miss_generations
+        .get(registry_root_tag.trim())
+        .map(|entry| *entry.value())
+        .unwrap_or(0)
+}
+
+fn kv_miss_cache_key(state: &AppState, registry_root_tag: &str, scoped_key: &str) -> String {
+    format!(
+        "{}\u{0}{}\u{0}{}",
+        registry_root_tag.trim(),
+        kv_miss_generation(state, registry_root_tag),
+        scoped_key
+    )
+}
+
+fn use_kv_miss_cache(namespace: KvNamespace) -> bool {
+    !matches!(namespace, KvNamespace::Sccache)
 }
 
 fn lookup_flight_key_for_sizes(scoped_keys: &[String]) -> String {
@@ -65,18 +101,12 @@ fn lookup_flight_key_for_sizes(scoped_keys: &[String]) -> String {
 struct LookupFlightGuard {
     key: String,
     notify: Arc<tokio::sync::Notify>,
-    inflight: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>>,
+    inflight: Arc<dashmap::DashMap<String, Arc<tokio::sync::Notify>>>,
 }
 
 impl Drop for LookupFlightGuard {
     fn drop(&mut self) {
-        {
-            let mut inflight = self
-                .inflight
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            inflight.remove(&self.key);
-        }
+        self.inflight.remove(&self.key);
         self.notify.notify_waiters();
     }
 }
@@ -87,42 +117,33 @@ enum LookupFlight {
 }
 
 const FLIGHT_WAIT_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(1);
-const FLIGHT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const FLIGHT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 async fn await_flight(
-    state: &AppState,
     kind: &str,
     key: &str,
     notified: std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>,
 ) -> bool {
-    let inflight_size = state
-        .kv_lookup_inflight
-        .lock()
-        .map(|m| m.len())
-        .unwrap_or(0);
     let started = std::time::Instant::now();
     match tokio::time::timeout(FLIGHT_WAIT_TIMEOUT, notified).await {
         Ok(()) => {
             let elapsed = started.elapsed();
             if elapsed >= FLIGHT_WAIT_WARN_THRESHOLD {
                 log::warn!(
-                    "flight follower waited {}ms: kind={} key={} inflight_at_start={}",
+                    "flight follower waited {}ms: kind={} key={}",
                     elapsed.as_millis(),
                     kind,
                     &key[..key.len().min(24)],
-                    inflight_size,
                 );
             }
             true
         }
         Err(_) => {
-            let elapsed = started.elapsed();
             log::warn!(
-                "flight follower timed out after {}ms: kind={} key={} inflight_at_start={}",
-                elapsed.as_millis(),
+                "flight follower timed out after {}ms: kind={} key={}",
+                started.elapsed().as_millis(),
                 kind,
                 &key[..key.len().min(24)],
-                inflight_size,
             );
             false
         }
@@ -130,31 +151,26 @@ async fn await_flight(
 }
 
 fn begin_lookup_flight(state: &AppState, key: String) -> LookupFlight {
-    let mut inflight = state
-        .kv_lookup_inflight
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(existing) = inflight.get(&key) {
-        let mut notified = Box::pin(existing.clone().notified_owned());
-        notified.as_mut().enable();
-        return LookupFlight::Follower(notified);
+    match state.kv_lookup_inflight.entry(key.clone()) {
+        dashmap::mapref::entry::Entry::Occupied(existing) => {
+            let mut notified = Box::pin(existing.get().clone().notified_owned());
+            notified.as_mut().enable();
+            LookupFlight::Follower(notified)
+        }
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            let notify = Arc::new(tokio::sync::Notify::new());
+            entry.insert(notify.clone());
+            LookupFlight::Leader(LookupFlightGuard {
+                key,
+                notify,
+                inflight: state.kv_lookup_inflight.clone(),
+            })
+        }
     }
-
-    let notify = Arc::new(tokio::sync::Notify::new());
-    inflight.insert(key.clone(), notify.clone());
-    LookupFlight::Leader(LookupFlightGuard {
-        key,
-        notify,
-        inflight: state.kv_lookup_inflight.clone(),
-    })
 }
 
 fn clear_lookup_flight_entry(state: &AppState, key: &str) {
-    let mut inflight = state
-        .kv_lookup_inflight
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    inflight.remove(key);
+    state.kv_lookup_inflight.remove(key);
 }
 
 fn conflict_backoff_window(message: &str) -> (u64, u64) {
@@ -241,6 +257,10 @@ pub(crate) async fn put_kv_object(
     put_status: StatusCode,
 ) -> Result<Response, RegistryError> {
     let put_start = std::time::Instant::now();
+    let scoped_key = namespace.scoped_key(key);
+    let use_miss_cache = use_kv_miss_cache(namespace);
+    let put_probe = super::PutProbeGuard::start(&scoped_key);
+    put_probe.stage("precheck_spool");
     {
         let pending = state.kv_pending.read().await;
         if pending.total_spool_bytes() >= crate::serve::state::MAX_SPOOL_BYTES {
@@ -259,10 +279,11 @@ pub(crate) async fn put_kv_object(
         }
     }
 
-    let (path, blob_size, blob_digest) = write_body_to_temp_file(body).await?;
-    let scoped_key = namespace.scoped_key(key);
-    let miss_key = kv_miss_cache_key(&state.registry_root_tag, &scoped_key);
+    put_probe.stage("read_body");
+    let (path, blob_size, blob_digest) = write_body_to_temp_file(body, &put_probe).await?;
+    let miss_key = kv_miss_cache_key(state, &state.registry_root_tag, &scoped_key);
 
+    put_probe.stage("pending_lock");
     let (redundant, should_flush) = {
         let mut pending = state.kv_pending.write().await;
         let digest_exists = pending.blob_path(&blob_digest).is_some();
@@ -298,21 +319,31 @@ pub(crate) async fn put_kv_object(
             || pending.total_spool_bytes() >= crate::serve::state::FLUSH_SIZE_THRESHOLD;
         (redundant, should_flush)
     };
-    state.kv_recent_misses.remove(&miss_key);
+    put_probe.stage("pending_updated");
+    if use_miss_cache {
+        put_probe.stage("recent_miss_remove_wait");
+        state.kv_recent_misses.remove(&miss_key);
+        put_probe.stage("recent_miss_removed");
+    }
     if let Some(redundant_path) = redundant {
+        put_probe.stage("cleanup_redundant_wait");
         let _ = tokio::fs::remove_file(&redundant_path).await;
+        put_probe.stage("cleanup_redundant_done");
     }
 
     state
         .kv_last_put
         .store(crate::serve::state::unix_time_ms_now(), Ordering::Release);
 
+    put_probe.stage("flush_gate_wait");
     let gated = {
         let gate = state.kv_next_flush_at.read().await;
         gate.is_some_and(|t| std::time::Instant::now() < t)
     };
+    put_probe.stage("flush_gate_checked");
     if should_flush && !gated {
         if let Some(flush_guard) = try_schedule_flush(state) {
+            put_probe.stage("flush_spawned");
             let flush_state = state.clone();
             tokio::spawn(async move {
                 let _flush_guard = flush_guard;
@@ -330,6 +361,7 @@ pub(crate) async fn put_kv_object(
         put_start.elapsed().as_millis() as u64,
     );
 
+    put_probe.stage("respond");
     log::debug!("KV PUT {scoped_key}: queued ({blob_size} bytes, digest={blob_digest})");
     Ok((put_status, Body::empty()).into_response())
 }
@@ -339,13 +371,22 @@ async fn resolve_download_url(
     cache_entry_id: &str,
     blob: &BlobDescriptor,
 ) -> Result<String, RegistryError> {
-    let download_urls = state
+    let download_urls = match state
         .api_client
         .blob_download_urls(&state.workspace, cache_entry_id, std::slice::from_ref(blob))
         .await
-        .map_err(|e| {
-            RegistryError::internal(format!("Failed to resolve blob download URL: {e}"))
-        })?;
+    {
+        Ok(urls) => {
+            state.backend_breaker.record_success();
+            urls
+        }
+        Err(e) => {
+            state.backend_breaker.record_failure();
+            return Err(RegistryError::internal(format!(
+                "Failed to resolve blob download URL: {e}"
+            )));
+        }
+    };
 
     if download_urls
         .missing
@@ -424,11 +465,23 @@ fn clear_kv_miss(state: &AppState, scoped_key: &str) {
 }
 
 fn clear_tag_misses(state: &AppState, registry_root_tag: &str) {
-    let prefix = format!("{}\u{0}", registry_root_tag.trim());
+    let tag = registry_root_tag.trim().to_string();
+    match state.kv_miss_generations.entry(tag) {
+        dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+            let next = entry.get().wrapping_add(1);
+            entry.insert(next);
+        }
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            entry.insert(1);
+        }
+    }
+}
+
+pub(crate) fn cleanup_expired_kv_misses(state: &AppState) {
     let now = std::time::Instant::now();
     state
         .kv_recent_misses
-        .retain(|key, expires_at| *expires_at > now && !key.starts_with(&prefix));
+        .retain(|_, expires_at| *expires_at > now);
 }
 
 fn kv_root_tags_from_values(
@@ -485,6 +538,8 @@ fn is_retryable_blob_upload_error(message: &str) -> bool {
         || lower.contains("http 504")
         || lower.contains("timeout")
         || lower.contains("timed out")
+        || lower.contains("deadline has elapsed")
+        || lower.contains("connect error")
         || lower.contains("connection reset")
         || lower.contains("broken pipe")
         || lower.contains("connection refused")
@@ -572,7 +627,16 @@ fn should_suppress_lookup_refresh_due_to_pending_values(
 }
 
 async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), RegistryError> {
-    let (entries, cache_entry_id, _) = load_existing_index_with_fallback(state, true).await?;
+    let (entries, cache_entry_id, _) = match load_existing_index_with_fallback(state, true).await {
+        Ok(result) => {
+            state.backend_breaker.record_success();
+            result
+        }
+        Err(e) => {
+            state.backend_breaker.record_failure();
+            return Err(e);
+        }
+    };
 
     {
         let mut published = state.kv_published_index.write().await;
@@ -610,6 +674,9 @@ async fn refresh_published_index_for_lookup_with_timeout(
 }
 
 async fn maybe_refresh_published_index_for_lookup(state: &AppState) -> Result<(), RegistryError> {
+    if state.backend_breaker.is_open() {
+        return Ok(());
+    }
     if !should_refresh_published_index_for_lookup(state).await {
         return Ok(());
     }
@@ -617,7 +684,7 @@ async fn maybe_refresh_published_index_for_lookup(state: &AppState) -> Result<()
     let flight_key = LOOKUP_REFRESH_FLIGHT_KEY.to_string();
     match begin_lookup_flight(state, flight_key.clone()) {
         LookupFlight::Follower(notified) => {
-            if !await_flight(state, "refresh", &flight_key, notified).await {
+            if !await_flight("refresh", &flight_key, notified).await {
                 clear_lookup_flight_entry(state, &flight_key);
                 if should_refresh_published_index_for_lookup(state).await {
                     refresh_published_index_for_lookup_with_timeout(state).await?;
@@ -698,7 +765,9 @@ async fn get_or_head_kv_object_inner(
     is_head: bool,
 ) -> Result<Response, RegistryError> {
     let scoped_key = namespace.scoped_key(key);
-    let miss_key = kv_miss_cache_key(&state.registry_root_tag, &scoped_key);
+    kv_trace(namespace, &scoped_key, "start");
+    let use_miss_cache = use_kv_miss_cache(namespace);
+    let miss_key = kv_miss_cache_key(state, &state.registry_root_tag, &scoped_key);
 
     let local = {
         let pending = state.kv_pending.read().await;
@@ -708,8 +777,10 @@ async fn get_or_head_kv_object_inner(
                 .map(|path| (blob.clone(), path.clone()))
         })
     };
+    kv_trace(namespace, &scoped_key, "after-pending");
 
     if let Some((blob, path)) = local {
+        kv_trace(namespace, &scoped_key, "serve-local");
         match serve_local_blob(&blob, &path, is_head).await {
             Ok(response) => return Ok(response),
             Err(e) => {
@@ -728,8 +799,10 @@ async fn get_or_head_kv_object_inner(
             })
         })
     };
+    kv_trace(namespace, &scoped_key, "after-flushing");
 
     if let Some((blob, path)) = flushing_local {
+        kv_trace(namespace, &scoped_key, "serve-flushing");
         match serve_local_blob(&blob, &path, is_head).await {
             Ok(response) => return Ok(response),
             Err(e) => {
@@ -741,7 +814,10 @@ async fn get_or_head_kv_object_inner(
     if let Some((blob, cache_entry_id, cached_url)) =
         lookup_published_blob(state, &scoped_key).await
     {
-        clear_kv_miss(state, &miss_key);
+        kv_trace(namespace, &scoped_key, "serve-published-fast");
+        if use_miss_cache {
+            clear_kv_miss(state, &miss_key);
+        }
         return serve_backend_blob(
             state,
             &cache_entry_id,
@@ -752,38 +828,51 @@ async fn get_or_head_kv_object_inner(
         .await;
     }
 
-    if is_recent_kv_miss(state, &miss_key) {
+    if use_miss_cache && is_recent_kv_miss(state, &miss_key) {
+        kv_trace(namespace, &scoped_key, "recent-miss");
         return Err(RegistryError::not_found("Cache key not found"));
     }
 
+    kv_trace(namespace, &scoped_key, "lookup-flight-begin");
     let lookup_result = match begin_lookup_flight(state, miss_key.clone()) {
         LookupFlight::Follower(notified) => {
-            if !await_flight(state, "kv", &miss_key, notified).await {
+            kv_trace(namespace, &scoped_key, "lookup-flight-follower-wait");
+            if !await_flight("kv", &miss_key, notified).await {
                 clear_lookup_flight_entry(state, &miss_key);
             }
+            kv_trace(namespace, &scoped_key, "lookup-flight-follower-after-wait");
             lookup_published_blob(state, &scoped_key).await
         }
         LookupFlight::Leader(_lookup_guard) => {
-            if is_recent_kv_miss(state, &miss_key) {
+            if use_miss_cache && is_recent_kv_miss(state, &miss_key) {
+                kv_trace(namespace, &scoped_key, "leader-recent-miss");
                 return Err(RegistryError::not_found("Cache key not found"));
             }
 
             if let Some(found) = lookup_published_blob(state, &scoped_key).await {
+                kv_trace(namespace, &scoped_key, "leader-published-hit");
                 Some(found)
             } else {
+                kv_trace(namespace, &scoped_key, "leader-before-refresh");
                 maybe_refresh_published_index_for_lookup(state).await?;
+                kv_trace(namespace, &scoped_key, "leader-after-refresh");
                 let result = lookup_published_blob(state, &scoped_key).await;
-                if result.is_none() {
+                if use_miss_cache && result.is_none() {
                     mark_kv_miss(state, &miss_key);
+                    kv_trace(namespace, &scoped_key, "leader-mark-miss");
                 }
                 result
             }
             // _lookup_guard drops here — BEFORE the download
         }
     };
+    kv_trace(namespace, &scoped_key, "lookup-flight-end");
 
     if let Some((blob, cache_entry_id, cached_url)) = lookup_result {
-        clear_kv_miss(state, &miss_key);
+        kv_trace(namespace, &scoped_key, "serve-published-after-lookup");
+        if use_miss_cache {
+            clear_kv_miss(state, &miss_key);
+        }
         return serve_backend_blob(
             state,
             &cache_entry_id,
@@ -794,6 +883,7 @@ async fn get_or_head_kv_object_inner(
         .await;
     }
 
+    kv_trace(namespace, &scoped_key, "not-found");
     Err(RegistryError::not_found("Cache key not found"))
 }
 
@@ -842,7 +932,7 @@ async fn resolve_blob_url(
     let flight_key = format!("url:{}", blob.digest);
     match begin_lookup_flight(state, flight_key.clone()) {
         LookupFlight::Follower(notified) => {
-            if !await_flight(state, "url", &flight_key, notified).await {
+            if !await_flight("url", &flight_key, notified).await {
                 clear_lookup_flight_entry(state, &flight_key);
             }
             let published = state.kv_published_index.read().await;
@@ -876,6 +966,13 @@ async fn do_download_blob_to_cache(
 ) -> Result<PathBuf, RegistryError> {
     if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
         return Ok(cache_path);
+    }
+
+    if cached_url.is_none() && state.backend_breaker.is_open() {
+        return Err(RegistryError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Backend temporarily unavailable",
+        ));
     }
 
     let (url, from_cache) = match tokio::time::timeout(
@@ -1044,7 +1141,7 @@ async fn download_blob_to_cache(
             result
         }
         LookupFlight::Follower(notified) => {
-            if !await_flight(state, "dl", &flight_key, notified).await {
+            if !await_flight("dl", &flight_key, notified).await {
                 clear_lookup_flight_entry(state, &flight_key);
             }
             if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
@@ -1063,7 +1160,7 @@ async fn download_blob_to_cache(
                     do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await
                 }
                 LookupFlight::Follower(retry_notified) => {
-                    if !await_flight(state, "dlretry", &retry_key, retry_notified).await {
+                    if !await_flight("dlretry", &retry_key, retry_notified).await {
                         clear_lookup_flight_entry(state, &retry_key);
                     }
                     state
@@ -1173,7 +1270,7 @@ async fn resolve_kv_entries_inner(
     let sizes_key = lookup_flight_key_for_sizes(&scoped_keys);
     match begin_lookup_flight(state, sizes_key.clone()) {
         LookupFlight::Follower(notified) => {
-            if !await_flight(state, "sizes", &sizes_key, notified).await {
+            if !await_flight("sizes", &sizes_key, notified).await {
                 clear_lookup_flight_entry(state, &sizes_key);
             }
             populate_sizes_from_published(state, &scoped_keys, &mut sizes).await;
@@ -1197,11 +1294,20 @@ pub(crate) async fn resolve_hit(
     state: &AppState,
     tag: &str,
 ) -> Result<CacheResolutionEntry, RegistryError> {
-    let response = state
-        .api_client
-        .restore(&state.workspace, &[tag.to_string()])
-        .await
-        .map_err(|e| RegistryError::internal(format!("Failed to resolve cache key: {e}")))?;
+    let response = tokio::time::timeout(
+        KV_RESOLVE_HIT_TIMEOUT,
+        state
+            .api_client
+            .restore(&state.workspace, &[tag.to_string()]),
+    )
+    .await
+    .map_err(|_| {
+        RegistryError::internal(format!(
+            "Timed out resolving cache key after {}s",
+            KV_RESOLVE_HIT_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| RegistryError::internal(format!("Failed to resolve cache key: {e}")))?;
 
     response
         .into_iter()
@@ -1218,18 +1324,31 @@ async fn fetch_pointer(
         .as_ref()
         .ok_or_else(|| RegistryError::internal("Cache hit is missing manifest_url"))?;
 
-    let pointer_response = state
-        .api_client
-        .transfer_client()
-        .get(manifest_url)
-        .send()
+    let pointer_response = tokio::time::timeout(
+        KV_FETCH_POINTER_TIMEOUT,
+        state.api_client.transfer_client().get(manifest_url).send(),
+    )
+    .await
+    .map_err(|_| {
+        RegistryError::internal(format!(
+            "Timed out fetching manifest pointer after {}s",
+            KV_FETCH_POINTER_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| RegistryError::internal(format!("Failed to fetch manifest pointer: {e}")))?
+    .error_for_status()
+    .map_err(|e| RegistryError::internal(format!("Manifest pointer request failed: {e}")))?;
+    let pointer_bytes = tokio::time::timeout(KV_FETCH_POINTER_TIMEOUT, pointer_response.bytes())
         .await
-        .map_err(|e| RegistryError::internal(format!("Failed to fetch manifest pointer: {e}")))?
-        .error_for_status()
-        .map_err(|e| RegistryError::internal(format!("Manifest pointer request failed: {e}")))?;
-    let pointer_bytes = pointer_response.bytes().await.map_err(|e| {
-        RegistryError::internal(format!("Failed to read manifest pointer bytes: {e}"))
-    })?;
+        .map_err(|_| {
+            RegistryError::internal(format!(
+                "Timed out reading manifest pointer after {}s",
+                KV_FETCH_POINTER_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| {
+            RegistryError::internal(format!("Failed to read manifest pointer bytes: {e}"))
+        })?;
 
     crate::cas_file::parse_pointer(pointer_bytes.as_ref())
         .map_err(|e| RegistryError::internal(format!("Invalid file CAS pointer: {e}")))
@@ -1349,6 +1468,8 @@ fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
     let transient_hint = lower.contains("transient error")
         || lower.contains("timeout")
         || lower.contains("timed out")
+        || lower.contains("deadline has elapsed")
+        || lower.contains("connect error")
         || lower.contains("temporarily unavailable")
         || lower.contains("rate limit exceeded")
         || lower.contains("cannot connect")
@@ -1381,7 +1502,7 @@ fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
     let permanent_hint = lower.contains("authentication failed")
         || lower.contains("invalid or expired token")
         || lower.contains("access forbidden")
-        || lower.contains("workspace")
+        || lower.contains("workspace not found")
         || lower.contains("unprocessable");
     let permanent_kind = error.downcast_ref::<BoringCacheError>().is_some_and(|bc| {
         matches!(
@@ -1418,6 +1539,18 @@ async fn cleanup_blob_files(paths: &HashMap<String, PathBuf>) {
                 continue;
             }
             log::warn!("KV cleanup: failed to remove blob temp file: {error}");
+        }
+    }
+}
+
+async fn cleanup_paths(paths: Vec<PathBuf>) {
+    let removals = paths.into_iter().map(tokio::fs::remove_file);
+    for result in join_all(removals).await {
+        if let Err(error) = result {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                continue;
+            }
+            log::warn!("KV cleanup: failed to remove temp file: {error}");
         }
     }
 }
@@ -1506,8 +1639,9 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
         Err(FlushError::Conflict(msg)) => {
             eprintln!("KV batch flush: skipped — tag conflict ({msg})");
             let mut pending = state.kv_pending.write().await;
-            pending.restore(pending_entries, pending_blob_paths);
+            let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
             drop(pending);
+            cleanup_paths(paths_to_cleanup).await;
             let (base_ms, jitter_ms) = conflict_backoff_window(&msg);
             set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
             FlushResult::Conflict
@@ -1515,8 +1649,9 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
         Err(FlushError::Transient(msg)) => {
             eprintln!("KV batch flush failed: {msg}");
             let mut pending = state.kv_pending.write().await;
-            pending.restore(pending_entries, pending_blob_paths);
+            let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
             drop(pending);
+            cleanup_paths(paths_to_cleanup).await;
             let (base_ms, jitter_ms) = transient_backoff_window(&msg);
             set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
             FlushResult::Error
@@ -2002,8 +2137,14 @@ async fn do_flush(
         .save_entry(&state.workspace, &request)
         .await
     {
-        Ok(resp) => resp,
-        Err(e) => return Err(classify_flush_error(&e, "save_entry failed")),
+        Ok(resp) => {
+            state.backend_breaker.record_success();
+            resp
+        }
+        Err(e) => {
+            state.backend_breaker.record_failure();
+            return Err(classify_flush_error(&e, "save_entry failed"));
+        }
     };
 
     if save_response.exists {
@@ -2259,6 +2400,19 @@ fn kv_blob_upload_concurrency(operation_count: usize) -> usize {
         return 1;
     }
 
+    if let Some(configured) = std::env::var("BORINGCACHE_KV_BLOB_UPLOAD_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+    {
+        return configured
+            .clamp(
+                KV_BLOB_UPLOAD_MIN_CONCURRENCY,
+                KV_BLOB_UPLOAD_MAX_CONCURRENCY,
+            )
+            .min(operation_count);
+    }
+
     use crate::platform::resources::{MemoryStrategy, SystemResources};
 
     let resources = SystemResources::detect();
@@ -2298,6 +2452,11 @@ async fn upload_single_blob_with_retry(
         {
             Ok(_) => return Ok(BlobUploadOutcome::Uploaded),
             Err(error) => {
+                let error_text = format!("{error:#}");
+                log::warn!(
+                    "KV blob upload attempt {attempt}/{} failed for {upload_digest}: {error_text}",
+                    KV_BLOB_UPLOAD_MAX_ATTEMPTS,
+                );
                 last_error = Some(error);
                 if attempt >= KV_BLOB_UPLOAD_MAX_ATTEMPTS {
                     break;
@@ -2305,7 +2464,7 @@ async fn upload_single_blob_with_retry(
 
                 let retryable = last_error
                     .as_ref()
-                    .map(|err| is_retryable_blob_upload_error(&err.to_string()))
+                    .map(|err| is_retryable_blob_upload_error(&format!("{err:#}")))
                     .unwrap_or(false);
                 if !retryable {
                     break;
@@ -2354,8 +2513,9 @@ async fn upload_single_blob_with_retry(
 
     let error = last_error.unwrap_or_else(|| anyhow::anyhow!("unknown blob upload error"));
     Err(anyhow::anyhow!(
-        "Failed to upload blob {}: {error}",
-        upload_digest
+        "Failed to upload blob {}: {:#}",
+        upload_digest,
+        error
     ))
 }
 
@@ -2383,6 +2543,12 @@ async fn upload_blobs(
         .collect();
 
     let max_concurrent = kv_blob_upload_concurrency(upload_plan.upload_urls.len());
+    eprintln!(
+        "KV blob upload plan: requested={} already_present={} concurrency={}",
+        upload_plan.upload_urls.len(),
+        upload_plan.already_present.len(),
+        max_concurrent,
+    );
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -2537,35 +2703,116 @@ async fn resolve_hit_for_index_load(
     }
 }
 
-async fn write_body_to_temp_file(body: Body) -> Result<(PathBuf, u64, String), RegistryError> {
+async fn cleanup_temp_file(path: &PathBuf) {
+    let _ = tokio::fs::remove_file(path).await;
+}
+
+async fn write_body_to_temp_file(
+    body: Body,
+    put_probe: &super::PutProbeGuard,
+) -> Result<(PathBuf, u64, String), RegistryError> {
     let temp_dir = std::env::temp_dir().join("boringcache-kv-blobs");
     let path = temp_dir.join(uuid::Uuid::new_v4().to_string());
+    let ingest_start = std::time::Instant::now();
 
-    let mut file = tokio::fs::File::create(&path)
+    put_probe.stage("ensure_tmpdir");
+    tokio::fs::create_dir_all(&temp_dir)
         .await
-        .map_err(|e| RegistryError::internal(format!("Failed to create temp file: {e}")))?;
+        .map_err(|e| RegistryError::internal(format!("Failed to create temp dir: {e}")))?;
+
+    put_probe.stage("open_temp");
+    let mut file = match tokio::fs::File::create(&path).await {
+        Ok(file) => file,
+        Err(e) => {
+            return Err(RegistryError::internal(format!(
+                "Failed to create temp file: {e}"
+            )));
+        }
+    };
 
     let mut stream = body.into_data_stream();
     let mut total_size = 0u64;
     let mut hasher = Sha256::new();
+    let mut slow_logged = false;
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        put_probe.stage("read_chunk_wait");
+        let next_chunk = tokio::time::timeout(KV_PUT_BODY_CHUNK_TIMEOUT, stream.next()).await;
+        let Some(chunk_result) = (match next_chunk {
+            Ok(next) => next,
+            Err(_) => {
+                put_probe.stage("read_chunk_timeout");
+                drop(file);
+                cleanup_temp_file(&path).await;
+                return Err(RegistryError::new(
+                    StatusCode::REQUEST_TIMEOUT,
+                    format!(
+                        "KV PUT body read timed out after {}s (received {} bytes)",
+                        KV_PUT_BODY_CHUNK_TIMEOUT.as_secs(),
+                        total_size
+                    ),
+                ));
+            }
+        }) else {
+            break;
+        };
         let chunk = chunk_result
-            .map_err(|e| RegistryError::internal(format!("Failed to read request body: {e}")))?;
+            .map_err(|e| RegistryError::internal(format!("Failed to read request body: {e}")));
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                drop(file);
+                cleanup_temp_file(&path).await;
+                return Err(error);
+            }
+        };
         if chunk.is_empty() {
             continue;
         }
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| RegistryError::internal(format!("Failed to write temp file: {e}")))?;
+        put_probe.stage("read_chunk_got");
+        put_probe.add_read(chunk.len() as u64);
+        if !slow_logged && ingest_start.elapsed() >= KV_PUT_BODY_SLOW_WARN_THRESHOLD {
+            slow_logged = true;
+            log::warn!(
+                "KV PUT body ingest is slow: elapsed={}ms bytes={}",
+                ingest_start.elapsed().as_millis(),
+                total_size
+            );
+        }
+        put_probe.stage("write_chunk_wait");
+        if let Err(e) = file.write_all(&chunk).await {
+            put_probe.stage("write_chunk_error");
+            drop(file);
+            cleanup_temp_file(&path).await;
+            return Err(RegistryError::internal(format!(
+                "Failed to write temp file: {e}"
+            )));
+        }
+        put_probe.add_written(chunk.len() as u64);
+        put_probe.stage("write_chunk_done");
         hasher.update(&chunk);
         total_size = total_size.saturating_add(chunk.len() as u64);
     }
 
-    file.flush()
-        .await
-        .map_err(|e| RegistryError::internal(format!("Failed to flush temp file: {e}")))?;
+    put_probe.stage("flush_file");
+    if let Err(e) = file.flush().await {
+        drop(file);
+        cleanup_temp_file(&path).await;
+        return Err(RegistryError::internal(format!(
+            "Failed to flush temp file: {e}"
+        )));
+    }
+    drop(file);
 
+    if ingest_start.elapsed() >= KV_PUT_BODY_SLOW_WARN_THRESHOLD {
+        log::warn!(
+            "KV PUT body ingest completed slowly: elapsed={}ms bytes={}",
+            ingest_start.elapsed().as_millis(),
+            total_size
+        );
+    }
+
+    put_probe.stage("body_ingest_done");
     let digest = format!("sha256:{:x}", hasher.finalize());
     Ok((path, total_size, digest))
 }

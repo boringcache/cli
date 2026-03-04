@@ -13,10 +13,68 @@ use tokio::sync::{oneshot, RwLock};
 
 use crate::api::client::ApiClient;
 use crate::serve::state::{
-    unix_time_ms_now, AppState, BlobLocatorCache, BlobReadCache, KvPendingStore, KvPublishedIndex,
-    UploadSessionStore, DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
+    diagnostics_enabled, unix_time_ms_now, AppState, BlobLocatorCache, BlobReadCache,
+    KvPendingStore, KvPublishedIndex, UploadSessionStore, DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
 };
 use crate::tag_utils::TagResolver;
+
+const KV_REFRESH_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn spawn_runtime_watchdog(
+    cache_ops: Arc<cache_registry::cache_ops::Aggregator>,
+    diagnostics: bool,
+) {
+    let rt_handle = tokio::runtime::Handle::current();
+    std::thread::Builder::new()
+        .name("watchdog".into())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            let mut stuck_count: u32 = 0;
+            loop {
+                let started_at = std::time::Instant::now();
+                let ts = chrono::Utc::now().format("%H:%M:%S%.3f");
+                let (tx, rx) = std::sync::mpsc::channel();
+                rt_handle.spawn(async move {
+                    let _ = tx.send(());
+                });
+                match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                    Ok(()) => {
+                        if diagnostics && stuck_count > 0 {
+                            eprintln!(
+                                "WATCHDOG ts={ts} runtime=recovered after_stuck={stuck_count}"
+                            );
+                        }
+                        cache_ops.record(
+                            cache_registry::cache_ops::Tool::Runtime,
+                            cache_registry::cache_ops::Op::Query,
+                            cache_registry::cache_ops::OpResult::Hit,
+                            false,
+                            0,
+                            started_at.elapsed().as_millis() as u64,
+                        );
+                        stuck_count = 0;
+                    }
+                    Err(_) => {
+                        stuck_count += 1;
+                        if diagnostics {
+                            eprintln!("WATCHDOG ts={ts} runtime=STUCK consecutive={stuck_count}",);
+                            crate::serve::cache_registry::dump_stuck_puts(5, 2_000);
+                        }
+                        cache_ops.record(
+                            cache_registry::cache_ops::Tool::Runtime,
+                            cache_registry::cache_ops::Op::Query,
+                            cache_registry::cache_ops::OpResult::Error,
+                            true,
+                            0,
+                            started_at.elapsed().as_millis() as u64,
+                        );
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+        })
+        .expect("Failed to spawn watchdog thread");
+}
 
 pub struct ServeHandle {
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -154,18 +212,21 @@ async fn build_server_runtime(
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
         kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
-        kv_lookup_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
         kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_next_flush_at: Arc::new(RwLock::new(None)),
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
         kv_flushing: Arc::new(RwLock::new(None)),
         kv_recent_misses: Arc::new(dashmap::DashMap::new()),
+        kv_miss_generations: Arc::new(dashmap::DashMap::new()),
         blob_read_cache,
+        blob_download_max_concurrency: dl_concurrency,
         blob_download_semaphore,
         blob_prefetch_semaphore,
         cache_ops: Arc::new(cache_registry::cache_ops::Aggregator::new()),
         oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
+        backend_breaker: Arc::new(state::BackendCircuitBreaker::new()),
     };
 
     let addr = format!("{host}:{port}");
@@ -229,6 +290,46 @@ async fn build_server_runtime(
 }
 
 fn spawn_maintenance_tasks(state: &AppState) {
+    let diagnostics = diagnostics_enabled();
+    spawn_runtime_watchdog(state.cache_ops.clone(), diagnostics);
+
+    if diagnostics {
+        let heartbeat_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let ts = chrono::Utc::now().format("%H:%M:%S");
+                eprintln!("HEARTBEAT ts={ts} phase=tick");
+                let pending_count = {
+                    let p = heartbeat_state.kv_pending.read().await;
+                    p.entry_count()
+                };
+                let published_count = {
+                    let p = heartbeat_state.kv_published_index.read().await;
+                    p.entry_count()
+                };
+                let flights = heartbeat_state.kv_lookup_inflight.len();
+                let cache_bytes = heartbeat_state.blob_read_cache.total_bytes();
+                let breaker_open = heartbeat_state.backend_breaker.is_open();
+                let (inflight, total) = cache_registry::request_counters();
+                let cache_ops_queue_depth = heartbeat_state.cache_ops.queue_depth();
+                let cache_ops_dropped_total = heartbeat_state.cache_ops.dropped_events_total();
+                eprintln!(
+                    "HEARTBEAT ts={ts} reqs={total} inflight={inflight} pending={} published={} flights={} cache_bytes={} breaker={} ops_q={} ops_drop={}",
+                    pending_count,
+                    published_count,
+                    flights,
+                    cache_bytes,
+                    if breaker_open { "OPEN" } else { "closed" },
+                    cache_ops_queue_depth,
+                    cache_ops_dropped_total,
+                );
+            }
+        });
+    }
+
     let preload_state = state.clone();
     tokio::spawn(async move {
         cache_registry::preload_kv_index(&preload_state).await;
@@ -240,7 +341,28 @@ fn spawn_maintenance_tasks(state: &AppState) {
         interval.tick().await;
         loop {
             interval.tick().await;
-            cache_registry::refresh_kv_index(&refresh_state).await;
+            if tokio::time::timeout(
+                KV_REFRESH_TASK_TIMEOUT,
+                cache_registry::refresh_kv_index(&refresh_state),
+            )
+            .await
+            .is_err()
+            {
+                log::warn!(
+                    "KV index refresh timed out after {}s",
+                    KV_REFRESH_TASK_TIMEOUT.as_secs()
+                );
+            }
+        }
+    });
+
+    let miss_cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            cache_registry::cleanup_expired_kv_misses(&miss_cleanup_state);
         }
     });
 

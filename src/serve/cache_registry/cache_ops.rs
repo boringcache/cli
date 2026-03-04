@@ -1,14 +1,21 @@
-use dashmap::DashMap;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::kv::KvNamespace;
 
 const BUCKET_SECONDS: u64 = 10;
+const DEFAULT_CACHE_OPS_QUEUE_CAPACITY: usize = 32_768;
+const MIN_CACHE_OPS_QUEUE_CAPACITY: usize = 1_024;
+const MAX_CACHE_OPS_QUEUE_CAPACITY: usize = 262_144;
+const CACHE_OPS_BARRIER_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Tool {
+    Runtime,
     Turborepo,
     Nx,
     Bazel,
@@ -22,6 +29,7 @@ pub(crate) enum Tool {
 impl Tool {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::Runtime => "runtime",
             Self::Turborepo => "turborepo",
             Self::Nx => "nx",
             Self::Bazel => "bazel",
@@ -35,6 +43,7 @@ impl Tool {
 
     pub(crate) fn from_str(value: &str) -> Option<Self> {
         match value {
+            "runtime" => Some(Self::Runtime),
             "turborepo" => Some(Self::Turborepo),
             "nx" => Some(Self::Nx),
             "bazel" => Some(Self::Bazel),
@@ -125,10 +134,10 @@ struct BucketKey {
 
 #[derive(Debug, Default)]
 struct BucketCounters {
-    event_count: AtomicU64,
-    bytes_total: AtomicU64,
-    latency_sum_ms: AtomicU64,
-    latency_count: AtomicU64,
+    event_count: u64,
+    bytes_total: u64,
+    latency_sum_ms: u64,
+    latency_count: u64,
 }
 
 fn bucket_epoch(now_secs: u64) -> u64 {
@@ -142,17 +151,44 @@ fn now_epoch_secs() -> u64 {
         .as_secs()
 }
 
-#[derive(Debug, Clone)]
-pub struct Aggregator {
-    buckets: Arc<DashMap<BucketKey, Arc<BucketCounters>>>,
-    missed_keys: Arc<DashMap<(String, Tool), MissEntry>>,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct MissEntry {
     key_hash: String,
     count: u64,
     sampled_prefix: Option<String>,
+}
+
+#[derive(Default)]
+struct AggregateState {
+    buckets: HashMap<BucketKey, BucketCounters>,
+    missed_keys: HashMap<(String, Tool), MissEntry>,
+}
+
+enum CacheOpEvent {
+    Record {
+        epoch_secs: u64,
+        tool: Tool,
+        op: Op,
+        result: OpResult,
+        degraded: bool,
+        bytes: u64,
+        latency_ms: u64,
+    },
+    Miss {
+        tool: Tool,
+        raw_key: String,
+    },
+    Barrier {
+        ack: mpsc::Sender<()>,
+    },
+}
+
+#[derive(Clone)]
+pub struct Aggregator {
+    state: Arc<Mutex<AggregateState>>,
+    queue_tx: Option<Arc<SyncSender<CacheOpEvent>>>,
+    queued_events: Arc<AtomicU64>,
+    dropped_events: Arc<AtomicU64>,
 }
 
 impl Default for Aggregator {
@@ -163,10 +199,200 @@ impl Default for Aggregator {
 
 impl Aggregator {
     pub fn new() -> Self {
+        let state = Arc::new(Mutex::new(AggregateState::default()));
+        let queued_events = Arc::new(AtomicU64::new(0));
+        let dropped_events = Arc::new(AtomicU64::new(0));
+
+        let queue_tx = {
+            let (tx, rx) = mpsc::sync_channel(cache_ops_queue_capacity());
+            let worker_state = state.clone();
+            let worker_queued_events = queued_events.clone();
+            match std::thread::Builder::new()
+                .name("cache-ops-worker".to_string())
+                .spawn(move || {
+                    Self::run_worker(rx, worker_state, worker_queued_events);
+                }) {
+                Ok(_) => Some(Arc::new(tx)),
+                Err(error) => {
+                    log::warn!("Cache ops worker spawn failed ({error}); using direct mode");
+                    None
+                }
+            }
+        };
+
         Self {
-            buckets: Arc::new(DashMap::new()),
-            missed_keys: Arc::new(DashMap::new()),
+            state,
+            queue_tx,
+            queued_events,
+            dropped_events,
         }
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, AggregateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn lock_state_arc(state: &Arc<Mutex<AggregateState>>) -> MutexGuard<'_, AggregateState> {
+        state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn run_worker(
+        rx: mpsc::Receiver<CacheOpEvent>,
+        state: Arc<Mutex<AggregateState>>,
+        queued_events: Arc<AtomicU64>,
+    ) {
+        while let Ok(event) = rx.recv() {
+            match event {
+                CacheOpEvent::Record {
+                    epoch_secs,
+                    tool,
+                    op,
+                    result,
+                    degraded,
+                    bytes,
+                    latency_ms,
+                } => {
+                    let mut guard = Self::lock_state_arc(&state);
+                    Self::apply_record_to_state(
+                        &mut guard, epoch_secs, tool, op, result, degraded, bytes, latency_ms,
+                    );
+                    queued_events.fetch_sub(1, Ordering::AcqRel);
+                }
+                CacheOpEvent::Miss { tool, raw_key } => {
+                    let mut guard = Self::lock_state_arc(&state);
+                    Self::apply_miss_to_state(&mut guard, tool, &raw_key);
+                    queued_events.fetch_sub(1, Ordering::AcqRel);
+                }
+                CacheOpEvent::Barrier { ack } => {
+                    let _ = ack.send(());
+                }
+            }
+        }
+    }
+
+    fn enqueue_event(&self, event: CacheOpEvent) -> Option<CacheOpEvent> {
+        let Some(queue_tx) = &self.queue_tx else {
+            return Some(event);
+        };
+
+        match queue_tx.try_send(event) {
+            Ok(()) => {
+                self.queued_events.fetch_add(1, Ordering::AcqRel);
+                None
+            }
+            Err(TrySendError::Full(_)) => {
+                self.note_dropped_event();
+                None
+            }
+            Err(TrySendError::Disconnected(event)) => Some(event),
+        }
+    }
+
+    fn note_dropped_event(&self) {
+        let dropped = self.dropped_events.fetch_add(1, Ordering::AcqRel) + 1;
+        if dropped == 1 || dropped % 1_000 == 0 {
+            log::warn!("Cache ops queue saturated; dropped {dropped} analytics events");
+        }
+    }
+
+    fn flush_async_events(&self) {
+        if self.queued_events.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let Some(queue_tx) = &self.queue_tx else {
+            return;
+        };
+
+        let deadline = std::time::Instant::now() + CACHE_OPS_BARRIER_TIMEOUT;
+        loop {
+            let (ack_tx, ack_rx) = mpsc::channel();
+            match queue_tx.try_send(CacheOpEvent::Barrier { ack: ack_tx }) {
+                Ok(()) => {
+                    let _ = ack_rx.recv_timeout(CACHE_OPS_BARRIER_TIMEOUT);
+                    return;
+                }
+                Err(TrySendError::Full(_)) => {
+                    if std::time::Instant::now() >= deadline {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(TrySendError::Disconnected(_)) => return,
+            }
+        }
+    }
+
+    fn apply_event_direct(&self, event: CacheOpEvent) {
+        let mut guard = self.lock_state();
+        match event {
+            CacheOpEvent::Record {
+                epoch_secs,
+                tool,
+                op,
+                result,
+                degraded,
+                bytes,
+                latency_ms,
+            } => {
+                Self::apply_record_to_state(
+                    &mut guard, epoch_secs, tool, op, result, degraded, bytes, latency_ms,
+                );
+            }
+            CacheOpEvent::Miss { tool, raw_key } => {
+                Self::apply_miss_to_state(&mut guard, tool, &raw_key);
+            }
+            CacheOpEvent::Barrier { .. } => {}
+        }
+    }
+
+    fn apply_record_to_state(
+        state: &mut AggregateState,
+        epoch_secs: u64,
+        tool: Tool,
+        op: Op,
+        result: OpResult,
+        degraded: bool,
+        bytes: u64,
+        latency_ms: u64,
+    ) {
+        let key = BucketKey {
+            epoch_secs,
+            tool,
+            op,
+            result,
+            degraded,
+        };
+
+        let counters = state.buckets.entry(key).or_default();
+
+        counters.event_count = counters.event_count.saturating_add(1);
+        counters.bytes_total = counters.bytes_total.saturating_add(bytes);
+        if latency_ms > 0 {
+            counters.latency_sum_ms = counters.latency_sum_ms.saturating_add(latency_ms);
+            counters.latency_count = counters.latency_count.saturating_add(1);
+        }
+    }
+
+    fn apply_miss_to_state(state: &mut AggregateState, tool: Tool, raw_key: &str) {
+        let key_hash = crate::cas_oci::sha256_hex(raw_key.as_bytes());
+        let map_key = (key_hash.clone(), tool);
+        let prefix = raw_key.get(..32).unwrap_or(raw_key).to_string();
+
+        state
+            .missed_keys
+            .entry(map_key)
+            .and_modify(|entry| {
+                entry.count = entry.count.saturating_add(1);
+            })
+            .or_insert(MissEntry {
+                key_hash,
+                count: 1,
+                sampled_prefix: Some(prefix),
+            });
     }
 
     pub(crate) fn record(
@@ -178,31 +404,24 @@ impl Aggregator {
         bytes: u64,
         latency_ms: u64,
     ) {
-        let key = BucketKey {
+        let event = CacheOpEvent::Record {
             epoch_secs: bucket_epoch(now_epoch_secs()),
             tool,
             op,
             result,
             degraded,
+            bytes,
+            latency_ms,
         };
-
-        let counters = self
-            .buckets
-            .entry(key)
-            .or_insert_with(|| Arc::new(BucketCounters::default()))
-            .clone();
-
-        counters.event_count.fetch_add(1, Ordering::Relaxed);
-        counters.bytes_total.fetch_add(bytes, Ordering::Relaxed);
-        if latency_ms > 0 {
-            counters
-                .latency_sum_ms
-                .fetch_add(latency_ms, Ordering::Relaxed);
-            counters.latency_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(event) = self.enqueue_event(event) {
+            self.apply_event_direct(event);
         }
     }
 
     pub(crate) fn restore(&self, rollups: Vec<RollupRecord>, missed_keys: Vec<MissedKeyRecord>) {
+        self.flush_async_events();
+        let mut state = self.lock_state();
+
         for rollup in rollups {
             let Some(tool) = Tool::from_str(&rollup.tool) else {
                 continue;
@@ -222,23 +441,13 @@ impl Aggregator {
                 degraded: rollup.degraded,
             };
 
-            let counters = self
-                .buckets
-                .entry(key)
-                .or_insert_with(|| Arc::new(BucketCounters::default()))
-                .clone();
-            counters
-                .event_count
-                .fetch_add(rollup.event_count, Ordering::Relaxed);
-            counters
-                .bytes_total
-                .fetch_add(rollup.bytes_total, Ordering::Relaxed);
-            counters
+            let counters = state.buckets.entry(key).or_default();
+            counters.event_count = counters.event_count.saturating_add(rollup.event_count);
+            counters.bytes_total = counters.bytes_total.saturating_add(rollup.bytes_total);
+            counters.latency_sum_ms = counters
                 .latency_sum_ms
-                .fetch_add(rollup.latency_sum_ms, Ordering::Relaxed);
-            counters
-                .latency_count
-                .fetch_add(rollup.latency_count, Ordering::Relaxed);
+                .saturating_add(rollup.latency_sum_ms);
+            counters.latency_count = counters.latency_count.saturating_add(rollup.latency_count);
         }
 
         for miss in missed_keys {
@@ -246,7 +455,8 @@ impl Aggregator {
                 continue;
             };
 
-            self.missed_keys
+            state
+                .missed_keys
                 .entry((miss.key_hash.clone(), tool))
                 .and_modify(|entry| {
                     entry.count = entry.count.saturating_add(miss.miss_count);
@@ -263,70 +473,88 @@ impl Aggregator {
     }
 
     pub(crate) fn record_miss(&self, tool: Tool, raw_key: &str) {
-        let key_hash = crate::cas_oci::sha256_hex(raw_key.as_bytes());
-        let map_key = (key_hash.clone(), tool);
-        let prefix = raw_key.get(..32).unwrap_or(raw_key).to_string();
-
-        self.missed_keys
-            .entry(map_key)
-            .and_modify(|entry| {
-                entry.count = entry.count.saturating_add(1);
-            })
-            .or_insert(MissEntry {
-                key_hash,
-                count: 1,
-                sampled_prefix: Some(prefix),
-            });
+        if tool == Tool::Sccache && !track_sccache_miss_keys_enabled() {
+            return;
+        }
+        let event = CacheOpEvent::Miss {
+            tool,
+            raw_key: raw_key.to_string(),
+        };
+        if let Some(event) = self.enqueue_event(event) {
+            self.apply_event_direct(event);
+        }
     }
 
     pub(crate) fn drain(&self) -> (Vec<RollupRecord>, Vec<MissedKeyRecord>) {
-        let bucket_keys: Vec<BucketKey> = self.buckets.iter().map(|entry| *entry.key()).collect();
+        self.flush_async_events();
+        let mut state = self.lock_state();
 
-        let mut rollups = Vec::with_capacity(bucket_keys.len());
-        for key in bucket_keys {
-            if let Some((_, counters)) = self.buckets.remove(&key) {
-                let count = counters.event_count.load(Ordering::Relaxed);
-                if count == 0 {
-                    continue;
-                }
-                rollups.push(RollupRecord {
-                    bucket_epoch_secs: key.epoch_secs,
-                    tool: key.tool.as_str().to_string(),
-                    operation: key.op.as_str().to_string(),
-                    result: key.result.as_str().to_string(),
-                    degraded: key.degraded,
-                    event_count: count,
-                    bytes_total: counters.bytes_total.load(Ordering::Relaxed),
-                    latency_sum_ms: counters.latency_sum_ms.load(Ordering::Relaxed),
-                    latency_count: counters.latency_count.load(Ordering::Relaxed),
-                });
+        let drained_buckets = std::mem::take(&mut state.buckets);
+        let mut rollups = Vec::with_capacity(drained_buckets.len());
+        for (key, counters) in drained_buckets {
+            if counters.event_count == 0 {
+                continue;
             }
+            rollups.push(RollupRecord {
+                bucket_epoch_secs: key.epoch_secs,
+                tool: key.tool.as_str().to_string(),
+                operation: key.op.as_str().to_string(),
+                result: key.result.as_str().to_string(),
+                degraded: key.degraded,
+                event_count: counters.event_count,
+                bytes_total: counters.bytes_total,
+                latency_sum_ms: counters.latency_sum_ms,
+                latency_count: counters.latency_count,
+            });
         }
 
-        let miss_keys: Vec<_> = self
-            .missed_keys
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        let mut missed = Vec::with_capacity(miss_keys.len());
-        for mk in miss_keys {
-            if let Some((_, entry)) = self.missed_keys.remove(&mk) {
-                missed.push(MissedKeyRecord {
-                    key_hash: entry.key_hash,
-                    tool: mk.1.as_str().to_string(),
-                    miss_count: entry.count,
-                    sampled_key_prefix: entry.sampled_prefix,
-                });
-            }
+        let drained_missed_keys = std::mem::take(&mut state.missed_keys);
+        let mut missed = Vec::with_capacity(drained_missed_keys.len());
+        for ((_, tool), entry) in drained_missed_keys {
+            missed.push(MissedKeyRecord {
+                key_hash: entry.key_hash,
+                tool: tool.as_str().to_string(),
+                miss_count: entry.count,
+                sampled_key_prefix: entry.sampled_prefix,
+            });
         }
 
         (rollups, missed)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.buckets.is_empty() && self.missed_keys.is_empty()
+        if self.queued_events.load(Ordering::Acquire) > 0 {
+            return false;
+        }
+        let state = self.lock_state();
+        state.buckets.is_empty() && state.missed_keys.is_empty()
     }
+
+    pub(crate) fn queue_depth(&self) -> u64 {
+        self.queued_events.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn dropped_events_total(&self) -> u64 {
+        self.dropped_events.load(Ordering::Acquire)
+    }
+}
+
+fn cache_ops_queue_capacity() -> usize {
+    std::env::var("BORINGCACHE_CACHE_OPS_QUEUE_CAPACITY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(MIN_CACHE_OPS_QUEUE_CAPACITY, MAX_CACHE_OPS_QUEUE_CAPACITY))
+        .unwrap_or(DEFAULT_CACHE_OPS_QUEUE_CAPACITY)
+}
+
+fn track_sccache_miss_keys_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("BORINGCACHE_CACHE_OPS_TRACK_SCCACHE_MISSES")
+            .ok()
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -392,6 +620,12 @@ mod tests {
 
         let nx = rollups.iter().find(|r| r.tool == "nx").expect("nx rollup");
         assert_eq!(nx.event_count, 1);
+    }
+
+    #[test]
+    fn runtime_tool_round_trip() {
+        assert_eq!(Tool::Runtime.as_str(), "runtime");
+        assert_eq!(Tool::from_str("runtime"), Some(Tool::Runtime));
     }
 
     #[test]

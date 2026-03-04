@@ -6,7 +6,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
@@ -15,8 +15,8 @@ use crate::cas_transport::upload_payload;
 use crate::multipart_upload::upload_via_single_url;
 use crate::serve::error::OciError;
 use crate::serve::state::{
-    digest_tag, ref_tag_for_input, AppState, BlobLocatorEntry, OciManifestCacheEntry,
-    UploadSession, OCI_MANIFEST_CACHE_TTL,
+    diagnostics_enabled, digest_tag, env_bool, ref_tag_for_input, AppState, BlobLocatorEntry,
+    OciManifestCacheEntry, UploadSession, OCI_MANIFEST_CACHE_TTL,
 };
 use crate::tag_utils::TagResolver;
 
@@ -27,6 +27,15 @@ const EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS: u64 = 75;
 const EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS: usize = 3;
 const EMPTY_FINALIZE_REMOTE_RETRY_DELAY_MS: u64 = 100;
 const OCI_DEGRADED_HEADER: &str = "X-BoringCache-Cache-Degraded";
+const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+const OCI_POINTER_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn oci_request_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| env_bool("BORINGCACHE_OCI_REQUEST_LOG").unwrap_or_else(diagnostics_enabled))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EmptyFinalizeReuse {
@@ -209,7 +218,9 @@ pub async fn oci_dispatch(
     let request_method = method.clone();
     let request_path = format!("/v2/{path}");
     let request_start = Instant::now();
-    eprintln!("REQUEST: {} {}", request_method, request_path);
+    if oci_request_log_enabled() {
+        eprintln!("REQUEST: {} {}", request_method, request_path);
+    }
     let fail_on_cache_error = state.fail_on_cache_error;
     let route = match parse_oci_path(&path) {
         Some(route) => route,
@@ -217,7 +228,9 @@ pub async fn oci_dispatch(
     };
     let maybe_cache_op = oci_cache_op_for_route_method(&route, &request_method);
     let miss_key = oci_miss_key(&route);
-    eprintln!("OCI {} {}", request_method, request_path);
+    if oci_request_log_enabled() {
+        eprintln!("OCI {} {}", request_method, request_path);
+    }
 
     let response = match route.clone() {
         OciRoute::Manifest { name, reference } => match method {
@@ -430,11 +443,18 @@ async fn resolve_manifest(
         ));
     }
 
-    let entries = state
-        .api_client
-        .restore(&state.workspace, &tags)
-        .await
-        .map_err(|e| OciError::internal(format!("Backend restore failed: {e}")))?;
+    let entries = tokio::time::timeout(
+        OCI_API_CALL_TIMEOUT,
+        state.api_client.restore(&state.workspace, &tags),
+    )
+    .await
+    .map_err(|_| {
+        OciError::internal(format!(
+            "Backend restore timed out after {}s",
+            OCI_API_CALL_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| OciError::internal(format!("Backend restore failed: {e}")))?;
 
     let mut entries_by_tag: HashMap<String, _> = entries
         .into_iter()
@@ -467,15 +487,29 @@ async fn resolve_manifest(
         .as_ref()
         .ok_or_else(|| OciError::internal("Missing manifest_url"))?;
 
-    let pointer_bytes = state
-        .api_client
-        .transfer_client()
-        .get(manifest_url)
-        .send()
+    let pointer_response = tokio::time::timeout(
+        OCI_POINTER_FETCH_TIMEOUT,
+        state.api_client.transfer_client().get(manifest_url).send(),
+    )
+    .await
+    .map_err(|_| {
+        OciError::internal(format!(
+            "Timed out downloading pointer after {}s",
+            OCI_POINTER_FETCH_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| OciError::internal(format!("Failed to download pointer: {e}")))?
+    .error_for_status()
+    .map_err(|e| OciError::internal(format!("Pointer download returned error: {e}")))?;
+
+    let pointer_bytes = tokio::time::timeout(OCI_POINTER_FETCH_TIMEOUT, pointer_response.bytes())
         .await
-        .map_err(|e| OciError::internal(format!("Failed to download pointer: {e}")))?
-        .bytes()
-        .await
+        .map_err(|_| {
+            OciError::internal(format!(
+                "Timed out reading pointer bytes after {}s",
+                OCI_POINTER_FETCH_TIMEOUT.as_secs()
+            ))
+        })?
         .map_err(|e| OciError::internal(format!("Failed to read pointer bytes: {e}")))?;
 
     let pointer = cas_oci::parse_pointer(&pointer_bytes)
@@ -498,10 +532,15 @@ async fn resolve_manifest(
             })
             .collect();
         if !blob_descriptors.is_empty() {
-            if let Ok(response) = state
-                .api_client
-                .blob_download_urls(&state.workspace, cache_entry_id, &blob_descriptors)
-                .await
+            if let Ok(Ok(response)) = tokio::time::timeout(
+                OCI_API_CALL_TIMEOUT,
+                state.api_client.blob_download_urls(
+                    &state.workspace,
+                    cache_entry_id,
+                    &blob_descriptors,
+                ),
+            )
+            .await
             {
                 for entry in response.download_urls {
                     prefetched_urls.insert(entry.digest, entry.url);
@@ -612,11 +651,20 @@ async fn bind_alias_tag(
         encryption_recipient_hint: None,
     };
 
-    let alias_save = state
-        .api_client
-        .save_entry(&state.workspace, &alias_request)
-        .await
-        .map_err(|e| format!("save_entry failed: {e}"))?;
+    let alias_save = tokio::time::timeout(
+        OCI_API_CALL_TIMEOUT,
+        state
+            .api_client
+            .save_entry(&state.workspace, &alias_request),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "save_entry timed out after {}s",
+            OCI_API_CALL_TIMEOUT.as_secs()
+        )
+    })?
+    .map_err(|e| format!("save_entry failed: {e}"))?;
 
     let alias_confirm = ConfirmRequest {
         manifest_digest: manifest_root_digest.to_string(),
@@ -633,11 +681,20 @@ async fn bind_alias_tag(
         tag: Some(alias_tag.to_string()),
     };
 
-    state
-        .api_client
-        .confirm(&state.workspace, &alias_save.cache_entry_id, &alias_confirm)
-        .await
-        .map_err(|e| format!("confirm failed: {e}"))?;
+    tokio::time::timeout(
+        OCI_API_CALL_TIMEOUT,
+        state
+            .api_client
+            .confirm(&state.workspace, &alias_save.cache_entry_id, &alias_confirm),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "confirm timed out after {}s",
+            OCI_API_CALL_TIMEOUT.as_secs()
+        )
+    })?
+    .map_err(|e| format!("confirm failed: {e}"))?;
 
     Ok(())
 }
@@ -722,13 +779,18 @@ async fn get_blob(
         return Ok((StatusCode::OK, headers, Body::empty()).into_response());
     }
 
-    let download_result = state
-        .api_client
-        .transfer_client()
-        .get(&download_url)
-        .send()
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to download blob: {e}")))?;
+    let download_result = tokio::time::timeout(
+        OCI_TRANSFER_CALL_TIMEOUT,
+        state.api_client.transfer_client().get(&download_url).send(),
+    )
+    .await
+    .map_err(|_| {
+        OciError::internal(format!(
+            "Timed out downloading blob after {}s",
+            OCI_TRANSFER_CALL_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| OciError::internal(format!("Failed to download blob: {e}")))?;
 
     if from_cache && download_result.status() == StatusCode::FORBIDDEN {
         {
@@ -739,15 +801,20 @@ async fn get_blob(
         }
         let fresh_url =
             resolve_oci_download_url(&state, &cache_entry_id, &blob_desc, &name, &digest).await?;
-        let retry_response = state
-            .api_client
-            .transfer_client()
-            .get(&fresh_url)
-            .send()
-            .await
-            .map_err(|e| OciError::internal(format!("Failed to download blob: {e}")))?
-            .error_for_status()
-            .map_err(|e| OciError::internal(format!("Blob storage returned error: {e}")))?;
+        let retry_response = tokio::time::timeout(
+            OCI_TRANSFER_CALL_TIMEOUT,
+            state.api_client.transfer_client().get(&fresh_url).send(),
+        )
+        .await
+        .map_err(|_| {
+            OciError::internal(format!(
+                "Timed out downloading blob after {}s",
+                OCI_TRANSFER_CALL_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| OciError::internal(format!("Failed to download blob: {e}")))?
+        .error_for_status()
+        .map_err(|e| OciError::internal(format!("Blob storage returned error: {e}")))?;
         let body = Body::from_stream(retry_response.bytes_stream());
         return Ok((StatusCode::OK, headers, body).into_response());
     }
@@ -767,15 +834,22 @@ async fn resolve_oci_download_url(
     name: &str,
     digest: &str,
 ) -> Result<String, OciError> {
-    let download_response = state
-        .api_client
-        .blob_download_urls(
+    let download_response = tokio::time::timeout(
+        OCI_API_CALL_TIMEOUT,
+        state.api_client.blob_download_urls(
             &state.workspace,
             cache_entry_id,
             std::slice::from_ref(blob_desc),
-        )
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to get blob download URL: {e}")))?;
+        ),
+    )
+    .await
+    .map_err(|_| {
+        OciError::internal(format!(
+            "Timed out resolving blob URL after {}s",
+            OCI_API_CALL_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| OciError::internal(format!("Failed to get blob download URL: {e}")))?;
 
     let url = download_response
         .download_urls
@@ -852,29 +926,33 @@ async fn write_body_to_file(body: Body, file: &mut tokio::fs::File) -> Result<u6
 }
 
 async fn read_file_digest_and_size(path: &std::path::Path) -> Result<(u64, String), OciError> {
-    use tokio::io::AsyncReadExt;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<(u64, String), String> {
+        use std::io::Read;
 
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to open temp file: {e}")))?;
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut hasher = Sha256::new();
-    let mut size = 0u64;
+        let mut file = std::fs::File::open(&path)
+            .map_err(|e| format!("Failed to open temp file {}: {e}", path.display()))?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut hasher = Sha256::new();
+        let mut size = 0u64;
 
-    loop {
-        let read = file
-            .read(&mut buf)
-            .await
-            .map_err(|e| OciError::internal(format!("Failed to read temp file: {e}")))?;
-        if read == 0 {
-            break;
+        loop {
+            let read = file
+                .read(&mut buf)
+                .map_err(|e| format!("Failed to read temp file {}: {e}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buf[..read]);
+            size = size.saturating_add(read as u64);
         }
-        hasher.update(&buf[..read]);
-        size = size.saturating_add(read as u64);
-    }
 
-    let digest = format!("sha256:{:x}", hasher.finalize());
-    Ok((size, digest))
+        let digest = format!("sha256:{:x}", hasher.finalize());
+        Ok((size, digest))
+    })
+    .await
+    .map_err(|e| OciError::internal(format!("Digest worker join failed: {e}")))?
+    .map_err(OciError::internal)
 }
 
 async fn has_non_empty_local_blob(state: &AppState, digest: &str) -> bool {
@@ -886,17 +964,24 @@ async fn has_non_empty_local_blob(state: &AppState, digest: &str) -> bool {
 }
 
 async fn has_remote_blob(state: &AppState, digest: &str) -> Result<bool, OciError> {
-    let check = state
-        .api_client
-        .check_blobs(
+    let check = tokio::time::timeout(
+        OCI_API_CALL_TIMEOUT,
+        state.api_client.check_blobs(
             &state.workspace,
             &[BlobDescriptor {
                 digest: digest.to_string(),
                 size_bytes: 0,
             }],
-        )
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to check blob existence: {e}")))?;
+        ),
+    )
+    .await
+    .map_err(|_| {
+        OciError::internal(format!(
+            "Timed out checking blob existence after {}s",
+            OCI_API_CALL_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| OciError::internal(format!("Failed to check blob existence: {e}")))?;
 
     Ok(check
         .results
@@ -1428,23 +1513,37 @@ async fn put_manifest(
     };
 
     let persist_result: Result<(), OciError> = async {
-        let save_response = state
-            .api_client
-            .save_entry(&state.workspace, &save_request)
-            .await
-            .map_err(|e| OciError::internal(format!("save_entry failed: {e}")))?;
+        let save_response = tokio::time::timeout(
+            OCI_API_CALL_TIMEOUT,
+            state.api_client.save_entry(&state.workspace, &save_request),
+        )
+        .await
+        .map_err(|_| {
+            OciError::internal(format!(
+                "save_entry timed out after {}s",
+                OCI_API_CALL_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| OciError::internal(format!("save_entry failed: {e}")))?;
 
         if !save_response.exists {
             if !blob_descriptors.is_empty() {
-                let upload_plan = state
-                    .api_client
-                    .blob_upload_urls(
+                let upload_plan = tokio::time::timeout(
+                    OCI_API_CALL_TIMEOUT,
+                    state.api_client.blob_upload_urls(
                         &state.workspace,
                         &save_response.cache_entry_id,
                         &blob_descriptors,
-                    )
-                    .await
-                    .map_err(|e| OciError::internal(format!("blob_upload_urls failed: {e}")))?;
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    OciError::internal(format!(
+                        "blob_upload_urls timed out after {}s",
+                        OCI_API_CALL_TIMEOUT.as_secs()
+                    ))
+                })?
+                .map_err(|e| OciError::internal(format!("blob_upload_urls failed: {e}")))?;
 
                 let upload_jobs = {
                     let sessions = state.upload_sessions.read().await;
@@ -1482,14 +1581,24 @@ async fn put_manifest(
                                 OciError::internal(format!("Blob upload semaphore closed: {e}"))
                             })?;
                             let progress = crate::progress::TransferProgress::new_noop();
-                            upload_via_single_url(
-                                temp_path.as_path(),
-                                &upload_url,
-                                &progress,
-                                &transfer_client,
-                                &upload_headers,
+                            tokio::time::timeout(
+                                OCI_TRANSFER_CALL_TIMEOUT,
+                                upload_via_single_url(
+                                    temp_path.as_path(),
+                                    &upload_url,
+                                    &progress,
+                                    &transfer_client,
+                                    &upload_headers,
+                                ),
                             )
                             .await
+                            .map_err(|_| {
+                                OciError::internal(format!(
+                                    "Blob upload timed out for {} after {}s",
+                                    digest,
+                                    OCI_TRANSFER_CALL_TIMEOUT.as_secs()
+                                ))
+                            })?
                             .map_err(|e| {
                                 OciError::internal(format!(
                                     "Blob upload failed for {}: {}",
@@ -1514,14 +1623,23 @@ async fn put_manifest(
                 .as_ref()
                 .ok_or_else(|| OciError::internal("Missing manifest_upload_url"))?;
 
-            upload_payload(
-                state.api_client.transfer_client(),
-                manifest_upload_url,
-                &pointer_bytes,
-                "application/cbor",
-                &save_response.upload_headers,
+            tokio::time::timeout(
+                OCI_TRANSFER_CALL_TIMEOUT,
+                upload_payload(
+                    state.api_client.transfer_client(),
+                    manifest_upload_url,
+                    &pointer_bytes,
+                    "application/cbor",
+                    &save_response.upload_headers,
+                ),
             )
             .await
+            .map_err(|_| {
+                OciError::internal(format!(
+                    "Pointer upload timed out after {}s",
+                    OCI_TRANSFER_CALL_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| OciError::internal(format!("Pointer upload failed: {e}")))?;
         }
 
@@ -1540,15 +1658,22 @@ async fn put_manifest(
             tag: Some(tag.clone()),
         };
 
-        state
-            .api_client
-            .confirm(
+        tokio::time::timeout(
+            OCI_API_CALL_TIMEOUT,
+            state.api_client.confirm(
                 &state.workspace,
                 &save_response.cache_entry_id,
                 &confirm_request,
-            )
-            .await
-            .map_err(|e| OciError::internal(format!("confirm failed: {e}")))?;
+            ),
+        )
+        .await
+        .map_err(|_| {
+            OciError::internal(format!(
+                "confirm timed out after {}s",
+                OCI_API_CALL_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| OciError::internal(format!("confirm failed: {e}")))?;
 
         {
             let cached = OciManifestCacheEntry {
@@ -1733,13 +1858,14 @@ mod tests {
             upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
             kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
             kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
-            kv_lookup_inflight: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
             kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             kv_next_flush_at: Arc::new(RwLock::new(None)),
             kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
             kv_flushing: Arc::new(RwLock::new(None)),
             kv_recent_misses: Arc::new(dashmap::DashMap::new()),
+            kv_miss_generations: Arc::new(dashmap::DashMap::new()),
             blob_read_cache: Arc::new(
                 BlobReadCache::new_at(
                     std::env::temp_dir().join(format!(
@@ -1750,10 +1876,12 @@ mod tests {
                 )
                 .expect("blob read cache"),
             ),
+            blob_download_max_concurrency: 16,
             blob_download_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
             blob_prefetch_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             cache_ops: Arc::new(crate::serve::cache_registry::cache_ops::Aggregator::new()),
             oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
+            backend_breaker: Arc::new(crate::serve::state::BackendCircuitBreaker::new()),
         }
     }
 

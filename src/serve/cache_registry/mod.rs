@@ -1,9 +1,167 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use dashmap::DashMap;
 
-use crate::serve::state::AppState;
+use crate::serve::state::{diagnostics_enabled, env_bool, AppState};
+
+static INFLIGHT_REQUESTS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_REQUESTS: AtomicU64 = AtomicU64::new(0);
+tokio::task_local! {
+    static REQUEST_SEQ: u64;
+}
+
+struct PutProgress {
+    scoped_key: String,
+    stage: &'static str,
+    started_ms: u64,
+    last_progress_ms: u64,
+    bytes_read: u64,
+    bytes_written: u64,
+}
+
+static PUT_PROGRESS: OnceLock<DashMap<u64, PutProgress>> = OnceLock::new();
+
+fn put_progress_map() -> &'static DashMap<u64, PutProgress> {
+    PUT_PROGRESS.get_or_init(DashMap::new)
+}
+
+fn unix_time_ms_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_millis(0))
+        .as_millis() as u64
+}
+
+fn sccache_request_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        env_bool("BORINGCACHE_SCCACHE_REQUEST_LOG").unwrap_or_else(diagnostics_enabled)
+    })
+}
+
+fn put_probe_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_bool("BORINGCACHE_PUT_PROBE").unwrap_or_else(diagnostics_enabled))
+}
+
+pub(crate) struct PutProbeGuard {
+    seq: Option<u64>,
+}
+
+impl PutProbeGuard {
+    pub(crate) fn start(scoped_key: &str) -> Self {
+        if !put_probe_enabled() {
+            return Self { seq: None };
+        }
+        let seq = REQUEST_SEQ.try_with(|seq| *seq).ok();
+        if let Some(seq) = seq {
+            let now_ms = unix_time_ms_now();
+            put_progress_map().insert(
+                seq,
+                PutProgress {
+                    scoped_key: scoped_key.to_string(),
+                    stage: "begin",
+                    started_ms: now_ms,
+                    last_progress_ms: now_ms,
+                    bytes_read: 0,
+                    bytes_written: 0,
+                },
+            );
+        }
+        Self { seq }
+    }
+
+    pub(crate) fn stage(&self, stage: &'static str) {
+        let Some(seq) = self.seq else {
+            return;
+        };
+        let now_ms = unix_time_ms_now();
+        if let Some(mut progress) = put_progress_map().get_mut(&seq) {
+            progress.stage = stage;
+            progress.last_progress_ms = now_ms;
+        }
+    }
+
+    pub(crate) fn add_read(&self, bytes: u64) {
+        let Some(seq) = self.seq else {
+            return;
+        };
+        let now_ms = unix_time_ms_now();
+        if let Some(mut progress) = put_progress_map().get_mut(&seq) {
+            progress.bytes_read = progress.bytes_read.saturating_add(bytes);
+            progress.last_progress_ms = now_ms;
+        }
+    }
+
+    pub(crate) fn add_written(&self, bytes: u64) {
+        let Some(seq) = self.seq else {
+            return;
+        };
+        let now_ms = unix_time_ms_now();
+        if let Some(mut progress) = put_progress_map().get_mut(&seq) {
+            progress.bytes_written = progress.bytes_written.saturating_add(bytes);
+            progress.last_progress_ms = now_ms;
+        }
+    }
+}
+
+impl Drop for PutProbeGuard {
+    fn drop(&mut self) {
+        if let Some(seq) = self.seq {
+            put_progress_map().remove(&seq);
+        }
+    }
+}
+
+pub(crate) fn dump_stuck_puts(limit: usize, min_idle_ms: u64) {
+    if !put_probe_enabled() {
+        return;
+    }
+    let now_ms = unix_time_ms_now();
+    let tracked = put_progress_map().len();
+    let mut stuck = Vec::new();
+    for item in put_progress_map().iter() {
+        let idle_ms = now_ms.saturating_sub(item.last_progress_ms);
+        if idle_ms < min_idle_ms {
+            continue;
+        }
+        stuck.push((
+            *item.key(),
+            item.value().stage,
+            idle_ms,
+            now_ms.saturating_sub(item.value().started_ms),
+            item.value().bytes_read,
+            item.value().bytes_written,
+            item.value().scoped_key.clone(),
+        ));
+    }
+
+    stuck.sort_by_key(|(_, _, idle_ms, _, _, _, _)| std::cmp::Reverse(*idle_ms));
+    if stuck.is_empty() {
+        eprintln!("WATCHDOG PUT none tracked={tracked} min_idle_ms={min_idle_ms}",);
+        return;
+    }
+    for (seq, stage, idle_ms, age_ms, bytes_read, bytes_written, scoped_key) in
+        stuck.into_iter().take(limit)
+    {
+        eprintln!(
+            "WATCHDOG PUT seq={seq} stage={stage} idle_ms={idle_ms} age_ms={age_ms} bytes_read={bytes_read} bytes_written={bytes_written} key={scoped_key}"
+        );
+    }
+}
+
+pub(crate) fn request_counters() -> (u64, u64) {
+    (
+        INFLIGHT_REQUESTS.load(Ordering::Relaxed),
+        TOTAL_REQUESTS.load(Ordering::Relaxed),
+    )
+}
 
 mod bazel;
 pub mod cache_ops;
@@ -18,6 +176,7 @@ mod sccache;
 mod turborepo;
 
 pub use error::RegistryError;
+pub(crate) use kv::cleanup_expired_kv_misses;
 pub(crate) use kv::flush_kv_index;
 pub(crate) use kv::preload_kv_index;
 pub(crate) use kv::refresh_kv_index;
@@ -71,73 +230,84 @@ async fn dispatch_with_path(
         route::RegistryRoute::SccacheObject { .. } | route::RegistryRoute::SccacheMkcol
     );
     let request_start = std::time::Instant::now();
-    if is_sccache_route && cache_registry_trace_enabled() {
-        eprintln!("CACHE {} {}", request_method, request_path);
+    let inflight = INFLIGHT_REQUESTS.fetch_add(1, Ordering::Relaxed) + 1;
+    let seq = TOTAL_REQUESTS.fetch_add(1, Ordering::Relaxed);
+    if is_sccache_route && sccache_request_log_enabled() {
+        eprintln!("REQ#{seq} {request_method} {request_path} inflight={inflight}");
     }
 
-    let response = match route {
-        route::RegistryRoute::BazelAc { digest_hex } => {
-            bazel::handle_ac(&state, method, &digest_hex, body).await
-        }
-        route::RegistryRoute::BazelCas { digest_hex } => {
-            bazel::handle_cas(&state, method, &digest_hex, body).await
-        }
-        route::RegistryRoute::Gradle { cache_key } => {
-            gradle::handle(&state, method, &cache_key, body).await
-        }
-        route::RegistryRoute::Maven { cache_key } => {
-            maven::handle(&state, method, &cache_key, body).await
-        }
-        route::RegistryRoute::NxArtifact { hash } => {
-            nx::handle_artifact(&state, method, &headers, &hash, body).await
-        }
-        route::RegistryRoute::NxTerminalOutput { hash } => {
-            nx::handle_terminal_output(&state, method, &headers, &hash, body).await
-        }
-        route::RegistryRoute::NxQuery => nx::handle_query(&state, method, &headers, body).await,
-        route::RegistryRoute::TurborepoStatus => turborepo::handle_status(method, &headers),
-        route::RegistryRoute::TurborepoArtifact { hash } => {
-            turborepo::handle_artifact(&state, method, &headers, &hash, body).await
-        }
-        route::RegistryRoute::TurborepoQueryArtifacts => {
-            turborepo::handle_query_artifacts(&state, method, &headers, body).await
-        }
-        route::RegistryRoute::TurborepoEvents => turborepo::handle_events(method, &headers),
-        route::RegistryRoute::SccacheObject { key_path } => {
-            sccache::handle_object(&state, method, &key_path, body).await
-        }
-        route::RegistryRoute::SccacheMkcol => sccache::handle_mkcol(method),
-        route::RegistryRoute::GoCacheObject { action_hex } => {
-            go_cache::handle_action(&state, method, &action_hex, body).await
-        }
-    };
+    let route_state = state.clone();
+    let response = REQUEST_SEQ
+        .scope(seq, async move {
+            match route {
+                route::RegistryRoute::BazelAc { digest_hex } => {
+                    bazel::handle_ac(&route_state, method, &digest_hex, body).await
+                }
+                route::RegistryRoute::BazelCas { digest_hex } => {
+                    bazel::handle_cas(&route_state, method, &digest_hex, body).await
+                }
+                route::RegistryRoute::Gradle { cache_key } => {
+                    gradle::handle(&route_state, method, &cache_key, body).await
+                }
+                route::RegistryRoute::Maven { cache_key } => {
+                    maven::handle(&route_state, method, &cache_key, body).await
+                }
+                route::RegistryRoute::NxArtifact { hash } => {
+                    nx::handle_artifact(&route_state, method, &headers, &hash, body).await
+                }
+                route::RegistryRoute::NxTerminalOutput { hash } => {
+                    nx::handle_terminal_output(&route_state, method, &headers, &hash, body).await
+                }
+                route::RegistryRoute::NxQuery => {
+                    nx::handle_query(&route_state, method, &headers, body).await
+                }
+                route::RegistryRoute::TurborepoStatus => turborepo::handle_status(method, &headers),
+                route::RegistryRoute::TurborepoArtifact { hash } => {
+                    turborepo::handle_artifact(&route_state, method, &headers, &hash, body).await
+                }
+                route::RegistryRoute::TurborepoQueryArtifacts => {
+                    turborepo::handle_query_artifacts(&route_state, method, &headers, body).await
+                }
+                route::RegistryRoute::TurborepoEvents => turborepo::handle_events(method, &headers),
+                route::RegistryRoute::SccacheObject { key_path } => {
+                    sccache::handle_object(&route_state, method, &key_path, body).await
+                }
+                route::RegistryRoute::SccacheMkcol => sccache::handle_mkcol(method),
+                route::RegistryRoute::GoCacheObject { action_hex } => {
+                    go_cache::handle_action(&route_state, method, &action_hex, body).await
+                }
+            }
+        })
+        .await;
+
+    INFLIGHT_REQUESTS.fetch_sub(1, Ordering::Relaxed);
 
     match response {
         Ok(response) => {
             let elapsed_ms = request_start.elapsed().as_millis();
-            if is_sccache_route && elapsed_ms >= 500 {
+            if is_sccache_route && sccache_request_log_enabled() {
                 let status = response.status();
-                log::warn!(
-                    "CACHE {} {} -> {} ({}ms)",
-                    request_method,
-                    request_path,
-                    status,
-                    elapsed_ms
-                );
-                eprintln!(
-                    "CACHE {} {} -> {} ({}ms)",
-                    request_method, request_path, status, elapsed_ms
-                );
+                eprintln!("REQ#{seq} {request_method} {request_path} -> {status} ({elapsed_ms}ms)",);
             }
             Ok(response)
         }
         Err(error) => {
             let elapsed_ms = request_start.elapsed().as_millis();
-            if is_sccache_route {
-                if error.status != StatusCode::NOT_FOUND || elapsed_ms >= 500 {
+            if is_sccache_route && sccache_request_log_enabled() {
+                if error.status.is_server_error() {
+                    let compact = error
+                        .message()
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     eprintln!(
-                        "CACHE {} {} -> {} ({}ms)",
-                        request_method, request_path, error.status, elapsed_ms
+                        "REQ#{seq} {request_method} {request_path} -> {} ({elapsed_ms}ms) msg={compact}",
+                        error.status,
+                    );
+                } else if error.status != StatusCode::NOT_FOUND || elapsed_ms >= 500 {
+                    eprintln!(
+                        "REQ#{seq} {request_method} {request_path} -> {} ({elapsed_ms}ms)",
+                        error.status,
                     );
                 }
             }
@@ -159,16 +329,6 @@ async fn dispatch_with_path(
             Ok(best_effort_cache_registry_response(&request_method))
         }
     }
-}
-
-fn cache_registry_trace_enabled() -> bool {
-    std::env::var("BORINGCACHE_TRACE_CACHE_REGISTRY")
-        .ok()
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
 }
 
 fn tool_for_route(route: &route::RegistryRoute) -> Option<cache_ops::Tool> {

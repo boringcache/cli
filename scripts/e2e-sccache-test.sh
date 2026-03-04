@@ -679,6 +679,16 @@ run_build() {
   if [[ "$status" -ne 0 ]]; then
     echo "ERROR: ${label} failed with exit code ${status}. Recent log output:"
     tail -n "$BUILD_FAILURE_TAIL_LINES" "$log_file" || true
+    if [[ -f "$sccache_error_log" ]]; then
+      echo ""
+      echo "Recent sccache daemon log (${sccache_error_log}):"
+      tail -n "$BUILD_FAILURE_TAIL_LINES" "$sccache_error_log" || true
+    fi
+    if [[ -f "$sccache_ctl_log" ]]; then
+      echo ""
+      echo "Recent sccache control log (${sccache_ctl_log}):"
+      tail -n "$BUILD_FAILURE_TAIL_LINES" "$sccache_ctl_log" || true
+    fi
     return "$status"
   fi
   echo "${label} completed in ${elapsed}s"
