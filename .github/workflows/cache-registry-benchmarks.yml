@@ -76,36 +76,42 @@ jobs:
             phase: efficacy
             run_efficacy: "1"
             run_stress: "0"
+            run_durability: "0"
           - backend: local
             sccache_backend: local
             http2: "0"
             phase: stress
             run_efficacy: "0"
             run_stress: "1"
+            run_durability: "0"
           - backend: proxy
             sccache_backend: proxy
             http2: "0"
             phase: efficacy
             run_efficacy: "1"
             run_stress: "0"
+            run_durability: "0"
           - backend: proxy
             sccache_backend: proxy
             http2: "0"
             phase: stress
             run_efficacy: "0"
             run_stress: "1"
+            run_durability: "0"
           - backend: proxy-h2
             sccache_backend: proxy
             http2: "1"
             phase: efficacy
             run_efficacy: "1"
             run_stress: "0"
+            run_durability: "0"
           - backend: proxy-h2
             sccache_backend: proxy
             http2: "1"
             phase: stress
             run_efficacy: "0"
             run_stress: "1"
+            run_durability: "0"
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
@@ -185,6 +191,7 @@ jobs:
           SCCACHE_BACKEND: ${{ matrix.sccache_backend }}
           RUN_EFFICACY: ${{ matrix.run_efficacy }}
           RUN_STRESS: ${{ matrix.run_stress }}
+          RUN_DURABILITY: ${{ matrix.run_durability }}
         run: |
           set -euo pipefail
           if [[ "${{ matrix.phase }}" == "efficacy" ]]; then
