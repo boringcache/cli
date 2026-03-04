@@ -480,6 +480,7 @@ async fn test_blob_get_after_manifest_resolution() {
         .mock("GET", format!("/blobs/{}", blob_digest).as_str())
         .with_status(200)
         .with_body(blob_content)
+        .expect(1)
         .create_async()
         .await;
 
@@ -494,8 +495,8 @@ async fn test_blob_get_after_manifest_resolution() {
     .await
     .unwrap();
 
-    let app = build_router(state);
-    let response = tower::ServiceExt::oneshot(
+    let app = build_router(state.clone());
+    let first_response = tower::ServiceExt::oneshot(
         app,
         Request::builder()
             .uri(format!("/v2/img/blobs/{blob_digest}"))
@@ -505,9 +506,9 @@ async fn test_blob_get_after_manifest_resolution() {
     .await
     .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(first_response.status(), StatusCode::OK);
     assert_eq!(
-        response
+        first_response
             .headers()
             .get("Docker-Content-Digest")
             .unwrap()
@@ -516,12 +517,37 @@ async fn test_blob_get_after_manifest_resolution() {
         blob_digest
     );
     assert_eq!(
-        response.headers().get("Content-Type").unwrap(),
+        first_response.headers().get("Content-Type").unwrap(),
         "application/octet-stream"
     );
 
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&body[..], blob_content);
+    let first_body = first_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(&first_body[..], blob_content);
+
+    let app = build_router(state.clone());
+    let second_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri(format!("/v2/img/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_body = second_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(&second_body[..], blob_content);
 }
 
 #[tokio::test]
