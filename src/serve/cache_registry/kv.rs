@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::io::ReaderStream;
 
@@ -23,7 +23,7 @@ use crate::error::BoringCacheError;
 use crate::manifest::EntryType;
 use crate::progress::TransferProgress;
 use crate::serve::state::{
-    diagnostics_enabled, env_bool, AppState, KvFlushingSnapshot, KvReplicationWork,
+    diagnostics_enabled, env_bool, AppState, BlobReadHandle, KvFlushingSnapshot, KvReplicationWork,
     KV_BACKLOG_POLICY,
 };
 
@@ -466,11 +466,16 @@ async fn serve_backend_blob(
         return Ok((StatusCode::OK, response_headers, Body::empty()).into_response());
     }
 
-    let cache_path = download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
-    let file = tokio::fs::File::open(&cache_path)
+    let cache_handle = download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
+    let mut file = tokio::fs::File::open(cache_handle.path())
         .await
         .map_err(|e| RegistryError::internal(format!("Failed to open cached blob: {e}")))?;
-    let stream = ReaderStream::new(file);
+    if cache_handle.offset() > 0 {
+        file.seek(std::io::SeekFrom::Start(cache_handle.offset()))
+            .await
+            .map_err(|e| RegistryError::internal(format!("Failed to seek cached blob: {e}")))?;
+    }
+    let stream = ReaderStream::new(file.take(cache_handle.size_bytes()));
 
     Ok((StatusCode::OK, response_headers, Body::from_stream(stream)).into_response())
 }
@@ -997,9 +1002,9 @@ async fn do_download_blob_to_cache(
     cache_entry_id: &str,
     blob: &BlobDescriptor,
     cached_url: Option<&str>,
-) -> Result<PathBuf, RegistryError> {
-    if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
-        return Ok(cache_path);
+) -> Result<BlobReadHandle, RegistryError> {
+    if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
+        return Ok(cache_handle);
     }
 
     if cached_url.is_none() && state.backend_breaker.is_open() {
@@ -1030,8 +1035,8 @@ async fn do_download_blob_to_cache(
         .await
         .map_err(|_| RegistryError::internal("Download semaphore closed"))?;
 
-    if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
-        return Ok(cache_path);
+    if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
+        return Ok(cache_handle);
     }
 
     let digest_hex = crate::cas_file::sha256_hex(blob.digest.as_bytes());
@@ -1073,12 +1078,12 @@ async fn do_download_blob_to_cache(
         }
     }
 
-    if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
-        return Ok(cache_path);
+    if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
+        return Ok(cache_handle);
     }
 
     if tokio::fs::metadata(&temp_path).await.is_ok() {
-        return Ok(temp_path);
+        return Ok(BlobReadHandle::from_file(temp_path, written));
     }
 
     Err(RegistryError::internal(
@@ -1159,17 +1164,17 @@ async fn download_blob_to_cache(
     cache_entry_id: &str,
     blob: &BlobDescriptor,
     cached_url: Option<&str>,
-) -> Result<PathBuf, RegistryError> {
-    if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
+) -> Result<BlobReadHandle, RegistryError> {
+    if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
         log::debug!("dl cache hit: {}", short_digest(&blob.digest));
-        return Ok(cache_path);
+        return Ok(cache_handle);
     }
 
     let flight_key = format!("dl:{}", blob.digest);
     match begin_lookup_flight(state, flight_key.clone()) {
         LookupFlight::Leader(_dl_guard) => {
-            if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
-                return Ok(cache_path);
+            if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
+                return Ok(cache_handle);
             }
             let result = do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await;
             result
@@ -1178,18 +1183,19 @@ async fn download_blob_to_cache(
             if !await_flight("dl", &flight_key, notified).await {
                 clear_lookup_flight_entry(state, &flight_key);
             }
-            if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
-                return Ok(cache_path);
+            if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
+                return Ok(cache_handle);
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
-                return Ok(cache_path);
+            if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
+                return Ok(cache_handle);
             }
             let retry_key = format!("dlretry:{}", blob.digest);
             match begin_lookup_flight(state, retry_key.clone()) {
                 LookupFlight::Leader(_retry_guard) => {
-                    if let Some(cache_path) = state.blob_read_cache.get(&blob.digest).await {
-                        return Ok(cache_path);
+                    if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await
+                    {
+                        return Ok(cache_handle);
                     }
                     do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await
                 }
@@ -1199,7 +1205,7 @@ async fn download_blob_to_cache(
                     }
                     state
                         .blob_read_cache
-                        .get(&blob.digest)
+                        .get_handle(&blob.digest)
                         .await
                         .ok_or_else(|| {
                             RegistryError::internal(format!(
@@ -1993,7 +1999,12 @@ async fn preload_single_blob(
     blob: BlobDescriptor,
     url: String,
 ) -> anyhow::Result<bool> {
-    if state.blob_read_cache.get(&blob.digest).await.is_some() {
+    if state
+        .blob_read_cache
+        .get_handle(&blob.digest)
+        .await
+        .is_some()
+    {
         return Ok(false);
     }
 
@@ -2030,7 +2041,12 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
 
     let mut targets = Vec::new();
     for (blob, url) in candidates.drain(..) {
-        if state.blob_read_cache.get(&blob.digest).await.is_none() {
+        if state
+            .blob_read_cache
+            .get_handle(&blob.digest)
+            .await
+            .is_none()
+        {
             targets.push((blob, url));
         }
     }
