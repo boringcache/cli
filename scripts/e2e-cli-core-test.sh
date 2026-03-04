@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BINARY="${BINARY:-./target/debug/boringcache}"
+WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
+BORINGCACHE_API_URL="${BORINGCACHE_API_URL:-https://api.boringcache.com}"
+LOG_DIR="${LOG_DIR:-.}"
+RUN_ID="${GITHUB_RUN_ID:-local}"
+RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
+RUN_SHA="${GITHUB_SHA:-localsha}"
+
+if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+  echo "ERROR: BORINGCACHE_API_TOKEN is required"
+  exit 1
+fi
+
+for dep in jq stat mktemp grep cmp curl sh; do
+  if ! command -v "$dep" >/dev/null 2>&1; then
+    echo "ERROR: required dependency not found: ${dep}"
+    exit 1
+  fi
+done
+
+if [[ ! -x "${BINARY}" ]]; then
+  echo "ERROR: BINARY is not executable: ${BINARY}"
+  exit 1
+fi
+
+mkdir -p "${LOG_DIR}"
+CLI_LOG_DIR="${LOG_DIR}/cli-command-e2e"
+mkdir -p "${CLI_LOG_DIR}"
+CLI_HOME="$(mktemp -d)"
+export HOME="${CLI_HOME}"
+CLI="${BINARY}"
+
+dump_cli_debug_logs() {
+  set +e
+  echo "=== CLI core debug logs ==="
+  if [[ -d "${CLI_LOG_DIR}" ]]; then
+    shopt -s nullglob
+    for log_file in "${CLI_LOG_DIR}"/*.log "${CLI_LOG_DIR}"/*.json; do
+      echo "--- ${log_file} ---"
+      tail -n 200 "${log_file}" || true
+    done
+    shopt -u nullglob
+  fi
+  if [[ -f "${MOUNT_LOG:-}" ]]; then
+    echo "--- ${MOUNT_LOG} ---"
+    tail -n 200 "${MOUNT_LOG}" || true
+  fi
+  echo "=== End CLI core debug logs ==="
+}
+trap dump_cli_debug_logs ERR
+
+"${CLI}" auth --token "${BORINGCACHE_API_TOKEN}" > "${CLI_LOG_DIR}/auth.log"
+unset BORINGCACHE_API_TOKEN BORINGCACHE_DEFAULT_WORKSPACE
+"${CLI}" config set default_workspace "${WORKSPACE}" > "${CLI_LOG_DIR}/config-set-workspace.log"
+"${CLI}" config set api_url "${BORINGCACHE_API_URL}" > "${CLI_LOG_DIR}/config-set-api-url.log"
+"${CLI}" config get default_workspace > "${CLI_LOG_DIR}/config-get-default-workspace.log"
+grep -q "${WORKSPACE}" "${CLI_LOG_DIR}/config-get-default-workspace.log"
+"${CLI}" config list --json > "${CLI_LOG_DIR}/config-list.json"
+"${CLI}" workspaces --json > "${CLI_LOG_DIR}/workspaces.json"
+"${CLI}" ls --limit 1 --json > "${CLI_LOG_DIR}/ls.json"
+
+TAG_ROOT="bc-e2e-cli-core-${RUN_ID}-${RUN_ATTEMPT}"
+TAG_DIR="${TAG_ROOT}-dir"
+TAG_FILE="${TAG_ROOT}-file"
+TAG_MOUNT="${TAG_ROOT}-mount"
+SRC_DIR="${CLI_LOG_DIR}/src"
+RESTORE_DIR="${CLI_LOG_DIR}/restore-dir"
+SINGLE_FILE="${CLI_LOG_DIR}/single.txt"
+RESTORE_FILE_DIR="${CLI_LOG_DIR}/restore-file"
+MOUNT_SRC_DIR="${CLI_LOG_DIR}/mount-src"
+MOUNT_WATCH_DIR="${CLI_LOG_DIR}/mount-watch"
+MOUNT_RESTORE_DIR="${CLI_LOG_DIR}/mount-restore"
+MOUNT_LOG="${CLI_LOG_DIR}/mount.log"
+IDENTITY_FILE="${CLI_LOG_DIR}/age-identity.txt"
+MISSING_TAG="${TAG_ROOT}-missing"
+
+mkdir -p "${SRC_DIR}"
+printf 'cli-e2e-dir-%s\n' "${RUN_SHA}" > "${SRC_DIR}/a.txt"
+printf 'cli-e2e-nested-%s\n' "${RUN_ID}" > "${SRC_DIR}/nested.txt"
+printf 'cli-e2e-file-%s\n' "${RUN_ATTEMPT}" > "${SINGLE_FILE}"
+
+"${CLI}" save --no-platform --no-git "${WORKSPACE}" "${TAG_DIR}:${SRC_DIR},${TAG_FILE}:${SINGLE_FILE}" > "${CLI_LOG_DIR}/save.log"
+save_visible=0
+for _ in $(seq 1 10); do
+  if "${CLI}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/check-hit.log" 2>&1; then
+    save_visible=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${save_visible}" != "1" ]]; then
+  echo "saved tags did not become visible in time"
+  cat "${CLI_LOG_DIR}/check-hit.log"
+  exit 1
+fi
+"${CLI}" restore --no-platform --no-git "${WORKSPACE}" "${TAG_DIR}:${RESTORE_DIR},${TAG_FILE}:${RESTORE_FILE_DIR}" > "${CLI_LOG_DIR}/restore.log"
+
+cmp -s "${SRC_DIR}/a.txt" "${RESTORE_DIR}/a.txt"
+cmp -s "${SRC_DIR}/nested.txt" "${RESTORE_DIR}/nested.txt"
+cmp -s "${SINGLE_FILE}" "${RESTORE_FILE_DIR}/single.txt"
+
+set +e
+"${CLI}" restore --no-platform --no-git --lookup-only --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/missing-target" > "${CLI_LOG_DIR}/restore-miss.log" 2>&1
+restore_miss_status=$?
+set -e
+if [[ "${restore_miss_status}" -eq 0 ]]; then
+  echo "expected restore miss to fail with non-zero exit code"
+  cat "${CLI_LOG_DIR}/restore-miss.log"
+  exit 1
+fi
+if ! grep -q "Cache miss for tags" "${CLI_LOG_DIR}/restore-miss.log"; then
+  echo "restore miss log did not include cache miss summary"
+  cat "${CLI_LOG_DIR}/restore-miss.log"
+  exit 1
+fi
+
+"${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/delete.log"
+deleted_confirmed=0
+for _ in $(seq 1 10); do
+  if "${CLI}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/check-after-delete.log" 2>&1; then
+    sleep 1
+    continue
+  fi
+  deleted_confirmed=1
+  break
+done
+if [[ "${deleted_confirmed}" != "1" ]]; then
+  echo "deleted tags were still visible after retries"
+  cat "${CLI_LOG_DIR}/check-after-delete.log"
+  exit 1
+fi
+
+RUN_TAG="${TAG_ROOT}-run"
+RUN_PROXY_TAG="${TAG_ROOT}-run-proxy"
+RUN_SEED_DIR="${CLI_LOG_DIR}/run-seed"
+RUN_TARGET_DIR="${CLI_LOG_DIR}/run-target"
+RUN_VERIFY_DIR="${CLI_LOG_DIR}/run-verify"
+RUN_MISS_SENTINEL="${CLI_LOG_DIR}/run-miss-sentinel.txt"
+
+mkdir -p "${RUN_SEED_DIR}"
+printf 'run-warm-cache-%s\n' "${RUN_SHA}" > "${RUN_SEED_DIR}/restored.txt"
+"${CLI}" save --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}:${RUN_SEED_DIR}" > "${CLI_LOG_DIR}/run-seed-save.log"
+
+run_seed_visible=0
+for _ in $(seq 1 10); do
+  if "${CLI}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-seed-check.log" 2>&1; then
+    run_seed_visible=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${run_seed_visible}" != "1" ]]; then
+  echo "run seed tag did not become visible in time"
+  cat "${CLI_LOG_DIR}/run-seed-check.log"
+  exit 1
+fi
+
+run_archive_script=$'[ "$(cat "$1/restored.txt")" = "run-warm-cache-'"${RUN_SHA}"'" ] || exit 27\nprintf "run-generated-%s\\n" "'"${RUN_ID}"'" > "$1/generated.txt"'
+"${CLI}" run --no-platform --no-git --fail-on-cache-error "${WORKSPACE}" "${RUN_TAG}:${RUN_TARGET_DIR}" -- sh -ec "${run_archive_script}" _ "${RUN_TARGET_DIR}" > "${CLI_LOG_DIR}/run-archive.log"
+
+"${CLI}" restore --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}:${RUN_VERIFY_DIR}" > "${CLI_LOG_DIR}/run-verify-restore.log"
+grep -q "run-generated-${RUN_ID}" "${RUN_VERIFY_DIR}/generated.txt"
+
+set +e
+"${CLI}" run --no-platform --no-git --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/run-missing-target" -- sh -ec 'printf "unexpected-run\n" > "$1"' _ "${RUN_MISS_SENTINEL}" > "${CLI_LOG_DIR}/run-miss.log" 2>&1
+run_miss_status=$?
+set -e
+if [[ "${run_miss_status}" -ne 78 ]]; then
+  echo "expected run miss exit code 78, got ${run_miss_status}"
+  cat "${CLI_LOG_DIR}/run-miss.log"
+  exit 1
+fi
+if [[ -f "${RUN_MISS_SENTINEL}" ]]; then
+  echo "run child command executed despite fail-on-cache-miss"
+  cat "${CLI_LOG_DIR}/run-miss.log"
+  exit 1
+fi
+
+run_proxy_script=$'endpoint="${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}"\n[ -n "${endpoint}" ] || exit 31\n[ "${TURBO_API:-}" = "${endpoint}" ] || exit 32\nexpected_ref="127.0.0.1:$1/cache:$2"\n[ "$3" = "${expected_ref}" ] || exit 33\ncurl -fsS --max-time 2 "${endpoint}/v2/" >/dev/null || exit 34'
+"${CLI}" run "${WORKSPACE}" --proxy "${RUN_PROXY_TAG}" --no-platform --no-git --host 127.0.0.1 --port 0 -- sh -ec "${run_proxy_script}" _ "{PORT}" "${RUN_PROXY_TAG}" "{CACHE_REF}" > "${CLI_LOG_DIR}/run-proxy.log"
+
+"${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-delete.log"
+
+"${CLI}" setup-encryption "${WORKSPACE}" --identity-output "${IDENTITY_FILE}" > "${CLI_LOG_DIR}/setup-encryption.log"
+if [[ ! -f "${IDENTITY_FILE}" ]]; then
+  echo "setup-encryption did not create identity file"
+  exit 1
+fi
+if [[ "$(stat -c '%a' "${IDENTITY_FILE}")" != "600" ]]; then
+  echo "identity file permissions are not 0600"
+  stat -c '%a %n' "${IDENTITY_FILE}"
+  exit 1
+fi
+
+mkdir -p "${MOUNT_SRC_DIR}"
+printf 'mount-initial-%s\n' "${RUN_SHA}" > "${MOUNT_SRC_DIR}/file.txt"
+"${CLI}" save --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_SRC_DIR}" > "${CLI_LOG_DIR}/mount-save.log"
+
+"${CLI}" ls "${WORKSPACE}" --limit 50 --json > "${CLI_LOG_DIR}/ls-after-encryption.json"
+if ! jq -e --arg tag "${TAG_MOUNT}" '.entries[]? | select(.tag == $tag and .encrypted == true)' "${CLI_LOG_DIR}/ls-after-encryption.json" >/dev/null; then
+  echo "encrypted entry for ${TAG_MOUNT} was not visible in ls output"
+  cat "${CLI_LOG_DIR}/ls-after-encryption.json"
+  exit 1
+fi
+
+MOUNT_PID=""
+cleanup_mount() {
+  set +e
+  if [[ -n "${MOUNT_PID:-}" ]] && kill -0 "${MOUNT_PID}" >/dev/null 2>&1; then
+    kill -INT "${MOUNT_PID}" >/dev/null 2>&1 || true
+    wait "${MOUNT_PID}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_mount EXIT
+
+"${CLI}" mount "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_WATCH_DIR}" --identity "${IDENTITY_FILE}" --verbose > "${MOUNT_LOG}" 2>&1 &
+MOUNT_PID=$!
+
+mount_ready=0
+for _ in $(seq 1 30); do
+  if ! kill -0 "${MOUNT_PID}" >/dev/null 2>&1; then
+    echo "mount exited before readiness"
+    cat "${MOUNT_LOG}"
+    exit 1
+  fi
+  if grep -q "Watching" "${MOUNT_LOG}"; then
+    mount_ready=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${mount_ready}" != "1" ]]; then
+  echo "mount did not reach watch state in time"
+  cat "${MOUNT_LOG}"
+  exit 1
+fi
+
+printf 'mount-updated-%s\n' "${RUN_ID}" >> "${MOUNT_WATCH_DIR}/file.txt"
+sleep 2
+kill -INT "${MOUNT_PID}" >/dev/null 2>&1 || true
+if ! wait "${MOUNT_PID}"; then
+  echo "mount exited with non-zero status"
+  cat "${MOUNT_LOG}"
+  exit 1
+fi
+if grep -q "Final sync failed" "${MOUNT_LOG}"; then
+  echo "mount reported final sync failure"
+  cat "${MOUNT_LOG}"
+  exit 1
+fi
+MOUNT_PID=""
+trap - EXIT
+
+"${CLI}" restore --no-platform --no-git --identity "${IDENTITY_FILE}" "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_RESTORE_DIR}" > "${CLI_LOG_DIR}/mount-restore.log"
+grep -q "mount-updated-${RUN_ID}" "${MOUNT_RESTORE_DIR}/file.txt"
+
+"${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}" > "${CLI_LOG_DIR}/mount-delete.log"
+
+echo "CLI core e2e completed. Logs: ${CLI_LOG_DIR}"

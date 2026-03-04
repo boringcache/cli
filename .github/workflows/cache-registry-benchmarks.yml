@@ -327,6 +327,8 @@ jobs:
         include:
           - leg: adapters-http
             needs_sccache: "false"
+          - leg: cli-core
+            needs_sccache: "false"
           - leg: dual-proxy
             needs_sccache: "true"
           - leg: docker-buildkit
@@ -414,6 +416,13 @@ jobs:
               LOG_DIR="$LOG_DIR" \
               TAG="$TAG" \
               ./scripts/e2e-all-adapters-http-test.sh | tee "$LOG_DIR/run.log"
+              ;;
+            cli-core)
+              BINARY="$BIN_PATH" \
+              WORKSPACE="${GITHUB_REPOSITORY}" \
+              BORINGCACHE_API_URL="https://api.boringcache.com" \
+              LOG_DIR="$LOG_DIR" \
+              ./scripts/e2e-cli-core-test.sh | tee "$LOG_DIR/run.log"
               ;;
             dual-proxy)
               BINARY="$BIN_PATH" \
