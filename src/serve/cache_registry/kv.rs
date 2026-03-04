@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use rand::Rng;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -2119,16 +2119,32 @@ async fn do_flush(
     let (mut entries, used_published_fallback) =
         select_flush_base_entries(backend_entries, published_snapshot.as_ref());
     let existing_count = entries.len();
+    let (
+        filtered_pending_entries,
+        filtered_pending_blob_paths,
+        missing_pending_digests,
+        missing_pending_entries,
+    ) = filter_pending_entries_with_local_blobs(pending_entries, pending_blob_paths);
     if used_published_fallback {
         eprintln!(
             "KV flush: backend index empty, using published snapshot with {existing_count} entries"
         );
     }
-    entries.extend(pending_entries.iter().map(|(k, v)| (k.clone(), v.clone())));
+    if missing_pending_entries > 0 {
+        eprintln!(
+            "KV flush: dropped {missing_pending_entries} pending entries with missing local blobs ({} digests)",
+            missing_pending_digests.len()
+        );
+    }
+    entries.extend(
+        filtered_pending_entries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
     let total_count = entries.len();
     eprintln!(
         "KV flush: merging {existing_count} existing + {} pending = {total_count} total entries",
-        pending_entries.len()
+        filtered_pending_entries.len()
     );
 
     let (pointer_bytes, blobs) = build_index_pointer(&entries)
@@ -2180,7 +2196,7 @@ async fn do_flush(
 
     if save_response.exists {
         let mut pending_blob_by_digest: HashMap<String, u64> = HashMap::new();
-        for blob in pending_entries.values() {
+        for blob in filtered_pending_entries.values() {
             pending_blob_by_digest
                 .entry(blob.digest.clone())
                 .or_insert(blob.size_bytes);
@@ -2195,7 +2211,7 @@ async fn do_flush(
                 state,
                 &save_response.cache_entry_id,
                 &pending_blobs,
-                pending_blob_paths,
+                &filtered_pending_blob_paths,
             )
             .await
             {
@@ -2235,7 +2251,7 @@ async fn do_flush(
             state,
             &save_response.cache_entry_id,
             &blobs,
-            pending_blob_paths,
+            &filtered_pending_blob_paths,
         )
         .await
         .map_err(|e| classify_flush_error(&e, "blob upload failed"))?
@@ -2305,6 +2321,60 @@ async fn do_flush(
     );
 
     Ok((entries, save_response.cache_entry_id))
+}
+
+fn filter_pending_entries_with_local_blobs(
+    pending_entries: &BTreeMap<String, BlobDescriptor>,
+    pending_blob_paths: &HashMap<String, PathBuf>,
+) -> (
+    BTreeMap<String, BlobDescriptor>,
+    HashMap<String, PathBuf>,
+    Vec<String>,
+    usize,
+) {
+    let mut missing_digests = HashSet::new();
+    let mut filtered_blob_paths = HashMap::new();
+
+    for blob in pending_entries.values() {
+        if missing_digests.contains(&blob.digest) || filtered_blob_paths.contains_key(&blob.digest)
+        {
+            continue;
+        }
+
+        let Some(path) = pending_blob_paths.get(&blob.digest) else {
+            missing_digests.insert(blob.digest.clone());
+            continue;
+        };
+
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => {
+                filtered_blob_paths.insert(blob.digest.clone(), path.clone());
+            }
+            Ok(_) => {
+                missing_digests.insert(blob.digest.clone());
+            }
+            Err(_) => {
+                missing_digests.insert(blob.digest.clone());
+            }
+        }
+    }
+
+    let mut filtered_entries = BTreeMap::new();
+    let mut missing_entry_count = 0usize;
+    for (key, blob) in pending_entries {
+        if missing_digests.contains(&blob.digest) {
+            missing_entry_count = missing_entry_count.saturating_add(1);
+            continue;
+        }
+        filtered_entries.insert(key.clone(), blob.clone());
+    }
+
+    (
+        filtered_entries,
+        filtered_blob_paths,
+        missing_digests.into_iter().collect(),
+        missing_entry_count,
+    )
 }
 
 async fn bind_kv_alias_tag(
