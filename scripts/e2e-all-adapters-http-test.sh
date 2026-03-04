@@ -295,11 +295,14 @@ http_request() {
     -sS
     --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECS"
     --max-time "$HTTP_REQUEST_TIMEOUT_SECS"
-    -X "$method"
-    -o "$output_file"
     -w "%{http_code}"
     "${PROXY_URL}${path}"
   )
+  if [[ "$method" == "HEAD" ]]; then
+    args+=(--head -o /dev/null -D "$output_file")
+  else
+    args+=(-X "$method" -o "$output_file")
+  fi
   if [[ -n "$body_file" ]]; then
     args+=(--data-binary "@$body_file")
   fi
