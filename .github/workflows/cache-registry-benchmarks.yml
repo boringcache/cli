@@ -202,11 +202,15 @@ jobs:
           fi
           LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}"
           mkdir -p "$LOG_DIR"
+          SCCACHE_DIR="${RUNNER_TEMP}/sccache-bench-${{ matrix.backend }}-${{ matrix.phase }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf "$SCCACHE_DIR"
+          mkdir -p "$SCCACHE_DIR"
           BRANCH_SLUG="${GITHUB_REF_NAME//\//-}"
           TAG="gha-cache-registry-${{ matrix.backend }}-${{ matrix.phase }}-rust-${RUST_VERSION}-${BRANCH_SLUG}"
           BINARY="${RUNNER_TEMP}/boringcache-bin/boringcache" \
           WORKSPACE="${GITHUB_REPOSITORY}" \
           LOG_DIR="$LOG_DIR" \
+          SCCACHE_DIR="$SCCACHE_DIR" \
           TAG="$TAG" \
           ./scripts/e2e-sccache-test.sh | tee "$LOG_DIR/run.log"
 

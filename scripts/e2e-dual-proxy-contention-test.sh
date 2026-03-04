@@ -28,6 +28,7 @@ PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
 PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
 BLOB_PREFETCH_CONCURRENCY="${BORINGCACHE_BLOB_PREFETCH_CONCURRENCY:-}"
+KV_WRITE_MODE="${BORINGCACHE_KV_WRITE_MODE:-write_through}"
 PREWARM_SCCACHE_DIR="${TMP_ROOT}/sccache-prewarm-${RUN_ID}"
 SCCACHE_DIR_A="${TMP_ROOT}/sccache-a-${RUN_ID}"
 SCCACHE_DIR_B="${TMP_ROOT}/sccache-b-${RUN_ID}"
@@ -91,6 +92,19 @@ fi
 if [[ "$BLOB_PREFETCH_CONCURRENCY" == "0" ]]; then
   echo "WARNING: blob prefetch is disabled (BORINGCACHE_BLOB_PREFETCH_CONCURRENCY=0); proxy warm performance may lag local sccache."
 fi
+
+case "$KV_WRITE_MODE" in
+  write_back|write-back|wb)
+    KV_WRITE_MODE_NORMALIZED="write_back"
+    ;;
+  write_through|write-through|wt)
+    KV_WRITE_MODE_NORMALIZED="write_through"
+    ;;
+  *)
+    echo "ERROR: BORINGCACHE_KV_WRITE_MODE must be one of: write_back, write-through, write_through, wb, wt"
+    exit 1
+    ;;
+esac
 
 if [[ "$SCCACHE_PORT_A" == "$SCCACHE_PORT_B" ]]; then
   echo "ERROR: SCCACHE_PORT_A and SCCACHE_PORT_B must be different"
@@ -290,6 +304,7 @@ if [[ -n "$BLOB_PREFETCH_CONCURRENCY" ]]; then
 else
   echo "Blob prefetch concurrency: auto (default)"
 fi
+echo "KV write mode: ${KV_WRITE_MODE_NORMALIZED}"
 echo "Cargo cmd:    $CARGO_CMD"
 echo "Logs:         $LOG_DIR"
 
@@ -311,10 +326,22 @@ stat_value() {
       awk '$1 == "Cache" && $2 == "misses" && $3 ~ /^[0-9]+$/ { print $3; exit }' "$file"
       ;;
     "Cache hits rate")
-      awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" { print $(NF-1); exit }' "$file"
+      awk '
+        $1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 != "(Rust)" {
+          if ($4 == "-") { print 0; exit }
+          if ($NF == "%") { print $(NF-1); exit }
+          print $4; exit
+        }
+      ' "$file"
       ;;
     "Cache hits rate (Rust)")
-      awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }' "$file"
+      awk '
+        $1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" {
+          if ($5 == "-") { print 0; exit }
+          if ($NF == "%") { print $(NF-1); exit }
+          print $5; exit
+        }
+      ' "$file"
       ;;
     *)
       sed -n "s/^[[:space:]]*${key}[[:space:]]\\+\\([0-9.][0-9.]*\\)\\( %\\)*$/\\1/p" "$file" | head -n 1
@@ -337,11 +364,13 @@ print_stats_summary() {
 count_pattern() {
   local file="$1"
   local pattern="$2"
+  local count
   if command -v rg >/dev/null 2>&1; then
-    rg -c "$pattern" "$file" 2>/dev/null || echo "0"
+    count="$(rg -c "$pattern" "$file" 2>/dev/null || true)"
   else
-    grep -c "$pattern" "$file" 2>/dev/null || echo "0"
+    count="$(grep -c "$pattern" "$file" 2>/dev/null || true)"
   fi
+  echo "${count:-0}"
 }
 
 format_delta() {
@@ -367,6 +396,7 @@ start_proxy() {
   if [[ -n "$BLOB_PREFETCH_CONCURRENCY" ]]; then
     BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
       BORINGCACHE_BLOB_PREFETCH_CONCURRENCY="$BLOB_PREFETCH_CONCURRENCY" \
+      BORINGCACHE_KV_WRITE_MODE="$KV_WRITE_MODE_NORMALIZED" \
       RUST_LOG="$RUST_LOG_LEVEL" \
       "$TMP_BINARY" cache-registry "$WORKSPACE" "$TAG" \
       --host "$PROXY_HOST" \
@@ -375,6 +405,7 @@ start_proxy() {
       --no-git >>"$log_file" 2>&1 &
   else
     BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
+      BORINGCACHE_KV_WRITE_MODE="$KV_WRITE_MODE_NORMALIZED" \
       RUST_LOG="$RUST_LOG_LEVEL" \
       "$TMP_BINARY" cache-registry "$WORKSPACE" "$TAG" \
       --host "$PROXY_HOST" \

@@ -19,6 +19,8 @@ PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
 PROXY_READY_WARN_SECS="${PROXY_READY_WARN_SECS:-15}"
 PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-20}"
 PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
+HTTP_CONNECT_TIMEOUT_SECS="${HTTP_CONNECT_TIMEOUT_SECS:-5}"
+HTTP_REQUEST_TIMEOUT_SECS="${HTTP_REQUEST_TIMEOUT_SECS:-30}"
 BLOB_PREFETCH_CONCURRENCY="${BORINGCACHE_BLOB_PREFETCH_CONCURRENCY:-}"
 AUTH_BEARER="${ADAPTER_AUTH_BEARER:-adapter-e2e-token}"
 
@@ -71,6 +73,8 @@ require_positive "PROXY_READY_POLL_SECS" "$PROXY_READY_POLL_SECS"
 require_positive "PROXY_READY_WARN_SECS" "$PROXY_READY_WARN_SECS"
 require_positive "PROXY_SHUTDOWN_WAIT_SECS" "$PROXY_SHUTDOWN_WAIT_SECS"
 require_positive "PORT_RECLAIM_WAIT_SECS" "$PORT_RECLAIM_WAIT_SECS"
+require_positive "HTTP_CONNECT_TIMEOUT_SECS" "$HTTP_CONNECT_TIMEOUT_SECS"
+require_positive "HTTP_REQUEST_TIMEOUT_SECS" "$HTTP_REQUEST_TIMEOUT_SECS"
 
 for dep in curl pgrep ps cmp; do
   if ! command -v "$dep" >/dev/null 2>&1; then
@@ -210,6 +214,8 @@ if [[ -n "$BLOB_PREFETCH_CONCURRENCY" ]]; then
 else
   echo "Blob prefetch concurrency: auto (default)"
 fi
+echo "HTTP connect timeout: ${HTTP_CONNECT_TIMEOUT_SECS}s"
+echo "HTTP request timeout: ${HTTP_REQUEST_TIMEOUT_SECS}s"
 echo "Logs: $LOG_DIR"
 
 start_proxy() {
@@ -287,6 +293,8 @@ http_request() {
   local status
   local args=(
     -sS
+    --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECS"
+    --max-time "$HTTP_REQUEST_TIMEOUT_SECS"
     -X "$method"
     -o "$output_file"
     -w "%{http_code}"
