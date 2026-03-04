@@ -25,6 +25,9 @@ jobs:
     name: Build CLI Binary
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+      BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -36,7 +39,7 @@ jobs:
         with:
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-cache-registry-bench-build"
+          cache-tag: "rust-${{ env.RUST_VERSION }}-cache-registry-bench-linux-x86_64"
           sccache: "true"
           sccache-mode: "local"
           cache-target: "true"
@@ -139,7 +142,7 @@ jobs:
         with:
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-cache-registry-bench-${{ matrix.backend }}-${{ matrix.phase }}"
+          cache-tag: "rust-${{ env.RUST_VERSION }}-cache-registry-bench-linux-x86_64"
           sccache: "true"
           sccache-mode: ${{ matrix.sccache_backend }}
           cache-target: "true"
@@ -326,6 +329,8 @@ jobs:
             needs_sccache: "false"
           - leg: dual-proxy
             needs_sccache: "true"
+          - leg: docker-buildkit
+            needs_sccache: "false"
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
@@ -357,7 +362,7 @@ jobs:
         with:
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-adapter-e2e-${{ matrix.leg }}"
+          cache-tag: "rust-${{ env.RUST_VERSION }}-cache-registry-bench-linux-x86_64"
           sccache: "true"
           sccache-mode: "local"
           cache-target: "true"
@@ -415,6 +420,14 @@ jobs:
               LOG_DIR="$LOG_DIR" \
               TAG="$TAG" \
               ./scripts/e2e-dual-proxy-contention-test.sh | tee "$LOG_DIR/run.log"
+              ;;
+            docker-buildkit)
+              BINARY="$BIN_PATH" \
+              WORKSPACE="${GITHUB_REPOSITORY}" \
+              E2E_TAG_PREFIX="gha-cache-registry" \
+              PORT="5000" \
+              LOG_DIR="$LOG_DIR" \
+              ./scripts/e2e-docker-buildkit-registry-test.sh | tee "$LOG_DIR/run.log"
               ;;
             *)
               echo "Unknown adapter leg: $LEG"
