@@ -955,6 +955,40 @@ async fn read_file_digest_and_size(path: &std::path::Path) -> Result<(u64, Strin
     .map_err(OciError::internal)
 }
 
+async fn read_open_file_digest_and_size(
+    file: &mut tokio::fs::File,
+) -> Result<(u64, String), OciError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    file.flush()
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to flush temp file: {e}")))?;
+    file.sync_data()
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to sync temp file: {e}")))?;
+    file.seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to seek temp file for digest: {e}")))?;
+
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+
+    loop {
+        let read = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| OciError::internal(format!("Failed to read temp file for digest: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+        size = size.saturating_add(read as u64);
+    }
+
+    Ok((size, format!("sha256:{:x}", hasher.finalize())))
+}
+
 async fn has_non_empty_local_blob(state: &AppState, digest: &str) -> bool {
     let sessions = state.upload_sessions.read().await;
     sessions
@@ -1171,6 +1205,7 @@ async fn patch_upload(
 
     use tokio::io::AsyncSeekExt;
     let mut file = tokio::fs::OpenOptions::new()
+        .read(true)
         .write(true)
         .open(&temp_path)
         .await
@@ -1253,6 +1288,7 @@ async fn put_upload(
 
     use tokio::io::AsyncSeekExt;
     let mut file = tokio::fs::OpenOptions::new()
+        .read(true)
         .write(true)
         .open(&temp_path)
         .await
@@ -1277,8 +1313,6 @@ async fn put_upload(
             .await
             .map_err(|e| OciError::internal(format!("Failed to resize temp file: {e}")))?;
     }
-    drop(file);
-
     let mut bytes_after_write = bytes_before;
     if bytes_written > 0 {
         if write_offset == 0 {
@@ -1292,23 +1326,18 @@ async fn put_upload(
     }
 
     let mut finalized_size = bytes_after_write;
-    let (mut file_size, mut actual_digest) = read_file_digest_and_size(&temp_path).await?;
+    let (mut file_size, mut actual_digest) = read_open_file_digest_and_size(&mut file).await?;
 
     if actual_digest != digest_param
         && bytes_written > 0
         && bytes_before > 0
         && write_offset == bytes_before
     {
-        let file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(&temp_path)
-            .await
-            .map_err(|e| OciError::internal(format!("Failed to reopen temp file: {e}")))?;
         file.set_len(bytes_before)
             .await
             .map_err(|e| OciError::internal(format!("Failed to truncate temp file: {e}")))?;
 
-        let (truncated_size, truncated_digest) = read_file_digest_and_size(&temp_path).await?;
+        let (truncated_size, truncated_digest) = read_open_file_digest_and_size(&mut file).await?;
         file_size = truncated_size;
         actual_digest = truncated_digest;
         finalized_size = bytes_before;
@@ -1368,6 +1397,7 @@ async fn put_upload(
             "expected {digest_param}, got {actual_digest}"
         )));
     }
+    drop(file);
 
     {
         let mut sessions = state.upload_sessions.write().await;
