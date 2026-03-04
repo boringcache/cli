@@ -1252,6 +1252,14 @@ impl KvPublishedIndex {
         self.last_refresh_at = Some(Instant::now());
     }
 
+    pub fn set_empty_incomplete(&mut self) {
+        self.entries = Arc::new(HashMap::new());
+        self.cache_entry_id = None;
+        self.download_urls.clear();
+        self.complete = false;
+        self.last_refresh_at = None;
+    }
+
     pub fn set_download_urls(&mut self, urls: HashMap<String, String>) {
         let expires_at = Instant::now() + DOWNLOAD_URL_TTL;
         self.download_urls = urls
@@ -1473,6 +1481,28 @@ mod tests {
             .expect("insert call");
         assert!(!inserted);
         assert!(cache.get_handle("not-a-digest").await.is_none());
+    }
+
+    #[test]
+    fn kv_published_index_set_empty_incomplete_forces_refresh() {
+        let mut index = KvPublishedIndex::default();
+        let mut entries = HashMap::new();
+        entries.insert(
+            "ac/key".to_string(),
+            BlobDescriptor {
+                digest: format!("sha256:{}", "a".repeat(64)),
+                size_bytes: 1,
+            },
+        );
+        index.update(entries, "cache-entry".to_string());
+        assert!(index.is_complete());
+        assert!(index.last_refresh_at().is_some());
+
+        index.set_empty_incomplete();
+        assert_eq!(index.entry_count(), 0);
+        assert!(index.cache_entry_id().is_none());
+        assert!(!index.is_complete());
+        assert!(index.last_refresh_at().is_none());
     }
 
     #[tokio::test]

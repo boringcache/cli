@@ -1732,7 +1732,7 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
         Ok(_) => {
             {
                 let mut published = state.kv_published_index.write().await;
-                published.set_empty();
+                published.set_empty_incomplete();
             }
             eprintln!("KV index preload: no existing entries");
         }
