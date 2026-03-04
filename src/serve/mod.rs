@@ -537,38 +537,16 @@ fn kv_manifest_warm_enabled() -> (bool, bool) {
     (true, false)
 }
 
-fn blob_download_concurrency() -> (usize, bool) {
-    if let Some(configured) = std::env::var("BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-    {
-        return (configured.clamp(1, 128), true);
-    }
-
-    use crate::platform::resources::{MemoryStrategy, SystemResources};
-    let resources = SystemResources::detect();
-    let mut n = resources.max_parallel_chunks.clamp(2, 16);
-    if matches!(resources.memory_strategy, MemoryStrategy::Balanced) {
-        n = n.min(8);
-    }
-    (n, false)
+fn auto_transfer_concurrency() -> usize {
+    num_cpus::get().max(1).saturating_mul(2).clamp(16, 64)
 }
 
-fn blob_prefetch_concurrency(download_concurrency: usize) -> (usize, bool) {
-    if let Some(configured) = std::env::var("BORINGCACHE_BLOB_PREFETCH_CONCURRENCY")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-    {
-        return (configured.clamp(0, 16), true);
-    }
+fn blob_download_concurrency() -> (usize, bool) {
+    (auto_transfer_concurrency(), false)
+}
 
-    use crate::platform::resources::{MemoryStrategy, SystemResources};
-    let resources = SystemResources::detect();
-    if matches!(resources.memory_strategy, MemoryStrategy::Balanced) {
-        return (1, false);
-    }
-    ((download_concurrency / 8).clamp(1, 2), false)
+fn blob_prefetch_concurrency(_download_concurrency: usize) -> (usize, bool) {
+    (1, false)
 }
 
 async fn flush_pending_on_shutdown(state: &AppState) {

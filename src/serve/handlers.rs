@@ -876,32 +876,16 @@ fn fresh_download_url(entry: &BlobLocatorEntry) -> Option<String> {
 }
 
 fn adaptive_blob_upload_concurrency(operation_count: usize) -> usize {
-    use crate::platform::resources::{MemoryStrategy, SystemResources};
-
     if operation_count == 0 {
         return 1;
     }
 
-    let resources = SystemResources::detect();
-    let mut concurrency: usize = match resources.memory_strategy {
-        MemoryStrategy::Balanced => 2,
-        MemoryStrategy::Aggressive => 4,
-        MemoryStrategy::UltraAggressive => 6,
-    };
-
-    if resources.cpu_load_percent > 75.0 {
-        concurrency = concurrency.saturating_sub(1).max(1);
-    }
-
-    if std::env::var_os("CI").is_some() {
-        concurrency = concurrency.min(4);
-    }
-
-    concurrency = concurrency
-        .min(resources.cpu_cores.max(1))
-        .min(resources.max_parallel_chunks.max(1));
-
-    concurrency.min(operation_count).max(1)
+    num_cpus::get()
+        .max(1)
+        .saturating_mul(2)
+        .clamp(16, 64)
+        .min(operation_count)
+        .max(1)
 }
 
 async fn write_body_to_file(body: Body, file: &mut tokio::fs::File) -> Result<u64, OciError> {

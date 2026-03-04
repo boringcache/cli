@@ -27,7 +27,6 @@ BUILD_FAILURE_TAIL_LINES="${BUILD_FAILURE_TAIL_LINES:-60}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
 PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
-BLOB_PREFETCH_CONCURRENCY="${BORINGCACHE_BLOB_PREFETCH_CONCURRENCY:-}"
 PREWARM_SCCACHE_DIR="${TMP_ROOT}/sccache-prewarm-${RUN_ID}"
 SCCACHE_DIR_A="${TMP_ROOT}/sccache-a-${RUN_ID}"
 SCCACHE_DIR_B="${TMP_ROOT}/sccache-b-${RUN_ID}"
@@ -84,13 +83,6 @@ require_positive "BUILD_FAILURE_TAIL_LINES" "$BUILD_FAILURE_TAIL_LINES"
 require_positive "PROXY_READY_TIMEOUT_SECS" "$PROXY_READY_TIMEOUT_SECS"
 require_positive "PROXY_READY_POLL_SECS" "$PROXY_READY_POLL_SECS"
 require_positive "PORT_RECLAIM_WAIT_SECS" "$PORT_RECLAIM_WAIT_SECS"
-if [[ -n "$BLOB_PREFETCH_CONCURRENCY" ]]; then
-  require_numeric "BORINGCACHE_BLOB_PREFETCH_CONCURRENCY" "$BLOB_PREFETCH_CONCURRENCY"
-fi
-
-if [[ "$BLOB_PREFETCH_CONCURRENCY" == "0" ]]; then
-  echo "WARNING: blob prefetch is disabled (BORINGCACHE_BLOB_PREFETCH_CONCURRENCY=0); proxy warm performance may lag local sccache."
-fi
 
 if [[ "$SCCACHE_PORT_A" == "$SCCACHE_PORT_B" ]]; then
   echo "ERROR: SCCACHE_PORT_A and SCCACHE_PORT_B must be different"
@@ -285,11 +277,6 @@ echo "sccache A dir: ${SCCACHE_DIR_A}"
 echo "sccache B dir: ${SCCACHE_DIR_B}"
 echo "Build timeout: ${BUILD_TIMEOUT_SECS}s (0 disables)"
 echo "Build heartbeat: ${BUILD_HEARTBEAT_SECS}s"
-if [[ -n "$BLOB_PREFETCH_CONCURRENCY" ]]; then
-  echo "Blob prefetch concurrency: ${BLOB_PREFETCH_CONCURRENCY}"
-else
-  echo "Blob prefetch concurrency: auto (default)"
-fi
 echo "Cargo cmd:    $CARGO_CMD"
 echo "Logs:         $LOG_DIR"
 
@@ -378,24 +365,13 @@ start_proxy() {
     echo ""
     echo "=== Proxy ${label} start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${TAG} port=${port} ==="
   } >>"$log_file"
-  if [[ -n "$BLOB_PREFETCH_CONCURRENCY" ]]; then
-    BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
-      BORINGCACHE_BLOB_PREFETCH_CONCURRENCY="$BLOB_PREFETCH_CONCURRENCY" \
-      RUST_LOG="$RUST_LOG_LEVEL" \
-      "$TMP_BINARY" cache-registry "$WORKSPACE" "$TAG" \
-      --host "$PROXY_HOST" \
-      --port "$port" \
-      --no-platform \
-      --no-git >>"$log_file" 2>&1 &
-  else
-    BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
-      RUST_LOG="$RUST_LOG_LEVEL" \
-      "$TMP_BINARY" cache-registry "$WORKSPACE" "$TAG" \
-      --host "$PROXY_HOST" \
-      --port "$port" \
-      --no-platform \
-      --no-git >>"$log_file" 2>&1 &
-  fi
+  BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
+    RUST_LOG="$RUST_LOG_LEVEL" \
+    "$TMP_BINARY" cache-registry "$WORKSPACE" "$TAG" \
+    --host "$PROXY_HOST" \
+    --port "$port" \
+    --no-platform \
+    --no-git >>"$log_file" 2>&1 &
   eval "${pid_var}=$!"
   sleep 2
 }

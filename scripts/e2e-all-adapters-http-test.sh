@@ -21,7 +21,6 @@ PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-20}"
 PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
 HTTP_CONNECT_TIMEOUT_SECS="${HTTP_CONNECT_TIMEOUT_SECS:-5}"
 HTTP_REQUEST_TIMEOUT_SECS="${HTTP_REQUEST_TIMEOUT_SECS:-30}"
-BLOB_PREFETCH_CONCURRENCY="${BORINGCACHE_BLOB_PREFETCH_CONCURRENCY:-}"
 AUTH_BEARER="${ADAPTER_AUTH_BEARER:-adapter-e2e-token}"
 
 PROXY_PID=""
@@ -48,22 +47,9 @@ require_positive() {
   fi
 }
 
-require_non_negative() {
-  local name="$1"
-  local value="$2"
-  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: ${name} must be a non-negative integer"
-    exit 1
-  fi
-}
-
 if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
   echo "ERROR: BORINGCACHE_API_TOKEN not set"
   exit 1
-fi
-
-if [[ -n "$BLOB_PREFETCH_CONCURRENCY" ]]; then
-  require_non_negative "BORINGCACHE_BLOB_PREFETCH_CONCURRENCY" "$BLOB_PREFETCH_CONCURRENCY"
 fi
 
 require_positive "PROXY_PORT" "$PROXY_PORT"
@@ -209,11 +195,6 @@ echo "Binary: $TMP_BINARY"
 echo "Workspace: $WORKSPACE"
 echo "Tag: ${TAG_BASE}-${RUN_ID}"
 echo "Proxy: ${PROXY_HOST}:${PROXY_PORT}"
-if [[ -n "$BLOB_PREFETCH_CONCURRENCY" ]]; then
-  echo "Blob prefetch concurrency: ${BLOB_PREFETCH_CONCURRENCY}"
-else
-  echo "Blob prefetch concurrency: auto (default)"
-fi
 echo "HTTP connect timeout: ${HTTP_CONNECT_TIMEOUT_SECS}s"
 echo "HTTP request timeout: ${HTTP_REQUEST_TIMEOUT_SECS}s"
 echo "Logs: $LOG_DIR"
@@ -226,24 +207,13 @@ start_proxy() {
     echo ""
     echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} ==="
   } >>"$PROXY_LOG"
-  if [[ -n "$BLOB_PREFETCH_CONCURRENCY" ]]; then
-    BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
-      BORINGCACHE_BLOB_PREFETCH_CONCURRENCY="$BLOB_PREFETCH_CONCURRENCY" \
-      RUST_LOG="${RUST_LOG:-warn}" \
-      "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
-      --host "$PROXY_HOST" \
-      --port "$PROXY_PORT" \
-      --no-platform \
-      --no-git >>"$PROXY_LOG" 2>&1 &
-  else
-    BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
-      RUST_LOG="${RUST_LOG:-warn}" \
-      "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
-      --host "$PROXY_HOST" \
-      --port "$PROXY_PORT" \
-      --no-platform \
-      --no-git >>"$PROXY_LOG" 2>&1 &
-  fi
+  BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
+    RUST_LOG="${RUST_LOG:-warn}" \
+    "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
+    --host "$PROXY_HOST" \
+    --port "$PROXY_PORT" \
+    --no-platform \
+    --no-git >>"$PROXY_LOG" 2>&1 &
   PROXY_PID=$!
   sleep 2
 }

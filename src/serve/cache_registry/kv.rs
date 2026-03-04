@@ -42,8 +42,7 @@ const KV_RESOLVE_NOT_FOUND_RETRY_DELAY: std::time::Duration = std::time::Duratio
 const KV_BLOB_UPLOAD_MAX_ATTEMPTS: u32 = 3;
 const KV_BLOB_UPLOAD_RETRY_BASE_MS: u64 = 300;
 const KV_BLOB_UPLOAD_RETRY_MAX_MS: u64 = 1_500;
-const KV_BLOB_UPLOAD_MAX_CONCURRENCY: usize = 16;
-const KV_BLOB_UPLOAD_MIN_CONCURRENCY: usize = 1;
+const KV_BLOB_UPLOAD_MAX_CONCURRENCY: usize = 64;
 const KV_BLOB_PRELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const KV_BLOB_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const KV_BLOB_URL_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1946,26 +1945,11 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
 }
 
 fn kv_blob_preload_max_blob_bytes() -> u64 {
-    std::env::var("BORINGCACHE_BLOB_PRELOAD_MAX_BLOB_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(KV_BLOB_PRELOAD_MAX_BLOB_BYTES)
+    KV_BLOB_PRELOAD_MAX_BLOB_BYTES
 }
 
 fn kv_blob_preload_max_blobs() -> usize {
-    std::env::var("BORINGCACHE_BLOB_PRELOAD_MAX_BLOBS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(KV_BLOB_PRELOAD_MAX_BLOBS)
-}
-
-fn is_prefetch_disabled() -> bool {
-    std::env::var("BORINGCACHE_BLOB_PREFETCH_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        == Some(0)
+    KV_BLOB_PRELOAD_MAX_BLOBS
 }
 
 async fn preload_single_blob(
@@ -1986,10 +1970,6 @@ async fn preload_single_blob(
 }
 
 pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
-    if is_prefetch_disabled() {
-        return;
-    }
-
     let max_blob_bytes = kv_blob_preload_max_blob_bytes();
     let max_blobs = kv_blob_preload_max_blobs();
     let mut candidates = {
@@ -2400,29 +2380,10 @@ fn kv_blob_upload_concurrency(operation_count: usize) -> usize {
         return 1;
     }
 
-    if let Some(configured) = std::env::var("BORINGCACHE_KV_BLOB_UPLOAD_CONCURRENCY")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-    {
-        return configured
-            .clamp(
-                KV_BLOB_UPLOAD_MIN_CONCURRENCY,
-                KV_BLOB_UPLOAD_MAX_CONCURRENCY,
-            )
-            .min(operation_count);
-    }
-
-    use crate::platform::resources::{MemoryStrategy, SystemResources};
-
-    let resources = SystemResources::detect();
-    let base = match resources.memory_strategy {
-        MemoryStrategy::Balanced => 8,
-        MemoryStrategy::Aggressive => 12,
-        MemoryStrategy::UltraAggressive => 16,
-    };
-
-    base.min(resources.cpu_cores.max(1))
+    num_cpus::get()
+        .max(1)
+        .saturating_mul(2)
+        .clamp(16, KV_BLOB_UPLOAD_MAX_CONCURRENCY)
         .min(KV_BLOB_UPLOAD_MAX_CONCURRENCY)
         .min(operation_count)
         .max(1)
