@@ -13,8 +13,9 @@ use tokio::sync::{oneshot, RwLock};
 
 use crate::api::client::ApiClient;
 use crate::serve::state::{
-    diagnostics_enabled, unix_time_ms_now, AppState, BlobLocatorCache, BlobReadCache,
-    KvPendingStore, KvPublishedIndex, UploadSessionStore, DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
+    diagnostics_enabled, env_bool, unix_time_ms_now, AppState, BlobLocatorCache, BlobReadCache,
+    KvPendingStore, KvPublishedIndex, UploadSessionStore, WriteMode,
+    DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
 };
 use crate::tag_utils::TagResolver;
 
@@ -197,6 +198,8 @@ async fn build_server_runtime(
     fail_on_cache_error: bool,
 ) -> Result<(AppState, TcpListener)> {
     let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
+    let (kv_warm_enabled, kv_warm_from_env) = kv_manifest_warm_enabled();
+    let (write_mode, write_mode_from_env) = kv_write_mode();
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
     let (pf_concurrency, pf_from_env) = blob_prefetch_concurrency(dl_concurrency);
     let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
@@ -208,6 +211,8 @@ async fn build_server_runtime(
         configured_human_tags,
         registry_root_tag,
         fail_on_cache_error,
+        kv_manifest_warm_enabled: kv_warm_enabled,
+        write_mode,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -275,6 +280,23 @@ async fn build_server_runtime(
         "  Blob Download Concurrency: {dl_concurrency} max ({}), prefetch: {pf_label}",
         src(dl_from_env)
     );
+    eprintln!(
+        "  Manifest warm: {} ({})",
+        if state.kv_manifest_warm_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        src(kv_warm_from_env)
+    );
+    eprintln!(
+        "  KV write mode: {} ({})",
+        match state.write_mode {
+            WriteMode::WriteBack => "write_back",
+            WriteMode::WriteThrough => "write_through",
+        },
+        src(write_mode_from_env)
+    );
 
     for dir_name in ["boringcache-kv-blobs", "boringcache-uploads"] {
         let stale_dir = std::env::temp_dir().join(dir_name);
@@ -330,10 +352,12 @@ fn spawn_maintenance_tasks(state: &AppState) {
         });
     }
 
-    let preload_state = state.clone();
-    tokio::spawn(async move {
-        cache_registry::preload_kv_index(&preload_state).await;
-    });
+    if state.kv_manifest_warm_enabled {
+        let preload_state = state.clone();
+        tokio::spawn(async move {
+            cache_registry::preload_kv_index(&preload_state).await;
+        });
+    }
 
     let refresh_state = state.clone();
     tokio::spawn(async move {
@@ -515,6 +539,35 @@ fn blob_read_cache_max_bytes() -> u64 {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_BLOB_READ_CACHE_MAX_BYTES)
+}
+
+fn kv_manifest_warm_enabled() -> (bool, bool) {
+    if let Some(enabled) = env_bool("BORINGCACHE_KV_MANIFEST_WARM") {
+        return (enabled, true);
+    }
+
+    (true, false)
+}
+
+fn kv_write_mode() -> (WriteMode, bool) {
+    let Some(raw_mode) = std::env::var("BORINGCACHE_KV_WRITE_MODE").ok() else {
+        return (WriteMode::WriteBack, false);
+    };
+
+    let normalized = raw_mode.trim().to_ascii_lowercase();
+    let mode = match normalized.as_str() {
+        "write_back" | "write-back" | "wb" => Some(WriteMode::WriteBack),
+        "write_through" | "write-through" | "wt" => Some(WriteMode::WriteThrough),
+        _ => None,
+    };
+
+    match mode {
+        Some(mode) => (mode, true),
+        None => {
+            log::warn!("Invalid BORINGCACHE_KV_WRITE_MODE={raw_mode}; defaulting to write_back");
+            (WriteMode::WriteBack, false)
+        }
+    }
 }
 
 fn blob_download_concurrency() -> (usize, bool) {

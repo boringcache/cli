@@ -1260,16 +1260,18 @@ async fn put_upload(
     file.seek(std::io::SeekFrom::Start(write_offset))
         .await
         .map_err(|e| OciError::internal(format!("Failed to seek temp file: {e}")))?;
-    let bytes_written = match write_body_to_file(body, &mut file).await {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!(
+    let bytes_written = write_body_to_file(body, &mut file)
+        .await
+        .map_err(|e| {
+            OciError::internal(format!(
                 "OCI PUT body stream error: upload={} digest={} error={} bytes_before={} write_offset={}",
-                uuid, digest_param, e.message(), bytes_before, write_offset
-            );
-            0
-        }
-    };
+                uuid,
+                digest_param,
+                e.message(),
+                bytes_before,
+                write_offset
+            ))
+        })?;
     if write_offset == 0 && bytes_before > 0 && bytes_written > 0 {
         file.set_len(bytes_written)
             .await
@@ -1841,6 +1843,7 @@ mod tests {
         BlobLocatorCache, BlobReadCache, KvPendingStore, KvPublishedIndex, UploadSessionStore,
     };
     use crate::tag_utils::TagResolver;
+    use axum::body::Bytes;
     use std::sync::Arc;
     use std::time::Instant;
     use tokio::sync::RwLock;
@@ -1854,6 +1857,8 @@ mod tests {
             configured_human_tags: Vec::new(),
             registry_root_tag: "registry".to_string(),
             fail_on_cache_error: true,
+            kv_manifest_warm_enabled: true,
+            write_mode: crate::serve::state::WriteMode::WriteBack,
             blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
             upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
             kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -2132,6 +2137,51 @@ mod tests {
 
         let _ = tokio::fs::remove_file(&delayed_path).await;
         let _ = tokio::fs::remove_file(&empty_path).await;
+    }
+
+    #[tokio::test]
+    async fn put_upload_returns_internal_error_on_body_stream_error() {
+        let state = test_state();
+        let path = write_temp_upload_file(&[]).await;
+        let digest = cas_oci::prefixed_sha256_digest(b"payload");
+
+        {
+            let mut sessions = state.upload_sessions.write().await;
+            sessions.create(UploadSession {
+                id: "stream-error-session".to_string(),
+                name: "cache".to_string(),
+                temp_path: path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
+                bytes_received: 0,
+                finalized_digest: None,
+                finalized_size: None,
+                created_at: Instant::now(),
+            });
+        }
+
+        let mut params = HashMap::new();
+        params.insert("digest".to_string(), digest);
+
+        let body = Body::from_stream(futures_util::stream::once(async {
+            let error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe");
+            Err::<Bytes, std::io::Error>(error)
+        }));
+
+        let error = put_upload(
+            state,
+            "cache".to_string(),
+            "stream-error-session".to_string(),
+            params,
+            HeaderMap::new(),
+            body,
+        )
+        .await
+        .expect_err("stream error should fail finalize");
+
+        assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(error.message().contains("body stream error"));
+
+        let _ = tokio::fs::remove_file(&path).await;
     }
 
     #[test]

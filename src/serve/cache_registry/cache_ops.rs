@@ -258,7 +258,16 @@ impl Aggregator {
                 } => {
                     let mut guard = Self::lock_state_arc(&state);
                     Self::apply_record_to_state(
-                        &mut guard, epoch_secs, tool, op, result, degraded, bytes, latency_ms,
+                        &mut guard,
+                        BucketKey {
+                            epoch_secs,
+                            tool,
+                            op,
+                            result,
+                            degraded,
+                        },
+                        bytes,
+                        latency_ms,
                     );
                     queued_events.fetch_sub(1, Ordering::AcqRel);
                 }
@@ -294,7 +303,7 @@ impl Aggregator {
 
     fn note_dropped_event(&self) {
         let dropped = self.dropped_events.fetch_add(1, Ordering::AcqRel) + 1;
-        if dropped == 1 || dropped % 1_000 == 0 {
+        if dropped == 1 || dropped.is_multiple_of(1_000) {
             log::warn!("Cache ops queue saturated; dropped {dropped} analytics events");
         }
     }
@@ -339,7 +348,16 @@ impl Aggregator {
                 latency_ms,
             } => {
                 Self::apply_record_to_state(
-                    &mut guard, epoch_secs, tool, op, result, degraded, bytes, latency_ms,
+                    &mut guard,
+                    BucketKey {
+                        epoch_secs,
+                        tool,
+                        op,
+                        result,
+                        degraded,
+                    },
+                    bytes,
+                    latency_ms,
                 );
             }
             CacheOpEvent::Miss { tool, raw_key } => {
@@ -351,22 +369,10 @@ impl Aggregator {
 
     fn apply_record_to_state(
         state: &mut AggregateState,
-        epoch_secs: u64,
-        tool: Tool,
-        op: Op,
-        result: OpResult,
-        degraded: bool,
+        key: BucketKey,
         bytes: u64,
         latency_ms: u64,
     ) {
-        let key = BucketKey {
-            epoch_secs,
-            tool,
-            op,
-            result,
-            degraded,
-        };
-
         let counters = state.buckets.entry(key).or_default();
 
         counters.event_count = counters.event_count.saturating_add(1);

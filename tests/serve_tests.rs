@@ -9,13 +9,14 @@ use boring_cache_cli::manifest::EntryType;
 use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
     digest_tag, ref_tag, AppState, BlobLocatorCache, BlobReadCache, KvPendingStore,
-    KvPublishedIndex, UploadSessionStore,
+    KvPublishedIndex, UploadSessionStore, WriteMode,
 };
 use boring_cache_cli::tag_utils::TagResolver;
 use http_body_util::BodyExt;
 use mockito::{Matcher, Server};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 
 static ENV_MUTEX: Mutex<()> = Mutex::const_new(());
@@ -34,6 +35,9 @@ async fn setup(
         std::env::set_var("BORINGCACHE_API_URL", server.url());
         std::env::set_var("BORINGCACHE_AUTH_TOKEN", "test-token");
         std::env::set_var("BORINGCACHE_TEST_MODE", "1");
+        std::env::remove_var("BORINGCACHE_KV_MANIFEST_WARM");
+        std::env::remove_var("BORINGCACHE_KV_WRITE_MODE");
+        std::env::remove_var("BORINGCACHE_KV_WRITE_THROUGH_TIMEOUT_SECS");
     }
 
     let api_client =
@@ -46,6 +50,8 @@ async fn setup(
         configured_human_tags: Vec::new(),
         registry_root_tag: "registry".to_string(),
         fail_on_cache_error: true,
+        kv_manifest_warm_enabled: true,
+        write_mode: WriteMode::WriteBack,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -104,6 +110,55 @@ fn make_file_pointer(blob_digest: &str, size_bytes: u64) -> Vec<u8> {
         }],
     };
     serde_json::to_vec(&pointer).unwrap()
+}
+
+#[tokio::test]
+async fn test_startup_manifest_warm_can_be_disabled() {
+    let mut server = Server::new_async().await;
+    let (_state, _home, _guard) = setup(&server).await;
+    unsafe {
+        std::env::set_var("BORINGCACHE_KV_MANIFEST_WARM", "0");
+    }
+
+    let restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .expect(0)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create_async()
+        .await;
+
+    let handle = boring_cache_cli::serve::start_server_background(
+        ApiClient::new_with_token_override(Some("test-token".to_string())).expect("api client"),
+        "org/repo".to_string(),
+        "127.0.0.1".to_string(),
+        0,
+        TagResolver::new(None, GitContext::default(), false),
+        vec!["main".to_string()],
+        "registry".to_string(),
+        true,
+    )
+    .await
+    .expect("start proxy");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let base_url = format!("http://127.0.0.1:{}", handle.port);
+    let client = reqwest::Client::new();
+
+    let get = client
+        .get(format!("{base_url}/v2/"))
+        .send()
+        .await
+        .expect("get request");
+    assert_eq!(get.status(), reqwest::StatusCode::OK);
+
+    handle.shutdown_and_flush().await.expect("shutdown proxy");
+    restore_mock.assert_async().await;
 }
 
 #[tokio::test]
@@ -1258,6 +1313,59 @@ async fn test_upload_digest_mismatch_returns_error() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(parsed["errors"][0]["code"], "DIGEST_INVALID");
+}
+
+#[tokio::test]
+async fn test_put_upload_body_stream_error_returns_internal_error() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let app = build_router(state.clone());
+    let start = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v2/my-cache/blobs/uploads/")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let uuid = start
+        .headers()
+        .get("Docker-Upload-UUID")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let digest = cas_oci::prefixed_sha256_digest(b"stream-error");
+    let stream = futures_util::stream::once(async {
+        let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe");
+        Err::<axum::body::Bytes, std::io::Error>(err)
+    });
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v2/my-cache/blobs/uploads/{uuid}?digest={digest}"))
+            .body(Body::from_stream(stream))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["errors"][0]["code"], "INTERNAL_ERROR");
+    assert!(parsed["errors"][0]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("body stream error"));
 }
 
 #[tokio::test]
@@ -2489,6 +2597,204 @@ async fn test_sccache_put_head_get_round_trip() {
     assert_eq!(get_response.status(), StatusCode::OK);
     let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(get_body.as_ref(), payload);
+}
+
+#[tokio::test]
+async fn test_sccache_write_through_put_flushes_before_ack() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.write_mode = WriteMode::WriteThrough;
+
+    let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let key_path = format!(
+        "cache-prefix/{}/{}/{}/{}",
+        &key[0..1],
+        &key[1..2],
+        &key[2..3],
+        key
+    );
+    let payload = b"sccache-write-through-payload";
+    let payload_digest = cas_file::prefixed_sha256_digest(payload);
+
+    let save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "unused",
+                "cache_entry_id": "entry-sccache-write-through",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": payload.len(),
+                "cas_layout": "file-v1",
+                "manifest_upload_url": format!("{}/manifest-upload-write-through", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let blob_upload_urls_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/stage")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_urls": [{
+                    "digest": payload_digest,
+                    "url": format!("{}/blob-upload-write-through", server.url()),
+                    "headers": {}
+                }],
+                "already_present": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let blob_upload_mock = server
+        .mock("PUT", "/blob-upload-write-through")
+        .match_body(Matcher::Exact(
+            String::from_utf8(payload.to_vec()).expect("payload is utf8"),
+        ))
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let manifest_upload_mock = server
+        .mock("PUT", "/manifest-upload-write-through")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .create_async()
+        .await;
+
+    let pointer_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/org/repo/caches/tags/registry/pointer",
+        )
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "11",
+                "cache_entry_id": "entry-sccache-write-through",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let publish_mock = server
+        .mock(
+            "PUT",
+            "/v2/workspaces/org/repo/caches/tags/registry/publish",
+        )
+        .match_header("if-match", "11")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "11",
+                "status": "confirmed",
+                "cache_entry_id": "entry-sccache-write-through"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let put_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/{key_path}"))
+            .body(Body::from(payload.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_response.status(), StatusCode::CREATED);
+
+    save_mock.assert_async().await;
+    blob_upload_urls_mock.assert_async().await;
+    blob_upload_mock.assert_async().await;
+    manifest_upload_mock.assert_async().await;
+    pointer_mock.assert_async().await;
+    publish_mock.assert_async().await;
+
+    let pending = state.kv_pending.read().await;
+    assert_eq!(pending.entry_count(), 0);
+    assert_eq!(pending.blob_count(), 0);
+    drop(pending);
+
+    let app = build_router(state);
+    let head_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/{key_path}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(head_response.status(), StatusCode::OK);
+    let expected_content_length = payload.len().to_string();
+    assert_eq!(
+        head_response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
+        Some(expected_content_length.as_str())
+    );
+}
+
+#[tokio::test]
+async fn test_sccache_write_through_put_surfaces_flush_failure_and_preserves_pending() {
+    let server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.write_mode = WriteMode::WriteThrough;
+    unsafe {
+        std::env::set_var("BORINGCACHE_KV_WRITE_THROUGH_TIMEOUT_SECS", "5");
+    }
+
+    let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let key_path = format!(
+        "cache-prefix/{}/{}/{}/{}",
+        &key[0..1],
+        &key[1..2],
+        &key[2..3],
+        key
+    );
+
+    let app = build_router(state.clone());
+    let put_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/{key_path}"))
+            .body(Body::from("write-through-error"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let pending = state.kv_pending.read().await;
+    assert_eq!(pending.entry_count(), 1);
+    assert_eq!(pending.blob_count(), 1);
+    assert!(pending.total_spool_bytes() > 0);
 }
 
 #[tokio::test]
