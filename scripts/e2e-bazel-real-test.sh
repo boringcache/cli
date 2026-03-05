@@ -70,10 +70,17 @@ trap cleanup EXIT INT TERM
 
 http_status() {
   local path="$1"
-  curl -sS -o /dev/null -w "%{http_code}" \
-    --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECS" \
-    --max-time "$HTTP_REQUEST_TIMEOUT_SECS" \
-    "${PROXY_URL}${path}"
+  local status
+  status="$(
+    curl -sS -o /dev/null -w "%{http_code}" \
+      --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECS" \
+      --max-time "$HTTP_REQUEST_TIMEOUT_SECS" \
+      "${PROXY_URL}${path}" 2>/dev/null || true
+  )"
+  if [[ -z "$status" ]]; then
+    status="000"
+  fi
+  printf '%s' "$status"
 }
 
 wait_for_proxy_ready() {
