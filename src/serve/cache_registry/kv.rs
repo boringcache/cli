@@ -102,18 +102,20 @@ fn emit_serve_phase_metric(
     batch_size: Option<u64>,
 ) {
     request_metrics::emit(request_metrics::RequestMetric::success(
-        SERVE_METRIC_SOURCE,
-        operation,
-        "PHASE",
-        path.to_string(),
-        status,
-        duration_ms,
-        None,
-        None,
-        None,
-        None,
-        batch_size,
-        None,
+        request_metrics::SuccessMetric {
+            source: SERVE_METRIC_SOURCE,
+            operation,
+            method: "PHASE",
+            path: path.to_string(),
+            status,
+            duration_ms,
+            request_bytes: None,
+            response_bytes: None,
+            batch_index: None,
+            batch_count: None,
+            batch_size,
+            retry_count: None,
+        },
     ));
 }
 

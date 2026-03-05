@@ -470,18 +470,20 @@ impl ApiClient {
             Ok(response) => {
                 let status = response.status();
                 request_metrics::emit(request_metrics::RequestMetric::success(
-                    REQUEST_METRIC_SOURCE_CLI,
-                    operation,
-                    "POST",
-                    path,
-                    status.as_u16(),
-                    started_at.elapsed().as_millis() as u64,
-                    request_bytes,
-                    response.content_length(),
-                    batch_index,
-                    batch_count,
-                    batch_size,
-                    Some(retry_count),
+                    request_metrics::SuccessMetric {
+                        source: REQUEST_METRIC_SOURCE_CLI,
+                        operation,
+                        method: "POST",
+                        path,
+                        status: status.as_u16(),
+                        duration_ms: started_at.elapsed().as_millis() as u64,
+                        request_bytes,
+                        response_bytes: response.content_length(),
+                        batch_index,
+                        batch_count,
+                        batch_size,
+                        retry_count: Some(retry_count),
+                    },
                 ));
 
                 if status.is_success() {
@@ -532,18 +534,20 @@ impl ApiClient {
             Ok(response) => {
                 let status = response.status();
                 request_metrics::emit(request_metrics::RequestMetric::success(
-                    REQUEST_METRIC_SOURCE_CLI,
-                    operation,
-                    "PUT",
-                    path,
-                    status.as_u16(),
-                    started_at.elapsed().as_millis() as u64,
-                    request_bytes,
-                    response.content_length(),
-                    None,
-                    None,
-                    None,
-                    Some(retry_count),
+                    request_metrics::SuccessMetric {
+                        source: REQUEST_METRIC_SOURCE_CLI,
+                        operation,
+                        method: "PUT",
+                        path,
+                        status: status.as_u16(),
+                        duration_ms: started_at.elapsed().as_millis() as u64,
+                        request_bytes,
+                        response_bytes: response.content_length(),
+                        batch_index: None,
+                        batch_count: None,
+                        batch_size: None,
+                        retry_count: Some(retry_count),
+                    },
                 ));
 
                 if status.is_success() {
