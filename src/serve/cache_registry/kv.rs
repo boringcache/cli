@@ -1554,6 +1554,10 @@ async fn fetch_pointer(
         .map_err(|e| RegistryError::internal(format!("Invalid file CAS pointer: {e}")))
 }
 
+fn is_invalid_file_pointer_error(error: &RegistryError) -> bool {
+    error.message().contains("Invalid file CAS pointer")
+}
+
 fn build_index_pointer(
     entries: &BTreeMap<String, BlobDescriptor>,
     blob_order: &[BlobDescriptor],
@@ -2077,7 +2081,7 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
         }
         Err(e) => {
             let error_text = format!("{e:?}");
-            if error_text.contains("Invalid file CAS pointer") {
+            if is_invalid_file_pointer_error(&e) {
                 // Treat invalid legacy/corrupt preload pointers as a cache miss so the proxy can continue.
                 {
                     let mut published = state.kv_published_index.write().await;
@@ -3273,7 +3277,17 @@ async fn load_existing_index_with_fallback(
     let tags = kv_root_tags(state);
     for (idx, tag) in tags.iter().enumerate() {
         let (entries, blob_order, cache_entry_id, manifest_root_digest) =
-            load_existing_index(state, tag, retry_not_found).await?;
+            match load_existing_index(state, tag, retry_not_found).await {
+                Ok(result) => result,
+                Err(error) if is_invalid_file_pointer_error(&error) => {
+                    log::warn!(
+                        "KV root fallback: skipping tag {tag} due to invalid pointer ({})",
+                        error.message()
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
         if cache_entry_id.is_some() || !entries.is_empty() {
             if idx > 0 {
                 eprintln!("KV root fallback hit: loaded legacy tag {tag}");
