@@ -1004,12 +1004,14 @@ pub struct KvPendingStore {
     blob_refs: HashMap<String, BlobRef>,
     total_spool_bytes: u64,
     oldest_entry_unix_ms: Option<u64>,
+    next_blob_sequence: u64,
 }
 
 struct BlobRef {
     path: PathBuf,
     size_bytes: u64,
     refcount: u32,
+    first_seen_sequence: u64,
 }
 
 impl KvPendingStore {
@@ -1043,12 +1045,15 @@ impl KvPendingStore {
                     );
                 }
                 self.total_spool_bytes += blob.size_bytes;
+                let sequence = self.next_blob_sequence;
+                self.next_blob_sequence = self.next_blob_sequence.saturating_add(1);
                 self.blob_refs.insert(
                     blob.digest.clone(),
                     BlobRef {
                         path: temp_path,
                         size_bytes: blob.size_bytes,
                         refcount: 1,
+                        first_seen_sequence: sequence,
                     },
                 );
                 None
@@ -1087,22 +1092,30 @@ impl KvPendingStore {
         self.blob_refs.get(digest).map(|b| &b.path)
     }
 
-    pub fn take_all(&mut self) -> (BTreeMap<String, BlobDescriptor>, HashMap<String, PathBuf>) {
+    pub fn take_all(
+        &mut self,
+    ) -> (
+        BTreeMap<String, BlobDescriptor>,
+        HashMap<String, PathBuf>,
+        HashMap<String, u64>,
+    ) {
         let entries = std::mem::take(&mut self.entries);
-        let blob_paths: HashMap<String, PathBuf> = self
-            .blob_refs
-            .drain()
-            .map(|(digest, bref)| (digest, bref.path))
-            .collect();
+        let mut blob_paths = HashMap::new();
+        let mut blob_sequences = HashMap::new();
+        for (digest, bref) in self.blob_refs.drain() {
+            blob_sequences.insert(digest.clone(), bref.first_seen_sequence);
+            blob_paths.insert(digest, bref.path);
+        }
         self.total_spool_bytes = 0;
         self.oldest_entry_unix_ms = None;
-        (entries, blob_paths)
+        (entries, blob_paths, blob_sequences)
     }
 
     pub fn restore(
         &mut self,
         entries: BTreeMap<String, BlobDescriptor>,
         blob_paths: HashMap<String, PathBuf>,
+        blob_sequences: HashMap<String, u64>,
     ) -> Vec<PathBuf> {
         let was_empty = self.entries.is_empty();
         let mut cleanup_paths = Vec::new();
@@ -1134,6 +1147,15 @@ impl KvPendingStore {
                                 path: path.clone(),
                                 size_bytes: size,
                                 refcount: *count,
+                                first_seen_sequence: blob_sequences
+                                    .get(digest)
+                                    .copied()
+                                    .unwrap_or_else(|| {
+                                        let sequence = self.next_blob_sequence;
+                                        self.next_blob_sequence =
+                                            self.next_blob_sequence.saturating_add(1);
+                                        sequence
+                                    }),
                             },
                         );
                     }
@@ -1148,6 +1170,14 @@ impl KvPendingStore {
         }
         if was_empty && !self.entries.is_empty() {
             self.oldest_entry_unix_ms = Some(unix_time_ms_now());
+        }
+        if let Some(max_sequence) = self
+            .blob_refs
+            .values()
+            .map(|bref| bref.first_seen_sequence)
+            .max()
+        {
+            self.next_blob_sequence = self.next_blob_sequence.max(max_sequence.saturating_add(1));
         }
         cleanup_paths
     }
@@ -1209,6 +1239,7 @@ struct CachedUrl {
 #[derive(Default)]
 pub struct KvPublishedIndex {
     entries: Arc<HashMap<String, BlobDescriptor>>,
+    blob_order: Arc<Vec<BlobDescriptor>>,
     cache_entry_id: Option<String>,
     download_urls: HashMap<String, CachedUrl>,
     complete: bool,
@@ -1216,12 +1247,19 @@ pub struct KvPublishedIndex {
 }
 
 impl KvPublishedIndex {
-    pub fn update(&mut self, entries: HashMap<String, BlobDescriptor>, cache_entry_id: String) {
+    pub fn update(
+        &mut self,
+        entries: HashMap<String, BlobDescriptor>,
+        blob_order: Vec<BlobDescriptor>,
+        cache_entry_id: String,
+    ) {
         let now = Instant::now();
         let cache_entry_changed = self.cache_entry_id.as_deref() != Some(cache_entry_id.as_str());
         let active_digests: HashSet<String> =
             entries.values().map(|blob| blob.digest.clone()).collect();
+        let normalized_blob_order = Self::normalize_blob_order(&entries, blob_order);
         self.entries = Arc::new(entries);
+        self.blob_order = Arc::new(normalized_blob_order);
         self.cache_entry_id = Some(cache_entry_id);
         if cache_entry_changed {
             self.download_urls.clear();
@@ -1240,16 +1278,27 @@ impl KvPublishedIndex {
             self.download_urls.clear();
             self.cache_entry_id = Some(cache_entry_id);
             self.entries = Arc::new(HashMap::new());
+            self.blob_order = Arc::new(Vec::new());
         }
 
         let entries = Arc::make_mut(&mut self.entries);
-        entries.insert(scoped_key, blob);
+        let digest = blob.digest.clone();
+        entries.insert(scoped_key, blob.clone());
+        let has_digest = self
+            .blob_order
+            .iter()
+            .any(|existing| existing.digest == digest);
+        if !has_digest {
+            let order = Arc::make_mut(&mut self.blob_order);
+            order.push(blob);
+        }
         self.complete = false;
         self.last_refresh_at = Some(Instant::now());
     }
 
     pub fn set_empty(&mut self) {
         self.entries = Arc::new(HashMap::new());
+        self.blob_order = Arc::new(Vec::new());
         self.cache_entry_id = None;
         self.download_urls.clear();
         self.complete = true;
@@ -1258,6 +1307,7 @@ impl KvPublishedIndex {
 
     pub fn set_empty_incomplete(&mut self) {
         self.entries = Arc::new(HashMap::new());
+        self.blob_order = Arc::new(Vec::new());
         self.cache_entry_id = None;
         self.download_urls.clear();
         self.complete = false;
@@ -1297,14 +1347,7 @@ impl KvPublishedIndex {
     }
 
     pub fn unique_blobs(&self) -> Vec<BlobDescriptor> {
-        let mut seen = HashMap::new();
-        for blob in self.entries.values() {
-            seen.entry(blob.digest.clone()).or_insert(BlobDescriptor {
-                digest: blob.digest.clone(),
-                size_bytes: blob.size_bytes,
-            });
-        }
-        seen.into_values().collect()
+        self.blob_order.as_ref().clone()
     }
 
     pub fn cache_entry_id(&self) -> Option<&str> {
@@ -1325,6 +1368,41 @@ impl KvPublishedIndex {
 
     pub fn entries_snapshot(&self) -> Arc<HashMap<String, BlobDescriptor>> {
         self.entries.clone()
+    }
+
+    fn normalize_blob_order(
+        entries: &HashMap<String, BlobDescriptor>,
+        requested_order: Vec<BlobDescriptor>,
+    ) -> Vec<BlobDescriptor> {
+        let mut by_digest = BTreeMap::new();
+        for blob in entries.values() {
+            by_digest
+                .entry(blob.digest.clone())
+                .or_insert(blob.size_bytes);
+        }
+
+        let mut ordered = Vec::with_capacity(by_digest.len());
+        let mut seen = HashSet::new();
+        for blob in requested_order {
+            let digest = blob.digest.clone();
+            let Some(size_bytes) = by_digest.get(&digest) else {
+                continue;
+            };
+            if seen.insert(digest.clone()) {
+                ordered.push(BlobDescriptor {
+                    digest,
+                    size_bytes: *size_bytes,
+                });
+            }
+        }
+
+        for (digest, size_bytes) in by_digest {
+            if seen.insert(digest.clone()) {
+                ordered.push(BlobDescriptor { digest, size_bytes });
+            }
+        }
+
+        ordered
     }
 }
 
@@ -1595,7 +1673,11 @@ mod tests {
                 size_bytes: 1,
             },
         );
-        index.update(entries, "cache-entry".to_string());
+        index.update(
+            entries.clone(),
+            entries.into_values().collect(),
+            "cache-entry".to_string(),
+        );
         assert!(index.is_complete());
         assert!(index.last_refresh_at().is_some());
 

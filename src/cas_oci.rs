@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const FORMAT_VERSION: u32 = 1;
@@ -28,6 +29,8 @@ pub struct OciLayoutScan {
 pub struct OciPointerBlob {
     pub digest: String,
     pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,7 +82,7 @@ pub fn scan_layout(path: &Path) -> Result<OciLayoutScan> {
         DEFAULT_OCI_LAYOUT.as_bytes().to_vec()
     };
 
-    let mut blobs = Vec::new();
+    let mut blobs_by_digest = HashMap::new();
     for entry in std::fs::read_dir(&blobs_path)
         .with_context(|| format!("Failed to read {}", blobs_path.display()))?
     {
@@ -100,14 +103,30 @@ pub fn scan_layout(path: &Path) -> Result<OciLayoutScan> {
             .with_context(|| format!("Failed to stat {}", path.display()))?
             .len();
 
-        blobs.push(OciBlobFile {
-            digest,
-            size_bytes,
-            path,
-        });
+        blobs_by_digest.insert(
+            digest.clone(),
+            OciBlobFile {
+                digest,
+                size_bytes,
+                path,
+            },
+        );
     }
 
-    blobs.sort_by(|left, right| left.digest.cmp(&right.digest));
+    let available_blobs: HashSet<String> = blobs_by_digest.keys().cloned().collect();
+    let mut blobs = Vec::with_capacity(blobs_by_digest.len());
+    let mut seen = HashSet::new();
+    for digest in emitted_blob_order(path, &index_json, &available_blobs) {
+        if !seen.insert(digest.clone()) {
+            continue;
+        }
+        if let Some(blob) = blobs_by_digest.remove(&digest) {
+            blobs.push(blob);
+        }
+    }
+    let mut remaining: Vec<OciBlobFile> = blobs_by_digest.into_values().collect();
+    remaining.sort_by(|left, right| left.digest.cmp(&right.digest));
+    blobs.extend(remaining);
     let total_blob_bytes = blobs.iter().map(|blob| blob.size_bytes).sum();
 
     Ok(OciLayoutScan {
@@ -127,9 +146,11 @@ pub fn build_pointer(scan: &OciLayoutScan) -> Result<Vec<u8>> {
         blobs: scan
             .blobs
             .iter()
-            .map(|blob| OciPointerBlob {
+            .enumerate()
+            .map(|(sequence, blob)| OciPointerBlob {
                 digest: blob.digest.clone(),
                 size_bytes: blob.size_bytes,
+                sequence: Some(sequence as u64),
             })
             .collect(),
     };
@@ -138,8 +159,17 @@ pub fn build_pointer(scan: &OciLayoutScan) -> Result<Vec<u8>> {
 }
 
 pub fn parse_pointer(bytes: &[u8]) -> Result<OciPointer> {
-    let pointer: OciPointer =
+    let mut pointer: OciPointer =
         serde_json::from_slice(bytes).context("Failed to parse OCI CAS pointer")?;
+
+    if pointer.blobs.iter().any(|blob| blob.sequence.is_some()) {
+        pointer.blobs.sort_by(|left, right| {
+            left.sequence
+                .unwrap_or(u64::MAX)
+                .cmp(&right.sequence.unwrap_or(u64::MAX))
+                .then_with(|| left.digest.cmp(&right.digest))
+        });
+    }
 
     if pointer.format_version != FORMAT_VERSION {
         return Err(anyhow!(
@@ -164,6 +194,129 @@ pub fn parse_pointer(bytes: &[u8]) -> Result<OciPointer> {
     }
 
     Ok(pointer)
+}
+
+fn emitted_blob_order(
+    layout_root: &Path,
+    index_json: &[u8],
+    available_blobs: &HashSet<String>,
+) -> Vec<String> {
+    let mut ordered = Vec::new();
+    let parsed: serde_json::Value = match serde_json::from_slice(index_json) {
+        Ok(parsed) => parsed,
+        Err(_) => return ordered,
+    };
+    let mut visited_descriptors = HashSet::new();
+    if let Some(manifests) = parsed.get("manifests").and_then(|value| value.as_array()) {
+        for manifest in manifests {
+            if let Some(digest) = descriptor_digest(manifest) {
+                visit_descriptor(
+                    layout_root,
+                    digest,
+                    available_blobs,
+                    &mut visited_descriptors,
+                    &mut ordered,
+                );
+            }
+        }
+    } else {
+        collect_manifest_blob_digests(&parsed, available_blobs, &mut ordered);
+    }
+    ordered
+}
+
+fn visit_descriptor(
+    layout_root: &Path,
+    digest: &str,
+    available_blobs: &HashSet<String>,
+    visited_descriptors: &mut HashSet<String>,
+    ordered: &mut Vec<String>,
+) {
+    if !visited_descriptors.insert(digest.to_string()) {
+        return;
+    }
+    push_digest_if_available(digest, available_blobs, ordered);
+    let Some(path) = blob_path_for_digest(layout_root, digest) else {
+        return;
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return,
+    };
+    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+
+    if let Some(manifests) = value.get("manifests").and_then(|node| node.as_array()) {
+        for manifest in manifests {
+            if let Some(child_digest) = descriptor_digest(manifest) {
+                visit_descriptor(
+                    layout_root,
+                    child_digest,
+                    available_blobs,
+                    visited_descriptors,
+                    ordered,
+                );
+            }
+        }
+        return;
+    }
+
+    collect_manifest_blob_digests(&value, available_blobs, ordered);
+}
+
+fn collect_manifest_blob_digests(
+    manifest: &serde_json::Value,
+    available_blobs: &HashSet<String>,
+    ordered: &mut Vec<String>,
+) {
+    if let Some(config_digest) = manifest.get("config").and_then(descriptor_digest) {
+        push_digest_if_available(config_digest, available_blobs, ordered);
+    }
+    if let Some(subject_digest) = manifest.get("subject").and_then(descriptor_digest) {
+        push_digest_if_available(subject_digest, available_blobs, ordered);
+    }
+    if let Some(layers) = manifest.get("layers").and_then(|node| node.as_array()) {
+        for layer in layers {
+            if let Some(layer_digest) = descriptor_digest(layer) {
+                push_digest_if_available(layer_digest, available_blobs, ordered);
+            }
+        }
+    }
+    if let Some(blobs) = manifest.get("blobs").and_then(|node| node.as_array()) {
+        for blob in blobs {
+            if let Some(blob_digest) = descriptor_digest(blob) {
+                push_digest_if_available(blob_digest, available_blobs, ordered);
+            }
+        }
+    }
+}
+
+fn push_digest_if_available(
+    digest: &str,
+    available_blobs: &HashSet<String>,
+    ordered: &mut Vec<String>,
+) {
+    if is_valid_sha256_digest(digest) && available_blobs.contains(digest) {
+        ordered.push(digest.to_string());
+    }
+}
+
+fn descriptor_digest(node: &serde_json::Value) -> Option<&str> {
+    node.get("digest")
+        .and_then(|digest| digest.as_str())
+        .filter(|digest| is_valid_sha256_digest(digest))
+}
+
+fn blob_path_for_digest(layout_root: &Path, digest: &str) -> Option<PathBuf> {
+    let hex = digest_hex_component(digest)?;
+    Some(
+        layout_root
+            .join("blobs")
+            .join("sha256")
+            .join(hex.to_ascii_lowercase()),
+    )
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -250,6 +403,66 @@ mod tests {
         assert_eq!(pointer.format_version, FORMAT_VERSION);
         assert_eq!(pointer.adapter, ADAPTER);
         assert_eq!(pointer.blobs.len(), 1);
+        assert_eq!(pointer.blobs[0].sequence, Some(0));
+    }
+
+    #[test]
+    fn parse_pointer_supports_legacy_sequence_free_blobs() {
+        let bytes = br#"{
+            "format_version":1,
+            "adapter":"oci-v1",
+            "index_json_base64":"e30=",
+            "oci_layout_base64":"eyJpbWFnZUxheW91dFZlcnNpb24iOiIxLjAuMCJ9",
+            "blobs":[
+                {"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":12}
+            ]
+        }"#;
+
+        let pointer = parse_pointer(bytes).unwrap();
+        assert_eq!(pointer.blobs.len(), 1);
+        assert_eq!(pointer.blobs[0].sequence, None);
+    }
+
+    #[test]
+    fn scan_layout_prefers_descriptor_emission_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let blobs_dir = temp.path().join("blobs").join("sha256");
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+
+        let manifest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let config = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let layer1 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let layer2 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let extra = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+        let index_json = format!(
+            "{{\"schemaVersion\":2,\"manifests\":[{{\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"digest\":\"sha256:{manifest}\",\"size\":123}}]}}"
+        );
+        std::fs::write(temp.path().join("index.json"), index_json).unwrap();
+        std::fs::write(
+            blobs_dir.join(manifest),
+            format!(
+                "{{\"schemaVersion\":2,\"config\":{{\"digest\":\"sha256:{config}\",\"size\":5}},\"layers\":[{{\"digest\":\"sha256:{layer2}\",\"size\":7}},{{\"digest\":\"sha256:{layer1}\",\"size\":9}}]}}"
+            ),
+        )
+        .unwrap();
+        std::fs::write(blobs_dir.join(config), b"cfg").unwrap();
+        std::fs::write(blobs_dir.join(layer1), b"l1").unwrap();
+        std::fs::write(blobs_dir.join(layer2), b"l2").unwrap();
+        std::fs::write(blobs_dir.join(extra), b"x").unwrap();
+
+        let scan = scan_layout(temp.path()).unwrap();
+        let order: Vec<String> = scan.blobs.iter().map(|blob| blob.digest.clone()).collect();
+        assert_eq!(
+            order,
+            vec![
+                format!("sha256:{manifest}"),
+                format!("sha256:{config}"),
+                format!("sha256:{layer2}"),
+                format!("sha256:{layer1}"),
+                format!("sha256:{extra}"),
+            ]
+        );
     }
 
     #[test]

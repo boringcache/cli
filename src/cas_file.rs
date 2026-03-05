@@ -25,6 +25,8 @@ pub struct FileLayoutScan {
 pub struct FilePointerBlob {
     pub digest: String,
     pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +133,7 @@ pub fn build_pointer(scan: &FileLayoutScan) -> Result<Vec<u8>> {
             .map(|blob| FilePointerBlob {
                 digest: blob.digest.clone(),
                 size_bytes: blob.size_bytes,
+                sequence: None,
             })
             .collect(),
     };

@@ -690,8 +690,10 @@ fn blob_download_concurrency() -> (usize, bool) {
     (auto_transfer_concurrency(), false)
 }
 
-fn blob_prefetch_concurrency(_download_concurrency: usize) -> (usize, bool) {
-    (1, false)
+fn blob_prefetch_concurrency(download_concurrency: usize) -> (usize, bool) {
+    let max_download = download_concurrency.max(1);
+    let adaptive = (max_download / 4).clamp(2, 16).min(max_download);
+    (adaptive.max(1), false)
 }
 
 async fn flush_pending_on_shutdown(state: &AppState) {

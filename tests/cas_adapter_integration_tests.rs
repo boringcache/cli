@@ -477,6 +477,7 @@ async fn test_restore_materializes_file_cas_layout() {
         blobs: vec![cas_file::FilePointerBlob {
             digest: blob_digest.clone(),
             size_bytes: blob_bytes.len() as u64,
+            sequence: None,
         }],
     };
     let pointer_bytes = serde_json::to_vec(&pointer).expect("Failed to encode pointer");
@@ -612,10 +613,12 @@ async fn test_restore_materializes_bazel_layout() {
             cas_file::FilePointerBlob {
                 digest: ac_digest.clone(),
                 size_bytes: ac_bytes.len() as u64,
+                sequence: None,
             },
             cas_file::FilePointerBlob {
                 digest: cas_digest.clone(),
                 size_bytes: cas_bytes.len() as u64,
+                sequence: None,
             },
         ],
     };
@@ -747,6 +750,7 @@ async fn test_restore_materializes_oci_layout() {
         blobs: vec![cas_oci::OciPointerBlob {
             digest: blob_digest.clone(),
             size_bytes: blob_bytes.len() as u64,
+            sequence: None,
         }],
     };
     let pointer_bytes = serde_json::to_vec(&pointer).expect("Failed to encode OCI pointer");

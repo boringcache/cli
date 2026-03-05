@@ -1598,9 +1598,11 @@ async fn put_manifest(
         oci_layout_base64: STANDARD.encode(br#"{"imageLayoutVersion":"1.0.0"}"#),
         blobs: blob_descriptors
             .iter()
-            .map(|b| cas_oci::OciPointerBlob {
+            .enumerate()
+            .map(|(sequence, b)| cas_oci::OciPointerBlob {
                 digest: b.digest.clone(),
                 size_bytes: b.size_bytes,
+                sequence: Some(sequence as u64),
             })
             .collect(),
     };

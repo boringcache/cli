@@ -678,23 +678,24 @@ fn should_suppress_lookup_refresh_due_to_pending_values(
 }
 
 async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), RegistryError> {
-    let (entries, cache_entry_id, _) = match load_existing_index_with_fallback(state, true).await {
-        Ok(result) => {
-            state.backend_breaker.record_success();
-            result
-        }
-        Err(e) => {
-            state.backend_breaker.record_failure();
-            return Err(e);
-        }
-    };
+    let (entries, blob_order, cache_entry_id, _) =
+        match load_existing_index_with_fallback(state, true).await {
+            Ok(result) => {
+                state.backend_breaker.record_success();
+                result
+            }
+            Err(e) => {
+                state.backend_breaker.record_failure();
+                return Err(e);
+            }
+        };
 
     {
         let mut published = state.kv_published_index.write().await;
         if entries.is_empty() {
             published.set_empty();
         } else if let Some(cache_entry_id) = cache_entry_id {
-            published.update(entries.into_iter().collect(), cache_entry_id);
+            published.update(entries.into_iter().collect(), blob_order, cache_entry_id);
         } else {
             published.set_empty();
         }
@@ -1488,8 +1489,9 @@ async fn fetch_pointer(
 
 fn build_index_pointer(
     entries: &BTreeMap<String, BlobDescriptor>,
+    blob_order: &[BlobDescriptor],
 ) -> Result<(Vec<u8>, Vec<BlobDescriptor>), RegistryError> {
-    let mut blob_sizes: HashMap<String, u64> = HashMap::new();
+    let mut blob_sizes: BTreeMap<String, u64> = BTreeMap::new();
     let mut pointer_entries = Vec::with_capacity(entries.len());
 
     for (key, blob) in entries {
@@ -1514,11 +1516,28 @@ fn build_index_pointer(
         });
     }
 
-    let mut blobs: Vec<BlobDescriptor> = blob_sizes
-        .into_iter()
-        .map(|(digest, size_bytes)| BlobDescriptor { digest, size_bytes })
-        .collect();
-    blobs.sort_by(|left, right| left.digest.cmp(&right.digest));
+    let mut blobs = Vec::with_capacity(blob_sizes.len());
+    let mut seen = HashSet::new();
+    for blob in blob_order {
+        let digest = blob.digest.clone();
+        let Some(size_bytes) = blob_sizes.get(&digest) else {
+            continue;
+        };
+        if seen.insert(digest.clone()) {
+            blobs.push(BlobDescriptor {
+                digest,
+                size_bytes: *size_bytes,
+            });
+        }
+    }
+    for (digest, size_bytes) in &blob_sizes {
+        if seen.insert(digest.clone()) {
+            blobs.push(BlobDescriptor {
+                digest: digest.clone(),
+                size_bytes: *size_bytes,
+            });
+        }
+    }
 
     let pointer = crate::cas_file::FilePointer {
         format_version: 1,
@@ -1526,9 +1545,11 @@ fn build_index_pointer(
         entries: pointer_entries,
         blobs: blobs
             .iter()
-            .map(|blob| crate::cas_file::FilePointerBlob {
+            .enumerate()
+            .map(|(sequence, blob)| crate::cas_file::FilePointerBlob {
                 digest: blob.digest.clone(),
                 size_bytes: blob.size_bytes,
+                sequence: Some(sequence as u64),
             })
             .collect(),
     };
@@ -1536,6 +1557,104 @@ fn build_index_pointer(
         .map_err(|e| RegistryError::internal(format!("Failed to serialize file pointer: {e}")))?;
 
     Ok((pointer_bytes, blobs))
+}
+
+fn pointer_blob_order(
+    pointer: &crate::cas_file::FilePointer,
+    entries: &BTreeMap<String, BlobDescriptor>,
+) -> Vec<BlobDescriptor> {
+    let mut size_by_digest = BTreeMap::new();
+    for blob in entries.values() {
+        size_by_digest
+            .entry(blob.digest.clone())
+            .or_insert(blob.size_bytes);
+    }
+
+    let mut pointer_blobs = pointer.blobs.clone();
+    if pointer_blobs.iter().any(|blob| blob.sequence.is_some()) {
+        pointer_blobs.sort_by(|left, right| {
+            left.sequence
+                .unwrap_or(u64::MAX)
+                .cmp(&right.sequence.unwrap_or(u64::MAX))
+                .then_with(|| left.digest.cmp(&right.digest))
+        });
+    }
+
+    let mut ordered = Vec::with_capacity(size_by_digest.len());
+    let mut seen = HashSet::new();
+    for blob in pointer_blobs {
+        let digest = blob.digest;
+        let Some(size_bytes) = size_by_digest.get(&digest) else {
+            continue;
+        };
+        if seen.insert(digest.clone()) {
+            ordered.push(BlobDescriptor {
+                digest,
+                size_bytes: *size_bytes,
+            });
+        }
+    }
+
+    for (digest, size_bytes) in size_by_digest {
+        if seen.insert(digest.clone()) {
+            ordered.push(BlobDescriptor { digest, size_bytes });
+        }
+    }
+
+    ordered
+}
+
+fn merge_blob_order(
+    merged_entries: &BTreeMap<String, BlobDescriptor>,
+    base_blob_order: &[BlobDescriptor],
+    pending_blob_sequences: &HashMap<String, u64>,
+) -> Vec<BlobDescriptor> {
+    let mut size_by_digest = BTreeMap::new();
+    for blob in merged_entries.values() {
+        size_by_digest
+            .entry(blob.digest.clone())
+            .or_insert(blob.size_bytes);
+    }
+
+    let mut ordered = Vec::with_capacity(size_by_digest.len());
+    let mut seen = HashSet::new();
+    for blob in base_blob_order {
+        let digest = blob.digest.clone();
+        let Some(size_bytes) = size_by_digest.get(&digest) else {
+            continue;
+        };
+        if seen.insert(digest.clone()) {
+            ordered.push(BlobDescriptor {
+                digest,
+                size_bytes: *size_bytes,
+            });
+        }
+    }
+
+    let mut pending_digests: Vec<(u64, String)> = pending_blob_sequences
+        .iter()
+        .map(|(digest, sequence)| (*sequence, digest.clone()))
+        .collect();
+    pending_digests.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    for (_, digest) in pending_digests {
+        let Some(size_bytes) = size_by_digest.get(&digest) else {
+            continue;
+        };
+        if seen.insert(digest.clone()) {
+            ordered.push(BlobDescriptor {
+                digest,
+                size_bytes: *size_bytes,
+            });
+        }
+    }
+
+    for (digest, size_bytes) in size_by_digest {
+        if seen.insert(digest.clone()) {
+            ordered.push(BlobDescriptor { digest, size_bytes });
+        }
+    }
+
+    ordered
 }
 
 pub(crate) enum FlushResult {
@@ -1716,7 +1835,7 @@ async fn promote_pending_blobs_to_read_cache(
 pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
     let guard = state.kv_flush_lock.lock().await;
 
-    let (pending_entries, pending_blob_paths) = {
+    let (pending_entries, pending_blob_paths, pending_blob_sequences) = {
         let mut pending = state.kv_pending.write().await;
         if pending.is_empty() {
             return FlushResult::Ok;
@@ -1741,11 +1860,22 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
 
     let entry_count = pending_entries.len();
 
-    let result = match do_flush(state, &pending_entries, &pending_blob_paths).await {
-        Ok((merged_entries, cache_entry_id)) => {
+    let result = match do_flush(
+        state,
+        &pending_entries,
+        &pending_blob_paths,
+        &pending_blob_sequences,
+    )
+    .await
+    {
+        Ok((merged_entries, merged_blob_order, cache_entry_id)) => {
             {
                 let mut published = state.kv_published_index.write().await;
-                published.update(merged_entries.into_iter().collect(), cache_entry_id.clone());
+                published.update(
+                    merged_entries.into_iter().collect(),
+                    merged_blob_order,
+                    cache_entry_id.clone(),
+                );
             }
             {
                 let mut flushing = state.kv_flushing.write().await;
@@ -1771,7 +1901,8 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
         Err(FlushError::Conflict(msg)) => {
             eprintln!("KV batch flush: skipped — tag conflict ({msg})");
             let mut pending = state.kv_pending.write().await;
-            let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
+            let paths_to_cleanup =
+                pending.restore(pending_entries, pending_blob_paths, pending_blob_sequences);
             drop(pending);
             cleanup_paths(paths_to_cleanup).await;
             let (base_ms, jitter_ms) = conflict_backoff_window(&msg);
@@ -1781,7 +1912,8 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
         Err(FlushError::Transient(msg)) => {
             eprintln!("KV batch flush failed: {msg}");
             let mut pending = state.kv_pending.write().await;
-            let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
+            let paths_to_cleanup =
+                pending.restore(pending_entries, pending_blob_paths, pending_blob_sequences);
             drop(pending);
             cleanup_paths(paths_to_cleanup).await;
             let (base_ms, jitter_ms) = transient_backoff_window(&msg);
@@ -1806,7 +1938,9 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
 
 pub(crate) async fn preload_kv_index(state: &AppState) {
     match load_existing_index_with_fallback(state, true).await {
-        Ok((entries, Some(cache_entry_id), _manifest_root_digest)) if !entries.is_empty() => {
+        Ok((entries, blob_order, Some(cache_entry_id), _manifest_root_digest))
+            if !entries.is_empty() =>
+        {
             let count = entries.len();
             {
                 let mut published = state.kv_published_index.write().await;
@@ -1814,7 +1948,11 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
                     eprintln!("KV index preload: skipped, flush already published");
                     return;
                 }
-                published.update(entries.into_iter().collect(), cache_entry_id.clone());
+                published.update(
+                    entries.into_iter().collect(),
+                    blob_order,
+                    cache_entry_id.clone(),
+                );
             }
             clear_root_tag_misses(state);
             eprintln!("KV index preloaded: {count} entries, resolving download URLs...");
@@ -1934,6 +2072,11 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             );
         }
     }
+    let entry_map: BTreeMap<String, BlobDescriptor> = entries
+        .iter()
+        .map(|(key, blob)| (key.clone(), blob.clone()))
+        .collect();
+    let blob_order = pointer_blob_order(&pointer, &entry_map);
 
     if entries.is_empty() {
         let had_entries = {
@@ -1954,7 +2097,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
     let count = entries.len();
     {
         let mut published = state.kv_published_index.write().await;
-        published.update(entries, cache_entry_id.clone());
+        published.update(entries, blob_order, cache_entry_id.clone());
     }
     clear_root_tag_misses(state);
     eprintln!("KV index refresh: {count} entries loaded");
@@ -2214,31 +2357,50 @@ async fn do_flush(
     state: &AppState,
     pending_entries: &BTreeMap<String, BlobDescriptor>,
     pending_blob_paths: &HashMap<String, PathBuf>,
-) -> Result<(BTreeMap<String, BlobDescriptor>, String), FlushError> {
+    pending_blob_sequences: &HashMap<String, u64>,
+) -> Result<
+    (
+        BTreeMap<String, BlobDescriptor>,
+        Vec<BlobDescriptor>,
+        String,
+    ),
+    FlushError,
+> {
     let flush_started_at = std::time::Instant::now();
     let tag = state.registry_root_tag.trim().to_string();
 
-    let published_snapshot = {
+    let (published_snapshot, published_blob_order) = {
         let published = state.kv_published_index.read().await;
-        published.entries_snapshot()
+        (published.entries_snapshot(), published.unique_blobs())
     };
 
-    let backend_entries = match load_existing_index_with_fallback(state, false).await {
-        Ok((existing, _, _)) => existing,
-        Err(e) => {
-            log::warn!("KV flush: failed to load existing index: {e:?}");
-            BTreeMap::new()
-        }
-    };
+    let (backend_entries, backend_blob_order) =
+        match load_existing_index_with_fallback(state, false).await {
+            Ok((existing, blob_order, _, _)) => (existing, blob_order),
+            Err(e) => {
+                log::warn!("KV flush: failed to load existing index: {e:?}");
+                (BTreeMap::new(), Vec::new())
+            }
+        };
     let (mut entries, used_published_fallback) =
         select_flush_base_entries(backend_entries, published_snapshot.as_ref());
+    let base_blob_order = if used_published_fallback {
+        published_blob_order
+    } else {
+        backend_blob_order
+    };
     let existing_count = entries.len();
     let (
         filtered_pending_entries,
         filtered_pending_blob_paths,
+        filtered_pending_blob_sequences,
         missing_pending_digests,
         missing_pending_entries,
-    ) = filter_pending_entries_with_local_blobs(pending_entries, pending_blob_paths);
+    ) = filter_pending_entries_with_local_blobs(
+        pending_entries,
+        pending_blob_paths,
+        pending_blob_sequences,
+    );
     if used_published_fallback {
         eprintln!(
             "KV flush: backend index empty, using published snapshot with {existing_count} entries"
@@ -2255,13 +2417,15 @@ async fn do_flush(
             .iter()
             .map(|(k, v)| (k.clone(), v.clone())),
     );
+    let merged_blob_order =
+        merge_blob_order(&entries, &base_blob_order, &filtered_pending_blob_sequences);
     let total_count = entries.len();
     eprintln!(
         "KV flush: merging {existing_count} existing + {} pending = {total_count} total entries",
         filtered_pending_entries.len()
     );
 
-    let (pointer_bytes, blobs) = build_index_pointer(&entries)
+    let (pointer_bytes, blobs) = build_index_pointer(&entries, &merged_blob_order)
         .map_err(|e| FlushError::Transient(format!("build pointer failed: {e:?}")))?;
 
     let manifest_root_digest = crate::cas_file::prefixed_sha256_digest(&pointer_bytes);
@@ -2356,7 +2520,7 @@ async fn do_flush(
         .await?;
 
         eprintln!("KV flush: save_entry returned exists=true ({total_count} entries, {blob_count} blobs, digest={manifest_root_digest})");
-        return Ok((entries, save_response.cache_entry_id));
+        return Ok((entries, merged_blob_order, save_response.cache_entry_id));
     }
     eprintln!("KV flush: uploading {total_count} entries, {blob_count} blobs, pointer={expected_manifest_size} bytes");
 
@@ -2434,20 +2598,25 @@ async fn do_flush(
         flush_started_at.elapsed().as_millis()
     );
 
-    Ok((entries, save_response.cache_entry_id))
+    Ok((entries, merged_blob_order, save_response.cache_entry_id))
 }
+
+type FilteredPendingEntries = (
+    BTreeMap<String, BlobDescriptor>,
+    HashMap<String, PathBuf>,
+    HashMap<String, u64>,
+    Vec<String>,
+    usize,
+);
 
 fn filter_pending_entries_with_local_blobs(
     pending_entries: &BTreeMap<String, BlobDescriptor>,
     pending_blob_paths: &HashMap<String, PathBuf>,
-) -> (
-    BTreeMap<String, BlobDescriptor>,
-    HashMap<String, PathBuf>,
-    Vec<String>,
-    usize,
-) {
+    pending_blob_sequences: &HashMap<String, u64>,
+) -> FilteredPendingEntries {
     let mut missing_digests = HashSet::new();
     let mut filtered_blob_paths = HashMap::new();
+    let mut filtered_blob_sequences = HashMap::new();
 
     for blob in pending_entries.values() {
         if missing_digests.contains(&blob.digest) || filtered_blob_paths.contains_key(&blob.digest)
@@ -2463,6 +2632,9 @@ fn filter_pending_entries_with_local_blobs(
         match std::fs::metadata(path) {
             Ok(metadata) if metadata.is_file() => {
                 filtered_blob_paths.insert(blob.digest.clone(), path.clone());
+                if let Some(sequence) = pending_blob_sequences.get(&blob.digest) {
+                    filtered_blob_sequences.insert(blob.digest.clone(), *sequence);
+                }
             }
             Ok(_) => {
                 missing_digests.insert(blob.digest.clone());
@@ -2486,6 +2658,7 @@ fn filter_pending_entries_with_local_blobs(
     (
         filtered_entries,
         filtered_blob_paths,
+        filtered_blob_sequences,
         missing_digests.into_iter().collect(),
         missing_entry_count,
     )
@@ -2818,6 +2991,7 @@ async fn load_existing_index(
 ) -> Result<
     (
         BTreeMap<String, BlobDescriptor>,
+        Vec<BlobDescriptor>,
         Option<String>,
         Option<String>,
     ),
@@ -2826,7 +3000,7 @@ async fn load_existing_index(
     let hit = match resolve_hit_for_index_load(state, tag, retry_not_found).await {
         Ok(hit) => hit,
         Err(error) if error.status == StatusCode::NOT_FOUND => {
-            return Ok((BTreeMap::new(), None, None));
+            return Ok((BTreeMap::new(), Vec::new(), None, None));
         }
         Err(error) => return Err(error),
     };
@@ -2852,7 +3026,8 @@ async fn load_existing_index(
             );
         }
     }
-    Ok((map, cache_entry_id, manifest_root_digest))
+    let blob_order = pointer_blob_order(&pointer, &map);
+    Ok((map, blob_order, cache_entry_id, manifest_root_digest))
 }
 
 async fn load_existing_index_with_fallback(
@@ -2861,6 +3036,7 @@ async fn load_existing_index_with_fallback(
 ) -> Result<
     (
         BTreeMap<String, BlobDescriptor>,
+        Vec<BlobDescriptor>,
         Option<String>,
         Option<String>,
     ),
@@ -2868,16 +3044,16 @@ async fn load_existing_index_with_fallback(
 > {
     let tags = kv_root_tags(state);
     for (idx, tag) in tags.iter().enumerate() {
-        let (entries, cache_entry_id, manifest_root_digest) =
+        let (entries, blob_order, cache_entry_id, manifest_root_digest) =
             load_existing_index(state, tag, retry_not_found).await?;
         if cache_entry_id.is_some() || !entries.is_empty() {
             if idx > 0 {
                 eprintln!("KV root fallback hit: loaded legacy tag {tag}");
             }
-            return Ok((entries, cache_entry_id, manifest_root_digest));
+            return Ok((entries, blob_order, cache_entry_id, manifest_root_digest));
         }
     }
-    Ok((BTreeMap::new(), None, None))
+    Ok((BTreeMap::new(), Vec::new(), None, None))
 }
 
 async fn resolve_hit_for_index_load(

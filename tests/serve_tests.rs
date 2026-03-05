@@ -98,9 +98,11 @@ fn make_pointer(index_json: &[u8], blobs: &[(&str, u64)]) -> Vec<u8> {
         oci_layout_base64: STANDARD.encode(br#"{"imageLayoutVersion":"1.0.0"}"#),
         blobs: blobs
             .iter()
-            .map(|(digest, size)| cas_oci::OciPointerBlob {
+            .enumerate()
+            .map(|(sequence, (digest, size))| cas_oci::OciPointerBlob {
                 digest: digest.to_string(),
                 size_bytes: *size,
+                sequence: Some(sequence as u64),
             })
             .collect(),
     };
@@ -115,6 +117,7 @@ fn make_file_pointer(blob_digest: &str, size_bytes: u64) -> Vec<u8> {
         blobs: vec![cas_file::FilePointerBlob {
             digest: blob_digest.to_string(),
             size_bytes,
+            sequence: None,
         }],
     };
     serde_json::to_vec(&pointer).unwrap()
@@ -2685,6 +2688,7 @@ async fn test_sccache_miss_is_temporarily_cached_to_reduce_backend_lookups() {
         blobs: vec![cas_file::FilePointerBlob {
             digest: payload_digest,
             size_bytes: 9,
+            sequence: None,
         }],
     };
     let pointer_bytes = serde_json::to_vec(&pointer).expect("pointer");
@@ -3938,10 +3942,12 @@ async fn test_turborepo_query_artifacts_returns_metadata_map() {
             cas_file::FilePointerBlob {
                 digest: digest_a,
                 size_bytes: 11,
+                sequence: None,
             },
             cas_file::FilePointerBlob {
                 digest: digest_b,
                 size_bytes: 17,
+                sequence: None,
             },
         ],
     };
