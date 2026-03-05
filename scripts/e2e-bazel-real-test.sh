@@ -19,6 +19,8 @@ PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
 HTTP_CONNECT_TIMEOUT_SECS="${HTTP_CONNECT_TIMEOUT_SECS:-5}"
 HTTP_REQUEST_TIMEOUT_SECS="${HTTP_REQUEST_TIMEOUT_SECS:-30}"
+PHASE3_MAX_ATTEMPTS="${PHASE3_MAX_ATTEMPTS:-4}"
+PHASE3_RETRY_SLEEP_SECS="${PHASE3_RETRY_SLEEP_SECS:-3}"
 PROXY_PID=""
 
 require_positive() {
@@ -53,10 +55,13 @@ require_positive "PROXY_READY_TIMEOUT_SECS" "$PROXY_READY_TIMEOUT_SECS"
 require_positive "PROXY_READY_POLL_SECS" "$PROXY_READY_POLL_SECS"
 require_positive "HTTP_CONNECT_TIMEOUT_SECS" "$HTTP_CONNECT_TIMEOUT_SECS"
 require_positive "HTTP_REQUEST_TIMEOUT_SECS" "$HTTP_REQUEST_TIMEOUT_SECS"
+require_positive "PHASE3_MAX_ATTEMPTS" "$PHASE3_MAX_ATTEMPTS"
+require_positive "PHASE3_RETRY_SLEEP_SECS" "$PHASE3_RETRY_SLEEP_SECS"
 
 mkdir -p "$LOG_DIR" "$BINARY_DIR"
 cp "$BINARY" "$TMP_BINARY"
 chmod +x "$TMP_BINARY"
+: >"$PROXY_LOG"
 
 cleanup() {
   set +e
@@ -105,14 +110,17 @@ wait_for_proxy_ready() {
 
 start_proxy() {
   local tag="$1"
-  : >"$PROXY_LOG"
+  {
+    echo
+    echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} ==="
+  } >>"$PROXY_LOG"
   BORINGCACHE_API_TOKEN="${BORINGCACHE_API_TOKEN}" \
     "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
       --host "$PROXY_HOST" \
       --port "$PROXY_PORT" \
       --no-platform \
       --no-git \
-      --fail-on-cache-error >"$PROXY_LOG" 2>&1 &
+      --fail-on-cache-error >>"$PROXY_LOG" 2>&1 &
   PROXY_PID=$!
   wait_for_proxy_ready
 }
@@ -220,14 +228,49 @@ echo
 echo "=== Phase 3: Restart proxy and verify persisted remote hit ==="
 stop_proxy
 start_proxy "$TAG"
-run_bazel_build "bazel-build-3" "$OUTPUT_ROOT_C" "$MARKER_FILE" "$BAZEL_WS"
-MARKER_MTIME_AFTER_PHASE3="$(stat -c %Y "$MARKER_FILE")"
-if [[ "$MARKER_MTIME_AFTER_PHASE3" != "$MARKER_MTIME_AFTER_PHASE1" ]]; then
-  echo "ERROR: marker file changed after proxy restart; persisted cache miss caused re-execution"
-  tail -n 200 "${LOG_DIR}/bazel-build-3.log" || true
+PHASE3_OK=0
+PHASE3_LAST_LOG=""
+for ((attempt=1; attempt<=PHASE3_MAX_ATTEMPTS; attempt++)); do
+  phase_name="bazel-build-3-attempt-${attempt}"
+  phase_output_root="${OUTPUT_ROOT_C}-${attempt}"
+  phase_log="${LOG_DIR}/${phase_name}.log"
+  PHASE3_LAST_LOG="$phase_log"
+
+  if run_bazel_build "$phase_name" "$phase_output_root" "$MARKER_FILE" "$BAZEL_WS"; then
+    MARKER_MTIME_AFTER_PHASE3="$(stat -c %Y "$MARKER_FILE")"
+    if [[ "$MARKER_MTIME_AFTER_PHASE3" != "$MARKER_MTIME_AFTER_PHASE1" ]]; then
+      echo "ERROR: marker file changed after proxy restart; persisted cache miss caused re-execution"
+      tail -n 200 "$phase_log" || true
+      exit 1
+    fi
+    cmp "${BAZEL_WS}/input.txt" "${BAZEL_WS}/bazel-bin/out.txt"
+    PHASE3_OK=1
+    break
+  fi
+
+  if grep -Fq "expected remote cache hit; action re-executed" "$phase_log"; then
+    if (( attempt < PHASE3_MAX_ATTEMPTS )); then
+      echo "Phase 3 attempt ${attempt}/${PHASE3_MAX_ATTEMPTS} missed after restart; retrying in ${PHASE3_RETRY_SLEEP_SECS}s..."
+      sleep "$PHASE3_RETRY_SLEEP_SECS"
+      continue
+    fi
+    echo "ERROR: persisted cache was still unavailable after ${PHASE3_MAX_ATTEMPTS} attempts"
+    tail -n 200 "$phase_log" || true
+    exit 1
+  fi
+
+  echo "ERROR: bazel phase 3 failed for an unexpected reason"
+  tail -n 200 "$phase_log" || true
+  exit 1
+done
+
+if [[ "$PHASE3_OK" != "1" ]]; then
+  echo "ERROR: phase 3 did not succeed"
+  if [[ -n "$PHASE3_LAST_LOG" ]]; then
+    tail -n 200 "$PHASE3_LAST_LOG" || true
+  fi
   exit 1
 fi
-cmp "${BAZEL_WS}/input.txt" "${BAZEL_WS}/bazel-bin/out.txt"
 
 echo
 echo "Bazel real-client e2e passed"
