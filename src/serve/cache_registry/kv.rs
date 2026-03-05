@@ -2076,13 +2076,38 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
             );
         }
         Err(e) => {
-            log::warn!("KV index preload failed: {e:?}");
+            let error_text = format!("{e:?}");
+            if error_text.contains("Invalid file CAS pointer") {
+                // Treat invalid legacy/corrupt preload pointers as a cache miss so the proxy can continue.
+                {
+                    let mut published = state.kv_published_index.write().await;
+                    published.set_empty_incomplete();
+                }
+                log::warn!(
+                    "KV index preload: invalid file pointer, degraded to empty index ({error_text})"
+                );
+                emit_serve_phase_metric(
+                    SERVE_PRELOAD_INDEX_OPERATION,
+                    SERVE_PRELOAD_INDEX_PATH,
+                    206,
+                    started_at.elapsed().as_millis() as u64,
+                    Some(0),
+                );
+                emit_serve_event(
+                    SERVE_PRELOAD_INDEX_OPERATION,
+                    SERVE_PRELOAD_INDEX_PATH,
+                    "degraded: invalid file pointer treated as empty index".to_string(),
+                );
+                return;
+            }
+
+            log::warn!("KV index preload failed: {error_text}");
             request_metrics::emit(request_metrics::RequestMetric::failure(
                 SERVE_METRIC_SOURCE,
                 SERVE_PRELOAD_INDEX_OPERATION,
                 "PHASE",
                 SERVE_PRELOAD_INDEX_PATH.to_string(),
-                format!("{e:?}"),
+                error_text,
                 started_at.elapsed().as_millis() as u64,
                 None,
             ));

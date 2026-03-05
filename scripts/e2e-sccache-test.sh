@@ -459,7 +459,6 @@ start_proxy() {
   stop_proxy
   reclaim_stale_proxy_port "$log_file"
   metrics_file="$(proxy_request_metrics_path "$log_file")"
-  rm -f "$metrics_file"
   {
     echo ""
     echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} metrics=${metrics_file} ==="
@@ -893,6 +892,7 @@ phase_efficacy() {
   phase_dir="${LOG_DIR}/efficacy"
   proxy_log="${phase_dir}/proxy.log"
   mkdir -p "$phase_dir"
+  rm -f "$(proxy_request_metrics_path "$proxy_log")"
 
   echo ""
   echo "=== Phase 1: Key-stable efficacy ==="
@@ -972,6 +972,7 @@ phase_stress() {
   phase_dir="${LOG_DIR}/stress"
   proxy_log="${phase_dir}/proxy.log"
   mkdir -p "$phase_dir"
+  rm -f "$(proxy_request_metrics_path "$proxy_log")"
 
   echo ""
   echo "=== Phase 2: Parallel contention stress ==="
