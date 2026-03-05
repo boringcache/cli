@@ -19,6 +19,7 @@ permissions:
 env:
   RUST_VERSION: "1.89"
   SCCACHE_VERSION: "v0.13.0"
+  BAZELISK_VERSION: "v1.20.0"
 
 jobs:
   build-cli-binary:
@@ -315,6 +316,9 @@ jobs:
             needs_sccache: "false"
           - leg: cli-core
             needs_sccache: "false"
+          - leg: bazel-real
+            needs_sccache: "false"
+            needs_bazel: "true"
           - leg: dual-proxy
             needs_sccache: "true"
           - leg: docker-buildkit
@@ -375,6 +379,20 @@ jobs:
           sudo chmod +x /usr/local/bin/sccache
           sccache --version
 
+      - name: Ensure bazel present
+        if: steps.gate.outputs.run == 'true' && matrix.needs_bazel == 'true'
+        run: |
+          set -euo pipefail
+          if command -v bazel >/dev/null 2>&1; then
+            bazel --version
+            exit 0
+          fi
+          url="https://github.com/bazelbuild/bazelisk/releases/download/${BAZELISK_VERSION}/bazelisk-linux-amd64"
+          curl -fsSL "$url" -o /tmp/bazelisk
+          sudo mv /tmp/bazelisk /usr/local/bin/bazel
+          sudo chmod +x /usr/local/bin/bazel
+          bazel --version
+
       - name: Download prebuilt CLI binary
         if: steps.gate.outputs.run == 'true'
         uses: actions/download-artifact@v4
@@ -409,6 +427,12 @@ jobs:
               BORINGCACHE_API_URL="https://api.boringcache.com" \
               LOG_DIR="$LOG_DIR" \
               ./scripts/e2e-cli-core-test.sh | tee "$LOG_DIR/run.log"
+              ;;
+            bazel-real)
+              BINARY="$BIN_PATH" \
+              LOG_DIR="$LOG_DIR" \
+              TAG="$TAG" \
+              ./scripts/e2e-bazel-real-test.sh | tee "$LOG_DIR/run.log"
               ;;
             dual-proxy)
               BINARY="$BIN_PATH" \
