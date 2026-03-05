@@ -23,7 +23,7 @@ use crate::error::BoringCacheError;
 use crate::manifest::EntryType;
 use crate::progress::TransferProgress;
 use crate::serve::state::{
-    diagnostics_enabled, env_bool, AppState, BlobReadHandle, KvFlushingSnapshot, KvReplicationWork,
+    diagnostics_enabled, AppState, BlobReadHandle, KvFlushingSnapshot, KvReplicationWork,
     KV_BACKLOG_POLICY,
 };
 
@@ -63,7 +63,7 @@ static KV_BLOB_DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn kv_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_bool("BORINGCACHE_KV_TRACE").unwrap_or_else(diagnostics_enabled))
+    *ENABLED.get_or_init(diagnostics_enabled)
 }
 
 fn kv_trace(namespace: KvNamespace, scoped_key: &str, stage: &str) {

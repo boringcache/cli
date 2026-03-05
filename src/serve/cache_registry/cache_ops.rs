@@ -835,11 +835,20 @@ impl Aggregator {
 }
 
 fn cache_ops_queue_capacity() -> usize {
-    std::env::var("BORINGCACHE_CACHE_OPS_QUEUE_CAPACITY")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(|value| value.clamp(MIN_CACHE_OPS_QUEUE_CAPACITY, MAX_CACHE_OPS_QUEUE_CAPACITY))
-        .unwrap_or(DEFAULT_CACHE_OPS_QUEUE_CAPACITY)
+    let resources = crate::platform::resources::SystemResources::detect();
+    let memory_target = match resources.memory_strategy {
+        crate::platform::resources::MemoryStrategy::Balanced => DEFAULT_CACHE_OPS_QUEUE_CAPACITY,
+        crate::platform::resources::MemoryStrategy::Aggressive => {
+            DEFAULT_CACHE_OPS_QUEUE_CAPACITY.saturating_mul(2)
+        }
+        crate::platform::resources::MemoryStrategy::UltraAggressive => {
+            DEFAULT_CACHE_OPS_QUEUE_CAPACITY.saturating_mul(4)
+        }
+    };
+    let cpu_target = resources.cpu_cores.saturating_mul(8_192);
+    memory_target
+        .max(cpu_target)
+        .clamp(MIN_CACHE_OPS_QUEUE_CAPACITY, MAX_CACHE_OPS_QUEUE_CAPACITY)
 }
 
 fn should_track_sccache_miss_key(raw_key: &str) -> bool {

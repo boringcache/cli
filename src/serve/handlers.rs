@@ -16,8 +16,8 @@ use crate::cas_transport::upload_payload;
 use crate::multipart_upload::upload_via_single_url;
 use crate::serve::error::OciError;
 use crate::serve::state::{
-    diagnostics_enabled, digest_tag, env_bool, ref_tag_for_input, AppState, BlobLocatorEntry,
-    BlobReadHandle, OciManifestCacheEntry, UploadSession, OCI_MANIFEST_CACHE_TTL,
+    diagnostics_enabled, digest_tag, ref_tag_for_input, AppState, BlobLocatorEntry, BlobReadHandle,
+    OciManifestCacheEntry, UploadSession, OCI_MANIFEST_CACHE_TTL,
 };
 use crate::tag_utils::TagResolver;
 
@@ -34,8 +34,7 @@ const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn oci_request_log_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| env_bool("BORINGCACHE_OCI_REQUEST_LOG").unwrap_or_else(diagnostics_enabled))
+    *ENABLED.get_or_init(diagnostics_enabled)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

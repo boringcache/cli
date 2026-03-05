@@ -35,7 +35,6 @@ async fn setup(
         std::env::set_var("BORINGCACHE_API_URL", server.url());
         std::env::set_var("BORINGCACHE_AUTH_TOKEN", "test-token");
         std::env::set_var("BORINGCACHE_TEST_MODE", "1");
-        std::env::remove_var("BORINGCACHE_KV_MANIFEST_WARM");
     }
 
     let api_client =
@@ -124,19 +123,16 @@ fn make_file_pointer(blob_digest: &str, size_bytes: u64) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn test_startup_manifest_warm_can_be_disabled() {
+async fn test_startup_manifest_warm_runs_by_default() {
     let mut server = Server::new_async().await;
     let (_state, _home, _guard) = setup(&server).await;
-    unsafe {
-        std::env::set_var("BORINGCACHE_KV_MANIFEST_WARM", "0");
-    }
 
     let restore_mock = server
         .mock(
             "GET",
             Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
-        .expect(0)
+        .expect_at_least(1)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body("[]")

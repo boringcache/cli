@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::api::client::ApiClient;
 use crate::serve::state::{
-    diagnostics_enabled, env_bool, unix_time_ms_now, AppState, BlobLocatorCache, BlobReadCache,
+    diagnostics_enabled, unix_time_ms_now, AppState, BlobLocatorCache, BlobReadCache,
     KvPendingStore, KvPublishedIndex, KvReplicationWork, UploadSessionStore,
     DEFAULT_BLOB_READ_CACHE_MAX_BYTES, KV_BACKLOG_POLICY, KV_REPLICATION_WORK_QUEUE_CAPACITY,
 };
@@ -199,7 +199,6 @@ async fn build_server_runtime(
     fail_on_cache_error: bool,
 ) -> Result<(AppState, TcpListener, mpsc::Receiver<KvReplicationWork>)> {
     let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
-    let (kv_warm_enabled, kv_warm_from_env) = kv_manifest_warm_enabled();
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
     let (pf_concurrency, pf_from_env) = blob_prefetch_concurrency(dl_concurrency);
     let (kv_replication_work_tx, kv_replication_work_rx) =
@@ -213,7 +212,7 @@ async fn build_server_runtime(
         configured_human_tags,
         registry_root_tag,
         fail_on_cache_error,
-        kv_manifest_warm_enabled: kv_warm_enabled,
+        kv_manifest_warm_enabled: true,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -291,13 +290,12 @@ async fn build_server_runtime(
     );
     eprintln!("  Replication queue: {KV_REPLICATION_WORK_QUEUE_CAPACITY} (bounded)");
     eprintln!(
-        "  Manifest warm: {} ({})",
+        "  Manifest warm: {} (auto)",
         if state.kv_manifest_warm_enabled {
             "enabled"
         } else {
             "disabled"
-        },
-        src(kv_warm_from_env)
+        }
     );
     eprintln!("  KV backlog policy: {KV_BACKLOG_POLICY}");
     for dir_name in ["boringcache-kv-blobs", "boringcache-uploads"] {
@@ -667,23 +665,21 @@ async fn flush_cache_ops(state: &AppState) {
 }
 
 fn blob_read_cache_max_bytes() -> u64 {
-    std::env::var("BORINGCACHE_BLOB_READ_CACHE_MAX_BYTES")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_BLOB_READ_CACHE_MAX_BYTES)
-}
-
-fn kv_manifest_warm_enabled() -> (bool, bool) {
-    if let Some(enabled) = env_bool("BORINGCACHE_KV_MANIFEST_WARM") {
-        return (enabled, true);
-    }
-
-    (true, false)
+    let resources = crate::platform::resources::SystemResources::detect();
+    let auto_max = match resources.memory_strategy {
+        crate::platform::resources::MemoryStrategy::Balanced => 1024_u64 * 1024 * 1024,
+        crate::platform::resources::MemoryStrategy::Aggressive => DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
+        crate::platform::resources::MemoryStrategy::UltraAggressive => {
+            DEFAULT_BLOB_READ_CACHE_MAX_BYTES.saturating_mul(2)
+        }
+    };
+    auto_max.max(512_u64 * 1024 * 1024)
 }
 
 fn auto_transfer_concurrency() -> usize {
-    num_cpus::get().max(1).saturating_mul(2).clamp(16, 64)
+    let resources = crate::platform::resources::SystemResources::detect();
+    let is_ci = std::env::var("CI").is_ok();
+    resources.recommended_download_concurrency(is_ci)
 }
 
 fn blob_download_concurrency() -> (usize, bool) {

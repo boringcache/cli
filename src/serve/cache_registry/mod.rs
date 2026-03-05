@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
 
-use crate::serve::state::{diagnostics_enabled, env_bool, AppState};
+use crate::serve::state::{diagnostics_enabled, AppState};
 
 static INFLIGHT_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_REQUESTS: AtomicU64 = AtomicU64::new(0);
@@ -42,14 +42,12 @@ fn unix_time_ms_now() -> u64 {
 
 fn sccache_request_log_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        env_bool("BORINGCACHE_SCCACHE_REQUEST_LOG").unwrap_or_else(diagnostics_enabled)
-    })
+    *ENABLED.get_or_init(diagnostics_enabled)
 }
 
 fn put_probe_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_bool("BORINGCACHE_PUT_PROBE").unwrap_or_else(diagnostics_enabled))
+    *ENABLED.get_or_init(diagnostics_enabled)
 }
 
 pub(crate) struct PutProbeGuard {

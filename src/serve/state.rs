@@ -11,30 +11,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 
-fn parse_env_bool(raw: &str) -> Option<bool> {
-    if raw == "1"
-        || raw.eq_ignore_ascii_case("true")
-        || raw.eq_ignore_ascii_case("yes")
-        || raw.eq_ignore_ascii_case("on")
-    {
-        return Some(true);
-    }
-    if raw == "0"
-        || raw.eq_ignore_ascii_case("false")
-        || raw.eq_ignore_ascii_case("no")
-        || raw.eq_ignore_ascii_case("off")
-    {
-        return Some(false);
-    }
-    None
-}
-
-pub fn env_bool(name: &str) -> Option<bool> {
-    std::env::var(name).ok().as_deref().and_then(parse_env_bool)
-}
-
 pub fn diagnostics_enabled() -> bool {
-    env_bool("BORINGCACHE_DEBUG_DIAGNOSTICS").unwrap_or(false)
+    log::log_enabled!(log::Level::Debug)
 }
 
 #[derive(Clone)]

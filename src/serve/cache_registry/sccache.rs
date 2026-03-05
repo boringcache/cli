@@ -17,17 +17,6 @@ const SCCACHE_TIMEOUT_HIGH_LOAD_ADD_SECS: u64 = 45;
 const SCCACHE_TIMEOUT_BREAKER_CAP_SECS: u64 = 30;
 
 fn sccache_get_head_timeout(state: &AppState, is_head: bool) -> Duration {
-    if let Some(secs) = std::env::var("BORINGCACHE_SCCACHE_GET_HEAD_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-    {
-        return Duration::from_secs(secs.clamp(
-            SCCACHE_GET_HEAD_TIMEOUT_MIN_SECS,
-            SCCACHE_GET_HEAD_TIMEOUT_MAX_SECS,
-        ));
-    }
-
     let mut timeout_secs = if is_head {
         SCCACHE_HEAD_TIMEOUT_BASE_SECS
     } else {

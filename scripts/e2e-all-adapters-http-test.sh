@@ -27,8 +27,6 @@ PROXY_PID=""
 INTERRUPTED="0"
 PORT_TOOL=""
 
-BAZEL_AC_DIGEST="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-BAZEL_CAS_DIGEST="abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 GRADLE_KEY="gradle-key-e2e"
 MAVEN_PATH="/v1.1/com.example/app/abcdef1234567890/buildinfo.xml"
 NX_HASH="nxhash123"
@@ -122,6 +120,15 @@ port_listener_pids() {
     lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
   else
     ss -lntp "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u
+  fi
+}
+
+sha256_file_hex() {
+  local file_path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file_path" | awk '{print $1}'
+  else
+    shasum -a 256 "$file_path" | awk '{print $1}'
   fi
 }
 
@@ -353,12 +360,16 @@ run_round_trip_phase() {
   printf "turbo-%s\n" "$phase" >"$turbo_payload"
   printf "sccache-%s\n" "$phase" >"$sccache_payload"
   printf "go-%s\n" "$phase" >"$go_payload"
+  local bazel_ac_digest
+  local bazel_cas_digest
+  bazel_ac_digest="$(sha256_file_hex "$bazel_ac_payload")"
+  bazel_cas_digest="$(sha256_file_hex "$bazel_cas_payload")"
 
   local auth_header="Authorization: Bearer ${AUTH_BEARER}"
   local json_header="Content-Type: application/json"
   echo "== ${phase}: write =="
-  http_request "PUT" "/ac/${BAZEL_AC_DIGEST}" "200" "$bazel_ac_payload" "${phase_dir}/bazel-ac-put.out"
-  http_request "PUT" "/cas/${BAZEL_CAS_DIGEST}" "200" "$bazel_cas_payload" "${phase_dir}/bazel-cas-put.out"
+  http_request "PUT" "/ac/${bazel_ac_digest}" "200" "$bazel_ac_payload" "${phase_dir}/bazel-ac-put.out"
+  http_request "PUT" "/cas/${bazel_cas_digest}" "200" "$bazel_cas_payload" "${phase_dir}/bazel-cas-put.out"
   http_request "PUT" "/cache/${GRADLE_KEY}" "200" "$gradle_payload" "${phase_dir}/gradle-put.out"
   http_request "PUT" "${MAVEN_PATH}" "200" "$maven_payload" "${phase_dir}/maven-put.out"
   http_request "PUT" "/v1/cache/${NX_HASH}" "200" "$nx_payload" "${phase_dir}/nx-put.out" "$auth_header"
@@ -381,8 +392,8 @@ run_round_trip_phase() {
   assert_not_contains "\"${NX_HASH}\"" "${phase_dir}/nx-query.out" "nx query response"
 
   echo "== ${phase}: read =="
-  http_request "HEAD" "/ac/${BAZEL_AC_DIGEST}" "200" "" "${phase_dir}/bazel-ac-head.out"
-  http_request "HEAD" "/cas/${BAZEL_CAS_DIGEST}" "200" "" "${phase_dir}/bazel-cas-head.out"
+  http_request "HEAD" "/ac/${bazel_ac_digest}" "200" "" "${phase_dir}/bazel-ac-head.out"
+  http_request "HEAD" "/cas/${bazel_cas_digest}" "200" "" "${phase_dir}/bazel-cas-head.out"
   http_request "HEAD" "/cache/${GRADLE_KEY}" "200" "" "${phase_dir}/gradle-head.out"
   http_request "HEAD" "${MAVEN_PATH}" "200" "" "${phase_dir}/maven-head.out"
   http_request "HEAD" "/v1/cache/${NX_HASH}" "200" "" "${phase_dir}/nx-head.out" "$auth_header"
@@ -391,9 +402,9 @@ run_round_trip_phase() {
   http_request "HEAD" "/a/b/c/${SCCACHE_KEY}" "200" "" "${phase_dir}/sccache-head.out"
   http_request "HEAD" "/gocache/${GO_ACTION}" "200" "" "${phase_dir}/go-head.out"
 
-  http_request "GET" "/ac/${BAZEL_AC_DIGEST}" "200" "" "${phase_dir}/bazel-ac-get.bin"
+  http_request "GET" "/ac/${bazel_ac_digest}" "200" "" "${phase_dir}/bazel-ac-get.bin"
   assert_file_equals "$bazel_ac_payload" "${phase_dir}/bazel-ac-get.bin" "bazel-ac"
-  http_request "GET" "/cas/${BAZEL_CAS_DIGEST}" "200" "" "${phase_dir}/bazel-cas-get.bin"
+  http_request "GET" "/cas/${bazel_cas_digest}" "200" "" "${phase_dir}/bazel-cas-get.bin"
   assert_file_equals "$bazel_cas_payload" "${phase_dir}/bazel-cas-get.bin" "bazel-cas"
   http_request "GET" "/cache/${GRADLE_KEY}" "200" "" "${phase_dir}/gradle-get.bin"
   assert_file_equals "$gradle_payload" "${phase_dir}/gradle-get.bin" "gradle"
@@ -417,13 +428,17 @@ verify_restart_read_phase() {
   mkdir -p "$phase_dir"
   local auth_header="Authorization: Bearer ${AUTH_BEARER}"
   local json_header="Content-Type: application/json"
+  local bazel_ac_digest
+  local bazel_cas_digest
+  bazel_ac_digest="$(sha256_file_hex "${source_dir}/bazel-ac.payload")"
+  bazel_cas_digest="$(sha256_file_hex "${source_dir}/bazel-cas.payload")"
 
   echo "== phase2: read after restart =="
   http_request "GET" "/v8/artifacts/status" "200" "" "${phase_dir}/turbo-status.out" "$auth_header"
   assert_contains '"status":"enabled"' "${phase_dir}/turbo-status.out" "turborepo status"
 
-  http_request "HEAD" "/ac/${BAZEL_AC_DIGEST}" "200" "" "${phase_dir}/bazel-ac-head.out"
-  http_request "HEAD" "/cas/${BAZEL_CAS_DIGEST}" "200" "" "${phase_dir}/bazel-cas-head.out"
+  http_request "HEAD" "/ac/${bazel_ac_digest}" "200" "" "${phase_dir}/bazel-ac-head.out"
+  http_request "HEAD" "/cas/${bazel_cas_digest}" "200" "" "${phase_dir}/bazel-cas-head.out"
   http_request "HEAD" "/cache/${GRADLE_KEY}" "200" "" "${phase_dir}/gradle-head.out"
   http_request "HEAD" "${MAVEN_PATH}" "200" "" "${phase_dir}/maven-head.out"
   http_request "HEAD" "/v1/cache/${NX_HASH}" "200" "" "${phase_dir}/nx-head.out" "$auth_header"
@@ -432,9 +447,9 @@ verify_restart_read_phase() {
   http_request "HEAD" "/a/b/c/${SCCACHE_KEY}" "200" "" "${phase_dir}/sccache-head.out"
   http_request "HEAD" "/gocache/${GO_ACTION}" "200" "" "${phase_dir}/go-head.out"
 
-  http_request "GET" "/ac/${BAZEL_AC_DIGEST}" "200" "" "${phase_dir}/bazel-ac-get.bin"
+  http_request "GET" "/ac/${bazel_ac_digest}" "200" "" "${phase_dir}/bazel-ac-get.bin"
   assert_file_equals "${source_dir}/bazel-ac.payload" "${phase_dir}/bazel-ac-get.bin" "bazel-ac after restart"
-  http_request "GET" "/cas/${BAZEL_CAS_DIGEST}" "200" "" "${phase_dir}/bazel-cas-get.bin"
+  http_request "GET" "/cas/${bazel_cas_digest}" "200" "" "${phase_dir}/bazel-cas-get.bin"
   assert_file_equals "${source_dir}/bazel-cas.payload" "${phase_dir}/bazel-cas-get.bin" "bazel-cas after restart"
   http_request "GET" "/cache/${GRADLE_KEY}" "200" "" "${phase_dir}/gradle-get.bin"
   assert_file_equals "${source_dir}/gradle.payload" "${phase_dir}/gradle-get.bin" "gradle after restart"
