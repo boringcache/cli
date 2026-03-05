@@ -220,6 +220,14 @@ jobs:
           stress_sccache_unexpected_shutdowns="0"
           stress_proxy_429="0"
           stress_proxy_conflicts="0"
+          request_metrics_total="0"
+          request_metrics_failures="0"
+          request_metrics_retry_events="0"
+          request_metrics_check_p95_ms="0"
+          request_metrics_download_p95_ms="0"
+          request_metrics_save_p95_ms="0"
+          request_metrics_publish_p95_ms="0"
+          request_metrics_prefetch_cycles="0"
 
           if [[ "$phase" == "efficacy" ]]; then
             if [[ -f "${log_dir}/efficacy/cold.log.seconds" ]]; then
@@ -269,6 +277,12 @@ jobs:
             fi
           fi
 
+          request_metrics_file="${log_dir}/${phase}/request-metrics.jsonl"
+          if [[ -f "$request_metrics_file" ]]; then
+            python3 scripts/request-metrics-summary.py "$request_metrics_file" > "${log_dir}/request-metrics-summary.env"
+            source "${log_dir}/request-metrics-summary.env"
+          fi
+
           warm_rust_hit_rate="${warm_rust_hit_rate:-0}"
           warm_avg_read_hit="${warm_avg_read_hit:-0}"
           parallel_rust_hit_rate="${parallel_rust_hit_rate:-0}"
@@ -293,6 +307,14 @@ jobs:
             echo "stress_sccache_unexpected_shutdowns=${stress_sccache_unexpected_shutdowns}"
             echo "stress_proxy_429=${stress_proxy_429}"
             echo "stress_proxy_tag_conflicts=${stress_proxy_conflicts}"
+            echo "request_metrics_total=${request_metrics_total}"
+            echo "request_metrics_failures=${request_metrics_failures}"
+            echo "request_metrics_retry_events=${request_metrics_retry_events}"
+            echo "request_metrics_check_p95_ms=${request_metrics_check_p95_ms}"
+            echo "request_metrics_download_p95_ms=${request_metrics_download_p95_ms}"
+            echo "request_metrics_save_p95_ms=${request_metrics_save_p95_ms}"
+            echo "request_metrics_publish_p95_ms=${request_metrics_publish_p95_ms}"
+            echo "request_metrics_prefetch_cycles=${request_metrics_prefetch_cycles}"
           } > "${log_dir}/metrics.env"
 
       - name: Upload benchmark artifacts

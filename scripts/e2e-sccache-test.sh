@@ -218,7 +218,7 @@ register_sccache_instance() {
   local dir="$2"
   local entry="${port}|${dir}"
   local existing
-  for existing in "${SCCACHE_INSTANCES[@]}"; do
+  for existing in "${SCCACHE_INSTANCES[@]-}"; do
     if [[ "$existing" == "$entry" ]]; then
       return 0
     fi
@@ -228,7 +228,7 @@ register_sccache_instance() {
 
 stop_registered_sccache_servers() {
   local entry port dir
-  for entry in "${SCCACHE_INSTANCES[@]}"; do
+  for entry in "${SCCACHE_INSTANCES[@]-}"; do
     port="${entry%%|*}"
     dir="${entry#*|}"
     SCCACHE_SERVER_PORT="$port" \
@@ -241,7 +241,7 @@ remove_active_build_pid() {
   local target_pid="$1"
   local remaining=()
   local pid
-  for pid in "${ACTIVE_BUILD_PIDS[@]}"; do
+  for pid in "${ACTIVE_BUILD_PIDS[@]-}"; do
     if [[ "$pid" != "$target_pid" ]]; then
       remaining+=("$pid")
     fi
@@ -320,7 +320,7 @@ handle_interrupt() {
 cleanup() {
   stop_background_jobs
   local pid
-  for pid in "${ACTIVE_BUILD_PIDS[@]}"; do
+  for pid in "${ACTIVE_BUILD_PIDS[@]-}"; do
     stop_pid_tree "$pid" "build" "$BUILD_CLEANUP_WAIT_SECS"
   done
   ACTIVE_BUILD_PIDS=()
@@ -445,16 +445,28 @@ sccache_error_log_path() {
   echo "${LOG_DIR}/sccache-${sccache_port}.log"
 }
 
+proxy_request_metrics_path() {
+  local log_file="$1"
+  local phase_dir
+  phase_dir="$(dirname "$log_file")"
+  echo "${phase_dir}/request-metrics.jsonl"
+}
+
 start_proxy() {
   local tag="$1"
   local log_file="$2"
+  local metrics_file
   stop_proxy
   reclaim_stale_proxy_port "$log_file"
+  metrics_file="$(proxy_request_metrics_path "$log_file")"
+  rm -f "$metrics_file"
   {
     echo ""
-    echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} ==="
+    echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} metrics=${metrics_file} ==="
   } >>"$log_file"
   BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
+    BORINGCACHE_METRICS_FORMAT="${BORINGCACHE_METRICS_FORMAT:-json}" \
+    BORINGCACHE_REQUEST_METRICS_PATH="$metrics_file" \
     RUST_LOG="$RUST_LOG_LEVEL" \
     "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
     --host "$PROXY_HOST" \
@@ -749,6 +761,22 @@ count_pattern() {
   echo "${count:-0}"
 }
 
+print_request_metrics_summary() {
+  local phase_dir="$1"
+  local label="$2"
+  local metrics_file total failures retries
+  metrics_file="${phase_dir}/request-metrics.jsonl"
+  if [[ ! -f "$metrics_file" ]]; then
+    echo "${label} request metrics: not captured"
+    return
+  fi
+
+  total="$(wc -l < "$metrics_file" 2>/dev/null || echo 0)"
+  failures="$(count_pattern "$metrics_file" '"error":')"
+  retries="$(count_pattern "$metrics_file" '"retry_count":[1-9]')"
+  echo "${label} request metrics: events=${total}, failures=${failures}, retry_events=${retries}, file=${metrics_file}"
+}
+
 format_delta() {
   local base="$1"
   local current="$2"
@@ -907,6 +935,7 @@ phase_efficacy() {
   print_stats_summary "Efficacy warm stats" "${phase_dir}/warm-sccache-stats.txt"
   if [[ "$USE_PROXY" == "1" ]]; then
     stop_proxy
+    print_request_metrics_summary "$phase_dir" "Efficacy"
   fi
 
   EFFICACY_COLD_SECONDS="$(cat "${phase_dir}/cold.log.seconds")"
@@ -1105,6 +1134,7 @@ EOF
   print_stats_summary "Stress parallel stats" "${phase_dir}/parallel-sccache-stats.txt"
   if [[ "$USE_PROXY" == "1" ]]; then
     stop_proxy
+    print_request_metrics_summary "$phase_dir" "Stress"
   fi
 
   prewarm_avg="$((prewarm_sum / PARALLEL_JOBS))"
