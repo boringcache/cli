@@ -217,11 +217,17 @@ impl SessionState {
         }
     }
 
-    fn record_event(&mut self, op: Op, result: OpResult, bytes: u64) {
+    fn record_event(&mut self, op: Op, result: OpResult, degraded: bool, bytes: u64) {
         match result {
             OpResult::Hit => self.hit_count = self.hit_count.saturating_add(1),
             OpResult::Miss => self.miss_count = self.miss_count.saturating_add(1),
-            OpResult::Error => self.error_count = self.error_count.saturating_add(1),
+            OpResult::Error => {
+                if degraded && op == Op::Get {
+                    self.miss_count = self.miss_count.saturating_add(1);
+                } else {
+                    self.error_count = self.error_count.saturating_add(1);
+                }
+            }
         }
 
         if result == OpResult::Hit {
@@ -467,7 +473,7 @@ impl Aggregator {
         let session_id = Self::ensure_active_session(state, event.tool, event.event_epoch_secs);
         if let Some(session) = state.active_sessions.get_mut(&event.tool) {
             session.last_event_secs = event.event_epoch_secs;
-            session.record_event(event.op, event.result, event.bytes);
+            session.record_event(event.op, event.result, event.degraded, event.bytes);
         }
 
         let key = BucketKey {
@@ -1249,5 +1255,55 @@ mod tests {
         assert_eq!(session.session_duration_ms, 11_000);
         assert_eq!(session.top_missed_keys.len(), 2);
         assert_eq!(session.top_missed_keys[0].miss_count, 2);
+    }
+
+    #[test]
+    fn degraded_get_error_counts_as_miss_not_error_in_session() {
+        let mut state = AggregateState::default();
+        Aggregator::apply_session_connect_event(&mut state, 100, Tool::Sccache);
+        Aggregator::apply_record_event(
+            &mut state,
+            RecordEvent {
+                event_epoch_secs: 101,
+                tool: Tool::Sccache,
+                op: Op::Get,
+                result: OpResult::Error,
+                degraded: true,
+                bytes: 0,
+                latency_ms: 20,
+            },
+        );
+        Aggregator::close_idle_sessions(&mut state, 112);
+
+        assert_eq!(state.completed_sessions.len(), 1);
+        let session = &state.completed_sessions[0];
+        assert_eq!(session.hit_count, 0);
+        assert_eq!(session.miss_count, 1);
+        assert_eq!(session.error_count, 0);
+    }
+
+    #[test]
+    fn degraded_put_error_still_counts_as_error_in_session() {
+        let mut state = AggregateState::default();
+        Aggregator::apply_session_connect_event(&mut state, 100, Tool::Sccache);
+        Aggregator::apply_record_event(
+            &mut state,
+            RecordEvent {
+                event_epoch_secs: 101,
+                tool: Tool::Sccache,
+                op: Op::Put,
+                result: OpResult::Error,
+                degraded: true,
+                bytes: 0,
+                latency_ms: 20,
+            },
+        );
+        Aggregator::close_idle_sessions(&mut state, 112);
+
+        assert_eq!(state.completed_sessions.len(), 1);
+        let session = &state.completed_sessions[0];
+        assert_eq!(session.hit_count, 0);
+        assert_eq!(session.miss_count, 0);
+        assert_eq!(session.error_count, 1);
     }
 }

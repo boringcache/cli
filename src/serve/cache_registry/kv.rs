@@ -890,12 +890,13 @@ pub(crate) async fn get_or_head_kv_object(
             );
             state.cache_ops.record_miss(tool, key);
         }
-        Err(_) => {
+        Err(error) => {
+            let degraded = !state.fail_on_cache_error && error.status.is_server_error();
             state.cache_ops.record(
                 tool,
                 super::cache_ops::Op::Get,
                 super::cache_ops::OpResult::Error,
-                false,
+                degraded,
                 0,
                 elapsed_ms,
             );
