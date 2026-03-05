@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::kv::KvNamespace;
+use crate::observability;
 
 const BUCKET_SECONDS: u64 = 10;
 const SESSION_IDLE_SECS: u64 = 10;
@@ -16,6 +17,12 @@ const DEFAULT_CACHE_OPS_QUEUE_CAPACITY: usize = 32_768;
 const MIN_CACHE_OPS_QUEUE_CAPACITY: usize = 1_024;
 const MAX_CACHE_OPS_QUEUE_CAPACITY: usize = 262_144;
 const CACHE_OPS_BARRIER_TIMEOUT: Duration = Duration::from_millis(200);
+const CACHE_OPS_OBSERVABILITY_ENV: &str = "BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS";
+const CACHE_OPS_OBSERVABILITY_SOURCE: &str = "serve";
+const CACHE_OPS_OBSERVABILITY_PATH: &str = "/serve/cache_registry/cache-ops";
+const CACHE_OPS_OBSERVABILITY_RECORD_OP: &str = "cache_ops_record";
+const CACHE_OPS_OBSERVABILITY_MISS_OP: &str = "cache_ops_miss";
+const CACHE_OPS_OBSERVABILITY_CONNECT_OP: &str = "cache_ops_session_connect";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Tool {
@@ -669,6 +676,7 @@ impl Aggregator {
         if let Some(event) = self.enqueue_event(event) {
             self.apply_event_direct(event);
         }
+        emit_cache_ops_record(tool, op, result, degraded, bytes, latency_ms);
     }
 
     pub(crate) fn record_session_connect(&self, tool: Tool) {
@@ -679,6 +687,7 @@ impl Aggregator {
         if let Some(event) = self.enqueue_event(event) {
             self.apply_event_direct(event);
         }
+        emit_cache_ops_session_connect(tool);
     }
 
     pub(crate) fn restore(
@@ -758,6 +767,7 @@ impl Aggregator {
         if let Some(event) = self.enqueue_event(event) {
             self.apply_event_direct(event);
         }
+        emit_cache_ops_miss(tool, raw_key);
     }
 
     pub(crate) fn drain(&self) -> (Vec<RollupRecord>, Vec<MissedKeyRecord>, Vec<SessionRecord>) {
@@ -849,6 +859,92 @@ fn cache_ops_queue_capacity() -> usize {
     memory_target
         .max(cpu_target)
         .clamp(MIN_CACHE_OPS_QUEUE_CAPACITY, MAX_CACHE_OPS_QUEUE_CAPACITY)
+}
+
+fn cache_ops_observability_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var(CACHE_OPS_OBSERVABILITY_ENV)
+            .ok()
+            .map(|raw| {
+                let v = raw.trim();
+                v == "1"
+                    || v.eq_ignore_ascii_case("true")
+                    || v.eq_ignore_ascii_case("yes")
+                    || v.eq_ignore_ascii_case("on")
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn emit_cache_ops_record(
+    tool: Tool,
+    op: Op,
+    result: OpResult,
+    degraded: bool,
+    bytes: u64,
+    latency_ms: u64,
+) {
+    if !cache_ops_observability_enabled() {
+        return;
+    }
+
+    let status = match result {
+        OpResult::Hit => 200,
+        OpResult::Miss => 404,
+        OpResult::Error => 500,
+    };
+    observability::emit(
+        observability::ObservabilityEvent::success(
+            CACHE_OPS_OBSERVABILITY_SOURCE,
+            CACHE_OPS_OBSERVABILITY_RECORD_OP,
+            "EVENT",
+            CACHE_OPS_OBSERVABILITY_PATH.to_string(),
+            status,
+            latency_ms,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_details(Some(format!(
+            "tool={} op={} result={} degraded={} bytes={}",
+            tool.as_str(),
+            op.as_str(),
+            result.as_str(),
+            degraded,
+            bytes
+        ))),
+    );
+}
+
+fn emit_cache_ops_miss(tool: Tool, raw_key: &str) {
+    if !cache_ops_observability_enabled() {
+        return;
+    }
+    let key_hash = crate::cas_oci::sha256_hex(raw_key.as_bytes());
+    observability::emit(observability::ObservabilityEvent::event(
+        CACHE_OPS_OBSERVABILITY_SOURCE,
+        CACHE_OPS_OBSERVABILITY_MISS_OP,
+        "EVENT",
+        CACHE_OPS_OBSERVABILITY_PATH.to_string(),
+        format!("tool={} key_hash={key_hash}", tool.as_str()),
+    ));
+}
+
+fn emit_cache_ops_session_connect(tool: Tool) {
+    if !cache_ops_observability_enabled() {
+        return;
+    }
+    observability::emit(observability::ObservabilityEvent::event(
+        CACHE_OPS_OBSERVABILITY_SOURCE,
+        CACHE_OPS_OBSERVABILITY_CONNECT_OP,
+        "EVENT",
+        CACHE_OPS_OBSERVABILITY_PATH.to_string(),
+        format!("tool={}", tool.as_str()),
+    ));
 }
 
 fn should_track_sccache_miss_key(raw_key: &str) -> bool {

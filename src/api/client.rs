@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::error::{BoringCacheError, ConflictMetadata};
-use crate::request_metrics;
+use crate::observability;
 use crate::retry_resume::RetryConfig;
 use crate::types::Result;
 use anyhow::{ensure, Context};
@@ -445,6 +445,28 @@ impl ApiClient {
         format!("/v2/{}", endpoint.trim_start_matches('/'))
     }
 
+    fn metric_workspace_from_endpoint(endpoint: &str) -> Option<String> {
+        let mut parts = endpoint.trim_start_matches('/').split('/');
+        if parts.next()? != "workspaces" {
+            return None;
+        }
+        let namespace = parts.next()?.trim();
+        let workspace = parts.next()?.trim();
+        if namespace.is_empty() || workspace.is_empty() {
+            return None;
+        }
+        Some(format!("{namespace}/{workspace}"))
+    }
+
+    fn response_request_id(response: &Response) -> Option<String> {
+        response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
     async fn post_v2_with_request_metrics<T, R>(
         &self,
         endpoint: &str,
@@ -460,6 +482,7 @@ impl ApiClient {
     {
         let url = self.build_v2_url(endpoint);
         let path = Self::v2_metric_path(endpoint);
+        let workspace = Self::metric_workspace_from_endpoint(endpoint);
         let request_bytes = serde_json::to_vec(body).ok().map(|buf| buf.len() as u64);
         let started_at = Instant::now();
         let (response_result, retry_count) = self
@@ -469,22 +492,26 @@ impl ApiClient {
         match response_result {
             Ok(response) => {
                 let status = response.status();
-                request_metrics::emit(request_metrics::RequestMetric::success(
-                    request_metrics::SuccessMetric {
-                        source: REQUEST_METRIC_SOURCE_CLI,
+                let response_bytes = response.content_length();
+                let request_id = Self::response_request_id(&response);
+                observability::emit(
+                    observability::ObservabilityEvent::success(
+                        REQUEST_METRIC_SOURCE_CLI,
                         operation,
-                        method: "POST",
+                        "POST",
                         path,
-                        status: status.as_u16(),
-                        duration_ms: started_at.elapsed().as_millis() as u64,
+                        status.as_u16(),
+                        started_at.elapsed().as_millis() as u64,
                         request_bytes,
-                        response_bytes: response.content_length(),
+                        response_bytes,
                         batch_index,
                         batch_count,
                         batch_size,
-                        retry_count: Some(retry_count),
-                    },
-                ));
+                        Some(retry_count),
+                    )
+                    .with_workspace(workspace.clone())
+                    .with_request_id(request_id),
+                );
 
                 if status.is_success() {
                     self.parse_json_response(response).await
@@ -493,15 +520,18 @@ impl ApiClient {
                 }
             }
             Err(error) => {
-                request_metrics::emit(request_metrics::RequestMetric::failure(
-                    REQUEST_METRIC_SOURCE_CLI,
-                    operation,
-                    "POST",
-                    path,
-                    error.to_string(),
-                    started_at.elapsed().as_millis() as u64,
-                    Some(retry_count),
-                ));
+                observability::emit(
+                    observability::ObservabilityEvent::failure(
+                        REQUEST_METRIC_SOURCE_CLI,
+                        operation,
+                        "POST",
+                        path,
+                        error.to_string(),
+                        started_at.elapsed().as_millis() as u64,
+                        Some(retry_count),
+                    )
+                    .with_workspace(workspace),
+                );
                 Err(error)
             }
         }
@@ -520,6 +550,7 @@ impl ApiClient {
     {
         let url = self.build_v2_url(endpoint);
         let path = Self::v2_metric_path(endpoint);
+        let workspace = Self::metric_workspace_from_endpoint(endpoint);
         let request_bytes = serde_json::to_vec(body).ok().map(|buf| buf.len() as u64);
         let started_at = Instant::now();
         let mut request = self.client.put(&url).json(body);
@@ -533,22 +564,26 @@ impl ApiClient {
         match response_result {
             Ok(response) => {
                 let status = response.status();
-                request_metrics::emit(request_metrics::RequestMetric::success(
-                    request_metrics::SuccessMetric {
-                        source: REQUEST_METRIC_SOURCE_CLI,
+                let response_bytes = response.content_length();
+                let request_id = Self::response_request_id(&response);
+                observability::emit(
+                    observability::ObservabilityEvent::success(
+                        REQUEST_METRIC_SOURCE_CLI,
                         operation,
-                        method: "PUT",
+                        "PUT",
                         path,
-                        status: status.as_u16(),
-                        duration_ms: started_at.elapsed().as_millis() as u64,
+                        status.as_u16(),
+                        started_at.elapsed().as_millis() as u64,
                         request_bytes,
-                        response_bytes: response.content_length(),
-                        batch_index: None,
-                        batch_count: None,
-                        batch_size: None,
-                        retry_count: Some(retry_count),
-                    },
-                ));
+                        response_bytes,
+                        None,
+                        None,
+                        None,
+                        Some(retry_count),
+                    )
+                    .with_workspace(workspace.clone())
+                    .with_request_id(request_id),
+                );
 
                 if status.is_success() {
                     self.parse_json_response(response).await
@@ -557,15 +592,18 @@ impl ApiClient {
                 }
             }
             Err(error) => {
-                request_metrics::emit(request_metrics::RequestMetric::failure(
-                    REQUEST_METRIC_SOURCE_CLI,
-                    operation,
-                    "PUT",
-                    path,
-                    error.to_string(),
-                    started_at.elapsed().as_millis() as u64,
-                    Some(retry_count),
-                ));
+                observability::emit(
+                    observability::ObservabilityEvent::failure(
+                        REQUEST_METRIC_SOURCE_CLI,
+                        operation,
+                        "PUT",
+                        path,
+                        error.to_string(),
+                        started_at.elapsed().as_millis() as u64,
+                        Some(retry_count),
+                    )
+                    .with_workspace(workspace),
+                );
                 Err(error)
             }
         }

@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::api::client::ApiClient;
+use crate::observability;
 use crate::serve::state::{
     diagnostics_enabled, unix_time_ms_now, AppState, BlobLocatorCache, BlobReadCache,
     KvPendingStore, KvPublishedIndex, KvReplicationWork, UploadSessionStore,
@@ -356,6 +357,8 @@ fn spawn_maintenance_tasks(
                 let (inflight, total) = cache_registry::request_counters();
                 let cache_ops_queue_depth = heartbeat_state.cache_ops.queue_depth();
                 let cache_ops_dropped_total = heartbeat_state.cache_ops.dropped_events_total();
+                let observability_queue_depth = observability::queue_depth();
+                let observability_dropped_total = observability::dropped_events_total();
                 let backlog_rejects = heartbeat_state.kv_backlog_rejects.load(Ordering::Acquire);
                 let replication_deferred = heartbeat_state
                     .kv_replication_enqueue_deferred
@@ -376,7 +379,7 @@ fn spawn_maintenance_tasks(
                     .kv_replication_flush_permanent
                     .load(Ordering::Acquire);
                 eprintln!(
-                    "HEARTBEAT ts={ts} reqs={total} inflight={inflight} pending={} pending_bytes={} pending_oldest_ms={} flush_gate_ms={} backlog_rejects={} repl_q={} repl_q_max={} repl_deferred={} repl_ok={} repl_conflict={} repl_error={} repl_permanent={} published={} flights={} cache_bytes={} breaker={} ops_q={} ops_drop={}",
+                    "HEARTBEAT ts={ts} reqs={total} inflight={inflight} pending={} pending_bytes={} pending_oldest_ms={} flush_gate_ms={} backlog_rejects={} repl_q={} repl_q_max={} repl_deferred={} repl_ok={} repl_conflict={} repl_error={} repl_permanent={} published={} flights={} cache_bytes={} breaker={} ops_q={} ops_drop={} obs_q={} obs_drop={}",
                     pending_count,
                     pending_bytes,
                     pending_oldest_ms,
@@ -395,6 +398,8 @@ fn spawn_maintenance_tasks(
                     if breaker_open { "OPEN" } else { "closed" },
                     cache_ops_queue_depth,
                     cache_ops_dropped_total,
+                    observability_queue_depth,
+                    observability_dropped_total,
                 );
             }
         });

@@ -21,8 +21,8 @@ use crate::api::models::cache::{
 use crate::cas_transport::upload_payload;
 use crate::error::BoringCacheError;
 use crate::manifest::EntryType;
+use crate::observability;
 use crate::progress::TransferProgress;
-use crate::request_metrics;
 use crate::serve::state::{
     diagnostics_enabled, AppState, BlobReadHandle, KvFlushingSnapshot, KvReplicationWork,
     KV_BACKLOG_POLICY,
@@ -84,39 +84,51 @@ fn kv_trace(namespace: KvNamespace, scoped_key: &str, stage: &str) {
     eprintln!("KV TRACE stage={stage} key={truncated}");
 }
 
-fn emit_serve_event(operation: &'static str, path: &'static str, details: String) {
-    request_metrics::emit(request_metrics::RequestMetric::event(
-        SERVE_METRIC_SOURCE,
-        operation,
-        "EVENT",
-        path.to_string(),
-        details,
-    ));
+fn emit_serve_event(
+    workspace: Option<&str>,
+    operation: &'static str,
+    path: &'static str,
+    details: String,
+) {
+    observability::emit(
+        observability::ObservabilityEvent::event(
+            SERVE_METRIC_SOURCE,
+            operation,
+            "EVENT",
+            path.to_string(),
+            details,
+        )
+        .with_workspace(workspace.map(|value| value.to_string())),
+    );
 }
 
 fn emit_serve_phase_metric(
+    workspace: Option<&str>,
+    cache_entry_id: Option<&str>,
     operation: &'static str,
     path: &'static str,
     status: u16,
     duration_ms: u64,
     batch_size: Option<u64>,
 ) {
-    request_metrics::emit(request_metrics::RequestMetric::success(
-        request_metrics::SuccessMetric {
-            source: SERVE_METRIC_SOURCE,
+    observability::emit(
+        observability::ObservabilityEvent::success(
+            SERVE_METRIC_SOURCE,
             operation,
-            method: "PHASE",
-            path: path.to_string(),
+            "PHASE",
+            path.to_string(),
             status,
             duration_ms,
-            request_bytes: None,
-            response_bytes: None,
-            batch_index: None,
-            batch_count: None,
+            None,
+            None,
+            None,
+            None,
             batch_size,
-            retry_count: None,
-        },
-    ));
+            None,
+        )
+        .with_workspace(workspace.map(|value| value.to_string()))
+        .with_cache_entry_id(cache_entry_id.map(|value| value.to_string())),
+    );
 }
 
 fn parse_positive_usize_env(name: &str) -> Option<usize> {
@@ -2011,6 +2023,7 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
 
 pub(crate) async fn preload_kv_index(state: &AppState) {
     emit_serve_event(
+        Some(&state.workspace),
         SERVE_PRELOAD_INDEX_OPERATION,
         SERVE_PRELOAD_INDEX_PATH,
         "start".to_string(),
@@ -2026,6 +2039,8 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
                 if published.entry_count() > 0 {
                     eprintln!("KV index preload: skipped, flush already published");
                     emit_serve_phase_metric(
+                        Some(&state.workspace),
+                        Some(cache_entry_id.as_str()),
                         SERVE_PRELOAD_INDEX_OPERATION,
                         SERVE_PRELOAD_INDEX_PATH,
                         208,
@@ -2033,6 +2048,7 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
                         Some(count as u64),
                     );
                     emit_serve_event(
+                        Some(&state.workspace),
                         SERVE_PRELOAD_INDEX_OPERATION,
                         SERVE_PRELOAD_INDEX_PATH,
                         "skipped: existing in-memory index".to_string(),
@@ -2048,6 +2064,8 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
             clear_root_tag_misses(state);
             eprintln!("KV index preloaded: {count} entries, resolving download URLs...");
             emit_serve_phase_metric(
+                Some(&state.workspace),
+                Some(cache_entry_id.as_str()),
                 SERVE_PRELOAD_INDEX_OPERATION,
                 SERVE_PRELOAD_INDEX_PATH,
                 200,
@@ -2055,6 +2073,7 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
                 Some(count as u64),
             );
             emit_serve_event(
+                Some(&state.workspace),
                 SERVE_PRELOAD_INDEX_OPERATION,
                 SERVE_PRELOAD_INDEX_PATH,
                 format!("loaded entries={count}"),
@@ -2069,6 +2088,8 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
             }
             eprintln!("KV index preload: no existing entries");
             emit_serve_phase_metric(
+                Some(&state.workspace),
+                None,
                 SERVE_PRELOAD_INDEX_OPERATION,
                 SERVE_PRELOAD_INDEX_PATH,
                 204,
@@ -2076,6 +2097,7 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
                 Some(0),
             );
             emit_serve_event(
+                Some(&state.workspace),
                 SERVE_PRELOAD_INDEX_OPERATION,
                 SERVE_PRELOAD_INDEX_PATH,
                 "empty index".to_string(),
@@ -2093,6 +2115,8 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
                     "KV index preload: invalid file pointer, degraded to empty index ({error_text})"
                 );
                 emit_serve_phase_metric(
+                    Some(&state.workspace),
+                    None,
                     SERVE_PRELOAD_INDEX_OPERATION,
                     SERVE_PRELOAD_INDEX_PATH,
                     206,
@@ -2100,6 +2124,7 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
                     Some(0),
                 );
                 emit_serve_event(
+                    Some(&state.workspace),
                     SERVE_PRELOAD_INDEX_OPERATION,
                     SERVE_PRELOAD_INDEX_PATH,
                     "degraded: invalid file pointer treated as empty index".to_string(),
@@ -2108,15 +2133,18 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
             }
 
             log::warn!("KV index preload failed: {error_text}");
-            request_metrics::emit(request_metrics::RequestMetric::failure(
-                SERVE_METRIC_SOURCE,
-                SERVE_PRELOAD_INDEX_OPERATION,
-                "PHASE",
-                SERVE_PRELOAD_INDEX_PATH.to_string(),
-                error_text,
-                started_at.elapsed().as_millis() as u64,
-                None,
-            ));
+            observability::emit(
+                observability::ObservabilityEvent::failure(
+                    SERVE_METRIC_SOURCE,
+                    SERVE_PRELOAD_INDEX_OPERATION,
+                    "PHASE",
+                    SERVE_PRELOAD_INDEX_PATH.to_string(),
+                    error_text,
+                    started_at.elapsed().as_millis() as u64,
+                    None,
+                )
+                .with_workspace(Some(state.workspace.clone())),
+            );
         }
     }
 }
@@ -2349,6 +2377,7 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
 
     let batch_size = blobs.len() as u64;
     emit_serve_event(
+        Some(&state.workspace),
         SERVE_PRELOAD_INDEX_OPERATION,
         SERVE_PRELOAD_INDEX_PATH,
         format!("resolve_download_urls:start batch_size={batch_size}"),
@@ -2371,6 +2400,8 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
             published.set_download_urls(urls);
             eprintln!("KV index preload: resolved {url_count} download URLs");
             emit_serve_phase_metric(
+                Some(&state.workspace),
+                Some(cache_entry_id),
                 SERVE_PRELOAD_INDEX_OPERATION,
                 SERVE_PRELOAD_INDEX_PATH,
                 200,
@@ -2378,6 +2409,7 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
                 Some(batch_size),
             );
             emit_serve_event(
+                Some(&state.workspace),
                 SERVE_PRELOAD_INDEX_OPERATION,
                 SERVE_PRELOAD_INDEX_PATH,
                 format!("resolve_download_urls:done resolved={url_count}"),
@@ -2385,15 +2417,19 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
         }
         Err(e) => {
             log::warn!("KV index preload: failed to resolve download URLs: {e}");
-            request_metrics::emit(request_metrics::RequestMetric::failure(
-                SERVE_METRIC_SOURCE,
-                SERVE_PRELOAD_INDEX_OPERATION,
-                "PHASE",
-                SERVE_PRELOAD_INDEX_PATH.to_string(),
-                e.to_string(),
-                started_at.elapsed().as_millis() as u64,
-                None,
-            ));
+            observability::emit(
+                observability::ObservabilityEvent::failure(
+                    SERVE_METRIC_SOURCE,
+                    SERVE_PRELOAD_INDEX_OPERATION,
+                    "PHASE",
+                    SERVE_PRELOAD_INDEX_PATH.to_string(),
+                    e.to_string(),
+                    started_at.elapsed().as_millis() as u64,
+                    None,
+                )
+                .with_workspace(Some(state.workspace.clone()))
+                .with_cache_entry_id(Some(cache_entry_id.to_string())),
+            );
         }
     }
 }
@@ -2464,6 +2500,7 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         .min(inflight_budget_cap);
     if preload_budget == 0 {
         emit_serve_event(
+            Some(&state.workspace),
             SERVE_PREFETCH_OPERATION,
             SERVE_PREFETCH_PATH,
             "skipped: prefetch budget is zero".to_string(),
@@ -2517,6 +2554,7 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         .map(|(blob, _)| blob.size_bytes)
         .fold(0u64, |acc, size| acc.saturating_add(size));
     emit_serve_event(
+        Some(&state.workspace),
         SERVE_PREFETCH_OPERATION,
         SERVE_PREFETCH_PATH,
         format!(
@@ -2565,6 +2603,8 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         500
     };
     emit_serve_phase_metric(
+        Some(&state.workspace),
+        Some(cache_entry_id),
         SERVE_PREFETCH_OPERATION,
         SERVE_PREFETCH_PATH,
         status,
@@ -2572,6 +2612,7 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         Some(scheduled as u64),
     );
     emit_serve_event(
+        Some(&state.workspace),
         SERVE_PREFETCH_OPERATION,
         SERVE_PREFETCH_PATH,
         format!(
