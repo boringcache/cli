@@ -9,6 +9,9 @@ use std::sync::OnceLock;
 const OBSERVABILITY_JSONL_PATH_ENV: &str = "BORINGCACHE_OBSERVABILITY_JSONL_PATH";
 const OBSERVABILITY_ARCHIVE_DIR_ENV: &str = "BORINGCACHE_OBSERVABILITY_ARCHIVE_DIR";
 const OBSERVABILITY_ARCHIVE_WORKSPACE_ENV: &str = "BORINGCACHE_OBSERVABILITY_ARCHIVE_WORKSPACE";
+const INTERNAL_LOG_DIR_NAME: &str = ".boringcache";
+const INTERNAL_LOG_SUBDIR_NAME: &str = "logs";
+const DEFAULT_OBSERVABILITY_JSONL_FILE: &str = "cache-registry-request-metrics.jsonl";
 
 pub(crate) fn sink_event(event: &ObservabilityEvent) {
     if !metrics_enabled() {
@@ -61,6 +64,10 @@ fn primary_output_path() -> Option<&'static PathBuf> {
             if let Some(trimmed) = trim_optional_env(log_dir) {
                 return Some(PathBuf::from(trimmed).join("cache-registry-request-metrics.jsonl"));
             }
+        }
+
+        if let Some(default_logs_dir) = default_internal_logs_dir() {
+            return Some(default_logs_dir.join(DEFAULT_OBSERVABILITY_JSONL_FILE));
         }
 
         None
@@ -139,4 +146,11 @@ fn sanitize_segment(value: &str) -> String {
             }
         })
         .collect::<String>()
+}
+
+fn default_internal_logs_dir() -> Option<PathBuf> {
+    crate::config::Config::home_dir().ok().map(|home| {
+        home.join(INTERNAL_LOG_DIR_NAME)
+            .join(INTERNAL_LOG_SUBDIR_NAME)
+    })
 }
