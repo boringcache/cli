@@ -1784,12 +1784,28 @@ fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
     let message = format!("{context}: {error}");
     let lower = message.to_ascii_lowercase();
 
-    let is_conflict = error
-        .downcast_ref::<BoringCacheError>()
-        .and_then(BoringCacheError::conflict_message)
-        .is_some()
-        || lower.contains("another cache upload is in progress");
-    let conflict_status = lower.contains("http 409") || lower.contains("http 412");
+    if let Some(bc_error) = error.downcast_ref::<BoringCacheError>() {
+        match bc_error {
+            BoringCacheError::CacheConflict { .. } | BoringCacheError::CachePending => {
+                return FlushError::Conflict(message);
+            }
+            BoringCacheError::NetworkError(_) | BoringCacheError::ConnectionError(_) => {
+                return FlushError::Transient(message);
+            }
+            BoringCacheError::ConfigNotFound
+            | BoringCacheError::TokenNotFound
+            | BoringCacheError::WorkspaceNotFound(_)
+            | BoringCacheError::AuthenticationFailed(_) => {
+                return FlushError::Permanent(message);
+            }
+            _ => {}
+        }
+    }
+
+    let is_conflict = lower.contains("another cache upload is in progress");
+    let conflict_status = has_status_code(&lower, 409)
+        || has_status_code(&lower, 412)
+        || has_status_code(&lower, 423);
     let conflict_hint = lower.contains("precondition failed")
         || lower.contains("etag mismatch")
         || lower.contains("manifest digest mismatch");
@@ -1797,11 +1813,11 @@ fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
         return FlushError::Conflict(message);
     }
 
-    let transient_status = lower.contains("http 429")
-        || lower.contains("http 500")
-        || lower.contains("http 502")
-        || lower.contains("http 503")
-        || lower.contains("http 504");
+    let transient_status = has_status_code(&lower, 429)
+        || has_status_code(&lower, 500)
+        || has_status_code(&lower, 502)
+        || has_status_code(&lower, 503)
+        || has_status_code(&lower, 504);
     let transient_hint = lower.contains("transient error")
         || lower.contains("timeout")
         || lower.contains("timed out")
@@ -1813,48 +1829,38 @@ fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
         || lower.contains("connection refused")
         || lower.contains("broken pipe")
         || lower.contains("connection reset");
-    let transient_kind = error.downcast_ref::<BoringCacheError>().is_some_and(|bc| {
-        matches!(
-            bc,
-            BoringCacheError::NetworkError(_)
-                | BoringCacheError::ConnectionError(_)
-                | BoringCacheError::CachePending
-        )
-    });
-    if transient_status || transient_hint || transient_kind {
+    if transient_status || transient_hint {
         return FlushError::Transient(message);
     }
 
-    let permanent_status = lower.contains("http 400")
-        || lower.contains("http 401")
-        || lower.contains("http 403")
-        || lower.contains("http 404")
-        || lower.contains("http 405")
-        || lower.contains("http 410")
-        || lower.contains("http 411")
-        || lower.contains("http 413")
-        || lower.contains("http 414")
-        || lower.contains("http 415")
-        || lower.contains("http 422");
+    let permanent_status = has_status_code(&lower, 400)
+        || has_status_code(&lower, 401)
+        || has_status_code(&lower, 403)
+        || has_status_code(&lower, 404)
+        || has_status_code(&lower, 405)
+        || has_status_code(&lower, 410)
+        || has_status_code(&lower, 411)
+        || has_status_code(&lower, 413)
+        || has_status_code(&lower, 414)
+        || has_status_code(&lower, 415)
+        || has_status_code(&lower, 422);
     let permanent_hint = lower.contains("authentication failed")
         || lower.contains("invalid or expired token")
         || lower.contains("access forbidden")
         || lower.contains("workspace not found")
         || lower.contains("unprocessable");
-    let permanent_kind = error.downcast_ref::<BoringCacheError>().is_some_and(|bc| {
-        matches!(
-            bc,
-            BoringCacheError::ConfigNotFound
-                | BoringCacheError::TokenNotFound
-                | BoringCacheError::WorkspaceNotFound(_)
-                | BoringCacheError::AuthenticationFailed(_)
-        )
-    });
-    if permanent_status || permanent_hint || permanent_kind {
+    if permanent_status || permanent_hint {
         return FlushError::Permanent(message);
     }
 
     FlushError::Transient(message)
+}
+
+fn has_status_code(lower: &str, code: u16) -> bool {
+    let code = code.to_string();
+    lower.contains(&format!("http {code}"))
+        || lower.contains(&format!("status {code}"))
+        || lower.contains(&format!("({code})"))
 }
 
 async fn set_next_flush_at_with_jitter(state: &AppState, base_ms: u64, jitter_ms: u64) {
@@ -2014,12 +2020,16 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
         }
     };
 
-    {
+    if should_clear_flushing_after_flush(&result) {
         let mut flushing = state.kv_flushing.write().await;
         *flushing = None;
     }
 
     result
+}
+
+fn should_clear_flushing_after_flush(result: &FlushResult) -> bool {
+    !matches!(result, FlushResult::Ok)
 }
 
 pub(crate) async fn preload_kv_index(state: &AppState) {
@@ -3491,6 +3501,20 @@ mod tests {
     }
 
     #[test]
+    fn classify_flush_error_treats_cache_pending_as_conflict() {
+        let error: anyhow::Error = BoringCacheError::CachePending.into();
+        let classified = classify_flush_error(&error, "confirm failed");
+        assert!(matches!(classified, FlushError::Conflict(_)));
+    }
+
+    #[test]
+    fn classify_flush_error_treats_server_error_message_as_transient() {
+        let error = anyhow::anyhow!("Server error (500). Please try again later.");
+        let classified = classify_flush_error(&error, "confirm failed");
+        assert!(matches!(classified, FlushError::Transient(_)));
+    }
+
+    #[test]
     fn conflict_backoff_window_is_longer_for_in_progress_conflicts() {
         let (base, jitter) =
             conflict_backoff_window("save_entry failed: another cache upload is in progress");
@@ -3510,6 +3534,14 @@ mod tests {
         let error = anyhow::anyhow!("HTTP 400 from backend: invalid payload");
         let classified = classify_flush_error(&error, "save failed");
         assert!(matches!(classified, FlushError::Permanent(_)));
+    }
+
+    #[test]
+    fn should_clear_flushing_after_flush_skips_ok_path() {
+        assert!(!should_clear_flushing_after_flush(&FlushResult::Ok));
+        assert!(should_clear_flushing_after_flush(&FlushResult::Conflict));
+        assert!(should_clear_flushing_after_flush(&FlushResult::Error));
+        assert!(should_clear_flushing_after_flush(&FlushResult::Permanent));
     }
 
     #[test]

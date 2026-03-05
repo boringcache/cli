@@ -572,9 +572,10 @@ async fn process_replication_work(state: &AppState, urgent: bool, consecutive_fa
     let Some(_flush_guard) = cache_registry::try_schedule_flush(state) else {
         return;
     };
-    match cache_registry::flush_kv_index(state).await {
+    let flush_result = cache_registry::flush_kv_index(state).await;
+    update_consecutive_failures_on_flush_result(&flush_result, consecutive_failures);
+    match flush_result {
         cache_registry::FlushResult::Ok => {
-            *consecutive_failures = 0;
             let mut gate = state.kv_next_flush_at.write().await;
             *gate = None;
             state.kv_replication_flush_ok.fetch_add(1, Ordering::AcqRel);
@@ -585,18 +586,32 @@ async fn process_replication_work(state: &AppState, urgent: bool, consecutive_fa
                 .fetch_add(1, Ordering::AcqRel);
         }
         cache_registry::FlushResult::Error => {
-            *consecutive_failures = consecutive_failures.saturating_add(1);
             state
                 .kv_replication_flush_error
                 .fetch_add(1, Ordering::AcqRel);
         }
         cache_registry::FlushResult::Permanent => {
-            *consecutive_failures = 0;
             let mut gate = state.kv_next_flush_at.write().await;
             *gate = None;
             state
                 .kv_replication_flush_permanent
                 .fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+
+fn update_consecutive_failures_on_flush_result(
+    result: &cache_registry::FlushResult,
+    consecutive_failures: &mut u32,
+) {
+    match result {
+        cache_registry::FlushResult::Error => {
+            *consecutive_failures = consecutive_failures.saturating_add(1);
+        }
+        cache_registry::FlushResult::Ok
+        | cache_registry::FlushResult::Conflict
+        | cache_registry::FlushResult::Permanent => {
+            *consecutive_failures = 0;
         }
     }
 }
@@ -829,4 +844,46 @@ async fn shutdown_signal_with_channel(mut shutdown_rx: oneshot::Receiver<()>) {
     }
 
     eprintln!("\nShutting down...");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_consecutive_failures_resets_on_conflict() {
+        let mut consecutive_failures = 3;
+        update_consecutive_failures_on_flush_result(
+            &cache_registry::FlushResult::Conflict,
+            &mut consecutive_failures,
+        );
+        assert_eq!(consecutive_failures, 0);
+    }
+
+    #[test]
+    fn update_consecutive_failures_increments_on_error() {
+        let mut consecutive_failures = 2;
+        update_consecutive_failures_on_flush_result(
+            &cache_registry::FlushResult::Error,
+            &mut consecutive_failures,
+        );
+        assert_eq!(consecutive_failures, 3);
+    }
+
+    #[test]
+    fn update_consecutive_failures_resets_on_ok_and_permanent() {
+        let mut consecutive_failures = 2;
+        update_consecutive_failures_on_flush_result(
+            &cache_registry::FlushResult::Ok,
+            &mut consecutive_failures,
+        );
+        assert_eq!(consecutive_failures, 0);
+
+        consecutive_failures = 5;
+        update_consecutive_failures_on_flush_result(
+            &cache_registry::FlushResult::Permanent,
+            &mut consecutive_failures,
+        );
+        assert_eq!(consecutive_failures, 0);
+    }
 }
