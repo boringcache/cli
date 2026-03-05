@@ -299,6 +299,80 @@ async fn test_manifest_hit_returns_decoded_index_json() {
 }
 
 #[tokio::test]
+async fn test_manifest_degrades_to_miss_when_pointer_blobs_missing_in_best_effort() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.fail_on_cache_error = false;
+
+    let index_json = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:aaaa","size":100},"layers":[]}"#;
+    let blob_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let pointer_bytes = make_pointer(index_json, &[(blob_digest, 5000)]);
+    let tag = ref_tag("my-cache", "main");
+
+    let restore_body = json!([{
+        "tag": tag,
+        "status": "hit",
+        "cache_entry_id": "entry-123",
+        "manifest_url": format!("{}/pointers/entry-123", server.url()),
+        "manifest_root_digest": cas_oci::prefixed_sha256_digest(&pointer_bytes),
+        "storage_mode": "cas",
+        "cas_layout": "oci-v1",
+    }]);
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(restore_body.to_string())
+        .create_async()
+        .await;
+
+    let _pointer_mock = server
+        .mock("GET", "/pointers/entry-123")
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let _check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [
+                    {
+                        "digest": blob_digest,
+                        "exists": false
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri("/v2/my-cache/manifests/main")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["errors"][0]["code"], "MANIFEST_UNKNOWN");
+}
+
+#[tokio::test]
 async fn test_manifest_miss_returns_404() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;

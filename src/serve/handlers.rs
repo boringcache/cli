@@ -518,33 +518,61 @@ async fn resolve_manifest(
     let index_json = pointer
         .index_json_bytes()
         .map_err(|e| OciError::internal(format!("Failed to decode index_json: {e}")))?;
+    let blob_descriptors: Vec<BlobDescriptor> = pointer
+        .blobs
+        .iter()
+        .map(|blob| BlobDescriptor {
+            digest: blob.digest.clone(),
+            size_bytes: blob.size_bytes,
+        })
+        .collect();
+
+    if !state.fail_on_cache_error && !blob_descriptors.is_empty() {
+        match missing_oci_blobs(state, &blob_descriptors).await {
+            Ok(missing) if !missing.is_empty() => {
+                let sample = missing
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                log::warn!(
+                    "OCI manifest degraded to miss: cache entry {} has {} missing blobs (sample: {})",
+                    cache_entry_id,
+                    missing.len(),
+                    sample
+                );
+                return Err(OciError::manifest_unknown(format!("{name}:{reference}")));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!(
+                    "OCI manifest degraded to miss: blob availability check failed for {}:{} ({:?})",
+                    name,
+                    reference,
+                    error
+                );
+                return Err(OciError::manifest_unknown(format!("{name}:{reference}")));
+            }
+        }
+    }
 
     let should_prefetch_blob_urls =
         prefetch_blob_urls && pointer.blobs.len() <= OCI_PREFETCH_BLOB_URL_LIMIT;
     let mut prefetched_urls: HashMap<String, String> = HashMap::new();
-    if should_prefetch_blob_urls {
-        let blob_descriptors: Vec<BlobDescriptor> = pointer
-            .blobs
-            .iter()
-            .map(|blob| BlobDescriptor {
-                digest: blob.digest.clone(),
-                size_bytes: blob.size_bytes,
-            })
-            .collect();
-        if !blob_descriptors.is_empty() {
-            if let Ok(Ok(response)) = tokio::time::timeout(
-                OCI_API_CALL_TIMEOUT,
-                state.api_client.blob_download_urls(
-                    &state.workspace,
-                    cache_entry_id,
-                    &blob_descriptors,
-                ),
-            )
-            .await
-            {
-                for entry in response.download_urls {
-                    prefetched_urls.insert(entry.digest, entry.url);
-                }
+    if should_prefetch_blob_urls && !blob_descriptors.is_empty() {
+        if let Ok(Ok(response)) = tokio::time::timeout(
+            OCI_API_CALL_TIMEOUT,
+            state.api_client.blob_download_urls(
+                &state.workspace,
+                cache_entry_id,
+                &blob_descriptors,
+            ),
+        )
+        .await
+        {
+            for entry in response.download_urls {
+                prefetched_urls.insert(entry.digest, entry.url);
             }
         }
     }
@@ -575,6 +603,49 @@ async fn resolve_manifest(
     let digest = cas_oci::prefixed_sha256_digest(&index_json);
 
     Ok((index_json, content_type, digest))
+}
+
+async fn missing_oci_blobs(
+    state: &AppState,
+    blob_descriptors: &[BlobDescriptor],
+) -> Result<Vec<String>, OciError> {
+    if blob_descriptors.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let response = tokio::time::timeout(
+        OCI_API_CALL_TIMEOUT,
+        state
+            .api_client
+            .check_blobs(&state.workspace, blob_descriptors),
+    )
+    .await
+    .map_err(|_| {
+        OciError::internal(format!(
+            "Timed out checking OCI blob availability after {}s",
+            OCI_API_CALL_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| OciError::internal(format!("Failed checking OCI blob availability: {e}")))?;
+
+    let mut exists_by_digest = HashMap::with_capacity(response.results.len());
+    for result in response.results {
+        exists_by_digest.insert(result.digest, result.exists);
+    }
+
+    let mut missing = Vec::new();
+    for blob in blob_descriptors {
+        if !exists_by_digest
+            .get(blob.digest.as_str())
+            .copied()
+            .unwrap_or(false)
+        {
+            missing.push(blob.digest.clone());
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    Ok(missing)
 }
 
 fn scoped_restore_tags(tag_resolver: &TagResolver, name: &str, reference: &str) -> Vec<String> {
