@@ -6,6 +6,7 @@ use serde_json::json;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
@@ -67,6 +68,36 @@ fn clear_env() {
     env::remove_var("BORINGCACHE_API_URL");
     env::remove_var("HOME");
     env::remove_var("BORINGCACHE_TELEMETRY_DISABLED");
+}
+
+fn create_bazel_cache_dir(base: &Path, dir_name: &str) -> PathBuf {
+    let cache_dir = base.join(dir_name);
+    fs::create_dir_all(cache_dir.join("ac")).expect("Failed to create bazel ac dir");
+    fs::create_dir_all(cache_dir.join("cas")).expect("Failed to create bazel cas dir");
+    fs::write(cache_dir.join("ac").join("action-1"), "action data")
+        .expect("Failed to write bazel ac file");
+    fs::write(cache_dir.join("cas").join("blob-1"), "blob data")
+        .expect("Failed to write bazel cas file");
+    cache_dir
+}
+
+fn create_oci_cache_dir(base: &Path, dir_name: &str) -> PathBuf {
+    let cache_dir = base.join(dir_name);
+    let blobs_dir = cache_dir.join("blobs").join("sha256");
+    fs::create_dir_all(&blobs_dir).expect("Failed to create OCI blobs dir");
+    fs::write(cache_dir.join("index.json"), "{\"schemaVersion\":2}")
+        .expect("Failed to write OCI index");
+    fs::write(
+        cache_dir.join("oci-layout"),
+        "{\"imageLayoutVersion\":\"1.0.0\"}",
+    )
+    .expect("Failed to write OCI layout");
+    fs::write(
+        blobs_dir.join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        b"blobdata",
+    )
+    .expect("Failed to write OCI blob");
+    cache_dir
 }
 
 #[tokio::test]
@@ -449,6 +480,394 @@ async fn test_save_skips_stage_for_existing_cas_blobs() {
     pointer_mock.assert_async().await;
     manifest_upload_mock.assert_async().await;
     confirm_mock.assert_async().await;
+    clear_env();
+}
+
+#[tokio::test]
+async fn test_save_bazel_cas_skips_on_locked_create_without_extra_api_calls() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!(
+            "skipping test_save_bazel_cas_skips_on_locked_create_without_extra_api_calls: networking disabled"
+        );
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+    let save_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
+        .match_header("authorization", "Bearer test-token-123")
+        .with_status(423)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "error": "locked",
+                "message": "Unable to reserve cache tag bazel-lock-tag: another cache upload is in progress"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches/blobs/check")
+        .expect(0)
+        .create_async()
+        .await;
+    let stage_blobs_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches/blobs/stage")
+        .expect(0)
+        .create_async()
+        .await;
+    let pointer_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/test/workspace/caches/tags/bazel-lock-tag/pointer",
+        )
+        .expect(0)
+        .create_async()
+        .await;
+    let publish_mock = server
+        .mock(
+            "PUT",
+            "/v2/workspaces/test/workspace/caches/tags/bazel-lock-tag/publish",
+        )
+        .expect(0)
+        .create_async()
+        .await;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    restore_env(temp_dir.path(), &server.url());
+    let cache_dir = create_bazel_cache_dir(temp_dir.path(), "bazel_lock_cache");
+
+    let started = Instant::now();
+    let tag_path = format!("bazel-lock-tag:{}", cache_dir.to_string_lossy());
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "save",
+            "test/workspace",
+            tag_path.as_str(),
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        started.elapsed().as_millis() < 5000,
+        "Expected fast contention skip, took {:?}",
+        started.elapsed()
+    );
+    save_mock.assert_async().await;
+    check_blobs_mock.assert_async().await;
+    stage_blobs_mock.assert_async().await;
+    pointer_mock.assert_async().await;
+    publish_mock.assert_async().await;
+    clear_env();
+}
+
+#[tokio::test]
+async fn test_save_oci_skips_on_locked_create_without_extra_api_calls() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!(
+            "skipping test_save_oci_skips_on_locked_create_without_extra_api_calls: networking disabled"
+        );
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+    let save_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
+        .match_header("authorization", "Bearer test-token-123")
+        .with_status(423)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "error": "locked",
+                "message": "Unable to reserve cache tag oci-lock-tag: another cache upload is in progress"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches/blobs/check")
+        .expect(0)
+        .create_async()
+        .await;
+    let stage_blobs_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches/blobs/stage")
+        .expect(0)
+        .create_async()
+        .await;
+    let pointer_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/test/workspace/caches/tags/oci-lock-tag/pointer",
+        )
+        .expect(0)
+        .create_async()
+        .await;
+    let publish_mock = server
+        .mock(
+            "PUT",
+            "/v2/workspaces/test/workspace/caches/tags/oci-lock-tag/publish",
+        )
+        .expect(0)
+        .create_async()
+        .await;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    restore_env(temp_dir.path(), &server.url());
+    let cache_dir = create_oci_cache_dir(temp_dir.path(), "oci_lock_cache");
+
+    let started = Instant::now();
+    let tag_path = format!("oci-lock-tag:{}", cache_dir.to_string_lossy());
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "save",
+            "test/workspace",
+            tag_path.as_str(),
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        started.elapsed().as_millis() < 5000,
+        "Expected fast contention skip, took {:?}",
+        started.elapsed()
+    );
+    save_mock.assert_async().await;
+    check_blobs_mock.assert_async().await;
+    stage_blobs_mock.assert_async().await;
+    pointer_mock.assert_async().await;
+    publish_mock.assert_async().await;
+    clear_env();
+}
+
+#[tokio::test]
+async fn test_save_bazel_cas_skips_when_publish_conflicts_for_existing_entry() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!(
+            "skipping test_save_bazel_cas_skips_when_publish_conflicts_for_existing_entry: networking disabled"
+        );
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+    let save_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
+        .match_header("authorization", "Bearer test-token-123")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "bazel-publish-conflict-tag",
+                "cache_entry_id": "entry-bazel-existing",
+                "exists": true,
+                "status": "ready",
+                "storage_mode": "cas",
+                "cas_layout": "bazel-v2",
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches/blobs/check")
+        .expect(0)
+        .create_async()
+        .await;
+    let stage_blobs_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches/blobs/stage")
+        .expect(0)
+        .create_async()
+        .await;
+    let pointer_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/test/workspace/caches/tags/bazel-publish-conflict-tag/pointer",
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "5",
+                "cache_entry_id": "entry-bazel-winner",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let publish_mock = server
+        .mock(
+            "PUT",
+            "/v2/workspaces/test/workspace/caches/tags/bazel-publish-conflict-tag/publish",
+        )
+        .match_header("if-match", "5")
+        .with_status(412)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "error": "Tag publish conflict",
+                "tag": "bazel-publish-conflict-tag",
+                "current_version": "6",
+                "current_cache_entry_id": "entry-bazel-winner"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    restore_env(temp_dir.path(), &server.url());
+    let cache_dir = create_bazel_cache_dir(temp_dir.path(), "bazel_publish_conflict_cache");
+    let tag_path = format!("bazel-publish-conflict-tag:{}", cache_dir.to_string_lossy());
+
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "save",
+            "test/workspace",
+            tag_path.as_str(),
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(0));
+    save_mock.assert_async().await;
+    check_blobs_mock.assert_async().await;
+    stage_blobs_mock.assert_async().await;
+    pointer_mock.assert_async().await;
+    publish_mock.assert_async().await;
+    clear_env();
+}
+
+#[tokio::test]
+async fn test_save_oci_skips_when_publish_conflicts_for_existing_entry() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!(
+            "skipping test_save_oci_skips_when_publish_conflicts_for_existing_entry: networking disabled"
+        );
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+    let save_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
+        .match_header("authorization", "Bearer test-token-123")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "oci-publish-conflict-tag",
+                "cache_entry_id": "entry-oci-existing",
+                "exists": true,
+                "status": "ready",
+                "storage_mode": "cas",
+                "cas_layout": "oci-v1",
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches/blobs/check")
+        .expect(0)
+        .create_async()
+        .await;
+    let stage_blobs_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches/blobs/stage")
+        .expect(0)
+        .create_async()
+        .await;
+    let pointer_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/test/workspace/caches/tags/oci-publish-conflict-tag/pointer",
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "11",
+                "cache_entry_id": "entry-oci-winner",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let publish_mock = server
+        .mock(
+            "PUT",
+            "/v2/workspaces/test/workspace/caches/tags/oci-publish-conflict-tag/publish",
+        )
+        .match_header("if-match", "11")
+        .with_status(412)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "error": "Tag publish conflict",
+                "tag": "oci-publish-conflict-tag",
+                "current_version": "12",
+                "current_cache_entry_id": "entry-oci-winner"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    restore_env(temp_dir.path(), &server.url());
+    let cache_dir = create_oci_cache_dir(temp_dir.path(), "oci_publish_conflict_cache");
+    let tag_path = format!("oci-publish-conflict-tag:{}", cache_dir.to_string_lossy());
+
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "save",
+            "test/workspace",
+            tag_path.as_str(),
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(0));
+    save_mock.assert_async().await;
+    check_blobs_mock.assert_async().await;
+    stage_blobs_mock.assert_async().await;
+    pointer_mock.assert_async().await;
+    publish_mock.assert_async().await;
     clear_env();
 }
 

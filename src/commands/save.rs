@@ -1235,10 +1235,86 @@ async fn save_single_file_entry(
         encryption_recipient_hint: None,
     };
 
-    let save_response = api_client
-        .save_entry(&workspace, &request)
-        .await
-        .with_context(|| format!("Failed to create CAS entry for {}", tag))?;
+    let save_response = match api_client.save_entry(&workspace, &request).await {
+        Ok(response) => response,
+        Err(err) => {
+            create_step.complete()?;
+
+            if let Some(message) = conflict_message_from_error(&err) {
+                progress_warning(&reporter, format!("  Conflict: {}", message));
+                progress_info(
+                    &reporter,
+                    "  Tag already exists with different content; skipping save",
+                );
+                complete_skipped_step(
+                    &mut session,
+                    "Checking remote blobs",
+                    "skipped — tag conflict",
+                )?;
+                complete_skipped_step(&mut session, "Uploading blobs", "skipped — tag conflict")?;
+                complete_skipped_step(
+                    &mut session,
+                    "Uploading CAS index",
+                    "skipped — tag conflict",
+                )?;
+                complete_skipped_step(&mut session, "Confirming upload", "skipped — tag conflict")?;
+
+                let summary = Summary {
+                    size_bytes: total_size_bytes,
+                    file_count,
+                    digest: Some(manifest_root_digest.clone()),
+                    path: Some(path.clone()),
+                };
+                session.complete(summary)?;
+                drop(reporter);
+                progress_system.shutdown()?;
+                return Ok(SaveStatus::Skipped);
+            }
+
+            if is_cache_pending_error(&err) {
+                progress_info(
+                    &reporter,
+                    "  Another job is uploading this cache; skipping wait",
+                );
+                complete_skipped_step(
+                    &mut session,
+                    "Checking remote blobs",
+                    "skipped — another job is uploading",
+                )?;
+                complete_skipped_step(
+                    &mut session,
+                    "Uploading blobs",
+                    "skipped — another job is uploading",
+                )?;
+                complete_skipped_step(
+                    &mut session,
+                    "Uploading CAS index",
+                    "skipped — another job is uploading",
+                )?;
+                complete_skipped_step(
+                    &mut session,
+                    "Confirming upload",
+                    "skipped — another job is uploading",
+                )?;
+
+                let summary = Summary {
+                    size_bytes: total_size_bytes,
+                    file_count,
+                    digest: Some(manifest_root_digest.clone()),
+                    path: Some(path.clone()),
+                };
+                session.complete(summary)?;
+                drop(reporter);
+                progress_system.shutdown()?;
+                return Ok(SaveStatus::AlreadyExists);
+            }
+
+            session.error(err.to_string())?;
+            drop(reporter);
+            progress_system.shutdown()?;
+            return Err(err.context(format!("Failed to create CAS entry for {}", tag)));
+        }
+    };
     create_step.complete()?;
 
     let server_adapter = crate::cache_adapter::detect_restore_transport(
@@ -1455,10 +1531,52 @@ async fn save_single_file_entry(
         storage_mode: Some("cas".to_string()),
         tag: Some(tag.clone()),
     };
-    api_client
+    if let Err(err) = api_client
         .confirm(&workspace, &save_response.cache_entry_id, &confirm_request)
         .await
-        .with_context(|| format!("Failed to confirm CAS upload for {}", tag))?;
+    {
+        confirm_step.complete()?;
+
+        if let Some(message) = conflict_message_from_error(&err) {
+            progress_warning(&reporter, format!("  Conflict: {}", message));
+            progress_info(
+                &reporter,
+                "  Another job finalized this tag first; skipping save",
+            );
+            let summary = Summary {
+                size_bytes: total_size_bytes,
+                file_count,
+                digest: Some(manifest_root_digest.clone()),
+                path: Some(path.clone()),
+            };
+            session.complete(summary)?;
+            drop(reporter);
+            progress_system.shutdown()?;
+            return Ok(SaveStatus::Skipped);
+        }
+
+        if is_cache_pending_error(&err) {
+            progress_info(
+                &reporter,
+                "  Another job is uploading this cache; skipping wait",
+            );
+            let summary = Summary {
+                size_bytes: total_size_bytes,
+                file_count,
+                digest: Some(manifest_root_digest.clone()),
+                path: Some(path.clone()),
+            };
+            session.complete(summary)?;
+            drop(reporter);
+            progress_system.shutdown()?;
+            return Ok(SaveStatus::AlreadyExists);
+        }
+
+        session.error(err.to_string())?;
+        drop(reporter);
+        progress_system.shutdown()?;
+        return Err(err.context(format!("Failed to confirm CAS upload for {}", tag)));
+    }
     confirm_step.complete()?;
 
     let summary = Summary {
@@ -1579,10 +1697,86 @@ async fn save_single_oci_entry(
         encryption_recipient_hint: None,
     };
 
-    let save_response = api_client
-        .save_entry(&workspace, &request)
-        .await
-        .with_context(|| format!("Failed to create CAS entry for {}", tag))?;
+    let save_response = match api_client.save_entry(&workspace, &request).await {
+        Ok(response) => response,
+        Err(err) => {
+            create_step.complete()?;
+
+            if let Some(message) = conflict_message_from_error(&err) {
+                progress_warning(&reporter, format!("  Conflict: {}", message));
+                progress_info(
+                    &reporter,
+                    "  Tag already exists with different content; skipping save",
+                );
+                complete_skipped_step(
+                    &mut session,
+                    "Checking remote blobs",
+                    "skipped — tag conflict",
+                )?;
+                complete_skipped_step(&mut session, "Uploading blobs", "skipped — tag conflict")?;
+                complete_skipped_step(
+                    &mut session,
+                    "Uploading CAS index",
+                    "skipped — tag conflict",
+                )?;
+                complete_skipped_step(&mut session, "Confirming upload", "skipped — tag conflict")?;
+
+                let summary = Summary {
+                    size_bytes: total_size_bytes,
+                    file_count,
+                    digest: Some(manifest_root_digest.clone()),
+                    path: Some(path.clone()),
+                };
+                session.complete(summary)?;
+                drop(reporter);
+                progress_system.shutdown()?;
+                return Ok(SaveStatus::Skipped);
+            }
+
+            if is_cache_pending_error(&err) {
+                progress_info(
+                    &reporter,
+                    "  Another job is uploading this cache; skipping wait",
+                );
+                complete_skipped_step(
+                    &mut session,
+                    "Checking remote blobs",
+                    "skipped — another job is uploading",
+                )?;
+                complete_skipped_step(
+                    &mut session,
+                    "Uploading blobs",
+                    "skipped — another job is uploading",
+                )?;
+                complete_skipped_step(
+                    &mut session,
+                    "Uploading CAS index",
+                    "skipped — another job is uploading",
+                )?;
+                complete_skipped_step(
+                    &mut session,
+                    "Confirming upload",
+                    "skipped — another job is uploading",
+                )?;
+
+                let summary = Summary {
+                    size_bytes: total_size_bytes,
+                    file_count,
+                    digest: Some(manifest_root_digest.clone()),
+                    path: Some(path.clone()),
+                };
+                session.complete(summary)?;
+                drop(reporter);
+                progress_system.shutdown()?;
+                return Ok(SaveStatus::AlreadyExists);
+            }
+
+            session.error(err.to_string())?;
+            drop(reporter);
+            progress_system.shutdown()?;
+            return Err(err.context(format!("Failed to create CAS entry for {}", tag)));
+        }
+    };
     create_step.complete()?;
 
     let server_adapter = crate::cache_adapter::detect_restore_transport(
@@ -1799,10 +1993,52 @@ async fn save_single_oci_entry(
         storage_mode: Some("cas".to_string()),
         tag: Some(tag.clone()),
     };
-    api_client
+    if let Err(err) = api_client
         .confirm(&workspace, &save_response.cache_entry_id, &confirm_request)
         .await
-        .with_context(|| format!("Failed to confirm CAS upload for {}", tag))?;
+    {
+        confirm_step.complete()?;
+
+        if let Some(message) = conflict_message_from_error(&err) {
+            progress_warning(&reporter, format!("  Conflict: {}", message));
+            progress_info(
+                &reporter,
+                "  Another job finalized this tag first; skipping save",
+            );
+            let summary = Summary {
+                size_bytes: total_size_bytes,
+                file_count,
+                digest: Some(manifest_root_digest.clone()),
+                path: Some(path.clone()),
+            };
+            session.complete(summary)?;
+            drop(reporter);
+            progress_system.shutdown()?;
+            return Ok(SaveStatus::Skipped);
+        }
+
+        if is_cache_pending_error(&err) {
+            progress_info(
+                &reporter,
+                "  Another job is uploading this cache; skipping wait",
+            );
+            let summary = Summary {
+                size_bytes: total_size_bytes,
+                file_count,
+                digest: Some(manifest_root_digest.clone()),
+                path: Some(path.clone()),
+            };
+            session.complete(summary)?;
+            drop(reporter);
+            progress_system.shutdown()?;
+            return Ok(SaveStatus::AlreadyExists);
+        }
+
+        session.error(err.to_string())?;
+        drop(reporter);
+        progress_system.shutdown()?;
+        return Err(err.context(format!("Failed to confirm CAS upload for {}", tag)));
+    }
     confirm_step.complete()?;
 
     let summary = Summary {
@@ -1857,6 +2093,16 @@ fn progress_warning(reporter: &crate::progress::Reporter, message: impl Into<Str
     if reporter.warning(message.clone()).is_err() {
         ui::warn(&message);
     }
+}
+
+fn conflict_message_from_error(err: &anyhow::Error) -> Option<String> {
+    err.downcast_ref::<crate::error::BoringCacheError>()
+        .and_then(|bc_err| bc_err.conflict_message().map(|message| message.to_string()))
+}
+
+fn is_cache_pending_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<crate::error::BoringCacheError>()
+        .is_some_and(|bc_err| matches!(bc_err, crate::error::BoringCacheError::CachePending))
 }
 
 fn manifest_files_from_draft(draft: &crate::manifest::ManifestDraft) -> Vec<ManifestFile> {
@@ -2065,4 +2311,33 @@ fn format_phase_duration_ms(ms: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conflict_message_is_extracted_from_boringcache_error() {
+        let err: anyhow::Error =
+            crate::error::BoringCacheError::cache_conflict("tag already claimed").into();
+
+        assert_eq!(
+            conflict_message_from_error(&err),
+            Some("tag already claimed".to_string())
+        );
+    }
+
+    #[test]
+    fn cache_pending_errors_are_detected() {
+        let err: anyhow::Error = crate::error::BoringCacheError::CachePending.into();
+
+        assert!(is_cache_pending_error(&err));
+        assert_eq!(conflict_message_from_error(&err), None);
+    }
+
+    #[test]
+    fn non_boringcache_errors_do_not_report_contention() {
+        let err = anyhow::anyhow!("boom");
+
+        assert!(!is_cache_pending_error(&err));
+        assert_eq!(conflict_message_from_error(&err), None);
+    }
+}
