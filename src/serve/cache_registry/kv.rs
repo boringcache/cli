@@ -286,6 +286,17 @@ pub(crate) async fn put_kv_object(
 
     put_probe.stage("read_body");
     let (path, blob_size, blob_digest) = write_body_to_temp_file(body, &put_probe).await?;
+
+    if let Some(expected_digest) = expected_bazel_cas_blob_digest(namespace, key) {
+        if !blob_digest.eq_ignore_ascii_case(&expected_digest) {
+            cleanup_temp_file(&path).await;
+            return Err(RegistryError::new(
+                StatusCode::BAD_REQUEST,
+                format!("Bazel CAS digest mismatch: expected {expected_digest}, got {blob_digest}"),
+            ));
+        }
+    }
+
     let miss_key = kv_miss_cache_key(state, &state.registry_root_tag, &scoped_key);
 
     put_probe.stage("pending_lock");
@@ -750,6 +761,20 @@ fn content_length_bytes(response: &Response) -> u64 {
         .unwrap_or(0)
 }
 
+fn expected_bazel_cas_blob_digest(namespace: KvNamespace, key: &str) -> Option<String> {
+    if !matches!(namespace, KvNamespace::BazelCas) {
+        return None;
+    }
+    Some(format!("sha256:{}", namespace.normalize_key(key)))
+}
+
+fn bazel_cas_blob_matches(namespace: KvNamespace, key: &str, blob: &BlobDescriptor) -> bool {
+    match expected_bazel_cas_blob_digest(namespace, key) {
+        Some(expected) => blob.digest.eq_ignore_ascii_case(&expected),
+        None => true,
+    }
+}
+
 pub(crate) async fn get_or_head_kv_object(
     state: &AppState,
     namespace: KvNamespace,
@@ -820,12 +845,20 @@ async fn get_or_head_kv_object_inner(
     kv_trace(namespace, &scoped_key, "after-pending");
 
     if let Some((blob, path)) = local {
-        kv_trace(namespace, &scoped_key, "serve-local");
-        match serve_local_blob(&blob, &path, is_head).await {
-            Ok(response) => return Ok(response),
-            Err(e) => {
-                log::warn!("KV local blob read failed, falling back to backend: {e:?}");
+        if bazel_cas_blob_matches(namespace, key, &blob) {
+            kv_trace(namespace, &scoped_key, "serve-local");
+            match serve_local_blob(&blob, &path, is_head).await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    log::warn!("KV local blob read failed, falling back to backend: {e:?}");
+                }
             }
+        } else {
+            log::warn!(
+                "Bazel CAS local blob digest mismatch: key={} digest={}",
+                key,
+                blob.digest
+            );
         }
     }
 
@@ -842,30 +875,45 @@ async fn get_or_head_kv_object_inner(
     kv_trace(namespace, &scoped_key, "after-flushing");
 
     if let Some((blob, path)) = flushing_local {
-        kv_trace(namespace, &scoped_key, "serve-flushing");
-        match serve_local_blob(&blob, &path, is_head).await {
-            Ok(response) => return Ok(response),
-            Err(e) => {
-                log::warn!("KV flushing blob read failed, falling through: {e:?}");
+        if bazel_cas_blob_matches(namespace, key, &blob) {
+            kv_trace(namespace, &scoped_key, "serve-flushing");
+            match serve_local_blob(&blob, &path, is_head).await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    log::warn!("KV flushing blob read failed, falling through: {e:?}");
+                }
             }
+        } else {
+            log::warn!(
+                "Bazel CAS flushing blob digest mismatch: key={} digest={}",
+                key,
+                blob.digest
+            );
         }
     }
 
     if let Some((blob, cache_entry_id, cached_url)) =
         lookup_published_blob(state, &scoped_key).await
     {
-        kv_trace(namespace, &scoped_key, "serve-published-fast");
-        if use_miss_cache {
-            clear_kv_miss(state, &miss_key);
+        if bazel_cas_blob_matches(namespace, key, &blob) {
+            kv_trace(namespace, &scoped_key, "serve-published-fast");
+            if use_miss_cache {
+                clear_kv_miss(state, &miss_key);
+            }
+            return serve_backend_blob(
+                state,
+                &cache_entry_id,
+                &blob,
+                cached_url.as_deref(),
+                is_head,
+            )
+            .await;
         }
-        return serve_backend_blob(
-            state,
-            &cache_entry_id,
-            &blob,
-            cached_url.as_deref(),
-            is_head,
-        )
-        .await;
+        log::warn!(
+            "Bazel CAS published blob digest mismatch: key={} digest={}",
+            key,
+            blob.digest
+        );
     }
 
     if use_miss_cache && is_recent_kv_miss(state, &miss_key) {
@@ -909,18 +957,25 @@ async fn get_or_head_kv_object_inner(
     kv_trace(namespace, &scoped_key, "lookup-flight-end");
 
     if let Some((blob, cache_entry_id, cached_url)) = lookup_result {
-        kv_trace(namespace, &scoped_key, "serve-published-after-lookup");
-        if use_miss_cache {
-            clear_kv_miss(state, &miss_key);
+        if bazel_cas_blob_matches(namespace, key, &blob) {
+            kv_trace(namespace, &scoped_key, "serve-published-after-lookup");
+            if use_miss_cache {
+                clear_kv_miss(state, &miss_key);
+            }
+            return serve_backend_blob(
+                state,
+                &cache_entry_id,
+                &blob,
+                cached_url.as_deref(),
+                is_head,
+            )
+            .await;
         }
-        return serve_backend_blob(
-            state,
-            &cache_entry_id,
-            &blob,
-            cached_url.as_deref(),
-            is_head,
-        )
-        .await;
+        log::warn!(
+            "Bazel CAS lookup blob digest mismatch: key={} digest={}",
+            key,
+            blob.digest
+        );
     }
 
     kv_trace(namespace, &scoped_key, "not-found");
@@ -1100,56 +1155,92 @@ async fn stream_blob_to_file(
     from_cache: bool,
     dest: &std::path::Path,
 ) -> Result<u64, RegistryError> {
-    let response = state
-        .api_client
-        .transfer_client()
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| RegistryError::internal(format!("Failed to download blob: {e}")))?;
+    let mut active_url = url.to_string();
+    let mut may_refresh = from_cache;
+    let expected_digest = blob.digest.to_ascii_lowercase();
 
-    let response = if from_cache
-        && (response.status() == StatusCode::FORBIDDEN
-            || response.status() == StatusCode::NOT_FOUND)
-    {
-        let fresh_url = resolve_download_url(state, cache_entry_id, blob).await?;
-        {
-            let mut published = state.kv_published_index.write().await;
-            published.set_download_url(blob.digest.clone(), fresh_url.clone());
-        }
-        state
+    for attempt in 0..=1 {
+        let response = state
             .api_client
             .transfer_client()
-            .get(&fresh_url)
+            .get(&active_url)
             .send()
             .await
-            .map_err(|e| RegistryError::internal(format!("Failed to download blob: {e}")))?
-            .error_for_status()
-            .map_err(|e| RegistryError::internal(format!("Blob storage returned an error: {e}")))?
-    } else {
-        response
-            .error_for_status()
-            .map_err(|e| RegistryError::internal(format!("Blob storage returned an error: {e}")))?
-    };
+            .map_err(|e| RegistryError::internal(format!("Failed to download blob: {e}")))?;
 
-    let mut stream = response.bytes_stream();
-    let mut file = tokio::fs::File::create(dest)
-        .await
-        .map_err(|e| RegistryError::internal(format!("Failed to create temp file: {e}")))?;
-    let mut written = 0u64;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|e| RegistryError::internal(format!("Failed to read blob stream: {e}")))?;
-        file.write_all(&chunk).await.map_err(|e| {
-            RegistryError::internal(format!("Failed to write blob to temp file: {e}"))
-        })?;
-        written += chunk.len() as u64;
+        let response = if may_refresh
+            && (response.status() == StatusCode::FORBIDDEN
+                || response.status() == StatusCode::NOT_FOUND)
+        {
+            let fresh_url = resolve_download_url(state, cache_entry_id, blob).await?;
+            {
+                let mut published = state.kv_published_index.write().await;
+                published.set_download_url(blob.digest.clone(), fresh_url.clone());
+            }
+            may_refresh = false;
+            state
+                .api_client
+                .transfer_client()
+                .get(&fresh_url)
+                .send()
+                .await
+                .map_err(|e| RegistryError::internal(format!("Failed to download blob: {e}")))?
+                .error_for_status()
+                .map_err(|e| {
+                    RegistryError::internal(format!("Blob storage returned an error: {e}"))
+                })?
+        } else {
+            response.error_for_status().map_err(|e| {
+                RegistryError::internal(format!("Blob storage returned an error: {e}"))
+            })?
+        };
+
+        let mut stream = response.bytes_stream();
+        let mut file = tokio::fs::File::create(dest)
+            .await
+            .map_err(|e| RegistryError::internal(format!("Failed to create temp file: {e}")))?;
+        let mut written = 0u64;
+        let mut hasher = Sha256::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .map_err(|e| RegistryError::internal(format!("Failed to read blob stream: {e}")))?;
+            file.write_all(&chunk).await.map_err(|e| {
+                RegistryError::internal(format!("Failed to write blob to temp file: {e}"))
+            })?;
+            hasher.update(&chunk);
+            written += chunk.len() as u64;
+        }
+        file.flush()
+            .await
+            .map_err(|e| RegistryError::internal(format!("Failed to flush temp file: {e}")))?;
+        drop(file);
+
+        let actual_digest = format!("sha256:{:x}", hasher.finalize());
+        if actual_digest.eq_ignore_ascii_case(&expected_digest) {
+            return Ok(written);
+        }
+
+        let _ = tokio::fs::remove_file(dest).await;
+        if may_refresh && attempt == 0 {
+            let fresh_url = resolve_download_url(state, cache_entry_id, blob).await?;
+            {
+                let mut published = state.kv_published_index.write().await;
+                published.set_download_url(blob.digest.clone(), fresh_url.clone());
+            }
+            active_url = fresh_url;
+            may_refresh = false;
+            continue;
+        }
+
+        return Err(RegistryError::internal(format!(
+            "Downloaded blob digest mismatch: expected {}, got {}",
+            expected_digest, actual_digest
+        )));
     }
-    file.flush()
-        .await
-        .map_err(|e| RegistryError::internal(format!("Failed to flush temp file: {e}")))?;
 
-    Ok(written)
+    Err(RegistryError::internal(
+        "Blob download failed after digest validation retries",
+    ))
 }
 
 fn short_digest(digest: &str) -> &str {

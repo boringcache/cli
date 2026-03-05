@@ -2115,9 +2115,11 @@ async fn test_bazel_cas_put_head_get_round_trip() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
 
-    let bazel_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let payload = b"bazel-cas-payload";
     let payload_digest = cas_file::prefixed_sha256_digest(payload);
+    let bazel_key = payload_digest
+        .strip_prefix("sha256:")
+        .expect("sha256 prefix present");
     let pointer_bytes = make_file_pointer(&payload_digest, payload.len() as u64);
     let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
 
@@ -2760,6 +2762,26 @@ async fn test_bazel_route_rejects_invalid_digest() {
             .method(Method::GET)
             .uri("/ac/not-a-sha256")
             .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_bazel_put_rejects_digest_key_mismatch() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/cas/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .body(Body::from("mismatched-bazel-payload"))
             .unwrap(),
     )
     .await
