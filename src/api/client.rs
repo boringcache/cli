@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::error::{BoringCacheError, ConflictMetadata};
+use crate::request_metrics;
 use crate::retry_resume::RetryConfig;
 use crate::types::Result;
 use anyhow::{ensure, Context};
@@ -8,12 +9,22 @@ use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 const BLOB_CHECK_BATCH_MAX: usize = 10_000;
 const BLOB_URL_BATCH_MAX: usize = 2_000;
+const BLOB_CHECK_BATCH_MAX_ENV: &str = "BORINGCACHE_CACHE_CHECK_BATCH_MAX";
+const BLOB_URL_BATCH_MAX_ENV: &str = "BORINGCACHE_CACHE_URL_BATCH_MAX";
+const BLOB_CHECK_BATCH_CONCURRENCY_ENV: &str = "BORINGCACHE_CACHE_CHECK_BATCH_CONCURRENCY";
+const BLOB_URL_BATCH_CONCURRENCY_ENV: &str = "BORINGCACHE_CACHE_URL_BATCH_CONCURRENCY";
+const BLOB_METRIC_ENDPOINT_OPERATION_CHECK: &str = "cache_blobs_check";
+const BLOB_METRIC_ENDPOINT_OPERATION_UPLOAD_URLS: &str = "cache_blobs_upload_urls";
+const BLOB_METRIC_ENDPOINT_OPERATION_DOWNLOAD_URLS: &str = "cache_blobs_download_urls";
+const CACHE_METRIC_ENDPOINT_OPERATION_SAVE_ENTRY: &str = "cache_flush_upload";
+const CACHE_METRIC_ENDPOINT_OPERATION_CONFIRM_PUBLISH: &str = "cache_finalize_publish";
+const REQUEST_METRIC_SOURCE_CLI: &str = "cli";
 const API_VERSION_V1: &str = "v1";
 const API_VERSION_V2: &str = "v2";
 const FALLBACK_API_BASE_URL: &str = "https://api.boringcache.com";
@@ -347,31 +358,53 @@ impl ApiClient {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<Response> {
+        let (result, _retry_count) = self
+            .send_authenticated_request_with_retry_count(request)
+            .await;
+        result
+    }
+
+    async fn send_authenticated_request_with_retry_count(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> (Result<Response>, u32) {
         let token = self
             .auth_token
             .as_ref()
-            .ok_or(BoringCacheError::TokenNotFound)?;
+            .ok_or(BoringCacheError::TokenNotFound);
+        let token = match token {
+            Ok(token) => token,
+            Err(error) => return (Err(error.into()), 0),
+        };
 
         if request.try_clone().is_none() {
             let request = request.header("Authorization", format!("Bearer {}", token));
-            return match request.send().await {
-                Ok(response) => Ok(response),
-                Err(err) if err.is_connect() => Err(BoringCacheError::ConnectionError(
-                    "ERROR: Cannot connect to BoringCache server. Please check:\n\
+            return (
+                match request.send().await {
+                    Ok(response) => Ok(response),
+                    Err(err) if err.is_connect() => Err(BoringCacheError::ConnectionError(
+                        "ERROR: Cannot connect to BoringCache server. Please check:\n\
                          • Is the API URL correct? (Check with: boringcache config)\n\
                          • Is there a firewall blocking the connection?"
-                        .to_string(),
-                )
-                .into()),
-                Err(err) => Err(err.into()),
-            };
+                            .to_string(),
+                    )
+                    .into()),
+                    Err(err) => Err(err.into()),
+                },
+                0,
+            );
         }
 
         let retry_config = RetryConfig::new(false);
         let token_clone = token.clone();
+        let mut attempts = 0u32;
+        let mut last_retry_count = 0u32;
 
-        retry_config
+        let result = retry_config
             .retry_with_backoff("API request", || {
+                attempts = attempts.saturating_add(1);
+                let retry_count = attempts.saturating_sub(1);
+                last_retry_count = retry_count;
                 let request = request
                     .try_clone()
                     .expect("Request cloneability already verified");
@@ -386,7 +419,7 @@ impl ApiClient {
                             {
                                 anyhow::bail!("Transient error: {}", response.status());
                             }
-                            Ok(response)
+                            Ok((response, retry_count))
                         }
                         Err(err) if err.is_connect() => Err(BoringCacheError::ConnectionError(
                             "ERROR: Cannot connect to BoringCache server. Please check:\n\
@@ -403,6 +436,135 @@ impl ApiClient {
                 }
             })
             .await
+            .map(|(response, _retry_count)| response);
+
+        (result, last_retry_count)
+    }
+
+    fn v2_metric_path(endpoint: &str) -> String {
+        format!("/v2/{}", endpoint.trim_start_matches('/'))
+    }
+
+    async fn post_v2_with_request_metrics<T, R>(
+        &self,
+        endpoint: &str,
+        body: &T,
+        operation: &'static str,
+        batch_index: Option<u64>,
+        batch_count: Option<u64>,
+        batch_size: Option<u64>,
+    ) -> Result<R>
+    where
+        T: Serialize,
+        R: for<'de> Deserialize<'de>,
+    {
+        let url = self.build_v2_url(endpoint);
+        let path = Self::v2_metric_path(endpoint);
+        let request_bytes = serde_json::to_vec(body).ok().map(|buf| buf.len() as u64);
+        let started_at = Instant::now();
+        let (response_result, retry_count) = self
+            .send_authenticated_request_with_retry_count(self.client.post(&url).json(body))
+            .await;
+
+        match response_result {
+            Ok(response) => {
+                let status = response.status();
+                request_metrics::emit(request_metrics::RequestMetric::success(
+                    REQUEST_METRIC_SOURCE_CLI,
+                    operation,
+                    "POST",
+                    path,
+                    status.as_u16(),
+                    started_at.elapsed().as_millis() as u64,
+                    request_bytes,
+                    response.content_length(),
+                    batch_index,
+                    batch_count,
+                    batch_size,
+                    Some(retry_count),
+                ));
+
+                if status.is_success() {
+                    self.parse_json_response(response).await
+                } else {
+                    Err(self.create_error_from_response(response).await)
+                }
+            }
+            Err(error) => {
+                request_metrics::emit(request_metrics::RequestMetric::failure(
+                    REQUEST_METRIC_SOURCE_CLI,
+                    operation,
+                    "POST",
+                    path,
+                    error.to_string(),
+                    started_at.elapsed().as_millis() as u64,
+                    Some(retry_count),
+                ));
+                Err(error)
+            }
+        }
+    }
+
+    async fn put_v2_with_request_metrics<T, R>(
+        &self,
+        endpoint: &str,
+        body: &T,
+        if_match: Option<&str>,
+        operation: &'static str,
+    ) -> Result<R>
+    where
+        T: Serialize,
+        R: for<'de> Deserialize<'de>,
+    {
+        let url = self.build_v2_url(endpoint);
+        let path = Self::v2_metric_path(endpoint);
+        let request_bytes = serde_json::to_vec(body).ok().map(|buf| buf.len() as u64);
+        let started_at = Instant::now();
+        let mut request = self.client.put(&url).json(body);
+        if let Some(version) = if_match {
+            request = request.header("If-Match", version);
+        }
+        let (response_result, retry_count) = self
+            .send_authenticated_request_with_retry_count(request)
+            .await;
+
+        match response_result {
+            Ok(response) => {
+                let status = response.status();
+                request_metrics::emit(request_metrics::RequestMetric::success(
+                    REQUEST_METRIC_SOURCE_CLI,
+                    operation,
+                    "PUT",
+                    path,
+                    status.as_u16(),
+                    started_at.elapsed().as_millis() as u64,
+                    request_bytes,
+                    response.content_length(),
+                    None,
+                    None,
+                    None,
+                    Some(retry_count),
+                ));
+
+                if status.is_success() {
+                    self.parse_json_response(response).await
+                } else {
+                    Err(self.create_error_from_response(response).await)
+                }
+            }
+            Err(error) => {
+                request_metrics::emit(request_metrics::RequestMetric::failure(
+                    REQUEST_METRIC_SOURCE_CLI,
+                    operation,
+                    "PUT",
+                    path,
+                    error.to_string(),
+                    started_at.elapsed().as_millis() as u64,
+                    Some(retry_count),
+                ));
+                Err(error)
+            }
+        }
     }
 
     async fn send_public_request(&self, request: reqwest::RequestBuilder) -> Result<Response> {
@@ -601,19 +763,14 @@ impl ApiClient {
         endpoint: &str,
         body: &T,
         if_match: Option<&str>,
+        operation: &'static str,
     ) -> Result<R>
     where
         T: Serialize,
         R: for<'de> Deserialize<'de>,
     {
-        let url = self.build_v2_url(endpoint);
-        debug!("PUT {}", url);
-        let mut request = self.client.put(&url).json(body);
-        if let Some(version) = if_match {
-            request = request.header("If-Match", version);
-        }
-        let response = self.send_authenticated_request(request).await?;
-        self.parse_json_response(response).await
+        self.put_v2_with_request_metrics(endpoint, body, if_match, operation)
+            .await
     }
 
     async fn get_capabilities(&self) -> CapabilityFlags {
@@ -730,23 +887,36 @@ impl ApiClient {
     ) -> Result<super::models::cache::BlobCheckResponse> {
         ensure!(!blobs.is_empty(), "blobs cannot be empty");
         let endpoint = self.workspace_endpoint(workspace, "caches/blobs/check")?;
-        if blobs.len() <= BLOB_CHECK_BATCH_MAX {
+        let batch_max = blob_check_batch_max();
+        let chunk_count = blobs.len().div_ceil(batch_max);
+        let batch_count = chunk_count as u64;
+        if chunk_count == 1 {
             let body = super::models::cache::BlobCheckRequest {
                 blobs: blobs.to_vec(),
             };
-            return self.post_v2(&endpoint, &body).await;
+            return self
+                .post_v2_with_request_metrics(
+                    &endpoint,
+                    &body,
+                    BLOB_METRIC_ENDPOINT_OPERATION_CHECK,
+                    Some(1),
+                    Some(batch_count),
+                    Some(blobs.len() as u64),
+                )
+                .await;
         }
 
-        let chunk_count = blobs.len().div_ceil(BLOB_CHECK_BATCH_MAX);
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(api_batch_concurrency(
-            chunk_count,
-        )));
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            blob_check_batch_concurrency(chunk_count),
+        ));
         let mut tasks = Vec::new();
-        for chunk in blobs.chunks(BLOB_CHECK_BATCH_MAX) {
+        for (batch_idx, chunk) in blobs.chunks(batch_max).enumerate() {
             let client = self.clone();
             let endpoint = endpoint.clone();
             let chunk = chunk.to_vec();
             let semaphore = semaphore.clone();
+            let batch_size = chunk.len() as u64;
+            let batch_index = (batch_idx + 1) as u64;
             tasks.push(tokio::spawn(async move {
                 let _permit = semaphore
                     .acquire_owned()
@@ -754,7 +924,14 @@ impl ApiClient {
                     .map_err(|e| anyhow::anyhow!("Blob check semaphore closed: {e}"))?;
                 let body = super::models::cache::BlobCheckRequest { blobs: chunk };
                 client
-                    .post_v2::<_, super::models::cache::BlobCheckResponse>(&endpoint, &body)
+                    .post_v2_with_request_metrics::<_, super::models::cache::BlobCheckResponse>(
+                        &endpoint,
+                        &body,
+                        BLOB_METRIC_ENDPOINT_OPERATION_CHECK,
+                        Some(batch_index),
+                        Some(batch_count),
+                        Some(batch_size),
+                    )
                     .await
             }));
         }
@@ -776,23 +953,36 @@ impl ApiClient {
     ) -> Result<super::models::cache::BlobUploadUrlsResponse> {
         ensure!(!blobs.is_empty(), "blobs cannot be empty");
         let endpoint = self.workspace_endpoint(workspace, "caches/blobs/stage")?;
-        if blobs.len() <= BLOB_URL_BATCH_MAX {
+        let batch_max = blob_url_batch_max();
+        let chunk_count = blobs.len().div_ceil(batch_max);
+        let batch_count = chunk_count as u64;
+        if chunk_count == 1 {
             let body = super::models::cache::BlobStageRequest {
                 blobs: blobs.to_vec(),
             };
-            return self.post_v2(&endpoint, &body).await;
+            return self
+                .post_v2_with_request_metrics(
+                    &endpoint,
+                    &body,
+                    BLOB_METRIC_ENDPOINT_OPERATION_UPLOAD_URLS,
+                    Some(1),
+                    Some(batch_count),
+                    Some(blobs.len() as u64),
+                )
+                .await;
         }
 
-        let chunk_count = blobs.len().div_ceil(BLOB_URL_BATCH_MAX);
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(api_batch_concurrency(
-            chunk_count,
-        )));
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            blob_url_batch_concurrency(chunk_count),
+        ));
         let mut tasks = Vec::new();
-        for chunk in blobs.chunks(BLOB_URL_BATCH_MAX) {
+        for (batch_idx, chunk) in blobs.chunks(batch_max).enumerate() {
             let client = self.clone();
             let endpoint = endpoint.clone();
             let chunk = chunk.to_vec();
             let semaphore = semaphore.clone();
+            let batch_size = chunk.len() as u64;
+            let batch_index = (batch_idx + 1) as u64;
             tasks.push(tokio::spawn(async move {
                 let _permit = semaphore
                     .acquire_owned()
@@ -800,7 +990,17 @@ impl ApiClient {
                     .map_err(|e| anyhow::anyhow!("Blob stage semaphore closed: {e}"))?;
                 let body = super::models::cache::BlobStageRequest { blobs: chunk };
                 client
-                    .post_v2::<_, super::models::cache::BlobUploadUrlsResponse>(&endpoint, &body)
+                    .post_v2_with_request_metrics::<
+                        _,
+                        super::models::cache::BlobUploadUrlsResponse,
+                    >(
+                        &endpoint,
+                        &body,
+                        BLOB_METRIC_ENDPOINT_OPERATION_UPLOAD_URLS,
+                        Some(batch_index),
+                        Some(batch_count),
+                        Some(batch_size),
+                    )
                     .await
             }));
         }
@@ -831,25 +1031,38 @@ impl ApiClient {
         );
         ensure!(!blobs.is_empty(), "blobs cannot be empty");
         let endpoint = self.workspace_endpoint(workspace, "caches/blobs/download-urls")?;
-        if blobs.len() <= BLOB_URL_BATCH_MAX {
+        let batch_max = blob_url_batch_max();
+        let chunk_count = blobs.len().div_ceil(batch_max);
+        let batch_count = chunk_count as u64;
+        if chunk_count == 1 {
             let body = super::models::cache::BlobDownloadUrlsRequest {
                 cache_entry_id: cache_entry_id.to_string(),
                 blobs: blobs.to_vec(),
             };
-            return self.post_v2(&endpoint, &body).await;
+            return self
+                .post_v2_with_request_metrics(
+                    &endpoint,
+                    &body,
+                    BLOB_METRIC_ENDPOINT_OPERATION_DOWNLOAD_URLS,
+                    Some(1),
+                    Some(batch_count),
+                    Some(blobs.len() as u64),
+                )
+                .await;
         }
 
-        let chunk_count = blobs.len().div_ceil(BLOB_URL_BATCH_MAX);
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(api_batch_concurrency(
-            chunk_count,
-        )));
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            blob_url_batch_concurrency(chunk_count),
+        ));
         let mut tasks = Vec::new();
-        for chunk in blobs.chunks(BLOB_URL_BATCH_MAX) {
+        for (batch_idx, chunk) in blobs.chunks(batch_max).enumerate() {
             let client = self.clone();
             let endpoint = endpoint.clone();
             let chunk = chunk.to_vec();
             let cache_entry_id = cache_entry_id.to_string();
             let semaphore = semaphore.clone();
+            let batch_size = chunk.len() as u64;
+            let batch_index = (batch_idx + 1) as u64;
             tasks.push(tokio::spawn(async move {
                 let _permit = semaphore
                     .acquire_owned()
@@ -860,7 +1073,17 @@ impl ApiClient {
                     blobs: chunk,
                 };
                 client
-                    .post_v2::<_, super::models::cache::BlobDownloadUrlsResponse>(&endpoint, &body)
+                    .post_v2_with_request_metrics::<
+                        _,
+                        super::models::cache::BlobDownloadUrlsResponse,
+                    >(
+                        &endpoint,
+                        &body,
+                        BLOB_METRIC_ENDPOINT_OPERATION_DOWNLOAD_URLS,
+                        Some(batch_index),
+                        Some(batch_count),
+                        Some(batch_size),
+                    )
                     .await
             }));
         }
@@ -901,7 +1124,15 @@ impl ApiClient {
             debug!("POST {} body={}", endpoint, body);
         }
 
-        self.post_v2(&endpoint, &payload).await
+        self.post_v2_with_request_metrics(
+            &endpoint,
+            &payload,
+            CACHE_METRIC_ENDPOINT_OPERATION_SAVE_ENTRY,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     pub async fn delete(
@@ -1045,6 +1276,7 @@ impl ApiClient {
                     },
                 },
                 if_match.as_deref(),
+                CACHE_METRIC_ENDPOINT_OPERATION_CONFIRM_PUBLISH,
             )
             .await?;
 
@@ -1441,6 +1673,45 @@ fn dedupe_strings(values: Vec<String>) -> Vec<String> {
     deduped
 }
 
+fn parse_usize_env(name: &str) -> Option<usize> {
+    let raw = std::env::var(name).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<usize>() {
+        Ok(value) if value > 0 => Some(value),
+        Ok(_) => None,
+        Err(_) => None,
+    }
+}
+
+fn blob_check_batch_max() -> usize {
+    parse_usize_env(BLOB_CHECK_BATCH_MAX_ENV).unwrap_or(BLOB_CHECK_BATCH_MAX)
+}
+
+fn blob_url_batch_max() -> usize {
+    parse_usize_env(BLOB_URL_BATCH_MAX_ENV).unwrap_or(BLOB_URL_BATCH_MAX)
+}
+
+fn blob_check_batch_concurrency(chunk_count: usize) -> usize {
+    if chunk_count == 0 {
+        return 1;
+    }
+    parse_usize_env(BLOB_CHECK_BATCH_CONCURRENCY_ENV)
+        .unwrap_or_else(|| api_batch_concurrency(chunk_count))
+        .clamp(1, chunk_count)
+}
+
+fn blob_url_batch_concurrency(chunk_count: usize) -> usize {
+    if chunk_count == 0 {
+        return 1;
+    }
+    parse_usize_env(BLOB_URL_BATCH_CONCURRENCY_ENV)
+        .unwrap_or_else(|| api_batch_concurrency(chunk_count))
+        .clamp(1, chunk_count)
+}
+
 fn derive_api_base_urls(configured_base_url: &str) -> (String, String) {
     let configured = configured_base_url.trim().trim_end_matches('/');
     let default = crate::config::Config::default_api_url_value()
@@ -1645,6 +1916,48 @@ mod tests {
 
         let larger = api_batch_concurrency(32);
         assert!((1..=32).contains(&larger));
+    }
+
+    #[test]
+    fn test_blob_check_batch_max_env_override() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+
+        std::env::set_var(BLOB_CHECK_BATCH_MAX_ENV, "7");
+        assert_eq!(blob_check_batch_max(), 7);
+        std::env::remove_var(BLOB_CHECK_BATCH_MAX_ENV);
+        assert_eq!(blob_check_batch_max(), BLOB_CHECK_BATCH_MAX);
+    }
+
+    #[test]
+    fn test_blob_url_batch_max_env_override() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+
+        std::env::set_var(BLOB_URL_BATCH_MAX_ENV, "9");
+        assert_eq!(blob_url_batch_max(), 9);
+        std::env::remove_var(BLOB_URL_BATCH_MAX_ENV);
+        assert_eq!(blob_url_batch_max(), BLOB_URL_BATCH_MAX);
+    }
+
+    #[test]
+    fn test_blob_check_batch_concurrency_env_override() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+
+        std::env::set_var(BLOB_CHECK_BATCH_CONCURRENCY_ENV, "16");
+        assert_eq!(blob_check_batch_concurrency(4), 4);
+        std::env::remove_var(BLOB_CHECK_BATCH_CONCURRENCY_ENV);
+    }
+
+    #[test]
+    fn test_blob_url_batch_concurrency_env_override() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+
+        std::env::set_var(BLOB_URL_BATCH_CONCURRENCY_ENV, "3");
+        assert_eq!(blob_url_batch_concurrency(10), 3);
+        std::env::remove_var(BLOB_URL_BATCH_CONCURRENCY_ENV);
     }
 
     #[test]

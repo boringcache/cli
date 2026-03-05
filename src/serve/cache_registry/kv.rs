@@ -22,6 +22,7 @@ use crate::cas_transport::upload_payload;
 use crate::error::BoringCacheError;
 use crate::manifest::EntryType;
 use crate::progress::TransferProgress;
+use crate::request_metrics;
 use crate::serve::state::{
     diagnostics_enabled, AppState, BlobReadHandle, KvFlushingSnapshot, KvReplicationWork,
     KV_BACKLOG_POLICY,
@@ -57,7 +58,16 @@ const KV_RESOLVE_HIT_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 const KV_FETCH_POINTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_BLOB_PRELOAD_MAX_BLOBS: usize = 2_000;
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
+const KV_BLOB_PRELOAD_MAX_BLOBS_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_BATCH_MAX";
+const KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_MAX_BLOB_BYTES";
+const KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV: &str =
+    "BORINGCACHE_BLOB_PREFETCH_MAX_INFLIGHT_BYTES";
 const KV_BLOB_PRELOAD_SKIP_USED_PCT: u64 = 95;
+const SERVE_METRIC_SOURCE: &str = "serve";
+const SERVE_PRELOAD_INDEX_OPERATION: &str = "cache_preload_index_fetch";
+const SERVE_PREFETCH_OPERATION: &str = "blob_prefetch_cycle";
+const SERVE_PRELOAD_INDEX_PATH: &str = "/serve/cache_registry/preload-index";
+const SERVE_PREFETCH_PATH: &str = "/serve/cache_registry/prefetch";
 const LOOKUP_REFRESH_FLIGHT_KEY: &str = "lookup_refresh";
 static KV_BLOB_DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -72,6 +82,63 @@ fn kv_trace(namespace: KvNamespace, scoped_key: &str, stage: &str) {
     }
     let truncated = scoped_key.get(..96).unwrap_or(scoped_key);
     eprintln!("KV TRACE stage={stage} key={truncated}");
+}
+
+fn emit_serve_event(operation: &'static str, path: &'static str, details: String) {
+    request_metrics::emit(request_metrics::RequestMetric::event(
+        SERVE_METRIC_SOURCE,
+        operation,
+        "EVENT",
+        path.to_string(),
+        details,
+    ));
+}
+
+fn emit_serve_phase_metric(
+    operation: &'static str,
+    path: &'static str,
+    status: u16,
+    duration_ms: u64,
+    batch_size: Option<u64>,
+) {
+    request_metrics::emit(request_metrics::RequestMetric::success(
+        SERVE_METRIC_SOURCE,
+        operation,
+        "PHASE",
+        path.to_string(),
+        status,
+        duration_ms,
+        None,
+        None,
+        None,
+        None,
+        batch_size,
+        None,
+    ));
+}
+
+fn parse_positive_usize_env(name: &str) -> Option<usize> {
+    let raw = std::env::var(name).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<usize>() {
+        Ok(value) if value > 0 => Some(value),
+        _ => None,
+    }
+}
+
+fn parse_positive_u64_env(name: &str) -> Option<u64> {
+    let raw = std::env::var(name).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<u64>() {
+        Ok(value) if value > 0 => Some(value),
+        _ => None,
+    }
 }
 
 fn kv_miss_generation(state: &AppState, registry_root_tag: &str) -> u64 {
@@ -1937,6 +2004,12 @@ pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
 }
 
 pub(crate) async fn preload_kv_index(state: &AppState) {
+    emit_serve_event(
+        SERVE_PRELOAD_INDEX_OPERATION,
+        SERVE_PRELOAD_INDEX_PATH,
+        "start".to_string(),
+    );
+    let started_at = std::time::Instant::now();
     match load_existing_index_with_fallback(state, true).await {
         Ok((entries, blob_order, Some(cache_entry_id), _manifest_root_digest))
             if !entries.is_empty() =>
@@ -1946,6 +2019,18 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
                 let mut published = state.kv_published_index.write().await;
                 if published.entry_count() > 0 {
                     eprintln!("KV index preload: skipped, flush already published");
+                    emit_serve_phase_metric(
+                        SERVE_PRELOAD_INDEX_OPERATION,
+                        SERVE_PRELOAD_INDEX_PATH,
+                        208,
+                        started_at.elapsed().as_millis() as u64,
+                        Some(count as u64),
+                    );
+                    emit_serve_event(
+                        SERVE_PRELOAD_INDEX_OPERATION,
+                        SERVE_PRELOAD_INDEX_PATH,
+                        "skipped: existing in-memory index".to_string(),
+                    );
                     return;
                 }
                 published.update(
@@ -1956,6 +2041,18 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
             }
             clear_root_tag_misses(state);
             eprintln!("KV index preloaded: {count} entries, resolving download URLs...");
+            emit_serve_phase_metric(
+                SERVE_PRELOAD_INDEX_OPERATION,
+                SERVE_PRELOAD_INDEX_PATH,
+                200,
+                started_at.elapsed().as_millis() as u64,
+                Some(count as u64),
+            );
+            emit_serve_event(
+                SERVE_PRELOAD_INDEX_OPERATION,
+                SERVE_PRELOAD_INDEX_PATH,
+                format!("loaded entries={count}"),
+            );
             preload_download_urls(state, &cache_entry_id).await;
             spawn_preload_blobs(state, &cache_entry_id);
         }
@@ -1965,9 +2062,30 @@ pub(crate) async fn preload_kv_index(state: &AppState) {
                 published.set_empty_incomplete();
             }
             eprintln!("KV index preload: no existing entries");
+            emit_serve_phase_metric(
+                SERVE_PRELOAD_INDEX_OPERATION,
+                SERVE_PRELOAD_INDEX_PATH,
+                204,
+                started_at.elapsed().as_millis() as u64,
+                Some(0),
+            );
+            emit_serve_event(
+                SERVE_PRELOAD_INDEX_OPERATION,
+                SERVE_PRELOAD_INDEX_PATH,
+                "empty index".to_string(),
+            );
         }
         Err(e) => {
             log::warn!("KV index preload failed: {e:?}");
+            request_metrics::emit(request_metrics::RequestMetric::failure(
+                SERVE_METRIC_SOURCE,
+                SERVE_PRELOAD_INDEX_OPERATION,
+                "PHASE",
+                SERVE_PRELOAD_INDEX_PATH.to_string(),
+                format!("{e:?}"),
+                started_at.elapsed().as_millis() as u64,
+                None,
+            ));
         }
     }
 }
@@ -2198,6 +2316,14 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
         return;
     }
 
+    let batch_size = blobs.len() as u64;
+    emit_serve_event(
+        SERVE_PRELOAD_INDEX_OPERATION,
+        SERVE_PRELOAD_INDEX_PATH,
+        format!("resolve_download_urls:start batch_size={batch_size}"),
+    );
+    let started_at = std::time::Instant::now();
+
     match state
         .api_client
         .blob_download_urls(&state.workspace, cache_entry_id, &blobs)
@@ -2213,19 +2339,51 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
             let mut published = state.kv_published_index.write().await;
             published.set_download_urls(urls);
             eprintln!("KV index preload: resolved {url_count} download URLs");
+            emit_serve_phase_metric(
+                SERVE_PRELOAD_INDEX_OPERATION,
+                SERVE_PRELOAD_INDEX_PATH,
+                200,
+                started_at.elapsed().as_millis() as u64,
+                Some(batch_size),
+            );
+            emit_serve_event(
+                SERVE_PRELOAD_INDEX_OPERATION,
+                SERVE_PRELOAD_INDEX_PATH,
+                format!("resolve_download_urls:done resolved={url_count}"),
+            );
         }
         Err(e) => {
             log::warn!("KV index preload: failed to resolve download URLs: {e}");
+            request_metrics::emit(request_metrics::RequestMetric::failure(
+                SERVE_METRIC_SOURCE,
+                SERVE_PRELOAD_INDEX_OPERATION,
+                "PHASE",
+                SERVE_PRELOAD_INDEX_PATH.to_string(),
+                e.to_string(),
+                started_at.elapsed().as_millis() as u64,
+                None,
+            ));
         }
     }
 }
 
 fn kv_blob_preload_max_blob_bytes() -> u64 {
-    KV_BLOB_PRELOAD_MAX_BLOB_BYTES
+    parse_positive_u64_env(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV)
+        .unwrap_or(KV_BLOB_PRELOAD_MAX_BLOB_BYTES)
 }
 
 fn kv_blob_preload_max_blobs() -> usize {
-    KV_BLOB_PRELOAD_MAX_BLOBS
+    parse_positive_usize_env(KV_BLOB_PRELOAD_MAX_BLOBS_ENV).unwrap_or(KV_BLOB_PRELOAD_MAX_BLOBS)
+}
+
+fn kv_blob_prefetch_max_inflight_bytes(cache_max: u64) -> u64 {
+    if let Some(configured) = parse_positive_u64_env(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV) {
+        return configured;
+    }
+    // Keep defaults conservative for small nodes while still scaling on larger caches.
+    cache_max
+        .saturating_div(4)
+        .clamp(64 * 1024 * 1024, 512 * 1024 * 1024)
 }
 
 fn should_skip_blob_preload(used_bytes: u64, max_bytes: u64) -> bool {
@@ -2269,7 +2427,18 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         );
         return;
     }
-    let mut preload_budget = cache_max.saturating_sub(cache_used);
+    let inflight_budget_cap = kv_blob_prefetch_max_inflight_bytes(cache_max);
+    let mut preload_budget = cache_max
+        .saturating_sub(cache_used)
+        .min(inflight_budget_cap);
+    if preload_budget == 0 {
+        emit_serve_event(
+            SERVE_PREFETCH_OPERATION,
+            SERVE_PREFETCH_PATH,
+            "skipped: prefetch budget is zero".to_string(),
+        );
+        return;
+    }
     let mut candidates = {
         let published = state.kv_published_index.read().await;
         let mut values = Vec::new();
@@ -2311,14 +2480,26 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         return;
     }
 
+    let scheduled = targets.len();
+    let scheduled_bytes = targets
+        .iter()
+        .map(|(blob, _)| blob.size_bytes)
+        .fold(0u64, |acc, size| acc.saturating_add(size));
+    emit_serve_event(
+        SERVE_PREFETCH_OPERATION,
+        SERVE_PREFETCH_PATH,
+        format!(
+            "start: scheduled={scheduled} scheduled_bytes={scheduled_bytes} max_blobs={max_blobs} max_blob_bytes={max_blob_bytes} inflight_budget_cap={inflight_budget_cap}"
+        ),
+    );
+    let prefetch_started_at = std::time::Instant::now();
+
     let prefetch_semaphore = state.blob_prefetch_semaphore.clone();
     let mut tasks = tokio::task::JoinSet::new();
-    let mut scheduled = 0usize;
     for (blob, url) in targets {
         let state = state.clone();
         let cache_entry_id = cache_entry_id.to_string();
         let prefetch_semaphore = prefetch_semaphore.clone();
-        scheduled = scheduled.saturating_add(1);
         tasks.spawn(async move {
             let _permit = prefetch_semaphore
                 .acquire_owned()
@@ -2344,6 +2525,28 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
             }
         }
     }
+
+    let status = if failures == 0 {
+        200
+    } else if inserted > 0 {
+        207
+    } else {
+        500
+    };
+    emit_serve_phase_metric(
+        SERVE_PREFETCH_OPERATION,
+        SERVE_PREFETCH_PATH,
+        status,
+        prefetch_started_at.elapsed().as_millis() as u64,
+        Some(scheduled as u64),
+    );
+    emit_serve_event(
+        SERVE_PREFETCH_OPERATION,
+        SERVE_PREFETCH_PATH,
+        format!(
+            "done: inserted={inserted} scheduled={scheduled} failures={failures} scheduled_bytes={scheduled_bytes}"
+        ),
+    );
 
     if inserted > 0 || failures > 0 {
         eprintln!(
@@ -3193,6 +3396,9 @@ async fn write_body_to_temp_file(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn classify_flush_error_treats_precondition_failed_as_conflict() {
@@ -3415,5 +3621,28 @@ mod tests {
     fn should_skip_blob_preload_when_cache_capacity_is_invalid() {
         assert!(should_skip_blob_preload(0, 0));
         assert!(should_skip_blob_preload(10, 0));
+    }
+
+    #[test]
+    fn kv_blob_preload_limits_allow_env_overrides() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+
+        std::env::set_var(KV_BLOB_PRELOAD_MAX_BLOBS_ENV, "32");
+        std::env::set_var(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV, "1048576");
+        assert_eq!(kv_blob_preload_max_blobs(), 32);
+        assert_eq!(kv_blob_preload_max_blob_bytes(), 1_048_576);
+        std::env::remove_var(KV_BLOB_PRELOAD_MAX_BLOBS_ENV);
+        std::env::remove_var(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV);
+    }
+
+    #[test]
+    fn kv_blob_prefetch_max_inflight_bytes_uses_env_override() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+
+        std::env::set_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV, "12345");
+        assert_eq!(kv_blob_prefetch_max_inflight_bytes(1024 * 1024), 12_345);
+        std::env::remove_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV);
     }
 }

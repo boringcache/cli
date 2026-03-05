@@ -21,6 +21,8 @@ use crate::tag_utils::TagResolver;
 
 const KV_REFRESH_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const KV_REPLICATION_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const BLOB_DOWNLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY";
+const CACHE_PREFETCH_CONCURRENCY_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_CONCURRENCY";
 
 fn spawn_runtime_watchdog(
     cache_ops: Arc<cache_registry::cache_ops::Aggregator>,
@@ -682,12 +684,30 @@ fn auto_transfer_concurrency() -> usize {
     resources.recommended_download_concurrency(is_ci)
 }
 
+fn parse_positive_usize_env(name: &str) -> Option<usize> {
+    let raw = std::env::var(name).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<usize>() {
+        Ok(value) if value > 0 => Some(value),
+        _ => None,
+    }
+}
+
 fn blob_download_concurrency() -> (usize, bool) {
+    if let Some(configured) = parse_positive_usize_env(BLOB_DOWNLOAD_CONCURRENCY_ENV) {
+        return (configured, true);
+    }
     (auto_transfer_concurrency(), false)
 }
 
 fn blob_prefetch_concurrency(download_concurrency: usize) -> (usize, bool) {
     let max_download = download_concurrency.max(1);
+    if let Some(configured) = parse_positive_usize_env(CACHE_PREFETCH_CONCURRENCY_ENV) {
+        return (configured.min(max_download), true);
+    }
     let adaptive = (max_download / 4).clamp(2, 16).min(max_download);
     (adaptive.max(1), false)
 }
