@@ -19,6 +19,7 @@ RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 BUILDER="bc-e2e-${RUN_ID}-${RUN_ATTEMPT}"
 CACHE_TAG="${E2E_TAG_PREFIX}-docker-buildkit-${RUN_ID}-${RUN_ATTEMPT}"
 CACHE_REF="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG}"
+CACHE_REF_IMPLICIT="localhost:${PORT}/boringcache-e2e/cache"
 CACHE_TAG_ALIAS="${CACHE_TAG}-alias"
 CACHE_REF_ALIAS="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG_ALIAS}"
 REGISTRY_ROOT_TAG="${E2E_TAG_PREFIX}-docker-buildkit-registry-${RUN_ID}-${RUN_ATTEMPT}"
@@ -304,6 +305,15 @@ assert_registry_import_succeeded() {
   fi
 }
 
+assert_import_reference_seen() {
+  local log_file="$1"
+  local reference="$2"
+  if ! grep -Fq "importing cache manifest from ${reference}" "${log_file}"; then
+    echo "expected cache import reference '${reference}' in ${log_file}"
+    exit 1
+  fi
+}
+
 fetch_manifest_with_retry() {
   local reference="$1"
   local manifest_file="$2"
@@ -406,18 +416,31 @@ assert_cached "fourth-build-after-restart.log"
 assert_registry_import_succeeded "fourth-build-after-restart.log"
 
 echo
-echo "=== Phase 3: Alias publish and alias warm import ==="
-run_build_with_retry "fifth-build-alias-export.log" \
+echo "=== Phase 3: Implicit latest cache import compatibility ==="
+run_build_with_retry "fifth-build-implicit-export.log" \
+  --no-cache \
+  --cache-to "type=registry,ref=${CACHE_REF_IMPLICIT},mode=max"
+reset_builder
+run_build_with_retry "sixth-build-implicit-warm.log" \
+  --cache-from "type=registry,ref=${CACHE_REF_IMPLICIT}" \
+  --cache-to "type=registry,ref=${CACHE_REF_IMPLICIT},mode=max"
+assert_cached "sixth-build-implicit-warm.log"
+assert_registry_import_succeeded "sixth-build-implicit-warm.log"
+assert_import_reference_seen "sixth-build-implicit-warm.log" "${CACHE_REF_IMPLICIT}"
+
+echo
+echo "=== Phase 4: Alias publish and alias warm import ==="
+run_build_with_retry "seventh-build-alias-export.log" \
   --cache-from "type=registry,ref=${CACHE_REF}" \
   --cache-to "type=registry,ref=${CACHE_REF_ALIAS},mode=max"
-assert_registry_import_succeeded "fifth-build-alias-export.log"
-run_build_with_retry "sixth-build-alias-warm.log" \
+assert_registry_import_succeeded "seventh-build-alias-export.log"
+run_build_with_retry "eighth-build-alias-warm.log" \
   --cache-from "type=registry,ref=${CACHE_REF_ALIAS}" \
   --cache-to "type=registry,ref=${CACHE_REF_ALIAS},mode=max"
-assert_cached "sixth-build-alias-warm.log"
-assert_registry_import_succeeded "sixth-build-alias-warm.log"
+assert_cached "eighth-build-alias-warm.log"
+assert_registry_import_succeeded "eighth-build-alias-warm.log"
 
-for tag in "${CACHE_TAG}" "${CACHE_TAG_ALIAS}"; do
+for tag in "${CACHE_TAG}" "latest" "${CACHE_TAG_ALIAS}"; do
   manifest_file="manifest-${tag}.json"
   LOG_FILES+=("${manifest_file}")
   fetch_manifest_with_retry "${tag}" "${manifest_file}"

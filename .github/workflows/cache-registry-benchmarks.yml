@@ -601,7 +601,8 @@ jobs:
             docker-buildkit)
               assert_log_contains "=== Phase 1: Cold build and warm import ===" "phase1"
               assert_log_contains "=== Phase 2: Restart proxy and verify persisted warm import ===" "phase2"
-              assert_log_contains "=== Phase 3: Alias publish and alias warm import ===" "phase3"
+              assert_log_contains "=== Phase 3: Implicit latest cache import compatibility ===" "phase3"
+              assert_log_contains "=== Phase 4: Alias publish and alias warm import ===" "phase4"
               assert_log_contains "Docker buildkit registry e2e passed" "success"
               ;;
             *)
