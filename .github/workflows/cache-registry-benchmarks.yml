@@ -172,6 +172,8 @@ jobs:
           set -euo pipefail
           if [[ "${{ matrix.phase }}" == "efficacy" ]]; then
             export BUDGET_EFFICACY_RUST_HIT_RATE_MIN="95"
+            export BUDGET_EFFICACY_CACHE_READ_ERRORS_MAX="0"
+            export BUDGET_EFFICACY_CACHE_TIMEOUTS_MAX="0"
             export BUDGET_EFFICACY_PROXY_429_MAX="0"
             export BUDGET_EFFICACY_PROXY_CONFLICTS_MAX="0"
             if [[ "${{ matrix.sccache_backend }}" == "proxy" ]]; then
@@ -191,6 +193,8 @@ jobs:
           fi
           if [[ "${{ matrix.phase }}" == "stress" ]]; then
             export BUDGET_STRESS_RUST_HIT_RATE_MIN="70"
+            export BUDGET_STRESS_CACHE_READ_ERRORS_MAX="0"
+            export BUDGET_STRESS_CACHE_TIMEOUTS_MAX="0"
             export BUDGET_STRESS_SCCACHE_STARTUP_TIMEOUTS_MAX="0"
             export BUDGET_STRESS_SCCACHE_UNEXPECTED_SHUTDOWNS_MAX="0"
             export BUDGET_STRESS_LOCK_WAITS_MAX="0"
@@ -521,6 +525,10 @@ jobs:
               BINARY="$BIN_PATH" \
               LOG_DIR="$LOG_DIR" \
               TAG="$TAG" \
+              BAZEL_BUILD_JOBS="256" \
+              BAZEL_REMOTE_MAX_CONNECTIONS="64" \
+              STRESS_ACTION_COUNT="96" \
+              BUDGET_REMOTE_TIMEOUTS_MAX="0" \
               ./scripts/e2e-bazel-real-test.sh | tee "$LOG_DIR/run.log"
               ;;
             dual-proxy)
@@ -590,6 +598,7 @@ jobs:
               assert_log_contains "=== Phase 1: Cold build (expect local execution + upload) ===" "phase1"
               assert_log_contains "=== Phase 2: Warm build with isolated output root (expect remote hit) ===" "phase2"
               assert_log_contains "=== Phase 3: Restart proxy and verify persisted remote hit ===" "phase3"
+              assert_log_contains "=== Phase 4: High-concurrency stress warm (expect remote hits, no connect timeouts) ===" "phase4"
               assert_log_contains "Bazel real-client e2e passed" "success"
               ;;
             dual-proxy)

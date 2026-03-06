@@ -779,14 +779,31 @@ fn should_suppress_lookup_refresh_due_to_pending_or_flushing_values(
     should_suppress_lookup_refresh_due_to_pending_values(has_pending_entries, last_put_ms, now_ms)
 }
 
-fn count_missing_published_keys_in_backend(
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PublishedGapCounts {
+    missing_keys: usize,
+    mismatched_keys: usize,
+}
+
+fn count_published_gaps_in_backend(
     backend_entries: &BTreeMap<String, BlobDescriptor>,
     published_entries: &HashMap<String, BlobDescriptor>,
-) -> usize {
-    published_entries
-        .keys()
-        .filter(|key| !backend_entries.contains_key(*key))
-        .count()
+) -> PublishedGapCounts {
+    let mut counts = PublishedGapCounts::default();
+    for (key, published_blob) in published_entries {
+        match backend_entries.get(key) {
+            Some(backend_blob)
+                if backend_blob.digest == published_blob.digest
+                    && backend_blob.size_bytes == published_blob.size_bytes => {}
+            Some(_) => {
+                counts.mismatched_keys = counts.mismatched_keys.saturating_add(1);
+            }
+            None => {
+                counts.missing_keys = counts.missing_keys.saturating_add(1);
+            }
+        }
+    }
+    counts
 }
 
 async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), RegistryError> {
@@ -807,15 +824,17 @@ async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), Regi
         let mut published = state.kv_published_index.write().await;
         let published_entries = published.entries_snapshot();
         let published_entry_count = published_entries.len();
-        let missing_published_keys =
-            count_missing_published_keys_in_backend(&entries, published_entries.as_ref());
+        let gap_counts = count_published_gaps_in_backend(&entries, published_entries.as_ref());
 
-        if published_entry_count > 0 && missing_published_keys > 0 {
+        if published_entry_count > 0
+            && (gap_counts.missing_keys > 0 || gap_counts.mismatched_keys > 0)
+        {
             log::warn!(
-                "KV lookup refresh: preserving in-memory index (backend={} published={} missing_keys={})",
+                "KV lookup refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
                 backend_entry_count,
                 published_entry_count,
-                missing_published_keys
+                gap_counts.missing_keys,
+                gap_counts.mismatched_keys
             );
             published.touch_refresh();
         } else if entries.is_empty() {
@@ -2214,6 +2233,9 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
     if state.kv_flush_scheduled.load(Ordering::Acquire) {
         return;
     }
+    if state.kv_flushing.read().await.is_some() {
+        return;
+    }
 
     let mut live_hit: Option<(String, CacheResolutionEntry)> = None;
     for candidate_tag in kv_root_tags(state) {
@@ -2238,6 +2260,13 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             let published = state.kv_published_index.read().await;
             published.entry_count() > 0
         };
+        if had_entries {
+            let mut published = state.kv_published_index.write().await;
+            published.touch_refresh();
+            clear_root_tag_misses(state);
+            eprintln!("KV index refresh: preserving in-memory index (no backend index)");
+            return;
+        }
         {
             let mut published = state.kv_published_index.write().await;
             published.set_empty();
@@ -2316,11 +2345,38 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         .collect();
     let blob_order = pointer_blob_order(&pointer, &entry_map);
 
+    let (published_entries, published_entry_count) = {
+        let published = state.kv_published_index.read().await;
+        (published.entries_snapshot(), published.entry_count())
+    };
+    let gap_counts = count_published_gaps_in_backend(&entry_map, published_entries.as_ref());
+    if published_entry_count > 0 && (gap_counts.missing_keys > 0 || gap_counts.mismatched_keys > 0)
+    {
+        let mut published = state.kv_published_index.write().await;
+        published.touch_refresh();
+        clear_root_tag_misses(state);
+        eprintln!(
+            "KV index refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
+            entry_map.len(),
+            published_entry_count,
+            gap_counts.missing_keys,
+            gap_counts.mismatched_keys
+        );
+        return;
+    }
+
     if entries.is_empty() {
         let had_entries = {
             let published = state.kv_published_index.read().await;
             published.entry_count() > 0
         };
+        if had_entries {
+            let mut published = state.kv_published_index.write().await;
+            published.touch_refresh();
+            clear_root_tag_misses(state);
+            eprintln!("KV index refresh: preserving in-memory index (empty pointer)");
+            return;
+        }
         {
             let mut published = state.kv_published_index.write().await;
             published.set_empty();
@@ -3895,7 +3951,7 @@ mod tests {
     }
 
     #[test]
-    fn count_missing_published_keys_in_backend_reports_subset_gap() {
+    fn count_published_gaps_in_backend_reports_subset_gap() {
         let mut backend = BTreeMap::new();
         backend.insert(
             "k1".to_string(),
@@ -3922,13 +3978,16 @@ mod tests {
         );
 
         assert_eq!(
-            count_missing_published_keys_in_backend(&backend, &published),
-            1
+            count_published_gaps_in_backend(&backend, &published),
+            PublishedGapCounts {
+                missing_keys: 1,
+                mismatched_keys: 0
+            }
         );
     }
 
     #[test]
-    fn count_missing_published_keys_in_backend_is_zero_for_superset() {
+    fn count_published_gaps_in_backend_reports_digest_mismatch() {
         let mut backend = BTreeMap::new();
         backend.insert(
             "k1".to_string(),
@@ -3955,8 +4014,11 @@ mod tests {
         );
 
         assert_eq!(
-            count_missing_published_keys_in_backend(&backend, &published),
-            0
+            count_published_gaps_in_backend(&backend, &published),
+            PublishedGapCounts {
+                missing_keys: 0,
+                mismatched_keys: 1
+            }
         );
     }
 

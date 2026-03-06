@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use axum::serve::ListenerExt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::net::TcpListener;
+use tokio::net::{lookup_host, TcpListener, TcpSocket};
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::api::client::ApiClient;
@@ -24,6 +24,8 @@ const KV_REFRESH_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 const KV_REPLICATION_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 const BLOB_DOWNLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY";
 const CACHE_PREFETCH_CONCURRENCY_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_CONCURRENCY";
+const TCP_LISTEN_BACKLOG_ENV: &str = "BORINGCACHE_TCP_LISTEN_BACKLOG";
+const DEFAULT_TCP_LISTEN_BACKLOG: u32 = 1024;
 
 fn spawn_runtime_watchdog(
     cache_ops: Arc<cache_registry::cache_ops::Aggregator>,
@@ -246,7 +248,22 @@ async fn build_server_runtime(
     };
 
     let addr = format!("{host}:{port}");
-    let listener = TcpListener::bind(&addr).await?;
+    let mut resolved = lookup_host(&addr)
+        .await
+        .with_context(|| format!("failed to resolve bind address {addr}"))?;
+    let bind_addr = resolved
+        .next()
+        .with_context(|| format!("no bind addresses resolved for {addr}"))?;
+
+    let listen_backlog = tcp_listen_backlog();
+    let socket = if bind_addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(bind_addr)?;
+    let listener = socket.listen(listen_backlog)?;
 
     eprintln!("BoringCache cache registry proxy listening on {addr}");
     eprintln!("  Workspace: {workspace}");
@@ -301,6 +318,14 @@ async fn build_server_runtime(
         }
     );
     eprintln!("  KV backlog policy: {KV_BACKLOG_POLICY}");
+    eprintln!(
+        "  TCP listen backlog: {listen_backlog} ({})",
+        if std::env::var(TCP_LISTEN_BACKLOG_ENV).is_ok() {
+            "env"
+        } else {
+            "default"
+        }
+    );
     for dir_name in ["boringcache-kv-blobs", "boringcache-uploads"] {
         let stale_dir = std::env::temp_dir().join(dir_name);
         if stale_dir.exists() {
@@ -716,6 +741,22 @@ fn parse_positive_usize_env(name: &str) -> Option<usize> {
     }
 }
 
+fn parse_positive_u32_env(name: &str) -> Option<u32> {
+    let raw = std::env::var(name).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<u32>() {
+        Ok(value) if value > 0 => Some(value),
+        _ => None,
+    }
+}
+
+fn tcp_listen_backlog() -> u32 {
+    parse_positive_u32_env(TCP_LISTEN_BACKLOG_ENV).unwrap_or(DEFAULT_TCP_LISTEN_BACKLOG)
+}
+
 fn blob_download_concurrency() -> (usize, bool) {
     if let Some(configured) = parse_positive_usize_env(BLOB_DOWNLOAD_CONCURRENCY_ENV) {
         return (configured, true);
@@ -743,7 +784,21 @@ async fn flush_pending_on_shutdown(state: &AppState) {
             pending.entry_count()
         };
         if pending_entries == 0 {
-            return;
+            // A running flush drains kv_pending before publish finalization.
+            // Wait for any in-flight flush to finish so shutdown cannot exit
+            // mid-publish and lose persisted warm state for the next proxy start.
+            {
+                let _running_flush = state.kv_flush_lock.lock().await;
+            }
+
+            let pending_after_flush = {
+                let pending = state.kv_pending.read().await;
+                pending.entry_count()
+            };
+            if pending_after_flush == 0 {
+                return;
+            }
+            continue;
         }
 
         if let Some(_flush_guard) = cache_registry::try_schedule_flush(state) {
@@ -885,5 +940,38 @@ mod tests {
             &mut consecutive_failures,
         );
         assert_eq!(consecutive_failures, 0);
+    }
+
+    #[test]
+    fn tcp_listen_backlog_defaults_when_unset_or_invalid() {
+        unsafe {
+            std::env::remove_var(TCP_LISTEN_BACKLOG_ENV);
+        }
+        assert_eq!(tcp_listen_backlog(), DEFAULT_TCP_LISTEN_BACKLOG);
+
+        unsafe {
+            std::env::set_var(TCP_LISTEN_BACKLOG_ENV, "0");
+        }
+        assert_eq!(tcp_listen_backlog(), DEFAULT_TCP_LISTEN_BACKLOG);
+
+        unsafe {
+            std::env::set_var(TCP_LISTEN_BACKLOG_ENV, "not-a-number");
+        }
+        assert_eq!(tcp_listen_backlog(), DEFAULT_TCP_LISTEN_BACKLOG);
+
+        unsafe {
+            std::env::remove_var(TCP_LISTEN_BACKLOG_ENV);
+        }
+    }
+
+    #[test]
+    fn tcp_listen_backlog_honors_positive_env_override() {
+        unsafe {
+            std::env::set_var(TCP_LISTEN_BACKLOG_ENV, "4096");
+        }
+        assert_eq!(tcp_listen_backlog(), 4096);
+        unsafe {
+            std::env::remove_var(TCP_LISTEN_BACKLOG_ENV);
+        }
     }
 }

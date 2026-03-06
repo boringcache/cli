@@ -601,6 +601,27 @@ async fn resolve_manifest(
 
     let content_type = detect_manifest_content_type(&index_json);
     let digest = cas_oci::prefixed_sha256_digest(&index_json);
+    let resolved_entry_tag = entry.tag.clone();
+    let cached = Arc::new(OciManifestCacheEntry {
+        index_json: index_json.clone(),
+        content_type: content_type.clone(),
+        manifest_digest: digest.clone(),
+        cache_entry_id: cache_entry_id.clone(),
+        blobs: blob_descriptors.clone(),
+        name: name.to_string(),
+        inserted_at: Instant::now(),
+    });
+    let mut cache_keys = HashSet::new();
+    for tag in &tags {
+        cache_keys.insert(tag.clone());
+    }
+    cache_keys.insert(resolved_entry_tag);
+    cache_keys.insert(digest_tag(&digest));
+    for cache_key in cache_keys {
+        state
+            .oci_manifest_cache
+            .insert(cache_key, Arc::clone(&cached));
+    }
 
     Ok((index_json, content_type, digest))
 }
