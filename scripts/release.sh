@@ -124,7 +124,7 @@ verify_install_fallback_version() {
     local file="$1"
     local expected="$2"
     local actual
-    actual="$(sed -n 's/^[[:space:]]*local fallback_version=\"\\(v[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*\\)\"/\\1/p' "$file" | head -1)"
+    actual="$(sed -n -E 's/^[[:space:]]*local fallback_version=\"(v[0-9]+\.[0-9]+\.[0-9]+)\"/\1/p' "$file" | head -1)"
     if [[ "$actual" != "$expected" ]]; then
         log_error "Fallback version update failed for ${file}. Expected ${expected}, got ${actual:-<missing>}"
         exit 1
