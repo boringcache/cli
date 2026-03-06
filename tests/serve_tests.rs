@@ -878,6 +878,189 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
 }
 
 #[tokio::test]
+async fn test_manifest_put_by_digest_binds_latest_alias() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
+    let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
+    let primary_tag = digest_tag(&manifest_digest);
+    let latest_alias_tag = ref_tag("my-cache", "latest");
+
+    let primary_save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": primary_tag
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": primary_tag,
+                "cache_entry_id": "entry-primary",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 0,
+                "blob_total_size_bytes": 0,
+                "cas_layout": "oci-v1",
+                "manifest_upload_url": format!("{}/uploads/entry-primary-manifest", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let pointer_upload_mock = server
+        .mock("PUT", "/uploads/entry-primary-manifest")
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let primary_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&primary_tag)
+    );
+    let primary_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&primary_tag)
+    );
+    let primary_pointer_mock = server
+        .mock("GET", primary_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "3",
+                "cache_entry_id": "entry-primary",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let primary_confirm_mock = server
+        .mock("PUT", primary_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "3")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "3",
+                "status": "ok",
+                "cache_entry_id": "entry-primary"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let latest_alias_save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": latest_alias_tag
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": latest_alias_tag,
+                "cache_entry_id": "entry-latest",
+                "exists": true,
+                "storage_mode": "cas",
+                "blob_count": 0,
+                "blob_total_size_bytes": 0,
+                "cas_layout": "oci-v1",
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let latest_alias_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&latest_alias_tag)
+    );
+    let latest_alias_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&latest_alias_tag)
+    );
+    let latest_alias_pointer_mock = server
+        .mock("GET", latest_alias_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "4",
+                "cache_entry_id": "entry-latest",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let latest_alias_confirm_mock = server
+        .mock("PUT", latest_alias_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "4")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "4",
+                "status": "ok",
+                "cache_entry_id": "entry-latest"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v2/my-cache/manifests/{manifest_digest}"))
+            .body(Body::from(manifest_body))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    primary_save_mock.assert_async().await;
+    pointer_upload_mock.assert_async().await;
+    primary_pointer_mock.assert_async().await;
+    primary_confirm_mock.assert_async().await;
+    latest_alias_save_mock.assert_async().await;
+    latest_alias_pointer_mock.assert_async().await;
+    latest_alias_confirm_mock.assert_async().await;
+}
+
+#[tokio::test]
 async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;

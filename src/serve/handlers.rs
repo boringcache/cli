@@ -672,6 +672,7 @@ fn alias_tags_for_manifest(
     primary_tag: &str,
     manifest_digest: &str,
     configured_human_tags: &[String],
+    additional_aliases: &[String],
 ) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut aliases = Vec::new();
@@ -684,6 +685,12 @@ fn alias_tags_for_manifest(
     for human_tag in configured_human_tags {
         if human_tag != primary_tag && seen.insert(human_tag.clone()) {
             aliases.push(human_tag.clone());
+        }
+    }
+
+    for alias in additional_aliases {
+        if alias != primary_tag && seen.insert(alias.clone()) {
+            aliases.push(alias.clone());
         }
     }
 
@@ -1686,6 +1693,14 @@ async fn put_manifest(
     } else {
         scoped_save_tag(&state.tag_resolver, &name, &reference)?
     };
+    // BuildKit can publish manifest by digest while cache-from imports by tag
+    // (defaulting to `latest` when omitted). Bind `name:latest` so fresh importers
+    // resolve the just-published cache manifest.
+    let additional_aliases = if reference.starts_with("sha256:") {
+        vec![scoped_save_tag(&state.tag_resolver, &name, "latest")?]
+    } else {
+        Vec::new()
+    };
     let blob_count = blob_descriptors.len() as u64;
     let blob_total_size_bytes: u64 = blob_descriptors.iter().map(|b| b.size_bytes).sum();
     let total_size_bytes = blob_total_size_bytes + manifest_body.len() as u64;
@@ -1895,8 +1910,12 @@ async fn put_manifest(
                 .insert(digest_tag(&manifest_digest), Arc::clone(&cached));
         }
 
-        let alias_tags =
-            alias_tags_for_manifest(&tag, &manifest_digest, &state.configured_human_tags);
+        let alias_tags = alias_tags_for_manifest(
+            &tag,
+            &manifest_digest,
+            &state.configured_human_tags,
+            &additional_aliases,
+        );
         for alias_tag in alias_tags {
             if let Err(error) = bind_alias_tag(
                 &state,
@@ -2681,6 +2700,7 @@ mod tests {
             "oci_ref_primary",
             "sha256:abc123",
             &["posthog-docker-build".to_string()],
+            &[],
         );
         assert_eq!(
             tags,
@@ -2697,6 +2717,7 @@ mod tests {
             "oci_digest_abc123",
             "sha256:abc123",
             &["oci_digest_abc123".to_string()],
+            &[],
         );
         assert!(tags.is_empty());
     }
@@ -2711,6 +2732,7 @@ mod tests {
                 "posthog-stable".to_string(),
                 "posthog-build".to_string(),
             ],
+            &[],
         );
         assert_eq!(
             tags,
@@ -2719,6 +2741,24 @@ mod tests {
                 "posthog-build".to_string(),
                 "posthog-stable".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn alias_tags_include_additional_aliases() {
+        let tags = alias_tags_for_manifest(
+            "oci_digest_abc123",
+            "sha256:abc123",
+            &["posthog-build".to_string()],
+            &[
+                "oci_ref_latest".to_string(),
+                "posthog-build".to_string(),
+                "oci_ref_latest".to_string(),
+            ],
+        );
+        assert_eq!(
+            tags,
+            vec!["posthog-build".to_string(), "oci_ref_latest".to_string()]
         );
     }
 }
