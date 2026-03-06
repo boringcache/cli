@@ -732,17 +732,26 @@ async fn should_suppress_lookup_refresh_due_to_pending(state: &AppState) -> bool
         let pending = state.kv_pending.read().await;
         !pending.is_empty()
     };
-    if !has_pending_entries {
+    let has_flushing_entries = {
+        let flushing = state.kv_flushing.read().await;
+        flushing.is_some()
+    };
+    if !has_pending_entries && !has_flushing_entries {
         return false;
     }
 
     let last_put_ms = state.kv_last_put.load(Ordering::Acquire);
-    if last_put_ms == 0 {
+    if last_put_ms == 0 && !has_flushing_entries {
         return false;
     }
 
     let now_ms = crate::serve::state::unix_time_ms_now();
-    should_suppress_lookup_refresh_due_to_pending_values(has_pending_entries, last_put_ms, now_ms)
+    should_suppress_lookup_refresh_due_to_pending_or_flushing_values(
+        has_pending_entries,
+        has_flushing_entries,
+        last_put_ms,
+        now_ms,
+    )
 }
 
 fn should_suppress_lookup_refresh_due_to_pending_values(
@@ -758,6 +767,28 @@ fn should_suppress_lookup_refresh_due_to_pending_values(
     elapsed_ms < KV_PENDING_REFRESH_SUPPRESSION_WINDOW.as_millis() as u64
 }
 
+fn should_suppress_lookup_refresh_due_to_pending_or_flushing_values(
+    has_pending_entries: bool,
+    has_flushing_entries: bool,
+    last_put_ms: u64,
+    now_ms: u64,
+) -> bool {
+    if has_flushing_entries {
+        return true;
+    }
+    should_suppress_lookup_refresh_due_to_pending_values(has_pending_entries, last_put_ms, now_ms)
+}
+
+fn count_missing_published_keys_in_backend(
+    backend_entries: &BTreeMap<String, BlobDescriptor>,
+    published_entries: &HashMap<String, BlobDescriptor>,
+) -> usize {
+    published_entries
+        .keys()
+        .filter(|key| !backend_entries.contains_key(*key))
+        .count()
+}
+
 async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), RegistryError> {
     let (entries, blob_order, cache_entry_id, _) =
         match load_existing_index_with_fallback(state, true).await {
@@ -771,12 +802,31 @@ async fn refresh_published_index_for_lookup(state: &AppState) -> Result<(), Regi
             }
         };
 
+    let backend_entry_count = entries.len();
     {
         let mut published = state.kv_published_index.write().await;
-        if entries.is_empty() {
+        let published_entries = published.entries_snapshot();
+        let published_entry_count = published_entries.len();
+        let missing_published_keys =
+            count_missing_published_keys_in_backend(&entries, published_entries.as_ref());
+
+        if published_entry_count > 0 && missing_published_keys > 0 {
+            log::warn!(
+                "KV lookup refresh: preserving in-memory index (backend={} published={} missing_keys={})",
+                backend_entry_count,
+                published_entry_count,
+                missing_published_keys
+            );
+            published.touch_refresh();
+        } else if entries.is_empty() {
             published.set_empty();
         } else if let Some(cache_entry_id) = cache_entry_id {
             published.update(entries.into_iter().collect(), blob_order, cache_entry_id);
+        } else if published_entry_count > 0 {
+            log::warn!(
+                "KV lookup refresh: backend returned entries without cache_entry_id; preserving in-memory index"
+            );
+            published.touch_refresh();
         } else {
             published.set_empty();
         }
@@ -3832,6 +3882,82 @@ mod tests {
             last_put_ms,
             now_ms
         ));
+    }
+
+    #[test]
+    fn pending_or_flushing_refresh_suppression_applies_when_flushing() {
+        let now_ms: u64 = 100_000;
+        assert!(
+            should_suppress_lookup_refresh_due_to_pending_or_flushing_values(
+                false, true, 0, now_ms
+            )
+        );
+    }
+
+    #[test]
+    fn count_missing_published_keys_in_backend_reports_subset_gap() {
+        let mut backend = BTreeMap::new();
+        backend.insert(
+            "k1".to_string(),
+            BlobDescriptor {
+                digest: "sha256:111".to_string(),
+                size_bytes: 10,
+            },
+        );
+
+        let mut published = HashMap::new();
+        published.insert(
+            "k1".to_string(),
+            BlobDescriptor {
+                digest: "sha256:111".to_string(),
+                size_bytes: 10,
+            },
+        );
+        published.insert(
+            "k2".to_string(),
+            BlobDescriptor {
+                digest: "sha256:222".to_string(),
+                size_bytes: 20,
+            },
+        );
+
+        assert_eq!(
+            count_missing_published_keys_in_backend(&backend, &published),
+            1
+        );
+    }
+
+    #[test]
+    fn count_missing_published_keys_in_backend_is_zero_for_superset() {
+        let mut backend = BTreeMap::new();
+        backend.insert(
+            "k1".to_string(),
+            BlobDescriptor {
+                digest: "sha256:111".to_string(),
+                size_bytes: 10,
+            },
+        );
+        backend.insert(
+            "k2".to_string(),
+            BlobDescriptor {
+                digest: "sha256:222".to_string(),
+                size_bytes: 20,
+            },
+        );
+
+        let mut published = HashMap::new();
+        published.insert(
+            "k1".to_string(),
+            BlobDescriptor {
+                digest: "sha256:999".to_string(),
+                size_bytes: 99,
+            },
+        );
+
+        assert_eq!(
+            count_missing_published_keys_in_backend(&backend, &published),
+            0
+        );
     }
 
     #[test]
