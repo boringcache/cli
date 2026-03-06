@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 PROXY_PORT="${PROXY_PORT:-5050}"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 TAG_BASE="${TAG:-bc-e2e-cli-sccache}"
@@ -43,6 +45,11 @@ STRESS_PREWARM_TARGET_DIR="${STRESS_PREWARM_TARGET_DIR:-${TARGET_ROOT}/stress-pr
 PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
 BUDGET_EFFICACY_RUST_HIT_RATE_MIN="${BUDGET_EFFICACY_RUST_HIT_RATE_MIN:-}"
 BUDGET_EFFICACY_WARM_REQUESTS_MIN="${BUDGET_EFFICACY_WARM_REQUESTS_MIN:-}"
+BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN="${BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN:-}"
+BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX="${BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX:-}"
+BUDGET_EFFICACY_CACHE_OPS_RECORDS_MIN="${BUDGET_EFFICACY_CACHE_OPS_RECORDS_MIN:-}"
+BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN="${BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN:-}"
+BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX="${BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX:-}"
 BUDGET_EFFICACY_PROXY_429_MAX="${BUDGET_EFFICACY_PROXY_429_MAX:-}"
 BUDGET_EFFICACY_PROXY_CONFLICTS_MAX="${BUDGET_EFFICACY_PROXY_CONFLICTS_MAX:-}"
 BUDGET_STRESS_RUST_HIT_RATE_MIN="${BUDGET_STRESS_RUST_HIT_RATE_MIN:-}"
@@ -167,6 +174,11 @@ require_numeric_if_set() {
 
 require_numeric_if_set "BUDGET_EFFICACY_RUST_HIT_RATE_MIN" "$BUDGET_EFFICACY_RUST_HIT_RATE_MIN"
 require_numeric_if_set "BUDGET_EFFICACY_WARM_REQUESTS_MIN" "$BUDGET_EFFICACY_WARM_REQUESTS_MIN"
+require_numeric_if_set "BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN" "$BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN"
+require_numeric_if_set "BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX" "$BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX"
+require_numeric_if_set "BUDGET_EFFICACY_CACHE_OPS_RECORDS_MIN" "$BUDGET_EFFICACY_CACHE_OPS_RECORDS_MIN"
+require_numeric_if_set "BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN" "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN"
+require_numeric_if_set "BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX" "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX"
 require_numeric_if_set "BUDGET_EFFICACY_PROXY_429_MAX" "$BUDGET_EFFICACY_PROXY_429_MAX"
 require_numeric_if_set "BUDGET_EFFICACY_PROXY_CONFLICTS_MAX" "$BUDGET_EFFICACY_PROXY_CONFLICTS_MAX"
 require_numeric_if_set "BUDGET_STRESS_RUST_HIT_RATE_MIN" "$BUDGET_STRESS_RUST_HIT_RATE_MIN"
@@ -248,14 +260,14 @@ stop_registered_sccache_servers() {
 
 remove_active_build_pid() {
   local target_pid="$1"
-  local remaining=()
+  local -a remaining=()
   local pid
   for pid in "${ACTIVE_BUILD_PIDS[@]-}"; do
     if [[ "$pid" != "$target_pid" ]]; then
       remaining+=("$pid")
     fi
   done
-  ACTIVE_BUILD_PIDS=("${remaining[@]}")
+  ACTIVE_BUILD_PIDS=("${remaining[@]-}")
 }
 
 children_of_pid() {
@@ -480,6 +492,7 @@ start_proxy() {
   BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
     BORINGCACHE_METRICS_FORMAT="${BORINGCACHE_METRICS_FORMAT:-json}" \
     BORINGCACHE_REQUEST_METRICS_PATH="$metrics_file" \
+    BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS="${BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS:-1}" \
     RUST_LOG="$RUST_LOG_LEVEL" \
     "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
     --host "$PROXY_HOST" \
@@ -790,6 +803,22 @@ print_request_metrics_summary() {
   echo "${label} request metrics: events=${total}, failures=${failures}, retry_events=${retries}, file=${metrics_file}"
 }
 
+load_request_metrics_summary() {
+  local phase_dir="$1"
+  local metrics_file summary_file
+  metrics_file="${phase_dir}/request-metrics.jsonl"
+  summary_file="${phase_dir}/request-metrics-summary.env"
+  if [[ ! -f "$metrics_file" ]]; then
+    return 1
+  fi
+  if ! python3 "${SCRIPT_DIR}/request-metrics-summary.py" "$metrics_file" >"$summary_file"; then
+    return 1
+  fi
+  # shellcheck disable=SC1090
+  source "$summary_file"
+  return 0
+}
+
 format_delta() {
   local base="$1"
   local current="$2"
@@ -845,6 +874,26 @@ evaluate_budgets() {
     if [[ -n "$BUDGET_EFFICACY_WARM_REQUESTS_MIN" ]]; then
       checks=$((checks + 1))
       budget_check_min "efficacy warm compile requests" "${EFFICACY_WARM_REQUESTS:-0}" "$BUDGET_EFFICACY_WARM_REQUESTS_MIN"
+    fi
+    if [[ -n "$BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN" ]]; then
+      checks=$((checks + 1))
+      budget_check_min "efficacy two-pass rust hit rate (%)" "${EFFICACY_TWO_PASS_HIT_RATE:-0}" "$BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN"
+    fi
+    if [[ -n "$BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX" ]]; then
+      checks=$((checks + 1))
+      budget_check_max "efficacy two-pass rust hit rate (%)" "${EFFICACY_TWO_PASS_HIT_RATE:-0}" "$BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX"
+    fi
+    if [[ -n "$BUDGET_EFFICACY_CACHE_OPS_RECORDS_MIN" ]]; then
+      checks=$((checks + 1))
+      budget_check_min "efficacy cache-ops record count" "${EFFICACY_CACHE_OPS_RECORDS:-0}" "$BUDGET_EFFICACY_CACHE_OPS_RECORDS_MIN"
+    fi
+    if [[ -n "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN" ]]; then
+      checks=$((checks + 1))
+      budget_check_min "efficacy cache-ops sccache hit rate (%)" "${EFFICACY_CACHE_OPS_HIT_RATE:-0}" "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN"
+    fi
+    if [[ -n "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX" ]]; then
+      checks=$((checks + 1))
+      budget_check_max "efficacy cache-ops sccache hit rate (%)" "${EFFICACY_CACHE_OPS_HIT_RATE:-0}" "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX"
     fi
     if [[ -n "$BUDGET_EFFICACY_PROXY_429_MAX" ]]; then
       checks=$((checks + 1))
@@ -937,6 +986,12 @@ phase_efficacy() {
     SCCACHE_DIR="$SCCACHE_DIR" \
     sccache --show-stats >"${phase_dir}/cold-sccache-stats.txt" 2>&1
   print_stats_summary "Efficacy cold stats" "${phase_dir}/cold-sccache-stats.txt"
+  EFFICACY_COLD_REQUESTS="$(stat_value 'Compile requests' "${phase_dir}/cold-sccache-stats.txt")"
+  EFFICACY_COLD_HITS="$(stat_value 'Cache hits' "${phase_dir}/cold-sccache-stats.txt")"
+  EFFICACY_COLD_MISSES="$(stat_value 'Cache misses' "${phase_dir}/cold-sccache-stats.txt")"
+  EFFICACY_COLD_REQUESTS="${EFFICACY_COLD_REQUESTS:-0}"
+  EFFICACY_COLD_HITS="${EFFICACY_COLD_HITS:-0}"
+  EFFICACY_COLD_MISSES="${EFFICACY_COLD_MISSES:-0}"
 
   echo ""
   echo "Waiting for writes to settle (${SETTLE_SECS}s)..."
@@ -963,6 +1018,27 @@ phase_efficacy() {
   if [[ "$USE_PROXY" == "1" ]]; then
     stop_proxy
     print_request_metrics_summary "$phase_dir" "Efficacy"
+    if load_request_metrics_summary "$phase_dir"; then
+      EFFICACY_CACHE_OPS_RECORDS="${request_metrics_cache_ops_records_total:-0}"
+      EFFICACY_CACHE_OPS_HITS="${request_metrics_cache_ops_sccache_hits:-0}"
+      EFFICACY_CACHE_OPS_MISSES="${request_metrics_cache_ops_sccache_misses:-0}"
+      EFFICACY_CACHE_OPS_ERRORS="${request_metrics_cache_ops_sccache_errors:-0}"
+      EFFICACY_CACHE_OPS_HIT_RATE="${request_metrics_cache_ops_sccache_hit_rate:-0}"
+      echo "Efficacy cache ops (sccache): records=${EFFICACY_CACHE_OPS_RECORDS}, hits=${EFFICACY_CACHE_OPS_HITS}, misses=${EFFICACY_CACHE_OPS_MISSES}, errors=${EFFICACY_CACHE_OPS_ERRORS}, hit_rate=${EFFICACY_CACHE_OPS_HIT_RATE}%"
+    else
+      EFFICACY_CACHE_OPS_RECORDS="0"
+      EFFICACY_CACHE_OPS_HITS="0"
+      EFFICACY_CACHE_OPS_MISSES="0"
+      EFFICACY_CACHE_OPS_ERRORS="0"
+      EFFICACY_CACHE_OPS_HIT_RATE="0"
+      echo "Efficacy cache ops (sccache): metrics unavailable"
+    fi
+  else
+    EFFICACY_CACHE_OPS_RECORDS="0"
+    EFFICACY_CACHE_OPS_HITS="0"
+    EFFICACY_CACHE_OPS_MISSES="0"
+    EFFICACY_CACHE_OPS_ERRORS="0"
+    EFFICACY_CACHE_OPS_HIT_RATE="0"
   fi
 
   EFFICACY_COLD_SECONDS="$(cat "${phase_dir}/cold.log.seconds")"
@@ -978,6 +1054,18 @@ phase_efficacy() {
   EFFICACY_WARM_REQUESTS="${EFFICACY_WARM_REQUESTS:-0}"
   EFFICACY_WARM_HITS="${EFFICACY_WARM_HITS:-0}"
   EFFICACY_WARM_MISSES="${EFFICACY_WARM_MISSES:-0}"
+  EFFICACY_TWO_PASS_HIT_RATE="$(awk \
+    -v cold_hits="${EFFICACY_COLD_HITS}" \
+    -v cold_misses="${EFFICACY_COLD_MISSES}" \
+    -v warm_hits="${EFFICACY_WARM_HITS}" \
+    -v warm_misses="${EFFICACY_WARM_MISSES}" \
+    'BEGIN {
+      total_hits = cold_hits + warm_hits;
+      total_misses = cold_misses + warm_misses;
+      denom = total_hits + total_misses;
+      if (denom == 0) { printf "0.00" } else { printf "%.2f", (total_hits * 100) / denom }
+    }'
+  )"
   if [[ "$USE_PROXY" == "1" ]]; then
     EFFICACY_PROXY_429="$(count_pattern "$proxy_log" '429 Too Many Requests')"
     EFFICACY_PROXY_CONFLICTS="$(count_pattern "$proxy_log" 'tag conflict')"
@@ -1218,7 +1306,10 @@ if [[ "$RUN_EFFICACY" == "1" ]]; then
   echo "  Warm:                 ${EFFICACY_WARM_SECONDS}s"
   echo "  Delta (cold-warm):    ${EFFICACY_DELTA}"
   echo "  Warm Rust hit rate:   ${EFFICACY_RUST_HIT_RATE}%"
+  echo "  Two-pass Rust hit:    ${EFFICACY_TWO_PASS_HIT_RATE}%"
   echo "  Warm req/hit/miss:    ${EFFICACY_WARM_REQUESTS}/${EFFICACY_WARM_HITS}/${EFFICACY_WARM_MISSES}"
+  echo "  Cold req/hit/miss:    ${EFFICACY_COLD_REQUESTS}/${EFFICACY_COLD_HITS}/${EFFICACY_COLD_MISSES}"
+  echo "  Cache ops hit rate:   ${EFFICACY_CACHE_OPS_HIT_RATE}% (records=${EFFICACY_CACHE_OPS_RECORDS}, hits=${EFFICACY_CACHE_OPS_HITS}, misses=${EFFICACY_CACHE_OPS_MISSES}, errors=${EFFICACY_CACHE_OPS_ERRORS})"
   echo "  Warm avg read hit:    ${EFFICACY_AVG_READ_HIT}s"
   echo "  Proxy 429:            ${EFFICACY_PROXY_429:-0}"
   echo "  Proxy tag conflicts:  ${EFFICACY_PROXY_CONFLICTS:-0}"

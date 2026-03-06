@@ -179,6 +179,14 @@ jobs:
               export EFFICACY_FRESH_WARM_SCCACHE_DIR="1"
               # Require enough warm compile traffic so hit-rate budgets are statistically meaningful.
               export BUDGET_EFFICACY_WARM_REQUESTS_MIN="100"
+              # Require cache-ops records so hit-rate validation cannot pass on missing instrumentation.
+              export BUDGET_EFFICACY_CACHE_OPS_RECORDS_MIN="100"
+              # Cold+warm mixed traffic should sit around 50% hit rate for seeded-warm scenarios.
+              export BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN="45"
+              export BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX="55"
+              # Cache-ops stream should reflect the same mixed hit-rate envelope.
+              export BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN="45"
+              export BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX="55"
             fi
           fi
           if [[ "${{ matrix.phase }}" == "stress" ]]; then
@@ -215,6 +223,8 @@ jobs:
           warm="0"
           warm_rust_hit_rate="0"
           warm_avg_read_hit="0"
+          efficacy_two_pass_hit_rate="0"
+          efficacy_cache_ops_hit_rate="0"
           efficacy_proxy_429="0"
           efficacy_proxy_conflicts="0"
 
@@ -234,10 +244,23 @@ jobs:
           request_metrics_save_p95_ms="0"
           request_metrics_publish_p95_ms="0"
           request_metrics_prefetch_cycles="0"
+          request_metrics_cache_ops_records_total="0"
+          request_metrics_cache_ops_sccache_hits="0"
+          request_metrics_cache_ops_sccache_misses="0"
+          request_metrics_cache_ops_sccache_errors="0"
+          request_metrics_cache_ops_sccache_hit_rate="0"
 
           if [[ "$phase" == "efficacy" ]]; then
+            efficacy_cold_hits="0"
+            efficacy_cold_misses="0"
+            efficacy_warm_hits="0"
+            efficacy_warm_misses="0"
             if [[ -f "${log_dir}/efficacy/cold.log.seconds" ]]; then
               cold="$(cat "${log_dir}/efficacy/cold.log.seconds")"
+            fi
+            if [[ -f "${log_dir}/efficacy/cold-sccache-stats.txt" ]]; then
+              efficacy_cold_hits="$(awk '$1 == "Cache" && $2 == "hits" && $3 ~ /^[0-9]+$/ { print $3; exit }' "${log_dir}/efficacy/cold-sccache-stats.txt")"
+              efficacy_cold_misses="$(awk '$1 == "Cache" && $2 == "misses" && $3 ~ /^[0-9]+$/ { print $3; exit }' "${log_dir}/efficacy/cold-sccache-stats.txt")"
             fi
             if [[ -f "${log_dir}/efficacy/warm.log.seconds" ]]; then
               warm="$(cat "${log_dir}/efficacy/warm.log.seconds")"
@@ -245,11 +268,25 @@ jobs:
             if [[ -f "${log_dir}/efficacy/warm-sccache-stats.txt" ]]; then
               warm_rust_hit_rate="$(awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
               warm_avg_read_hit="$(awk '$1 == "Average" && $2 == "cache" && $3 == "read" && $4 == "hit" { print $5; exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
+              efficacy_warm_hits="$(awk '$1 == "Cache" && $2 == "hits" && $3 ~ /^[0-9]+$/ { print $3; exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
+              efficacy_warm_misses="$(awk '$1 == "Cache" && $2 == "misses" && $3 ~ /^[0-9]+$/ { print $3; exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
             fi
             if [[ -f "${log_dir}/efficacy/proxy.log" ]]; then
               efficacy_proxy_429="$(grep -c "429 Too Many Requests" "${log_dir}/efficacy/proxy.log" || true)"
               efficacy_proxy_conflicts="$(grep -c "tag conflict" "${log_dir}/efficacy/proxy.log" || true)"
             fi
+            efficacy_two_pass_hit_rate="$(awk \
+              -v cold_hits="${efficacy_cold_hits:-0}" \
+              -v cold_misses="${efficacy_cold_misses:-0}" \
+              -v warm_hits="${efficacy_warm_hits:-0}" \
+              -v warm_misses="${efficacy_warm_misses:-0}" \
+              'BEGIN {
+                total_hits = cold_hits + warm_hits;
+                total_misses = cold_misses + warm_misses;
+                denom = total_hits + total_misses;
+                if (denom == 0) { printf "0.00" } else { printf "%.2f", (total_hits * 100) / denom }
+              }'
+            )"
           fi
 
           if [[ "$phase" == "stress" ]]; then
@@ -287,6 +324,9 @@ jobs:
           if [[ -f "$request_metrics_file" ]]; then
             python3 scripts/request-metrics-summary.py "$request_metrics_file" > "${log_dir}/request-metrics-summary.env"
             source "${log_dir}/request-metrics-summary.env"
+            if [[ "$phase" == "efficacy" ]]; then
+              efficacy_cache_ops_hit_rate="${request_metrics_cache_ops_sccache_hit_rate:-0}"
+            fi
           fi
 
           warm_rust_hit_rate="${warm_rust_hit_rate:-0}"
@@ -303,6 +343,8 @@ jobs:
             echo "warm_seconds=${warm}"
             echo "warm_rust_hit_rate=${warm_rust_hit_rate}"
             echo "warm_avg_cache_read_hit=${warm_avg_read_hit}"
+            echo "efficacy_two_pass_hit_rate=${efficacy_two_pass_hit_rate}"
+            echo "efficacy_cache_ops_sccache_hit_rate=${efficacy_cache_ops_hit_rate}"
             echo "efficacy_proxy_429=${efficacy_proxy_429}"
             echo "efficacy_proxy_tag_conflicts=${efficacy_proxy_conflicts}"
             echo "prewarm_seconds=${prewarm}"
@@ -321,6 +363,11 @@ jobs:
             echo "request_metrics_save_p95_ms=${request_metrics_save_p95_ms}"
             echo "request_metrics_publish_p95_ms=${request_metrics_publish_p95_ms}"
             echo "request_metrics_prefetch_cycles=${request_metrics_prefetch_cycles}"
+            echo "request_metrics_cache_ops_records_total=${request_metrics_cache_ops_records_total}"
+            echo "request_metrics_cache_ops_sccache_hits=${request_metrics_cache_ops_sccache_hits}"
+            echo "request_metrics_cache_ops_sccache_misses=${request_metrics_cache_ops_sccache_misses}"
+            echo "request_metrics_cache_ops_sccache_errors=${request_metrics_cache_ops_sccache_errors}"
+            echo "request_metrics_cache_ops_sccache_hit_rate=${request_metrics_cache_ops_sccache_hit_rate}"
           } > "${log_dir}/metrics.env"
 
       - name: Upload benchmark artifacts
@@ -357,6 +404,10 @@ jobs:
       RUN_SCOPED_TAGS: "1"
       SETTLE_SECS: "5"
       BUILD_TIMEOUT_SECS: "1800"
+      BUILD_HEARTBEAT_SECS: "30"
+      BUILD_CLEANUP_WAIT_SECS: "20"
+      BUILD_FAILURE_TAIL_LINES: "120"
+      PROXY_SHUTDOWN_WAIT_SECS: "30"
       RUST_LOG_LEVEL: warn
 
     steps:
@@ -482,6 +533,65 @@ jobs:
               ;;
           esac
 
+      - name: Validate adapter scenario coverage
+        if: always() && steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          LEG="${{ matrix.leg }}"
+          LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/adapter-${LEG}"
+          LOG_FILE="${LOG_DIR}/run.log"
+          if [[ ! -f "$LOG_FILE" ]]; then
+            echo "ERROR: expected adapter run log at ${LOG_FILE}"
+            exit 1
+          fi
+
+          assert_log_contains() {
+            local pattern="$1"
+            local label="$2"
+            if ! grep -Fq "$pattern" "$LOG_FILE"; then
+              echo "ERROR: missing adapter scenario marker (${label}): ${pattern}"
+              echo "--- log tail ---"
+              tail -n 200 "$LOG_FILE" || true
+              exit 1
+            fi
+          }
+
+          case "$LEG" in
+            adapters-http)
+              assert_log_contains "=== Phase 1: Write and read with running proxy ===" "phase1"
+              assert_log_contains "=== Phase 2: Read-only verification after proxy restart ===" "phase2"
+              assert_log_contains "All adapter HTTP e2e checks passed" "success"
+              ;;
+            cli-core)
+              assert_log_contains "=== Phase 1: Save/restore/delete (archive cache path) ===" "phase1"
+              assert_log_contains "=== Phase 2: run command cache integration ===" "phase2"
+              assert_log_contains "=== Phase 3: encryption + mount sync ===" "phase3"
+              assert_log_contains "CLI core e2e passed" "success"
+              ;;
+            bazel-real)
+              assert_log_contains "=== Phase 1: Cold build (expect local execution + upload) ===" "phase1"
+              assert_log_contains "=== Phase 2: Warm build with isolated output root (expect remote hit) ===" "phase2"
+              assert_log_contains "=== Phase 3: Restart proxy and verify persisted remote hit ===" "phase3"
+              assert_log_contains "Bazel real-client e2e passed" "success"
+              ;;
+            dual-proxy)
+              assert_log_contains "=== Phase 1: Prewarm (populate baseline tag) ===" "phase1"
+              assert_log_contains "=== Phase 2: Dual-Proxy Contention ===" "phase2"
+              assert_log_contains "=== Phase 3: Verification (merged index check) ===" "phase3"
+              assert_log_contains "PASS: both proxies flushed without timeouts/drops" "success"
+              ;;
+            docker-buildkit)
+              assert_log_contains "=== Phase 1: Cold build and warm import ===" "phase1"
+              assert_log_contains "=== Phase 2: Restart proxy and verify persisted warm import ===" "phase2"
+              assert_log_contains "=== Phase 3: Alias publish and alias warm import ===" "phase3"
+              assert_log_contains "Docker buildkit registry e2e passed" "success"
+              ;;
+            *)
+              echo "ERROR: unknown adapter leg: ${LEG}"
+              exit 1
+              ;;
+          esac
+
       - name: Extract adapter metrics
         if: always() && steps.gate.outputs.run == 'true'
         run: |
@@ -522,8 +632,8 @@ jobs:
 
           echo "## Efficacy (cold/warm)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Backend | Status | Cold (s) | Warm (s) | Warm Rust hit rate | Warm avg cache read hit (s) | Proxy 429 | Proxy conflicts |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---------|--------|----------|----------|--------------------|-----------------------------|-----------|-----------------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Backend | Status | Cold (s) | Warm (s) | Warm Rust hit rate | Two-pass Rust hit rate | Cache ops sccache hit rate | Warm avg cache read hit (s) | Proxy 429 | Proxy conflicts |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|--------|----------|----------|--------------------|------------------------|----------------------------|-----------------------------|-----------|-----------------|" >> "$GITHUB_STEP_SUMMARY"
 
           local_warm=""
           proxy_warm=""
@@ -535,7 +645,7 @@ jobs:
             if [[ "${phase}" != "efficacy" ]]; then
               continue
             fi
-            echo "| ${backend} | ${status} | ${cold_seconds} | ${warm_seconds} | ${warm_rust_hit_rate}% | ${warm_avg_cache_read_hit} | ${efficacy_proxy_429} | ${efficacy_proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| ${backend} | ${status} | ${cold_seconds} | ${warm_seconds} | ${warm_rust_hit_rate}% | ${efficacy_two_pass_hit_rate}% | ${efficacy_cache_ops_sccache_hit_rate}% | ${warm_avg_cache_read_hit} | ${efficacy_proxy_429} | ${efficacy_proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
             if [[ "${status}" == "success" ]]; then
               case "$backend" in
                 local) local_warm="$warm_seconds" ;;

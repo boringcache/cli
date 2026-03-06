@@ -21,7 +21,23 @@ HTTP_CONNECT_TIMEOUT_SECS="${HTTP_CONNECT_TIMEOUT_SECS:-5}"
 HTTP_REQUEST_TIMEOUT_SECS="${HTTP_REQUEST_TIMEOUT_SECS:-30}"
 PHASE3_MAX_ATTEMPTS="${PHASE3_MAX_ATTEMPTS:-4}"
 PHASE3_RETRY_SLEEP_SECS="${PHASE3_RETRY_SLEEP_SECS:-3}"
+PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-30}"
+BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-0}"
+BUILD_HEARTBEAT_SECS="${BUILD_HEARTBEAT_SECS:-30}"
+BUILD_CLEANUP_WAIT_SECS="${BUILD_CLEANUP_WAIT_SECS:-20}"
+BUILD_FAILURE_TAIL_LINES="${BUILD_FAILURE_TAIL_LINES:-120}"
 PROXY_PID=""
+INTERRUPTED="0"
+declare -a ACTIVE_BUILD_PIDS=()
+
+require_numeric() {
+  local name="$1"
+  local value="$2"
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: ${name} must be a non-negative integer"
+    exit 1
+  fi
+}
 
 require_positive() {
   local name="$1"
@@ -37,7 +53,7 @@ if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
   exit 1
 fi
 
-for dep in curl cmp stat "$BAZEL_BIN"; do
+for dep in curl cmp pgrep stat "$BAZEL_BIN"; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     echo "ERROR: ${dep} not found in PATH"
     exit 1
@@ -57,21 +73,110 @@ require_positive "HTTP_CONNECT_TIMEOUT_SECS" "$HTTP_CONNECT_TIMEOUT_SECS"
 require_positive "HTTP_REQUEST_TIMEOUT_SECS" "$HTTP_REQUEST_TIMEOUT_SECS"
 require_positive "PHASE3_MAX_ATTEMPTS" "$PHASE3_MAX_ATTEMPTS"
 require_positive "PHASE3_RETRY_SLEEP_SECS" "$PHASE3_RETRY_SLEEP_SECS"
+require_positive "PROXY_SHUTDOWN_WAIT_SECS" "$PROXY_SHUTDOWN_WAIT_SECS"
+require_numeric "BUILD_TIMEOUT_SECS" "$BUILD_TIMEOUT_SECS"
+require_positive "BUILD_HEARTBEAT_SECS" "$BUILD_HEARTBEAT_SECS"
+require_positive "BUILD_CLEANUP_WAIT_SECS" "$BUILD_CLEANUP_WAIT_SECS"
+require_positive "BUILD_FAILURE_TAIL_LINES" "$BUILD_FAILURE_TAIL_LINES"
 
 mkdir -p "$LOG_DIR" "$BINARY_DIR"
 cp "$BINARY" "$TMP_BINARY"
 chmod +x "$TMP_BINARY"
 : >"$PROXY_LOG"
 
-cleanup() {
-  set +e
+remove_active_build_pid() {
+  local target_pid="$1"
+  local -a remaining=()
+  local pid
+  for pid in "${ACTIVE_BUILD_PIDS[@]}"; do
+    if [[ "$pid" != "$target_pid" ]]; then
+      remaining+=("$pid")
+    fi
+  done
+  ACTIVE_BUILD_PIDS=("${remaining[@]-}")
+}
+
+children_of_pid() {
+  pgrep -P "$1" 2>/dev/null || true
+}
+
+signal_pid_tree() {
+  local pid="$1"
+  local signal_name="$2"
+  local child
+  for child in $(children_of_pid "$pid"); do
+    signal_pid_tree "$child" "$signal_name"
+  done
+  kill -s "$signal_name" "$pid" >/dev/null 2>&1 || true
+}
+
+stop_pid_tree() {
+  local pid="$1"
+  local label="$2"
+  local wait_secs="$3"
+  local deadline
+  if [[ -z "${pid:-}" ]]; then
+    return 0
+  fi
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    return 0
+  fi
+  signal_pid_tree "$pid" TERM
+  deadline=$((SECONDS + wait_secs))
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      echo "WARNING: ${label} ${pid} did not exit after ${wait_secs}s, sending SIGKILL"
+      signal_pid_tree "$pid" KILL
+      break
+    fi
+    sleep 1
+  done
+  wait "$pid" >/dev/null 2>&1 || true
+}
+
+stop_background_jobs() {
+  local job_pids
+  local pid
+  job_pids="$(jobs -pr || true)"
+  if [[ -z "$job_pids" ]]; then
+    return 0
+  fi
+  for pid in $job_pids; do
+    stop_pid_tree "$pid" "background job" "$BUILD_CLEANUP_WAIT_SECS"
+  done
+}
+
+handle_interrupt() {
+  if [[ "$INTERRUPTED" == "1" ]]; then
+    return
+  fi
+  INTERRUPTED="1"
+  trap '' INT TERM
+  echo ""
+  echo "Interrupt received, shutting down..."
+  exit 130
+}
+
+stop_proxy() {
   if [[ -n "${PROXY_PID:-}" ]]; then
-    kill "$PROXY_PID" >/dev/null 2>&1 || true
-    wait "$PROXY_PID" >/dev/null 2>&1 || true
+    stop_pid_tree "$PROXY_PID" "proxy" "$PROXY_SHUTDOWN_WAIT_SECS"
     PROXY_PID=""
   fi
 }
-trap cleanup EXIT INT TERM
+
+cleanup() {
+  set +e
+  stop_background_jobs
+  local pid
+  for pid in "${ACTIVE_BUILD_PIDS[@]}"; do
+    stop_pid_tree "$pid" "build" "$BUILD_CLEANUP_WAIT_SECS"
+  done
+  ACTIVE_BUILD_PIDS=()
+  stop_proxy
+  rm -f "$TMP_BINARY" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+trap handle_interrupt INT TERM
 
 http_status() {
   local path="$1"
@@ -110,6 +215,7 @@ wait_for_proxy_ready() {
 
 start_proxy() {
   local tag="$1"
+  stop_proxy
   {
     echo
     echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} ==="
@@ -125,23 +231,19 @@ start_proxy() {
   wait_for_proxy_ready
 }
 
-stop_proxy() {
-  if [[ -n "${PROXY_PID:-}" ]]; then
-    kill "$PROXY_PID" >/dev/null 2>&1 || true
-    wait "$PROXY_PID" >/dev/null 2>&1 || true
-    PROXY_PID=""
-  fi
-}
-
 run_bazel_build() {
   local phase="$1"
   local output_root="$2"
   local marker_file="$3"
   local workspace_dir="$4"
   local log_path="${LOG_DIR}/${phase}.log"
+  local start_ts end_ts elapsed
+  local build_pid now next_heartbeat status latest_line
 
   rm -rf "$output_root"
   mkdir -p "$output_root"
+  echo "${phase} starting..."
+  start_ts="$(date +%s)"
   (
     cd "$workspace_dir"
     "$BAZEL_BIN" --batch --output_user_root="$output_root" build //:emit \
@@ -156,7 +258,46 @@ run_bazel_build() {
       --remote_upload_local_results=true \
       --remote_accept_cached=true \
       --action_env="BAZEL_MARKER_FILE=${marker_file}" >"$log_path" 2>&1
-  )
+  ) &
+  build_pid=$!
+  ACTIVE_BUILD_PIDS+=("$build_pid")
+  next_heartbeat=$((start_ts + BUILD_HEARTBEAT_SECS))
+  while kill -0 "$build_pid" >/dev/null 2>&1; do
+    now="$(date +%s)"
+    if [[ "$BUILD_TIMEOUT_SECS" -gt 0 ]] && (( now - start_ts >= BUILD_TIMEOUT_SECS )); then
+      echo "ERROR: ${phase} exceeded BUILD_TIMEOUT_SECS=${BUILD_TIMEOUT_SECS}s"
+      stop_pid_tree "$build_pid" "${phase} build" "$BUILD_CLEANUP_WAIT_SECS"
+      remove_active_build_pid "$build_pid"
+      tail -n "$BUILD_FAILURE_TAIL_LINES" "$log_path" || true
+      return 124
+    fi
+    if (( now >= next_heartbeat )); then
+      elapsed="$((now - start_ts))"
+      latest_line="$(awk 'NF { line=$0 } END { print line }' "$log_path" 2>/dev/null || true)"
+      if [[ -n "$latest_line" ]]; then
+        echo "  [heartbeat] ${phase} running ${elapsed}s | ${latest_line}"
+      else
+        echo "  [heartbeat] ${phase} running ${elapsed}s"
+      fi
+      next_heartbeat=$((now + BUILD_HEARTBEAT_SECS))
+    fi
+    sleep 1
+  done
+  if wait "$build_pid"; then
+    status=0
+  else
+    status=$?
+  fi
+  remove_active_build_pid "$build_pid"
+  end_ts="$(date +%s)"
+  elapsed="$((end_ts - start_ts))"
+  echo "$elapsed" >"${log_path}.seconds"
+  if [[ "$status" -ne 0 ]]; then
+    echo "ERROR: ${phase} failed with exit code ${status}. Recent log output:"
+    tail -n "$BUILD_FAILURE_TAIL_LINES" "$log_path" || true
+    return "$status"
+  fi
+  echo "${phase} completed in ${elapsed}s"
 }
 
 echo "Binary: ${TMP_BINARY}"
@@ -164,6 +305,9 @@ echo "Workspace: ${WORKSPACE}"
 echo "Tag: ${TAG_BASE}-${RUN_ID}"
 echo "Proxy: ${PROXY_HOST}:${PROXY_PORT}"
 echo "Bazel binary: $(command -v "$BAZEL_BIN")"
+echo "Build timeout: ${BUILD_TIMEOUT_SECS}s (0 disables)"
+echo "Build heartbeat: ${BUILD_HEARTBEAT_SECS}s"
+echo "Proxy shutdown wait: ${PROXY_SHUTDOWN_WAIT_SECS}s"
 echo "Logs: ${LOG_DIR}"
 
 TAG="${TAG_BASE}-${RUN_ID}"

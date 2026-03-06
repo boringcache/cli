@@ -108,14 +108,14 @@ fi
 
 remove_active_build_pid() {
   local target_pid="$1"
-  local remaining=()
+  local -a remaining=()
   local pid
   for pid in "${ACTIVE_BUILD_PIDS[@]}"; do
     if [[ "$pid" != "$target_pid" ]]; then
       remaining+=("$pid")
     fi
   done
-  ACTIVE_BUILD_PIDS=("${remaining[@]}")
+  ACTIVE_BUILD_PIDS=("${remaining[@]-}")
 }
 
 children_of_pid() {

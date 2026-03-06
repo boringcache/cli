@@ -8,18 +8,68 @@ LOG_DIR="${LOG_DIR:-.}"
 RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 RUN_SHA="${GITHUB_SHA:-localsha}"
+MOUNT_SHUTDOWN_WAIT_SECS="${MOUNT_SHUTDOWN_WAIT_SECS:-20}"
+
+require_positive() {
+  local name="$1"
+  local value="$2"
+  if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: ${name} must be a positive integer"
+    exit 1
+  fi
+}
+
+require_positive "MOUNT_SHUTDOWN_WAIT_SECS" "$MOUNT_SHUTDOWN_WAIT_SECS"
 
 if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
   echo "ERROR: BORINGCACHE_API_TOKEN is required"
   exit 1
 fi
 
-for dep in jq stat mktemp grep cmp curl sh; do
+for dep in jq stat mktemp grep cmp curl pgrep sh; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     echo "ERROR: required dependency not found: ${dep}"
     exit 1
   fi
 done
+
+children_of_pid() {
+  pgrep -P "$1" 2>/dev/null || true
+}
+
+signal_pid_tree() {
+  local pid="$1"
+  local signal_name="$2"
+  local child
+  for child in $(children_of_pid "$pid"); do
+    signal_pid_tree "$child" "$signal_name"
+  done
+  kill -s "$signal_name" "$pid" >/dev/null 2>&1 || true
+}
+
+stop_pid_tree() {
+  local pid="$1"
+  local label="$2"
+  local wait_secs="$3"
+  local deadline
+  if [[ -z "${pid:-}" ]]; then
+    return 0
+  fi
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    return 0
+  fi
+  signal_pid_tree "$pid" TERM
+  deadline=$((SECONDS + wait_secs))
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      echo "WARNING: ${label} ${pid} did not exit after ${wait_secs}s, sending SIGKILL"
+      signal_pid_tree "$pid" KILL
+      break
+    fi
+    sleep 1
+  done
+  wait "$pid" >/dev/null 2>&1 || true
+}
 
 if [[ ! -x "${BINARY}" ]]; then
   echo "ERROR: BINARY is not executable: ${BINARY}"
@@ -82,6 +132,7 @@ printf 'cli-e2e-dir-%s\n' "${RUN_SHA}" > "${SRC_DIR}/a.txt"
 printf 'cli-e2e-nested-%s\n' "${RUN_ID}" > "${SRC_DIR}/nested.txt"
 printf 'cli-e2e-file-%s\n' "${RUN_ATTEMPT}" > "${SINGLE_FILE}"
 
+echo "=== Phase 1: Save/restore/delete (archive cache path) ==="
 "${CLI}" save --no-platform --no-git "${WORKSPACE}" "${TAG_DIR}:${SRC_DIR},${TAG_FILE}:${SINGLE_FILE}" > "${CLI_LOG_DIR}/save.log"
 save_visible=0
 for _ in $(seq 1 10); do
@@ -140,6 +191,7 @@ RUN_TARGET_DIR="${CLI_LOG_DIR}/run-target"
 RUN_VERIFY_DIR="${CLI_LOG_DIR}/run-verify"
 RUN_MISS_SENTINEL="${CLI_LOG_DIR}/run-miss-sentinel.txt"
 
+echo "=== Phase 2: run command cache integration ==="
 mkdir -p "${RUN_SEED_DIR}"
 printf 'run-warm-cache-%s\n' "${RUN_SHA}" > "${RUN_SEED_DIR}/restored.txt"
 "${CLI}" save --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}:${RUN_SEED_DIR}" > "${CLI_LOG_DIR}/run-seed-save.log"
@@ -184,6 +236,7 @@ run_proxy_script=$'endpoint="${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}"\n[ -n "${e
 
 "${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-delete.log"
 
+echo "=== Phase 3: encryption + mount sync ==="
 "${CLI}" setup-encryption "${WORKSPACE}" --identity-output "${IDENTITY_FILE}" > "${CLI_LOG_DIR}/setup-encryption.log"
 if [[ ! -f "${IDENTITY_FILE}" ]]; then
   echo "setup-encryption did not create identity file"
@@ -218,8 +271,7 @@ MOUNT_PID=""
 cleanup_mount() {
   set +e
   if [[ -n "${MOUNT_PID:-}" ]] && kill -0 "${MOUNT_PID}" >/dev/null 2>&1; then
-    kill -INT "${MOUNT_PID}" >/dev/null 2>&1 || true
-    wait "${MOUNT_PID}" >/dev/null 2>&1 || true
+    stop_pid_tree "${MOUNT_PID}" "mount process" "$MOUNT_SHUTDOWN_WAIT_SECS"
   fi
 }
 trap cleanup_mount EXIT
@@ -267,4 +319,4 @@ grep -q "mount-updated-${RUN_ID}" "${MOUNT_RESTORE_DIR}/file.txt"
 
 "${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}" > "${CLI_LOG_DIR}/mount-delete.log"
 
-echo "CLI core e2e completed. Logs: ${CLI_LOG_DIR}"
+echo "CLI core e2e passed. Logs: ${CLI_LOG_DIR}"

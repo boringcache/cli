@@ -4,6 +4,18 @@ import math
 import sys
 
 
+def parse_details(details):
+    if not isinstance(details, str) or not details.strip():
+        return {}
+    parsed = {}
+    for token in details.strip().split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        parsed[key.strip()] = value.strip().rstrip(",")
+    return parsed
+
+
 def percentile(values, pct):
     if not values:
         return 0
@@ -40,6 +52,8 @@ def main() -> int:
     failures = 0
     retries = 0
     prefetch_cycles = 0
+    cache_ops_records_total = 0
+    cache_ops_by_tool = {}
     for item in records:
         status = item.get("status")
         if item.get("error") is not None:
@@ -54,6 +68,24 @@ def main() -> int:
         if item.get("operation") == "blob_prefetch_cycle":
             prefetch_cycles += 1
 
+        if item.get("operation") == "cache_ops_record":
+            cache_ops_records_total += 1
+            details = parse_details(item.get("details"))
+            tool = details.get("tool", "").strip().lower()
+            result = details.get("result", "").strip().lower()
+            if tool:
+                bucket = cache_ops_by_tool.setdefault(
+                    tool, {"hit": 0, "miss": 0, "error": 0}
+                )
+                if result in bucket:
+                    bucket[result] += 1
+
+    sccache = cache_ops_by_tool.get("sccache", {"hit": 0, "miss": 0, "error": 0})
+    sccache_denom = sccache["hit"] + sccache["miss"]
+    sccache_hit_rate = (
+        100.0 if sccache_denom == 0 else (100.0 * sccache["hit"] / sccache_denom)
+    )
+
     print(f"request_metrics_total={len(records)}")
     print(f"request_metrics_failures={failures}")
     print(f"request_metrics_retry_events={retries}")
@@ -66,6 +98,11 @@ def main() -> int:
         f"request_metrics_publish_p95_ms={percentile(by_operation(records, 'cache_finalize_publish'), 95)}"
     )
     print(f"request_metrics_prefetch_cycles={prefetch_cycles}")
+    print(f"request_metrics_cache_ops_records_total={cache_ops_records_total}")
+    print(f"request_metrics_cache_ops_sccache_hits={sccache['hit']}")
+    print(f"request_metrics_cache_ops_sccache_misses={sccache['miss']}")
+    print(f"request_metrics_cache_ops_sccache_errors={sccache['error']}")
+    print(f"request_metrics_cache_ops_sccache_hit_rate={sccache_hit_rate:.2f}")
     return 0
 
 
