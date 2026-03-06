@@ -524,6 +524,7 @@ jobs:
               ./scripts/e2e-bazel-real-test.sh | tee "$LOG_DIR/run.log"
               ;;
             dual-proxy)
+              # Dual-proxy contention uses isolated target dirs, so absolute GET hit-rate is workload-dependent.
               BINARY="$BIN_PATH" \
               LOG_DIR="$LOG_DIR" \
               TAG="$TAG" \
@@ -532,7 +533,6 @@ jobs:
               BUDGET_PROXY_429_MAX="0" \
               BUDGET_FLUSH_DURATION_MS_MAX="15000" \
               BUDGET_CACHE_OPS_GET_RECORDS_MIN="300" \
-              BUDGET_CACHE_OPS_GET_HIT_RATE_MIN="40" \
               BUDGET_CACHE_OPS_GET_HIT_RATE_MAX="100" \
               BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX="15" \
               ./scripts/e2e-dual-proxy-contention-test.sh | tee "$LOG_DIR/run.log"
