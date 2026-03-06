@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT_A="${PROXY_PORT_A:-5050}"
 PROXY_PORT_B="${PROXY_PORT_B:-5052}"
@@ -30,6 +32,14 @@ PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
 PREWARM_SCCACHE_DIR="${TMP_ROOT}/sccache-prewarm-${RUN_ID}"
 SCCACHE_DIR_A="${TMP_ROOT}/sccache-a-${RUN_ID}"
 SCCACHE_DIR_B="${TMP_ROOT}/sccache-b-${RUN_ID}"
+BUDGET_CONTENTION_WALL_SECONDS_MAX="${BUDGET_CONTENTION_WALL_SECONDS_MAX:-}"
+BUDGET_TOTAL_CONFLICTS_MAX="${BUDGET_TOTAL_CONFLICTS_MAX:-}"
+BUDGET_PROXY_429_MAX="${BUDGET_PROXY_429_MAX:-}"
+BUDGET_FLUSH_DURATION_MS_MAX="${BUDGET_FLUSH_DURATION_MS_MAX:-}"
+BUDGET_CACHE_OPS_GET_RECORDS_MIN="${BUDGET_CACHE_OPS_GET_RECORDS_MIN:-}"
+BUDGET_CACHE_OPS_GET_HIT_RATE_MIN="${BUDGET_CACHE_OPS_GET_HIT_RATE_MIN:-}"
+BUDGET_CACHE_OPS_GET_HIT_RATE_MAX="${BUDGET_CACHE_OPS_GET_HIT_RATE_MAX:-}"
+BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX="${BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX:-}"
 
 PROXY_PID_A=""
 PROXY_PID_B=""
@@ -51,6 +61,18 @@ require_positive() {
   local value="$2"
   if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: ${name} must be a positive integer"
+    exit 1
+  fi
+}
+
+require_numeric_if_set() {
+  local name="$1"
+  local value="$2"
+  if [[ -z "$value" ]]; then
+    return 0
+  fi
+  if ! [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "ERROR: ${name} must be numeric when set"
     exit 1
   fi
 }
@@ -83,13 +105,21 @@ require_positive "BUILD_FAILURE_TAIL_LINES" "$BUILD_FAILURE_TAIL_LINES"
 require_positive "PROXY_READY_TIMEOUT_SECS" "$PROXY_READY_TIMEOUT_SECS"
 require_positive "PROXY_READY_POLL_SECS" "$PROXY_READY_POLL_SECS"
 require_positive "PORT_RECLAIM_WAIT_SECS" "$PORT_RECLAIM_WAIT_SECS"
+require_numeric_if_set "BUDGET_CONTENTION_WALL_SECONDS_MAX" "$BUDGET_CONTENTION_WALL_SECONDS_MAX"
+require_numeric_if_set "BUDGET_TOTAL_CONFLICTS_MAX" "$BUDGET_TOTAL_CONFLICTS_MAX"
+require_numeric_if_set "BUDGET_PROXY_429_MAX" "$BUDGET_PROXY_429_MAX"
+require_numeric_if_set "BUDGET_FLUSH_DURATION_MS_MAX" "$BUDGET_FLUSH_DURATION_MS_MAX"
+require_numeric_if_set "BUDGET_CACHE_OPS_GET_RECORDS_MIN" "$BUDGET_CACHE_OPS_GET_RECORDS_MIN"
+require_numeric_if_set "BUDGET_CACHE_OPS_GET_HIT_RATE_MIN" "$BUDGET_CACHE_OPS_GET_HIT_RATE_MIN"
+require_numeric_if_set "BUDGET_CACHE_OPS_GET_HIT_RATE_MAX" "$BUDGET_CACHE_OPS_GET_HIT_RATE_MAX"
+require_numeric_if_set "BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX" "$BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX"
 
 if [[ "$SCCACHE_PORT_A" == "$SCCACHE_PORT_B" ]]; then
   echo "ERROR: SCCACHE_PORT_A and SCCACHE_PORT_B must be different"
   exit 1
 fi
 
-for dep in sccache curl pgrep ps; do
+for dep in sccache curl pgrep ps python3; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     echo "ERROR: ${dep} not found in PATH"
     exit 1
@@ -345,6 +375,30 @@ count_pattern() {
   echo "${count:-0}"
 }
 
+proxy_request_metrics_path() {
+  local log_file="$1"
+  local log_dir
+  log_dir="$(dirname "$log_file")"
+  echo "${log_dir}/request-metrics.jsonl"
+}
+
+cache_ops_get_summary_for_metrics_file() {
+  local metrics_file="$1"
+  local summary_file="$2"
+  local records=0 hits=0 misses=0 errors=0
+  if [[ -f "$metrics_file" ]]; then
+    if python3 "${SCRIPT_DIR}/request-metrics-summary.py" "$metrics_file" >"$summary_file"; then
+      # shellcheck disable=SC1090
+      source "$summary_file"
+      records="${request_metrics_cache_ops_sccache_get_records_total:-0}"
+      hits="${request_metrics_cache_ops_sccache_get_hits:-0}"
+      misses="${request_metrics_cache_ops_sccache_get_misses:-0}"
+      errors="${request_metrics_cache_ops_sccache_get_errors:-0}"
+    fi
+  fi
+  echo "${records} ${hits} ${misses} ${errors}"
+}
+
 format_delta() {
   local base="$1"
   local current="$2"
@@ -354,11 +408,90 @@ format_delta() {
   echo "${delta}s (${pct}%)"
 }
 
+BUDGET_FAILURES=0
+
+budget_check_min() {
+  local label="$1"
+  local actual="$2"
+  local expected="$3"
+  if awk -v a="$actual" -v e="$expected" 'BEGIN { exit !(a + 0 >= e + 0) }'; then
+    echo "  BUDGET OK: ${label} ${actual} >= ${expected}"
+  else
+    echo "  BUDGET FAIL: ${label} ${actual} < ${expected}"
+    BUDGET_FAILURES=$((BUDGET_FAILURES + 1))
+  fi
+}
+
+budget_check_max() {
+  local label="$1"
+  local actual="$2"
+  local expected="$3"
+  if awk -v a="$actual" -v e="$expected" 'BEGIN { exit !(a + 0 <= e + 0) }'; then
+    echo "  BUDGET OK: ${label} ${actual} <= ${expected}"
+  else
+    echo "  BUDGET FAIL: ${label} ${actual} > ${expected}"
+    BUDGET_FAILURES=$((BUDGET_FAILURES + 1))
+  fi
+}
+
+evaluate_budgets() {
+  local checks=0
+  echo ""
+  echo "Budget checks:"
+
+  if [[ -n "$BUDGET_CONTENTION_WALL_SECONDS_MAX" ]]; then
+    checks=$((checks + 1))
+    budget_check_max "contention wall seconds" "${CONTENTION_WALL:-0}" "$BUDGET_CONTENTION_WALL_SECONDS_MAX"
+  fi
+  if [[ -n "$BUDGET_TOTAL_CONFLICTS_MAX" ]]; then
+    checks=$((checks + 1))
+    budget_check_max "total tag conflicts" "${TOTAL_CONFLICTS:-0}" "$BUDGET_TOTAL_CONFLICTS_MAX"
+  fi
+  if [[ -n "$BUDGET_PROXY_429_MAX" ]]; then
+    checks=$((checks + 1))
+    budget_check_max "proxy 429 count" "${TOTAL_429:-0}" "$BUDGET_PROXY_429_MAX"
+  fi
+  if [[ -n "$BUDGET_FLUSH_DURATION_MS_MAX" ]]; then
+    checks=$((checks + 1))
+    budget_check_max "max flush duration (ms)" "${MAX_FLUSH_DURATION_MS:-0}" "$BUDGET_FLUSH_DURATION_MS_MAX"
+  fi
+  if [[ -n "$BUDGET_CACHE_OPS_GET_RECORDS_MIN" ]]; then
+    checks=$((checks + 1))
+    budget_check_min "cache-ops sccache GET record count" "${TOTAL_CACHE_OPS_GET_RECORDS:-0}" "$BUDGET_CACHE_OPS_GET_RECORDS_MIN"
+  fi
+  if [[ -n "$BUDGET_CACHE_OPS_GET_HIT_RATE_MIN" ]]; then
+    checks=$((checks + 1))
+    budget_check_min "cache-ops sccache GET hit rate (%)" "${CACHE_OPS_GET_HIT_RATE:-0}" "$BUDGET_CACHE_OPS_GET_HIT_RATE_MIN"
+  fi
+  if [[ -n "$BUDGET_CACHE_OPS_GET_HIT_RATE_MAX" ]]; then
+    checks=$((checks + 1))
+    budget_check_max "cache-ops sccache GET hit rate (%)" "${CACHE_OPS_GET_HIT_RATE:-0}" "$BUDGET_CACHE_OPS_GET_HIT_RATE_MAX"
+  fi
+  if [[ -n "$BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX" ]]; then
+    checks=$((checks + 1))
+    budget_check_max "cache-ops vs sccache hit-rate delta (pp)" "${CACHE_OPS_SCCACHE_HIT_RATE_DELTA:-0}" "$BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX"
+  fi
+
+  if (( checks == 0 )); then
+    echo "  no budgets configured"
+    return 0
+  fi
+  if (( BUDGET_FAILURES > 0 )); then
+    echo "  budget failures: ${BUDGET_FAILURES}"
+    return 1
+  fi
+  echo "  all checks passed (${checks})"
+  return 0
+}
+
 start_proxy() {
   local label="$1"
   local port="$2"
   local log_file="$3"
   local pid_var="$4"
+  local metrics_file
+  metrics_file="$(proxy_request_metrics_path "$log_file")"
+  rm -f "$metrics_file"
   stop_proxy_by_var "$pid_var" "$label"
   reclaim_stale_proxy_port "$port" "$log_file"
   {
@@ -366,6 +499,9 @@ start_proxy() {
     echo "=== Proxy ${label} start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${TAG} port=${port} ==="
   } >>"$log_file"
   BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
+    BORINGCACHE_METRICS_FORMAT="${BORINGCACHE_METRICS_FORMAT:-json}" \
+    BORINGCACHE_REQUEST_METRICS_PATH="$metrics_file" \
+    BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS="${BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS:-1}" \
     RUST_LOG="$RUST_LOG_LEVEL" \
     "$TMP_BINARY" cache-registry "$WORKSPACE" "$TAG" \
     --host "$PROXY_HOST" \
@@ -594,9 +730,35 @@ stop_proxy_graceful "PROXY_PID_B" "B"
 
 BUILD_A_SECONDS="$(cat "${CONTENTION_DIR}/build-a.log.seconds" 2>/dev/null || echo "0")"
 BUILD_B_SECONDS="$(cat "${CONTENTION_DIR}/build-b.log.seconds" 2>/dev/null || echo "0")"
+REQ_A="$(stat_value 'Compile requests' "${CONTENTION_DIR}/sccache-a-stats.txt")"
+REQ_B="$(stat_value 'Compile requests' "${CONTENTION_DIR}/sccache-b-stats.txt")"
+HITS_A="$(stat_value 'Cache hits' "${CONTENTION_DIR}/sccache-a-stats.txt")"
+HITS_B="$(stat_value 'Cache hits' "${CONTENTION_DIR}/sccache-b-stats.txt")"
+MISSES_A="$(stat_value 'Cache misses' "${CONTENTION_DIR}/sccache-a-stats.txt")"
+MISSES_B="$(stat_value 'Cache misses' "${CONTENTION_DIR}/sccache-b-stats.txt")"
+REQ_A="${REQ_A:-0}"
+REQ_B="${REQ_B:-0}"
+HITS_A="${HITS_A:-0}"
+HITS_B="${HITS_B:-0}"
+MISSES_A="${MISSES_A:-0}"
+MISSES_B="${MISSES_B:-0}"
+TOTAL_REQ="$((REQ_A + REQ_B))"
+TOTAL_HITS="$((HITS_A + HITS_B))"
+TOTAL_MISSES="$((MISSES_A + MISSES_B))"
+SCCACHE_COMBINED_HIT_RATE="$(awk \
+  -v hits="$TOTAL_HITS" \
+  -v misses="$TOTAL_MISSES" \
+  'BEGIN {
+    denom = hits + misses;
+    if (denom == 0) { printf "0.00" } else { printf "%.2f", (hits * 100) / denom }
+  }'
+)"
 
 CONFLICTS_A="$(count_pattern "$PROXY_LOG_A" 'tag conflict')"
 CONFLICTS_B="$(count_pattern "$PROXY_LOG_B" 'tag conflict')"
+PROXY_429_A="$(count_pattern "$PROXY_LOG_A" '429 Too Many Requests')"
+PROXY_429_B="$(count_pattern "$PROXY_LOG_B" '429 Too Many Requests')"
+TOTAL_429="$((PROXY_429_A + PROXY_429_B))"
 
 FLUSHED_A="$(count_pattern "$PROXY_LOG_A" 'KV batch: flushed')"
 FLUSHED_B="$(count_pattern "$PROXY_LOG_B" 'KV batch: flushed')"
@@ -611,16 +773,78 @@ FLUSH_SUMMARY_A="$(sed -n 's/.*KV flush summary:.*uploaded=\([0-9]*\).*already_p
 FLUSH_SUMMARY_B="$(sed -n 's/.*KV flush summary:.*uploaded=\([0-9]*\).*already_present=\([0-9]*\).*duration_ms=\([0-9]*\).*/uploaded=\1 already_present=\2 duration_ms=\3/p' "$PROXY_LOG_B" | tail -1)"
 FLUSH_SUMMARY_A="${FLUSH_SUMMARY_A:-none}"
 FLUSH_SUMMARY_B="${FLUSH_SUMMARY_B:-none}"
+FLUSH_DURATION_MS_A="$(sed -n 's/.*KV flush summary:.*duration_ms=\([0-9]*\).*/\1/p' "$PROXY_LOG_A" | tail -1)"
+FLUSH_DURATION_MS_B="$(sed -n 's/.*KV flush summary:.*duration_ms=\([0-9]*\).*/\1/p' "$PROXY_LOG_B" | tail -1)"
+FLUSH_DURATION_MS_A="${FLUSH_DURATION_MS_A:-0}"
+FLUSH_DURATION_MS_B="${FLUSH_DURATION_MS_B:-0}"
+MAX_FLUSH_DURATION_MS="$(awk -v a="$FLUSH_DURATION_MS_A" -v b="$FLUSH_DURATION_MS_B" 'BEGIN { print (a+0 > b+0) ? a : b }')"
+
+CACHE_OPS_RECORDS_A=0
+CACHE_OPS_HITS_A=0
+CACHE_OPS_MISSES_A=0
+CACHE_OPS_ERRORS_A=0
+CACHE_OPS_RECORDS_B=0
+CACHE_OPS_HITS_B=0
+CACHE_OPS_MISSES_B=0
+CACHE_OPS_ERRORS_B=0
+
+if read -r CACHE_OPS_RECORDS_A CACHE_OPS_HITS_A CACHE_OPS_MISSES_A CACHE_OPS_ERRORS_A < <(
+  cache_ops_get_summary_for_metrics_file \
+    "$(proxy_request_metrics_path "$PROXY_LOG_A")" \
+    "${CONTENTION_DIR}/request-metrics-a-summary.env"
+); then :; else
+  CACHE_OPS_RECORDS_A=0
+  CACHE_OPS_HITS_A=0
+  CACHE_OPS_MISSES_A=0
+  CACHE_OPS_ERRORS_A=0
+fi
+
+if read -r CACHE_OPS_RECORDS_B CACHE_OPS_HITS_B CACHE_OPS_MISSES_B CACHE_OPS_ERRORS_B < <(
+  cache_ops_get_summary_for_metrics_file \
+    "$(proxy_request_metrics_path "$PROXY_LOG_B")" \
+    "${CONTENTION_DIR}/request-metrics-b-summary.env"
+); then :; else
+  CACHE_OPS_RECORDS_B=0
+  CACHE_OPS_HITS_B=0
+  CACHE_OPS_MISSES_B=0
+  CACHE_OPS_ERRORS_B=0
+fi
+
+TOTAL_CACHE_OPS_GET_RECORDS="$((CACHE_OPS_RECORDS_A + CACHE_OPS_RECORDS_B))"
+TOTAL_CACHE_OPS_GET_HITS="$((CACHE_OPS_HITS_A + CACHE_OPS_HITS_B))"
+TOTAL_CACHE_OPS_GET_MISSES="$((CACHE_OPS_MISSES_A + CACHE_OPS_MISSES_B))"
+TOTAL_CACHE_OPS_GET_ERRORS="$((CACHE_OPS_ERRORS_A + CACHE_OPS_ERRORS_B))"
+CACHE_OPS_GET_HIT_RATE="$(awk \
+  -v hits="$TOTAL_CACHE_OPS_GET_HITS" \
+  -v misses="$TOTAL_CACHE_OPS_GET_MISSES" \
+  'BEGIN {
+    denom = hits + misses;
+    if (denom == 0) { printf "0.00" } else { printf "%.2f", (hits * 100) / denom }
+  }'
+)"
+CACHE_OPS_SCCACHE_HIT_RATE_DELTA="$(awk \
+  -v cache_ops="$CACHE_OPS_GET_HIT_RATE" \
+  -v sccache="$SCCACHE_COMBINED_HIT_RATE" \
+  'BEGIN {
+    delta = cache_ops - sccache;
+    if (delta < 0) { delta = -delta }
+    printf "%.2f", delta
+  }'
+)"
 
 echo ""
 echo "--- Contention metrics ---"
 echo "Build A: ${BUILD_A_SECONDS}s"
 echo "Build B: ${BUILD_B_SECONDS}s"
 echo "Wall clock: ${CONTENTION_WALL}s"
+echo "Compile req/hit/miss: A=${REQ_A}/${HITS_A}/${MISSES_A}, B=${REQ_B}/${HITS_B}/${MISSES_B}, combined_hit_rate=${SCCACHE_COMBINED_HIT_RATE}%"
 echo "Proxy A: conflicts=${CONFLICTS_A}, batches_flushed=${FLUSHED_A}, flush_timeouts=${TIMEOUT_A}, permanent_drops=${DROPS_A}"
 echo "Proxy B: conflicts=${CONFLICTS_B}, batches_flushed=${FLUSHED_B}, flush_timeouts=${TIMEOUT_B}, permanent_drops=${DROPS_B}"
+echo "Proxy 429: A=${PROXY_429_A}, B=${PROXY_429_B}, total=${TOTAL_429}"
 echo "Flush A: ${FLUSH_SUMMARY_A}"
 echo "Flush B: ${FLUSH_SUMMARY_B}"
+echo "Cache ops (sccache GET): records=${TOTAL_CACHE_OPS_GET_RECORDS}, hits=${TOTAL_CACHE_OPS_GET_HITS}, misses=${TOTAL_CACHE_OPS_GET_MISSES}, errors=${TOTAL_CACHE_OPS_GET_ERRORS}, hit_rate=${CACHE_OPS_GET_HIT_RATE}%"
+echo "Cache ops vs sccache hit-rate delta: ${CACHE_OPS_SCCACHE_HIT_RATE_DELTA}pp"
 
 # ---------------------------------------------------------------------------
 # Phase 3: Verification — third proxy loads merged index
@@ -666,13 +890,19 @@ echo "Contention"
 echo "  Build A:              ${BUILD_A_SECONDS}s"
 echo "  Build B:              ${BUILD_B_SECONDS}s"
 echo "  Wall clock:           ${CONTENTION_WALL}s"
+echo "  Build failures:       ${BUILD_FAILED}"
+echo "  Compile req/hit/miss: ${TOTAL_REQ}/${TOTAL_HITS}/${TOTAL_MISSES} (hit_rate=${SCCACHE_COMBINED_HIT_RATE}%)"
 echo "  Proxy A conflicts:    ${CONFLICTS_A}"
 echo "  Proxy B conflicts:    ${CONFLICTS_B}"
 echo "  Total conflicts:      ${TOTAL_CONFLICTS}"
+echo "  Proxy 429 total:      ${TOTAL_429}"
 echo "  Proxy A flush:        ${FLUSH_SUMMARY_A}"
 echo "  Proxy B flush:        ${FLUSH_SUMMARY_B}"
+echo "  Max flush duration:   ${MAX_FLUSH_DURATION_MS}ms"
 echo "  Flush timeouts:       ${TOTAL_TIMEOUTS}"
 echo "  Permanent drops:      ${TOTAL_DROPS}"
+echo "  Cache ops GET:        records=${TOTAL_CACHE_OPS_GET_RECORDS} hits=${TOTAL_CACHE_OPS_GET_HITS} misses=${TOTAL_CACHE_OPS_GET_MISSES} errors=${TOTAL_CACHE_OPS_GET_ERRORS} hit_rate=${CACHE_OPS_GET_HIT_RATE}%"
+echo "  Hit-rate delta:       ${CACHE_OPS_SCCACHE_HIT_RATE_DELTA}pp (cache-ops GET vs sccache)"
 echo ""
 echo "Verification"
 echo "  Merged index entries: ${VERIFY_PRELOADED}"
@@ -681,6 +911,12 @@ echo "Logs: ${LOG_DIR}"
 echo "========================================="
 
 PASS=1
+
+if [[ "$BUILD_FAILED" -ne 0 ]]; then
+  echo ""
+  echo "FAIL: one or more contention builds failed"
+  PASS=0
+fi
 
 if [[ "$TOTAL_TIMEOUTS" -gt 0 ]]; then
   echo ""
@@ -700,9 +936,18 @@ if [[ "$VERIFY_PRELOADED" -eq 0 ]]; then
   PASS=0
 fi
 
+BUDGET_STATUS=0
+if ! evaluate_budgets; then
+  BUDGET_STATUS=1
+  PASS=0
+fi
+
 if [[ "$PASS" -eq 1 ]]; then
   echo ""
   echo "PASS: both proxies flushed without timeouts/drops, merged index has ${VERIFY_PRELOADED} entries"
 fi
 
+if [[ "$BUDGET_STATUS" -ne 0 ]]; then
+  exit 1
+fi
 exit $((1 - PASS))
