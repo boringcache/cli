@@ -54,6 +54,7 @@ def main() -> int:
     prefetch_cycles = 0
     cache_ops_records_total = 0
     cache_ops_by_tool = {}
+    cache_ops_get_by_tool = {}
     for item in records:
         status = item.get("status")
         if item.get("error") is not None:
@@ -72,6 +73,7 @@ def main() -> int:
             cache_ops_records_total += 1
             details = parse_details(item.get("details"))
             tool = details.get("tool", "").strip().lower()
+            op = details.get("op", "").strip().lower()
             result = details.get("result", "").strip().lower()
             if tool:
                 bucket = cache_ops_by_tool.setdefault(
@@ -79,11 +81,28 @@ def main() -> int:
                 )
                 if result in bucket:
                     bucket[result] += 1
+                    if op == "get":
+                        get_bucket = cache_ops_get_by_tool.setdefault(
+                            tool, {"hit": 0, "miss": 0, "error": 0}
+                        )
+                        get_bucket[result] += 1
 
     sccache = cache_ops_by_tool.get("sccache", {"hit": 0, "miss": 0, "error": 0})
     sccache_denom = sccache["hit"] + sccache["miss"]
     sccache_hit_rate = (
         100.0 if sccache_denom == 0 else (100.0 * sccache["hit"] / sccache_denom)
+    )
+    sccache_get = cache_ops_get_by_tool.get(
+        "sccache", {"hit": 0, "miss": 0, "error": 0}
+    )
+    sccache_get_records_total = (
+        sccache_get["hit"] + sccache_get["miss"] + sccache_get["error"]
+    )
+    sccache_get_denom = sccache_get["hit"] + sccache_get["miss"]
+    sccache_get_hit_rate = (
+        100.0
+        if sccache_get_denom == 0
+        else (100.0 * sccache_get["hit"] / sccache_get_denom)
     )
 
     print(f"request_metrics_total={len(records)}")
@@ -103,6 +122,11 @@ def main() -> int:
     print(f"request_metrics_cache_ops_sccache_misses={sccache['miss']}")
     print(f"request_metrics_cache_ops_sccache_errors={sccache['error']}")
     print(f"request_metrics_cache_ops_sccache_hit_rate={sccache_hit_rate:.2f}")
+    print(f"request_metrics_cache_ops_sccache_get_records_total={sccache_get_records_total}")
+    print(f"request_metrics_cache_ops_sccache_get_hits={sccache_get['hit']}")
+    print(f"request_metrics_cache_ops_sccache_get_misses={sccache_get['miss']}")
+    print(f"request_metrics_cache_ops_sccache_get_errors={sccache_get['error']}")
+    print(f"request_metrics_cache_ops_sccache_get_hit_rate={sccache_get_hit_rate:.2f}")
     return 0
 
 

@@ -184,7 +184,7 @@ jobs:
               # Cold+warm mixed traffic should sit around 50% hit rate for seeded-warm scenarios.
               export BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN="45"
               export BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX="55"
-              # Cache-ops stream should reflect the same mixed hit-rate envelope.
+              # Cache-ops GET stream should reflect the same mixed hit-rate envelope.
               export BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN="45"
               export BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX="55"
             fi
@@ -249,6 +249,11 @@ jobs:
           request_metrics_cache_ops_sccache_misses="0"
           request_metrics_cache_ops_sccache_errors="0"
           request_metrics_cache_ops_sccache_hit_rate="0"
+          request_metrics_cache_ops_sccache_get_records_total="0"
+          request_metrics_cache_ops_sccache_get_hits="0"
+          request_metrics_cache_ops_sccache_get_misses="0"
+          request_metrics_cache_ops_sccache_get_errors="0"
+          request_metrics_cache_ops_sccache_get_hit_rate="0"
 
           if [[ "$phase" == "efficacy" ]]; then
             efficacy_cold_hits="0"
@@ -325,7 +330,7 @@ jobs:
             python3 scripts/request-metrics-summary.py "$request_metrics_file" > "${log_dir}/request-metrics-summary.env"
             source "${log_dir}/request-metrics-summary.env"
             if [[ "$phase" == "efficacy" ]]; then
-              efficacy_cache_ops_hit_rate="${request_metrics_cache_ops_sccache_hit_rate:-0}"
+              efficacy_cache_ops_hit_rate="${request_metrics_cache_ops_sccache_get_hit_rate:-0}"
             fi
           fi
 
@@ -368,6 +373,11 @@ jobs:
             echo "request_metrics_cache_ops_sccache_misses=${request_metrics_cache_ops_sccache_misses}"
             echo "request_metrics_cache_ops_sccache_errors=${request_metrics_cache_ops_sccache_errors}"
             echo "request_metrics_cache_ops_sccache_hit_rate=${request_metrics_cache_ops_sccache_hit_rate}"
+            echo "request_metrics_cache_ops_sccache_get_records_total=${request_metrics_cache_ops_sccache_get_records_total}"
+            echo "request_metrics_cache_ops_sccache_get_hits=${request_metrics_cache_ops_sccache_get_hits}"
+            echo "request_metrics_cache_ops_sccache_get_misses=${request_metrics_cache_ops_sccache_get_misses}"
+            echo "request_metrics_cache_ops_sccache_get_errors=${request_metrics_cache_ops_sccache_get_errors}"
+            echo "request_metrics_cache_ops_sccache_get_hit_rate=${request_metrics_cache_ops_sccache_get_hit_rate}"
           } > "${log_dir}/metrics.env"
 
       - name: Upload benchmark artifacts
@@ -632,8 +642,8 @@ jobs:
 
           echo "## Efficacy (cold/warm)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Backend | Status | Cold (s) | Warm (s) | Warm Rust hit rate | Two-pass Rust hit rate | Cache ops sccache hit rate | Warm avg cache read hit (s) | Proxy 429 | Proxy conflicts |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---------|--------|----------|----------|--------------------|------------------------|----------------------------|-----------------------------|-----------|-----------------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Backend | Status | Cold (s) | Warm (s) | Warm Rust hit rate | Two-pass Rust hit rate | Cache ops sccache GET hit rate | Warm avg cache read hit (s) | Proxy 429 | Proxy conflicts |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|--------|----------|----------|--------------------|------------------------|--------------------------------|-----------------------------|-----------|-----------------|" >> "$GITHUB_STEP_SUMMARY"
 
           local_warm=""
           proxy_warm=""

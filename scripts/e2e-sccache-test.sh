@@ -889,11 +889,11 @@ evaluate_budgets() {
     fi
     if [[ -n "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN" ]]; then
       checks=$((checks + 1))
-      budget_check_min "efficacy cache-ops sccache hit rate (%)" "${EFFICACY_CACHE_OPS_HIT_RATE:-0}" "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN"
+      budget_check_min "efficacy cache-ops sccache GET hit rate (%)" "${EFFICACY_CACHE_OPS_HIT_RATE:-0}" "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN"
     fi
     if [[ -n "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX" ]]; then
       checks=$((checks + 1))
-      budget_check_max "efficacy cache-ops sccache hit rate (%)" "${EFFICACY_CACHE_OPS_HIT_RATE:-0}" "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX"
+      budget_check_max "efficacy cache-ops sccache GET hit rate (%)" "${EFFICACY_CACHE_OPS_HIT_RATE:-0}" "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX"
     fi
     if [[ -n "$BUDGET_EFFICACY_PROXY_429_MAX" ]]; then
       checks=$((checks + 1))
@@ -1019,12 +1019,12 @@ phase_efficacy() {
     stop_proxy
     print_request_metrics_summary "$phase_dir" "Efficacy"
     if load_request_metrics_summary "$phase_dir"; then
-      EFFICACY_CACHE_OPS_RECORDS="${request_metrics_cache_ops_records_total:-0}"
-      EFFICACY_CACHE_OPS_HITS="${request_metrics_cache_ops_sccache_hits:-0}"
-      EFFICACY_CACHE_OPS_MISSES="${request_metrics_cache_ops_sccache_misses:-0}"
-      EFFICACY_CACHE_OPS_ERRORS="${request_metrics_cache_ops_sccache_errors:-0}"
-      EFFICACY_CACHE_OPS_HIT_RATE="${request_metrics_cache_ops_sccache_hit_rate:-0}"
-      echo "Efficacy cache ops (sccache): records=${EFFICACY_CACHE_OPS_RECORDS}, hits=${EFFICACY_CACHE_OPS_HITS}, misses=${EFFICACY_CACHE_OPS_MISSES}, errors=${EFFICACY_CACHE_OPS_ERRORS}, hit_rate=${EFFICACY_CACHE_OPS_HIT_RATE}%"
+      EFFICACY_CACHE_OPS_RECORDS="${request_metrics_cache_ops_sccache_get_records_total:-0}"
+      EFFICACY_CACHE_OPS_HITS="${request_metrics_cache_ops_sccache_get_hits:-0}"
+      EFFICACY_CACHE_OPS_MISSES="${request_metrics_cache_ops_sccache_get_misses:-0}"
+      EFFICACY_CACHE_OPS_ERRORS="${request_metrics_cache_ops_sccache_get_errors:-0}"
+      EFFICACY_CACHE_OPS_HIT_RATE="${request_metrics_cache_ops_sccache_get_hit_rate:-0}"
+      echo "Efficacy cache ops (sccache get): records=${EFFICACY_CACHE_OPS_RECORDS}, hits=${EFFICACY_CACHE_OPS_HITS}, misses=${EFFICACY_CACHE_OPS_MISSES}, errors=${EFFICACY_CACHE_OPS_ERRORS}, hit_rate=${EFFICACY_CACHE_OPS_HIT_RATE}%"
     else
       EFFICACY_CACHE_OPS_RECORDS="0"
       EFFICACY_CACHE_OPS_HITS="0"
@@ -1309,7 +1309,7 @@ if [[ "$RUN_EFFICACY" == "1" ]]; then
   echo "  Two-pass Rust hit:    ${EFFICACY_TWO_PASS_HIT_RATE}%"
   echo "  Warm req/hit/miss:    ${EFFICACY_WARM_REQUESTS}/${EFFICACY_WARM_HITS}/${EFFICACY_WARM_MISSES}"
   echo "  Cold req/hit/miss:    ${EFFICACY_COLD_REQUESTS}/${EFFICACY_COLD_HITS}/${EFFICACY_COLD_MISSES}"
-  echo "  Cache ops hit rate:   ${EFFICACY_CACHE_OPS_HIT_RATE}% (records=${EFFICACY_CACHE_OPS_RECORDS}, hits=${EFFICACY_CACHE_OPS_HITS}, misses=${EFFICACY_CACHE_OPS_MISSES}, errors=${EFFICACY_CACHE_OPS_ERRORS})"
+  echo "  Cache ops GET hit:    ${EFFICACY_CACHE_OPS_HIT_RATE}% (records=${EFFICACY_CACHE_OPS_RECORDS}, hits=${EFFICACY_CACHE_OPS_HITS}, misses=${EFFICACY_CACHE_OPS_MISSES}, errors=${EFFICACY_CACHE_OPS_ERRORS})"
   echo "  Warm avg read hit:    ${EFFICACY_AVG_READ_HIT}s"
   echo "  Proxy 429:            ${EFFICACY_PROXY_429:-0}"
   echo "  Proxy tag conflicts:  ${EFFICACY_PROXY_CONFLICTS:-0}"
