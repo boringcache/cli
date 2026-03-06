@@ -22,6 +22,7 @@ SETTLE_SECS="${SETTLE_SECS:-10}"
 RUN_STRESS="${RUN_STRESS:-1}"
 RUN_EFFICACY="${RUN_EFFICACY:-1}"
 RUN_SCOPED_TAGS="${RUN_SCOPED_TAGS:-0}"
+EFFICACY_FRESH_WARM_SCCACHE_DIR="${EFFICACY_FRESH_WARM_SCCACHE_DIR:-0}"
 SCCACHE_BACKEND="${SCCACHE_BACKEND:-proxy}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
@@ -35,11 +36,13 @@ BUILD_STALL_WARN_SECS="${BUILD_STALL_WARN_SECS:-90}"
 PROXY_READY_WARN_SECS="${PROXY_READY_WARN_SECS:-15}"
 SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT:-$((4200 + (RANDOM % 2000)))}"
 SCCACHE_DIR="${SCCACHE_DIR:-${TMP_ROOT}/sccache-${RUN_ID}}"
+EFFICACY_WARM_SCCACHE_DIR="${EFFICACY_WARM_SCCACHE_DIR:-${SCCACHE_DIR}-warm}"
 STRESS_SCCACHE_PORT_BASE="${STRESS_SCCACHE_PORT_BASE:-$((SCCACHE_SERVER_PORT + 100))}"
 STRESS_SCCACHE_ISOLATION="${STRESS_SCCACHE_ISOLATION:-0}"
 STRESS_PREWARM_TARGET_DIR="${STRESS_PREWARM_TARGET_DIR:-${TARGET_ROOT}/stress-prewarm-stable}"
 PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
 BUDGET_EFFICACY_RUST_HIT_RATE_MIN="${BUDGET_EFFICACY_RUST_HIT_RATE_MIN:-}"
+BUDGET_EFFICACY_WARM_REQUESTS_MIN="${BUDGET_EFFICACY_WARM_REQUESTS_MIN:-}"
 BUDGET_EFFICACY_PROXY_429_MAX="${BUDGET_EFFICACY_PROXY_429_MAX:-}"
 BUDGET_EFFICACY_PROXY_CONFLICTS_MAX="${BUDGET_EFFICACY_PROXY_CONFLICTS_MAX:-}"
 BUDGET_STRESS_RUST_HIT_RATE_MIN="${BUDGET_STRESS_RUST_HIT_RATE_MIN:-}"
@@ -63,6 +66,11 @@ fi
 
 if [[ "$RUN_EFFICACY" != "0" && "$RUN_EFFICACY" != "1" ]]; then
   echo "ERROR: RUN_EFFICACY must be 0 or 1"
+  exit 1
+fi
+
+if [[ "$EFFICACY_FRESH_WARM_SCCACHE_DIR" != "0" && "$EFFICACY_FRESH_WARM_SCCACHE_DIR" != "1" ]]; then
+  echo "ERROR: EFFICACY_FRESH_WARM_SCCACHE_DIR must be 0 or 1"
   exit 1
 fi
 
@@ -158,6 +166,7 @@ require_numeric_if_set() {
 }
 
 require_numeric_if_set "BUDGET_EFFICACY_RUST_HIT_RATE_MIN" "$BUDGET_EFFICACY_RUST_HIT_RATE_MIN"
+require_numeric_if_set "BUDGET_EFFICACY_WARM_REQUESTS_MIN" "$BUDGET_EFFICACY_WARM_REQUESTS_MIN"
 require_numeric_if_set "BUDGET_EFFICACY_PROXY_429_MAX" "$BUDGET_EFFICACY_PROXY_429_MAX"
 require_numeric_if_set "BUDGET_EFFICACY_PROXY_CONFLICTS_MAX" "$BUDGET_EFFICACY_PROXY_CONFLICTS_MAX"
 require_numeric_if_set "BUDGET_STRESS_RUST_HIT_RATE_MIN" "$BUDGET_STRESS_RUST_HIT_RATE_MIN"
@@ -350,6 +359,11 @@ echo "Parallel jobs: $PARALLEL_JOBS"
 echo "Run efficacy phase: ${RUN_EFFICACY}"
 echo "Run stress phase: ${RUN_STRESS}"
 echo "Run-scoped tags: $RUN_SCOPED_TAGS"
+if [[ "$EFFICACY_FRESH_WARM_SCCACHE_DIR" == "1" ]]; then
+  echo "Efficacy warm sccache mode: fresh (${EFFICACY_WARM_SCCACHE_DIR})"
+else
+  echo "Efficacy warm sccache mode: reuse (${SCCACHE_DIR})"
+fi
 echo "sccache backend: $SCCACHE_BACKEND"
 echo "sccache server port: $SCCACHE_SERVER_PORT"
 echo "sccache dir: $SCCACHE_DIR"
@@ -828,6 +842,10 @@ evaluate_budgets() {
       checks=$((checks + 1))
       budget_check_min "efficacy warm rust hit rate (%)" "${EFFICACY_RUST_HIT_RATE:-0}" "$BUDGET_EFFICACY_RUST_HIT_RATE_MIN"
     fi
+    if [[ -n "$BUDGET_EFFICACY_WARM_REQUESTS_MIN" ]]; then
+      checks=$((checks + 1))
+      budget_check_min "efficacy warm compile requests" "${EFFICACY_WARM_REQUESTS:-0}" "$BUDGET_EFFICACY_WARM_REQUESTS_MIN"
+    fi
     if [[ -n "$BUDGET_EFFICACY_PROXY_429_MAX" ]]; then
       checks=$((checks + 1))
       budget_check_max "efficacy proxy 429 count" "${EFFICACY_PROXY_429:-0}" "$BUDGET_EFFICACY_PROXY_429_MAX"
@@ -888,9 +906,13 @@ evaluate_budgets() {
 }
 
 phase_efficacy() {
-  local phase_dir proxy_log
+  local phase_dir proxy_log warm_sccache_dir
   phase_dir="${LOG_DIR}/efficacy"
   proxy_log="${phase_dir}/proxy.log"
+  warm_sccache_dir="$SCCACHE_DIR"
+  if [[ "$EFFICACY_FRESH_WARM_SCCACHE_DIR" == "1" ]]; then
+    warm_sccache_dir="$EFFICACY_WARM_SCCACHE_DIR"
+  fi
   mkdir -p "$phase_dir"
   rm -f "$(proxy_request_metrics_path "$proxy_log")"
 
@@ -927,10 +949,15 @@ phase_efficacy() {
     ensure_proxy_ready "$proxy_log"
   fi
 
-  reset_sccache
-  run_build "efficacy-warm" "${TARGET_ROOT}/efficacy-stable" "${phase_dir}/warm.log"
+  if [[ "$EFFICACY_FRESH_WARM_SCCACHE_DIR" == "1" ]]; then
+    rm -rf "$warm_sccache_dir"
+    mkdir -p "$warm_sccache_dir"
+    echo "Using fresh warm sccache dir: ${warm_sccache_dir}"
+  fi
+  reset_sccache "$SCCACHE_SERVER_PORT" "$warm_sccache_dir"
+  run_build "efficacy-warm" "${TARGET_ROOT}/efficacy-stable" "${phase_dir}/warm.log" "$SCCACHE_SERVER_PORT" "$warm_sccache_dir"
   SCCACHE_SERVER_PORT="$SCCACHE_SERVER_PORT" \
-    SCCACHE_DIR="$SCCACHE_DIR" \
+    SCCACHE_DIR="$warm_sccache_dir" \
     sccache --show-stats >"${phase_dir}/warm-sccache-stats.txt" 2>&1
   print_stats_summary "Efficacy warm stats" "${phase_dir}/warm-sccache-stats.txt"
   if [[ "$USE_PROXY" == "1" ]]; then

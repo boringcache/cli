@@ -174,6 +174,12 @@ jobs:
             export BUDGET_EFFICACY_RUST_HIT_RATE_MIN="95"
             export BUDGET_EFFICACY_PROXY_429_MAX="0"
             export BUDGET_EFFICACY_PROXY_CONFLICTS_MAX="0"
+            if [[ "${{ matrix.sccache_backend }}" == "proxy" ]]; then
+              # Force a fresh warm dir so efficacy validates remote-index correctness, not local disk reuse.
+              export EFFICACY_FRESH_WARM_SCCACHE_DIR="1"
+              # Require enough warm compile traffic so hit-rate budgets are statistically meaningful.
+              export BUDGET_EFFICACY_WARM_REQUESTS_MIN="100"
+            fi
           fi
           if [[ "${{ matrix.phase }}" == "stress" ]]; then
             export BUDGET_STRESS_RUST_HIT_RATE_MIN="70"

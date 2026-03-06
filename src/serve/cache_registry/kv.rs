@@ -3106,6 +3106,7 @@ fn select_flush_base_entries(
 
     let backend_entry_count = backend_entries.len();
     let published_entry_count = published_entries.len();
+    // Backend reads can lag right after publish; preserve local monotonic state to avoid pointer shrink.
     let mut merged = backend_entries;
     for (key, value) in published_entries {
         merged.insert(key.clone(), value.clone());
