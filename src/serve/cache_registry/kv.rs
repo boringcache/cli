@@ -2668,12 +2668,11 @@ async fn do_flush(
                 (BTreeMap::new(), Vec::new())
             }
         };
-    let (mut entries, used_published_fallback) =
+    let (mut entries, base_selection) =
         select_flush_base_entries(backend_entries, published_snapshot.as_ref());
-    let base_blob_order = if used_published_fallback {
-        published_blob_order
-    } else {
-        backend_blob_order
+    let base_blob_order = match base_selection {
+        FlushBaseSelection::Backend => backend_blob_order,
+        FlushBaseSelection::PublishedFallback { .. } => published_blob_order,
     };
     let existing_count = entries.len();
     let (
@@ -2687,10 +2686,22 @@ async fn do_flush(
         pending_blob_paths,
         pending_blob_sequences,
     );
-    if used_published_fallback {
-        eprintln!(
-            "KV flush: backend index empty, using published snapshot with {existing_count} entries"
-        );
+    if let FlushBaseSelection::PublishedFallback {
+        backend_entry_count,
+        published_entry_count,
+        missing_published_keys,
+        mismatched_published_keys,
+    } = base_selection
+    {
+        if backend_entry_count == 0 {
+            eprintln!(
+                "KV flush: backend index empty, using published snapshot with {published_entry_count} entries"
+            );
+        } else {
+            eprintln!(
+                "KV flush: backend index stale (backend={backend_entry_count}, published={published_entry_count}, missing_keys={missing_published_keys}, mismatched_keys={mismatched_published_keys}); preserving in-memory snapshot"
+            );
+        }
     }
     if missing_pending_entries > 0 {
         eprintln!(
@@ -3040,20 +3051,75 @@ async fn bind_kv_alias_tags(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FlushBaseSelection {
+    Backend,
+    PublishedFallback {
+        backend_entry_count: usize,
+        published_entry_count: usize,
+        missing_published_keys: usize,
+        mismatched_published_keys: usize,
+    },
+}
+
 fn select_flush_base_entries(
     backend_entries: BTreeMap<String, BlobDescriptor>,
     published_entries: &HashMap<String, BlobDescriptor>,
-) -> (BTreeMap<String, BlobDescriptor>, bool) {
+) -> (BTreeMap<String, BlobDescriptor>, FlushBaseSelection) {
     if backend_entries.is_empty() && !published_entries.is_empty() {
         return (
             published_entries
                 .iter()
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
-            true,
+            FlushBaseSelection::PublishedFallback {
+                backend_entry_count: 0,
+                published_entry_count: published_entries.len(),
+                missing_published_keys: published_entries.len(),
+                mismatched_published_keys: 0,
+            },
         );
     }
-    (backend_entries, false)
+    if backend_entries.is_empty() || published_entries.is_empty() {
+        return (backend_entries, FlushBaseSelection::Backend);
+    }
+
+    let mut missing_published_keys = 0usize;
+    let mut mismatched_published_keys = 0usize;
+    for (key, published_blob) in published_entries {
+        match backend_entries.get(key) {
+            Some(backend_blob)
+                if backend_blob.digest == published_blob.digest
+                    && backend_blob.size_bytes == published_blob.size_bytes => {}
+            Some(_) => {
+                mismatched_published_keys = mismatched_published_keys.saturating_add(1);
+            }
+            None => {
+                missing_published_keys = missing_published_keys.saturating_add(1);
+            }
+        }
+    }
+
+    if missing_published_keys == 0 && mismatched_published_keys == 0 {
+        return (backend_entries, FlushBaseSelection::Backend);
+    }
+
+    let backend_entry_count = backend_entries.len();
+    let published_entry_count = published_entries.len();
+    let mut merged = backend_entries;
+    for (key, value) in published_entries {
+        merged.insert(key.clone(), value.clone());
+    }
+
+    (
+        merged,
+        FlushBaseSelection::PublishedFallback {
+            backend_entry_count,
+            published_entry_count,
+            missing_published_keys,
+            mismatched_published_keys,
+        },
+    )
 }
 
 #[derive(Default)]
@@ -3554,6 +3620,13 @@ mod tests {
                 size_bytes: 10,
             },
         );
+        backend.insert(
+            "k2".to_string(),
+            BlobDescriptor {
+                digest: "sha256:222".to_string(),
+                size_bytes: 20,
+            },
+        );
         let mut published = HashMap::new();
         published.insert(
             "k2".to_string(),
@@ -3563,8 +3636,8 @@ mod tests {
             },
         );
 
-        let (selected, used_fallback) = select_flush_base_entries(backend.clone(), &published);
-        assert!(!used_fallback);
+        let (selected, selection) = select_flush_base_entries(backend.clone(), &published);
+        assert!(matches!(selection, FlushBaseSelection::Backend));
         assert_eq!(selected.len(), backend.len());
         assert!(selected.contains_key("k1"));
     }
@@ -3581,10 +3654,95 @@ mod tests {
             },
         );
 
-        let (selected, used_fallback) = select_flush_base_entries(backend, &published);
-        assert!(used_fallback);
+        let (selected, selection) = select_flush_base_entries(backend, &published);
+        assert!(matches!(
+            selection,
+            FlushBaseSelection::PublishedFallback {
+                backend_entry_count: 0,
+                published_entry_count: 1,
+                missing_published_keys: 1,
+                mismatched_published_keys: 0
+            }
+        ));
         assert_eq!(selected.len(), 1);
         assert!(selected.contains_key("k2"));
+    }
+
+    #[test]
+    fn select_flush_base_entries_preserves_published_when_backend_is_stale_subset() {
+        let mut backend = BTreeMap::new();
+        backend.insert(
+            "k1".to_string(),
+            BlobDescriptor {
+                digest: "sha256:111".to_string(),
+                size_bytes: 10,
+            },
+        );
+
+        let mut published = HashMap::new();
+        published.insert(
+            "k1".to_string(),
+            BlobDescriptor {
+                digest: "sha256:111".to_string(),
+                size_bytes: 10,
+            },
+        );
+        published.insert(
+            "k2".to_string(),
+            BlobDescriptor {
+                digest: "sha256:222".to_string(),
+                size_bytes: 20,
+            },
+        );
+
+        let (selected, selection) = select_flush_base_entries(backend, &published);
+        assert!(matches!(
+            selection,
+            FlushBaseSelection::PublishedFallback {
+                backend_entry_count: 1,
+                published_entry_count: 2,
+                missing_published_keys: 1,
+                mismatched_published_keys: 0
+            }
+        ));
+        assert_eq!(selected.len(), 2);
+        assert!(selected.contains_key("k1"));
+        assert!(selected.contains_key("k2"));
+    }
+
+    #[test]
+    fn select_flush_base_entries_preserves_published_on_digest_mismatch() {
+        let mut backend = BTreeMap::new();
+        backend.insert(
+            "k1".to_string(),
+            BlobDescriptor {
+                digest: "sha256:111".to_string(),
+                size_bytes: 10,
+            },
+        );
+        let mut published = HashMap::new();
+        published.insert(
+            "k1".to_string(),
+            BlobDescriptor {
+                digest: "sha256:222".to_string(),
+                size_bytes: 20,
+            },
+        );
+
+        let (selected, selection) = select_flush_base_entries(backend, &published);
+        assert!(matches!(
+            selection,
+            FlushBaseSelection::PublishedFallback {
+                backend_entry_count: 1,
+                published_entry_count: 1,
+                missing_published_keys: 0,
+                mismatched_published_keys: 1
+            }
+        ));
+        assert_eq!(selected.len(), 1);
+        let selected_blob = selected.get("k1").expect("expected selected key");
+        assert_eq!(selected_blob.digest, "sha256:222");
+        assert_eq!(selected_blob.size_bytes, 20);
     }
 
     #[test]
