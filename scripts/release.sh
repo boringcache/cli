@@ -14,8 +14,9 @@
 #   3. Runs cargo clippy
 #   4. Runs cargo test
 #   5. Bumps version in Cargo.toml
-#   6. Updates Cargo.lock
-#   7. Commits the version bump
+#   6. Updates install fallback versions
+#   7. Updates Cargo.lock
+#   8. Commits the version bump (signed)
 #   8. Creates an annotated git tag
 #   9. Pushes the commit and tag
 
@@ -107,6 +108,29 @@ update_cargo_version() {
     fi
 }
 
+update_install_fallback_version() {
+    local file="$1"
+    local new_version="$2"
+    local release_tag="v${new_version}"
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' "s/local fallback_version=\"v[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*\"/local fallback_version=\"${release_tag}\"/" "$file"
+    else
+        sed -i "s/local fallback_version=\"v[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*\"/local fallback_version=\"${release_tag}\"/" "$file"
+    fi
+}
+
+verify_install_fallback_version() {
+    local file="$1"
+    local expected="$2"
+    local actual
+    actual="$(sed -n 's/^[[:space:]]*local fallback_version=\"\\(v[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*\\)\"/\\1/p' "$file" | head -1)"
+    if [[ "$actual" != "$expected" ]]; then
+        log_error "Fallback version update failed for ${file}. Expected ${expected}, got ${actual:-<missing>}"
+        exit 1
+    fi
+}
+
 # Main release function
 main() {
     if [[ $# -lt 1 ]]; then
@@ -187,12 +211,19 @@ main() {
     fi
     log_success "All tests passed"
 
-    # Step 5-7: Update version and commit (skip if version unchanged)
+    # Step 5-8: Update version and commit (skip if version unchanged)
     if [[ "$current_version" == "$new_version" ]]; then
         log_info "Version already set to $new_version, skipping version bump..."
     else
         log_info "Updating Cargo.toml version to $new_version..."
         update_cargo_version "$new_version"
+
+        # Update install script fallback versions
+        log_info "Updating install fallback version to v${new_version}..."
+        update_install_fallback_version "$PROJECT_ROOT/install.sh" "$new_version"
+        update_install_fallback_version "$PROJECT_ROOT/install-web/install.sh" "$new_version"
+        verify_install_fallback_version "$PROJECT_ROOT/install.sh" "v${new_version}"
+        verify_install_fallback_version "$PROJECT_ROOT/install-web/install.sh" "v${new_version}"
 
         # Update Cargo.lock
         log_info "Updating Cargo.lock..."
@@ -208,8 +239,8 @@ main() {
 
         # Commit the version bump
         log_info "Committing version bump..."
-        git add Cargo.toml Cargo.lock
-        git commit -m "chore: bump version to $new_version"
+        git add Cargo.toml Cargo.lock install.sh install-web/install.sh
+        git commit -S -m "chore: bump version to $new_version"
     fi
 
     # Step 8: Create annotated tag
