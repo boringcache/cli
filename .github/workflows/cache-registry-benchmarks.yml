@@ -640,13 +640,14 @@ jobs:
           path: benchmark-logs/adapter-${{ matrix.leg }}
 
   cross-runner-seed:
-    name: Cross-Runner Seed
+    name: Cross-Runner CAS Seed
     runs-on: ubuntu-latest
     needs: build-cli-binary
     timeout-minutes: 10
     outputs:
       tag: ${{ steps.seed.outputs.tag }}
-      checksum: ${{ steps.seed.outputs.checksum }}
+      cas_digest: ${{ steps.seed.outputs.cas_digest }}
+      ac_digest: ${{ steps.seed.outputs.ac_digest }}
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
     steps:
@@ -666,33 +667,80 @@ jobs:
           name: boringcache-cli-release-linux-amd64
           path: ${{ runner.temp }}/bin
 
-      - name: Seed cache
+      - name: Seed CAS via proxy
         id: seed
         if: steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
           CLI="${RUNNER_TEMP}/bin/boringcache"
           chmod +x "$CLI"
-          TAG="gha-cross-runner-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          SEED_DIR="$(mktemp -d)"
-          printf 'cross-runner-seed-%s-%s\n' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" > "${SEED_DIR}/payload.txt"
-          dd if=/dev/urandom bs=1024 count=64 2>/dev/null | base64 > "${SEED_DIR}/random.bin"
-          CHECKSUM="$(sha256sum "${SEED_DIR}/payload.txt" "${SEED_DIR}/random.bin" | sha256sum | awk '{print $1}')"
-          "$CLI" save --no-platform --no-git "${{ github.repository }}" "${TAG}:${SEED_DIR}"
-          for i in $(seq 1 15); do
-            if "$CLI" check --no-platform --no-git --fail-on-miss "${{ github.repository }}" "${TAG}" 2>/dev/null; then
-              echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-              echo "checksum=${CHECKSUM}" >> "$GITHUB_OUTPUT"
-              echo "Seed visible after ${i}s"
-              exit 0
+          TAG="gha-cross-runner-cas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          WORK_DIR="$(mktemp -d)"
+          PROXY_PORT=5050
+          PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
+          PROXY_LOG="${WORK_DIR}/proxy.log"
+
+          CAS_PAYLOAD="${WORK_DIR}/cas-payload.bin"
+          dd if=/dev/urandom bs=1024 count=64 2>/dev/null | base64 > "$CAS_PAYLOAD"
+          CAS_DIGEST="$(sha256sum "$CAS_PAYLOAD" | awk '{print $1}')"
+
+          AC_PAYLOAD="${WORK_DIR}/ac-payload.bin"
+          printf 'cross-runner-ac-%s-%s\n' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" > "$AC_PAYLOAD"
+          AC_DIGEST="$(sha256sum "$AC_PAYLOAD" | awk '{print $1}')"
+
+          RUST_LOG=info "$CLI" cache-registry "${{ github.repository }}" "$TAG" \
+            --host 127.0.0.1 --port "$PROXY_PORT" --no-platform --no-git \
+            >>"$PROXY_LOG" 2>&1 &
+          PROXY_PID=$!
+
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 2 "${PROXY_URL}/v2/" >/dev/null 2>&1; then
+              break
+            fi
+            if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+              echo "ERROR: proxy exited during startup"
+              cat "$PROXY_LOG"
+              exit 1
             fi
             sleep 1
           done
-          echo "ERROR: seeded tag not visible after retries"
-          exit 1
+
+          echo "Proxy ready, writing CAS + AC blobs..."
+          curl -fsS --max-time 30 -X PUT --data-binary "@${CAS_PAYLOAD}" -o /dev/null -w "CAS PUT: %{http_code}\n" "${PROXY_URL}/cas/${CAS_DIGEST}"
+          curl -fsS --max-time 30 -X PUT --data-binary "@${AC_PAYLOAD}" -o /dev/null -w "AC PUT: %{http_code}\n" "${PROXY_URL}/ac/${AC_DIGEST}"
+
+          echo "Verifying blobs readable on same proxy..."
+          curl -fsS --max-time 30 -o "${WORK_DIR}/cas-verify.bin" "${PROXY_URL}/cas/${CAS_DIGEST}"
+          if ! cmp -s "$CAS_PAYLOAD" "${WORK_DIR}/cas-verify.bin"; then
+            echo "ERROR: CAS blob readback mismatch on seed runner"
+            exit 1
+          fi
+          curl -fsS --max-time 30 -o "${WORK_DIR}/ac-verify.bin" "${PROXY_URL}/ac/${AC_DIGEST}"
+          if ! cmp -s "$AC_PAYLOAD" "${WORK_DIR}/ac-verify.bin"; then
+            echo "ERROR: AC blob readback mismatch on seed runner"
+            exit 1
+          fi
+
+          echo "Flushing proxy (graceful shutdown)..."
+          kill "$PROXY_PID"
+          wait "$PROXY_PID" 2>/dev/null || true
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "cas_digest=${CAS_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "ac_digest=${AC_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Seed complete: tag=${TAG} cas=${CAS_DIGEST} ac=${AC_DIGEST}"
+
+      - name: Upload seed payloads
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-runner-seed-payloads
+          path: |
+            ${{ runner.temp }}/cross-runner-seed/
+          if-no-files-found: ignore
 
   cross-runner-verify:
-    name: Cross-Runner Verify
+    name: Cross-Runner CAS Verify
     runs-on: ubuntu-latest
     needs: [build-cli-binary, cross-runner-seed]
     if: needs.cross-runner-seed.outputs.tag != ''
@@ -706,23 +754,76 @@ jobs:
           name: boringcache-cli-release-linux-amd64
           path: ${{ runner.temp }}/bin
 
-      - name: Verify cache on fresh runner
+      - name: Verify CAS on fresh runner via proxy
         run: |
           set -euo pipefail
           CLI="${RUNNER_TEMP}/bin/boringcache"
           chmod +x "$CLI"
           TAG="${{ needs.cross-runner-seed.outputs.tag }}"
-          EXPECTED="${{ needs.cross-runner-seed.outputs.checksum }}"
-          RESTORE_DIR="$(mktemp -d)"
-          "$CLI" restore --no-platform --no-git "${{ github.repository }}" "${TAG}:${RESTORE_DIR}"
-          ACTUAL="$(sha256sum "${RESTORE_DIR}/payload.txt" "${RESTORE_DIR}/random.bin" | sha256sum | awk '{print $1}')"
-          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
-            echo "ERROR: checksum mismatch"
-            echo "  expected: ${EXPECTED}"
-            echo "  actual:   ${ACTUAL}"
+          CAS_DIGEST="${{ needs.cross-runner-seed.outputs.cas_digest }}"
+          AC_DIGEST="${{ needs.cross-runner-seed.outputs.ac_digest }}"
+          WORK_DIR="$(mktemp -d)"
+          PROXY_PORT=5050
+          PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
+          PROXY_LOG="${WORK_DIR}/proxy.log"
+
+          RUST_LOG=info "$CLI" cache-registry "${{ github.repository }}" "$TAG" \
+            --host 127.0.0.1 --port "$PROXY_PORT" --no-platform --no-git \
+            >>"$PROXY_LOG" 2>&1 &
+          PROXY_PID=$!
+
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 2 "${PROXY_URL}/v2/" >/dev/null 2>&1; then
+              break
+            fi
+            if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+              echo "ERROR: proxy exited during startup"
+              cat "$PROXY_LOG"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "Proxy ready on fresh runner, verifying CAS blobs..."
+          CAS_STATUS="$(curl -sS --max-time 30 -o "${WORK_DIR}/cas-restored.bin" -w "%{http_code}" "${PROXY_URL}/cas/${CAS_DIGEST}")"
+          if [[ "$CAS_STATUS" != "200" ]]; then
+            echo "ERROR: CAS GET returned ${CAS_STATUS} (expected 200)"
+            echo "This means the tag pointer did not update — blobs were not linked during stage."
+            echo "--- proxy log ---"
+            tail -n 60 "$PROXY_LOG"
+            kill "$PROXY_PID" 2>/dev/null || true
             exit 1
           fi
-          echo "Cross-runner cache verified: checksum matches"
+          CAS_ACTUAL="$(sha256sum "${WORK_DIR}/cas-restored.bin" | awk '{print $1}')"
+          if [[ "$CAS_ACTUAL" != "$CAS_DIGEST" ]]; then
+            echo "ERROR: CAS content mismatch"
+            echo "  expected digest: ${CAS_DIGEST}"
+            echo "  actual digest:   ${CAS_ACTUAL}"
+            kill "$PROXY_PID" 2>/dev/null || true
+            exit 1
+          fi
+          echo "CAS blob verified: digest matches"
+
+          AC_STATUS="$(curl -sS --max-time 30 -o "${WORK_DIR}/ac-restored.bin" -w "%{http_code}" "${PROXY_URL}/ac/${AC_DIGEST}")"
+          if [[ "$AC_STATUS" != "200" ]]; then
+            echo "ERROR: AC GET returned ${AC_STATUS} (expected 200)"
+            echo "--- proxy log ---"
+            tail -n 60 "$PROXY_LOG"
+            kill "$PROXY_PID" 2>/dev/null || true
+            exit 1
+          fi
+          AC_ACTUAL="$(sha256sum "${WORK_DIR}/ac-restored.bin" | awk '{print $1}')"
+          if [[ "$AC_ACTUAL" != "$AC_DIGEST" ]]; then
+            echo "ERROR: AC content mismatch"
+            echo "  expected digest: ${AC_DIGEST}"
+            echo "  actual digest:   ${AC_ACTUAL}"
+            kill "$PROXY_PID" 2>/dev/null || true
+            exit 1
+          fi
+          echo "AC blob verified: digest matches"
+
+          echo "Cross-runner CAS persistence verified"
+          kill "$PROXY_PID" 2>/dev/null || true
 
       - name: Cleanup
         if: always()
@@ -831,4 +932,4 @@ jobs:
           cross_runner_status="${{ needs.cross-runner-verify.result }}"
           echo "| Test | Status |" >> "$GITHUB_STEP_SUMMARY"
           echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| CAS save/restore across runners | ${cross_runner_status} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| CAS blob persistence across runners (proxy) | ${cross_runner_status} |" >> "$GITHUB_STEP_SUMMARY"
