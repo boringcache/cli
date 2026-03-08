@@ -545,7 +545,7 @@ fn decrement_replication_queue_depth(state: &AppState) {
 }
 
 async fn should_flush_pending(state: &AppState, urgent: bool) -> bool {
-    use crate::serve::state::{FLUSH_BLOB_THRESHOLD, FLUSH_SIZE_THRESHOLD};
+    use crate::serve::state::FLUSH_SIZE_THRESHOLD;
 
     let pending = state.kv_pending.read().await;
     if pending.is_empty() {
@@ -554,7 +554,7 @@ async fn should_flush_pending(state: &AppState, urgent: bool) -> bool {
     if urgent {
         return true;
     }
-    if pending.blob_count() >= FLUSH_BLOB_THRESHOLD
+    if pending.blob_count() >= crate::serve::state::flush_blob_threshold()
         || pending.total_spool_bytes() >= FLUSH_SIZE_THRESHOLD
     {
         return true;

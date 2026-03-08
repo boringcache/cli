@@ -346,9 +346,10 @@ pub(crate) async fn put_kv_object(
     let use_miss_cache = use_kv_miss_cache(namespace);
     let put_probe = super::PutProbeGuard::start(&scoped_key);
     put_probe.stage("precheck_spool");
+    let spool_limit = crate::serve::state::max_spool_bytes();
     {
         let pending = state.kv_pending.read().await;
-        if pending.total_spool_bytes() >= crate::serve::state::MAX_SPOOL_BYTES {
+        if pending.total_spool_bytes() >= spool_limit {
             state.kv_backlog_rejects.fetch_add(1, Ordering::AcqRel);
             state.cache_ops.record(
                 namespace.into(),
@@ -387,7 +388,7 @@ pub(crate) async fn put_kv_object(
         let projected_spool = pending
             .total_spool_bytes()
             .saturating_add(if digest_exists { 0 } else { blob_size });
-        if projected_spool > crate::serve::state::MAX_SPOOL_BYTES {
+        if projected_spool > spool_limit {
             drop(pending);
             let _ = tokio::fs::remove_file(&path).await;
             state.kv_backlog_rejects.fetch_add(1, Ordering::AcqRel);
@@ -413,7 +414,7 @@ pub(crate) async fn put_kv_object(
             },
             path,
         );
-        let should_flush = pending.blob_count() >= crate::serve::state::FLUSH_BLOB_THRESHOLD
+        let should_flush = pending.blob_count() >= crate::serve::state::flush_blob_threshold()
             || pending.total_spool_bytes() >= crate::serve::state::FLUSH_SIZE_THRESHOLD;
         (redundant, should_flush)
     };
@@ -3242,9 +3243,19 @@ enum BlobUploadOutcome {
     AlreadyPresent,
 }
 
+const KV_BLOB_UPLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_KV_BLOB_UPLOAD_CONCURRENCY";
+
 fn kv_blob_upload_concurrency(operation_count: usize) -> usize {
     if operation_count == 0 {
         return 1;
+    }
+
+    if let Ok(val) = std::env::var(KV_BLOB_UPLOAD_CONCURRENCY_ENV) {
+        if let Ok(v) = val.trim().parse::<usize>() {
+            if v > 0 {
+                return v.min(operation_count).max(1);
+            }
+        }
     }
 
     num_cpus::get()

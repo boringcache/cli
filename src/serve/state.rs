@@ -956,8 +956,28 @@ impl UploadSessionStore {
     }
 }
 
-pub const MAX_SPOOL_BYTES: u64 = 512 * 1024 * 1024;
-pub const FLUSH_BLOB_THRESHOLD: usize = 500;
+const DEFAULT_MAX_SPOOL_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_SPOOL_BYTES_ENV: &str = "BORINGCACHE_MAX_SPOOL_BYTES";
+
+pub fn max_spool_bytes() -> u64 {
+    std::env::var(MAX_SPOOL_BYTES_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_MAX_SPOOL_BYTES)
+}
+
+const DEFAULT_FLUSH_BLOB_THRESHOLD: usize = 500;
+const FLUSH_BLOB_THRESHOLD_ENV: &str = "BORINGCACHE_FLUSH_BLOB_THRESHOLD";
+
+pub fn flush_blob_threshold() -> usize {
+    std::env::var(FLUSH_BLOB_THRESHOLD_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_FLUSH_BLOB_THRESHOLD)
+}
+
 pub const FLUSH_SIZE_THRESHOLD: u64 = 256 * 1024 * 1024;
 pub const KV_BACKLOG_POLICY: &str = "reject_when_spool_full";
 pub const KV_REPLICATION_WORK_QUEUE_CAPACITY: usize = 5_000;
@@ -1013,12 +1033,13 @@ impl KvPendingStore {
                 Some(temp_path)
             }
             None => {
-                if self.total_spool_bytes + blob.size_bytes > MAX_SPOOL_BYTES {
+                let spool_limit = max_spool_bytes();
+                if self.total_spool_bytes + blob.size_bytes > spool_limit {
                     log::warn!(
                         "KV spool budget exceeded before insert ({} + {} > {}, policy={})",
                         self.total_spool_bytes,
                         blob.size_bytes,
-                        MAX_SPOOL_BYTES,
+                        spool_limit,
                         KV_BACKLOG_POLICY
                     );
                 }
