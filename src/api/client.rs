@@ -990,16 +990,22 @@ impl ApiClient {
     pub async fn blob_upload_urls(
         &self,
         workspace: &str,
-        _cache_entry_id: &str,
+        cache_entry_id: &str,
         blobs: &[super::models::cache::BlobDescriptor],
     ) -> Result<super::models::cache::BlobUploadUrlsResponse> {
         ensure!(!blobs.is_empty(), "blobs cannot be empty");
         let endpoint = self.workspace_endpoint(workspace, "caches/blobs/stage")?;
+        let entry_id = if cache_entry_id.is_empty() {
+            None
+        } else {
+            Some(cache_entry_id.to_string())
+        };
         let batch_max = blob_url_batch_max();
         let chunk_count = blobs.len().div_ceil(batch_max);
         let batch_count = chunk_count as u64;
         if chunk_count == 1 {
             let body = super::models::cache::BlobStageRequest {
+                cache_entry_id: entry_id.clone(),
                 blobs: blobs.to_vec(),
             };
             return self
@@ -1025,12 +1031,16 @@ impl ApiClient {
             let semaphore = semaphore.clone();
             let batch_size = chunk.len() as u64;
             let batch_index = (batch_idx + 1) as u64;
+            let entry_id = entry_id.clone();
             tasks.push(tokio::spawn(async move {
                 let _permit = semaphore
                     .acquire_owned()
                     .await
                     .map_err(|e| anyhow::anyhow!("Blob stage semaphore closed: {e}"))?;
-                let body = super::models::cache::BlobStageRequest { blobs: chunk };
+                let body = super::models::cache::BlobStageRequest {
+                    cache_entry_id: entry_id,
+                    blobs: chunk,
+                };
                 client
                     .post_v2_with_request_metrics::<
                         _,
@@ -2439,6 +2449,66 @@ mod tests {
             .await
             .expect("blob upload urls should succeed");
         assert_eq!(response.upload_urls.len(), 2);
+
+        mock.assert_async().await;
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
+        std::env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_blob_upload_urls_sends_cache_entry_id() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let guard_result = mutex.lock();
+        let _guard = match guard_result {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if !networking_available() {
+            eprintln!("skipping test_blob_upload_urls_sends_cache_entry_id: networking disabled in sandbox");
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_home.path());
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v2/workspaces/ns/ws/caches/blobs/stage")
+            .match_header("authorization", "Bearer test-token")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"cache_entry_id":"test-entry-42"}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"upload_urls":[],"already_present":["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#,
+            )
+            .create_async()
+            .await;
+
+        std::env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize");
+
+        let blobs = vec![cache::BlobDescriptor {
+            digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            size_bytes: 100,
+        }];
+
+        let response = client
+            .blob_upload_urls("ns/ws", "test-entry-42", &blobs)
+            .await
+            .expect("blob upload urls should succeed");
+        assert_eq!(response.already_present.len(), 1);
 
         mock.assert_async().await;
 

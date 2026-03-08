@@ -424,6 +424,8 @@ pub mod cache {
 
     #[derive(Debug, Serialize)]
     pub struct BlobStageRequest {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub cache_entry_id: Option<String>,
         pub blobs: Vec<BlobDescriptor>,
     }
 

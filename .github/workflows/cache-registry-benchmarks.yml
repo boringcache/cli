@@ -639,12 +639,105 @@ jobs:
           name: cache-registry-benchmark-adapter-${{ matrix.leg }}
           path: benchmark-logs/adapter-${{ matrix.leg }}
 
+  cross-runner-seed:
+    name: Cross-Runner Seed
+    runs-on: ubuntu-latest
+    needs: build-cli-binary
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.seed.outputs.tag }}
+      checksum: ${{ steps.seed.outputs.checksum }}
+    env:
+      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+    steps:
+      - name: Gate
+        id: gate
+        run: |
+          if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download CLI binary
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: boringcache-cli-release-linux-amd64
+          path: ${{ runner.temp }}/bin
+
+      - name: Seed cache
+        id: seed
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          CLI="${RUNNER_TEMP}/bin/boringcache"
+          chmod +x "$CLI"
+          TAG="gha-cross-runner-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          SEED_DIR="$(mktemp -d)"
+          printf 'cross-runner-seed-%s-%s\n' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" > "${SEED_DIR}/payload.txt"
+          dd if=/dev/urandom bs=1024 count=64 2>/dev/null | base64 > "${SEED_DIR}/random.bin"
+          CHECKSUM="$(sha256sum "${SEED_DIR}/payload.txt" "${SEED_DIR}/random.bin" | sha256sum | awk '{print $1}')"
+          "$CLI" save --no-platform --no-git "${{ github.repository }}" "${TAG}:${SEED_DIR}"
+          for i in $(seq 1 15); do
+            if "$CLI" check --no-platform --no-git --fail-on-miss "${{ github.repository }}" "${TAG}" 2>/dev/null; then
+              echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+              echo "checksum=${CHECKSUM}" >> "$GITHUB_OUTPUT"
+              echo "Seed visible after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "ERROR: seeded tag not visible after retries"
+          exit 1
+
+  cross-runner-verify:
+    name: Cross-Runner Verify
+    runs-on: ubuntu-latest
+    needs: [build-cli-binary, cross-runner-seed]
+    if: needs.cross-runner-seed.outputs.tag != ''
+    timeout-minutes: 10
+    env:
+      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+    steps:
+      - name: Download CLI binary
+        uses: actions/download-artifact@v4
+        with:
+          name: boringcache-cli-release-linux-amd64
+          path: ${{ runner.temp }}/bin
+
+      - name: Verify cache on fresh runner
+        run: |
+          set -euo pipefail
+          CLI="${RUNNER_TEMP}/bin/boringcache"
+          chmod +x "$CLI"
+          TAG="${{ needs.cross-runner-seed.outputs.tag }}"
+          EXPECTED="${{ needs.cross-runner-seed.outputs.checksum }}"
+          RESTORE_DIR="$(mktemp -d)"
+          "$CLI" restore --no-platform --no-git "${{ github.repository }}" "${TAG}:${RESTORE_DIR}"
+          ACTUAL="$(sha256sum "${RESTORE_DIR}/payload.txt" "${RESTORE_DIR}/random.bin" | sha256sum | awk '{print $1}')"
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "ERROR: checksum mismatch"
+            echo "  expected: ${EXPECTED}"
+            echo "  actual:   ${ACTUAL}"
+            exit 1
+          fi
+          echo "Cross-runner cache verified: checksum matches"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          CLI="${RUNNER_TEMP}/bin/boringcache"
+          TAG="${{ needs.cross-runner-seed.outputs.tag }}"
+          "$CLI" delete --no-platform --no-git "${{ github.repository }}" "${TAG}" || true
+
   benchmark-summary:
     name: Cache Registry Benchmark Summary
     runs-on: ubuntu-latest
     needs:
       - benchmark
       - adapter-e2e
+      - cross-runner-verify
     if: always()
     steps:
       - name: Download artifacts
@@ -731,3 +824,11 @@ jobs:
             source "$metrics"
             echo "| ${leg} | ${status} |" >> "$GITHUB_STEP_SUMMARY"
           done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Cross-Runner Cache Persistence" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cross_runner_status="${{ needs.cross-runner-verify.result }}"
+          echo "| Test | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| CAS save/restore across runners | ${cross_runner_status} |" >> "$GITHUB_STEP_SUMMARY"
