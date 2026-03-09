@@ -862,7 +862,7 @@ echo "Verification proxy running (pid=${PROXY_PID_VERIFY}) on port ${PROXY_PORT_
 
 sleep 3
 
-VERIFY_PRELOADED="$(sed -n 's/.*KV index preloaded: \([0-9]*\) entries.*/\1/p' "$VERIFY_PROXY_LOG" | tail -1)"
+VERIFY_PRELOADED="$(sed -n 's/.*Prefetch: \([0-9]*\) entries loaded.*/\1/p' "$VERIFY_PROXY_LOG" | tail -1)"
 VERIFY_PRELOADED="${VERIFY_PRELOADED:-0}"
 
 stop_proxy_graceful "PROXY_PID_VERIFY" "verify"
