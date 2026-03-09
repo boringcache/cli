@@ -21,6 +21,23 @@ use tokio::sync::{Mutex, RwLock};
 
 static ENV_MUTEX: Mutex<()> = Mutex::const_new(());
 
+struct ScopedEnvVar(&'static str);
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var(self.0);
+        }
+    }
+}
+
+fn set_scoped_env_var(key: &'static str, value: &str) -> ScopedEnvVar {
+    unsafe {
+        std::env::set_var(key, value);
+    }
+    ScopedEnvVar(key)
+}
+
 async fn setup(
     server: &Server,
 ) -> (
@@ -123,6 +140,34 @@ fn make_file_pointer(blob_digest: &str, size_bytes: u64) -> Vec<u8> {
     serde_json::to_vec(&pointer).unwrap()
 }
 
+fn make_kv_pointer(entries: &[(String, String, u64)]) -> Vec<u8> {
+    let pointer = cas_file::FilePointer {
+        format_version: 1,
+        adapter: "file-v1".to_string(),
+        entries: entries
+            .iter()
+            .map(|(path, digest, size_bytes)| cas_file::FilePointerEntry {
+                path: path.clone(),
+                entry_type: EntryType::File,
+                size_bytes: *size_bytes,
+                executable: None,
+                target: None,
+                digest: Some(digest.clone()),
+            })
+            .collect(),
+        blobs: entries
+            .iter()
+            .enumerate()
+            .map(|(sequence, (_, digest, size_bytes))| cas_file::FilePointerBlob {
+                digest: digest.clone(),
+                size_bytes: *size_bytes,
+                sequence: Some(sequence as u64),
+            })
+            .collect(),
+    };
+    serde_json::to_vec(&pointer).unwrap()
+}
+
 #[tokio::test]
 async fn test_startup_manifest_warm_runs_by_default() {
     let mut server = Server::new_async().await;
@@ -194,6 +239,189 @@ async fn test_v2_returns_503_before_prefetch_complete() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
+    let mut server = Server::new_async().await;
+    let (_state, _home, _guard) = setup(&server).await;
+    let _max_blobs_env = set_scoped_env_var("BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS", "2");
+    let _max_bytes_env = set_scoped_env_var("BORINGCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES", "10");
+
+    let warm_blob_a = b"aaaaa";
+    let warm_blob_b = b"bbbbb";
+    let cold_blob = b"cccccccccccc";
+    let digest_a = cas_oci::prefixed_sha256_digest(warm_blob_a);
+    let digest_b = cas_oci::prefixed_sha256_digest(warm_blob_b);
+    let digest_c = cas_oci::prefixed_sha256_digest(cold_blob);
+
+    let key_a = digest_a.strip_prefix("sha256:").unwrap();
+    let key_b = digest_b.strip_prefix("sha256:").unwrap();
+    let key_c = digest_c.strip_prefix("sha256:").unwrap();
+    let pointer_entries = vec![
+        (
+            format!("bazel_cas/{key_a}"),
+            digest_a.clone(),
+            warm_blob_a.len() as u64,
+        ),
+        (
+            format!("bazel_cas/{key_b}"),
+            digest_b.clone(),
+            warm_blob_b.len() as u64,
+        ),
+        (
+            format!("bazel_cas/{key_c}"),
+            digest_c.clone(),
+            cold_blob.len() as u64,
+        ),
+    ];
+    let pointer_bytes = make_kv_pointer(&pointer_entries);
+
+    let restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .expect_at_least(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "registry",
+                "status": "hit",
+                "cache_entry_id": "entry-startup-slice",
+                "manifest_url": format!("{}/pointers/entry-startup-slice", server.url()),
+                "manifest_root_digest": cas_file::prefixed_sha256_digest(&pointer_bytes),
+                "storage_mode": "cas",
+                "cas_layout": "file-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let pointer_mock = server
+        .mock("GET", "/pointers/entry-startup-slice")
+        .expect_at_least(1)
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let download_urls_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .expect(1)
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [
+                    {
+                        "digest": digest_a,
+                        "url": format!("{}/blobs/{}", server.url(), digest_a),
+                    },
+                    {
+                        "digest": digest_b,
+                        "url": format!("{}/blobs/{}", server.url(), digest_b),
+                    },
+                    {
+                        "digest": digest_c,
+                        "url": format!("{}/blobs/{}", server.url(), digest_c),
+                    }
+                ],
+                "missing": [],
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let warm_blob_a_mock = server
+        .mock("GET", format!("/blobs/{}", digest_a).as_str())
+        .expect(1)
+        .with_status(200)
+        .with_body(warm_blob_a)
+        .create_async()
+        .await;
+    let warm_blob_b_mock = server
+        .mock("GET", format!("/blobs/{}", digest_b).as_str())
+        .expect(1)
+        .with_status(200)
+        .with_body(warm_blob_b)
+        .create_async()
+        .await;
+    let cold_blob_startup_mock = server
+        .mock("GET", format!("/blobs/{}", digest_c).as_str())
+        .expect(0)
+        .with_status(200)
+        .with_body(cold_blob)
+        .create_async()
+        .await;
+
+    let handle = boring_cache_cli::serve::start_server_background(
+        ApiClient::new_with_token_override(Some("test-token".to_string())).expect("api client"),
+        "org/repo".to_string(),
+        "127.0.0.1".to_string(),
+        0,
+        TagResolver::new(None, GitContext::default(), false),
+        Vec::new(),
+        "registry".to_string(),
+        true,
+    )
+    .await
+    .expect("start proxy");
+
+    let base_url = format!("http://127.0.0.1:{}", handle.port);
+    let client = reqwest::Client::new();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let get = client
+            .get(format!("{base_url}/v2/"))
+            .send()
+            .await
+            .expect("get request");
+        if get.status() == reqwest::StatusCode::OK {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "proxy did not become ready within 10s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    warm_blob_a_mock.assert_async().await;
+    warm_blob_b_mock.assert_async().await;
+    assert!(
+        cold_blob_startup_mock.matched_async().await,
+        "third blob should not be prefetched during startup"
+    );
+    cold_blob_startup_mock.remove_async().await;
+
+    let cold_blob_on_demand_mock = server
+        .mock("GET", format!("/blobs/{}", digest_c).as_str())
+        .expect(1)
+        .with_status(200)
+        .with_body(cold_blob)
+        .create_async()
+        .await;
+
+    let blob_response = client
+        .get(format!("{base_url}/cas/{key_c}"))
+        .send()
+        .await
+        .expect("blob request");
+    assert_eq!(blob_response.status(), reqwest::StatusCode::OK);
+    assert_eq!(blob_response.bytes().await.unwrap().as_ref(), cold_blob);
+
+    handle.shutdown_and_flush().await.expect("shutdown proxy");
+
+    restore_mock.assert_async().await;
+    pointer_mock.assert_async().await;
+    download_urls_mock.assert_async().await;
+    cold_blob_on_demand_mock.assert_async().await;
 }
 
 #[tokio::test]
