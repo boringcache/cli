@@ -563,6 +563,8 @@ jobs:
               BLOB_SIZE_BYTES="4096" \
               SEED_CONCURRENCY="64" \
               VERIFY_CONCURRENCY="64" \
+              PROXY_SHUTDOWN_WAIT_SECS="120" \
+              SEED_FLUSH_TIMEOUT_SECS="240" \
               LOG_DIR="$LOG_DIR" \
               ./scripts/e2e-prefetch-readiness-test.sh | tee "$LOG_DIR/run.log"
               ;;

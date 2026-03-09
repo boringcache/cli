@@ -14,6 +14,8 @@ PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-300}"
 PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-30}"
 HTTP_CONNECT_TIMEOUT_SECS="${HTTP_CONNECT_TIMEOUT_SECS:-5}"
 HTTP_REQUEST_TIMEOUT_SECS="${HTTP_REQUEST_TIMEOUT_SECS:-30}"
+SETTLE_SECS="${SETTLE_SECS:-5}"
+SEED_FLUSH_TIMEOUT_SECS="${SEED_FLUSH_TIMEOUT_SECS:-180}"
 
 BLOB_COUNT="${BLOB_COUNT:-20000}"
 BLOB_SIZE_BYTES="${BLOB_SIZE_BYTES:-4096}"
@@ -72,6 +74,47 @@ wait_for_proxy_ready() {
   done
 
   echo "ERROR: timed out waiting for proxy readiness (${PROXY_READY_TIMEOUT_SECS}s)"
+  tail -n 200 "$PROXY_LOG" || true
+  exit 1
+}
+
+flushed_entry_count() {
+  awk '
+    /KV batch: flushed [0-9]+ new entries/ {
+      sum += $4
+    }
+    END {
+      print sum + 0
+    }
+  ' "$PROXY_LOG"
+}
+
+wait_for_seed_flush() {
+  local target="$1"
+  local waited=0
+
+  while (( waited < SEED_FLUSH_TIMEOUT_SECS )); do
+    local flushed
+    flushed="$(flushed_entry_count)"
+    if [[ "$flushed" =~ ^[0-9]+$ ]] && (( flushed >= target )); then
+      echo "  published flush progress reached ${flushed}/${target} entries"
+      return 0
+    fi
+
+    if [[ -n "${PROXY_PID:-}" ]] && ! kill -0 "$PROXY_PID" >/dev/null 2>&1; then
+      echo "ERROR: proxy exited before seed flush completed"
+      tail -n 200 "$PROXY_LOG" || true
+      exit 1
+    fi
+
+    sleep 2
+    waited=$((waited + 2))
+    if (( waited % 10 == 0 )); then
+      echo "  waiting for seed flush progress... (${flushed:-0}/${target} entries, ${waited}s)"
+    fi
+  done
+
+  echo "ERROR: timed out waiting for seed flush progress (${SEED_FLUSH_TIMEOUT_SECS}s)"
   tail -n 200 "$PROXY_LOG" || true
   exit 1
 }
@@ -161,6 +204,11 @@ if (( SEED_COUNT < BLOB_COUNT )); then
   echo "ERROR: only seeded ${SEED_COUNT}/${BLOB_COUNT} blobs"
   exit 1
 fi
+
+echo "  waiting for writes to settle (${SETTLE_SECS}s)..."
+sleep "$SETTLE_SECS"
+echo "  waiting for published index flush..."
+wait_for_seed_flush "$BLOB_COUNT"
 
 echo "  flushing proxy..."
 stop_proxy
