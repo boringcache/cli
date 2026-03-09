@@ -60,6 +60,12 @@ const KV_BLOB_PRELOAD_MAX_BLOBS: usize = 2_000;
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 const KV_BLOB_PRELOAD_MAX_BLOBS_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_BATCH_MAX";
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_MAX_BLOB_BYTES";
+const KV_STARTUP_PREFETCH_MAX_BLOBS: usize = 256;
+const KV_STARTUP_PREFETCH_MIN_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+const KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+const KV_STARTUP_PREFETCH_MAX_BLOBS_ENV: &str = "BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS";
+const KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV: &str =
+    "BORINGCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES";
 const KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV: &str =
     "BORINGCACHE_BLOB_PREFETCH_MAX_INFLIGHT_BYTES";
 const KV_BLOB_PRELOAD_SKIP_USED_PCT: u64 = 95;
@@ -2717,6 +2723,20 @@ fn kv_blob_preload_max_blobs() -> usize {
     parse_positive_usize_env(KV_BLOB_PRELOAD_MAX_BLOBS_ENV).unwrap_or(KV_BLOB_PRELOAD_MAX_BLOBS)
 }
 
+fn kv_startup_prefetch_max_blobs() -> usize {
+    parse_positive_usize_env(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV)
+        .unwrap_or(KV_STARTUP_PREFETCH_MAX_BLOBS)
+}
+
+fn kv_startup_prefetch_max_total_bytes(cache_max: u64) -> u64 {
+    parse_positive_u64_env(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV).unwrap_or_else(|| {
+        cache_max.saturating_div(16).clamp(
+            KV_STARTUP_PREFETCH_MIN_TOTAL_BYTES,
+            KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES,
+        )
+    })
+}
+
 fn kv_blob_prefetch_max_inflight_bytes(cache_max: u64) -> u64 {
     if let Some(configured) = parse_positive_u64_env(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV) {
         return configured;
@@ -2732,6 +2752,31 @@ fn should_skip_blob_preload(used_bytes: u64, max_bytes: u64) -> bool {
         return true;
     }
     used_bytes.saturating_mul(100) >= max_bytes.saturating_mul(KV_BLOB_PRELOAD_SKIP_USED_PCT)
+}
+
+fn select_startup_prefetch_slice(
+    blobs: &[BlobDescriptor],
+    max_blobs: usize,
+    max_total_bytes: u64,
+) -> Vec<BlobDescriptor> {
+    let mut selected = Vec::new();
+    let mut remaining_bytes = max_total_bytes;
+
+    for blob in blobs {
+        if selected.len() >= max_blobs {
+            break;
+        }
+        if blob.size_bytes == 0 {
+            continue;
+        }
+        if blob.size_bytes > remaining_bytes {
+            break;
+        }
+        remaining_bytes = remaining_bytes.saturating_sub(blob.size_bytes);
+        selected.push(blob.clone());
+    }
+
+    selected
 }
 
 async fn preload_single_blob(
@@ -2905,7 +2950,7 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
 const KV_PREFETCH_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
-    eprintln!("Prefetch: loading index and downloading all blobs before serving...");
+    eprintln!("Prefetch: loading index and warming startup slice before serving...");
     let started_at = std::time::Instant::now();
 
     emit_serve_event(
@@ -2933,7 +2978,7 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
 
             preload_download_urls(state, &cache_entry_id).await;
 
-            eprintln!("Prefetch: downloading blobs to disk cache...");
+            eprintln!("Prefetch: warming startup slice...");
             match tokio::time::timeout(
                 KV_PREFETCH_READINESS_TIMEOUT,
                 prefetch_all_blobs(state, &cache_entry_id),
@@ -2975,28 +3020,75 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
 }
 
 async fn prefetch_all_blobs(state: &AppState, cache_entry_id: &str) {
-    let targets: Vec<(BlobDescriptor, String)> = {
+    let cache_used = state.blob_read_cache.total_bytes();
+    let cache_max = state.blob_read_cache.max_bytes();
+    if should_skip_blob_preload(cache_used, cache_max) {
+        eprintln!(
+            "Prefetch: startup slice skipped, cache near capacity used={} max={}",
+            cache_used, cache_max
+        );
+        return;
+    }
+
+    let startup_max_blobs = kv_startup_prefetch_max_blobs();
+    let startup_max_total_bytes =
+        kv_startup_prefetch_max_total_bytes(cache_max).min(cache_max.saturating_sub(cache_used));
+    if startup_max_total_bytes == 0 {
+        eprintln!("Prefetch: startup slice skipped, budget is zero");
+        return;
+    }
+
+    let (total_unique_blobs, startup_slice) = {
         let published = state.kv_published_index.read().await;
-        published
-            .unique_blobs()
-            .into_iter()
-            .filter(|blob| blob.size_bytes > 0)
-            .filter_map(|blob| {
-                published
-                    .download_url(&blob.digest)
-                    .map(|url| (blob, url.to_string()))
-            })
-            .collect()
+        let unique_blobs = published.unique_blobs();
+        let total_unique_blobs = unique_blobs.len();
+        let startup_slice = select_startup_prefetch_slice(
+            &unique_blobs,
+            startup_max_blobs,
+            startup_max_total_bytes,
+        )
+        .into_iter()
+        .filter_map(|blob| {
+            published
+                .download_url(&blob.digest)
+                .map(|url| (blob, url.to_string()))
+        })
+        .collect::<Vec<_>>();
+        (total_unique_blobs, startup_slice)
     };
 
+    if startup_slice.is_empty() {
+        eprintln!(
+            "Prefetch: startup slice selected 0/{total_unique_blobs} blobs under budget={} bytes",
+            startup_max_total_bytes
+        );
+        return;
+    }
+
+    let mut targets = Vec::new();
+    for (blob, url) in startup_slice {
+        if state
+            .blob_read_cache
+            .get_handle(&blob.digest)
+            .await
+            .is_none()
+        {
+            targets.push((blob, url));
+        }
+    }
+
     if targets.is_empty() {
+        eprintln!(
+            "Prefetch: startup slice already warm under budget={} bytes",
+            startup_max_total_bytes
+        );
         return;
     }
 
     let scheduled = targets.len();
     let scheduled_bytes: u64 = targets.iter().map(|(b, _)| b.size_bytes).sum();
     eprintln!(
-        "Prefetch: downloading {scheduled} blobs ({:.1} MB)",
+        "Prefetch: warming startup slice {scheduled}/{total_unique_blobs} blobs ({:.1} MB)",
         scheduled_bytes as f64 / (1024.0 * 1024.0),
     );
 
@@ -3026,17 +3118,17 @@ async fn prefetch_all_blobs(state: &AppState, cache_entry_id: &str) {
             Ok(Ok(false)) => {}
             Ok(Err(error)) => {
                 failures = failures.saturating_add(1);
-                log::warn!("Prefetch blob failed: {error}");
+                log::warn!("Prefetch startup blob failed: {error}");
             }
             Err(error) => {
                 failures = failures.saturating_add(1);
-                log::warn!("Prefetch task failed: {error}");
+                log::warn!("Prefetch startup task failed: {error}");
             }
         }
         completed = completed.saturating_add(1);
         if completed.is_multiple_of(log_interval) {
             eprintln!(
-                "Prefetch: {completed}/{scheduled} blobs ({inserted} inserted, {failures} failed, {:.1}s)",
+                "Prefetch: startup slice {completed}/{scheduled} blobs ({inserted} inserted, {failures} failed, {:.1}s)",
                 prefetch_started_at.elapsed().as_secs_f64(),
             );
         }
@@ -3060,7 +3152,7 @@ async fn prefetch_all_blobs(state: &AppState, cache_entry_id: &str) {
     );
 
     eprintln!(
-        "Prefetch: done inserted={inserted} scheduled={scheduled} failures={failures} cache_size={} bytes in {:.1}s",
+        "Prefetch: startup slice done inserted={inserted} scheduled={scheduled} failures={failures} cache_size={} bytes in {:.1}s",
         state.blob_read_cache.total_bytes(),
         prefetch_started_at.elapsed().as_secs_f64(),
     );
@@ -4498,6 +4590,42 @@ mod tests {
         assert_eq!(kv_blob_preload_max_blob_bytes(), 1_048_576);
         std::env::remove_var(KV_BLOB_PRELOAD_MAX_BLOBS_ENV);
         std::env::remove_var(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV);
+    }
+
+    #[test]
+    fn kv_startup_prefetch_limits_allow_env_overrides() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+
+        std::env::set_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV, "48");
+        std::env::set_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV, "2097152");
+        assert_eq!(kv_startup_prefetch_max_blobs(), 48);
+        assert_eq!(kv_startup_prefetch_max_total_bytes(1024 * 1024 * 1024), 2_097_152);
+        std::env::remove_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV);
+        std::env::remove_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV);
+    }
+
+    #[test]
+    fn startup_prefetch_slice_respects_order_and_total_budget() {
+        let blobs = vec![
+            BlobDescriptor {
+                digest: "sha256:1".to_string(),
+                size_bytes: 10,
+            },
+            BlobDescriptor {
+                digest: "sha256:2".to_string(),
+                size_bytes: 15,
+            },
+            BlobDescriptor {
+                digest: "sha256:3".to_string(),
+                size_bytes: 20,
+            },
+        ];
+
+        let selected = select_startup_prefetch_slice(&blobs, 3, 25);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].digest, "sha256:1");
+        assert_eq!(selected[1].digest, "sha256:2");
     }
 
     #[test]
