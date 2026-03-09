@@ -51,7 +51,6 @@ pub struct AppState {
     pub cache_ops: Arc<super::cache_registry::cache_ops::Aggregator>,
     pub oci_manifest_cache: Arc<DashMap<String, Arc<OciManifestCacheEntry>>>,
     pub backend_breaker: Arc<BackendCircuitBreaker>,
-    pub kv_put_semaphore: Arc<tokio::sync::Semaphore>,
     pub prefetch_complete: Arc<AtomicBool>,
 }
 
@@ -989,17 +988,6 @@ pub fn flush_blob_threshold() -> usize {
 pub const FLUSH_SIZE_THRESHOLD: u64 = 256 * 1024 * 1024;
 pub const KV_BACKLOG_POLICY: &str = "reject_when_spool_full";
 pub const KV_REPLICATION_WORK_QUEUE_CAPACITY: usize = 5_000;
-
-const DEFAULT_KV_PUT_MAX_CONCURRENT: usize = 32;
-const KV_PUT_MAX_CONCURRENT_ENV: &str = "BORINGCACHE_KV_PUT_MAX_CONCURRENT";
-
-pub fn kv_put_max_concurrent() -> usize {
-    std::env::var(KV_PUT_MAX_CONCURRENT_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(DEFAULT_KV_PUT_MAX_CONCURRENT)
-}
 
 #[derive(Clone, Copy, Debug)]
 pub enum KvReplicationWork {

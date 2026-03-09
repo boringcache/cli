@@ -3560,31 +3560,84 @@ struct BlobUploadStats {
 #[derive(Clone, Copy)]
 enum BlobUploadOutcome {
     Uploaded,
+    UploadedAfterRetry,
     AlreadyPresent,
 }
 
 const KV_BLOB_UPLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_KV_BLOB_UPLOAD_CONCURRENCY";
+const KV_BLOB_UPLOAD_INITIAL_CONCURRENCY: usize = 8;
 
-fn kv_blob_upload_concurrency(operation_count: usize) -> usize {
+struct AdaptiveUploadConcurrency {
+    semaphore: Arc<tokio::sync::Semaphore>,
+    current: std::sync::atomic::AtomicUsize,
+    max: usize,
+    ramp_frozen: std::sync::atomic::AtomicBool,
+}
+
+impl AdaptiveUploadConcurrency {
+    fn new(initial: usize, max: usize) -> Self {
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(initial)),
+            current: std::sync::atomic::AtomicUsize::new(initial),
+            max,
+            ramp_frozen: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn semaphore(&self) -> &Arc<tokio::sync::Semaphore> {
+        &self.semaphore
+    }
+
+    fn on_upload_complete(&self, had_retry: bool) {
+        if had_retry {
+            self.ramp_frozen
+                .store(true, std::sync::atomic::Ordering::Release);
+            return;
+        }
+        if self.ramp_frozen.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let current = self.current.load(std::sync::atomic::Ordering::Acquire);
+        if current < self.max
+            && self
+                .current
+                .compare_exchange(
+                    current,
+                    current + 1,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+        {
+            self.semaphore.add_permits(1);
+        }
+    }
+
+    fn current(&self) -> usize {
+        self.current.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+fn kv_blob_upload_concurrency(operation_count: usize) -> (usize, usize) {
     if operation_count == 0 {
-        return 1;
+        return (1, 1);
     }
 
     if let Ok(val) = std::env::var(KV_BLOB_UPLOAD_CONCURRENCY_ENV) {
         if let Ok(v) = val.trim().parse::<usize>() {
             if v > 0 {
-                return v.min(operation_count).max(1);
+                let fixed = v.min(operation_count).max(1);
+                return (fixed, fixed);
             }
         }
     }
 
-    num_cpus::get()
-        .max(1)
-        .saturating_mul(2)
-        .clamp(16, KV_BLOB_UPLOAD_MAX_CONCURRENCY)
-        .min(KV_BLOB_UPLOAD_MAX_CONCURRENCY)
+    let max = KV_BLOB_UPLOAD_MAX_CONCURRENCY.min(operation_count).max(1);
+    let initial = KV_BLOB_UPLOAD_INITIAL_CONCURRENCY
+        .min(max)
         .min(operation_count)
-        .max(1)
+        .max(1);
+    (initial, max)
 }
 
 async fn upload_single_blob_with_retry(
@@ -3609,7 +3662,13 @@ async fn upload_single_blob_with_retry(
         )
         .await
         {
-            Ok(_) => return Ok(BlobUploadOutcome::Uploaded),
+            Ok(_) => {
+                return Ok(if attempt > 1 {
+                    BlobUploadOutcome::UploadedAfterRetry
+                } else {
+                    BlobUploadOutcome::Uploaded
+                });
+            }
             Err(error) => {
                 let error_text = format!("{error:#}");
                 log::warn!(
@@ -3701,14 +3760,15 @@ async fn upload_blobs(
         .map(|blob| (blob.digest.clone(), blob.clone()))
         .collect();
 
-    let max_concurrent = kv_blob_upload_concurrency(upload_plan.upload_urls.len());
+    let (initial, max) = kv_blob_upload_concurrency(upload_plan.upload_urls.len());
+    let limiter = Arc::new(AdaptiveUploadConcurrency::new(initial, max));
     eprintln!(
-        "KV blob upload plan: requested={} already_present={} concurrency={}",
+        "KV blob upload plan: requested={} already_present={} concurrency={}/{}",
         upload_plan.upload_urls.len(),
         upload_plan.already_present.len(),
-        max_concurrent,
+        initial,
+        max,
     );
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
     let mut tasks = tokio::task::JoinSet::new();
 
     for upload in upload_plan.upload_urls {
@@ -3727,7 +3787,7 @@ async fn upload_blobs(
         let state = state.clone();
         let cache_entry_id = cache_entry_id.to_string();
         let blob = blobs_by_digest.get(&upload.digest).cloned();
-        let semaphore = semaphore.clone();
+        let semaphore = limiter.semaphore().clone();
         tasks.spawn(async move {
             let _permit = semaphore
                 .acquire_owned()
@@ -3761,8 +3821,11 @@ async fn upload_blobs(
             }
         };
 
+        let had_retry = matches!(outcome, BlobUploadOutcome::UploadedAfterRetry);
+        limiter.on_upload_complete(had_retry);
+
         match outcome {
-            BlobUploadOutcome::Uploaded => {
+            BlobUploadOutcome::Uploaded | BlobUploadOutcome::UploadedAfterRetry => {
                 stats.uploaded_count = stats.uploaded_count.saturating_add(1);
             }
             BlobUploadOutcome::AlreadyPresent => {
@@ -3770,6 +3833,14 @@ async fn upload_blobs(
             }
         }
     }
+
+    eprintln!(
+        "KV blob upload complete: uploaded={} already_present={} missing_local={} final_concurrency={}",
+        stats.uploaded_count,
+        stats.already_present_count,
+        stats.missing_local_count,
+        limiter.current(),
+    );
 
     Ok(stats)
 }

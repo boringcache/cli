@@ -84,7 +84,6 @@ async fn setup(
         cache_ops: Arc::new(boring_cache_cli::serve::cache_registry::cache_ops::Aggregator::new()),
         oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
         backend_breaker: Arc::new(boring_cache_cli::serve::state::BackendCircuitBreaker::new()),
-        kv_put_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
         prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };
 
@@ -4356,9 +4355,7 @@ async fn test_tag_pointer_returns_cache_entry_id() {
     let pointer_mock = server
         .mock(
             "GET",
-            Matcher::Regex(
-                r"^/v2/workspaces/org/repo/caches/tags/registry/pointer".to_string(),
-            ),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches/tags/registry/pointer".to_string()),
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -4402,9 +4399,7 @@ async fn test_tag_pointer_returns_not_modified_on_304() {
     let pointer_mock = server
         .mock(
             "GET",
-            Matcher::Regex(
-                r"^/v2/workspaces/org/repo/caches/tags/registry/pointer".to_string(),
-            ),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches/tags/registry/pointer".to_string()),
         )
         .match_header("If-None-Match", "\"42\"")
         .with_status(304)
@@ -4430,9 +4425,7 @@ async fn test_tag_pointer_returns_not_found_on_404() {
     let pointer_mock = server
         .mock(
             "GET",
-            Matcher::Regex(
-                r"^/v2/workspaces/org/repo/caches/tags/registry/pointer".to_string(),
-            ),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches/tags/registry/pointer".to_string()),
         )
         .with_status(404)
         .with_body("{\"error\": \"not found\"}")
