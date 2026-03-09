@@ -73,6 +73,9 @@ filetime = "0.2"
 
 # HTTP server for OCI registry proxy
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "http2", "query"] }
+hyper = { version = "1", features = ["server"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
+tower = { version = "0.5", features = ["util"] }
 
 # Async utilities - minimal features
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
@@ -125,7 +128,6 @@ winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 mockito = "1.7"
 tempfile = "3.24"
 pretty_assertions = "1.4"
-tower = { version = "0.5.3", features = ["util"] }
 http-body-util = "0.1.3"
 
 

@@ -322,6 +322,8 @@ dependencies = [
  "hex",
  "http-body-util",
  "humansize",
+ "hyper",
+ "hyper-util",
  "jwalk",
  "libc",
  "log",

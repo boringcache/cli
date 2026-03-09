@@ -6,10 +6,14 @@ pub mod state;
 
 use anyhow::{Context, Result};
 use axum::serve::ListenerExt;
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as HttpConnectionBuilder;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::net::{lookup_host, TcpListener, TcpSocket};
 use tokio::sync::{mpsc, oneshot, RwLock};
+use tower::ServiceExt;
 
 use crate::api::client::ApiClient;
 use crate::observability;
@@ -26,6 +30,10 @@ const BLOB_DOWNLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_BLOB_DOWNLOAD_CONCURREN
 const CACHE_PREFETCH_CONCURRENCY_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_CONCURRENCY";
 const TCP_LISTEN_BACKLOG_ENV: &str = "BORINGCACHE_TCP_LISTEN_BACKLOG";
 const DEFAULT_TCP_LISTEN_BACKLOG: u32 = 1024;
+const HTTP_VERSION_ENV: &str = "BORINGCACHE_HTTP_VERSION";
+const H2_INITIAL_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
+const H2_INITIAL_CONNECTION_WINDOW: u32 = 32 * 1024 * 1024;
+const H2_MAX_CONCURRENT_STREAMS: u32 = 1024;
 
 fn spawn_runtime_watchdog(
     cache_ops: Arc<cache_registry::cache_ops::Aggregator>,
@@ -128,10 +136,6 @@ pub async fn run_server(
     spawn_maintenance_tasks(&state, replication_rx);
     let router = routes::build_router(state.clone());
 
-    let listener = listener.tap_io(|tcp_stream| {
-        let _ = tcp_stream.set_nodelay(true);
-    });
-
     if state.kv_manifest_warm_enabled {
         let prefetch_state = state.clone();
         tokio::spawn(async move {
@@ -144,9 +148,17 @@ pub async fn run_server(
         state.prefetch_complete.store(true, Ordering::Release);
     }
 
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    if force_http1() {
+        eprintln!("  HTTP transport: h1 only ({}=1)", HTTP_VERSION_ENV);
+        let listener = listener.tap_io(|tcp_stream| {
+            let _ = tcp_stream.set_nodelay(true);
+        });
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+    } else {
+        serve_with_h2c(listener, router, shutdown_signal()).await?;
+    }
 
     eprintln!("Shutdown: flushing pending KV entries");
     flush_pending_on_shutdown(&state).await;
@@ -197,14 +209,19 @@ pub async fn start_server_background(
         .context("Failed to determine proxy port")?
         .port();
 
-    let listener = listener.tap_io(|tcp_stream| {
-        let _ = tcp_stream.set_nodelay(true);
-    });
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let server_task = tokio::spawn(async move {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown_signal_with_channel(shutdown_rx))
-            .await?;
+        let shutdown = shutdown_signal_with_channel(shutdown_rx);
+        if force_http1() {
+            let listener = listener.tap_io(|tcp_stream| {
+                let _ = tcp_stream.set_nodelay(true);
+            });
+            axum::serve(listener, router)
+                .with_graceful_shutdown(shutdown)
+                .await?;
+        } else {
+            serve_with_h2c(listener, router, shutdown).await?;
+        }
 
         eprintln!("Shutdown: flushing pending KV entries");
         flush_pending_on_shutdown(&state).await;
@@ -925,6 +942,79 @@ async fn shutdown_signal_with_channel(mut shutdown_rx: oneshot::Receiver<()>) {
     }
 
     eprintln!("\nShutting down...");
+}
+
+fn force_http1() -> bool {
+    matches!(
+        std::env::var(HTTP_VERSION_ENV).as_deref(),
+        Ok("1" | "h1" | "http1")
+    )
+}
+
+fn build_http_connection_builder() -> HttpConnectionBuilder<TokioExecutor> {
+    let mut builder = HttpConnectionBuilder::new(TokioExecutor::new());
+    builder
+        .http2()
+        .initial_stream_window_size(H2_INITIAL_STREAM_WINDOW)
+        .initial_connection_window_size(H2_INITIAL_CONNECTION_WINDOW)
+        .max_concurrent_streams(H2_MAX_CONCURRENT_STREAMS);
+    builder
+}
+
+async fn serve_with_h2c(
+    listener: TcpListener,
+    router: axum::Router,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<()> {
+    let builder = build_http_connection_builder();
+
+    eprintln!(
+        "  HTTP transport: h1+h2c auto (stream_window={}MB, conn_window={}MB, max_streams={})",
+        H2_INITIAL_STREAM_WINDOW / (1024 * 1024),
+        H2_INITIAL_CONNECTION_WINDOW / (1024 * 1024),
+        H2_MAX_CONCURRENT_STREAMS,
+    );
+
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                let (stream, _addr) = match result {
+                    Ok(conn) => conn,
+                    Err(err) => {
+                        log::warn!("accept error: {err}");
+                        continue;
+                    }
+                };
+                let _ = stream.set_nodelay(true);
+                let builder = builder.clone();
+                let router = router.clone();
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
+                        let router = router.clone();
+                        async move {
+                            router
+                                .oneshot(req.map(axum::body::Body::new))
+                                .await
+                        }
+                    });
+                    let io = TokioIo::new(stream);
+                    if let Err(err) = builder
+                        .serve_connection_with_upgrades(io, service)
+                        .await
+                    {
+                        log::debug!("connection closed: {err}");
+                    }
+                });
+            }
+            _ = &mut shutdown => {
+                break;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
