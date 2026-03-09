@@ -199,7 +199,17 @@ fn oci_success_rollup_result(
     }
 }
 
-pub async fn v2_base() -> impl IntoResponse {
+pub async fn v2_base(State(state): State<AppState>) -> impl IntoResponse {
+    if !state
+        .prefetch_complete
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Docker-Distribution-API-Version", "registry/2.0")],
+            "prefetch in progress",
+        );
+    }
     (
         StatusCode::OK,
         [("Docker-Distribution-API-Version", "registry/2.0")],
@@ -2135,6 +2145,8 @@ mod tests {
             cache_ops: Arc::new(crate::serve::cache_registry::cache_ops::Aggregator::new()),
             oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
             backend_breaker: Arc::new(crate::serve::state::BackendCircuitBreaker::new()),
+            kv_put_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
+            prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 

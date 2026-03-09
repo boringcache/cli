@@ -84,6 +84,8 @@ async fn setup(
         cache_ops: Arc::new(boring_cache_cli::serve::cache_registry::cache_ops::Aggregator::new()),
         oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
         backend_breaker: Arc::new(boring_cache_cli::serve::state::BackendCircuitBreaker::new()),
+        kv_put_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
+        prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };
 
     (state, temp_home, guard)
@@ -152,20 +154,47 @@ async fn test_startup_manifest_warm_runs_by_default() {
     .await
     .expect("start proxy");
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
     let base_url = format!("http://127.0.0.1:{}", handle.port);
     let client = reqwest::Client::new();
 
-    let get = client
-        .get(format!("{base_url}/v2/"))
-        .send()
-        .await
-        .expect("get request");
-    assert_eq!(get.status(), reqwest::StatusCode::OK);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let get = client
+            .get(format!("{base_url}/v2/"))
+            .send()
+            .await
+            .expect("get request");
+        if get.status() == reqwest::StatusCode::OK {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "proxy did not become ready within 10s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     handle.shutdown_and_flush().await.expect("shutdown proxy");
     restore_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_v2_returns_503_before_prefetch_complete() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    state
+        .prefetch_complete
+        .store(false, std::sync::atomic::Ordering::Release);
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder().uri("/v2/").body(Body::empty()).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]

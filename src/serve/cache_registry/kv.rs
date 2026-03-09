@@ -2102,134 +2102,6 @@ fn should_clear_flushing_after_flush(result: &FlushResult) -> bool {
     !matches!(result, FlushResult::Ok)
 }
 
-pub(crate) async fn preload_kv_index(state: &AppState) {
-    emit_serve_event(
-        Some(&state.workspace),
-        SERVE_PRELOAD_INDEX_OPERATION,
-        SERVE_PRELOAD_INDEX_PATH,
-        "start".to_string(),
-    );
-    let started_at = std::time::Instant::now();
-    match load_existing_index_with_fallback(state, true).await {
-        Ok((entries, blob_order, Some(cache_entry_id), _manifest_root_digest))
-            if !entries.is_empty() =>
-        {
-            let count = entries.len();
-            {
-                let mut published = state.kv_published_index.write().await;
-                if published.entry_count() > 0 {
-                    eprintln!("KV index preload: skipped, flush already published");
-                    emit_serve_phase_metric(
-                        Some(&state.workspace),
-                        Some(cache_entry_id.as_str()),
-                        SERVE_PRELOAD_INDEX_OPERATION,
-                        SERVE_PRELOAD_INDEX_PATH,
-                        208,
-                        started_at.elapsed().as_millis() as u64,
-                        Some(count as u64),
-                    );
-                    emit_serve_event(
-                        Some(&state.workspace),
-                        SERVE_PRELOAD_INDEX_OPERATION,
-                        SERVE_PRELOAD_INDEX_PATH,
-                        "skipped: existing in-memory index".to_string(),
-                    );
-                    return;
-                }
-                published.update(
-                    entries.into_iter().collect(),
-                    blob_order,
-                    cache_entry_id.clone(),
-                );
-            }
-            clear_root_tag_misses(state);
-            eprintln!("KV index preloaded: {count} entries, resolving download URLs...");
-            emit_serve_phase_metric(
-                Some(&state.workspace),
-                Some(cache_entry_id.as_str()),
-                SERVE_PRELOAD_INDEX_OPERATION,
-                SERVE_PRELOAD_INDEX_PATH,
-                200,
-                started_at.elapsed().as_millis() as u64,
-                Some(count as u64),
-            );
-            emit_serve_event(
-                Some(&state.workspace),
-                SERVE_PRELOAD_INDEX_OPERATION,
-                SERVE_PRELOAD_INDEX_PATH,
-                format!("loaded entries={count}"),
-            );
-            preload_download_urls(state, &cache_entry_id).await;
-            spawn_preload_blobs(state, &cache_entry_id);
-        }
-        Ok(_) => {
-            {
-                let mut published = state.kv_published_index.write().await;
-                published.set_empty_incomplete();
-            }
-            eprintln!("KV index preload: no existing entries");
-            emit_serve_phase_metric(
-                Some(&state.workspace),
-                None,
-                SERVE_PRELOAD_INDEX_OPERATION,
-                SERVE_PRELOAD_INDEX_PATH,
-                204,
-                started_at.elapsed().as_millis() as u64,
-                Some(0),
-            );
-            emit_serve_event(
-                Some(&state.workspace),
-                SERVE_PRELOAD_INDEX_OPERATION,
-                SERVE_PRELOAD_INDEX_PATH,
-                "empty index".to_string(),
-            );
-        }
-        Err(e) => {
-            let error_text = format!("{e:?}");
-            if is_invalid_file_pointer_error(&e) {
-                // Treat invalid legacy/corrupt preload pointers as a cache miss so the proxy can continue.
-                {
-                    let mut published = state.kv_published_index.write().await;
-                    published.set_empty_incomplete();
-                }
-                log::warn!(
-                    "KV index preload: invalid file pointer, degraded to empty index ({error_text})"
-                );
-                emit_serve_phase_metric(
-                    Some(&state.workspace),
-                    None,
-                    SERVE_PRELOAD_INDEX_OPERATION,
-                    SERVE_PRELOAD_INDEX_PATH,
-                    206,
-                    started_at.elapsed().as_millis() as u64,
-                    Some(0),
-                );
-                emit_serve_event(
-                    Some(&state.workspace),
-                    SERVE_PRELOAD_INDEX_OPERATION,
-                    SERVE_PRELOAD_INDEX_PATH,
-                    "degraded: invalid file pointer treated as empty index".to_string(),
-                );
-                return;
-            }
-
-            log::warn!("KV index preload failed: {error_text}");
-            observability::emit(
-                observability::ObservabilityEvent::failure(
-                    SERVE_METRIC_SOURCE,
-                    SERVE_PRELOAD_INDEX_OPERATION,
-                    "PHASE",
-                    SERVE_PRELOAD_INDEX_PATH.to_string(),
-                    error_text,
-                    started_at.elapsed().as_millis() as u64,
-                    None,
-                )
-                .with_workspace(Some(state.workspace.clone())),
-            );
-        }
-    }
-}
-
 pub(crate) async fn refresh_kv_index(state: &AppState) {
     if state.kv_flush_scheduled.load(Ordering::Acquire) {
         return;
@@ -2744,6 +2616,170 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
             state.blob_read_cache.total_bytes()
         );
     }
+}
+
+const KV_PREFETCH_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
+    eprintln!("Prefetch: loading index and downloading all blobs before serving...");
+    let started_at = std::time::Instant::now();
+
+    emit_serve_event(
+        Some(&state.workspace),
+        SERVE_PRELOAD_INDEX_OPERATION,
+        SERVE_PRELOAD_INDEX_PATH,
+        "sync:start".to_string(),
+    );
+
+    match load_existing_index_with_fallback(state, true).await {
+        Ok((entries, blob_order, Some(cache_entry_id), _manifest_root_digest))
+            if !entries.is_empty() =>
+        {
+            let count = entries.len();
+            {
+                let mut published = state.kv_published_index.write().await;
+                published.update(
+                    entries.into_iter().collect(),
+                    blob_order,
+                    cache_entry_id.clone(),
+                );
+            }
+            clear_root_tag_misses(state);
+            eprintln!("Prefetch: {count} entries loaded, resolving download URLs...");
+
+            preload_download_urls(state, &cache_entry_id).await;
+
+            eprintln!("Prefetch: downloading blobs to disk cache...");
+            match tokio::time::timeout(
+                KV_PREFETCH_READINESS_TIMEOUT,
+                prefetch_all_blobs(state, &cache_entry_id),
+            )
+            .await
+            {
+                Ok(()) => {
+                    eprintln!(
+                        "Prefetch: complete in {:.1}s, cache_size={} bytes",
+                        started_at.elapsed().as_secs_f64(),
+                        state.blob_read_cache.total_bytes(),
+                    );
+                }
+                Err(_) => {
+                    eprintln!(
+                        "Prefetch: timed out after {}s (partial prefetch, continuing)",
+                        KV_PREFETCH_READINESS_TIMEOUT.as_secs(),
+                    );
+                }
+            }
+        }
+        Ok(_) => {
+            {
+                let mut published = state.kv_published_index.write().await;
+                published.set_empty_incomplete();
+            }
+            eprintln!("Prefetch: no existing entries, skipping");
+        }
+        Err(e) => {
+            if is_invalid_file_pointer_error(&e) {
+                let mut published = state.kv_published_index.write().await;
+                published.set_empty_incomplete();
+                eprintln!("Prefetch: invalid file pointer, degraded to empty index");
+                return;
+            }
+            log::warn!("Prefetch: index load failed: {e:?}");
+        }
+    }
+}
+
+async fn prefetch_all_blobs(state: &AppState, cache_entry_id: &str) {
+    let targets: Vec<(BlobDescriptor, String)> = {
+        let published = state.kv_published_index.read().await;
+        published
+            .unique_blobs()
+            .into_iter()
+            .filter(|blob| blob.size_bytes > 0)
+            .filter_map(|blob| {
+                published
+                    .download_url(&blob.digest)
+                    .map(|url| (blob, url.to_string()))
+            })
+            .collect()
+    };
+
+    if targets.is_empty() {
+        return;
+    }
+
+    let scheduled = targets.len();
+    let scheduled_bytes: u64 = targets.iter().map(|(b, _)| b.size_bytes).sum();
+    eprintln!(
+        "Prefetch: downloading {scheduled} blobs ({:.1} MB)",
+        scheduled_bytes as f64 / (1024.0 * 1024.0),
+    );
+
+    let prefetch_started_at = std::time::Instant::now();
+    let prefetch_semaphore = state.blob_prefetch_semaphore.clone();
+    let mut tasks = tokio::task::JoinSet::new();
+    for (blob, url) in targets {
+        let state = state.clone();
+        let cache_entry_id = cache_entry_id.to_string();
+        let prefetch_semaphore = prefetch_semaphore.clone();
+        tasks.spawn(async move {
+            let _permit = prefetch_semaphore
+                .acquire_owned()
+                .await
+                .map_err(|error| anyhow::anyhow!("prefetch semaphore closed: {error}"))?;
+            preload_single_blob(state, cache_entry_id, blob, url).await
+        });
+    }
+
+    let mut inserted = 0usize;
+    let mut failures = 0usize;
+    let log_interval = (scheduled / 10).max(1);
+    let mut completed = 0usize;
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(true)) => inserted = inserted.saturating_add(1),
+            Ok(Ok(false)) => {}
+            Ok(Err(error)) => {
+                failures = failures.saturating_add(1);
+                log::warn!("Prefetch blob failed: {error}");
+            }
+            Err(error) => {
+                failures = failures.saturating_add(1);
+                log::warn!("Prefetch task failed: {error}");
+            }
+        }
+        completed = completed.saturating_add(1);
+        if completed.is_multiple_of(log_interval) {
+            eprintln!(
+                "Prefetch: {completed}/{scheduled} blobs ({inserted} inserted, {failures} failed, {:.1}s)",
+                prefetch_started_at.elapsed().as_secs_f64(),
+            );
+        }
+    }
+
+    let status = if failures == 0 {
+        200
+    } else if inserted > 0 {
+        207
+    } else {
+        500
+    };
+    emit_serve_phase_metric(
+        Some(&state.workspace),
+        Some(cache_entry_id),
+        SERVE_PREFETCH_OPERATION,
+        SERVE_PREFETCH_PATH,
+        status,
+        prefetch_started_at.elapsed().as_millis() as u64,
+        Some(scheduled as u64),
+    );
+
+    eprintln!(
+        "Prefetch: done inserted={inserted} scheduled={scheduled} failures={failures} cache_size={} bytes in {:.1}s",
+        state.blob_read_cache.total_bytes(),
+        prefetch_started_at.elapsed().as_secs_f64(),
+    );
 }
 
 async fn do_flush(

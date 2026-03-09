@@ -131,6 +131,19 @@ pub async fn run_server(
     let listener = listener.tap_io(|tcp_stream| {
         let _ = tcp_stream.set_nodelay(true);
     });
+
+    if state.kv_manifest_warm_enabled {
+        let prefetch_state = state.clone();
+        tokio::spawn(async move {
+            cache_registry::prefetch_manifest_blobs(&prefetch_state).await;
+            prefetch_state
+                .prefetch_complete
+                .store(true, Ordering::Release);
+        });
+    } else {
+        state.prefetch_complete.store(true, Ordering::Release);
+    }
+
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -165,6 +178,19 @@ pub async fn start_server_background(
     .await?;
 
     spawn_maintenance_tasks(&state, replication_rx);
+
+    if state.kv_manifest_warm_enabled {
+        let prefetch_state = state.clone();
+        tokio::spawn(async move {
+            cache_registry::prefetch_manifest_blobs(&prefetch_state).await;
+            prefetch_state
+                .prefetch_complete
+                .store(true, Ordering::Release);
+        });
+    } else {
+        state.prefetch_complete.store(true, Ordering::Release);
+    }
+
     let router = routes::build_router(state.clone());
     let bound_port = listener
         .local_addr()
@@ -209,7 +235,7 @@ async fn build_server_runtime(
     let (kv_replication_work_tx, kv_replication_work_rx) =
         mpsc::channel(KV_REPLICATION_WORK_QUEUE_CAPACITY);
     let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
-    let blob_prefetch_semaphore = Arc::new(tokio::sync::Semaphore::new(pf_concurrency));
+    let blob_prefetch_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
     let state = AppState {
         api_client,
         workspace: workspace.clone(),
@@ -245,6 +271,8 @@ async fn build_server_runtime(
         cache_ops: Arc::new(cache_registry::cache_ops::Aggregator::new()),
         oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
         backend_breaker: Arc::new(state::BackendCircuitBreaker::new()),
+        kv_put_semaphore: Arc::new(tokio::sync::Semaphore::new(state::kv_put_max_concurrent())),
+        prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     let addr = format!("{host}:{port}");
@@ -427,13 +455,6 @@ fn spawn_maintenance_tasks(
                     observability_dropped_total,
                 );
             }
-        });
-    }
-
-    if state.kv_manifest_warm_enabled {
-        let preload_state = state.clone();
-        tokio::spawn(async move {
-            cache_registry::preload_kv_index(&preload_state).await;
         });
     }
 
