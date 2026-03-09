@@ -68,6 +68,7 @@ const KV_VERSION_POLL_IDLE_SECS: u64 = 30;
 const KV_VERSION_POLL_ACTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 const KV_VERSION_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const KV_VERSION_POLL_JITTER_MS: u64 = 500;
+const KV_VERSION_REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
 const SERVE_METRIC_SOURCE: &str = "serve";
 const SERVE_PRELOAD_INDEX_OPERATION: &str = "cache_preload_index_fetch";
 const SERVE_PREFETCH_OPERATION: &str = "blob_prefetch_cycle";
@@ -2443,7 +2444,9 @@ pub(crate) async fn poll_tag_version_loop(state: &AppState) {
     let mut polls: u64 = 0;
     let mut changes: u64 = 0;
     let mut refreshes: u64 = 0;
+    let mut skipped_refreshes: u64 = 0;
     let refreshing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let last_refresh_completed_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     loop {
         let is_active = is_proxy_active(state);
@@ -2503,6 +2506,24 @@ pub(crate) async fn poll_tag_version_loop(state: &AppState) {
                 if changed {
                     changes += 1;
                     let new_id = new_cache_entry_id.unwrap().to_string();
+                    last_cache_entry_id = Some(new_id.clone());
+
+                    let now_ms = crate::serve::state::unix_time_ms_now();
+                    let last_ms = last_refresh_completed_ms.load(Ordering::Acquire);
+                    let cooldown_ms = KV_VERSION_REFRESH_COOLDOWN.as_millis() as u64;
+                    if last_ms > 0 && now_ms.saturating_sub(last_ms) < cooldown_ms {
+                        skipped_refreshes += 1;
+                        eprintln!(
+                            "Tag version changed: {} (poll={} changes={} mode={} refresh=cooldown skipped={})",
+                            &new_id[..8.min(new_id.len())],
+                            polls,
+                            changes,
+                            if is_active { "active" } else { "idle" },
+                            skipped_refreshes,
+                        );
+                        continue;
+                    }
+
                     eprintln!(
                         "Tag version changed: {} (poll={} changes={} mode={})",
                         &new_id[..8.min(new_id.len())],
@@ -2510,10 +2531,10 @@ pub(crate) async fn poll_tag_version_loop(state: &AppState) {
                         changes,
                         if is_active { "active" } else { "idle" }
                     );
-                    last_cache_entry_id = Some(new_id);
 
                     let refresh_state = state.clone();
                     let refresh_flag = refreshing.clone();
+                    let refresh_completed = last_refresh_completed_ms.clone();
                     refresh_flag.store(true, Ordering::Release);
                     refreshes += 1;
                     let refresh_count = refreshes;
@@ -2521,6 +2542,8 @@ pub(crate) async fn poll_tag_version_loop(state: &AppState) {
                         let started = std::time::Instant::now();
                         refresh_kv_index_keys_only(&refresh_state).await;
                         let duration_ms = started.elapsed().as_millis();
+                        let completed_ms = crate::serve::state::unix_time_ms_now();
+                        refresh_completed.store(completed_ms, Ordering::Release);
                         eprintln!(
                             "Tag version refresh complete: {}ms (refreshes={})",
                             duration_ms, refresh_count
@@ -4470,6 +4493,19 @@ mod tests {
             _ => false,
         };
         assert!(changed);
+    }
+
+    #[test]
+    fn version_refresh_cooldown_prevents_rapid_refreshes() {
+        let cooldown_ms = KV_VERSION_REFRESH_COOLDOWN.as_millis() as u64;
+        assert!(
+            cooldown_ms >= 10_000,
+            "refresh cooldown should be >= 10s to prevent storms"
+        );
+        assert!(
+            cooldown_ms > KV_VERSION_POLL_ACTIVE_SECS * 1000,
+            "cooldown must exceed active poll interval"
+        );
     }
 
     #[test]
