@@ -412,6 +412,8 @@ jobs:
             needs_sccache: "true"
           - leg: docker-buildkit
             needs_sccache: "false"
+          - leg: prefetch-readiness
+            needs_sccache: "false"
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
@@ -553,6 +555,17 @@ jobs:
               LOG_DIR="$LOG_DIR" \
               ./scripts/e2e-docker-buildkit-registry-test.sh | tee "$LOG_DIR/run.log"
               ;;
+            prefetch-readiness)
+              BINARY="$BIN_PATH" \
+              WORKSPACE="${GITHUB_REPOSITORY}" \
+              TAG="gha-prefetch-readiness-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+              BLOB_COUNT="20000" \
+              BLOB_SIZE_BYTES="4096" \
+              SEED_CONCURRENCY="64" \
+              VERIFY_CONCURRENCY="64" \
+              LOG_DIR="$LOG_DIR" \
+              ./scripts/e2e-prefetch-readiness-test.sh | tee "$LOG_DIR/run.log"
+              ;;
             *)
               echo "Unknown adapter leg: $LEG"
               exit 1
@@ -613,6 +626,12 @@ jobs:
               assert_log_contains "=== Phase 3: Implicit latest cache import compatibility ===" "phase3"
               assert_log_contains "=== Phase 4: Alias publish and alias warm import ===" "phase4"
               assert_log_contains "Docker buildkit registry e2e passed" "success"
+              ;;
+            prefetch-readiness)
+              assert_log_contains "=== Phase 1: Seed" "phase1"
+              assert_log_contains "=== Phase 2: Restart proxy on fresh disk cache" "phase2"
+              assert_log_contains "=== Phase 3: Verify all" "phase3"
+              assert_log_contains "Prefetch readiness e2e passed" "success"
               ;;
             *)
               echo "ERROR: unknown adapter leg: ${LEG}"
