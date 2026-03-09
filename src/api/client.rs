@@ -60,6 +60,16 @@ struct TagPointer {
     uploaded_at: Option<String>,
 }
 
+#[derive(Debug)]
+pub enum TagPointerPollResult {
+    NotModified,
+    NotFound,
+    Changed {
+        pointer: super::models::cache::TagPointerResponse,
+        etag: Option<String>,
+    },
+}
+
 #[derive(Clone)]
 pub struct ApiClient {
     client: Client,
@@ -1490,6 +1500,45 @@ impl ApiClient {
             .context("Failed to parse restore response")?;
 
         Ok(Some(payload))
+    }
+
+    pub async fn tag_pointer(
+        &self,
+        workspace: &str,
+        tag: &str,
+        if_none_match: Option<&str>,
+    ) -> Result<TagPointerPollResult> {
+        let endpoint = self.workspace_endpoint(
+            workspace,
+            &format!("caches/tags/{}/pointer", urlencoding::encode(tag)),
+        )?;
+        let url = Self::build_url_from_base(&self.v2_base_url, &endpoint);
+        debug!("GET {} (version poll)", url);
+        let mut request = self.client.get(&url);
+        if let Some(etag) = if_none_match {
+            request = request.header("If-None-Match", etag);
+        }
+        let response = self.send_authenticated_request(request).await?;
+        let status = response.status();
+        if status == StatusCode::NOT_MODIFIED {
+            return Ok(TagPointerPollResult::NotModified);
+        }
+        if status == StatusCode::NOT_FOUND {
+            return Ok(TagPointerPollResult::NotFound);
+        }
+        if !status.is_success() {
+            return Err(self.create_error_from_response(response).await);
+        }
+        let etag = response
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let pointer: super::models::cache::TagPointerResponse = response
+            .json()
+            .await
+            .context("Failed to parse tag pointer response")?;
+        Ok(TagPointerPollResult::Changed { pointer, etag })
     }
 
     pub async fn list_workspaces(&self) -> Result<Vec<super::models::Workspace>> {

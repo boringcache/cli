@@ -458,9 +458,14 @@ fn spawn_maintenance_tasks(
         });
     }
 
+    let version_poll_state = state.clone();
+    tokio::spawn(async move {
+        cache_registry::poll_tag_version_loop(&version_poll_state).await;
+    });
+
     let refresh_state = state.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
         interval.tick().await;
         loop {
             interval.tick().await;

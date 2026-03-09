@@ -63,6 +63,11 @@ const KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_MAX
 const KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV: &str =
     "BORINGCACHE_BLOB_PREFETCH_MAX_INFLIGHT_BYTES";
 const KV_BLOB_PRELOAD_SKIP_USED_PCT: u64 = 95;
+const KV_VERSION_POLL_ACTIVE_SECS: u64 = 3;
+const KV_VERSION_POLL_IDLE_SECS: u64 = 30;
+const KV_VERSION_POLL_ACTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+const KV_VERSION_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const KV_VERSION_POLL_JITTER_MS: u64 = 500;
 const SERVE_METRIC_SOURCE: &str = "serve";
 const SERVE_PRELOAD_INDEX_OPERATION: &str = "cache_preload_index_fetch";
 const SERVE_PREFETCH_OPERATION: &str = "blob_prefetch_cycle";
@@ -82,6 +87,18 @@ fn kv_trace(namespace: KvNamespace, scoped_key: &str, stage: &str) {
     }
     let truncated = scoped_key.get(..96).unwrap_or(scoped_key);
     eprintln!("KV TRACE stage={stage} key={truncated}");
+}
+
+fn is_proxy_active(state: &AppState) -> bool {
+    let now_ms = crate::serve::state::unix_time_ms_now();
+    let window_ms = KV_VERSION_POLL_ACTIVE_WINDOW.as_millis() as u64;
+
+    let last_put_ms = state.kv_last_put.load(Ordering::Acquire);
+    if last_put_ms > 0 && now_ms.saturating_sub(last_put_ms) < window_ms {
+        return true;
+    }
+
+    !state.kv_recent_misses.is_empty()
 }
 
 fn emit_serve_event(
@@ -2272,6 +2289,250 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
     spawn_preload_blobs(state, &cache_entry_id);
 }
 
+pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
+    if state.kv_flush_scheduled.load(Ordering::Acquire) {
+        return;
+    }
+    if state.kv_flushing.read().await.is_some() {
+        return;
+    }
+
+    let mut live_hit: Option<(String, CacheResolutionEntry)> = None;
+    for candidate_tag in kv_root_tags(state) {
+        match resolve_hit_for_index_load(state, &candidate_tag, true).await {
+            Ok(hit) => {
+                if candidate_tag != state.registry_root_tag.trim() {
+                    eprintln!("KV root fallback hit: refreshing from legacy tag {candidate_tag}");
+                }
+                live_hit = Some((candidate_tag, hit));
+                break;
+            }
+            Err(error) if error.status == StatusCode::NOT_FOUND => {}
+            Err(error) => {
+                log::warn!("KV version-triggered refresh failed during resolve: {error:?}");
+                return;
+            }
+        }
+    }
+
+    let Some((tag, hit)) = live_hit else {
+        return;
+    };
+
+    let cache_entry_id = match hit.cache_entry_id.clone() {
+        Some(id) => id,
+        None => {
+            log::warn!("KV version-triggered refresh: live hit missing cache_entry_id");
+            return;
+        }
+    };
+    let manifest_root_digest = hit
+        .manifest_root_digest
+        .clone()
+        .or(hit.manifest_digest.clone());
+    let should_fence = {
+        let published = state.kv_published_index.read().await;
+        if published
+            .cache_entry_id()
+            .is_some_and(|current| current == cache_entry_id.as_str())
+        {
+            drop(published);
+            let mut published = state.kv_published_index.write().await;
+            published.touch_refresh();
+            return;
+        }
+        published
+            .cache_entry_id()
+            .is_some_and(|current| current != cache_entry_id.as_str())
+    };
+    if should_fence
+        && !refresh_fence_allows_update(
+            state,
+            &tag,
+            &cache_entry_id,
+            manifest_root_digest.as_deref(),
+        )
+        .await
+    {
+        return;
+    }
+
+    let pointer = match fetch_pointer(state, &hit).await {
+        Ok(pointer) => pointer,
+        Err(error) => {
+            log::warn!("KV version-triggered refresh failed to fetch pointer: {error:?}");
+            return;
+        }
+    };
+
+    let mut entries = HashMap::new();
+    for entry in &pointer.entries {
+        if !matches!(entry.entry_type, EntryType::File) {
+            continue;
+        }
+        if let Some(digest) = &entry.digest {
+            entries.insert(
+                entry.path.clone(),
+                BlobDescriptor {
+                    digest: digest.clone(),
+                    size_bytes: entry.size_bytes,
+                },
+            );
+        }
+    }
+    let entry_map: BTreeMap<String, BlobDescriptor> = entries
+        .iter()
+        .map(|(key, blob)| (key.clone(), blob.clone()))
+        .collect();
+    let blob_order = pointer_blob_order(&pointer, &entry_map);
+
+    let (published_entries, published_entry_count) = {
+        let published = state.kv_published_index.read().await;
+        (published.entries_snapshot(), published.entry_count())
+    };
+    let gap_counts = count_published_gaps_in_backend(&entry_map, published_entries.as_ref());
+    if published_entry_count > 0 && (gap_counts.missing_keys > 0 || gap_counts.mismatched_keys > 0)
+    {
+        let mut published = state.kv_published_index.write().await;
+        published.touch_refresh();
+        clear_root_tag_misses(state);
+        eprintln!(
+            "KV version-triggered refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
+            entry_map.len(),
+            published_entry_count,
+            gap_counts.missing_keys,
+            gap_counts.mismatched_keys
+        );
+        return;
+    }
+
+    if entries.is_empty() {
+        let had_entries = {
+            let published = state.kv_published_index.read().await;
+            published.entry_count() > 0
+        };
+        if had_entries {
+            let mut published = state.kv_published_index.write().await;
+            published.touch_refresh();
+            clear_root_tag_misses(state);
+            return;
+        }
+        {
+            let mut published = state.kv_published_index.write().await;
+            published.set_empty();
+        }
+        clear_root_tag_misses(state);
+        return;
+    }
+
+    let count = entries.len();
+    {
+        let mut published = state.kv_published_index.write().await;
+        published.update(entries, blob_order, cache_entry_id.clone());
+    }
+    clear_root_tag_misses(state);
+    eprintln!("KV version-triggered refresh: {count} entries loaded (no blob prefetch)");
+}
+
+pub(crate) async fn poll_tag_version_loop(state: &AppState) {
+    let mut last_etag: Option<String> = None;
+    let mut last_cache_entry_id: Option<String> = {
+        let published = state.kv_published_index.read().await;
+        published.cache_entry_id().map(|s| s.to_string())
+    };
+    let mut polls: u64 = 0;
+    let mut changes: u64 = 0;
+    let mut refreshes: u64 = 0;
+    let refreshing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    loop {
+        let is_active = is_proxy_active(state);
+        let base_ms = if is_active {
+            KV_VERSION_POLL_ACTIVE_SECS * 1000
+        } else {
+            KV_VERSION_POLL_IDLE_SECS * 1000
+        };
+        let jitter = rand::thread_rng().gen_range(0..=KV_VERSION_POLL_JITTER_MS * 2);
+        let sleep_ms = base_ms.saturating_sub(KV_VERSION_POLL_JITTER_MS) + jitter;
+        tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+
+        if refreshing.load(Ordering::Acquire) {
+            continue;
+        }
+
+        let primary_tag = state.registry_root_tag.trim().to_string();
+        let poll_result = tokio::time::timeout(
+            KV_VERSION_POLL_TIMEOUT,
+            state
+                .api_client
+                .tag_pointer(&state.workspace, &primary_tag, last_etag.as_deref()),
+        )
+        .await;
+
+        polls += 1;
+
+        let poll_result = match poll_result {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                log::warn!("Tag version poll failed: {error}");
+                last_etag = None;
+                continue;
+            }
+            Err(_) => {
+                log::warn!("Tag version poll timed out");
+                continue;
+            }
+        };
+
+        use crate::api::client::TagPointerPollResult;
+        match poll_result {
+            TagPointerPollResult::NotModified => {}
+            TagPointerPollResult::NotFound => {
+                last_etag = None;
+            }
+            TagPointerPollResult::Changed { pointer, etag } => {
+                last_etag = etag;
+
+                let new_cache_entry_id = pointer.cache_entry_id.as_deref();
+                let changed = match (&last_cache_entry_id, new_cache_entry_id) {
+                    (Some(old), Some(new)) => old != new,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+
+                if changed {
+                    changes += 1;
+                    let new_id = new_cache_entry_id.unwrap().to_string();
+                    eprintln!(
+                        "Tag version changed: {} (poll={} changes={} mode={})",
+                        &new_id[..8.min(new_id.len())],
+                        polls,
+                        changes,
+                        if is_active { "active" } else { "idle" }
+                    );
+                    last_cache_entry_id = Some(new_id);
+
+                    let refresh_state = state.clone();
+                    let refresh_flag = refreshing.clone();
+                    refresh_flag.store(true, Ordering::Release);
+                    refreshes += 1;
+                    let refresh_count = refreshes;
+                    tokio::spawn(async move {
+                        let started = std::time::Instant::now();
+                        refresh_kv_index_keys_only(&refresh_state).await;
+                        let duration_ms = started.elapsed().as_millis();
+                        eprintln!(
+                            "Tag version refresh complete: {}ms (refreshes={})",
+                            duration_ms, refresh_count
+                        );
+                        refresh_flag.store(false, Ordering::Release);
+                    });
+                }
+            }
+        }
+    }
+}
+
 async fn refresh_fence_allows_update(
     state: &AppState,
     tag: &str,
@@ -4153,5 +4414,73 @@ mod tests {
         std::env::set_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV, "12345");
         assert_eq!(kv_blob_prefetch_max_inflight_bytes(1024 * 1024), 12_345);
         std::env::remove_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV);
+    }
+
+    #[test]
+    fn version_poll_interval_active_includes_jitter() {
+        let base_ms = KV_VERSION_POLL_ACTIVE_SECS * 1000;
+        let min = base_ms.saturating_sub(KV_VERSION_POLL_JITTER_MS);
+        let max = base_ms + KV_VERSION_POLL_JITTER_MS;
+        assert!(min < max);
+        assert!(min >= 2000, "active poll min should be >= 2s");
+        assert!(max <= 4000, "active poll max should be <= 4s");
+    }
+
+    #[test]
+    fn version_poll_interval_idle_includes_jitter() {
+        let base_ms = KV_VERSION_POLL_IDLE_SECS * 1000;
+        let min = base_ms.saturating_sub(KV_VERSION_POLL_JITTER_MS);
+        let max = base_ms + KV_VERSION_POLL_JITTER_MS;
+        assert!(min < max);
+        assert!(min >= 29000, "idle poll min should be >= 29s");
+        assert!(max <= 31000, "idle poll max should be <= 31s");
+    }
+
+    #[test]
+    fn version_change_detection_detects_new_id() {
+        let last: Option<String> = Some("old-id".to_string());
+        let new: Option<&str> = Some("new-id");
+        let changed = match (&last, new) {
+            (Some(old), Some(new_val)) => old != new_val,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        assert!(changed);
+    }
+
+    #[test]
+    fn version_change_detection_ignores_same_id() {
+        let last: Option<String> = Some("same-id".to_string());
+        let new: Option<&str> = Some("same-id");
+        let changed = match (&last, new) {
+            (Some(old), Some(new_val)) => old != new_val,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        assert!(!changed);
+    }
+
+    #[test]
+    fn version_change_detection_triggers_on_first_id() {
+        let last: Option<String> = None;
+        let new: Option<&str> = Some("first-id");
+        let changed = match (&last, new) {
+            (Some(old), Some(new_val)) => old != new_val,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        assert!(changed);
+    }
+
+    #[test]
+    fn version_change_detection_ignores_none_to_none() {
+        let last: Option<String> = None;
+        let new: Option<&str> = None;
+        let changed = match (&last, new) {
+            (Some(old), Some(new_val)) => old != new_val,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        assert!(!changed);
     }
 }

@@ -192,6 +192,7 @@ pub use error::RegistryError;
 pub(crate) use kv::cleanup_expired_kv_misses;
 pub(crate) use kv::enqueue_replication_flush_hint;
 pub(crate) use kv::flush_kv_index;
+pub(crate) use kv::poll_tag_version_loop;
 pub(crate) use kv::prefetch_manifest_blobs;
 pub(crate) use kv::refresh_kv_index;
 pub(crate) use kv::try_schedule_flush;

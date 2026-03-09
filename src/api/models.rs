@@ -471,6 +471,14 @@ pub mod cache {
         pub missing: Vec<String>,
     }
 
+    #[derive(Debug, Deserialize)]
+    pub struct TagPointerResponse {
+        pub tag: String,
+        pub cache_entry_id: Option<String>,
+        pub manifest_root_digest: Option<String>,
+        pub version: Option<String>,
+    }
+
     #[derive(Debug, Clone)]
     pub struct CacheResolutionEntry {
         pub tag: String,
