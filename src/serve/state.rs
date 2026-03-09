@@ -201,6 +201,7 @@ pub struct BlobReadCache {
     max_bytes: u64,
     inflight: Arc<DashMap<String, Arc<Notify>>>,
     storage_index: Arc<DashMap<String, BlobReadStorageEntry>>,
+    segment_entry_keys: Arc<DashMap<u64, Vec<String>>>,
     segment_state: Arc<Mutex<BlobReadSegmentState>>,
     append_lock: Arc<Mutex<()>>,
     evict_lock: Arc<Mutex<()>>,
@@ -221,7 +222,14 @@ impl BlobReadCache {
             Self::scan_storage(&cache_dir, &segments_dir)?;
 
         let storage_index = Arc::new(DashMap::new());
+        let segment_entry_keys: DashMap<u64, Vec<String>> = DashMap::new();
         for (key, entry) in index_entries {
+            if let BlobReadStorageEntry::Segment { segment_id, .. } = &entry {
+                segment_entry_keys
+                    .entry(*segment_id)
+                    .or_default()
+                    .push(key.clone());
+            }
             storage_index.insert(key, entry);
         }
 
@@ -231,6 +239,7 @@ impl BlobReadCache {
             max_bytes: max_bytes.max(1),
             inflight: Arc::new(DashMap::new()),
             storage_index,
+            segment_entry_keys: Arc::new(segment_entry_keys),
             segment_state: Arc::new(Mutex::new(segment_state)),
             append_lock: Arc::new(Mutex::new(())),
             evict_lock: Arc::new(Mutex::new(())),
@@ -282,6 +291,16 @@ impl BlobReadCache {
         self.inflight.remove(key);
     }
 
+    fn track_storage_entry(&self, key: String, entry: BlobReadStorageEntry) {
+        if let BlobReadStorageEntry::Segment { segment_id, .. } = &entry {
+            self.segment_entry_keys
+                .entry(*segment_id)
+                .or_default()
+                .push(key.clone());
+        }
+        self.storage_index.insert(key, entry);
+    }
+
     pub async fn get_handle(&self, digest: &str) -> Option<BlobReadHandle> {
         let key = Self::normalize_digest_hex(digest)?;
         let entry = self
@@ -312,13 +331,7 @@ impl BlobReadCache {
                 offset,
                 size_bytes,
             } => {
-                let metadata = tokio::fs::metadata(&path).await.ok()?;
-                if !metadata.is_file() {
-                    self.storage_index.remove(&key);
-                    return None;
-                }
-                let end = offset.saturating_add(size_bytes);
-                if end > metadata.len() || size_bytes == 0 {
+                if size_bytes == 0 {
                     self.storage_index.remove(&key);
                     return None;
                 }
@@ -379,7 +392,7 @@ impl BlobReadCache {
                 let Some(entry) = self.append_blob_bytes(&key, data).await? else {
                     return Ok(false);
                 };
-                self.storage_index.insert(key, entry);
+                self.track_storage_entry(key, entry);
                 if let Err(error) = self.evict_over_budget().await {
                     log::warn!("Blob read cache eviction failed after insert: {error}");
                 }
@@ -440,7 +453,7 @@ impl BlobReadCache {
                 else {
                     return Ok(false);
                 };
-                self.storage_index.insert(key, entry);
+                self.track_storage_entry(key, entry);
                 let _ = tokio::fs::remove_file(src_path).await;
                 if let Err(error) = self.evict_over_budget().await {
                     log::warn!("Blob read cache eviction failed after promote: {error}");
@@ -620,17 +633,10 @@ impl BlobReadCache {
                     continue;
                 };
                 if tokio::fs::remove_file(&meta.path).await.is_ok() {
-                    let mut remove_keys = Vec::new();
-                    for entry in self.storage_index.iter() {
-                        if matches!(
-                            entry.value(),
-                            BlobReadStorageEntry::Segment { segment_id: id, .. } if *id == segment_id
-                        ) {
-                            remove_keys.push(entry.key().clone());
+                    if let Some((_, keys)) = self.segment_entry_keys.remove(&segment_id) {
+                        for key in keys {
+                            self.storage_index.remove(&key);
                         }
-                    }
-                    for key in remove_keys {
-                        self.storage_index.remove(&key);
                     }
                     total = total.saturating_sub(meta.size_bytes);
                 }
