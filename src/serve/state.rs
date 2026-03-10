@@ -42,6 +42,7 @@ pub struct AppState {
     pub kv_flush_scheduled: Arc<AtomicBool>,
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
     pub kv_flushing: Arc<RwLock<Option<KvFlushingSnapshot>>>,
+    pub shutdown_requested: Arc<AtomicBool>,
     pub kv_recent_misses: Arc<DashMap<String, Instant>>,
     pub kv_miss_generations: Arc<DashMap<String, u64>>,
     pub blob_read_cache: Arc<BlobReadCache>,

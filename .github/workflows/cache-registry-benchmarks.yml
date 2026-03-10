@@ -707,6 +707,7 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
+          source ./scripts/e2e-remote-tag.sh
           CLI="${RUNNER_TEMP}/bin/boringcache"
           chmod +x "$CLI"
           TAG="gha-cross-runner-cas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -759,6 +760,17 @@ jobs:
           echo "Flushing proxy (graceful shutdown)..."
           kill "$PROXY_PID"
           wait "$PROXY_PID" 2>/dev/null || true
+
+          echo "Waiting for published remote tag before handing off to fresh runner..."
+          verify_remote_tag_visible \
+            "$CLI" \
+            "${{ github.repository }}" \
+            "$TAG" \
+            "${WORK_DIR}/publish-check" \
+            1 \
+            45 \
+            2 \
+            "$PROXY_LOG"
 
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "cas_digest=${CAS_DIGEST}" >> "$GITHUB_OUTPUT"

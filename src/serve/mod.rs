@@ -10,7 +10,7 @@ use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as HttpConnectionBuilder;
 use std::collections::BTreeMap;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{lookup_host, TcpListener, TcpSocket};
 use tokio::sync::{mpsc, oneshot, RwLock};
@@ -95,11 +95,13 @@ fn spawn_runtime_watchdog(
 pub struct ServeHandle {
     shutdown_tx: Option<oneshot::Sender<()>>,
     server_task: tokio::task::JoinHandle<Result<()>>,
+    shutdown_requested: Arc<AtomicBool>,
     pub port: u16,
 }
 
 impl ServeHandle {
     pub async fn shutdown_and_flush(mut self) -> Result<()> {
+        self.shutdown_requested.store(true, Ordering::Release);
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
         }
@@ -157,10 +159,15 @@ pub async fn run_server(
             let _ = tcp_stream.set_nodelay(true);
         });
         axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(shutdown_signal(state.shutdown_requested.clone()))
             .await?;
     } else {
-        serve_with_h2c(listener, router, shutdown_signal()).await?;
+        serve_with_h2c(
+            listener,
+            router,
+            shutdown_signal(state.shutdown_requested.clone()),
+        )
+        .await?;
     }
 
     eprintln!("Shutdown: flushing pending KV entries");
@@ -215,8 +222,11 @@ pub async fn start_server_background(
         .port();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let shutdown_requested = state.shutdown_requested.clone();
+    let shutdown_handle_flag = state.shutdown_requested.clone();
+    let server_state = state.clone();
     let server_task = tokio::spawn(async move {
-        let shutdown = shutdown_signal_with_channel(shutdown_rx);
+        let shutdown = shutdown_signal_with_channel(shutdown_rx, shutdown_requested);
         if force_http1() {
             let listener = listener.tap_io(|tcp_stream| {
                 let _ = tcp_stream.set_nodelay(true);
@@ -229,13 +239,14 @@ pub async fn start_server_background(
         }
 
         eprintln!("Shutdown: flushing pending KV entries");
-        flush_pending_on_shutdown(&state).await;
+        flush_pending_on_shutdown(&server_state).await;
         Ok(())
     });
 
     Ok(ServeHandle {
         shutdown_tx: Some(shutdown_tx),
         server_task,
+        shutdown_requested: shutdown_handle_flag,
         port: bound_port,
     })
 }
@@ -285,6 +296,7 @@ async fn build_server_runtime(
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
         kv_flushing: Arc::new(RwLock::new(None)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_recent_misses: Arc::new(dashmap::DashMap::new()),
         kv_miss_generations: Arc::new(dashmap::DashMap::new()),
         blob_read_cache,
@@ -901,7 +913,7 @@ async fn flush_pending_on_shutdown(state: &AppState) {
     }
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(shutdown_requested: Arc<AtomicBool>) {
     let ctrl_c = async {
         if let Err(error) = tokio::signal::ctrl_c().await {
             log::warn!("Failed to install Ctrl+C handler: {error}");
@@ -930,10 +942,14 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 
+    shutdown_requested.store(true, Ordering::Release);
     eprintln!("\nShutting down...");
 }
 
-async fn shutdown_signal_with_channel(mut shutdown_rx: oneshot::Receiver<()>) {
+async fn shutdown_signal_with_channel(
+    mut shutdown_rx: oneshot::Receiver<()>,
+    shutdown_requested: Arc<AtomicBool>,
+) {
     let ctrl_c = async {
         if let Err(error) = tokio::signal::ctrl_c().await {
             log::warn!("Failed to install Ctrl+C handler: {error}");
@@ -963,6 +979,7 @@ async fn shutdown_signal_with_channel(mut shutdown_rx: oneshot::Receiver<()>) {
         _ = &mut shutdown_rx => {},
     }
 
+    shutdown_requested.store(true, Ordering::Release);
     eprintln!("\nShutting down...");
 }
 

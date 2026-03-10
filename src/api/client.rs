@@ -8,6 +8,7 @@ use log::debug;
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -40,6 +41,12 @@ enum PendingPublishStrategy {
 #[derive(Debug)]
 pub enum ConfirmPublishResult {
     Published(super::models::cache::CacheConfirmResponse),
+    Pending(PendingMetadata),
+}
+
+#[derive(Debug)]
+enum PendingPublishPollOutcome {
+    Published(TagPointer),
     Pending(PendingMetadata),
 }
 
@@ -1312,6 +1319,7 @@ impl ApiClient {
                 cache_entry_id,
                 request,
                 PendingPublishStrategy::WaitForPublish,
+                None,
             )
             .await?
         {
@@ -1333,6 +1341,24 @@ impl ApiClient {
             cache_entry_id,
             request,
             PendingPublishStrategy::AcceptServerOwnedPending,
+            None,
+        )
+        .await
+    }
+
+    pub async fn confirm_wait_for_publish_or_shutdown_pending(
+        &self,
+        workspace: &str,
+        cache_entry_id: &str,
+        request: &super::models::cache::ConfirmRequest,
+        shutdown_requested: &AtomicBool,
+    ) -> Result<ConfirmPublishResult> {
+        self.confirm_with_pending_strategy(
+            workspace,
+            cache_entry_id,
+            request,
+            PendingPublishStrategy::WaitForPublish,
+            Some(shutdown_requested),
         )
         .await
     }
@@ -1343,6 +1369,7 @@ impl ApiClient {
         cache_entry_id: &str,
         request: &super::models::cache::ConfirmRequest,
         pending_strategy: PendingPublishStrategy,
+        shutdown_requested: Option<&AtomicBool>,
     ) -> Result<ConfirmPublishResult> {
         let tag = request
             .tag
@@ -1422,9 +1449,11 @@ impl ApiClient {
                         return Err(error);
                     };
 
-                    if pending_strategy == PendingPublishStrategy::AcceptServerOwnedPending
-                        && server_owned_pending_publish(&metadata)
-                    {
+                    if should_accept_server_owned_pending(
+                        pending_strategy,
+                        shutdown_requested,
+                        &metadata,
+                    ) {
                         return Ok(ConfirmPublishResult::Pending(metadata));
                     }
 
@@ -1433,9 +1462,22 @@ impl ApiClient {
                     }
 
                     if metadata.poll_path.is_some() || metadata.upload_session_id.is_some() {
-                        break self
-                            .poll_pending_publish(workspace, tag, metadata, started_at)
-                            .await?;
+                        match self
+                            .poll_pending_publish(
+                                workspace,
+                                tag,
+                                metadata,
+                                started_at,
+                                pending_strategy,
+                                shutdown_requested,
+                            )
+                            .await?
+                        {
+                            PendingPublishPollOutcome::Published(pointer) => break pointer,
+                            PendingPublishPollOutcome::Pending(metadata) => {
+                                return Ok(ConfirmPublishResult::Pending(metadata));
+                            }
+                        }
                     }
 
                     let delay = Duration::from_secs(metadata.retry_after_seconds.unwrap_or(1));
@@ -1455,16 +1497,38 @@ impl ApiClient {
         tag: &str,
         metadata: PendingMetadata,
         started_at: Instant,
-    ) -> Result<TagPointer> {
+        pending_strategy: PendingPublishStrategy,
+        shutdown_requested: Option<&AtomicBool>,
+    ) -> Result<PendingPublishPollOutcome> {
         loop {
+            if should_accept_server_owned_pending(pending_strategy, shutdown_requested, &metadata) {
+                return Ok(PendingPublishPollOutcome::Pending(metadata));
+            }
+
             if started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT {
+                if should_accept_server_owned_pending(
+                    pending_strategy,
+                    shutdown_requested,
+                    &metadata,
+                ) {
+                    return Ok(PendingPublishPollOutcome::Pending(metadata));
+                }
                 return Err(BoringCacheError::cache_pending_with_metadata(metadata).into());
             }
 
-            let status = self
-                .upload_session_status(workspace, &metadata)
-                .await
-                .context("Failed to poll pending publish status")?;
+            let status = match self.upload_session_status(workspace, &metadata).await {
+                Ok(status) => status,
+                Err(error) => {
+                    if should_accept_server_owned_pending(
+                        pending_strategy,
+                        shutdown_requested,
+                        &metadata,
+                    ) {
+                        return Ok(PendingPublishPollOutcome::Pending(metadata));
+                    }
+                    return Err(error).context("Failed to poll pending publish status");
+                }
+            };
 
             match status
                 .publish_state
@@ -1473,12 +1537,12 @@ impl ApiClient {
             {
                 Some("published") => match self.tag_pointer_v2(workspace, tag).await? {
                     Some(pointer) => {
-                        return Ok(TagPointer {
+                        return Ok(PendingPublishPollOutcome::Published(TagPointer {
                             version: pointer.version,
                             cache_entry_id: pointer.cache_entry_id,
                             status: Some("published".to_string()),
                             uploaded_at: None,
-                        });
+                        }));
                     }
                     None => {
                         anyhow::bail!("Pending publish completed but tag pointer was not found")
@@ -1501,6 +1565,14 @@ impl ApiClient {
                     );
                 }
                 _ => {
+                    if should_accept_server_owned_pending(
+                        pending_strategy,
+                        shutdown_requested,
+                        &metadata,
+                    ) {
+                        return Ok(PendingPublishPollOutcome::Pending(metadata));
+                    }
+
                     let delay = Duration::from_secs(metadata.retry_after_seconds.unwrap_or(1))
                         .min(PENDING_PUBLISH_POLL_INTERVAL.max(Duration::from_secs(1)));
                     sleep(delay).await;
@@ -1907,6 +1979,16 @@ fn server_owned_pending_publish(metadata: &PendingMetadata) -> bool {
     }
 
     metadata.poll_path.is_some() || metadata.upload_session_id.is_some()
+}
+
+fn should_accept_server_owned_pending(
+    pending_strategy: PendingPublishStrategy,
+    shutdown_requested: Option<&AtomicBool>,
+    metadata: &PendingMetadata,
+) -> bool {
+    server_owned_pending_publish(metadata)
+        && (pending_strategy == PendingPublishStrategy::AcceptServerOwnedPending
+            || shutdown_requested.is_some_and(|flag| flag.load(Ordering::Acquire)))
 }
 
 fn cache_confirm_response_from_tag_pointer(
