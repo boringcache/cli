@@ -1,0 +1,2888 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "BoringCache API v2",
+    "version": "2.2.1",
+    "description": "BoringCache v2 API surface for cache read/write workflows.\n\nv2 includes:\n- capabilities negotiation\n- workspace/session endpoints\n- cache create/list/restore/delete/check\n- CAS blob stage/check/download\n- CAS tag pointer publish with If-Match\n"
+  },
+  "servers": [
+    {
+      "url": "https://api.boringcache.com/api/v2",
+      "description": "Production API"
+    },
+    {
+      "url": "http://localhost:3000/api/v2",
+      "description": "Local development"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Capabilities"
+    },
+    {
+      "name": "Documentation"
+    },
+    {
+      "name": "Session"
+    },
+    {
+      "name": "Workspaces"
+    },
+    {
+      "name": "Cache Entries"
+    },
+    {
+      "name": "Blob Storage"
+    },
+    {
+      "name": "Cache Tags"
+    },
+    {
+      "name": "Upload Sessions"
+    },
+    {
+      "name": "Metrics"
+    },
+    {
+      "name": "Cache Operations"
+    }
+  ],
+  "paths": {
+    "/openapi.json": {
+      "get": {
+        "operationId": "getOpenapiJson",
+        "summary": "Get OpenAPI specification (JSON)",
+        "tags": [
+          "Documentation"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI specification",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.yaml": {
+      "get": {
+        "operationId": "getOpenapiYaml",
+        "summary": "Get OpenAPI specification (YAML)",
+        "tags": [
+          "Documentation"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI specification",
+            "content": {
+              "application/x-yaml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/capabilities": {
+      "get": {
+        "operationId": "getCapabilities",
+        "summary": "Get API feature capabilities",
+        "tags": [
+          "Capabilities"
+        ],
+        "responses": {
+          "200": {
+            "description": "Capabilities payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilitiesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/session": {
+      "get": {
+        "operationId": "getSession",
+        "summary": "Validate token and fetch session context",
+        "tags": [
+          "Session"
+        ],
+        "responses": {
+          "200": {
+            "description": "Session context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/workspaces": {
+      "get": {
+        "operationId": "listWorkspaces",
+        "summary": "List accessible workspaces",
+        "tags": [
+          "Workspaces"
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WorkspaceSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/workspaces/{slug}": {
+      "get": {
+        "operationId": "getWorkspace",
+        "summary": "Get workspace details by slug",
+        "tags": [
+          "Workspaces"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WorkspaceSlugOnly"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/metrics": {
+      "post": {
+        "operationId": "createMetric",
+        "summary": "Submit client-side cache operation metrics",
+        "tags": [
+          "Metrics"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MetricsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Metric created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsCreatedResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/cache-rollups": {
+      "post": {
+        "operationId": "createCacheRollups",
+        "summary": "Submit proxy cache rollups, misses, and session summaries",
+        "tags": [
+          "Cache Operations"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CacheRollupsBatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Cache ops batch accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheRollupsAcceptedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches": {
+      "get": {
+        "operationId": "listOrRestoreCaches",
+        "summary": "List caches or restore by entries query",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/EntriesQuery"
+          },
+          {
+            "$ref": "#/components/parameters/PageQuery"
+          },
+          {
+            "$ref": "#/components/parameters/LimitQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List or restore response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/CacheEntriesListResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RestoreResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "Multi-status restore response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createCacheEntry",
+        "summary": "Create cache entry (v2)",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "cache"
+                ],
+                "properties": {
+                  "cache": {
+                    "$ref": "#/components/schemas/CacheEntryCreateRequest"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing cache entry found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New cache entry created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "423": {
+            "description": "Another upload already owns the tag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteCachesByTag",
+        "summary": "Delete caches by tag list",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteCachesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deletion completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DeleteCacheResult"
+                  }
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "Partial deletion result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DeleteCacheResult"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches/check": {
+      "post": {
+        "operationId": "checkManifestEntries",
+        "summary": "Check cache manifests by tag and digest",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManifestCheckBatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Manifest check results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManifestCheckResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches/{cache_entry_id}/multipart/complete": {
+      "post": {
+        "operationId": "completeArchiveMultipartUpload",
+        "summary": "Complete multipart archive upload",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/CacheEntryId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "multipart"
+                ],
+                "properties": {
+                  "multipart": {
+                    "$ref": "#/components/schemas/CompleteMultipartRequest"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Multipart completion result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompleteMultipartResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches/blobs/check": {
+      "post": {
+        "operationId": "checkBlobs",
+        "summary": "Check blob existence by digest",
+        "tags": [
+          "Blob Storage"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlobCheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Blob existence result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlobCheckResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches/blobs/stage": {
+      "post": {
+        "operationId": "stageBlobs",
+        "summary": "Stage upload URLs for missing blobs",
+        "tags": [
+          "Blob Storage"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlobCheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stage response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlobStageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches/blobs/download-urls": {
+      "post": {
+        "operationId": "blobDownloadUrls",
+        "summary": "Resolve download URLs for entry/workspace blobs",
+        "tags": [
+          "Blob Storage"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlobDownloadUrlsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Blob download URLs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlobDownloadUrlsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches/tags/{name}/pointer": {
+      "get": {
+        "operationId": "getTagPointer",
+        "summary": "Read current tag pointer",
+        "tags": [
+          "Cache Tags"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/TagName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tag pointer with version ETag",
+            "headers": {
+              "ETag": {
+                "description": "Pointer version for optimistic publish",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagPointerResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/caches/tags/{name}/publish": {
+      "put": {
+        "operationId": "publishTagPointer",
+        "summary": "Atomically publish tag pointer",
+        "tags": [
+          "Cache Tags"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/TagName"
+          },
+          {
+            "$ref": "#/components/parameters/ClientTypeHeader"
+          },
+          {
+            "$ref": "#/components/parameters/ClientVersionHeader"
+          },
+          {
+            "$ref": "#/components/parameters/PendingPublishPollHeader"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required for CAS publishes"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TagPublishRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Publish success",
+            "headers": {
+              "ETag": {
+                "description": "New pointer version",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagPointerResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "412": {
+            "description": "Publish conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagPublishConflictResponse"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "Publish is pending server-owned completion or another writer holds the tag",
+            "headers": {
+              "Retry-After": {
+                "description": "Suggested polling delay in seconds",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagPublishLockedResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/upload-sessions/{id}": {
+      "get": {
+        "operationId": "getUploadSession",
+        "summary": "Get upload session status",
+        "tags": [
+          "Upload Sessions"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/UploadSessionId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Upload session status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadSessionStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "API Token"
+      }
+    },
+    "parameters": {
+      "NamespaceSlug": {
+        "name": "namespace_slug",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "WorkspaceSlug": {
+        "name": "workspace_slug",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "WorkspaceSlugOnly": {
+        "name": "slug",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "TagName": {
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "CacheEntryId": {
+        "name": "cache_entry_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "UploadSessionId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "ClientTypeHeader": {
+        "name": "X-BoringCache-Client-Type",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Optional client identifier used for compatibility behavior"
+      },
+      "ClientVersionHeader": {
+        "name": "X-BoringCache-CLI-Version",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Optional CLI version string"
+      },
+      "PendingPublishPollHeader": {
+        "name": "X-BoringCache-Pending-Publish-Poll",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "1"
+          ]
+        },
+        "description": "Indicates the client can poll upload session status instead of relying on legacy synchronous waiting"
+      },
+      "EntriesQuery": {
+        "name": "entries",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Comma-separated cache tags for restore lookup"
+      },
+      "PageQuery": {
+        "name": "page",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "LimitQuery": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Unauthorized",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Forbidden",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Not found",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "BadRequest": {
+        "description": "Bad request",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "ValidationError": {
+        "description": "Validation error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Conflict",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "nullable": true
+          },
+          "details": {
+            "type": "object",
+            "nullable": true
+          }
+        }
+      },
+      "CapabilitiesResponse": {
+        "type": "object",
+        "required": [
+          "api_version",
+          "features"
+        ],
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "enum": [
+              "v2"
+            ]
+          },
+          "features": {
+            "type": "object",
+            "required": [
+              "blob_stage_v2",
+              "tag_pointer_v2",
+              "tag_publish_v2",
+              "finalize_only_v2",
+              "entry_create_v2",
+              "upload_sessions_v2",
+              "pending_publish_status_v2",
+              "cache_list_v2",
+              "cache_restore_v2",
+              "cache_check_v2",
+              "cache_delete_v2",
+              "workspaces_v2",
+              "session_v2",
+              "metrics_v2"
+            ],
+            "properties": {
+              "blob_stage_v2": {
+                "type": "boolean"
+              },
+              "tag_pointer_v2": {
+                "type": "boolean"
+              },
+              "tag_publish_v2": {
+                "type": "boolean"
+              },
+              "finalize_only_v2": {
+                "type": "boolean"
+              },
+              "entry_create_v2": {
+                "type": "boolean"
+              },
+              "upload_sessions_v2": {
+                "type": "boolean"
+              },
+              "pending_publish_status_v2": {
+                "type": "boolean"
+              },
+              "cas_publish_bootstrap_if_match": {
+                "type": "string"
+              },
+              "cache_list_v2": {
+                "type": "boolean"
+              },
+              "cache_restore_v2": {
+                "type": "boolean"
+              },
+              "cache_check_v2": {
+                "type": "boolean"
+              },
+              "cache_delete_v2": {
+                "type": "boolean"
+              },
+              "workspaces_v2": {
+                "type": "boolean"
+              },
+              "session_v2": {
+                "type": "boolean"
+              },
+              "metrics_v2": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "SessionToken": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scope_type": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "expires_in_days": {
+            "type": "integer",
+            "nullable": true
+          },
+          "last_used_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "SessionUser": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionOrganization": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionWorkspace": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionResponse": {
+        "type": "object",
+        "required": [
+          "valid"
+        ],
+        "properties": {
+          "valid": {
+            "type": "boolean"
+          },
+          "user": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionUser"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "token": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionToken"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "organization": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionOrganization"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workspace": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionWorkspace"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "WorkspaceSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "cache_entries_count",
+          "total_cache_size"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "cache_entries_count": {
+            "type": "integer"
+          },
+          "total_cache_size": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WorkspaceOrganization": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkspaceDetail": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "cache_entries_count",
+          "total_cache_size"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "organization": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceOrganization"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cache_entries_count": {
+            "type": "integer"
+          },
+          "total_cache_size": {
+            "type": "integer"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "provisioned": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "MetricsRequest": {
+        "type": "object",
+        "properties": {
+          "operation_type": {
+            "type": "string"
+          },
+          "manifest_root_digest": {
+            "type": "string"
+          },
+          "total_duration": {
+            "type": "number"
+          },
+          "tags": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "MetricsCreatedResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "metric_id"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "success"
+            ]
+          },
+          "metric_id": {
+            "type": "string"
+          }
+        }
+      },
+      "MetricsErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "MetadataHints": {
+        "type": "object",
+        "maxProperties": 8,
+        "additionalProperties": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "CacheRollupSessionMissedKey": {
+        "type": "object",
+        "required": [
+          "key_hash",
+          "miss_count"
+        ],
+        "properties": {
+          "key_hash": {
+            "type": "string"
+          },
+          "miss_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sampled_key_prefix": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CacheRollupSession": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "tool",
+          "session_duration_ms",
+          "hit_count",
+          "miss_count",
+          "error_count",
+          "bytes_read",
+          "bytes_written"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string",
+            "enum": [
+              "runtime",
+              "turborepo",
+              "nx",
+              "bazel",
+              "gradle",
+              "maven",
+              "sccache",
+              "gocache",
+              "oci"
+            ]
+          },
+          "session_duration_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "hit_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "miss_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "error_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes_read": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes_written": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "metadata_hints": {
+            "$ref": "#/components/schemas/MetadataHints"
+          },
+          "top_missed_keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CacheRollupSessionMissedKey"
+            }
+          }
+        }
+      },
+      "CacheRollupItem": {
+        "type": "object",
+        "required": [
+          "bucket_at",
+          "session_id",
+          "tool",
+          "operation",
+          "result",
+          "degraded",
+          "event_count",
+          "bytes_total",
+          "latency_sum_ms",
+          "latency_count"
+        ],
+        "properties": {
+          "bucket_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string",
+            "enum": [
+              "runtime",
+              "turborepo",
+              "nx",
+              "bazel",
+              "gradle",
+              "maven",
+              "sccache",
+              "gocache",
+              "oci"
+            ]
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "get",
+              "put",
+              "query"
+            ]
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "hit",
+              "miss",
+              "error"
+            ]
+          },
+          "degraded": {
+            "type": "boolean"
+          },
+          "event_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes_total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "latency_sum_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "latency_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "CacheMissedKeyItem": {
+        "type": "object",
+        "required": [
+          "key_hash",
+          "tool",
+          "miss_count"
+        ],
+        "properties": {
+          "key_hash": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string",
+            "enum": [
+              "runtime",
+              "turborepo",
+              "nx",
+              "bazel",
+              "gradle",
+              "maven",
+              "sccache",
+              "gocache",
+              "oci"
+            ]
+          },
+          "miss_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sampled_key_prefix": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CacheRollupsBatchRequest": {
+        "type": "object",
+        "properties": {
+          "rollups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CacheRollupItem"
+            }
+          },
+          "missed_keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CacheMissedKeyItem"
+            }
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CacheRollupSession"
+            }
+          }
+        }
+      },
+      "CacheRollupsAcceptedResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "rollups_count",
+          "missed_keys_count",
+          "sessions_count"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted"
+            ]
+          },
+          "rollups_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "missed_keys_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sessions_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "CacheListEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "manifest_root_digest",
+          "total_size_bytes",
+          "compression_algorithm",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "cache_key": {
+            "type": "string",
+            "nullable": true
+          },
+          "manifest_root_digest": {
+            "type": "string"
+          },
+          "tag": {
+            "type": "string",
+            "nullable": true
+          },
+          "total_size_bytes": {
+            "type": "integer"
+          },
+          "uncompressed_size": {
+            "type": "integer",
+            "nullable": true
+          },
+          "compressed_size": {
+            "type": "integer",
+            "nullable": true
+          },
+          "file_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "compression_algorithm": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "nullable": true
+          },
+          "uploaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "encrypted": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CacheEntriesListResponse": {
+        "type": "object",
+        "required": [
+          "entries",
+          "total",
+          "page",
+          "limit"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CacheListEntry"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "page": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        }
+      },
+      "RestoreMetadata": {
+        "type": "object",
+        "properties": {
+          "manifest_root_digest": {
+            "type": "string",
+            "nullable": true
+          },
+          "total_size_bytes": {
+            "type": "integer",
+            "nullable": true
+          },
+          "storage_mode": {
+            "type": "string",
+            "nullable": true
+          },
+          "blob_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "blob_total_size_bytes": {
+            "type": "integer",
+            "nullable": true
+          },
+          "cas_layout": {
+            "type": "string",
+            "nullable": true
+          },
+          "uncompressed_size": {
+            "type": "integer",
+            "nullable": true
+          },
+          "compressed_size": {
+            "type": "integer",
+            "nullable": true
+          },
+          "file_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "compression_algorithm": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "RestoreResult": {
+        "type": "object",
+        "required": [
+          "tag",
+          "status"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "primary_tag": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string"
+          },
+          "cache_entry_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "manifest_root_digest": {
+            "type": "string",
+            "nullable": true
+          },
+          "manifest_digest": {
+            "type": "string",
+            "nullable": true
+          },
+          "manifest_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "compression_algorithm": {
+            "type": "string",
+            "nullable": true
+          },
+          "storage_mode": {
+            "type": "string",
+            "nullable": true
+          },
+          "blob_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "blob_total_size_bytes": {
+            "type": "integer",
+            "nullable": true
+          },
+          "cas_layout": {
+            "type": "string",
+            "nullable": true
+          },
+          "signature_tag": {
+            "type": "string",
+            "nullable": true
+          },
+          "archive_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/RestoreMetadata"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          },
+          "pending": {
+            "type": "boolean"
+          },
+          "workspace_signing_public_key": {
+            "type": "string",
+            "nullable": true
+          },
+          "server_signature": {
+            "type": "string",
+            "nullable": true
+          },
+          "server_signed_at": {
+            "type": "string",
+            "nullable": true
+          },
+          "encrypted": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RestoreResponse": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/RestoreResult"
+        }
+      },
+      "DeleteCachesRequest": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "DeleteCacheResult": {
+        "type": "object",
+        "required": [
+          "tag",
+          "status"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "cache_entry_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ManifestCheckRequest": {
+        "type": "object",
+        "required": [
+          "tag",
+          "manifest_root_digest"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "manifest_root_digest": {
+            "type": "string"
+          },
+          "lookup": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ManifestCheckBatchRequest": {
+        "type": "object",
+        "required": [
+          "manifest_checks"
+        ],
+        "properties": {
+          "manifest_checks": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/ManifestCheckRequest"
+            }
+          }
+        }
+      },
+      "ManifestCheckResult": {
+        "type": "object",
+        "required": [
+          "tag",
+          "exists"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "pending": {
+            "type": "boolean"
+          },
+          "manifest_root_digest": {
+            "type": "string",
+            "nullable": true
+          },
+          "cache_entry_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "content_hash": {
+            "type": "string",
+            "nullable": true
+          },
+          "manifest_digest": {
+            "type": "string",
+            "nullable": true
+          },
+          "manifest_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "compression_algorithm": {
+            "type": "string",
+            "nullable": true
+          },
+          "archive_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "size": {
+            "type": "integer",
+            "nullable": true
+          },
+          "uncompressed_size": {
+            "type": "integer",
+            "nullable": true
+          },
+          "compressed_size": {
+            "type": "integer",
+            "nullable": true
+          },
+          "uploaded_at": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ManifestCheckResponse": {
+        "type": "object",
+        "required": [
+          "results"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManifestCheckResult"
+            }
+          }
+        }
+      },
+      "CacheEntryCreateRequest": {
+        "type": "object",
+        "required": [
+          "tag",
+          "manifest_root_digest",
+          "total_size_bytes"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "manifest_root_digest": {
+            "type": "string"
+          },
+          "compression_algorithm": {
+            "type": "string",
+            "enum": [
+              "zstd",
+              "lz4"
+            ]
+          },
+          "manifest_format_version": {
+            "type": "integer"
+          },
+          "total_size_bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "uncompressed_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "compressed_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "file_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "storage_mode": {
+            "type": "string",
+            "enum": [
+              "archive",
+              "cas"
+            ]
+          },
+          "blob_count": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "blob_total_size_bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "cas_layout": {
+            "type": "string",
+            "nullable": true
+          },
+          "expected_manifest_digest": {
+            "type": "string",
+            "nullable": true
+          },
+          "expected_manifest_size": {
+            "type": "integer",
+            "minimum": 1,
+            "nullable": true
+          },
+          "ci_provider": {
+            "type": "string",
+            "nullable": true
+          },
+          "encrypted": {
+            "type": "boolean"
+          },
+          "encryption_algorithm": {
+            "type": "string",
+            "nullable": true
+          },
+          "encryption_recipient_hint": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "SaveResponse": {
+        "type": "object",
+        "required": [
+          "tag",
+          "cache_entry_id",
+          "manifest_root_digest",
+          "exists",
+          "status"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "primary_tag": {
+            "type": "string",
+            "nullable": true
+          },
+          "cache_entry_id": {
+            "type": "string"
+          },
+          "upload_session_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "upload_state": {
+            "type": "string",
+            "enum": [
+              "uploading",
+              "awaiting_blob_visibility",
+              "ready_to_publish",
+              "published",
+              "failed",
+              "abandoned"
+            ],
+            "nullable": true
+          },
+          "manifest_root_digest": {
+            "type": "string"
+          },
+          "manifest_upload_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "archive_urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "multipart_upload_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "manifest_etag": {
+            "type": "string",
+            "nullable": true
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "storage_mode": {
+            "type": "string",
+            "enum": [
+              "archive",
+              "cas"
+            ],
+            "nullable": true
+          },
+          "blob_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "blob_total_size_bytes": {
+            "type": "integer",
+            "nullable": true
+          },
+          "cas_layout": {
+            "type": "string",
+            "nullable": true
+          },
+          "upload_headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CompleteMultipartRequest": {
+        "type": "object",
+        "required": [
+          "upload_id",
+          "parts"
+        ],
+        "properties": {
+          "upload_id": {
+            "type": "string"
+          },
+          "archive_size": {
+            "type": "integer",
+            "nullable": true
+          },
+          "parts": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/MultipartPart"
+            }
+          }
+        }
+      },
+      "MultipartPart": {
+        "type": "object",
+        "required": [
+          "part_number",
+          "etag"
+        ],
+        "properties": {
+          "part_number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "etag": {
+            "type": "string"
+          }
+        }
+      },
+      "CompleteMultipartResponse": {
+        "type": "object",
+        "required": [
+          "archive_etag"
+        ],
+        "properties": {
+          "archive_etag": {
+            "type": "string"
+          }
+        }
+      },
+      "BlobDescriptor": {
+        "type": "object",
+        "required": [
+          "digest",
+          "size_bytes"
+        ],
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "BlobCheckRequest": {
+        "type": "object",
+        "required": [
+          "blobs"
+        ],
+        "properties": {
+          "blobs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/BlobDescriptor"
+            }
+          }
+        }
+      },
+      "BlobCheckResult": {
+        "type": "object",
+        "required": [
+          "digest",
+          "exists"
+        ],
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "ready",
+              "failed"
+            ]
+          }
+        }
+      },
+      "BlobCheckResponse": {
+        "type": "object",
+        "required": [
+          "results"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlobCheckResult"
+            }
+          }
+        }
+      },
+      "BlobStageUploadUrl": {
+        "type": "object",
+        "required": [
+          "digest",
+          "url"
+        ],
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "BlobStageResponse": {
+        "type": "object",
+        "required": [
+          "upload_urls",
+          "already_present"
+        ],
+        "properties": {
+          "upload_urls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlobStageUploadUrl"
+            }
+          },
+          "already_present": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "upload_session_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "upload_state": {
+            "type": "string",
+            "enum": [
+              "uploading",
+              "awaiting_blob_visibility",
+              "ready_to_publish",
+              "published",
+              "failed",
+              "abandoned"
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "BlobDownloadUrlsRequest": {
+        "type": "object",
+        "required": [
+          "cache_entry_id",
+          "blobs"
+        ],
+        "properties": {
+          "cache_entry_id": {
+            "type": "string"
+          },
+          "blobs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/BlobDescriptor"
+            }
+          }
+        }
+      },
+      "BlobDownloadUrl": {
+        "type": "object",
+        "required": [
+          "digest",
+          "url"
+        ],
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "BlobDownloadUrlsResponse": {
+        "type": "object",
+        "required": [
+          "download_urls",
+          "missing"
+        ],
+        "properties": {
+          "download_urls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlobDownloadUrl"
+            }
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "TagPointerResponse": {
+        "type": "object",
+        "required": [
+          "tag",
+          "version"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "cache_entry_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "manifest_root_digest": {
+            "type": "string",
+            "nullable": true
+          },
+          "storage_mode": {
+            "type": "string",
+            "enum": [
+              "archive",
+              "cas"
+            ],
+            "nullable": true
+          },
+          "blob_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "blob_total_size_bytes": {
+            "type": "integer",
+            "nullable": true
+          },
+          "cas_layout": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "nullable": true
+          },
+          "uploaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "TagPublishFinalizePayload": {
+        "type": "object",
+        "properties": {
+          "manifest_digest": {
+            "type": "string"
+          },
+          "manifest_size": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "manifest_etag": {
+            "type": "string",
+            "nullable": true
+          },
+          "archive_size": {
+            "type": "integer",
+            "minimum": 1,
+            "nullable": true
+          },
+          "archive_etag": {
+            "type": "string",
+            "nullable": true
+          },
+          "blob_count": {
+            "type": "integer",
+            "minimum": 1,
+            "nullable": true
+          },
+          "blob_total_size_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "nullable": true
+          }
+        }
+      },
+      "TagPublishRequest": {
+        "type": "object",
+        "required": [
+          "cache_entry_id"
+        ],
+        "properties": {
+          "cache_entry_id": {
+            "type": "string"
+          },
+          "publish_mode": {
+            "type": "string",
+            "enum": [
+              "replace",
+              "cas"
+            ]
+          },
+          "cache": {
+            "$ref": "#/components/schemas/TagPublishFinalizePayload"
+          }
+        }
+      },
+      "TagPublishConflictResponse": {
+        "type": "object",
+        "required": [
+          "error",
+          "tag",
+          "current_version"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "tag": {
+            "type": "string"
+          },
+          "current_version": {
+            "type": "string"
+          },
+          "current_cache_entry_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "current_manifest_root_digest": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "PendingPublishDetails": {
+        "type": "object",
+        "required": [
+          "cache_entry_id",
+          "upload_session_id",
+          "publish_attempt_id",
+          "pending_blob_count",
+          "retry_after_seconds",
+          "poll_path"
+        ],
+        "properties": {
+          "cache_entry_id": {
+            "type": "string"
+          },
+          "upload_session_id": {
+            "type": "string"
+          },
+          "publish_attempt_id": {
+            "type": "string"
+          },
+          "pending_blob_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retry_after_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "poll_path": {
+            "type": "string"
+          }
+        }
+      },
+      "PendingPublishResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "error",
+          "code",
+          "details"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "pending_publish"
+            ]
+          },
+          "details": {
+            "$ref": "#/components/schemas/PendingPublishDetails"
+          }
+        }
+      },
+      "TagPublishLockedResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "nullable": true
+          },
+          "details": {
+            "$ref": "#/components/schemas/PendingPublishDetails",
+            "nullable": true
+          }
+        }
+      },
+      "UploadSessionStatusResponse": {
+        "type": "object",
+        "required": [
+          "upload_session_id",
+          "cache_entry_id",
+          "state"
+        ],
+        "properties": {
+          "upload_session_id": {
+            "type": "string"
+          },
+          "cache_entry_id": {
+            "type": "string"
+          },
+          "tag": {
+            "type": "string",
+            "nullable": true
+          },
+          "storage_mode": {
+            "type": "string",
+            "enum": [
+              "archive",
+              "cas"
+            ],
+            "nullable": true
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "uploading",
+              "awaiting_blob_visibility",
+              "ready_to_publish",
+              "published",
+              "failed",
+              "abandoned"
+            ]
+          },
+          "publish_attempt_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "publish_state": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "queued",
+                  "verifying",
+                  "publishing",
+                  "published",
+                  "conflicted",
+                  "failed"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expected_blob_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "attached_blob_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "visible_blob_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "pending_blob_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "published_tag_version": {
+            "type": "string",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      }
+    }
+  }
+}

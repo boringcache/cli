@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+REMOTE_TAG_VERIFY_ATTEMPTS="${REMOTE_TAG_VERIFY_ATTEMPTS:-30}"
+REMOTE_TAG_VERIFY_SLEEP_SECS="${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}"
+
 json_summary_value() {
   local key="$1"
   local file="$2"
@@ -49,8 +52,8 @@ verify_remote_tag_visible() {
   local tag="$3"
   local output_dir="$4"
   local minimum_hits="${5:-1}"
-  local attempts="${6:-1}"
-  local sleep_secs="${7:-1}"
+  local attempts="${6:-$REMOTE_TAG_VERIFY_ATTEMPTS}"
+  local sleep_secs="${7:-$REMOTE_TAG_VERIFY_SLEEP_SECS}"
   local proxy_log="${8:-}"
   local attempt
 

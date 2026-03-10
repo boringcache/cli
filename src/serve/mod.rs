@@ -9,6 +9,7 @@ use axum::serve::ListenerExt;
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as HttpConnectionBuilder;
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::net::{lookup_host, TcpListener, TcpSocket};
@@ -119,6 +120,7 @@ pub async fn run_server(
     tag_resolver: TagResolver,
     configured_human_tags: Vec<String>,
     registry_root_tag: String,
+    proxy_metadata_hints: BTreeMap<String, String>,
     fail_on_cache_error: bool,
 ) -> Result<()> {
     let (state, listener, replication_rx) = build_server_runtime(
@@ -129,6 +131,7 @@ pub async fn run_server(
         tag_resolver,
         configured_human_tags,
         registry_root_tag,
+        proxy_metadata_hints,
         fail_on_cache_error,
     )
     .await?;
@@ -175,6 +178,7 @@ pub async fn start_server_background(
     tag_resolver: TagResolver,
     configured_human_tags: Vec<String>,
     registry_root_tag: String,
+    proxy_metadata_hints: BTreeMap<String, String>,
     fail_on_cache_error: bool,
 ) -> Result<ServeHandle> {
     let (state, listener, replication_rx) = build_server_runtime(
@@ -185,6 +189,7 @@ pub async fn start_server_background(
         tag_resolver,
         configured_human_tags,
         registry_root_tag,
+        proxy_metadata_hints,
         fail_on_cache_error,
     )
     .await?;
@@ -244,6 +249,7 @@ async fn build_server_runtime(
     tag_resolver: TagResolver,
     configured_human_tags: Vec<String>,
     registry_root_tag: String,
+    proxy_metadata_hints: BTreeMap<String, String>,
     fail_on_cache_error: bool,
 ) -> Result<(AppState, TcpListener, mpsc::Receiver<KvReplicationWork>)> {
     let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
@@ -285,7 +291,11 @@ async fn build_server_runtime(
         blob_download_max_concurrency: dl_concurrency,
         blob_download_semaphore,
         blob_prefetch_semaphore,
-        cache_ops: Arc::new(cache_registry::cache_ops::Aggregator::new()),
+        cache_ops: Arc::new(
+            cache_registry::cache_ops::Aggregator::new_with_metadata_hints(
+                proxy_metadata_hints.clone(),
+            ),
+        ),
         oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
         backend_breaker: Arc::new(state::BackendCircuitBreaker::new()),
         prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -326,6 +336,18 @@ async fn build_server_runtime(
             "disabled (best-effort)"
         }
     );
+    if proxy_metadata_hints.is_empty() {
+        eprintln!("  Proxy Metadata Hints: none");
+    } else {
+        eprintln!(
+            "  Proxy Metadata Hints: {}",
+            proxy_metadata_hints
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     eprintln!("  OCI: --cache-from/--cache-to type=registry,ref={host}:{port}/CACHE_NAME:TAG");
     eprintln!("  Bazel HTTP: http://{host}:{port}/ac/{{sha256}} and /cas/{{sha256}}");
     eprintln!("  Gradle HTTP: http://{host}:{port}/cache/{{cache-key}}");
@@ -729,6 +751,7 @@ async fn flush_cache_ops(state: &AppState) {
                 error_count: session.error_count,
                 bytes_read: session.bytes_read,
                 bytes_written: session.bytes_written,
+                metadata_hints: session.metadata_hints.clone(),
                 top_missed_keys: session
                     .top_missed_keys
                     .iter()
@@ -844,7 +867,7 @@ async fn flush_pending_on_shutdown(state: &AppState) {
         }
 
         if let Some(_flush_guard) = cache_registry::try_schedule_flush(state) {
-            match cache_registry::flush_kv_index(state).await {
+            match cache_registry::flush_kv_index_on_shutdown(state).await {
                 cache_registry::FlushResult::Ok | cache_registry::FlushResult::Permanent => {
                     let mut gate = state.kv_next_flush_at.write().await;
                     *gate = None;

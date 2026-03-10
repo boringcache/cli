@@ -471,7 +471,7 @@ sleep "$SETTLE_SECS"
 echo
 echo "=== Phase 2b: Verify published remote tag resolves ==="
 stop_proxy
-if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${LOG_DIR}/phase2b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "$PROXY_LOG"; then
+if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${LOG_DIR}/phase2b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" "${REMOTE_TAG_VERIFY_ATTEMPTS:-30}" "${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}" "$PROXY_LOG"; then
   exit 1
 fi
 BASE_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"
@@ -545,7 +545,7 @@ if (( STRESS_ACTION_COUNT > 0 )); then
   echo
   echo "=== Phase 4b: Verify published remote tag after stress cold ==="
   stop_proxy
-  if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${LOG_DIR}/phase4b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "$PROXY_LOG"; then
+  if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${LOG_DIR}/phase4b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" "${REMOTE_TAG_VERIFY_ATTEMPTS:-30}" "${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}" "$PROXY_LOG"; then
     exit 1
   fi
   STRESS_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"

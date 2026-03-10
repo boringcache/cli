@@ -514,7 +514,9 @@ async fn execute_batch_restore_inner(
             Err(err) => {
                 let is_pending = err
                     .downcast_ref::<crate::error::BoringCacheError>()
-                    .map(|bc_err| matches!(bc_err, crate::error::BoringCacheError::CachePending { .. }))
+                    .map(|bc_err| {
+                        matches!(bc_err, crate::error::BoringCacheError::CachePending { .. })
+                    })
                     .unwrap_or(false);
 
                 if is_pending && pending_attempt < max_pending_retries {

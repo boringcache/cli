@@ -31,6 +31,18 @@ const FALLBACK_API_BASE_URL: &str = "https://api.boringcache.com";
 const PENDING_PUBLISH_POLL_TIMEOUT: Duration = Duration::from_secs(60);
 const PENDING_PUBLISH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingPublishStrategy {
+    WaitForPublish,
+    AcceptServerOwnedPending,
+}
+
+#[derive(Debug)]
+pub enum ConfirmPublishResult {
+    Published(super::models::cache::CacheConfirmResponse),
+    Pending(PendingMetadata),
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 struct CapabilityResponse {
     #[serde(default)]
@@ -738,11 +750,14 @@ impl ApiClient {
                     None => BoringCacheError::cache_conflict(message).into(),
                 }
             }
-            StatusCode::LOCKED => match parse_pending_metadata(&error_body, parsed_payload.as_ref())
-            {
-                Some(metadata) => BoringCacheError::cache_pending_with_metadata(metadata).into(),
-                None => BoringCacheError::cache_pending().into(),
-            },
+            StatusCode::LOCKED => {
+                match parse_pending_metadata(&error_body, parsed_payload.as_ref()) {
+                    Some(metadata) => {
+                        BoringCacheError::cache_pending_with_metadata(metadata).into()
+                    }
+                    None => BoringCacheError::cache_pending().into(),
+                }
+            }
             StatusCode::INTERNAL_SERVER_ERROR => {
                 anyhow::anyhow!("Server error (500). Please try again later.")
             }
@@ -1291,6 +1306,44 @@ impl ApiClient {
         cache_entry_id: &str,
         request: &super::models::cache::ConfirmRequest,
     ) -> Result<super::models::cache::CacheConfirmResponse> {
+        match self
+            .confirm_with_pending_strategy(
+                workspace,
+                cache_entry_id,
+                request,
+                PendingPublishStrategy::WaitForPublish,
+            )
+            .await?
+        {
+            ConfirmPublishResult::Published(response) => Ok(response),
+            ConfirmPublishResult::Pending(metadata) => {
+                Err(BoringCacheError::cache_pending_with_metadata(metadata).into())
+            }
+        }
+    }
+
+    pub async fn confirm_accept_pending_publish(
+        &self,
+        workspace: &str,
+        cache_entry_id: &str,
+        request: &super::models::cache::ConfirmRequest,
+    ) -> Result<ConfirmPublishResult> {
+        self.confirm_with_pending_strategy(
+            workspace,
+            cache_entry_id,
+            request,
+            PendingPublishStrategy::AcceptServerOwnedPending,
+        )
+        .await
+    }
+
+    async fn confirm_with_pending_strategy(
+        &self,
+        workspace: &str,
+        cache_entry_id: &str,
+        request: &super::models::cache::ConfirmRequest,
+        pending_strategy: PendingPublishStrategy,
+    ) -> Result<ConfirmPublishResult> {
         let tag = request
             .tag
             .as_deref()
@@ -1369,6 +1422,12 @@ impl ApiClient {
                         return Err(error);
                     };
 
+                    if pending_strategy == PendingPublishStrategy::AcceptServerOwnedPending
+                        && server_owned_pending_publish(&metadata)
+                    {
+                        return Ok(ConfirmPublishResult::Pending(metadata));
+                    }
+
                     if started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT {
                         return Err(error);
                     }
@@ -1385,19 +1444,9 @@ impl ApiClient {
             }
         };
 
-        Ok(super::models::cache::CacheConfirmResponse {
-            status: response
-                .status
-                .clone()
-                .unwrap_or_else(|| "ready".to_string()),
-            cache_entry_id: response.cache_entry_id.clone(),
-            uploaded_at: response.uploaded_at,
-            tag: None,
-            tag_status: response.status,
-            signature: None,
-            signing_public_key: None,
-            signed_at: None,
-        })
+        Ok(ConfirmPublishResult::Published(
+            cache_confirm_response_from_tag_pointer(response),
+        ))
     }
 
     async fn poll_pending_publish(
@@ -1417,7 +1466,11 @@ impl ApiClient {
                 .await
                 .context("Failed to poll pending publish status")?;
 
-            match status.publish_state.as_deref().or(Some(status.state.as_str())) {
+            match status
+                .publish_state
+                .as_deref()
+                .or(Some(status.state.as_str()))
+            {
                 Some("published") => match self.tag_pointer_v2(workspace, tag).await? {
                     Some(pointer) => {
                         return Ok(TagPointer {
@@ -1427,7 +1480,9 @@ impl ApiClient {
                             uploaded_at: None,
                         });
                     }
-                    None => anyhow::bail!("Pending publish completed but tag pointer was not found"),
+                    None => {
+                        anyhow::bail!("Pending publish completed but tag pointer was not found")
+                    }
                 },
                 Some("conflicted") => {
                     return Err(BoringCacheError::cache_conflict(
@@ -1844,6 +1899,32 @@ fn parse_pending_metadata(
 
 fn pending_metadata_from_error(error: &anyhow::Error) -> Option<&PendingMetadata> {
     error.downcast_ref::<BoringCacheError>()?.pending_metadata()
+}
+
+fn server_owned_pending_publish(metadata: &PendingMetadata) -> bool {
+    if metadata.code.as_deref() != Some("pending_publish") {
+        return false;
+    }
+
+    metadata.poll_path.is_some() || metadata.upload_session_id.is_some()
+}
+
+fn cache_confirm_response_from_tag_pointer(
+    response: TagPointer,
+) -> super::models::cache::CacheConfirmResponse {
+    super::models::cache::CacheConfirmResponse {
+        status: response
+            .status
+            .clone()
+            .unwrap_or_else(|| "ready".to_string()),
+        cache_entry_id: response.cache_entry_id.clone(),
+        uploaded_at: response.uploaded_at,
+        tag: None,
+        tag_status: response.status,
+        signature: None,
+        signing_public_key: None,
+        signed_at: None,
+    }
 }
 
 fn parse_conflict_metadata(body: &str) -> Option<ConflictMetadata> {
@@ -2416,6 +2497,133 @@ mod tests {
             Some("/v2/workspaces/acme/demo/upload-sessions/session-1")
         );
         assert_eq!(metadata.retry_after_seconds, Some(3));
+    }
+
+    #[test]
+    fn test_server_owned_pending_publish_requires_publish_code_and_poll_target() {
+        let metadata = PendingMetadata {
+            code: Some("pending_publish".to_string()),
+            upload_session_id: Some("session-1".to_string()),
+            publish_attempt_id: None,
+            poll_path: None,
+            retry_after_seconds: Some(1),
+        };
+        assert!(server_owned_pending_publish(&metadata));
+
+        let wrong_code = PendingMetadata {
+            code: Some("blob_verification_pending".to_string()),
+            ..metadata.clone()
+        };
+        assert!(!server_owned_pending_publish(&wrong_code));
+
+        let no_locator = PendingMetadata {
+            code: Some("pending_publish".to_string()),
+            upload_session_id: None,
+            publish_attempt_id: Some("attempt-1".to_string()),
+            poll_path: None,
+            retry_after_seconds: Some(1),
+        };
+        assert!(!server_owned_pending_publish(&no_locator));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_confirm_accept_pending_publish_returns_pending_metadata() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+
+        if !networking_available() {
+            eprintln!(
+                "skipping test_confirm_accept_pending_publish_returns_pending_metadata: networking disabled in sandbox"
+            );
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_home.path());
+
+        let mut server = mockito::Server::new_async().await;
+        let capabilities = server
+            .mock("GET", "/v2/capabilities")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"features":{"tag_publish_v2":true,"pending_publish_status_v2":true,"upload_sessions_v2":true,"cas_publish_bootstrap_if_match":"0"}}"#,
+            )
+            .create_async()
+            .await;
+        let pointer = server
+            .mock("GET", "/v2/workspaces/ns/ws/caches/tags/test-tag/pointer")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(404)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
+            .create_async()
+            .await;
+        let publish = server
+            .mock("PUT", "/v2/workspaces/ns/ws/caches/tags/test-tag/publish")
+            .match_header("authorization", "Bearer test-token")
+            .match_header("if-match", "0")
+            .match_header("x-boringcache-pending-publish-poll", "1")
+            .match_header("content-type", Matcher::Regex("application/json".to_string()))
+            .with_status(423)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"success":false,"error":"upload not yet fully verified in storage — retry after upload completes","code":"pending_publish","details":{"upload_session_id":"session-1","publish_attempt_id":"attempt-1","retry_after_seconds":1,"poll_path":"/v2/workspaces/ns/ws/upload-sessions/session-1"}}"#,
+            )
+            .create_async()
+            .await;
+
+        std::env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize");
+
+        let request = cache::ConfirmRequest {
+            manifest_digest: digest_for(1),
+            manifest_size: 123,
+            manifest_etag: None,
+            archive_size: None,
+            archive_etag: None,
+            blob_count: Some(2),
+            blob_total_size_bytes: Some(456),
+            file_count: Some(2),
+            uncompressed_size: None,
+            compressed_size: None,
+            storage_mode: Some("cas".to_string()),
+            tag: Some("test-tag".to_string()),
+        };
+
+        let result = client
+            .confirm_accept_pending_publish("ns/ws", "entry-1", &request)
+            .await
+            .expect("pending publish should be accepted");
+
+        match result {
+            ConfirmPublishResult::Pending(metadata) => {
+                assert_eq!(metadata.code.as_deref(), Some("pending_publish"));
+                assert_eq!(metadata.upload_session_id.as_deref(), Some("session-1"));
+                assert_eq!(metadata.publish_attempt_id.as_deref(), Some("attempt-1"));
+                assert_eq!(
+                    metadata.poll_path.as_deref(),
+                    Some("/v2/workspaces/ns/ws/upload-sessions/session-1")
+                );
+            }
+            ConfirmPublishResult::Published(_) => {
+                panic!("expected pending publish result")
+            }
+        }
+
+        capabilities.assert_async().await;
+        pointer.assert_async().await;
+        publish.assert_async().await;
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
+        std::env::remove_var("BORINGCACHE_API_URL");
     }
 
     #[test]

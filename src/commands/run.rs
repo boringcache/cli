@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use std::collections::BTreeMap;
 use std::process::Stdio;
 
 use crate::commands::{restore, save, serve, utils};
@@ -34,6 +35,7 @@ pub async fn execute(
     recipient: Option<String>,
     identity: Option<String>,
     proxy: Option<String>,
+    metadata_hints: Vec<String>,
     host: String,
     port: u16,
     save_on_failure: bool,
@@ -47,6 +49,7 @@ pub async fn execute(
     let workspace = utils::get_workspace_name(workspace)?;
     let archive_enabled = !tag_path_pairs.is_empty();
     let proxy_enabled = proxy.is_some();
+    let proxy_metadata_hints = serve::resolve_proxy_metadata_hints(&metadata_hints)?;
 
     if !archive_enabled && !proxy_enabled {
         anyhow::bail!("Provide TAG_PATH_PAIRS, --proxy <TAG>, or both");
@@ -67,6 +70,7 @@ pub async fn execute(
             recipient.as_deref(),
             identity.as_deref(),
             proxy.as_deref(),
+            &proxy_metadata_hints,
             &host,
             port,
             save_on_failure,
@@ -109,6 +113,7 @@ pub async fn execute(
             port,
             no_platform,
             no_git,
+            proxy_metadata_hints.clone(),
             fail_on_cache_error,
         )
         .await
@@ -379,6 +384,7 @@ fn print_dry_run(
     recipient: Option<&str>,
     identity: Option<&str>,
     proxy: Option<&str>,
+    proxy_metadata_hints: &BTreeMap<String, String>,
     host: &str,
     port: u16,
     save_on_failure: bool,
@@ -436,6 +442,10 @@ fn print_dry_run(
         }
         if fail_on_cache_error {
             proxy_parts.push("--fail-on-cache-error".to_string());
+        }
+        for (key, value) in proxy_metadata_hints {
+            proxy_parts.push("--metadata-hint".to_string());
+            proxy_parts.push(format!("{key}={value}"));
         }
         ui::info(&format!("[boringcache]   {}", proxy_parts.join(" ")));
     }

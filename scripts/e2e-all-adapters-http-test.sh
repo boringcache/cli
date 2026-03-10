@@ -501,7 +501,7 @@ sleep "$SETTLE_SECS"
 echo ""
 echo "=== Phase 1b: Verify published remote tag resolves ==="
 stop_proxy
-if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${LOG_DIR}/phase1b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "$PROXY_LOG"; then
+if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${LOG_DIR}/phase1b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" "${REMOTE_TAG_VERIFY_ATTEMPTS:-30}" "${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}" "$PROXY_LOG"; then
   exit 1
 fi
 

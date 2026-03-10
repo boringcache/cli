@@ -638,6 +638,7 @@ pub mod workspace {
 
 pub mod cache_rollups {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[derive(Debug, Serialize)]
     pub struct BatchParams {
@@ -680,6 +681,8 @@ pub mod cache_rollups {
         pub error_count: u64,
         pub bytes_read: u64,
         pub bytes_written: u64,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        pub metadata_hints: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub top_missed_keys: Vec<SessionMissedKeyParam>,
     }

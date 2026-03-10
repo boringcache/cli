@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -188,10 +188,10 @@ struct SessionState {
     error_count: u64,
     bytes_read: u64,
     bytes_written: u64,
+    metadata_hints: BTreeMap<String, String>,
     missed_keys: HashMap<String, SessionMissEntry>,
 }
 
-#[derive(Default)]
 struct AggregateState {
     buckets: HashMap<BucketKey, BucketCounters>,
     missed_keys: HashMap<(String, Tool), MissEntry>,
@@ -199,10 +199,30 @@ struct AggregateState {
     active_sessions: HashMap<Tool, SessionState>,
     completed_sessions: Vec<SessionRecord>,
     next_session_seq: HashMap<Tool, u64>,
+    session_metadata_hints: BTreeMap<String, String>,
+}
+
+impl Default for AggregateState {
+    fn default() -> Self {
+        Self {
+            buckets: HashMap::new(),
+            missed_keys: HashMap::new(),
+            missed_key_cardinality: HashMap::new(),
+            active_sessions: HashMap::new(),
+            completed_sessions: Vec::new(),
+            next_session_seq: HashMap::new(),
+            session_metadata_hints: BTreeMap::new(),
+        }
+    }
 }
 
 impl SessionState {
-    fn new(id: String, tool: Tool, started_at_secs: u64) -> Self {
+    fn new(
+        id: String,
+        tool: Tool,
+        started_at_secs: u64,
+        metadata_hints: BTreeMap<String, String>,
+    ) -> Self {
         Self {
             id,
             tool,
@@ -213,6 +233,7 @@ impl SessionState {
             error_count: 0,
             bytes_read: 0,
             bytes_written: 0,
+            metadata_hints,
             missed_keys: HashMap::new(),
         }
     }
@@ -272,6 +293,7 @@ impl SessionState {
             error_count: self.error_count,
             bytes_read: self.bytes_read,
             bytes_written: self.bytes_written,
+            metadata_hints: self.metadata_hints,
             top_missed_keys,
         }
     }
@@ -320,7 +342,14 @@ impl Default for Aggregator {
 
 impl Aggregator {
     pub fn new() -> Self {
-        let state = Arc::new(Mutex::new(AggregateState::default()));
+        Self::new_with_metadata_hints(BTreeMap::new())
+    }
+
+    pub fn new_with_metadata_hints(metadata_hints: BTreeMap<String, String>) -> Self {
+        let state = Arc::new(Mutex::new(AggregateState {
+            session_metadata_hints: metadata_hints,
+            ..AggregateState::default()
+        }));
         let queued_events = Arc::new(AtomicU64::new(0));
         let dropped_events = Arc::new(AtomicU64::new(0));
 
@@ -591,7 +620,12 @@ impl Aggregator {
         let session_id = format!("{}-{}-{}", tool.as_str(), event_epoch_secs, *seq);
         state.active_sessions.insert(
             tool,
-            SessionState::new(session_id.clone(), tool, event_epoch_secs),
+            SessionState::new(
+                session_id.clone(),
+                tool,
+                event_epoch_secs,
+                state.session_metadata_hints.clone(),
+            ),
         );
         session_id
     }
@@ -1007,6 +1041,7 @@ pub(crate) struct SessionRecord {
     pub error_count: u64,
     pub bytes_read: u64,
     pub bytes_written: u64,
+    pub metadata_hints: BTreeMap<String, String>,
     pub top_missed_keys: Vec<SessionMissedKeyRecord>,
 }
 
@@ -1212,7 +1247,13 @@ mod tests {
 
     #[test]
     fn session_rollup_contains_duration_and_top_missed_keys() {
-        let mut state = AggregateState::default();
+        let mut state = AggregateState {
+            session_metadata_hints: BTreeMap::from([
+                ("project".to_string(), "zed".to_string()),
+                ("phase".to_string(), "warm".to_string()),
+            ]),
+            ..AggregateState::default()
+        };
         Aggregator::apply_session_connect_event(&mut state, 100, Tool::Sccache);
         Aggregator::apply_record_event(
             &mut state,
@@ -1253,6 +1294,14 @@ mod tests {
         assert_eq!(session.bytes_read, 48 * 1024 * 1024);
         assert_eq!(session.bytes_written, 0);
         assert_eq!(session.session_duration_ms, 11_000);
+        assert_eq!(
+            session.metadata_hints.get("project"),
+            Some(&"zed".to_string())
+        );
+        assert_eq!(
+            session.metadata_hints.get("phase"),
+            Some(&"warm".to_string())
+        );
         assert_eq!(session.top_missed_keys.len(), 2);
         assert_eq!(session.top_missed_keys[0].miss_count, 2);
     }

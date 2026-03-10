@@ -15,6 +15,7 @@ use boring_cache_cli::tag_utils::TagResolver;
 use http_body_util::BodyExt;
 use mockito::{Matcher, Server};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
@@ -198,6 +199,7 @@ async fn test_startup_manifest_warm_runs_by_default() {
         TagResolver::new(None, GitContext::default(), false),
         vec!["main".to_string()],
         "registry".to_string(),
+        BTreeMap::new(),
         true,
     )
     .await
@@ -372,6 +374,7 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
         TagResolver::new(None, GitContext::default(), false),
         Vec::new(),
         "registry".to_string(),
+        BTreeMap::new(),
         true,
     )
     .await

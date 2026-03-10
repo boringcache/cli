@@ -236,7 +236,7 @@ echo "  seed proxy stopped"
 
 echo ""
 echo "=== Phase 1b: Verify published remote tag resolves ==="
-if ! verify_remote_tag_visible "$BINARY" "$WORKSPACE" "$TAG" "$LOG_DIR" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "$PROXY_LOG"; then
+if ! verify_remote_tag_visible "$BINARY" "$WORKSPACE" "$TAG" "$LOG_DIR" "$BUDGET_REMOTE_TAG_HITS_MIN" "${REMOTE_TAG_VERIFY_ATTEMPTS:-30}" "${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}" "$PROXY_LOG"; then
   exit 1
 fi
 REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"

@@ -404,7 +404,7 @@ if [[ -n "${SERVE_PID}" ]]; then
 fi
 
 echo "==> Verifying published remote tag resolves"
-if ! verify_remote_tag_visible "./target/debug/boringcache" "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" "${LOG_DIR}/publish-check" "${BUDGET_REMOTE_TAG_HITS_MIN}" 10 1 "${PROXY_LOG}"; then
+if ! verify_remote_tag_visible "./target/debug/boringcache" "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" "${LOG_DIR}/publish-check" "${BUDGET_REMOTE_TAG_HITS_MIN}" "${REMOTE_TAG_VERIFY_ATTEMPTS:-30}" "${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}" "${PROXY_LOG}"; then
   exit 1
 fi
 

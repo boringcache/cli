@@ -164,6 +164,13 @@ pub enum Commands {
         )]
         proxy: Option<String>,
 
+        #[arg(
+            long,
+            value_name = "KEY=VALUE",
+            help = "Attach low-cardinality metadata hints to proxy sessions (repeatable; also reads BORINGCACHE_PROXY_METADATA_HINTS)"
+        )]
+        metadata_hint: Vec<String>,
+
         #[arg(short, long, default_value = "5000")]
         port: u16,
 
@@ -314,6 +321,13 @@ pub enum Commands {
 
         #[arg(long, help = "Disable automatic git suffix for cache tags")]
         no_git: bool,
+
+        #[arg(
+            long,
+            value_name = "KEY=VALUE",
+            help = "Attach low-cardinality metadata hints to proxy sessions (repeatable; also reads BORINGCACHE_PROXY_METADATA_HINTS)"
+        )]
+        metadata_hint: Vec<String>,
 
         #[arg(
             long,

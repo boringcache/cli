@@ -663,7 +663,7 @@ stop_proxy_graceful "PROXY_PID_A" "prewarm"
 
 echo ""
 echo "=== Phase 1b: Verify published remote tag resolves ==="
-if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${PREWARM_DIR}/publish-check" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "$PREWARM_PROXY_LOG"; then
+if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${PREWARM_DIR}/publish-check" "$BUDGET_REMOTE_TAG_HITS_MIN" "${REMOTE_TAG_VERIFY_ATTEMPTS:-30}" "${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}" "$PREWARM_PROXY_LOG"; then
   exit 1
 fi
 PREWARM_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"
@@ -745,7 +745,7 @@ stop_proxy_graceful "PROXY_PID_B" "B"
 
 echo ""
 echo "=== Phase 2b: Verify published remote tag after contention flush ==="
-if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${CONTENTION_DIR}/publish-check" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "$PROXY_LOG_A"; then
+if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${CONTENTION_DIR}/publish-check" "$BUDGET_REMOTE_TAG_HITS_MIN" "${REMOTE_TAG_VERIFY_ATTEMPTS:-30}" "${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}" "$PROXY_LOG_A"; then
   exit 1
 fi
 POST_CONTENTION_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"

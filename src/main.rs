@@ -34,10 +34,18 @@ fn long_option_requires_value(command: &str, option: &str) -> bool {
         "restore" => matches!(option, "--identity"),
         "run" | "exec" => matches!(
             option,
-            "--exclude" | "--recipient" | "--identity" | "--proxy" | "--host" | "--port"
+            "--exclude"
+                | "--recipient"
+                | "--identity"
+                | "--proxy"
+                | "--metadata-hint"
+                | "--host"
+                | "--port"
         ),
         "ls" => matches!(option, "--limit" | "--page"),
-        "serve" | "docker-registry" | "cache-registry" => matches!(option, "--host" | "--port"),
+        "serve" | "docker-registry" | "cache-registry" => {
+            matches!(option, "--host" | "--port" | "--metadata-hint")
+        }
         _ => false,
     }
 }
@@ -298,6 +306,7 @@ async fn main() -> Result<()> {
             recipient,
             identity,
             proxy,
+            metadata_hint,
             host,
             port,
             save_on_failure,
@@ -328,6 +337,7 @@ async fn main() -> Result<()> {
                 recipient,
                 identity,
                 proxy,
+                metadata_hint,
                 host,
                 port,
                 save_on_failure,
@@ -421,6 +431,7 @@ async fn main() -> Result<()> {
             host,
             no_platform,
             no_git,
+            metadata_hint,
             fail_on_cache_error,
         } => {
             commands::serve::execute(
@@ -430,6 +441,7 @@ async fn main() -> Result<()> {
                 port,
                 no_platform,
                 no_git,
+                metadata_hint,
                 fail_on_cache_error,
             )
             .await

@@ -1041,7 +1041,7 @@ phase_efficacy() {
     ensure_proxy_ready "$proxy_log"
     echo ""
     echo "=== Phase 1b: Verify published remote tag before efficacy warm pass ==="
-    if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$EFFICACY_TAG" "$phase_dir" "${BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN:-1}" 10 1 "$proxy_log"; then
+    if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$EFFICACY_TAG" "$phase_dir" "${BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN:-1}" "${REMOTE_TAG_VERIFY_ATTEMPTS:-30}" "${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}" "$proxy_log"; then
       exit 1
     fi
     EFFICACY_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"

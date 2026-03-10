@@ -2,6 +2,8 @@ mod request_validation {
     use boring_cache_cli::api::models::cache::{
         ConfirmRequest, ManifestCheckBatchRequest, ManifestCheckRequest, SaveRequest,
     };
+    use boring_cache_cli::api::models::cache_rollups::{BatchParams, SessionParam};
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_save_request_serializes_correctly() {
@@ -171,6 +173,35 @@ mod request_validation {
         let check = &json["manifest_checks"][0];
 
         assert_eq!(check.get("lookup").unwrap(), "digest");
+    }
+
+    #[test]
+    fn test_cache_rollup_sessions_serialize_metadata_hints() {
+        let batch = BatchParams {
+            rollups: Vec::new(),
+            missed_keys: Vec::new(),
+            sessions: vec![SessionParam {
+                session_id: "sccache-1".to_string(),
+                tool: "sccache".to_string(),
+                session_duration_ms: 12_000,
+                hit_count: 19,
+                miss_count: 1,
+                error_count: 0,
+                bytes_read: 1024,
+                bytes_written: 0,
+                metadata_hints: BTreeMap::from([
+                    ("project".to_string(), "zed".to_string()),
+                    ("phase".to_string(), "warm".to_string()),
+                ]),
+                top_missed_keys: Vec::new(),
+            }],
+        };
+
+        let json = serde_json::to_value(&batch).unwrap();
+        let session = &json["sessions"][0];
+
+        assert_eq!(session["metadata_hints"]["project"], "zed");
+        assert_eq!(session["metadata_hints"]["phase"], "warm");
     }
 }
 
