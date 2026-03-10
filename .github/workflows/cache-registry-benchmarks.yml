@@ -702,6 +702,10 @@ jobs:
           name: boringcache-cli-release-linux-amd64
           path: ${{ runner.temp }}/bin
 
+      - name: Checkout code
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+
       - name: Seed CAS via proxy
         id: seed
         if: steps.gate.outputs.run == 'true'
