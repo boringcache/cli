@@ -1,6 +1,7 @@
 mod request_validation {
     use boring_cache_cli::api::models::cache::{
-        ConfirmRequest, ManifestCheckBatchRequest, ManifestCheckRequest, SaveRequest,
+        BlobReceipt, BlobReceiptCommitRequest, ConfirmRequest, ManifestCheckBatchRequest,
+        ManifestCheckRequest, ManifestReceiptCommitRequest, SaveRequest,
     };
     use boring_cache_cli::api::models::cache_rollups::{BatchParams, SessionParam};
     use std::collections::BTreeMap;
@@ -173,6 +174,62 @@ mod request_validation {
         let check = &json["manifest_checks"][0];
 
         assert_eq!(check.get("lookup").unwrap(), "digest");
+    }
+
+    #[test]
+    fn test_blob_receipt_commit_request_serializes_correctly() {
+        let request = BlobReceiptCommitRequest {
+            receipts: vec![
+                BlobReceipt {
+                    digest: "sha256:abc123".to_string(),
+                    etag: Some("\"etag1\"".to_string()),
+                },
+                BlobReceipt {
+                    digest: "sha256:def456".to_string(),
+                    etag: None,
+                },
+            ],
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        let receipts = json.get("receipts").unwrap().as_array().unwrap();
+
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].get("digest").unwrap(), "sha256:abc123");
+        assert!(receipts[0].get("etag").is_some());
+        assert_eq!(receipts[1].get("digest").unwrap(), "sha256:def456");
+        assert!(receipts[1].get("etag").is_none());
+    }
+
+    #[test]
+    fn test_manifest_receipt_commit_request_serializes_correctly() {
+        let request = ManifestReceiptCommitRequest {
+            manifest_digest: "sha256:manifest123".to_string(),
+            manifest_size: 8192,
+            manifest_etag: Some("\"manifest-etag\"".to_string()),
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(json.get("manifest_digest").unwrap(), "sha256:manifest123");
+        assert_eq!(json.get("manifest_size").unwrap(), 8192);
+        assert_eq!(json.get("manifest_etag").unwrap(), "\"manifest-etag\"");
+    }
+
+    #[test]
+    fn test_manifest_receipt_commit_request_omits_null_etag() {
+        let request = ManifestReceiptCommitRequest {
+            manifest_digest: "sha256:manifest123".to_string(),
+            manifest_size: 4096,
+            manifest_etag: None,
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(json.as_object().unwrap().len(), 2);
+        assert!(json.get("manifest_digest").is_some());
+        assert!(json.get("manifest_size").is_some());
+        assert!(json.get("manifest_etag").is_none());
     }
 
     #[test]
@@ -362,6 +419,28 @@ mod response_validation {
             Some("2026-03-10T12:00:00Z")
         );
         assert_eq!(response.pending_blob_count, Some(4));
+    }
+
+    #[test]
+    fn test_upload_session_status_response_deserializes_without_receipt_fields() {
+        let api_response = json!({
+            "upload_session_id": "session-2",
+            "cache_entry_id": "550e8400-e29b-41d4-a716-446655440000",
+            "tag": "node-cache",
+            "storage_mode": "cas",
+            "state": "uploading",
+            "expected_blob_count": 5,
+            "attached_blob_count": 3,
+            "visible_blob_count": 3,
+            "pending_blob_count": 2,
+            "published_tag_version": null,
+            "error": null
+        });
+
+        let response: UploadSessionStatusResponse = serde_json::from_value(api_response).unwrap();
+        assert_eq!(response.upload_session_id, "session-2");
+        assert_eq!(response.receipt_blob_count, None);
+        assert_eq!(response.manifest_receipt_received_at, None);
     }
 
     #[test]

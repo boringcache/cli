@@ -3491,7 +3491,7 @@ async fn do_flush(
 
     if let Some(upload_session_id) = save_response.upload_session_id.as_deref() {
         if !upload_stats.uploaded_receipts.is_empty() {
-            state
+            if let Err(e) = state
                 .api_client
                 .commit_blob_receipts(
                     &state.workspace,
@@ -3499,27 +3499,29 @@ async fn do_flush(
                     &upload_stats.uploaded_receipts,
                 )
                 .await
-                .map_err(|e| classify_flush_error(&e, "blob receipt commit failed"))?;
+            {
+                eprintln!("KV flush: blob receipt commit failed (non-fatal): {e:#}");
+            }
         }
-    }
 
-    if let Some(upload_session_id) = save_response.upload_session_id.as_deref() {
         let request = ManifestReceiptCommitRequest {
             manifest_digest: manifest_root_digest.clone(),
             manifest_size: expected_manifest_size,
             manifest_etag: manifest_etag.clone(),
         };
-        state
+        if let Err(e) = state
             .api_client
             .commit_manifest_receipt(&state.workspace, upload_session_id, &request)
             .await
-            .map_err(|e| classify_flush_error(&e, "manifest receipt commit failed"))?;
+        {
+            eprintln!("KV flush: manifest receipt commit failed (non-fatal): {e:#}");
+        }
     }
 
     let confirm_request = ConfirmRequest {
         manifest_digest: manifest_root_digest.clone(),
         manifest_size: expected_manifest_size,
-        manifest_etag: manifest_etag,
+        manifest_etag,
         archive_size: None,
         archive_etag: None,
         blob_count: Some(blob_count),
@@ -4128,7 +4130,9 @@ async fn upload_blobs(
         match outcome {
             BlobUploadOutcome::Uploaded | BlobUploadOutcome::UploadedAfterRetry => {
                 stats.uploaded_count = stats.uploaded_count.saturating_add(1);
-                stats.uploaded_receipts.push(BlobReceipt { digest, etag: None });
+                stats
+                    .uploaded_receipts
+                    .push(BlobReceipt { digest, etag: None });
             }
             BlobUploadOutcome::AlreadyPresent => {
                 stats.already_present_count = stats.already_present_count.saturating_add(1);

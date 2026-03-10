@@ -43,21 +43,20 @@ async fn maybe_commit_blob_receipts(
     state: &AppState,
     upload_session_id: Option<&str>,
     receipts: Vec<BlobReceipt>,
-) -> Result<(), OciError> {
+) {
     if let Some(upload_session_id) = upload_session_id.filter(|_| !receipts.is_empty()) {
-        state
+        if let Err(e) = state
             .api_client
             .commit_blob_receipts(&state.workspace, upload_session_id, &receipts)
             .await
-            .map_err(|e| {
-                OciError::internal(format!(
-                    "blob receipt commit failed for upload session {}: {}",
-                    upload_session_id, e
-                ))
-            })?;
+        {
+            log::warn!(
+                "blob receipt commit failed for upload session {}: {}",
+                upload_session_id,
+                e
+            );
+        }
     }
-
-    Ok(())
 }
 
 async fn maybe_commit_manifest_receipt(
@@ -66,26 +65,25 @@ async fn maybe_commit_manifest_receipt(
     manifest_digest: String,
     manifest_size: u64,
     manifest_etag: Option<String>,
-) -> Result<(), OciError> {
+) {
     if let Some(upload_session_id) = upload_session_id {
         let request = ManifestReceiptCommitRequest {
             manifest_digest,
             manifest_size,
             manifest_etag,
         };
-        state
+        if let Err(e) = state
             .api_client
             .commit_manifest_receipt(&state.workspace, upload_session_id, &request)
             .await
-            .map_err(|e| {
-                OciError::internal(format!(
-                    "manifest receipt commit failed for upload session {}: {}",
-                    upload_session_id, e
-                ))
-            })?;
+        {
+            log::warn!(
+                "manifest receipt commit failed for upload session {}: {}",
+                upload_session_id,
+                e
+            );
+        }
     }
-
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1923,7 +1921,7 @@ async fn put_manifest(
                 save_response.upload_session_id.as_deref(),
                 blob_receipts,
             )
-            .await?;
+            .await;
 
             let manifest_upload_url = save_response
                 .manifest_upload_url
@@ -1956,7 +1954,7 @@ async fn put_manifest(
                 pointer_bytes.len() as u64,
                 manifest_etag.clone(),
             )
-            .await?;
+            .await;
         }
 
         let confirm_request = ConfirmRequest {

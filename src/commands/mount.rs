@@ -36,15 +36,17 @@ async fn maybe_commit_blob_receipts(
     workspace: &str,
     upload_session_id: Option<&str>,
     receipts: Vec<BlobReceipt>,
-) -> Result<()> {
+) {
     if let Some(upload_session_id) = upload_session_id.filter(|_| !receipts.is_empty()) {
-        api_client
+        if let Err(e) = api_client
             .commit_blob_receipts(workspace, upload_session_id, &receipts)
             .await
-            .with_context(|| format!("Failed to commit blob receipts for upload session {upload_session_id}"))?;
+        {
+            log::warn!(
+                "Failed to commit blob receipts for upload session {upload_session_id}: {e:#}"
+            );
+        }
     }
-
-    Ok(())
 }
 
 async fn maybe_commit_manifest_receipt(
@@ -54,20 +56,22 @@ async fn maybe_commit_manifest_receipt(
     manifest_digest: String,
     manifest_size: u64,
     manifest_etag: Option<String>,
-) -> Result<()> {
+) {
     if let Some(upload_session_id) = upload_session_id {
         let request = ManifestReceiptCommitRequest {
             manifest_digest,
             manifest_size,
             manifest_etag,
         };
-        api_client
+        if let Err(e) = api_client
             .commit_manifest_receipt(workspace, upload_session_id, &request)
             .await
-            .with_context(|| format!("Failed to commit manifest receipt for upload session {upload_session_id}"))?;
+        {
+            log::warn!(
+                "Failed to commit manifest receipt for upload session {upload_session_id}: {e:#}"
+            );
+        }
     }
-
-    Ok(())
 }
 
 fn signature_subject_tag<'a>(
@@ -2002,21 +2006,17 @@ async fn sync_to_remote_oci(
         }
     }
 
-    blob_receipts.extend(
-        missing_blobs
-            .iter()
-            .map(|blob| BlobReceipt {
-                digest: blob.digest.clone(),
-                etag: None,
-            }),
-    );
+    blob_receipts.extend(missing_blobs.iter().map(|blob| BlobReceipt {
+        digest: blob.digest.clone(),
+        etag: None,
+    }));
     maybe_commit_blob_receipts(
         api_client,
         workspace,
         save_response.upload_session_id.as_deref(),
         blob_receipts,
     )
-    .await?;
+    .await;
 
     if verbose {
         ui::info("  Uploading CAS index...");
@@ -2043,7 +2043,7 @@ async fn sync_to_remote_oci(
         expected_manifest_size,
         manifest_etag.clone(),
     )
-    .await?;
+    .await;
 
     if verbose {
         ui::info("  Confirming CAS upload...");
@@ -2304,21 +2304,17 @@ async fn sync_to_remote_file(
         }
     }
 
-    blob_receipts.extend(
-        missing_blobs
-            .iter()
-            .map(|blob| BlobReceipt {
-                digest: blob.digest.clone(),
-                etag: None,
-            }),
-    );
+    blob_receipts.extend(missing_blobs.iter().map(|blob| BlobReceipt {
+        digest: blob.digest.clone(),
+        etag: None,
+    }));
     maybe_commit_blob_receipts(
         api_client,
         workspace,
         save_response.upload_session_id.as_deref(),
         blob_receipts,
     )
-    .await?;
+    .await;
 
     if verbose {
         ui::info("  Uploading CAS index...");
@@ -2345,7 +2341,7 @@ async fn sync_to_remote_file(
         expected_manifest_size,
         manifest_etag.clone(),
     )
-    .await?;
+    .await;
 
     if verbose {
         ui::info("  Confirming CAS upload...");

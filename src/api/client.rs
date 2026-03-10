@@ -1135,7 +1135,10 @@ impl ApiClient {
         upload_session_id: &str,
         receipts: &[super::models::cache::BlobReceipt],
     ) -> Result<Option<super::models::cache::UploadSessionStatusResponse>> {
-        ensure!(!upload_session_id.trim().is_empty(), "upload_session_id must not be empty");
+        ensure!(
+            !upload_session_id.trim().is_empty(),
+            "upload_session_id must not be empty"
+        );
         if receipts.is_empty() || !self.get_capabilities().await.upload_receipts_v2 {
             return Ok(None);
         }
@@ -1156,7 +1159,10 @@ impl ApiClient {
         upload_session_id: &str,
         request: &super::models::cache::ManifestReceiptCommitRequest,
     ) -> Result<Option<super::models::cache::UploadSessionStatusResponse>> {
-        ensure!(!upload_session_id.trim().is_empty(), "upload_session_id must not be empty");
+        ensure!(
+            !upload_session_id.trim().is_empty(),
+            "upload_session_id must not be empty"
+        );
         if !self.get_capabilities().await.upload_receipts_v2 {
             return Ok(None);
         }
@@ -1273,8 +1279,7 @@ impl ApiClient {
             debug!("POST {} body={}", endpoint, body);
         }
 
-        self
-            .post_v2_with_request_metrics(
+        self.post_v2_with_request_metrics(
             &endpoint,
             &payload,
             CACHE_METRIC_ENDPOINT_OPERATION_SAVE_ENTRY,

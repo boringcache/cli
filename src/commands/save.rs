@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use tokio::task;
 
 use crate::api::models::cache::{
-    BlobDescriptor, BlobReceipt, CompleteMultipartRequest, ConfirmRequest,
-    ManifestCheckRequest, ManifestReceiptCommitRequest, SaveRequest,
+    BlobDescriptor, BlobReceipt, CompleteMultipartRequest, ConfirmRequest, ManifestCheckRequest,
+    ManifestReceiptCommitRequest, SaveRequest,
 };
 use crate::api::ApiClient;
 use crate::archive::{create_tar_archive, TarArchiveInfo};
@@ -33,15 +33,17 @@ async fn maybe_commit_blob_receipts(
     workspace: &str,
     upload_session_id: Option<&str>,
     receipts: Vec<BlobReceipt>,
-) -> Result<()> {
+) {
     if let Some(upload_session_id) = upload_session_id.filter(|_| !receipts.is_empty()) {
-        api_client
+        if let Err(e) = api_client
             .commit_blob_receipts(workspace, upload_session_id, &receipts)
             .await
-            .with_context(|| format!("Failed to commit blob receipts for upload session {upload_session_id}"))?;
+        {
+            log::warn!(
+                "Failed to commit blob receipts for upload session {upload_session_id}: {e:#}"
+            );
+        }
     }
-
-    Ok(())
 }
 
 async fn maybe_commit_manifest_receipt(
@@ -51,20 +53,22 @@ async fn maybe_commit_manifest_receipt(
     manifest_digest: String,
     manifest_size: u64,
     manifest_etag: Option<String>,
-) -> Result<()> {
+) {
     if let Some(upload_session_id) = upload_session_id {
         let request = ManifestReceiptCommitRequest {
             manifest_digest,
             manifest_size,
             manifest_etag,
         };
-        api_client
+        if let Err(e) = api_client
             .commit_manifest_receipt(workspace, upload_session_id, &request)
             .await
-            .with_context(|| format!("Failed to commit manifest receipt for upload session {upload_session_id}"))?;
+        {
+            log::warn!(
+                "Failed to commit manifest receipt for upload session {upload_session_id}: {e:#}"
+            );
+        }
     }
-
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1526,7 +1530,9 @@ async fn save_single_file_entry(
                     )
                     .await
                     .with_context(|| format!("Failed to upload blob {}", blob_path.display()))?;
-                    Ok::<(String, u64, StorageMetrics), anyhow::Error>((digest, size_bytes, metrics))
+                    Ok::<(String, u64, StorageMetrics), anyhow::Error>((
+                        digest, size_bytes, metrics,
+                    ))
                 });
                 tasks.push(task);
             }
@@ -1550,7 +1556,7 @@ async fn save_single_file_entry(
         save_response.upload_session_id.as_deref(),
         blob_receipts,
     )
-    .await?;
+    .await;
 
     let index_step = session.start_step("Uploading CAS index".to_string(), None)?;
     let manifest_etag = upload_payload(
@@ -1574,7 +1580,7 @@ async fn save_single_file_entry(
         expected_manifest_size,
         manifest_etag.clone(),
     )
-    .await?;
+    .await;
 
     let confirm_step = session.start_step("Confirming upload".to_string(), None)?;
     let confirm_request = ConfirmRequest {
@@ -2008,7 +2014,9 @@ async fn save_single_oci_entry(
                     )
                     .await
                     .with_context(|| format!("Failed to upload blob {}", file_path.display()))?;
-                    Ok::<(String, u64, StorageMetrics), anyhow::Error>((digest, size_bytes, metrics))
+                    Ok::<(String, u64, StorageMetrics), anyhow::Error>((
+                        digest, size_bytes, metrics,
+                    ))
                 });
                 tasks.push(task);
             }
@@ -2032,7 +2040,7 @@ async fn save_single_oci_entry(
         save_response.upload_session_id.as_deref(),
         blob_receipts,
     )
-    .await?;
+    .await;
 
     let index_step = session.start_step("Uploading CAS index".to_string(), None)?;
     let manifest_etag = upload_payload(
@@ -2056,7 +2064,7 @@ async fn save_single_oci_entry(
         expected_manifest_size,
         manifest_etag.clone(),
     )
-    .await?;
+    .await;
 
     let confirm_step = session.start_step("Confirming upload".to_string(), None)?;
     let confirm_request = ConfirmRequest {
