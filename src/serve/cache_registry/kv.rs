@@ -1898,7 +1898,13 @@ fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
 
     if let Some(bc_error) = error.downcast_ref::<BoringCacheError>() {
         match bc_error {
-            BoringCacheError::CacheConflict { .. } | BoringCacheError::CachePending => {
+            BoringCacheError::CacheConflict { .. } => {
+                return FlushError::Conflict(message);
+            }
+            BoringCacheError::CachePending { .. } => {
+                if context.contains("confirm") {
+                    return FlushError::Transient(message);
+                }
                 return FlushError::Conflict(message);
             }
             BoringCacheError::NetworkError(_) | BoringCacheError::ConnectionError(_) => {
@@ -4229,9 +4235,9 @@ mod tests {
 
     #[test]
     fn classify_flush_error_treats_cache_pending_as_conflict() {
-        let error: anyhow::Error = BoringCacheError::CachePending.into();
+        let error: anyhow::Error = BoringCacheError::cache_pending().into();
         let classified = classify_flush_error(&error, "confirm failed");
-        assert!(matches!(classified, FlushError::Conflict(_)));
+        assert!(matches!(classified, FlushError::Transient(_)));
     }
 
     #[test]

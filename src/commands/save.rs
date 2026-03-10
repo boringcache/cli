@@ -729,7 +729,7 @@ async fn save_single_archive_entry(
                 return Ok(SaveStatus::Skipped);
             }
 
-            if let Some(crate::error::BoringCacheError::CachePending) = bc_error {
+            if let Some(crate::error::BoringCacheError::CachePending { .. }) = bc_error {
                 create_step.complete()?;
                 progress_info(
                     &reporter,
@@ -2102,7 +2102,7 @@ fn conflict_message_from_error(err: &anyhow::Error) -> Option<String> {
 
 fn is_cache_pending_error(err: &anyhow::Error) -> bool {
     err.downcast_ref::<crate::error::BoringCacheError>()
-        .is_some_and(|bc_err| matches!(bc_err, crate::error::BoringCacheError::CachePending))
+        .is_some_and(|bc_err| matches!(bc_err, crate::error::BoringCacheError::CachePending { .. }))
 }
 
 fn manifest_files_from_draft(draft: &crate::manifest::ManifestDraft) -> Vec<ManifestFile> {
@@ -2327,7 +2327,7 @@ mod tests {
 
     #[test]
     fn cache_pending_errors_are_detected() {
-        let err: anyhow::Error = crate::error::BoringCacheError::CachePending.into();
+        let err: anyhow::Error = crate::error::BoringCacheError::cache_pending().into();
 
         assert!(is_cache_pending_error(&err));
         assert_eq!(conflict_message_from_error(&err), None);

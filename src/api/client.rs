@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::error::{BoringCacheError, ConflictMetadata};
+use crate::error::{BoringCacheError, ConflictMetadata, PendingMetadata};
 use crate::observability;
 use crate::retry_resume::RetryConfig;
 use crate::types::Result;
@@ -28,6 +28,8 @@ const REQUEST_METRIC_SOURCE_CLI: &str = "cli";
 const API_VERSION_V1: &str = "v1";
 const API_VERSION_V2: &str = "v2";
 const FALLBACK_API_BASE_URL: &str = "https://api.boringcache.com";
+const PENDING_PUBLISH_POLL_TIMEOUT: Duration = Duration::from_secs(60);
+const PENDING_PUBLISH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct CapabilityResponse {
@@ -36,6 +38,7 @@ struct CapabilityResponse {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
 struct CapabilityFlags {
     #[serde(default)]
     blob_stage_v2: bool,
@@ -45,6 +48,10 @@ struct CapabilityFlags {
     finalize_only_v2: bool,
     #[serde(default)]
     entry_create_v2: bool,
+    #[serde(default)]
+    upload_sessions_v2: bool,
+    #[serde(default)]
+    pending_publish_status_v2: bool,
     #[serde(default)]
     cas_publish_bootstrap_if_match: Option<String>,
 }
@@ -106,6 +113,10 @@ impl ApiClient {
         headers.insert(
             "X-BoringCache-CLI-Version",
             reqwest::header::HeaderValue::from_str(cli_version).context("Invalid CLI version")?,
+        );
+        headers.insert(
+            "X-BoringCache-Pending-Publish-Poll",
+            reqwest::header::HeaderValue::from_static("1"),
         );
 
         let client = build_api_client_with_headers(Some(headers.clone()))?;
@@ -727,7 +738,11 @@ impl ApiClient {
                     None => BoringCacheError::cache_conflict(message).into(),
                 }
             }
-            StatusCode::LOCKED => BoringCacheError::CachePending.into(),
+            StatusCode::LOCKED => match parse_pending_metadata(&error_body, parsed_payload.as_ref())
+            {
+                Some(metadata) => BoringCacheError::cache_pending_with_metadata(metadata).into(),
+                None => BoringCacheError::cache_pending().into(),
+            },
             StatusCode::INTERNAL_SERVER_ERROR => {
                 anyhow::anyhow!("Server error (500). Please try again later.")
             }
@@ -1078,6 +1093,8 @@ impl ApiClient {
         Ok(super::models::cache::BlobUploadUrlsResponse {
             upload_urls,
             already_present: dedupe_strings(already_present),
+            upload_session_id: None,
+            upload_state: None,
         })
     }
 
@@ -1321,26 +1338,52 @@ impl ApiClient {
         let encoded_tag = urlencoding::encode(tag);
         let endpoint =
             self.workspace_endpoint(workspace, &format!("caches/tags/{encoded_tag}/publish"))?;
-        let response: TagPointer = self
-            .put_v2_with_if_match(
-                &endpoint,
-                &PublishPayload {
-                    cache_entry_id: cache_entry_id.to_string(),
-                    publish_mode: publish_mode.to_string(),
-                    cache: PublishFinalizePayload {
-                        manifest_digest: request.manifest_digest.clone(),
-                        manifest_size: request.manifest_size,
-                        manifest_etag: request.manifest_etag.clone(),
-                        archive_size: request.archive_size,
-                        archive_etag: request.archive_etag.clone(),
-                        blob_count: request.blob_count,
-                        blob_total_size_bytes: request.blob_total_size_bytes,
-                    },
-                },
-                if_match.as_deref(),
-                CACHE_METRIC_ENDPOINT_OPERATION_CONFIRM_PUBLISH,
-            )
-            .await?;
+        let publish_payload = PublishPayload {
+            cache_entry_id: cache_entry_id.to_string(),
+            publish_mode: publish_mode.to_string(),
+            cache: PublishFinalizePayload {
+                manifest_digest: request.manifest_digest.clone(),
+                manifest_size: request.manifest_size,
+                manifest_etag: request.manifest_etag.clone(),
+                archive_size: request.archive_size,
+                archive_etag: request.archive_etag.clone(),
+                blob_count: request.blob_count,
+                blob_total_size_bytes: request.blob_total_size_bytes,
+            },
+        };
+        let started_at = Instant::now();
+
+        let response: TagPointer = loop {
+            match self
+                .put_v2_with_if_match(
+                    &endpoint,
+                    &publish_payload,
+                    if_match.as_deref(),
+                    CACHE_METRIC_ENDPOINT_OPERATION_CONFIRM_PUBLISH,
+                )
+                .await
+            {
+                Ok(response) => break response,
+                Err(error) => {
+                    let Some(metadata) = pending_metadata_from_error(&error).cloned() else {
+                        return Err(error);
+                    };
+
+                    if started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT {
+                        return Err(error);
+                    }
+
+                    if metadata.poll_path.is_some() || metadata.upload_session_id.is_some() {
+                        break self
+                            .poll_pending_publish(workspace, tag, metadata, started_at)
+                            .await?;
+                    }
+
+                    let delay = Duration::from_secs(metadata.retry_after_seconds.unwrap_or(1));
+                    sleep(delay).await;
+                }
+            }
+        };
 
         Ok(super::models::cache::CacheConfirmResponse {
             status: response
@@ -1355,6 +1398,82 @@ impl ApiClient {
             signing_public_key: None,
             signed_at: None,
         })
+    }
+
+    async fn poll_pending_publish(
+        &self,
+        workspace: &str,
+        tag: &str,
+        metadata: PendingMetadata,
+        started_at: Instant,
+    ) -> Result<TagPointer> {
+        loop {
+            if started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT {
+                return Err(BoringCacheError::cache_pending_with_metadata(metadata).into());
+            }
+
+            let status = self
+                .upload_session_status(workspace, &metadata)
+                .await
+                .context("Failed to poll pending publish status")?;
+
+            match status.publish_state.as_deref().or(Some(status.state.as_str())) {
+                Some("published") => match self.tag_pointer_v2(workspace, tag).await? {
+                    Some(pointer) => {
+                        return Ok(TagPointer {
+                            version: pointer.version,
+                            cache_entry_id: pointer.cache_entry_id,
+                            status: Some("published".to_string()),
+                            uploaded_at: None,
+                        });
+                    }
+                    None => anyhow::bail!("Pending publish completed but tag pointer was not found"),
+                },
+                Some("conflicted") => {
+                    return Err(BoringCacheError::cache_conflict(
+                        status
+                            .error
+                            .unwrap_or_else(|| "Tag publish conflict".to_string()),
+                    )
+                    .into());
+                }
+                Some("failed") => {
+                    anyhow::bail!(
+                        "{}",
+                        status
+                            .error
+                            .unwrap_or_else(|| "Pending publish failed".to_string())
+                    );
+                }
+                _ => {
+                    let delay = Duration::from_secs(metadata.retry_after_seconds.unwrap_or(1))
+                        .min(PENDING_PUBLISH_POLL_INTERVAL.max(Duration::from_secs(1)));
+                    sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    async fn upload_session_status(
+        &self,
+        workspace: &str,
+        metadata: &PendingMetadata,
+    ) -> Result<super::models::cache::UploadSessionStatusResponse> {
+        if let Some(path) = metadata.poll_path.as_deref() {
+            let normalized = path
+                .trim_start_matches('/')
+                .strip_prefix("v2/")
+                .unwrap_or_else(|| path.trim_start_matches('/'));
+            return self.get_v2(normalized).await;
+        }
+
+        let upload_session_id = metadata
+            .upload_session_id
+            .as_deref()
+            .context("Pending publish response did not include upload_session_id")?;
+        let endpoint =
+            self.workspace_endpoint(workspace, &format!("upload-sessions/{upload_session_id}"))?;
+        self.get_v2(&endpoint).await
     }
 
     pub async fn complete_multipart(
@@ -1678,11 +1797,53 @@ fn parse_restore_not_found_body(
 
     if let Ok(pending_response) = serde_json::from_str::<RestorePendingResponse>(trimmed) {
         if pending_response.pending || pending_response.status.as_deref() == Some("pending") {
-            return Err(BoringCacheError::CachePending.into());
+            return Err(BoringCacheError::cache_pending().into());
         }
     }
 
     Ok(None)
+}
+
+fn parse_pending_metadata(
+    body: &str,
+    parsed_payload: Option<&ParsedError>,
+) -> Option<PendingMetadata> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let details = value.get("details")?;
+
+    let upload_session_id = details
+        .get("upload_session_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let publish_attempt_id = details
+        .get("publish_attempt_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let poll_path = details
+        .get("poll_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let retry_after_seconds = details
+        .get("retry_after_seconds")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            details
+                .get("retry_after_seconds")
+                .and_then(|v| v.as_str())
+                .and_then(|v| v.parse::<u64>().ok())
+        });
+
+    Some(PendingMetadata {
+        code: parsed_payload.and_then(|p| p.code.clone()),
+        upload_session_id,
+        publish_attempt_id,
+        poll_path,
+        retry_after_seconds,
+    })
+}
+
+fn pending_metadata_from_error(error: &anyhow::Error) -> Option<&PendingMetadata> {
+    error.downcast_ref::<BoringCacheError>()?.pending_metadata()
 }
 
 fn parse_conflict_metadata(body: &str) -> Option<ConflictMetadata> {
@@ -2226,6 +2387,35 @@ mod tests {
         }"#;
 
         assert!(parse_conflict_metadata(body).is_none());
+    }
+
+    #[test]
+    fn test_parse_pending_metadata_extracts_polling_fields() {
+        let body = r#"{
+            "success": false,
+            "error": "1 blob(s) not yet verified in storage — retry after upload completes",
+            "code": "pending_publish",
+            "details": {
+                "cache_entry_id": "entry-1",
+                "upload_session_id": "session-1",
+                "publish_attempt_id": "attempt-1",
+                "pending_blob_count": 1,
+                "retry_after_seconds": 3,
+                "poll_path": "/v2/workspaces/acme/demo/upload-sessions/session-1"
+            }
+        }"#;
+
+        let parsed = parse_error_payload(body).expect("payload should parse");
+        let metadata = parse_pending_metadata(body, Some(&parsed)).expect("metadata should parse");
+
+        assert_eq!(metadata.code.as_deref(), Some("pending_publish"));
+        assert_eq!(metadata.upload_session_id.as_deref(), Some("session-1"));
+        assert_eq!(metadata.publish_attempt_id.as_deref(), Some("attempt-1"));
+        assert_eq!(
+            metadata.poll_path.as_deref(),
+            Some("/v2/workspaces/acme/demo/upload-sessions/session-1")
+        );
+        assert_eq!(metadata.retry_after_seconds, Some(3));
     }
 
     #[test]

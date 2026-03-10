@@ -85,6 +85,10 @@ pub mod cache {
         pub tag: String,
         pub cache_entry_id: String,
         #[serde(default)]
+        pub upload_session_id: Option<String>,
+        #[serde(default)]
+        pub upload_state: Option<String>,
+        #[serde(default)]
         pub exists: bool,
         #[serde(default)]
         pub storage_mode: Option<String>,
@@ -449,6 +453,10 @@ pub mod cache {
         pub upload_urls: Vec<BlobUploadUrl>,
         #[serde(default)]
         pub already_present: Vec<String>,
+        #[serde(default)]
+        pub upload_session_id: Option<String>,
+        #[serde(default)]
+        pub upload_state: Option<String>,
     }
 
     #[derive(Debug, Serialize)]
@@ -477,6 +485,33 @@ pub mod cache {
         pub cache_entry_id: Option<String>,
         pub manifest_root_digest: Option<String>,
         pub version: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct UploadSessionStatusResponse {
+        pub upload_session_id: String,
+        pub cache_entry_id: String,
+        #[serde(default)]
+        pub tag: Option<String>,
+        #[serde(default)]
+        pub storage_mode: Option<String>,
+        pub state: String,
+        #[serde(default)]
+        pub publish_attempt_id: Option<String>,
+        #[serde(default)]
+        pub publish_state: Option<String>,
+        #[serde(default)]
+        pub expected_blob_count: Option<u64>,
+        #[serde(default)]
+        pub attached_blob_count: Option<u64>,
+        #[serde(default)]
+        pub visible_blob_count: Option<u64>,
+        #[serde(default)]
+        pub pending_blob_count: Option<u64>,
+        #[serde(default)]
+        pub published_tag_version: Option<String>,
+        #[serde(default)]
+        pub error: Option<String>,
     }
 
     #[derive(Debug, Clone)]

@@ -176,8 +176,9 @@ mod request_validation {
 
 mod response_validation {
     use boring_cache_cli::api::models::cache::{
-        CacheConfirmResponse, CacheEntriesListResponse, CompleteMultipartResponse,
-        ManifestCheckResponse, RestoreResult, SaveResponse, TagDeleteResponse,
+        BlobUploadUrlsResponse, CacheConfirmResponse, CacheEntriesListResponse,
+        CompleteMultipartResponse, ManifestCheckResponse, RestoreResult, SaveResponse,
+        TagDeleteResponse, UploadSessionStatusResponse,
     };
     use boring_cache_cli::api::models::workspace::{SessionInfo, Workspace};
     use serde_json::json;
@@ -222,6 +223,28 @@ mod response_validation {
     }
 
     #[test]
+    fn test_save_response_deserializes_upload_session_metadata() {
+        let api_response = json!({
+            "tag": "ruby-cache",
+            "cache_entry_id": "550e8400-e29b-41d4-a716-446655440000",
+            "upload_session_id": "session-1",
+            "upload_state": "uploading",
+            "manifest_root_digest": "b".repeat(64),
+            "manifest_upload_url": "https://storage.example.com/manifest",
+            "archive_urls": [],
+            "multipart_upload_id": null,
+            "manifest_etag": null,
+            "exists": false,
+            "status": "pending",
+            "error": null
+        });
+
+        let response: SaveResponse = serde_json::from_value(api_response).unwrap();
+        assert_eq!(response.upload_session_id.as_deref(), Some("session-1"));
+        assert_eq!(response.upload_state.as_deref(), Some("uploading"));
+    }
+
+    #[test]
     fn test_cache_confirm_response_deserializes() {
         let api_response = json!({
             "cache_entry_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -255,6 +278,52 @@ mod response_validation {
 
         let response: CacheConfirmResponse = serde_json::from_value(api_response).unwrap();
         assert_eq!(response.tag_status, Some("pending".to_string()));
+    }
+
+    #[test]
+    fn test_blob_stage_response_deserializes_upload_session_metadata() {
+        let api_response = json!({
+            "upload_urls": [
+                {
+                    "digest": "sha256:abc",
+                    "url": "https://storage.example.com/blob",
+                    "headers": {
+                        "content-type": "application/octet-stream"
+                    }
+                }
+            ],
+            "already_present": [],
+            "upload_session_id": "session-1",
+            "upload_state": "uploading"
+        });
+
+        let response: BlobUploadUrlsResponse = serde_json::from_value(api_response).unwrap();
+        assert_eq!(response.upload_session_id.as_deref(), Some("session-1"));
+        assert_eq!(response.upload_state.as_deref(), Some("uploading"));
+    }
+
+    #[test]
+    fn test_upload_session_status_response_deserializes() {
+        let api_response = json!({
+            "upload_session_id": "session-1",
+            "cache_entry_id": "550e8400-e29b-41d4-a716-446655440000",
+            "tag": "ruby-cache",
+            "storage_mode": "cas",
+            "state": "awaiting_blob_visibility",
+            "publish_attempt_id": "attempt-1",
+            "publish_state": "verifying",
+            "expected_blob_count": 10,
+            "attached_blob_count": 10,
+            "visible_blob_count": 6,
+            "pending_blob_count": 4,
+            "published_tag_version": null,
+            "error": null
+        });
+
+        let response: UploadSessionStatusResponse = serde_json::from_value(api_response).unwrap();
+        assert_eq!(response.upload_session_id, "session-1");
+        assert_eq!(response.publish_state.as_deref(), Some("verifying"));
+        assert_eq!(response.pending_blob_count, Some(4));
     }
 
     #[test]
