@@ -3611,6 +3611,7 @@ fn filter_pending_entries_with_local_blobs(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn bind_kv_alias_tag(
     state: &AppState,
     alias_tag: &str,
@@ -3674,12 +3675,12 @@ async fn bind_kv_alias_tag(
             )
             .await?
     } else {
-        crate::api::client::ConfirmPublishResult::Published(
+        crate::api::client::ConfirmPublishResult::Published(Box::new(
             state
                 .api_client
                 .confirm(&state.workspace, &alias_save.cache_entry_id, &alias_confirm)
                 .await?,
-        )
+        ))
     };
 
     Ok(matches!(

@@ -42,7 +42,7 @@ enum PendingPublishStrategy {
 
 #[derive(Debug)]
 pub enum ConfirmPublishResult {
-    Published(super::models::cache::CacheConfirmResponse),
+    Published(Box<super::models::cache::CacheConfirmResponse>),
     Pending(PendingMetadata),
 }
 
@@ -1328,7 +1328,7 @@ impl ApiClient {
             )
             .await?
         {
-            ConfirmPublishResult::Published(response) => Ok(response),
+            ConfirmPublishResult::Published(response) => Ok(*response),
             ConfirmPublishResult::Pending(metadata) => {
                 Err(BoringCacheError::cache_pending_with_metadata(metadata).into())
             }
@@ -1491,9 +1491,9 @@ impl ApiClient {
             }
         };
 
-        Ok(ConfirmPublishResult::Published(
+        Ok(ConfirmPublishResult::Published(Box::new(
             cache_confirm_response_from_tag_pointer(response),
-        ))
+        )))
     }
 
     async fn poll_pending_publish(

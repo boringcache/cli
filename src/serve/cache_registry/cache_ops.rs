@@ -192,6 +192,7 @@ struct SessionState {
     missed_keys: HashMap<String, SessionMissEntry>,
 }
 
+#[derive(Default)]
 struct AggregateState {
     buckets: HashMap<BucketKey, BucketCounters>,
     missed_keys: HashMap<(String, Tool), MissEntry>,
@@ -200,20 +201,6 @@ struct AggregateState {
     completed_sessions: Vec<SessionRecord>,
     next_session_seq: HashMap<Tool, u64>,
     session_metadata_hints: BTreeMap<String, String>,
-}
-
-impl Default for AggregateState {
-    fn default() -> Self {
-        Self {
-            buckets: HashMap::new(),
-            missed_keys: HashMap::new(),
-            missed_key_cardinality: HashMap::new(),
-            active_sessions: HashMap::new(),
-            completed_sessions: Vec::new(),
-            next_session_seq: HashMap::new(),
-            session_metadata_hints: BTreeMap::new(),
-        }
-    }
 }
 
 impl SessionState {

@@ -39,6 +39,7 @@ impl ProxyServerHandle {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     workspace: String,
     tag: String,
