@@ -39,6 +39,10 @@ const KV_TRANSIENT_BACKOFF_MS: u64 = 2_000;
 const KV_TRANSIENT_JITTER_MS: u64 = 2_000;
 const KV_TRANSIENT_WRITE_PATH_BACKOFF_MS: u64 = 20_000;
 const KV_TRANSIENT_WRITE_PATH_JITTER_MS: u64 = 5_000;
+const KV_CONFIRM_VERIFICATION_RETRY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(90);
+const KV_CONFIRM_VERIFICATION_RETRY_BASE_MS: u64 = 1_000;
+const KV_CONFIRM_VERIFICATION_RETRY_MAX_MS: u64 = 5_000;
 const KV_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_EMPTY_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(12);
 const KV_PENDING_REFRESH_SUPPRESSION_WINDOW: std::time::Duration =
@@ -309,6 +313,20 @@ fn transient_backoff_window(message: &str) -> (u64, u64) {
     } else {
         (KV_TRANSIENT_BACKOFF_MS, KV_TRANSIENT_JITTER_MS)
     }
+}
+
+fn is_blob_verification_pending_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("not yet verified in storage") || lower.contains("retry after upload completes")
+}
+
+fn kv_confirm_verification_retry_delay(attempt: u32) -> std::time::Duration {
+    let exponent = attempt.saturating_sub(1).min(6);
+    let multiplier = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
+    let delay_ms = KV_CONFIRM_VERIFICATION_RETRY_BASE_MS
+        .saturating_mul(multiplier)
+        .min(KV_CONFIRM_VERIFICATION_RETRY_MAX_MS);
+    std::time::Duration::from_millis(delay_ms)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1922,7 +1940,8 @@ fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
         || lower.contains("cannot connect")
         || lower.contains("connection refused")
         || lower.contains("broken pipe")
-        || lower.contains("connection reset");
+        || lower.contains("connection reset")
+        || is_blob_verification_pending_message(&lower);
     if transient_status || transient_hint {
         return FlushError::Transient(message);
     }
@@ -1948,6 +1967,42 @@ fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
     }
 
     FlushError::Transient(message)
+}
+
+async fn confirm_kv_flush(
+    state: &AppState,
+    cache_entry_id: &str,
+    confirm_request: &ConfirmRequest,
+) -> Result<(), FlushError> {
+    let started_at = std::time::Instant::now();
+    let mut attempt = 0u32;
+
+    loop {
+        match state
+            .api_client
+            .confirm(&state.workspace, cache_entry_id, confirm_request)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                let message = format!("confirm failed: {error}");
+                if is_blob_verification_pending_message(&message)
+                    && started_at.elapsed() < KV_CONFIRM_VERIFICATION_RETRY_TIMEOUT
+                {
+                    attempt = attempt.saturating_add(1);
+                    let delay = kv_confirm_verification_retry_delay(attempt);
+                    eprintln!(
+                        "KV confirm: blob verification pending for cache entry {cache_entry_id}; retrying in {:.1}s (attempt {attempt})",
+                        delay.as_secs_f32()
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+
+                return Err(classify_flush_error(&error, "confirm failed"));
+            }
+        }
+    }
 }
 
 fn has_status_code(lower: &str, code: u16) -> bool {
@@ -3383,15 +3438,7 @@ async fn do_flush(
         tag: Some(tag),
     };
 
-    state
-        .api_client
-        .confirm(
-            &state.workspace,
-            &save_response.cache_entry_id,
-            &confirm_request,
-        )
-        .await
-        .map_err(|e| classify_flush_error(&e, "confirm failed"))?;
+    confirm_kv_flush(state, &save_response.cache_entry_id, &confirm_request).await?;
 
     bind_kv_alias_tags(
         state,
@@ -4182,6 +4229,15 @@ mod tests {
     }
 
     #[test]
+    fn classify_flush_error_treats_blob_verification_pending_as_transient() {
+        let error = anyhow::anyhow!(
+            "Server returned 400 Bad Request: 714 blob(s) not yet verified in storage — retry after upload completes"
+        );
+        let classified = classify_flush_error(&error, "confirm failed");
+        assert!(matches!(classified, FlushError::Transient(_)));
+    }
+
+    #[test]
     fn conflict_backoff_window_is_longer_for_in_progress_conflicts() {
         let (base, jitter) =
             conflict_backoff_window("save_entry failed: another cache upload is in progress");
@@ -4201,6 +4257,22 @@ mod tests {
         let error = anyhow::anyhow!("HTTP 400 from backend: invalid payload");
         let classified = classify_flush_error(&error, "save failed");
         assert!(matches!(classified, FlushError::Permanent(_)));
+    }
+
+    #[test]
+    fn kv_confirm_verification_retry_delay_is_capped() {
+        assert_eq!(
+            kv_confirm_verification_retry_delay(1),
+            std::time::Duration::from_millis(1_000)
+        );
+        assert_eq!(
+            kv_confirm_verification_retry_delay(3),
+            std::time::Duration::from_millis(4_000)
+        );
+        assert_eq!(
+            kv_confirm_verification_retry_delay(6),
+            std::time::Duration::from_millis(5_000)
+        );
     }
 
     #[test]
@@ -4600,7 +4672,10 @@ mod tests {
         std::env::set_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV, "48");
         std::env::set_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV, "2097152");
         assert_eq!(kv_startup_prefetch_max_blobs(), 48);
-        assert_eq!(kv_startup_prefetch_max_total_bytes(1024 * 1024 * 1024), 2_097_152);
+        assert_eq!(
+            kv_startup_prefetch_max_total_bytes(1024 * 1024 * 1024),
+            2_097_152
+        );
         std::env::remove_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV);
         std::env::remove_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV);
     }
