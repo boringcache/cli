@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use tokio::task;
 
 use crate::api::models::cache::{
-    BlobDescriptor, ConfirmRequest, ManifestCheckRequest, SaveRequest,
+    BlobDescriptor, BlobReceipt, ConfirmRequest, ManifestCheckRequest,
+    ManifestReceiptCommitRequest, SaveRequest,
 };
 use crate::api::ApiClient;
 use crate::archive::create_tar_archive;
@@ -28,6 +29,45 @@ enum RestoreAction {
     AlreadyInSync,
     LocalDiffers,
     NoRemoteCache,
+}
+
+async fn maybe_commit_blob_receipts(
+    api_client: &ApiClient,
+    workspace: &str,
+    upload_session_id: Option<&str>,
+    receipts: Vec<BlobReceipt>,
+) -> Result<()> {
+    if let Some(upload_session_id) = upload_session_id.filter(|_| !receipts.is_empty()) {
+        api_client
+            .commit_blob_receipts(workspace, upload_session_id, &receipts)
+            .await
+            .with_context(|| format!("Failed to commit blob receipts for upload session {upload_session_id}"))?;
+    }
+
+    Ok(())
+}
+
+async fn maybe_commit_manifest_receipt(
+    api_client: &ApiClient,
+    workspace: &str,
+    upload_session_id: Option<&str>,
+    manifest_digest: String,
+    manifest_size: u64,
+    manifest_etag: Option<String>,
+) -> Result<()> {
+    if let Some(upload_session_id) = upload_session_id {
+        let request = ManifestReceiptCommitRequest {
+            manifest_digest,
+            manifest_size,
+            manifest_etag,
+        };
+        api_client
+            .commit_manifest_receipt(workspace, upload_session_id, &request)
+            .await
+            .with_context(|| format!("Failed to commit manifest receipt for upload session {upload_session_id}"))?;
+    }
+
+    Ok(())
 }
 
 fn signature_subject_tag<'a>(
@@ -1901,6 +1941,7 @@ async fn sync_to_remote_oci(
         ));
     }
 
+    let mut blob_receipts = Vec::new();
     if !missing_blobs.is_empty() {
         let upload_plan = api_client
             .blob_upload_urls(workspace, &save_response.cache_entry_id, &missing_blobs)
@@ -1961,6 +2002,22 @@ async fn sync_to_remote_oci(
         }
     }
 
+    blob_receipts.extend(
+        missing_blobs
+            .iter()
+            .map(|blob| BlobReceipt {
+                digest: blob.digest.clone(),
+                etag: None,
+            }),
+    );
+    maybe_commit_blob_receipts(
+        api_client,
+        workspace,
+        save_response.upload_session_id.as_deref(),
+        blob_receipts,
+    )
+    .await?;
+
     if verbose {
         ui::info("  Uploading CAS index...");
     }
@@ -1975,6 +2032,16 @@ async fn sync_to_remote_oci(
         &pointer_bytes,
         "application/cbor",
         &save_response.upload_headers,
+    )
+    .await?;
+
+    maybe_commit_manifest_receipt(
+        api_client,
+        workspace,
+        save_response.upload_session_id.as_deref(),
+        expected_manifest_digest.clone(),
+        expected_manifest_size,
+        manifest_etag.clone(),
     )
     .await?;
 
@@ -2176,6 +2243,7 @@ async fn sync_to_remote_file(
         ));
     }
 
+    let mut blob_receipts = Vec::new();
     if !missing_blobs.is_empty() {
         let upload_plan = api_client
             .blob_upload_urls(workspace, &save_response.cache_entry_id, &missing_blobs)
@@ -2236,6 +2304,22 @@ async fn sync_to_remote_file(
         }
     }
 
+    blob_receipts.extend(
+        missing_blobs
+            .iter()
+            .map(|blob| BlobReceipt {
+                digest: blob.digest.clone(),
+                etag: None,
+            }),
+    );
+    maybe_commit_blob_receipts(
+        api_client,
+        workspace,
+        save_response.upload_session_id.as_deref(),
+        blob_receipts,
+    )
+    .await?;
+
     if verbose {
         ui::info("  Uploading CAS index...");
     }
@@ -2250,6 +2334,16 @@ async fn sync_to_remote_file(
         &pointer_bytes,
         "application/cbor",
         &save_response.upload_headers,
+    )
+    .await?;
+
+    maybe_commit_manifest_receipt(
+        api_client,
+        workspace,
+        save_response.upload_session_id.as_deref(),
+        expected_manifest_digest.clone(),
+        expected_manifest_size,
+        manifest_etag.clone(),
     )
     .await?;
 

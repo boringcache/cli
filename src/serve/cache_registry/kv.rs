@@ -16,7 +16,8 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::io::ReaderStream;
 
 use crate::api::models::cache::{
-    BlobDescriptor, CacheResolutionEntry, ConfirmRequest, SaveRequest,
+    BlobDescriptor, BlobReceipt, CacheResolutionEntry, ConfirmRequest,
+    ManifestReceiptCommitRequest, SaveRequest,
 };
 use crate::cas_transport::upload_payload;
 use crate::error::{BoringCacheError, PendingMetadata};
@@ -3417,6 +3418,18 @@ async fn do_flush(
             .await
             {
                 Ok(heal_stats) => {
+                    if let Some(upload_session_id) = save_response.upload_session_id.as_deref() {
+                        if !heal_stats.uploaded_receipts.is_empty() {
+                            let _ = state
+                                .api_client
+                                .commit_blob_receipts(
+                                    &state.workspace,
+                                    upload_session_id,
+                                    &heal_stats.uploaded_receipts,
+                                )
+                                .await;
+                        }
+                    }
                     if heal_stats.uploaded_count > 0 || heal_stats.missing_local_count > 0 {
                         eprintln!(
                             "KV flush: exists=true blob reconcile uploaded={} already_present={} missing_local={}",
@@ -3466,7 +3479,7 @@ async fn do_flush(
         .as_ref()
         .ok_or(FlushError::Permanent("missing manifest upload URL".into()))?;
 
-    upload_payload(
+    let manifest_etag = upload_payload(
         state.api_client.transfer_client(),
         manifest_upload_url,
         &pointer_bytes,
@@ -3476,10 +3489,37 @@ async fn do_flush(
     .await
     .map_err(|e| classify_flush_error(&e, "manifest upload failed"))?;
 
+    if let Some(upload_session_id) = save_response.upload_session_id.as_deref() {
+        if !upload_stats.uploaded_receipts.is_empty() {
+            state
+                .api_client
+                .commit_blob_receipts(
+                    &state.workspace,
+                    upload_session_id,
+                    &upload_stats.uploaded_receipts,
+                )
+                .await
+                .map_err(|e| classify_flush_error(&e, "blob receipt commit failed"))?;
+        }
+    }
+
+    if let Some(upload_session_id) = save_response.upload_session_id.as_deref() {
+        let request = ManifestReceiptCommitRequest {
+            manifest_digest: manifest_root_digest.clone(),
+            manifest_size: expected_manifest_size,
+            manifest_etag: manifest_etag.clone(),
+        };
+        state
+            .api_client
+            .commit_manifest_receipt(&state.workspace, upload_session_id, &request)
+            .await
+            .map_err(|e| classify_flush_error(&e, "manifest receipt commit failed"))?;
+    }
+
     let confirm_request = ConfirmRequest {
         manifest_digest: manifest_root_digest.clone(),
         manifest_size: expected_manifest_size,
-        manifest_etag: None,
+        manifest_etag: manifest_etag,
         archive_size: None,
         archive_etag: None,
         blob_count: Some(blob_count),
@@ -3813,6 +3853,7 @@ struct BlobUploadStats {
     uploaded_count: u64,
     already_present_count: u64,
     missing_local_count: u64,
+    uploaded_receipts: Vec<BlobReceipt>,
 }
 
 #[derive(Clone, Copy)]
@@ -3906,7 +3947,7 @@ async fn upload_single_blob_with_retry(
     mut upload_url: String,
     mut upload_headers: HashMap<String, String>,
     blob_path: PathBuf,
-) -> anyhow::Result<BlobUploadOutcome> {
+) -> anyhow::Result<(String, BlobUploadOutcome)> {
     let mut last_error: Option<anyhow::Error> = None;
 
     for attempt in 1..=KV_BLOB_UPLOAD_MAX_ATTEMPTS {
@@ -3921,11 +3962,12 @@ async fn upload_single_blob_with_retry(
         .await
         {
             Ok(_) => {
-                return Ok(if attempt > 1 {
+                let outcome = if attempt > 1 {
                     BlobUploadOutcome::UploadedAfterRetry
                 } else {
                     BlobUploadOutcome::Uploaded
-                });
+                };
+                return Ok((upload_digest, outcome));
             }
             Err(error) => {
                 let error_text = format!("{error:#}");
@@ -3962,7 +4004,7 @@ async fn upload_single_blob_with_retry(
                                 .iter()
                                 .any(|d| d == &upload_digest)
                             {
-                                return Ok(BlobUploadOutcome::AlreadyPresent);
+                                return Ok((upload_digest, BlobUploadOutcome::AlreadyPresent));
                             }
                             if let Some(fresh_upload) = retry_plan
                                 .upload_urls
@@ -4011,6 +4053,7 @@ async fn upload_blobs(
         uploaded_count: 0,
         already_present_count: upload_plan.already_present.len() as u64,
         missing_local_count: 0,
+        uploaded_receipts: Vec::new(),
     };
 
     let blobs_by_digest: HashMap<String, BlobDescriptor> = blobs
@@ -4065,7 +4108,7 @@ async fn upload_blobs(
     }
 
     while let Some(task_result) = tasks.join_next().await {
-        let outcome = match task_result {
+        let (digest, outcome) = match task_result {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => {
                 tasks.abort_all();
@@ -4085,6 +4128,7 @@ async fn upload_blobs(
         match outcome {
             BlobUploadOutcome::Uploaded | BlobUploadOutcome::UploadedAfterRetry => {
                 stats.uploaded_count = stats.uploaded_count.saturating_add(1);
+                stats.uploaded_receipts.push(BlobReceipt { digest, etag: None });
             }
             BlobUploadOutcome::AlreadyPresent => {
                 stats.already_present_count = stats.already_present_count.saturating_add(1);

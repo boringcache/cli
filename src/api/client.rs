@@ -66,6 +66,8 @@ struct CapabilityFlags {
     #[serde(default)]
     upload_sessions_v2: bool,
     #[serde(default)]
+    upload_receipts_v2: bool,
+    #[serde(default)]
     pending_publish_status_v2: bool,
     #[serde(default)]
     cas_publish_bootstrap_if_match: Option<String>,
@@ -1105,18 +1107,65 @@ impl ApiClient {
 
         let mut upload_urls = Vec::new();
         let mut already_present = Vec::new();
+        let mut upload_session_id = None;
+        let mut upload_state = None;
         for task in tasks {
             let response = task.await.map_err(|e| anyhow::anyhow!(e))??;
             upload_urls.extend(response.upload_urls);
             already_present.extend(response.already_present);
+            if upload_session_id.is_none() {
+                upload_session_id = response.upload_session_id;
+            }
+            if upload_state.is_none() {
+                upload_state = response.upload_state;
+            }
         }
 
         Ok(super::models::cache::BlobUploadUrlsResponse {
             upload_urls,
             already_present: dedupe_strings(already_present),
-            upload_session_id: None,
-            upload_state: None,
+            upload_session_id,
+            upload_state,
         })
+    }
+
+    pub async fn commit_blob_receipts(
+        &self,
+        workspace: &str,
+        upload_session_id: &str,
+        receipts: &[super::models::cache::BlobReceipt],
+    ) -> Result<Option<super::models::cache::UploadSessionStatusResponse>> {
+        ensure!(!upload_session_id.trim().is_empty(), "upload_session_id must not be empty");
+        if receipts.is_empty() || !self.get_capabilities().await.upload_receipts_v2 {
+            return Ok(None);
+        }
+
+        let endpoint = self.workspace_endpoint(
+            workspace,
+            &format!("upload-sessions/{upload_session_id}/blobs/commit"),
+        )?;
+        let body = super::models::cache::BlobReceiptCommitRequest {
+            receipts: receipts.to_vec(),
+        };
+        self.post_v2(&endpoint, &body).await.map(Some)
+    }
+
+    pub async fn commit_manifest_receipt(
+        &self,
+        workspace: &str,
+        upload_session_id: &str,
+        request: &super::models::cache::ManifestReceiptCommitRequest,
+    ) -> Result<Option<super::models::cache::UploadSessionStatusResponse>> {
+        ensure!(!upload_session_id.trim().is_empty(), "upload_session_id must not be empty");
+        if !self.get_capabilities().await.upload_receipts_v2 {
+            return Ok(None);
+        }
+
+        let endpoint = self.workspace_endpoint(
+            workspace,
+            &format!("upload-sessions/{upload_session_id}/manifest/commit"),
+        )?;
+        self.post_v2(&endpoint, request).await.map(Some)
     }
 
     pub async fn blob_download_urls(
@@ -1224,7 +1273,8 @@ impl ApiClient {
             debug!("POST {} body={}", endpoint, body);
         }
 
-        self.post_v2_with_request_metrics(
+        self
+            .post_v2_with_request_metrics(
             &endpoint,
             &payload,
             CACHE_METRIC_ENDPOINT_OPERATION_SAVE_ENTRY,

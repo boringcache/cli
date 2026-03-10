@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use tokio::task;
 
 use crate::api::models::cache::{
-    BlobDescriptor, CompleteMultipartRequest, ConfirmRequest, ManifestCheckRequest, SaveRequest,
+    BlobDescriptor, BlobReceipt, CompleteMultipartRequest, ConfirmRequest,
+    ManifestCheckRequest, ManifestReceiptCommitRequest, SaveRequest,
 };
 use crate::api::ApiClient;
 use crate::archive::{create_tar_archive, TarArchiveInfo};
@@ -25,6 +26,45 @@ enum SaveStatus {
     AlreadyExists,
     Uploaded,
     Skipped,
+}
+
+async fn maybe_commit_blob_receipts(
+    api_client: &ApiClient,
+    workspace: &str,
+    upload_session_id: Option<&str>,
+    receipts: Vec<BlobReceipt>,
+) -> Result<()> {
+    if let Some(upload_session_id) = upload_session_id.filter(|_| !receipts.is_empty()) {
+        api_client
+            .commit_blob_receipts(workspace, upload_session_id, &receipts)
+            .await
+            .with_context(|| format!("Failed to commit blob receipts for upload session {upload_session_id}"))?;
+    }
+
+    Ok(())
+}
+
+async fn maybe_commit_manifest_receipt(
+    api_client: &ApiClient,
+    workspace: &str,
+    upload_session_id: Option<&str>,
+    manifest_digest: String,
+    manifest_size: u64,
+    manifest_etag: Option<String>,
+) -> Result<()> {
+    if let Some(upload_session_id) = upload_session_id {
+        let request = ManifestReceiptCommitRequest {
+            manifest_digest,
+            manifest_size,
+            manifest_etag,
+        };
+        api_client
+            .commit_manifest_receipt(workspace, upload_session_id, &request)
+            .await
+            .with_context(|| format!("Failed to commit manifest receipt for upload session {upload_session_id}"))?;
+    }
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1428,6 +1468,7 @@ async fn save_single_file_entry(
         Some(format!("{} missing", missing_blobs.len())),
     )?;
     let upload_started = Instant::now();
+    let mut blob_receipts = Vec::new();
     if !missing_blobs.is_empty() {
         let upload_plan = api_client
             .blob_upload_urls(&workspace, &save_response.cache_entry_id, &missing_blobs)
@@ -1467,7 +1508,7 @@ async fn save_single_file_entry(
             let transfer_client = api_client.transfer_client().clone();
             let mut tasks = Vec::new();
 
-            for (_digest, blob_path, upload_url, headers, size_bytes) in items {
+            for (digest, blob_path, upload_url, headers, size_bytes) in items {
                 let semaphore = semaphore.clone();
                 let progress = progress.clone();
                 let transfer_client = transfer_client.clone();
@@ -1485,14 +1526,15 @@ async fn save_single_file_entry(
                     )
                     .await
                     .with_context(|| format!("Failed to upload blob {}", blob_path.display()))?;
-                    Ok::<(u64, StorageMetrics), anyhow::Error>((size_bytes, metrics))
+                    Ok::<(String, u64, StorageMetrics), anyhow::Error>((digest, size_bytes, metrics))
                 });
                 tasks.push(task);
             }
 
             for task in tasks {
-                let (_uploaded_bytes, metrics) =
+                let (digest, _uploaded_bytes, metrics) =
                     task.await.context("Blob upload task panicked")??;
+                blob_receipts.push(BlobReceipt { digest, etag: None });
                 if upload_storage_metrics.region.is_none() {
                     upload_storage_metrics = metrics;
                 }
@@ -1501,6 +1543,14 @@ async fn save_single_file_entry(
     }
     let upload_duration = upload_started.elapsed();
     upload_step.complete()?;
+
+    maybe_commit_blob_receipts(
+        &api_client,
+        &workspace,
+        save_response.upload_session_id.as_deref(),
+        blob_receipts,
+    )
+    .await?;
 
     let index_step = session.start_step("Uploading CAS index".to_string(), None)?;
     let manifest_etag = upload_payload(
@@ -1515,6 +1565,16 @@ async fn save_single_file_entry(
     )
     .await?;
     index_step.complete()?;
+
+    maybe_commit_manifest_receipt(
+        &api_client,
+        &workspace,
+        save_response.upload_session_id.as_deref(),
+        expected_manifest_digest.clone(),
+        expected_manifest_size,
+        manifest_etag.clone(),
+    )
+    .await?;
 
     let confirm_step = session.start_step("Confirming upload".to_string(), None)?;
     let confirm_request = ConfirmRequest {
@@ -1890,6 +1950,7 @@ async fn save_single_oci_entry(
         Some(format!("{} missing", missing_blobs.len())),
     )?;
     let upload_started = Instant::now();
+    let mut blob_receipts = Vec::new();
     if !missing_blobs.is_empty() {
         let upload_plan = api_client
             .blob_upload_urls(&workspace, &save_response.cache_entry_id, &missing_blobs)
@@ -1929,7 +1990,7 @@ async fn save_single_oci_entry(
             let transfer_client = api_client.transfer_client().clone();
             let mut tasks = Vec::new();
 
-            for (_digest, file_path, upload_url, headers, size_bytes) in items {
+            for (digest, file_path, upload_url, headers, size_bytes) in items {
                 let semaphore = semaphore.clone();
                 let progress = progress.clone();
                 let transfer_client = transfer_client.clone();
@@ -1947,14 +2008,15 @@ async fn save_single_oci_entry(
                     )
                     .await
                     .with_context(|| format!("Failed to upload blob {}", file_path.display()))?;
-                    Ok::<(u64, StorageMetrics), anyhow::Error>((size_bytes, metrics))
+                    Ok::<(String, u64, StorageMetrics), anyhow::Error>((digest, size_bytes, metrics))
                 });
                 tasks.push(task);
             }
 
             for task in tasks {
-                let (_uploaded_bytes, metrics) =
+                let (digest, _uploaded_bytes, metrics) =
                     task.await.context("Blob upload task panicked")??;
+                blob_receipts.push(BlobReceipt { digest, etag: None });
                 if upload_storage_metrics.region.is_none() {
                     upload_storage_metrics = metrics;
                 }
@@ -1963,6 +2025,14 @@ async fn save_single_oci_entry(
     }
     let upload_duration = upload_started.elapsed();
     upload_step.complete()?;
+
+    maybe_commit_blob_receipts(
+        &api_client,
+        &workspace,
+        save_response.upload_session_id.as_deref(),
+        blob_receipts,
+    )
+    .await?;
 
     let index_step = session.start_step("Uploading CAS index".to_string(), None)?;
     let manifest_etag = upload_payload(
@@ -1977,6 +2047,16 @@ async fn save_single_oci_entry(
     )
     .await?;
     index_step.complete()?;
+
+    maybe_commit_manifest_receipt(
+        &api_client,
+        &workspace,
+        save_response.upload_session_id.as_deref(),
+        expected_manifest_digest.clone(),
+        expected_manifest_size,
+        manifest_etag.clone(),
+    )
+    .await?;
 
     let confirm_step = session.start_step("Confirming upload".to_string(), None)?;
     let confirm_request = ConfirmRequest {

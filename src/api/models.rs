@@ -459,6 +459,26 @@ pub mod cache {
         pub upload_state: Option<String>,
     }
 
+    #[derive(Debug, Serialize, Clone)]
+    pub struct BlobReceipt {
+        pub digest: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub etag: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct BlobReceiptCommitRequest {
+        pub receipts: Vec<BlobReceipt>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct ManifestReceiptCommitRequest {
+        pub manifest_digest: String,
+        pub manifest_size: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub manifest_etag: Option<String>,
+    }
+
     #[derive(Debug, Serialize)]
     pub struct BlobDownloadUrlsRequest {
         pub cache_entry_id: String,
@@ -505,7 +525,11 @@ pub mod cache {
         #[serde(default)]
         pub attached_blob_count: Option<u64>,
         #[serde(default)]
+        pub receipt_blob_count: Option<u64>,
+        #[serde(default)]
         pub visible_blob_count: Option<u64>,
+        #[serde(default)]
+        pub manifest_receipt_received_at: Option<String>,
         #[serde(default)]
         pub pending_blob_count: Option<u64>,
         #[serde(default)]

@@ -345,7 +345,9 @@ mod response_validation {
             "publish_state": "verifying",
             "expected_blob_count": 10,
             "attached_blob_count": 10,
+            "receipt_blob_count": 8,
             "visible_blob_count": 6,
+            "manifest_receipt_received_at": "2026-03-10T12:00:00Z",
             "pending_blob_count": 4,
             "published_tag_version": null,
             "error": null
@@ -354,6 +356,11 @@ mod response_validation {
         let response: UploadSessionStatusResponse = serde_json::from_value(api_response).unwrap();
         assert_eq!(response.upload_session_id, "session-1");
         assert_eq!(response.publish_state.as_deref(), Some("verifying"));
+        assert_eq!(response.receipt_blob_count, Some(8));
+        assert_eq!(
+            response.manifest_receipt_received_at.as_deref(),
+            Some("2026-03-10T12:00:00Z")
+        );
         assert_eq!(response.pending_blob_count, Some(4));
     }
 

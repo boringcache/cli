@@ -10,7 +10,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio_util::io::ReaderStream;
 
-use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
+use crate::api::models::cache::{
+    BlobDescriptor, BlobReceipt, ConfirmRequest, ManifestReceiptCommitRequest, SaveRequest,
+};
 use crate::cas_oci;
 use crate::cas_transport::upload_payload;
 use crate::multipart_upload::upload_via_single_url;
@@ -35,6 +37,55 @@ const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 fn oci_request_log_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(diagnostics_enabled)
+}
+
+async fn maybe_commit_blob_receipts(
+    state: &AppState,
+    upload_session_id: Option<&str>,
+    receipts: Vec<BlobReceipt>,
+) -> Result<(), OciError> {
+    if let Some(upload_session_id) = upload_session_id.filter(|_| !receipts.is_empty()) {
+        state
+            .api_client
+            .commit_blob_receipts(&state.workspace, upload_session_id, &receipts)
+            .await
+            .map_err(|e| {
+                OciError::internal(format!(
+                    "blob receipt commit failed for upload session {}: {}",
+                    upload_session_id, e
+                ))
+            })?;
+    }
+
+    Ok(())
+}
+
+async fn maybe_commit_manifest_receipt(
+    state: &AppState,
+    upload_session_id: Option<&str>,
+    manifest_digest: String,
+    manifest_size: u64,
+    manifest_etag: Option<String>,
+) -> Result<(), OciError> {
+    if let Some(upload_session_id) = upload_session_id {
+        let request = ManifestReceiptCommitRequest {
+            manifest_digest,
+            manifest_size,
+            manifest_etag,
+        };
+        state
+            .api_client
+            .commit_manifest_receipt(&state.workspace, upload_session_id, &request)
+            .await
+            .map_err(|e| {
+                OciError::internal(format!(
+                    "manifest receipt commit failed for upload session {}: {}",
+                    upload_session_id, e
+                ))
+            })?;
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1774,6 +1825,7 @@ async fn put_manifest(
         .map_err(|e| OciError::internal(format!("save_entry failed: {e}")))?;
 
         if !save_response.exists {
+            let mut blob_receipts = Vec::new();
             if !blob_descriptors.is_empty() {
                 let upload_plan = tokio::time::timeout(
                     OCI_API_CALL_TIMEOUT,
@@ -1852,25 +1904,33 @@ async fn put_manifest(
                                     digest, e
                                 ))
                             })?;
-                            Ok::<(), OciError>(())
+                            Ok::<String, OciError>(digest)
                         });
                         tasks.push(task);
                     }
 
                     for task in tasks {
-                        task.await.map_err(|e| {
+                        let digest = task.await.map_err(|e| {
                             OciError::internal(format!("Blob upload task failed: {e}"))
                         })??;
+                        blob_receipts.push(BlobReceipt { digest, etag: None });
                     }
                 }
             }
+
+            maybe_commit_blob_receipts(
+                &state,
+                save_response.upload_session_id.as_deref(),
+                blob_receipts,
+            )
+            .await?;
 
             let manifest_upload_url = save_response
                 .manifest_upload_url
                 .as_ref()
                 .ok_or_else(|| OciError::internal("Missing manifest_upload_url"))?;
 
-            tokio::time::timeout(
+            let manifest_etag = tokio::time::timeout(
                 OCI_TRANSFER_CALL_TIMEOUT,
                 upload_payload(
                     state.api_client.transfer_client(),
@@ -1888,6 +1948,15 @@ async fn put_manifest(
                 ))
             })?
             .map_err(|e| OciError::internal(format!("Pointer upload failed: {e}")))?;
+
+            maybe_commit_manifest_receipt(
+                &state,
+                save_response.upload_session_id.as_deref(),
+                manifest_root_digest.clone(),
+                pointer_bytes.len() as u64,
+                manifest_etag.clone(),
+            )
+            .await?;
         }
 
         let confirm_request = ConfirmRequest {

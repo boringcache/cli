@@ -958,6 +958,114 @@
           }
         }
       }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/upload-sessions/{id}/blobs/commit": {
+      "post": {
+        "operationId": "commitUploadSessionBlobs",
+        "summary": "Commit direct-upload blob receipts for an upload session",
+        "tags": [
+          "Upload Sessions"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/UploadSessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlobReceiptCommitRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Upload session status after recording blob receipts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadSessionStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/upload-sessions/{id}/manifest/commit": {
+      "post": {
+        "operationId": "commitUploadSessionManifest",
+        "summary": "Commit direct-upload manifest receipt for an upload session",
+        "tags": [
+          "Upload Sessions"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/UploadSessionId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManifestReceiptCommitRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Upload session status after recording manifest receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadSessionStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1184,6 +1292,7 @@
               "finalize_only_v2",
               "entry_create_v2",
               "upload_sessions_v2",
+              "upload_receipts_v2",
               "pending_publish_status_v2",
               "cache_list_v2",
               "cache_restore_v2",
@@ -1210,6 +1319,9 @@
                 "type": "boolean"
               },
               "upload_sessions_v2": {
+                "type": "boolean"
+              },
+              "upload_receipts_v2": {
                 "type": "boolean"
               },
               "pending_publish_status_v2": {
@@ -2523,6 +2635,56 @@
           }
         }
       },
+      "BlobReceipt": {
+        "type": "object",
+        "required": [
+          "digest"
+        ],
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "etag": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "BlobReceiptCommitRequest": {
+        "type": "object",
+        "required": [
+          "receipts"
+        ],
+        "properties": {
+          "receipts": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/BlobReceipt"
+            }
+          }
+        }
+      },
+      "ManifestReceiptCommitRequest": {
+        "type": "object",
+        "required": [
+          "manifest_digest",
+          "manifest_size"
+        ],
+        "properties": {
+          "manifest_digest": {
+            "type": "string"
+          },
+          "manifest_size": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "manifest_etag": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "BlobDownloadUrlsRequest": {
         "type": "object",
         "required": [
@@ -2865,8 +3027,17 @@
             "type": "integer",
             "nullable": true
           },
+          "receipt_blob_count": {
+            "type": "integer",
+            "nullable": true
+          },
           "visible_blob_count": {
             "type": "integer",
+            "nullable": true
+          },
+          "manifest_receipt_received_at": {
+            "type": "string",
+            "format": "date-time",
             "nullable": true
           },
           "pending_blob_count": {
