@@ -31,7 +31,7 @@ jobs:
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
@@ -55,7 +55,7 @@ jobs:
         run: cargo build --release --locked
 
       - name: Upload CLI binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: boringcache-cli-release-linux-amd64
           path: target/release/boringcache
@@ -104,7 +104,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Gate matrix leg
         id: gate
@@ -152,7 +152,7 @@ jobs:
 
       - name: Download prebuilt CLI binary
         if: steps.gate.outputs.run == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: boringcache-cli-release-linux-amd64
           path: ${{ runner.temp }}/boringcache-bin
@@ -388,7 +388,7 @@ jobs:
 
       - name: Upload benchmark artifacts
         if: always() && steps.gate.outputs.run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cache-registry-benchmark-${{ matrix.backend }}-${{ matrix.phase }}
           path: benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}
@@ -430,7 +430,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Gate adapter leg
         id: gate
@@ -492,7 +492,7 @@ jobs:
 
       - name: Download prebuilt CLI binary
         if: steps.gate.outputs.run == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: boringcache-cli-release-linux-amd64
           path: ${{ runner.temp }}/boringcache-bin
@@ -669,7 +669,7 @@ jobs:
 
       - name: Upload adapter artifacts
         if: always() && steps.gate.outputs.run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cache-registry-benchmark-adapter-${{ matrix.leg }}
           path: benchmark-logs/adapter-${{ matrix.leg }}
@@ -697,14 +697,14 @@ jobs:
 
       - name: Download CLI binary
         if: steps.gate.outputs.run == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: boringcache-cli-release-linux-amd64
           path: ${{ runner.temp }}/bin
 
       - name: Checkout code
         if: steps.gate.outputs.run == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Seed CAS via proxy
         id: seed
@@ -783,7 +783,7 @@ jobs:
 
       - name: Upload seed payloads
         if: steps.gate.outputs.run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cross-runner-seed-payloads
           path: |
@@ -800,7 +800,7 @@ jobs:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
     steps:
       - name: Download CLI binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: boringcache-cli-release-linux-amd64
           path: ${{ runner.temp }}/bin
@@ -893,7 +893,7 @@ jobs:
     if: always()
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 

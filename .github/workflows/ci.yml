@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
@@ -117,7 +117,7 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Upload results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: boringcache-results
           path: benchmark-results/
@@ -131,7 +131,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup BoringCache Docker cache
         id: boringcache-docker-test
@@ -258,7 +258,7 @@ jobs:
             '
 
       - name: Upload results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: docker-target-results
           path: benchmark-results/
@@ -272,7 +272,7 @@ jobs:
     if: always()
     steps:
       - name: Download all results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: "*-results*"
           merge-multiple: true
@@ -385,7 +385,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup BoringCache Docker cache
         id: boringcache-docker-build
