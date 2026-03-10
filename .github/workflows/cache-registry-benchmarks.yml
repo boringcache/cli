@@ -177,6 +177,7 @@ jobs:
             export BUDGET_EFFICACY_PROXY_429_MAX="0"
             export BUDGET_EFFICACY_PROXY_CONFLICTS_MAX="0"
             if [[ "${{ matrix.sccache_backend }}" == "proxy" ]]; then
+              export BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN="1"
               # Force a fresh warm dir so efficacy validates remote-index correctness, not local disk reuse.
               export EFFICACY_FRESH_WARM_SCCACHE_DIR="1"
               # Require enough warm compile traffic so hit-rate budgets are statistically meaningful.
@@ -189,6 +190,7 @@ jobs:
               # Cache-ops GET stream should reflect the same mixed hit-rate envelope.
               export BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN="45"
               export BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX="55"
+              export BUDGET_EFFICACY_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX="15"
             fi
           fi
           if [[ "${{ matrix.phase }}" == "stress" ]]; then
@@ -514,6 +516,7 @@ jobs:
               BINARY="$BIN_PATH" \
               LOG_DIR="$LOG_DIR" \
               TAG="$TAG" \
+              BUDGET_REMOTE_TAG_HITS_MIN="1" \
               ./scripts/e2e-all-adapters-http-test.sh | tee "$LOG_DIR/run.log"
               ;;
             cli-core)
@@ -531,6 +534,7 @@ jobs:
               BAZEL_REMOTE_MAX_CONNECTIONS="64" \
               STRESS_ACTION_COUNT="96" \
               BUDGET_REMOTE_TIMEOUTS_MAX="0" \
+              BUDGET_REMOTE_TAG_HITS_MIN="1" \
               ./scripts/e2e-bazel-real-test.sh | tee "$LOG_DIR/run.log"
               ;;
             dual-proxy)
@@ -545,6 +549,7 @@ jobs:
               BUDGET_CACHE_OPS_GET_RECORDS_MIN="300" \
               BUDGET_CACHE_OPS_GET_HIT_RATE_MAX="100" \
               BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX="15" \
+              BUDGET_REMOTE_TAG_HITS_MIN="1" \
               ./scripts/e2e-dual-proxy-contention-test.sh | tee "$LOG_DIR/run.log"
               ;;
             docker-buildkit)
@@ -553,6 +558,7 @@ jobs:
               E2E_TAG_PREFIX="gha-cache-registry" \
               PORT="5000" \
               LOG_DIR="$LOG_DIR" \
+              BUDGET_REMOTE_TAG_HITS_MIN="1" \
               ./scripts/e2e-docker-buildkit-registry-test.sh | tee "$LOG_DIR/run.log"
               ;;
             prefetch-readiness)
@@ -563,6 +569,7 @@ jobs:
               BLOB_SIZE_BYTES="4096" \
               SEED_CONCURRENCY="64" \
               VERIFY_CONCURRENCY="64" \
+              BUDGET_REMOTE_TAG_HITS_MIN="1" \
               PROXY_SHUTDOWN_WAIT_SECS="120" \
               SEED_FLUSH_TIMEOUT_SECS="240" \
               LOG_DIR="$LOG_DIR" \
@@ -600,6 +607,7 @@ jobs:
           case "$LEG" in
             adapters-http)
               assert_log_contains "=== Phase 1: Write and read with running proxy ===" "phase1"
+              assert_log_contains "=== Phase 1b: Verify published remote tag resolves ===" "phase1b"
               assert_log_contains "=== Phase 2: Read-only verification after proxy restart ===" "phase2"
               assert_log_contains "All adapter HTTP e2e checks passed" "success"
               ;;
@@ -612,18 +620,22 @@ jobs:
             bazel-real)
               assert_log_contains "=== Phase 1: Cold build (expect local execution + upload) ===" "phase1"
               assert_log_contains "=== Phase 2: Warm build with isolated output root (expect remote hit) ===" "phase2"
+              assert_log_contains "=== Phase 2b: Verify published remote tag resolves ===" "phase2b"
               assert_log_contains "=== Phase 3: Restart proxy and verify persisted remote hit ===" "phase3"
               assert_log_contains "=== Phase 4: High-concurrency stress warm (expect remote hits, no connect timeouts) ===" "phase4"
               assert_log_contains "Bazel real-client e2e passed" "success"
               ;;
             dual-proxy)
               assert_log_contains "=== Phase 1: Prewarm (populate baseline tag) ===" "phase1"
+              assert_log_contains "=== Phase 1b: Verify published remote tag resolves ===" "phase1b"
               assert_log_contains "=== Phase 2: Dual-Proxy Contention ===" "phase2"
+              assert_log_contains "=== Phase 2b: Verify published remote tag after contention flush ===" "phase2b"
               assert_log_contains "=== Phase 3: Verification (merged index check) ===" "phase3"
               assert_log_contains "PASS: both proxies flushed without timeouts/drops" "success"
               ;;
             docker-buildkit)
               assert_log_contains "=== Phase 1: Cold build and warm import ===" "phase1"
+              assert_log_contains "=== Phase 1b: Verify published remote tag resolves ===" "phase1b"
               assert_log_contains "=== Phase 2: Restart proxy and verify persisted warm import ===" "phase2"
               assert_log_contains "=== Phase 3: Implicit latest cache import compatibility ===" "phase3"
               assert_log_contains "=== Phase 4: Alias publish and alias warm import ===" "phase4"
@@ -631,6 +643,7 @@ jobs:
               ;;
             prefetch-readiness)
               assert_log_contains "=== Phase 1: Seed" "phase1"
+              assert_log_contains "=== Phase 1b: Verify published remote tag resolves ===" "phase1b"
               assert_log_contains "=== Phase 2: Restart proxy on fresh disk cache" "phase2"
               assert_log_contains "=== Phase 3: Verify all" "phase3"
               assert_log_contains "Prefetch readiness e2e passed" "success"

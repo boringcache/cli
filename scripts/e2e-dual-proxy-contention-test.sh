@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-remote-tag.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT_A="${PROXY_PORT_A:-5050}"
@@ -40,12 +41,17 @@ BUDGET_CACHE_OPS_GET_RECORDS_MIN="${BUDGET_CACHE_OPS_GET_RECORDS_MIN:-}"
 BUDGET_CACHE_OPS_GET_HIT_RATE_MIN="${BUDGET_CACHE_OPS_GET_HIT_RATE_MIN:-}"
 BUDGET_CACHE_OPS_GET_HIT_RATE_MAX="${BUDGET_CACHE_OPS_GET_HIT_RATE_MAX:-}"
 BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX="${BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX:-}"
+BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
 PROXY_PID_A=""
 PROXY_PID_B=""
 PROXY_PID_VERIFY=""
 INTERRUPTED="0"
 declare -a ACTIVE_BUILD_PIDS=()
+PREWARM_REMOTE_TAG_HITS=0
+PREWARM_REMOTE_TAG_MISSES=0
+POST_CONTENTION_REMOTE_TAG_HITS=0
+POST_CONTENTION_REMOTE_TAG_MISSES=0
 
 require_numeric() {
   local name="$1"
@@ -113,6 +119,7 @@ require_numeric_if_set "BUDGET_CACHE_OPS_GET_RECORDS_MIN" "$BUDGET_CACHE_OPS_GET
 require_numeric_if_set "BUDGET_CACHE_OPS_GET_HIT_RATE_MIN" "$BUDGET_CACHE_OPS_GET_HIT_RATE_MIN"
 require_numeric_if_set "BUDGET_CACHE_OPS_GET_HIT_RATE_MAX" "$BUDGET_CACHE_OPS_GET_HIT_RATE_MAX"
 require_numeric_if_set "BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX" "$BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX"
+require_numeric_if_set "BUDGET_REMOTE_TAG_HITS_MIN" "$BUDGET_REMOTE_TAG_HITS_MIN"
 
 if [[ "$SCCACHE_PORT_A" == "$SCCACHE_PORT_B" ]]; then
   echo "ERROR: SCCACHE_PORT_A and SCCACHE_PORT_B must be different"
@@ -630,7 +637,7 @@ run_build_for() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 1: Prewarm — single proxy cold build to populate baseline
+# Phase 1: Prewarm - single proxy cold build to populate baseline
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -654,6 +661,14 @@ sleep "$SETTLE_SECS"
 
 stop_proxy_graceful "PROXY_PID_A" "prewarm"
 
+echo ""
+echo "=== Phase 1b: Verify published remote tag resolves ==="
+if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${PREWARM_DIR}/publish-check" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "$PREWARM_PROXY_LOG"; then
+  exit 1
+fi
+PREWARM_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"
+PREWARM_REMOTE_TAG_MISSES="${REMOTE_TAG_CHECK_MISSES:-0}"
+
 PREWARM_COLD_SECONDS="$(cat "${PREWARM_DIR}/cold.log.seconds")"
 PREWARM_ENTRIES="$(count_pattern "$PREWARM_PROXY_LOG" 'KV flush summary:')"
 PREWARM_FLUSH_UPLOADED="$(sed -n 's/.*KV flush summary:.*uploaded=\([0-9]*\).*/\1/p' "$PREWARM_PROXY_LOG" | tail -1)"
@@ -661,7 +676,7 @@ PREWARM_FLUSH_UPLOADED="${PREWARM_FLUSH_UPLOADED:-0}"
 echo "Prewarm: ${PREWARM_COLD_SECONDS}s, flush_uploaded=${PREWARM_FLUSH_UPLOADED}"
 
 # ---------------------------------------------------------------------------
-# Phase 2: Dual-proxy contention — two proxies racing on the same tag
+# Phase 2: Dual-proxy contention - two proxies racing on the same tag
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -727,6 +742,14 @@ echo ""
 echo "Stopping both proxies (triggering shutdown flush)..."
 stop_proxy_graceful "PROXY_PID_A" "A"
 stop_proxy_graceful "PROXY_PID_B" "B"
+
+echo ""
+echo "=== Phase 2b: Verify published remote tag after contention flush ==="
+if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${CONTENTION_DIR}/publish-check" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "$PROXY_LOG_A"; then
+  exit 1
+fi
+POST_CONTENTION_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"
+POST_CONTENTION_REMOTE_TAG_MISSES="${REMOTE_TAG_CHECK_MISSES:-0}"
 
 BUILD_A_SECONDS="$(cat "${CONTENTION_DIR}/build-a.log.seconds" 2>/dev/null || echo "0")"
 BUILD_B_SECONDS="$(cat "${CONTENTION_DIR}/build-b.log.seconds" 2>/dev/null || echo "0")"
@@ -847,7 +870,7 @@ echo "Cache ops (sccache GET): records=${TOTAL_CACHE_OPS_GET_RECORDS}, hits=${TO
 echo "Cache ops vs sccache hit-rate delta: ${CACHE_OPS_SCCACHE_HIT_RATE_DELTA}pp"
 
 # ---------------------------------------------------------------------------
-# Phase 3: Verification — third proxy loads merged index
+# Phase 3: Verification - third proxy loads merged index
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -885,6 +908,7 @@ echo ""
 echo "Prewarm"
 echo "  Cold build:           ${PREWARM_COLD_SECONDS}s"
 echo "  Flush uploaded:       ${PREWARM_FLUSH_UPLOADED}"
+echo "  Remote tag hits/miss: ${PREWARM_REMOTE_TAG_HITS}/${PREWARM_REMOTE_TAG_MISSES}"
 echo ""
 echo "Contention"
 echo "  Build A:              ${BUILD_A_SECONDS}s"
@@ -906,6 +930,7 @@ echo "  Hit-rate delta:       ${CACHE_OPS_SCCACHE_HIT_RATE_DELTA}pp (cache-ops G
 echo ""
 echo "Verification"
 echo "  Merged index entries: ${VERIFY_PRELOADED}"
+echo "  Remote tag hits/miss: ${POST_CONTENTION_REMOTE_TAG_HITS}/${POST_CONTENTION_REMOTE_TAG_MISSES}"
 echo ""
 echo "Logs: ${LOG_DIR}"
 echo "========================================="

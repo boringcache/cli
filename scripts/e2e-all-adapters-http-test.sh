@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-remote-tag.sh"
+
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-5050}"
 WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-boringcache/testing2}}"
@@ -22,6 +25,7 @@ PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
 HTTP_CONNECT_TIMEOUT_SECS="${HTTP_CONNECT_TIMEOUT_SECS:-5}"
 HTTP_REQUEST_TIMEOUT_SECS="${HTTP_REQUEST_TIMEOUT_SECS:-30}"
 AUTH_BEARER="${ADAPTER_AUTH_BEARER:-adapter-e2e-token}"
+BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
 PROXY_PID=""
 INTERRUPTED="0"
@@ -59,6 +63,10 @@ require_positive "PROXY_SHUTDOWN_WAIT_SECS" "$PROXY_SHUTDOWN_WAIT_SECS"
 require_positive "PORT_RECLAIM_WAIT_SECS" "$PORT_RECLAIM_WAIT_SECS"
 require_positive "HTTP_CONNECT_TIMEOUT_SECS" "$HTTP_CONNECT_TIMEOUT_SECS"
 require_positive "HTTP_REQUEST_TIMEOUT_SECS" "$HTTP_REQUEST_TIMEOUT_SECS"
+if ! [[ "$BUDGET_REMOTE_TAG_HITS_MIN" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: BUDGET_REMOTE_TAG_HITS_MIN must be a non-negative integer"
+  exit 1
+fi
 
 for dep in curl pgrep ps cmp; do
   if ! command -v "$dep" >/dev/null 2>&1; then
@@ -491,8 +499,14 @@ echo "Waiting for writes to settle (${SETTLE_SECS}s)..."
 sleep "$SETTLE_SECS"
 
 echo ""
-echo "Restarting proxy to verify persisted index..."
+echo "=== Phase 1b: Verify published remote tag resolves ==="
 stop_proxy
+if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${LOG_DIR}/phase1b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "$PROXY_LOG"; then
+  exit 1
+fi
+
+echo ""
+echo "Restarting proxy to verify persisted index..."
 start_proxy "$TAG"
 ensure_proxy_ready
 

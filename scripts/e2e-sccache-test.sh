@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-remote-tag.sh"
 
 PROXY_PORT="${PROXY_PORT:-5050}"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
@@ -45,11 +46,13 @@ STRESS_PREWARM_TARGET_DIR="${STRESS_PREWARM_TARGET_DIR:-${TARGET_ROOT}/stress-pr
 PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
 BUDGET_EFFICACY_RUST_HIT_RATE_MIN="${BUDGET_EFFICACY_RUST_HIT_RATE_MIN:-}"
 BUDGET_EFFICACY_WARM_REQUESTS_MIN="${BUDGET_EFFICACY_WARM_REQUESTS_MIN:-}"
+BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN="${BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN:-}"
 BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN="${BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN:-}"
 BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX="${BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX:-}"
 BUDGET_EFFICACY_CACHE_OPS_RECORDS_MIN="${BUDGET_EFFICACY_CACHE_OPS_RECORDS_MIN:-}"
 BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN="${BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN:-}"
 BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX="${BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX:-}"
+BUDGET_EFFICACY_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX="${BUDGET_EFFICACY_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX:-}"
 BUDGET_EFFICACY_CACHE_READ_ERRORS_MAX="${BUDGET_EFFICACY_CACHE_READ_ERRORS_MAX:-}"
 BUDGET_EFFICACY_CACHE_TIMEOUTS_MAX="${BUDGET_EFFICACY_CACHE_TIMEOUTS_MAX:-}"
 BUDGET_EFFICACY_PROXY_429_MAX="${BUDGET_EFFICACY_PROXY_429_MAX:-}"
@@ -178,11 +181,13 @@ require_numeric_if_set() {
 
 require_numeric_if_set "BUDGET_EFFICACY_RUST_HIT_RATE_MIN" "$BUDGET_EFFICACY_RUST_HIT_RATE_MIN"
 require_numeric_if_set "BUDGET_EFFICACY_WARM_REQUESTS_MIN" "$BUDGET_EFFICACY_WARM_REQUESTS_MIN"
+require_numeric_if_set "BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN" "$BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN"
 require_numeric_if_set "BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN" "$BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN"
 require_numeric_if_set "BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX" "$BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX"
 require_numeric_if_set "BUDGET_EFFICACY_CACHE_OPS_RECORDS_MIN" "$BUDGET_EFFICACY_CACHE_OPS_RECORDS_MIN"
 require_numeric_if_set "BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN" "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN"
 require_numeric_if_set "BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX" "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX"
+require_numeric_if_set "BUDGET_EFFICACY_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX" "$BUDGET_EFFICACY_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX"
 require_numeric_if_set "BUDGET_EFFICACY_CACHE_READ_ERRORS_MAX" "$BUDGET_EFFICACY_CACHE_READ_ERRORS_MAX"
 require_numeric_if_set "BUDGET_EFFICACY_CACHE_TIMEOUTS_MAX" "$BUDGET_EFFICACY_CACHE_TIMEOUTS_MAX"
 require_numeric_if_set "BUDGET_EFFICACY_PROXY_429_MAX" "$BUDGET_EFFICACY_PROXY_429_MAX"
@@ -883,6 +888,10 @@ evaluate_budgets() {
       checks=$((checks + 1))
       budget_check_min "efficacy warm compile requests" "${EFFICACY_WARM_REQUESTS:-0}" "$BUDGET_EFFICACY_WARM_REQUESTS_MIN"
     fi
+    if [[ -n "$BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN" ]]; then
+      checks=$((checks + 1))
+      budget_check_min "efficacy remote tag hits" "${EFFICACY_REMOTE_TAG_HITS:-0}" "$BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN"
+    fi
     if [[ -n "$BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN" ]]; then
       checks=$((checks + 1))
       budget_check_min "efficacy two-pass rust hit rate (%)" "${EFFICACY_TWO_PASS_HIT_RATE:-0}" "$BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN"
@@ -902,6 +911,10 @@ evaluate_budgets() {
     if [[ -n "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX" ]]; then
       checks=$((checks + 1))
       budget_check_max "efficacy cache-ops sccache GET hit rate (%)" "${EFFICACY_CACHE_OPS_HIT_RATE:-0}" "$BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX"
+    fi
+    if [[ -n "$BUDGET_EFFICACY_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX" ]]; then
+      checks=$((checks + 1))
+      budget_check_max "efficacy cache-ops vs sccache hit-rate delta (pp)" "${EFFICACY_CACHE_OPS_SCCACHE_HIT_RATE_DELTA:-0}" "$BUDGET_EFFICACY_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX"
     fi
     if [[ -n "$BUDGET_EFFICACY_CACHE_READ_ERRORS_MAX" ]]; then
       checks=$((checks + 1))
@@ -1026,6 +1039,16 @@ phase_efficacy() {
   if [[ "$USE_PROXY" == "1" ]]; then
     start_proxy "$EFFICACY_TAG" "$proxy_log"
     ensure_proxy_ready "$proxy_log"
+    echo ""
+    echo "=== Phase 1b: Verify published remote tag before efficacy warm pass ==="
+    if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$EFFICACY_TAG" "$phase_dir" "${BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN:-1}" 10 1 "$proxy_log"; then
+      exit 1
+    fi
+    EFFICACY_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"
+    EFFICACY_REMOTE_TAG_MISSES="${REMOTE_TAG_CHECK_MISSES:-0}"
+  else
+    EFFICACY_REMOTE_TAG_HITS="0"
+    EFFICACY_REMOTE_TAG_MISSES="0"
   fi
 
   if [[ "$EFFICACY_FRESH_WARM_SCCACHE_DIR" == "1" ]]; then
@@ -1092,6 +1115,15 @@ phase_efficacy() {
       total_misses = cold_misses + warm_misses;
       denom = total_hits + total_misses;
       if (denom == 0) { printf "0.00" } else { printf "%.2f", (total_hits * 100) / denom }
+    }'
+  )"
+  EFFICACY_CACHE_OPS_SCCACHE_HIT_RATE_DELTA="$(awk \
+    -v cache_ops="${EFFICACY_CACHE_OPS_HIT_RATE:-0}" \
+    -v sccache="${EFFICACY_TWO_PASS_HIT_RATE:-0}" \
+    'BEGIN {
+      delta = cache_ops - sccache;
+      if (delta < 0) { delta = -delta }
+      printf "%.2f", delta
     }'
   )"
   if [[ "$USE_PROXY" == "1" ]]; then
@@ -1339,9 +1371,11 @@ if [[ "$RUN_EFFICACY" == "1" ]]; then
   echo "  Delta (cold-warm):    ${EFFICACY_DELTA}"
   echo "  Warm Rust hit rate:   ${EFFICACY_RUST_HIT_RATE}%"
   echo "  Two-pass Rust hit:    ${EFFICACY_TWO_PASS_HIT_RATE}%"
+  echo "  Remote tag hits/miss: ${EFFICACY_REMOTE_TAG_HITS:-0}/${EFFICACY_REMOTE_TAG_MISSES:-0}"
   echo "  Warm req/hit/miss:    ${EFFICACY_WARM_REQUESTS}/${EFFICACY_WARM_HITS}/${EFFICACY_WARM_MISSES}"
   echo "  Cold req/hit/miss:    ${EFFICACY_COLD_REQUESTS}/${EFFICACY_COLD_HITS}/${EFFICACY_COLD_MISSES}"
   echo "  Cache ops GET hit:    ${EFFICACY_CACHE_OPS_HIT_RATE}% (records=${EFFICACY_CACHE_OPS_RECORDS}, hits=${EFFICACY_CACHE_OPS_HITS}, misses=${EFFICACY_CACHE_OPS_MISSES}, errors=${EFFICACY_CACHE_OPS_ERRORS})"
+  echo "  Hit-rate delta:       ${EFFICACY_CACHE_OPS_SCCACHE_HIT_RATE_DELTA:-0}pp (cache-ops GET vs two-pass sccache)"
   echo "  Cache read errors:    ${EFFICACY_CACHE_READ_ERRORS}"
   echo "  Cache timeouts:       ${EFFICACY_CACHE_TIMEOUTS}"
   echo "  Warm avg read hit:    ${EFFICACY_AVG_READ_HIT}s"

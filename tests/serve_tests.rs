@@ -49,6 +49,9 @@ async fn setup(
     let temp_home = tempfile::tempdir().expect("temp dir");
     unsafe {
         std::env::set_var("HOME", temp_home.path());
+        std::env::set_var("TMPDIR", temp_home.path());
+        std::env::set_var("TMP", temp_home.path());
+        std::env::set_var("TEMP", temp_home.path());
         std::env::set_var("BORINGCACHE_API_URL", server.url());
         std::env::set_var("BORINGCACHE_AUTH_TOKEN", "test-token");
         std::env::set_var("BORINGCACHE_TEST_MODE", "1");
@@ -158,11 +161,13 @@ fn make_kv_pointer(entries: &[(String, String, u64)]) -> Vec<u8> {
         blobs: entries
             .iter()
             .enumerate()
-            .map(|(sequence, (_, digest, size_bytes))| cas_file::FilePointerBlob {
-                digest: digest.clone(),
-                size_bytes: *size_bytes,
-                sequence: Some(sequence as u64),
-            })
+            .map(
+                |(sequence, (_, digest, size_bytes))| cas_file::FilePointerBlob {
+                    digest: digest.clone(),
+                    size_bytes: *size_bytes,
+                    sequence: Some(sequence as u64),
+                },
+            )
             .collect(),
     };
     serde_json::to_vec(&pointer).unwrap()

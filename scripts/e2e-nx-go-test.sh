@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-remote-tag.sh"
+
 WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-}}"
 PORT="${PORT:-5057}"
 HOST="${HOST:-127.0.0.1}"
@@ -9,6 +12,7 @@ REGISTRY_ROOT_TAG="${REGISTRY_ROOT_TAG:-${TAG_PREFIX}-all-$(date -u +%Y%m%d%H%M%
 LOG_DIR="${LOG_DIR:-/tmp/boringcache-all-protocols-e2e-$(date +%Y%m%d-%H%M%S)}"
 RUN_SCCACHE="${RUN_SCCACHE:-0}"
 RUN_DOCKER="${RUN_DOCKER:-0}"
+BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 mkdir -p "${LOG_DIR}"
 
 require_cmd() {
@@ -397,6 +401,11 @@ if [[ -n "${SERVE_PID}" ]]; then
   kill "${SERVE_PID}" >/dev/null 2>&1 || true
   wait "${SERVE_PID}" >/dev/null 2>&1 || true
   SERVE_PID=""
+fi
+
+echo "==> Verifying published remote tag resolves"
+if ! verify_remote_tag_visible "./target/debug/boringcache" "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" "${LOG_DIR}/publish-check" "${BUDGET_REMOTE_TAG_HITS_MIN}" 10 1 "${PROXY_LOG}"; then
+  exit 1
 fi
 
 echo "==> Verifying human alias tag is visible in workspace entries"

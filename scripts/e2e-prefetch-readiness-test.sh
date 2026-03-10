@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-remote-tag.sh"
+
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-5059}"
 WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-boringcache/testing2}}"
@@ -16,6 +19,7 @@ HTTP_CONNECT_TIMEOUT_SECS="${HTTP_CONNECT_TIMEOUT_SECS:-5}"
 HTTP_REQUEST_TIMEOUT_SECS="${HTTP_REQUEST_TIMEOUT_SECS:-30}"
 SETTLE_SECS="${SETTLE_SECS:-5}"
 SEED_FLUSH_TIMEOUT_SECS="${SEED_FLUSH_TIMEOUT_SECS:-180}"
+SEED_FLUSH_STALL_TIMEOUT_SECS="${SEED_FLUSH_STALL_TIMEOUT_SECS:-60}"
 
 BLOB_COUNT="${BLOB_COUNT:-20000}"
 BLOB_SIZE_BYTES="${BLOB_SIZE_BYTES:-4096}"
@@ -23,6 +27,7 @@ SEED_CONCURRENCY="${SEED_CONCURRENCY:-64}"
 VERIFY_CONCURRENCY="${VERIFY_CONCURRENCY:-64}"
 BUDGET_PREFETCH_FAILURES_MAX="${BUDGET_PREFETCH_FAILURES_MAX:-0}"
 BUDGET_VERIFY_FAILURES_MAX="${BUDGET_VERIFY_FAILURES_MAX:-0}"
+BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
 PROXY_PID=""
 TAG=""
@@ -92,6 +97,8 @@ flushed_entry_count() {
 wait_for_seed_flush() {
   local target="$1"
   local waited=0
+  local last_flushed=0
+  local stalled_for=0
 
   while (( waited < SEED_FLUSH_TIMEOUT_SECS )); do
     local flushed
@@ -105,6 +112,19 @@ wait_for_seed_flush() {
       echo "ERROR: proxy exited before seed flush completed"
       tail -n 200 "$PROXY_LOG" || true
       exit 1
+    fi
+
+    if [[ "$flushed" =~ ^[0-9]+$ ]] && (( flushed > last_flushed )); then
+      last_flushed="$flushed"
+      stalled_for=0
+    else
+      stalled_for=$((stalled_for + 2))
+      if (( stalled_for >= SEED_FLUSH_STALL_TIMEOUT_SECS )) && \
+        grep -Eq 'KV batch flush failed:|tag conflict|Cache upload in progress' "$PROXY_LOG"; then
+        echo "ERROR: seed flush stalled at ${flushed:-0}/${target} entries for ${stalled_for}s after backend flush errors/conflicts"
+        tail -n 200 "$PROXY_LOG" || true
+        exit 1
+      fi
     fi
 
     sleep 2
@@ -215,6 +235,14 @@ stop_proxy
 echo "  seed proxy stopped"
 
 echo ""
+echo "=== Phase 1b: Verify published remote tag resolves ==="
+if ! verify_remote_tag_visible "$BINARY" "$WORKSPACE" "$TAG" "$LOG_DIR" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "$PROXY_LOG"; then
+  exit 1
+fi
+REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"
+REMOTE_TAG_MISSES="${REMOTE_TAG_CHECK_MISSES:-0}"
+
+echo ""
 echo "=== Phase 2: Restart proxy on fresh disk cache, verify readiness gates on prefetch ==="
 
 FRESH_CACHE_DIR="${TMP_ROOT}/fresh-cache-${RUN_ID}"
@@ -283,6 +311,8 @@ echo "=== Results ==="
 echo "  blobs seeded:    ${SEED_COUNT}"
 echo "  prefetch time:   ${PREFETCH_SECS}s"
 echo "  prefetch fails:  ${PREFETCH_FAILURES}"
+echo "  remote tag hits: ${REMOTE_TAG_HITS:-0}"
+echo "  remote tag miss: ${REMOTE_TAG_MISSES:-0}"
 echo "  verify time:     ${VERIFY_SECS}s"
 echo "  verify failures: ${VERIFY_FAILURES}"
 echo ""

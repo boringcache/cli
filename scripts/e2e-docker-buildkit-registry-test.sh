@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-remote-tag.sh"
+
 BINARY="${BINARY:-./target/debug/boringcache}"
 WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
 E2E_TAG_PREFIX="${E2E_TAG_PREFIX:-bc-e2e-cli}"
@@ -11,6 +14,7 @@ BUILD_HEARTBEAT_SECS="${BUILD_HEARTBEAT_SECS:-30}"
 BUILD_CLEANUP_WAIT_SECS="${BUILD_CLEANUP_WAIT_SECS:-20}"
 BUILD_FAILURE_TAIL_LINES="${BUILD_FAILURE_TAIL_LINES:-120}"
 PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-30}"
+BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
 mkdir -p "${LOG_DIR}"
 
@@ -51,6 +55,7 @@ require_positive "BUILD_HEARTBEAT_SECS" "$BUILD_HEARTBEAT_SECS"
 require_positive "BUILD_CLEANUP_WAIT_SECS" "$BUILD_CLEANUP_WAIT_SECS"
 require_positive "BUILD_FAILURE_TAIL_LINES" "$BUILD_FAILURE_TAIL_LINES"
 require_positive "PROXY_SHUTDOWN_WAIT_SECS" "$PROXY_SHUTDOWN_WAIT_SECS"
+require_numeric "BUDGET_REMOTE_TAG_HITS_MIN" "$BUDGET_REMOTE_TAG_HITS_MIN"
 
 for dep in docker curl pgrep; do
   if ! command -v "$dep" >/dev/null 2>&1; then
@@ -404,6 +409,12 @@ run_build_with_retry "third-build-reexport.log" \
   --no-cache \
   --cache-to "type=registry,ref=${CACHE_REF},mode=max"
 stop_proxy
+
+echo
+echo "=== Phase 1b: Verify published remote tag resolves ==="
+if ! verify_remote_tag_visible "$BINARY" "$WORKSPACE" "$REGISTRY_ROOT_TAG" "${LOG_DIR}/phase1b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "serve-initial.log"; then
+  exit 1
+fi
 
 echo
 echo "=== Phase 2: Restart proxy and verify persisted warm import ==="

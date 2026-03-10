@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-remote-tag.sh"
+
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-5058}"
 WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-boringcache/testing2}}"
@@ -30,10 +33,15 @@ BAZEL_BUILD_JOBS="${BAZEL_BUILD_JOBS:-128}"
 BAZEL_REMOTE_MAX_CONNECTIONS="${BAZEL_REMOTE_MAX_CONNECTIONS:-64}"
 STRESS_ACTION_COUNT="${STRESS_ACTION_COUNT:-96}"
 BUDGET_REMOTE_TIMEOUTS_MAX="${BUDGET_REMOTE_TIMEOUTS_MAX:-0}"
+BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 PROXY_PID=""
 INTERRUPTED="0"
 declare -a ACTIVE_BUILD_PIDS=()
 REMOTE_TIMEOUTS_TOTAL=0
+BASE_REMOTE_TAG_HITS=0
+BASE_REMOTE_TAG_MISSES=0
+STRESS_REMOTE_TAG_HITS=0
+STRESS_REMOTE_TAG_MISSES=0
 
 require_numeric() {
   local name="$1"
@@ -87,6 +95,7 @@ require_positive "BAZEL_BUILD_JOBS" "$BAZEL_BUILD_JOBS"
 require_positive "BAZEL_REMOTE_MAX_CONNECTIONS" "$BAZEL_REMOTE_MAX_CONNECTIONS"
 require_numeric "STRESS_ACTION_COUNT" "$STRESS_ACTION_COUNT"
 require_numeric "BUDGET_REMOTE_TIMEOUTS_MAX" "$BUDGET_REMOTE_TIMEOUTS_MAX"
+require_numeric "BUDGET_REMOTE_TAG_HITS_MIN" "$BUDGET_REMOTE_TAG_HITS_MIN"
 
 if (( STRESS_ACTION_COUNT < 0 )); then
   echo "ERROR: STRESS_ACTION_COUNT must be >= 0"
@@ -460,8 +469,16 @@ echo "Waiting for writes to settle (${SETTLE_SECS}s)..."
 sleep "$SETTLE_SECS"
 
 echo
-echo "=== Phase 3: Restart proxy and verify persisted remote hit ==="
+echo "=== Phase 2b: Verify published remote tag resolves ==="
 stop_proxy
+if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${LOG_DIR}/phase2b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "$PROXY_LOG"; then
+  exit 1
+fi
+BASE_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"
+BASE_REMOTE_TAG_MISSES="${REMOTE_TAG_CHECK_MISSES:-0}"
+
+echo
+echo "=== Phase 3: Restart proxy and verify persisted remote hit ==="
 start_proxy "$TAG"
 PHASE3_OK=0
 PHASE3_LAST_LOG=""
@@ -525,7 +542,14 @@ if (( STRESS_ACTION_COUNT > 0 )); then
 
   echo "Waiting for writes to settle (${SETTLE_SECS}s)..."
   sleep "$SETTLE_SECS"
+  echo
+  echo "=== Phase 4b: Verify published remote tag after stress cold ==="
   stop_proxy
+  if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${LOG_DIR}/phase4b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" 10 1 "$PROXY_LOG"; then
+    exit 1
+  fi
+  STRESS_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"
+  STRESS_REMOTE_TAG_MISSES="${REMOTE_TAG_CHECK_MISSES:-0}"
   start_proxy "$TAG"
 
   run_bazel_build "bazel-stress-warm" "$OUTPUT_ROOT_E" "$MARKER_FILE" "$STRESS_MARKER_DIR" "$BAZEL_WS" "//:stress_bundle"
@@ -540,4 +564,8 @@ fi
 echo
 echo "Bazel real-client e2e passed"
 echo "Remote cache connect timeouts observed: ${REMOTE_TIMEOUTS_TOTAL}"
+echo "Base remote tag hits/misses: ${BASE_REMOTE_TAG_HITS}/${BASE_REMOTE_TAG_MISSES}"
+if (( STRESS_ACTION_COUNT > 0 )); then
+  echo "Stress remote tag hits/misses: ${STRESS_REMOTE_TAG_HITS}/${STRESS_REMOTE_TAG_MISSES}"
+fi
 echo "Logs: ${LOG_DIR}"

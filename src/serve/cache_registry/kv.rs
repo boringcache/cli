@@ -1986,23 +1986,36 @@ async fn confirm_kv_flush(
             Ok(_) => return Ok(()),
             Err(error) => {
                 let message = format!("confirm failed: {error}");
-                if is_blob_verification_pending_message(&message)
-                    && started_at.elapsed() < KV_CONFIRM_VERIFICATION_RETRY_TIMEOUT
-                {
-                    attempt = attempt.saturating_add(1);
-                    let delay = kv_confirm_verification_retry_delay(attempt);
-                    eprintln!(
-                        "KV confirm: blob verification pending for cache entry {cache_entry_id}; retrying in {:.1}s (attempt {attempt})",
-                        delay.as_secs_f32()
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
+                let classified = classify_flush_error(&error, "confirm failed");
+                if started_at.elapsed() < KV_CONFIRM_VERIFICATION_RETRY_TIMEOUT {
+                    if let Some(reason) = confirm_retry_reason(&message, &classified) {
+                        attempt = attempt.saturating_add(1);
+                        let delay = kv_confirm_verification_retry_delay(attempt);
+                        eprintln!(
+                            "KV confirm: {reason} for cache entry {cache_entry_id}; retrying in {:.1}s (attempt {attempt})",
+                            delay.as_secs_f32()
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
                 }
 
-                return Err(classify_flush_error(&error, "confirm failed"));
+                return Err(classified);
             }
         }
     }
+}
+
+fn confirm_retry_reason(message: &str, classified: &FlushError) -> Option<&'static str> {
+    if is_blob_verification_pending_message(message) {
+        return Some("blob verification pending");
+    }
+
+    if matches!(classified, FlushError::Transient(_)) {
+        return Some("transient backend error");
+    }
+
+    None
 }
 
 fn has_status_code(lower: &str, code: u16) -> bool {
@@ -4273,6 +4286,30 @@ mod tests {
             kv_confirm_verification_retry_delay(6),
             std::time::Duration::from_millis(5_000)
         );
+    }
+
+    #[test]
+    fn confirm_retry_reason_retries_transient_server_errors() {
+        let error = anyhow::anyhow!("Server error (500). Please try again later.");
+        let classified = classify_flush_error(&error, "confirm failed");
+        let reason = confirm_retry_reason(
+            "confirm failed: Server error (500). Please try again later.",
+            &classified,
+        );
+        assert_eq!(reason, Some("transient backend error"));
+    }
+
+    #[test]
+    fn confirm_retry_reason_prefers_blob_verification_pending() {
+        let error = anyhow::anyhow!(
+            "Server returned 400 Bad Request: 714 blob(s) not yet verified in storage — retry after upload completes"
+        );
+        let classified = classify_flush_error(&error, "confirm failed");
+        let reason = confirm_retry_reason(
+            "confirm failed: Server returned 400 Bad Request: 714 blob(s) not yet verified in storage — retry after upload completes",
+            &classified,
+        );
+        assert_eq!(reason, Some("blob verification pending"));
     }
 
     #[test]
