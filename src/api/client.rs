@@ -29,6 +29,8 @@ const REQUEST_METRIC_SOURCE_CLI: &str = "cli";
 const API_VERSION_V1: &str = "v1";
 const API_VERSION_V2: &str = "v2";
 const FALLBACK_API_BASE_URL: &str = "https://api.boringcache.com";
+const CONFIRM_PUBLISH_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_CONFIRM_PUBLISH_TIMEOUT_SECS";
+const DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS: u64 = 10;
 const PENDING_PUBLISH_POLL_TIMEOUT: Duration = Duration::from_secs(60);
 const PENDING_PUBLISH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -596,6 +598,9 @@ impl ApiClient {
         let mut request = self.client.put(&url).json(body);
         if let Some(version) = if_match {
             request = request.header("If-Match", version);
+        }
+        if operation == CACHE_METRIC_ENDPOINT_OPERATION_CONFIRM_PUBLISH {
+            request = request.timeout(confirm_publish_request_timeout());
         }
         let (response_result, retry_count) = self
             .send_authenticated_request_with_retry_count(request)
@@ -2111,6 +2116,15 @@ fn parse_usize_env(name: &str) -> Option<usize> {
     }
 }
 
+fn confirm_publish_request_timeout() -> Duration {
+    let seconds = std::env::var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS);
+    Duration::from_secs(seconds)
+}
+
 fn blob_check_batch_max() -> usize {
     parse_usize_env(BLOB_CHECK_BATCH_MAX_ENV).unwrap_or(BLOB_CHECK_BATCH_MAX)
 }
@@ -2606,6 +2620,26 @@ mod tests {
             retry_after_seconds: Some(1),
         };
         assert!(!server_owned_pending_publish(&no_locator));
+    }
+
+    #[test]
+    fn test_confirm_publish_request_timeout_uses_default_and_env_override() {
+        unsafe {
+            std::env::remove_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV);
+        }
+        assert_eq!(
+            confirm_publish_request_timeout(),
+            Duration::from_secs(DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS)
+        );
+
+        unsafe {
+            std::env::set_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV, "7");
+        }
+        assert_eq!(confirm_publish_request_timeout(), Duration::from_secs(7));
+
+        unsafe {
+            std::env::remove_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV);
+        }
     }
 
     #[tokio::test]
