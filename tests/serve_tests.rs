@@ -21,6 +21,8 @@ use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 
 static ENV_MUTEX: Mutex<()> = Mutex::const_new(());
+static ORIGINAL_TMPDIR: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| std::env::var("TMPDIR").ok());
 
 struct ScopedEnvVar(&'static str);
 
@@ -47,12 +49,17 @@ async fn setup(
     tokio::sync::MutexGuard<'static, ()>,
 ) {
     let guard = ENV_MUTEX.lock().await;
+    let _ = *ORIGINAL_TMPDIR;
+    unsafe {
+        match ORIGINAL_TMPDIR.as_deref() {
+            Some(orig) => std::env::set_var("TMPDIR", orig),
+            None => std::env::remove_var("TMPDIR"),
+        }
+    }
     let temp_home = tempfile::tempdir().expect("temp dir");
     unsafe {
         std::env::set_var("HOME", temp_home.path());
         std::env::set_var("TMPDIR", temp_home.path());
-        std::env::set_var("TMP", temp_home.path());
-        std::env::set_var("TEMP", temp_home.path());
         std::env::set_var("BORINGCACHE_API_URL", server.url());
         std::env::set_var("BORINGCACHE_AUTH_TOKEN", "test-token");
         std::env::set_var("BORINGCACHE_TEST_MODE", "1");
