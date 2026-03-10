@@ -53,6 +53,11 @@ PREWARM_REMOTE_TAG_MISSES=0
 POST_CONTENTION_REMOTE_TAG_HITS=0
 POST_CONTENTION_REMOTE_TAG_MISSES=0
 
+phase_metadata_hints() {
+  local phase="$1"
+  printf 'project=cli-cache-registry,phase=%s,scenario=dual-proxy,tool=sccache' "$phase"
+}
+
 require_numeric() {
   local name="$1"
   local value="$2"
@@ -496,6 +501,7 @@ start_proxy() {
   local port="$2"
   local log_file="$3"
   local pid_var="$4"
+  local metadata_hints="${5:-}"
   local metrics_file
   metrics_file="$(proxy_request_metrics_path "$log_file")"
   rm -f "$metrics_file"
@@ -503,10 +509,11 @@ start_proxy() {
   reclaim_stale_proxy_port "$port" "$log_file"
   {
     echo ""
-    echo "=== Proxy ${label} start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${TAG} port=${port} ==="
+    echo "=== Proxy ${label} start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${TAG} port=${port} hints=${metadata_hints:-none} ==="
   } >>"$log_file"
   BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
     BORINGCACHE_METRICS_FORMAT="${BORINGCACHE_METRICS_FORMAT:-json}" \
+    BORINGCACHE_PROXY_METADATA_HINTS="$metadata_hints" \
     BORINGCACHE_REQUEST_METRICS_PATH="$metrics_file" \
     BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS="${BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS:-1}" \
     RUST_LOG="$RUST_LOG_LEVEL" \
@@ -646,7 +653,7 @@ PREWARM_DIR="${LOG_DIR}/prewarm"
 PREWARM_PROXY_LOG="${PREWARM_DIR}/proxy.log"
 mkdir -p "$PREWARM_DIR" "$PREWARM_SCCACHE_DIR"
 
-start_proxy "prewarm" "$PROXY_PORT_A" "$PREWARM_PROXY_LOG" "PROXY_PID_A"
+start_proxy "prewarm" "$PROXY_PORT_A" "$PREWARM_PROXY_LOG" "PROXY_PID_A" "$(phase_metadata_hints "dual-proxy-prewarm")"
 ensure_proxy_ready "$PROXY_PORT_A" "$PREWARM_PROXY_LOG" "PROXY_PID_A"
 echo "Prewarm proxy running (pid=${PROXY_PID_A})"
 
@@ -686,8 +693,8 @@ PROXY_LOG_A="${CONTENTION_DIR}/proxy-a.log"
 PROXY_LOG_B="${CONTENTION_DIR}/proxy-b.log"
 mkdir -p "$CONTENTION_DIR" "$SCCACHE_DIR_A" "$SCCACHE_DIR_B"
 
-start_proxy "A" "$PROXY_PORT_A" "$PROXY_LOG_A" "PROXY_PID_A"
-start_proxy "B" "$PROXY_PORT_B" "$PROXY_LOG_B" "PROXY_PID_B"
+start_proxy "A" "$PROXY_PORT_A" "$PROXY_LOG_A" "PROXY_PID_A" "$(phase_metadata_hints "dual-proxy-contention-a")"
+start_proxy "B" "$PROXY_PORT_B" "$PROXY_LOG_B" "PROXY_PID_B" "$(phase_metadata_hints "dual-proxy-contention-b")"
 ensure_proxy_ready "$PROXY_PORT_A" "$PROXY_LOG_A" "PROXY_PID_A"
 ensure_proxy_ready "$PROXY_PORT_B" "$PROXY_LOG_B" "PROXY_PID_B"
 echo "Proxy A running (pid=${PROXY_PID_A}) on port ${PROXY_PORT_A}"
@@ -879,7 +886,7 @@ VERIFY_DIR="${LOG_DIR}/verify"
 VERIFY_PROXY_LOG="${VERIFY_DIR}/proxy.log"
 mkdir -p "$VERIFY_DIR"
 
-start_proxy "verify" "$PROXY_PORT_VERIFY" "$VERIFY_PROXY_LOG" "PROXY_PID_VERIFY"
+start_proxy "verify" "$PROXY_PORT_VERIFY" "$VERIFY_PROXY_LOG" "PROXY_PID_VERIFY" "$(phase_metadata_hints "dual-proxy-verify")"
 ensure_proxy_ready "$PROXY_PORT_VERIFY" "$VERIFY_PROXY_LOG" "PROXY_PID_VERIFY"
 echo "Verification proxy running (pid=${PROXY_PID_VERIFY}) on port ${PROXY_PORT_VERIFY}"
 
@@ -935,44 +942,43 @@ echo ""
 echo "Logs: ${LOG_DIR}"
 echo "========================================="
 
-PASS=1
+SCENARIO_PASS=1
 
 if [[ "$BUILD_FAILED" -ne 0 ]]; then
   echo ""
   echo "FAIL: one or more contention builds failed"
-  PASS=0
+  SCENARIO_PASS=0
 fi
 
 if [[ "$TOTAL_TIMEOUTS" -gt 0 ]]; then
   echo ""
   echo "FAIL: ${TOTAL_TIMEOUTS} flush timeout(s) detected"
-  PASS=0
+  SCENARIO_PASS=0
 fi
 
 if [[ "$TOTAL_DROPS" -gt 0 ]]; then
   echo ""
   echo "FAIL: ${TOTAL_DROPS} permanent drop(s) detected"
-  PASS=0
+  SCENARIO_PASS=0
 fi
 
 if [[ "$VERIFY_PRELOADED" -eq 0 ]]; then
   echo ""
   echo "FAIL: verification proxy loaded 0 entries (expected merged index)"
-  PASS=0
+  SCENARIO_PASS=0
+fi
+
+if [[ "$SCENARIO_PASS" -eq 1 ]]; then
+  echo ""
+  echo "PASS: both proxies flushed without timeouts/drops, merged index has ${VERIFY_PRELOADED} entries"
 fi
 
 BUDGET_STATUS=0
 if ! evaluate_budgets; then
   BUDGET_STATUS=1
-  PASS=0
-fi
-
-if [[ "$PASS" -eq 1 ]]; then
-  echo ""
-  echo "PASS: both proxies flushed without timeouts/drops, merged index has ${VERIFY_PRELOADED} entries"
 fi
 
 if [[ "$BUDGET_STATUS" -ne 0 ]]; then
   exit 1
 fi
-exit $((1 - PASS))
+exit $((1 - SCENARIO_PASS))

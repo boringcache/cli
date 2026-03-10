@@ -491,19 +491,26 @@ proxy_request_metrics_path() {
   echo "${phase_dir}/request-metrics.jsonl"
 }
 
+phase_metadata_hints() {
+  local phase="$1"
+  printf 'project=cli-cache-registry,phase=%s,tool=sccache' "$phase"
+}
+
 start_proxy() {
   local tag="$1"
   local log_file="$2"
+  local metadata_hints="${3:-}"
   local metrics_file
   stop_proxy
   reclaim_stale_proxy_port "$log_file"
   metrics_file="$(proxy_request_metrics_path "$log_file")"
   {
     echo ""
-    echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} metrics=${metrics_file} ==="
+    echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} metrics=${metrics_file} hints=${metadata_hints:-none} ==="
   } >>"$log_file"
   BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
     BORINGCACHE_METRICS_FORMAT="${BORINGCACHE_METRICS_FORMAT:-json}" \
+    BORINGCACHE_PROXY_METADATA_HINTS="$metadata_hints" \
     BORINGCACHE_REQUEST_METRICS_PATH="$metrics_file" \
     BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS="${BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS:-1}" \
     RUST_LOG="$RUST_LOG_LEVEL" \
@@ -1008,7 +1015,7 @@ phase_efficacy() {
   echo "Target dir reused across runs: ${TARGET_ROOT}/efficacy-stable"
 
   if [[ "$USE_PROXY" == "1" ]]; then
-    start_proxy "$EFFICACY_TAG" "$proxy_log"
+    start_proxy "$EFFICACY_TAG" "$proxy_log" "$(phase_metadata_hints "sccache-efficacy-cold")"
     ensure_proxy_ready "$proxy_log"
     echo "Proxy running (pid=${PROXY_PID})"
   else
@@ -1037,7 +1044,7 @@ phase_efficacy() {
   echo ""
   echo "Restarting cache backend for efficacy warm pass..."
   if [[ "$USE_PROXY" == "1" ]]; then
-    start_proxy "$EFFICACY_TAG" "$proxy_log"
+    start_proxy "$EFFICACY_TAG" "$proxy_log" "$(phase_metadata_hints "sccache-efficacy-warm")"
     ensure_proxy_ready "$proxy_log"
     echo ""
     echo "=== Phase 1b: Verify published remote tag before efficacy warm pass ==="
@@ -1160,7 +1167,7 @@ phase_stress() {
   fi
 
   if [[ "$USE_PROXY" == "1" ]]; then
-    start_proxy "$STRESS_TAG" "$proxy_log"
+    start_proxy "$STRESS_TAG" "$proxy_log" "$(phase_metadata_hints "sccache-stress-prewarm")"
     ensure_proxy_ready "$proxy_log"
     echo "Proxy running (pid=${PROXY_PID})"
   else
@@ -1190,7 +1197,7 @@ phase_stress() {
       echo "Waiting for writes to settle (${SETTLE_SECS}s) before next stress prewarm build..."
       sleep "$SETTLE_SECS"
       echo "Restarting cache backend before stress-prewarm-$((i + 1))..."
-      start_proxy "$STRESS_TAG" "$proxy_log"
+      start_proxy "$STRESS_TAG" "$proxy_log" "$(phase_metadata_hints "sccache-stress-prewarm")"
       ensure_proxy_ready "$proxy_log"
     fi
   done
@@ -1206,7 +1213,7 @@ phase_stress() {
   echo ""
   echo "Restarting cache backend for stress parallel pass..."
   if [[ "$USE_PROXY" == "1" ]]; then
-    start_proxy "$STRESS_TAG" "$proxy_log"
+    start_proxy "$STRESS_TAG" "$proxy_log" "$(phase_metadata_hints "sccache-stress-parallel")"
     ensure_proxy_ready "$proxy_log"
   fi
 

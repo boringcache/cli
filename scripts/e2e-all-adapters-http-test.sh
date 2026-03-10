@@ -214,15 +214,22 @@ echo "HTTP connect timeout: ${HTTP_CONNECT_TIMEOUT_SECS}s"
 echo "HTTP request timeout: ${HTTP_REQUEST_TIMEOUT_SECS}s"
 echo "Logs: $LOG_DIR"
 
+phase_metadata_hints() {
+  local phase="$1"
+  printf 'project=cli-cache-registry,phase=%s,scenario=adapters-http' "$phase"
+}
+
 start_proxy() {
   local tag="$1"
+  local metadata_hints="${2:-}"
   stop_proxy
   reclaim_stale_proxy_port
   {
     echo ""
-    echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} ==="
+    echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} hints=${metadata_hints:-none} ==="
   } >>"$PROXY_LOG"
   BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
+    BORINGCACHE_PROXY_METADATA_HINTS="$metadata_hints" \
     RUST_LOG="${RUST_LOG:-warn}" \
     "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
     --host "$PROXY_HOST" \
@@ -487,7 +494,7 @@ verify_restart_read_phase() {
 
 TAG="${TAG_BASE}-${RUN_ID}"
 
-start_proxy "$TAG"
+start_proxy "$TAG" "$(phase_metadata_hints "adapters-http-write-read")"
 ensure_proxy_ready
 
 echo ""
@@ -507,7 +514,7 @@ fi
 
 echo ""
 echo "Restarting proxy to verify persisted index..."
-start_proxy "$TAG"
+start_proxy "$TAG" "$(phase_metadata_hints "adapters-http-restart-read")"
 ensure_proxy_ready
 
 echo ""

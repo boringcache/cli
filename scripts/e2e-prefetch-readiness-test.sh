@@ -163,13 +163,15 @@ trap cleanup EXIT
 
 start_proxy() {
   local proxy_tag="$1"
+  local metadata_hints="${2:-}"
   stop_proxy
   {
     echo
-    echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${proxy_tag} ==="
+    echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${proxy_tag} hints=${metadata_hints:-none} ==="
   } >>"$PROXY_LOG"
   BORINGCACHE_API_TOKEN="${BORINGCACHE_API_TOKEN}" \
     BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY="${SEED_CONCURRENCY}" \
+    BORINGCACHE_PROXY_METADATA_HINTS="$metadata_hints" \
     RUST_LOG="${RUST_LOG_LEVEL:-info}" \
     "$BINARY" cache-registry "$WORKSPACE" "$proxy_tag" \
       --host "$PROXY_HOST" \
@@ -189,8 +191,13 @@ echo ""
 RUN_ID="$(date +%s)-$$"
 TAG="${TAG_BASE}-${RUN_ID}"
 
+phase_metadata_hints() {
+  local phase="$1"
+  printf 'project=cli-cache-registry,phase=%s,scenario=prefetch-readiness' "$phase"
+}
+
 echo "=== Phase 1: Seed ${BLOB_COUNT} blobs via proxy ==="
-start_proxy "$TAG"
+start_proxy "$TAG" "$(phase_metadata_hints "prefetch-seed")"
 
 DATA_DIR="${TMP_ROOT}/data-${RUN_ID}"
 mkdir -p "$DATA_DIR"
@@ -249,7 +256,7 @@ FRESH_CACHE_DIR="${TMP_ROOT}/fresh-cache-${RUN_ID}"
 mkdir -p "$FRESH_CACHE_DIR"
 
 PREFETCH_START="$(date +%s)"
-start_proxy "$TAG"
+start_proxy "$TAG" "$(phase_metadata_hints "prefetch-restart")"
 PREFETCH_END="$(date +%s)"
 PREFETCH_SECS=$((PREFETCH_END - PREFETCH_START))
 echo "  proxy became ready in ${PREFETCH_SECS}s (prefetched manifest blobs)"

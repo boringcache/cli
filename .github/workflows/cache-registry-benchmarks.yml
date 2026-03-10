@@ -539,13 +539,14 @@ jobs:
               ;;
             dual-proxy)
               # Dual-proxy contention uses isolated target dirs, so absolute GET hit-rate is workload-dependent.
+              # Shutdown flush summary duration includes real upload time; correctness is guarded by
+              # remote-tag visibility, no flush timeouts, and no permanent drops instead.
               BINARY="$BIN_PATH" \
               LOG_DIR="$LOG_DIR" \
               TAG="$TAG" \
               BUDGET_CONTENTION_WALL_SECONDS_MAX="480" \
               BUDGET_TOTAL_CONFLICTS_MAX="20" \
               BUDGET_PROXY_429_MAX="0" \
-              BUDGET_FLUSH_DURATION_MS_MAX="15000" \
               BUDGET_CACHE_OPS_GET_RECORDS_MIN="300" \
               BUDGET_CACHE_OPS_GET_HIT_RATE_MAX="100" \
               BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX="15" \

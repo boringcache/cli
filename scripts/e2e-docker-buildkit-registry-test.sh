@@ -160,8 +160,10 @@ trap handle_interrupt INT TERM
 
 start_proxy() {
   local log_file="$1"
+  local metadata_hints="${2:-}"
   stop_proxy
   LOG_FILES+=("${log_file}")
+  BORINGCACHE_PROXY_METADATA_HINTS="${metadata_hints}" \
   "${BINARY}" docker-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" \
     --host 127.0.0.1 \
     --port "${PORT}" \
@@ -393,9 +395,14 @@ for i in $(seq -w 1 12); do
 done
 dd if=/dev/zero of=e2e-context/payload.bin bs=1M count=6 status=none
 
+phase_metadata_hints() {
+  local phase="$1"
+  printf 'project=cli-cache-registry,phase=%s,scenario=docker-buildkit,tool=oci' "$phase"
+}
+
 echo
 echo "=== Phase 1: Cold build and warm import ==="
-start_proxy "serve-initial.log"
+start_proxy "serve-initial.log" "$(phase_metadata_hints "docker-buildkit-cold-warm")"
 run_build_with_retry "first-build.log" \
   --cache-from "type=registry,ref=${CACHE_REF}" \
   --cache-to "type=registry,ref=${CACHE_REF},mode=max"
@@ -418,7 +425,7 @@ fi
 
 echo
 echo "=== Phase 2: Restart proxy and verify persisted warm import ==="
-start_proxy "serve-restart.log"
+start_proxy "serve-restart.log" "$(phase_metadata_hints "docker-buildkit-restart")"
 reset_builder
 run_build_with_retry "fourth-build-after-restart.log" \
   --cache-from "type=registry,ref=${CACHE_REF}" \

@@ -43,6 +43,11 @@ BASE_REMOTE_TAG_MISSES=0
 STRESS_REMOTE_TAG_HITS=0
 STRESS_REMOTE_TAG_MISSES=0
 
+phase_metadata_hints() {
+  local phase="$1"
+  printf 'project=cli-cache-registry,phase=%s,tool=bazel,scenario=bazel-real' "$phase"
+}
+
 require_numeric() {
   local name="$1"
   local value="$2"
@@ -252,12 +257,14 @@ wait_for_proxy_ready() {
 
 start_proxy() {
   local tag="$1"
+  local metadata_hints="${2:-}"
   stop_proxy
   {
     echo
-    echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} ==="
+    echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} hints=${metadata_hints:-none} ==="
   } >>"$PROXY_LOG"
   BORINGCACHE_API_TOKEN="${BORINGCACHE_API_TOKEN}" \
+    BORINGCACHE_PROXY_METADATA_HINTS="$metadata_hints" \
     "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
       --host "$PROXY_HOST" \
       --port "$PROXY_PORT" \
@@ -364,7 +371,7 @@ echo "Budget remote timeouts max: ${BUDGET_REMOTE_TIMEOUTS_MAX}"
 echo "Logs: ${LOG_DIR}"
 
 TAG="${TAG_BASE}-${RUN_ID}"
-start_proxy "$TAG"
+start_proxy "$TAG" "$(phase_metadata_hints "bazel-real-cold-warm")"
 
 BAZEL_WS="${LOG_DIR}/bazel-workspace"
 MARKER_FILE="${LOG_DIR}/bazel-action-executed.marker"
@@ -479,7 +486,7 @@ BASE_REMOTE_TAG_MISSES="${REMOTE_TAG_CHECK_MISSES:-0}"
 
 echo
 echo "=== Phase 3: Restart proxy and verify persisted remote hit ==="
-start_proxy "$TAG"
+start_proxy "$TAG" "$(phase_metadata_hints "bazel-real-restart-verify")"
 PHASE3_OK=0
 PHASE3_LAST_LOG=""
 for ((attempt=1; attempt<=PHASE3_MAX_ATTEMPTS; attempt++)); do
