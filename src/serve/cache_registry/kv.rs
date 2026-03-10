@@ -1991,28 +1991,20 @@ async fn confirm_kv_flush(
     state: &AppState,
     cache_entry_id: &str,
     confirm_request: &ConfirmRequest,
-    flush_mode: FlushMode,
 ) -> Result<KvConfirmOutcome, FlushError> {
     let started_at = std::time::Instant::now();
     let mut attempt = 0u32;
 
     loop {
-        let response = if flush_mode == FlushMode::Shutdown {
-            state
-                .api_client
-                .confirm_accept_pending_publish(&state.workspace, cache_entry_id, confirm_request)
-                .await
-        } else {
-            state
-                .api_client
-                .confirm_wait_for_publish_or_shutdown_pending(
-                    &state.workspace,
-                    cache_entry_id,
-                    confirm_request,
-                    state.shutdown_requested.as_ref(),
-                )
-                .await
-        };
+        let response = state
+            .api_client
+            .confirm_wait_for_publish_or_shutdown_pending(
+                &state.workspace,
+                cache_entry_id,
+                confirm_request,
+                state.shutdown_requested.as_ref(),
+            )
+            .await;
 
         match response {
             Ok(crate::api::client::ConfirmPublishResult::Published(_)) => {
@@ -3496,16 +3488,11 @@ async fn do_flush(
         uncompressed_size: None,
         compressed_size: None,
         storage_mode: Some("cas".to_string()),
-        tag: Some(tag),
+        tag: Some(tag.clone()),
     };
 
-    let confirm_outcome = confirm_kv_flush(
-        state,
-        &save_response.cache_entry_id,
-        &confirm_request,
-        flush_mode,
-    )
-    .await?;
+    let confirm_outcome =
+        confirm_kv_flush(state, &save_response.cache_entry_id, &confirm_request).await?;
 
     let pending_alias_count = bind_kv_alias_tags(
         state,
@@ -3517,6 +3504,25 @@ async fn do_flush(
         flush_mode,
     )
     .await?;
+
+    let (publish_state, upload_session_id, publish_attempt_id) = match &confirm_outcome {
+        KvConfirmOutcome::Pending(metadata) => (
+            "pending",
+            metadata.upload_session_id.as_deref().unwrap_or("-"),
+            metadata.publish_attempt_id.as_deref().unwrap_or("-"),
+        ),
+        KvConfirmOutcome::Published => ("published", "-", "-"),
+    };
+
+    eprintln!(
+        "KV flush root publish: tag={} cache_entry_id={} state={} upload_session_id={} publish_attempt_id={} pending_alias_tags={}",
+        tag,
+        save_response.cache_entry_id,
+        publish_state,
+        upload_session_id,
+        publish_attempt_id,
+        pending_alias_count
+    );
 
     if let KvConfirmOutcome::Pending(metadata) = &confirm_outcome {
         eprintln!(
@@ -3668,10 +3674,11 @@ async fn bind_kv_alias_tag(
     let result = if flush_mode == FlushMode::Shutdown {
         state
             .api_client
-            .confirm_accept_pending_publish(
+            .confirm_wait_for_publish_or_shutdown_pending(
                 &state.workspace,
                 &alias_save.cache_entry_id,
                 &alias_confirm,
+                state.shutdown_requested.as_ref(),
             )
             .await?
     } else {
@@ -4545,13 +4552,13 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn shutdown_confirm_accepts_server_owned_pending_publish() {
+    async fn confirm_polls_pending_publish_until_published() {
         let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
         let _guard = mutex.lock().unwrap();
         let _env_guard = TestEnvGuard::capture(&["BORINGCACHE_API_URL"]);
         if !networking_available() {
             eprintln!(
-                "skipping shutdown_confirm_accepts_server_owned_pending_publish: networking disabled in sandbox"
+                "skipping confirm_polls_pending_publish_until_published: networking disabled in sandbox"
             );
             return;
         }
@@ -4569,7 +4576,7 @@ mod tests {
             )
             .create_async()
             .await;
-        let pointer = server
+        let pointer_initial = server
             .mock(
                 "GET",
                 "/v2/workspaces/org/repo/caches/tags/registry/pointer",
@@ -4578,6 +4585,18 @@ mod tests {
             .with_status(404)
             .with_header("content-type", "application/json")
             .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let pointer_after_publish = server
+            .mock(
+                "GET",
+                "/v2/workspaces/org/repo/caches/tags/registry/pointer",
+            )
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"version":"1","cache_entry_id":"entry-1","status":"published"}"#)
             .create_async()
             .await;
         let publish = server
@@ -4593,28 +4612,31 @@ mod tests {
             )
             .create_async()
             .await;
+        let status = server
+            .mock("GET", "/v2/workspaces/org/repo/upload-sessions/session-1")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"upload_session_id":"session-1","cache_entry_id":"entry-1","state":"published","publish_attempt_id":"attempt-1","publish_state":"published"}"#,
+            )
+            .create_async()
+            .await;
 
-        let outcome = confirm_kv_flush(
-            &state,
-            "entry-1",
-            &confirm_request_for("registry"),
-            FlushMode::Shutdown,
-        )
-        .await
-        .expect("shutdown flush should accept server-owned pending publish");
+        let outcome = confirm_kv_flush(&state, "entry-1", &confirm_request_for("registry"))
+            .await
+            .expect("flush should poll pending publish to completion");
 
-        match outcome {
-            KvConfirmOutcome::Pending(metadata) => {
-                assert_eq!(metadata.code.as_deref(), Some("pending_publish"));
-                assert_eq!(metadata.upload_session_id.as_deref(), Some("session-1"));
-                assert_eq!(metadata.publish_attempt_id.as_deref(), Some("attempt-1"));
-            }
-            KvConfirmOutcome::Published => panic!("expected pending handoff"),
-        }
+        assert!(
+            matches!(outcome, KvConfirmOutcome::Published),
+            "expected Published after polling"
+        );
 
         capabilities.assert_async().await;
-        pointer.assert_async().await;
+        pointer_initial.assert_async().await;
+        pointer_after_publish.assert_async().await;
         publish.assert_async().await;
+        status.assert_async().await;
     }
 
     #[tokio::test]
@@ -4678,13 +4700,7 @@ mod tests {
             .create_async()
             .await;
 
-        let outcome = confirm_kv_flush(
-            &state,
-            "entry-1",
-            &confirm_request_for("registry"),
-            FlushMode::Normal,
-        )
-        .await;
+        let outcome = confirm_kv_flush(&state, "entry-1", &confirm_request_for("registry")).await;
 
         assert!(
             matches!(outcome, Err(FlushError::Conflict(message)) if message.contains("Tag publish conflict"))
@@ -4748,14 +4764,9 @@ mod tests {
             .create_async()
             .await;
 
-        let outcome = confirm_kv_flush(
-            &state,
-            "entry-1",
-            &confirm_request_for("registry"),
-            FlushMode::Normal,
-        )
-        .await
-        .expect("shutdown-aware normal flush should accept pending publish");
+        let outcome = confirm_kv_flush(&state, "entry-1", &confirm_request_for("registry"))
+            .await
+            .expect("shutdown-aware normal flush should accept pending publish");
 
         match outcome {
             KvConfirmOutcome::Pending(metadata) => {

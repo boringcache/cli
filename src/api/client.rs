@@ -34,12 +34,6 @@ const DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS: u64 = 10;
 const PENDING_PUBLISH_POLL_TIMEOUT: Duration = Duration::from_secs(60);
 const PENDING_PUBLISH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PendingPublishStrategy {
-    WaitForPublish,
-    AcceptServerOwnedPending,
-}
-
 #[derive(Debug)]
 pub enum ConfirmPublishResult {
     Published(Box<super::models::cache::CacheConfirmResponse>),
@@ -1319,13 +1313,7 @@ impl ApiClient {
         request: &super::models::cache::ConfirmRequest,
     ) -> Result<super::models::cache::CacheConfirmResponse> {
         match self
-            .confirm_with_pending_strategy(
-                workspace,
-                cache_entry_id,
-                request,
-                PendingPublishStrategy::WaitForPublish,
-                None,
-            )
+            .confirm_with_publish_poll(workspace, cache_entry_id, request, None)
             .await?
         {
             ConfirmPublishResult::Published(response) => Ok(*response),
@@ -1335,22 +1323,6 @@ impl ApiClient {
         }
     }
 
-    pub async fn confirm_accept_pending_publish(
-        &self,
-        workspace: &str,
-        cache_entry_id: &str,
-        request: &super::models::cache::ConfirmRequest,
-    ) -> Result<ConfirmPublishResult> {
-        self.confirm_with_pending_strategy(
-            workspace,
-            cache_entry_id,
-            request,
-            PendingPublishStrategy::AcceptServerOwnedPending,
-            None,
-        )
-        .await
-    }
-
     pub async fn confirm_wait_for_publish_or_shutdown_pending(
         &self,
         workspace: &str,
@@ -1358,22 +1330,15 @@ impl ApiClient {
         request: &super::models::cache::ConfirmRequest,
         shutdown_requested: &AtomicBool,
     ) -> Result<ConfirmPublishResult> {
-        self.confirm_with_pending_strategy(
-            workspace,
-            cache_entry_id,
-            request,
-            PendingPublishStrategy::WaitForPublish,
-            Some(shutdown_requested),
-        )
-        .await
+        self.confirm_with_publish_poll(workspace, cache_entry_id, request, Some(shutdown_requested))
+            .await
     }
 
-    async fn confirm_with_pending_strategy(
+    async fn confirm_with_publish_poll(
         &self,
         workspace: &str,
         cache_entry_id: &str,
         request: &super::models::cache::ConfirmRequest,
-        pending_strategy: PendingPublishStrategy,
         shutdown_requested: Option<&AtomicBool>,
     ) -> Result<ConfirmPublishResult> {
         let tag = request
@@ -1454,11 +1419,7 @@ impl ApiClient {
                         return Err(error);
                     };
 
-                    if should_accept_server_owned_pending(
-                        pending_strategy,
-                        shutdown_requested,
-                        &metadata,
-                    ) {
+                    if should_accept_server_owned_pending(shutdown_requested, &metadata) {
                         return Ok(ConfirmPublishResult::Pending(metadata));
                     }
 
@@ -1473,7 +1434,6 @@ impl ApiClient {
                                 tag,
                                 metadata,
                                 started_at,
-                                pending_strategy,
                                 shutdown_requested,
                             )
                             .await?
@@ -1502,20 +1462,15 @@ impl ApiClient {
         tag: &str,
         metadata: PendingMetadata,
         started_at: Instant,
-        pending_strategy: PendingPublishStrategy,
         shutdown_requested: Option<&AtomicBool>,
     ) -> Result<PendingPublishPollOutcome> {
         loop {
-            if should_accept_server_owned_pending(pending_strategy, shutdown_requested, &metadata) {
+            if should_accept_server_owned_pending(shutdown_requested, &metadata) {
                 return Ok(PendingPublishPollOutcome::Pending(metadata));
             }
 
             if started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT {
-                if should_accept_server_owned_pending(
-                    pending_strategy,
-                    shutdown_requested,
-                    &metadata,
-                ) {
+                if should_accept_server_owned_pending(shutdown_requested, &metadata) {
                     return Ok(PendingPublishPollOutcome::Pending(metadata));
                 }
                 return Err(BoringCacheError::cache_pending_with_metadata(metadata).into());
@@ -1524,11 +1479,7 @@ impl ApiClient {
             let status = match self.upload_session_status(workspace, &metadata).await {
                 Ok(status) => status,
                 Err(error) => {
-                    if should_accept_server_owned_pending(
-                        pending_strategy,
-                        shutdown_requested,
-                        &metadata,
-                    ) {
+                    if should_accept_server_owned_pending(shutdown_requested, &metadata) {
                         return Ok(PendingPublishPollOutcome::Pending(metadata));
                     }
                     return Err(error).context("Failed to poll pending publish status");
@@ -1570,11 +1521,7 @@ impl ApiClient {
                     );
                 }
                 _ => {
-                    if should_accept_server_owned_pending(
-                        pending_strategy,
-                        shutdown_requested,
-                        &metadata,
-                    ) {
+                    if should_accept_server_owned_pending(shutdown_requested, &metadata) {
                         return Ok(PendingPublishPollOutcome::Pending(metadata));
                     }
 
@@ -1987,13 +1934,11 @@ fn server_owned_pending_publish(metadata: &PendingMetadata) -> bool {
 }
 
 fn should_accept_server_owned_pending(
-    pending_strategy: PendingPublishStrategy,
     shutdown_requested: Option<&AtomicBool>,
     metadata: &PendingMetadata,
 ) -> bool {
     server_owned_pending_publish(metadata)
-        && (pending_strategy == PendingPublishStrategy::AcceptServerOwnedPending
-            || shutdown_requested.is_some_and(|flag| flag.load(Ordering::Acquire)))
+        && shutdown_requested.is_some_and(|flag| flag.load(Ordering::Acquire))
 }
 
 fn cache_confirm_response_from_tag_pointer(
@@ -2640,106 +2585,6 @@ mod tests {
         unsafe {
             std::env::remove_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV);
         }
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn test_confirm_accept_pending_publish_returns_pending_metadata() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
-
-        if !networking_available() {
-            eprintln!(
-                "skipping test_confirm_accept_pending_publish_returns_pending_metadata: networking disabled in sandbox"
-            );
-            return;
-        }
-
-        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
-
-        let mut server = mockito::Server::new_async().await;
-        let capabilities = server
-            .mock("GET", "/v2/capabilities")
-            .match_header("authorization", "Bearer test-token")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                r#"{"features":{"tag_publish_v2":true,"pending_publish_status_v2":true,"upload_sessions_v2":true,"cas_publish_bootstrap_if_match":"0"}}"#,
-            )
-            .create_async()
-            .await;
-        let pointer = server
-            .mock("GET", "/v2/workspaces/ns/ws/caches/tags/test-tag/pointer")
-            .match_header("authorization", "Bearer test-token")
-            .with_status(404)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
-            .create_async()
-            .await;
-        let publish = server
-            .mock("PUT", "/v2/workspaces/ns/ws/caches/tags/test-tag/publish")
-            .match_header("authorization", "Bearer test-token")
-            .match_header("if-match", "0")
-            .match_header("x-boringcache-pending-publish-poll", "1")
-            .match_header("content-type", Matcher::Regex("application/json".to_string()))
-            .with_status(423)
-            .with_header("content-type", "application/json")
-            .with_body(
-                r#"{"success":false,"error":"upload not yet fully verified in storage — retry after upload completes","code":"pending_publish","details":{"upload_session_id":"session-1","publish_attempt_id":"attempt-1","retry_after_seconds":1,"poll_path":"/v2/workspaces/ns/ws/upload-sessions/session-1"}}"#,
-            )
-            .create_async()
-            .await;
-
-        std::env::set_var("BORINGCACHE_API_URL", server.url());
-
-        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
-            .expect("client should initialize");
-
-        let request = cache::ConfirmRequest {
-            manifest_digest: digest_for(1),
-            manifest_size: 123,
-            manifest_etag: None,
-            archive_size: None,
-            archive_etag: None,
-            blob_count: Some(2),
-            blob_total_size_bytes: Some(456),
-            file_count: Some(2),
-            uncompressed_size: None,
-            compressed_size: None,
-            storage_mode: Some("cas".to_string()),
-            tag: Some("test-tag".to_string()),
-        };
-
-        let result = client
-            .confirm_accept_pending_publish("ns/ws", "entry-1", &request)
-            .await
-            .expect("pending publish should be accepted");
-
-        match result {
-            ConfirmPublishResult::Pending(metadata) => {
-                assert_eq!(metadata.code.as_deref(), Some("pending_publish"));
-                assert_eq!(metadata.upload_session_id.as_deref(), Some("session-1"));
-                assert_eq!(metadata.publish_attempt_id.as_deref(), Some("attempt-1"));
-                assert_eq!(
-                    metadata.poll_path.as_deref(),
-                    Some("/v2/workspaces/ns/ws/upload-sessions/session-1")
-                );
-            }
-            ConfirmPublishResult::Published(_) => {
-                panic!("expected pending publish result")
-            }
-        }
-
-        capabilities.assert_async().await;
-        pointer.assert_async().await;
-        publish.assert_async().await;
-
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        }
-        std::env::remove_var("BORINGCACHE_API_URL");
     }
 
     #[test]

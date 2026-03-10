@@ -854,6 +854,7 @@ async fn flush_pending_on_shutdown(state: &AppState) {
     flush_cache_ops(state).await;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let mut expected_root_cache_entry_id: Option<String> = None;
 
     loop {
         let pending_entries = {
@@ -873,6 +874,9 @@ async fn flush_pending_on_shutdown(state: &AppState) {
                 pending.entry_count()
             };
             if pending_after_flush == 0 {
+                if let Some(cache_entry_id) = expected_root_cache_entry_id.as_deref() {
+                    wait_for_root_tag_visibility(state, cache_entry_id, deadline).await;
+                }
                 return;
             }
             continue;
@@ -880,7 +884,15 @@ async fn flush_pending_on_shutdown(state: &AppState) {
 
         if let Some(_flush_guard) = cache_registry::try_schedule_flush(state) {
             match cache_registry::flush_kv_index_on_shutdown(state).await {
-                cache_registry::FlushResult::Ok | cache_registry::FlushResult::Permanent => {
+                cache_registry::FlushResult::Ok => {
+                    expected_root_cache_entry_id = {
+                        let published = state.kv_published_index.read().await;
+                        published.cache_entry_id().map(|value| value.to_string())
+                    };
+                    let mut gate = state.kv_next_flush_at.write().await;
+                    *gate = None;
+                }
+                cache_registry::FlushResult::Permanent => {
                     let mut gate = state.kv_next_flush_at.write().await;
                     *gate = None;
                 }
@@ -910,6 +922,54 @@ async fn flush_pending_on_shutdown(state: &AppState) {
             }
         };
         tokio::time::sleep(delay.min(std::time::Duration::from_secs(10))).await;
+    }
+}
+
+async fn wait_for_root_tag_visibility(
+    state: &AppState,
+    expected_cache_entry_id: &str,
+    deadline: std::time::Instant,
+) {
+    let tag = state.registry_root_tag.trim().to_string();
+    let mut attempts = 0u32;
+
+    loop {
+        attempts = attempts.saturating_add(1);
+
+        match state
+            .api_client
+            .tag_pointer(&state.workspace, &tag, None)
+            .await
+        {
+            Ok(crate::api::client::TagPointerPollResult::Changed { pointer, .. }) => {
+                if pointer.cache_entry_id.as_deref() == Some(expected_cache_entry_id) {
+                    eprintln!(
+                        "Shutdown: root tag visible for cache_entry_id={} after {} poll(s)",
+                        expected_cache_entry_id, attempts
+                    );
+                    return;
+                }
+            }
+            Ok(crate::api::client::TagPointerPollResult::NotModified) => {}
+            Ok(crate::api::client::TagPointerPollResult::NotFound) => {}
+            Err(error) => {
+                log::warn!(
+                    "Shutdown: root tag visibility poll failed for {}: {}",
+                    expected_cache_entry_id,
+                    error
+                );
+            }
+        }
+
+        if std::time::Instant::now() >= deadline {
+            eprintln!(
+                "Shutdown: root tag did not converge to cache_entry_id={} before timeout",
+                expected_cache_entry_id
+            );
+            return;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
 

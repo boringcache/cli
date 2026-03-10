@@ -551,143 +551,37 @@ jobs:
       - name: Create release (if not release event)
         if: github.event_name != 'release' && steps.release_exists.outputs.exists != 'true'
         id: create_release
-        uses: softprops/action-gh-release@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.get_tag.outputs.tag }}
-          name: "BoringCache CLI ${{ steps.get_tag.outputs.tag }}"
-          body: |
-            ## BoringCache CLI Release ${{ steps.get_tag.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.get_tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "BoringCache CLI ${{ steps.get_tag.outputs.tag }}" \
+            --notes "## BoringCache CLI Release ${{ steps.get_tag.outputs.tag }}
 
-            ### 🚀 What's New
-            - `run` command: transactional cache wrapper (restore → exec → save) with signal handling and correct exit codes
-            - Maven cache-registry adapter support
-            - `BORINGCACHE_TOKEN_FILE` env var: read API token from a file path (useful in Docker builds with secret mounts)
-            - `delete` now also purges proxy/cache-registry internal data for the deleted tag
-            - Unified `cache-registry` command with native OCI + Bazel + Gradle + Maven + Nx + Turborepo + sccache + Go support
-            - Cross-platform support: Linux (AMD64/ARM64), macOS (Apple Silicon), Windows (AMD64)
-            - Zstd-compressed tar archives with optional age encryption
-            - Streaming I/O for large caches
-            - Server-signed manifests with warn-only verification
+          ### What's New
+          - \`run\` command: transactional cache wrapper (restore → exec → save) with signal handling and correct exit codes
+          - Maven cache-registry adapter support
+          - \`BORINGCACHE_TOKEN_FILE\` env var: read API token from a file path (useful in Docker builds with secret mounts)
+          - \`delete\` now also purges proxy/cache-registry internal data for the deleted tag
+          - Unified \`cache-registry\` command with native OCI + Bazel + Gradle + Maven + Nx + Turborepo + sccache + Go support
+          - Cross-platform support: Linux (AMD64/ARM64), macOS (Apple Silicon), Windows (AMD64)
+          - Zstd-compressed tar archives with optional age encryption
+          - Streaming I/O for large caches
+          - Server-signed manifests with warn-only verification
 
-            ### 📦 Downloads
+          ### Downloads
+          See the assets below for platform-specific binaries. Each release includes a \`SHA256SUMS\` file for integrity verification.
 
-            #### CLI Binaries (GitHub-hosted runners)
-            **Generic Linux (Recommended for wide compatibility)**
-            - **Linux AMD64**: `boringcache-linux-amd64` (Ubuntu 22.04 base)
-            - **Linux ARM64**: `boringcache-linux-arm64` (Ubuntu 22.04 base)
-            
-            **Ubuntu (Native builds)**
-            - **Ubuntu 22.04 AMD64**: `boringcache-ubuntu-22.04-amd64`
-            - **Ubuntu 22.04 ARM64**: `boringcache-ubuntu-22.04-arm64`
-            - **Ubuntu 24.04 AMD64**: `boringcache-ubuntu-24.04-amd64`
-            - **Ubuntu 24.04 ARM64**: `boringcache-ubuntu-24.04-arm64`
-            - **Ubuntu 25.04 AMD64**: `boringcache-ubuntu-25.04-amd64`
-            - **Ubuntu 25.04 ARM64**: `boringcache-ubuntu-25.04-arm64`
-            
-            **Debian (Docker builds for precise compatibility)**
-            - **Debian Bookworm (12) AMD64**: `boringcache-debian-bookworm-amd64`
-            - **Debian Bookworm (12) ARM64**: `boringcache-debian-bookworm-arm64`
-            - **Debian Bullseye (11) AMD64**: `boringcache-debian-bullseye-amd64`
-            - **Debian Bullseye (11) ARM64**: `boringcache-debian-bullseye-arm64`
-            
-            **Alpine Linux (musl, statically linked)**
-            - **Alpine AMD64**: `boringcache-alpine-amd64`
-            
-            **Arch Linux (Latest rolling release)**
-            - **Arch AMD64**: `boringcache-arch-amd64`
-            - **Arch ARM64**: `boringcache-arch-arm64`
-            
-            **macOS (Native builds)**
-            - **macOS 14+ ARM64 (M1/M2/M3)**: `boringcache-macos-14-arm64`
-            - **macOS 15+ ARM64 (M1/M2/M3/M4)**: `boringcache-macos-15-arm64`
-            
-            **Windows (Native builds)**
-            - **Windows Server 2022 AMD64**: `boringcache-windows-2022-amd64.exe`
+          ### Usage
+          \`\`\`bash
+          boringcache auth --token your-api-token
+          boringcache run my-workspace \"node-deps:node_modules,build-cache:target\" -- npm test
+          boringcache ls my-workspace
+          \`\`\`
 
-            ### 🔧 Installation
-
-            #### Ubuntu 22.04
-            ```bash
-            # AMD64
-            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-ubuntu-22.04-amd64 -o boringcache
-            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
-            
-            # ARM64
-            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-ubuntu-22.04-arm64 -o boringcache
-            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
-            ```
-
-            #### Ubuntu 24.04
-            ```bash
-            # AMD64
-            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-ubuntu-24.04-amd64 -o boringcache
-            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
-
-            # ARM64
-            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-ubuntu-24.04-arm64 -o boringcache
-            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
-            ```
-
-            #### Ubuntu 25.04
-            ```bash
-            # AMD64
-            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-ubuntu-25.04-amd64 -o boringcache
-            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
-
-            # ARM64
-            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-ubuntu-25.04-arm64 -o boringcache
-            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
-            ```
-
-            #### macOS
-            ```bash
-            # Apple Silicon (macOS 14+)
-            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-macos-14-arm64 -o boringcache
-            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
-            
-            # Apple Silicon (macOS 15+ latest)
-            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-macos-15-arm64 -o boringcache
-            chmod +x boringcache && sudo mv boringcache /usr/local/bin/
-            ```
-
-            #### Windows (PowerShell)
-            ```powershell
-            # Windows 10+ / Server 2019+
-            Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-windows-2022-amd64.exe" -OutFile "boringcache.exe"
-            # Add to PATH or move to desired location
-            ```
-
-            ### 🔐 Verify Downloads
-
-            Each release includes a `SHA256SUMS` file for integrity verification:
-
-            ```bash
-            # Download the binary and checksums
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/boringcache-linux-amd64
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.get_tag.outputs.tag }}/SHA256SUMS
-
-            # Verify the binary
-            sha256sum -c SHA256SUMS --ignore-missing
-            ```
-
-            ### ⚡ Usage Examples
-            ```bash
-            # Authenticate
-            boringcache auth --token your-api-token
-
-            # Wrap restore -> command -> save in one call
-            boringcache run my-workspace "node-deps:node_modules,build-cache:target" -- npm test
-
-            # List cache entries
-            boringcache ls my-workspace
-            ```
-
-            ---
-            **Releases**: https://github.com/${{ github.repository }}/releases
-          draft: false
-          prerelease: false
+          ---
+          **Releases**: https://github.com/${{ github.repository }}/releases"
 
 
   # Upload CLI binaries to release
@@ -725,12 +619,13 @@ jobs:
           path: ./
 
       - name: Upload release asset
-        uses: softprops/action-gh-release@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ needs.create-release.outputs.tag }}
-          files: ./${{ matrix.binary }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ needs.create-release.outputs.tag }}" \
+            "./${{ matrix.binary }}" \
+            --repo "${{ github.repository }}" \
+            --clobber
 
   # Generate and upload SHA256 checksums
   generate-checksums:
@@ -763,12 +658,13 @@ jobs:
           cat SHA256SUMS
 
       - name: Upload SHA256SUMS
-        uses: softprops/action-gh-release@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ needs.create-release.outputs.tag }}
-          files: ./SHA256SUMS
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ needs.create-release.outputs.tag }}" \
+            "./SHA256SUMS" \
+            --repo "${{ github.repository }}" \
+            --clobber
 
   # Summary job
   release-summary:
