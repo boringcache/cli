@@ -765,6 +765,15 @@ struct AliasBinding {
     write_scope_tag: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct AliasTagManifest {
+    manifest_root_digest: String,
+    manifest_size: u64,
+    blob_count: u64,
+    blob_total_size_bytes: u64,
+    total_size_bytes: u64,
+}
+
 fn alias_tags_for_manifest(
     primary_tag: &str,
     manifest_digest: &str,
@@ -805,28 +814,24 @@ async fn bind_alias_tag(
     state: &AppState,
     alias_tag: &str,
     write_scope_tag: Option<&str>,
-    manifest_root_digest: &str,
-    manifest_size: u64,
-    blob_count: u64,
-    blob_total_size_bytes: u64,
-    total_size_bytes: u64,
+    manifest: &AliasTagManifest,
 ) -> Result<(), String> {
     let alias_request = SaveRequest {
         tag: alias_tag.to_string(),
         write_scope_tag: write_scope_tag.map(ToOwned::to_owned),
-        manifest_root_digest: manifest_root_digest.to_string(),
+        manifest_root_digest: manifest.manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
+        blob_count: Some(manifest.blob_count),
+        blob_total_size_bytes: Some(manifest.blob_total_size_bytes),
         cas_layout: Some("oci-v1".to_string()),
         manifest_format_version: Some(1),
-        total_size_bytes,
+        total_size_bytes: manifest.total_size_bytes,
         uncompressed_size: None,
         compressed_size: None,
-        file_count: Some(blob_count.min(u32::MAX as u64) as u32),
-        expected_manifest_digest: Some(manifest_root_digest.to_string()),
-        expected_manifest_size: Some(manifest_size),
+        file_count: Some(manifest.blob_count.min(u32::MAX as u64) as u32),
+        expected_manifest_digest: Some(manifest.manifest_root_digest.clone()),
+        expected_manifest_size: Some(manifest.manifest_size),
         force: None,
         use_multipart: None,
         ci_provider: None,
@@ -851,14 +856,14 @@ async fn bind_alias_tag(
     .map_err(|e| format!("save_entry failed: {e}"))?;
 
     let alias_confirm = ConfirmRequest {
-        manifest_digest: manifest_root_digest.to_string(),
-        manifest_size,
+        manifest_digest: manifest.manifest_root_digest.clone(),
+        manifest_size: manifest.manifest_size,
         manifest_etag: None,
         archive_size: None,
         archive_etag: None,
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        file_count: Some(blob_count.min(u32::MAX as u64) as u32),
+        blob_count: Some(manifest.blob_count),
+        blob_total_size_bytes: Some(manifest.blob_total_size_bytes),
+        file_count: Some(manifest.blob_count.min(u32::MAX as u64) as u32),
         uncompressed_size: None,
         compressed_size: None,
         storage_mode: Some("cas".to_string()),
@@ -1820,6 +1825,14 @@ async fn put_manifest(
     let blob_total_size_bytes: u64 = blob_descriptors.iter().map(|b| b.size_bytes).sum();
     let total_size_bytes = blob_total_size_bytes + manifest_body.len() as u64;
 
+    let alias_manifest = AliasTagManifest {
+        manifest_root_digest: manifest_root_digest.clone(),
+        manifest_size: pointer_bytes.len() as u64,
+        blob_count,
+        blob_total_size_bytes,
+        total_size_bytes,
+    };
+
     let save_request = SaveRequest {
         tag: tag.clone(),
         write_scope_tag: Some(write_scope_tag.clone()),
@@ -1835,7 +1848,7 @@ async fn put_manifest(
         compressed_size: None,
         file_count: Some(blob_count.min(u32::MAX as u64) as u32),
         expected_manifest_digest: Some(manifest_root_digest.clone()),
-        expected_manifest_size: Some(pointer_bytes.len() as u64),
+        expected_manifest_size: Some(alias_manifest.manifest_size),
         force: None,
         use_multipart: None,
         ci_provider: None,
@@ -2057,11 +2070,7 @@ async fn put_manifest(
                 &state,
                 &alias.tag,
                 alias.write_scope_tag.as_deref(),
-                &manifest_root_digest,
-                pointer_bytes.len() as u64,
-                blob_count,
-                blob_total_size_bytes,
-                total_size_bytes,
+                &alias_manifest,
             )
             .await
             {

@@ -4170,7 +4170,7 @@ async fn upload_blobs(
             .saturating_add(stats.missing_local_count);
         if total_requested > 0
             && (completed_requested == total_requested
-                || completed_requested % 1000 == 0
+                || completed_requested.is_multiple_of(1000)
                 || completed_requested == 1)
         {
             eprintln!(
