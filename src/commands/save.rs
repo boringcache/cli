@@ -452,14 +452,6 @@ async fn save_single_archive_entry(
         .transpose()?;
 
     let manifest_files = manifest_files_from_draft(&draft);
-    let (manifest_bytes, expected_manifest_digest, expected_manifest_size) = build_manifest_bytes(
-        &tag,
-        &manifest_root_digest,
-        &manifest_files,
-        encrypt,
-        recipient_str,
-        age_recipient.as_ref(),
-    )?;
 
     let check_step = session.start_step("Checking cache".to_string(), None)?;
     let check_response = api_client
@@ -533,6 +525,7 @@ async fn save_single_archive_entry(
         return Ok(SaveStatus::AlreadyExists);
     }
 
+    let mut digest_existing_cache_entry_id: Option<String> = None;
     if !cache_exists && !force {
         let digest_check_response = api_client
             .check_manifests(
@@ -557,69 +550,7 @@ async fn save_single_archive_entry(
 
                     if digest_exists {
                         if let Some(cache_entry_id) = result.cache_entry_id.as_deref() {
-                            progress_info(&reporter, "  Cache exists under another tag; binding");
-                            let confirm_request = ConfirmRequest {
-                                manifest_digest: expected_manifest_digest.clone(),
-                                manifest_size: expected_manifest_size,
-                                manifest_etag: None,
-                                archive_size: Some(0),
-                                archive_etag: None,
-                                blob_count: None,
-                                blob_total_size_bytes: None,
-                                file_count: Some(file_count),
-                                uncompressed_size: Some(total_size_bytes),
-                                compressed_size: None,
-                                storage_mode: Some("archive".to_string()),
-                                tag: Some(tag.clone()),
-                            };
-
-                            match api_client
-                                .confirm(&workspace, cache_entry_id, &confirm_request)
-                                .await
-                            {
-                                Ok(_) => {
-                                    complete_skipped_step(
-                                        &mut session,
-                                        "Creating archive",
-                                        "skipped — digest exists",
-                                    )?;
-                                    complete_skipped_step(
-                                        &mut session,
-                                        "Creating cache entry",
-                                        "skipped — digest exists",
-                                    )?;
-                                    complete_skipped_step(
-                                        &mut session,
-                                        "Uploading archive",
-                                        "skipped — digest exists",
-                                    )?;
-                                    complete_skipped_step(
-                                        &mut session,
-                                        "Confirming upload",
-                                        "skipped — digest exists",
-                                    )?;
-
-                                    let summary = Summary {
-                                        size_bytes: total_size_bytes,
-                                        file_count,
-                                        digest: Some(manifest_root_digest.clone()),
-                                        path: Some(path.clone()),
-                                    };
-                                    session.complete(summary)?;
-                                    drop(reporter);
-                                    progress_system.shutdown()?;
-                                    return Ok(SaveStatus::AlreadyExists);
-                                }
-                                Err(err) => {
-                                    progress_warning(
-                                        &reporter,
-                                        format!(
-                                            "  Failed to bind tag to existing cache ({}); proceeding",
-                                            err
-                                        ),
-                                    );
-                                }
-                            }
+                            digest_existing_cache_entry_id = Some(cache_entry_id.to_string());
                         }
                     }
                 }
@@ -676,7 +607,7 @@ async fn save_single_archive_entry(
     let archive_duration = archive_started.elapsed();
     archive_step.complete()?;
 
-    let (final_archive_path, final_compressed_size) = if encrypt {
+    let (final_archive_path, final_compressed_size, archive_content_hash) = if encrypt {
         let encrypt_step = session.start_step("Encrypting archive".to_string(), None)?;
         let age_recipient = age_recipient.as_ref().ok_or_else(|| {
             anyhow!(
@@ -684,27 +615,104 @@ async fn save_single_archive_entry(
             )
         })?;
 
-        let encrypted_path =
+        let encrypted_archive =
             crate::archive::encrypt_archive(archive_info.archive_path.as_ref(), age_recipient)?;
-        let encrypted_size = std::fs::metadata::<&std::path::Path>(encrypted_path.as_ref())?.len();
 
         progress_info(
             &reporter,
             format!(
                 "  Encrypted archive: {} → {}",
                 crate::progress::format_bytes(archive_info.compressed_size),
-                crate::progress::format_bytes(encrypted_size)
+                crate::progress::format_bytes(encrypted_archive.size_bytes)
             ),
         );
 
         encrypt_step.complete()?;
-        (encrypted_path, encrypted_size)
+        (
+            encrypted_archive.archive_path,
+            encrypted_archive.size_bytes,
+            encrypted_archive.content_hash,
+        )
     } else {
-        (archive_info.archive_path, archive_info.compressed_size)
+        (
+            archive_info.archive_path,
+            archive_info.compressed_size,
+            archive_info.content_hash.clone(),
+        )
     };
 
     let total_uncompressed_size = archive_info.uncompressed_size;
     let total_compressed_size = final_compressed_size;
+    let (manifest_bytes, expected_manifest_digest, expected_manifest_size) = build_manifest_bytes(
+        &tag,
+        &manifest_root_digest,
+        &manifest_files,
+        &archive_content_hash,
+        encrypt,
+        recipient_str,
+        age_recipient.as_ref(),
+    )?;
+
+    if let Some(cache_entry_id) = digest_existing_cache_entry_id.as_deref() {
+        progress_info(&reporter, "  Cache exists under another tag; binding");
+        let confirm_request = ConfirmRequest {
+            manifest_digest: expected_manifest_digest.clone(),
+            manifest_size: expected_manifest_size,
+            manifest_etag: None,
+            archive_size: Some(0),
+            archive_etag: None,
+            blob_count: None,
+            blob_total_size_bytes: None,
+            file_count: Some(file_count),
+            uncompressed_size: Some(total_size_bytes),
+            compressed_size: None,
+            storage_mode: Some("archive".to_string()),
+            tag: Some(tag.clone()),
+        };
+
+        match api_client
+            .confirm(&workspace, cache_entry_id, &confirm_request)
+            .await
+        {
+            Ok(_) => {
+                complete_skipped_step(
+                    &mut session,
+                    "Creating cache entry",
+                    "skipped — digest exists",
+                )?;
+                complete_skipped_step(
+                    &mut session,
+                    "Uploading archive",
+                    "skipped — digest exists",
+                )?;
+                complete_skipped_step(
+                    &mut session,
+                    "Confirming upload",
+                    "skipped — digest exists",
+                )?;
+
+                let summary = Summary {
+                    size_bytes: total_size_bytes,
+                    file_count,
+                    digest: Some(manifest_root_digest.clone()),
+                    path: Some(path.clone()),
+                };
+                session.complete(summary)?;
+                drop(reporter);
+                progress_system.shutdown()?;
+                return Ok(SaveStatus::AlreadyExists);
+            }
+            Err(err) => {
+                progress_warning(
+                    &reporter,
+                    format!(
+                        "  Failed to bind tag to existing cache ({}); proceeding",
+                        err
+                    ),
+                );
+            }
+        }
+    }
 
     let use_multipart = crate::archive::should_use_multipart_upload(total_compressed_size);
 
@@ -2213,6 +2221,7 @@ fn build_manifest_bytes(
     tag: &str,
     manifest_root_digest: &str,
     manifest_files: &[ManifestFile],
+    archive_content_hash: &str,
     encrypt: bool,
     recipient_str: Option<&str>,
     age_recipient: Option<&age::x25519::Recipient>,
@@ -2232,6 +2241,7 @@ fn build_manifest_bytes(
         tag,
         manifest_root_digest,
         manifest_files,
+        archive_content_hash,
         encryption_metadata,
         signature_metadata,
     )?;
@@ -2288,6 +2298,7 @@ fn serialize_manifest(
     tag: &str,
     root_digest: &str,
     files: &[ManifestFile],
+    archive_content_hash: &str,
     encryption: Option<crate::manifest::EncryptionMetadata>,
     signature: Option<crate::manifest::SignatureMetadata>,
 ) -> Result<Vec<u8>> {
@@ -2305,7 +2316,11 @@ fn serialize_manifest(
             removed_count: 0,
         },
         entry: None,
-        archive: None,
+        archive: Some(crate::manifest::ManifestArchive {
+            content_hash: Some(archive_content_hash.to_string()),
+            compression: "zstd".to_string(),
+            created_at: chrono::Utc::now(),
+        }),
         files: files.to_vec(),
         encryption,
         signature,
@@ -2427,5 +2442,28 @@ mod tests {
 
         assert!(!is_cache_pending_error(&err));
         assert_eq!(conflict_message_from_error(&err), None);
+    }
+
+    #[test]
+    fn serialize_manifest_includes_archive_content_hash() {
+        let bytes = serialize_manifest(
+            "cache-tag",
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            &[],
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let manifest: crate::manifest::Manifest = ciborium::from_reader(&bytes[..]).unwrap();
+        let archive = manifest
+            .archive
+            .expect("archive metadata should be present");
+        assert_eq!(
+            archive.content_hash.as_deref(),
+            Some("sha256:2222222222222222222222222222222222222222222222222222222222222222")
+        );
+        assert_eq!(archive.compression, "zstd");
     }
 }

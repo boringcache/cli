@@ -1308,6 +1308,33 @@ async fn process_restore_archive(
     .await
     .context("Archive download failed")?;
 
+    if let Some(expected_archive_digest) = manifest
+        .archive
+        .as_ref()
+        .and_then(|archive| archive.content_hash.as_ref())
+    {
+        let actual_archive_digest = tokio::task::spawn_blocking({
+            let archive_path = archive_file_path.clone();
+            move || crate::archive::compute_archive_digest(&archive_path)
+        })
+        .await
+        .context("Archive digest task failed")??;
+
+        if expected_archive_digest != &actual_archive_digest {
+            let reason = format!(
+                "Archive bytes digest mismatch for {} (expected {}, got {})",
+                hit.tag, expected_archive_digest, actual_archive_digest
+            );
+            let _ = reporter.warning(reason.clone());
+            ui::warn(&reason);
+            session.error(reason.clone())?;
+            return Ok(RestoreOutcome::Ignored {
+                tag: hit.tag.clone(),
+                reason,
+            });
+        }
+    }
+
     let download_elapsed = stage_start.elapsed();
     download_step.complete()?;
 
@@ -2058,6 +2085,11 @@ async fn process_restore_file(
                     .as_ref()
                     .ok_or_else(|| anyhow!("Symlink entry missing target for {}", entry.path))?
                     .clone();
+                crate::cas_file::validate_symlink_target(
+                    target_root,
+                    &destination,
+                    Path::new(&link_target),
+                )?;
                 symlink_jobs.push((destination, link_target));
             }
         }

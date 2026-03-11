@@ -1,0 +1,71 @@
+name: CLI Integrity E2E
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  RUST_VERSION: "1.89"
+  BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+  BORINGCACHE_E2E_WORKSPACE: ${{ vars.BORINGCACHE_E2E_WORKSPACE || github.repository }}
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  integrity-e2e:
+    name: Integrity E2E
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: cli-integrity-e2e-${{ github.ref_name }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Rust (BoringCache)
+        id: boringcache-rust
+        continue-on-error: true
+        uses: boringcache/rust-action@v1
+        with:
+          workspace: ${{ github.repository }}
+          rust-version: ${{ env.RUST_VERSION }}
+          cache-tag: "rust-${{ env.RUST_VERSION }}-integrity-e2e"
+          sccache: "true"
+          sccache-mode: "proxy"
+          cache-target: "true"
+
+      - name: Setup Rust (Fallback)
+        if: steps.boringcache-rust.outcome == 'failure'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Build CLI
+        run: cargo build --locked
+
+      - name: Require BoringCache token
+        run: |
+          if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+            echo "BORINGCACHE_API_TOKEN secret is required for integrity e2e"
+            exit 1
+          fi
+
+      - name: Run integrity e2e
+        run: |
+          bash ./scripts/e2e-cli-integrity-test.sh
+        env:
+          WORKSPACE: ${{ env.BORINGCACHE_E2E_WORKSPACE }}
+          LOG_DIR: ${{ github.workspace }}/e2e-logs
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-integrity-e2e-logs
+          path: e2e-logs/

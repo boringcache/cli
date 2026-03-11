@@ -558,6 +558,28 @@ async fn initial_restore(
     )
     .await?;
 
+    if let Some(expected_archive_digest) = manifest
+        .archive
+        .as_ref()
+        .and_then(|archive| archive.content_hash.as_ref())
+    {
+        let actual_archive_digest = tokio::task::spawn_blocking({
+            let archive_path = archive_path.clone();
+            move || crate::archive::compute_archive_digest(&archive_path)
+        })
+        .await
+        .context("Archive digest task failed")??;
+
+        if expected_archive_digest != &actual_archive_digest {
+            let reason = format!(
+                "Archive bytes digest mismatch for {} (expected {}, got {})",
+                hit.tag, expected_archive_digest, actual_archive_digest
+            );
+            ui::warn(&reason);
+            return Ok(RestoreAction::NoRemoteCache);
+        }
+    }
+
     let final_archive_path = if hit.encrypted || manifest.encryption.is_some() {
         if verbose {
             ui::info("  Decrypting archive...");
@@ -1190,6 +1212,11 @@ async fn initial_restore_file(
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Missing symlink target for {}", entry.path))?
                     .clone();
+                crate::cas_file::validate_symlink_target(
+                    local_path,
+                    &destination,
+                    Path::new(&link_target),
+                )?;
                 symlink_jobs.push((destination, link_target));
             }
         }
@@ -1563,7 +1590,7 @@ async fn sync_to_remote_archive(
         .map(crate::encryption::parse_recipient)
         .transpose()?;
 
-    let (final_archive_path, final_compressed_size) = if encrypt {
+    let (final_archive_path, final_compressed_size, archive_content_hash) = if encrypt {
         if verbose {
             ui::info("  Encrypting archive...");
         }
@@ -1573,21 +1600,28 @@ async fn sync_to_remote_archive(
             )
         })?;
 
-        let encrypted_path =
+        let encrypted_archive =
             crate::archive::encrypt_archive(archive_info.archive_path.as_ref(), age_recipient)?;
-        let encrypted_size = std::fs::metadata::<&std::path::Path>(encrypted_path.as_ref())?.len();
 
         if verbose {
             ui::info(&format!(
                 "  Encrypted archive: {} → {}",
                 crate::progress::format_bytes(archive_info.compressed_size),
-                crate::progress::format_bytes(encrypted_size)
+                crate::progress::format_bytes(encrypted_archive.size_bytes)
             ));
         }
 
-        (encrypted_path, encrypted_size)
+        (
+            encrypted_archive.archive_path,
+            encrypted_archive.size_bytes,
+            encrypted_archive.content_hash,
+        )
     } else {
-        (archive_info.archive_path, archive_info.compressed_size)
+        (
+            archive_info.archive_path,
+            archive_info.compressed_size,
+            archive_info.content_hash.clone(),
+        )
     };
 
     let encryption_metadata = if encrypt {
@@ -1614,7 +1648,11 @@ async fn sync_to_remote_archive(
             removed_count: 0,
         },
         entry: None,
-        archive: None,
+        archive: Some(crate::manifest::ManifestArchive {
+            content_hash: Some(archive_content_hash),
+            compression: "zstd".to_string(),
+            created_at: chrono::Utc::now(),
+        }),
         files: archive_info.manifest_files.clone(),
         encryption: encryption_metadata,
         signature: None,

@@ -1,6 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -18,7 +19,51 @@ pub struct TarArchiveInfo {
     pub archive_path: tempfile::TempPath,
     pub uncompressed_size: u64,
     pub compressed_size: u64,
+    pub content_hash: String,
     pub manifest_files: Vec<ManifestFile>,
+}
+
+pub struct EncryptedArchive {
+    pub archive_path: tempfile::TempPath,
+    pub size_bytes: u64,
+    pub content_hash: String,
+}
+
+struct HashingWriter<W> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W> HashingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    fn finish_hash(self) -> String {
+        let digest = self.hasher.finalize();
+        let mut output = String::with_capacity(digest.len() * 2 + 7);
+        output.push_str("sha256:");
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(output, "{byte:02x}");
+        }
+        output
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.hasher.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 pub async fn create_tar_archive(
@@ -71,7 +116,7 @@ pub async fn create_tar_archive(
         ));
     }
 
-    let compressed_size = tokio::task::spawn_blocking(move || {
+    let (compressed_size, content_hash) = tokio::task::spawn_blocking(move || {
         write_archive(
             &base_path_owned,
             &archive_path_owned,
@@ -101,6 +146,7 @@ pub async fn create_tar_archive(
         archive_path: archive_temp_path,
         uncompressed_size: total_size,
         compressed_size,
+        content_hash,
         manifest_files,
     })
 }
@@ -111,14 +157,15 @@ fn write_archive(
     manifest_files: &[ManifestFile],
     compression_level: i32,
     progress_callback: Option<Box<dyn Fn(usize, usize) + Send>>,
-) -> Result<u64> {
+) -> Result<(u64, String)> {
     let base_path_buf = PathBuf::from(base_path);
     let resources = SystemResources::detect();
 
     let output_file = File::create(archive_path)?;
     let writer = BufWriter::with_capacity(tar_buffer_size(resources), output_file);
+    let hashing_writer = HashingWriter::new(writer);
 
-    let mut encoder = ZstdEncoder::new(writer, compression_level)?;
+    let mut encoder = ZstdEncoder::new(hashing_writer, compression_level)?;
     encoder.multithread(resources.cpu_cores.min(resources.max_parallel_chunks) as u32)?;
     encoder.window_log(window_log(resources))?;
 
@@ -157,9 +204,13 @@ fn write_archive(
     }
 
     let encoder = tar_builder.into_inner()?;
-    encoder.finish()?;
+    let mut hashing_writer = encoder.finish()?;
+    hashing_writer.flush()?;
 
-    Ok(fs::metadata(archive_path)?.len())
+    Ok((
+        fs::metadata(archive_path)?.len(),
+        hashing_writer.finish_hash(),
+    ))
 }
 
 pub async fn extract_tar_archive(
@@ -297,21 +348,21 @@ impl ExtractionConfig {
 
 enum ExtractJob {
     Directory {
-        path: PathBuf,
+        full_path: PathBuf,
         mode: Option<u32>,
     },
     File {
-        path: PathBuf,
+        full_path: PathBuf,
         data: Vec<u8>,
         mode: Option<u32>,
         mtime: Option<u64>,
     },
     Symlink {
-        path: PathBuf,
+        full_path: PathBuf,
         target: PathBuf,
     },
     LargeFile {
-        path: PathBuf,
+        full_path: PathBuf,
         mode: Option<u32>,
         mtime: Option<u64>,
     },
@@ -345,97 +396,98 @@ fn extract_parallel(
     let workers: Vec<_> = (0..config.worker_count)
         .map(|_| {
             let rx = job_rx.clone();
-            let target = target_path.clone();
             let counter = files_extracted.clone();
             let callback = progress_callback.clone();
-            thread::spawn(move || loop {
-                let job = {
-                    let guard = rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    guard.recv()
-                };
+            thread::spawn(move || -> Result<()> {
+                loop {
+                    let job = {
+                        let guard = rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                        guard.recv()
+                    };
 
-                match job {
-                    Ok(ExtractJob::Directory { path, mode }) => {
-                        let full_path = target.join(&path);
-                        if let Err(e) = fs::create_dir_all(&full_path) {
-                            if e.kind() != std::io::ErrorKind::AlreadyExists {
-                                log::warn!("Failed to create directory {:?}: {}", full_path, e);
+                    match job {
+                        Ok(ExtractJob::Directory { full_path, mode }) => {
+                            fs::create_dir_all(&full_path).with_context(|| {
+                                format!("Failed to create directory {}", full_path.display())
+                            })?;
+                            if let Some(m) = mode {
+                                #[cfg(unix)]
+                                {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    fs::set_permissions(&full_path, fs::Permissions::from_mode(m))
+                                        .with_context(|| {
+                                            format!(
+                                                "Failed to set directory permissions {}",
+                                                full_path.display()
+                                            )
+                                        })?;
+                                }
+                                let _ = m;
+                            }
+
+                            let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                            if let Some(ref cb) = callback {
+                                if count.is_multiple_of(1000) {
+                                    cb(count as u64);
+                                }
                             }
                         }
-                        if let Some(m) = mode {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::PermissionsExt;
-                                let _ =
-                                    fs::set_permissions(&full_path, fs::Permissions::from_mode(m));
+                        Ok(ExtractJob::File {
+                            full_path,
+                            data,
+                            mode,
+                            mtime,
+                        }) => {
+                            if let Some(parent) = full_path.parent() {
+                                fs::create_dir_all(parent).with_context(|| {
+                                    format!("Failed to create directory {}", parent.display())
+                                })?;
                             }
-                            let _ = m;
-                        }
-                        let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Some(ref cb) = callback {
-                            if count.is_multiple_of(1000) {
-                                cb(count as u64);
+                            write_file(&full_path, &data, mode, mtime)?;
+
+                            let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                            if let Some(ref cb) = callback {
+                                if count.is_multiple_of(1000) {
+                                    cb(count as u64);
+                                }
                             }
                         }
+                        Ok(ExtractJob::Symlink {
+                            full_path,
+                            target: link_target,
+                        }) => {
+                            if let Some(parent) = full_path.parent() {
+                                fs::create_dir_all(parent).with_context(|| {
+                                    format!("Failed to create directory {}", parent.display())
+                                })?;
+                            }
+                            create_symlink(&full_path, &link_target)?;
+                            counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(ExtractJob::LargeFile {
+                            full_path,
+                            mode,
+                            mtime,
+                        }) => {
+                            if let Some(parent) = full_path.parent() {
+                                fs::create_dir_all(parent).with_context(|| {
+                                    format!("Failed to create directory {}", parent.display())
+                                })?;
+                            }
+                            apply_file_metadata(&full_path, mode, mtime);
+
+                            let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                            if let Some(ref cb) = callback {
+                                if count.is_multiple_of(1000) {
+                                    cb(count as u64);
+                                }
+                            }
+                        }
+                        Err(_) => break,
                     }
-                    Ok(ExtractJob::File {
-                        path,
-                        data,
-                        mode,
-                        mtime,
-                    }) => {
-                        let full_path = target.join(&path);
-                        if let Some(parent) = full_path.parent() {
-                            let _ = fs::create_dir_all(parent);
-                        }
-                        if let Err(e) = write_file(&full_path, &data, mode, mtime) {
-                            log::warn!("Failed to write file {:?}: {}", full_path, e);
-                        }
-                        let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Some(ref cb) = callback {
-                            if count.is_multiple_of(1000) {
-                                cb(count as u64);
-                            }
-                        }
-                    }
-                    Ok(ExtractJob::Symlink {
-                        path,
-                        target: link_target,
-                    }) => {
-                        let full_path = target.join(&path);
-                        if let Some(parent) = full_path.parent() {
-                            let _ = fs::create_dir_all(parent);
-                        }
-                        #[cfg(unix)]
-                        {
-                            let _ = std::os::unix::fs::symlink(&link_target, &full_path);
-                        }
-                        #[cfg(windows)]
-                        {
-                            if link_target.is_dir() {
-                                let _ = std::os::windows::fs::symlink_dir(&link_target, &full_path);
-                            } else {
-                                let _ =
-                                    std::os::windows::fs::symlink_file(&link_target, &full_path);
-                            }
-                        }
-                        counter.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Ok(ExtractJob::LargeFile { path, mode, mtime }) => {
-                        let full_path = target.join(&path);
-                        if let Some(parent) = full_path.parent() {
-                            let _ = fs::create_dir_all(parent);
-                        }
-                        apply_file_metadata(&full_path, mode, mtime);
-                        let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Some(ref cb) = callback {
-                            if count.is_multiple_of(1000) {
-                                cb(count as u64);
-                            }
-                        }
-                    }
-                    Err(_) => break,
                 }
+
+                Ok(())
             })
         })
         .collect();
@@ -457,27 +509,25 @@ fn extract_parallel(
 
         match entry_type {
             tar::EntryType::Directory => {
-                directories.push(ExtractJob::Directory {
-                    path: path.clone(),
-                    mode,
-                });
+                let full_path = crate::cas_file::safe_join_path(&target_path, &path)?;
+                directories.push(ExtractJob::Directory { full_path, mode });
             }
             tar::EntryType::Regular | tar::EntryType::Continuous => {
                 let size = entry.size();
+                let full_path = crate::cas_file::safe_join_path(&target_path, &path)?;
 
                 if size <= config.small_file_threshold {
                     let mut data = Vec::with_capacity(size as usize);
                     std::io::Read::read_to_end(&mut entry, &mut data)?;
                     job_tx
                         .send(ExtractJob::File {
-                            path,
+                            full_path,
                             data,
                             mode,
                             mtime,
                         })
-                        .ok();
+                        .map_err(|_| anyhow!("Archive extraction worker channel closed"))?;
                 } else {
-                    let full_path = target_path.join(&path);
                     if let Some(parent) = full_path.parent() {
                         fs::create_dir_all(parent)?;
                     }
@@ -487,18 +537,28 @@ fn extract_parallel(
                     drop(writer);
 
                     job_tx
-                        .send(ExtractJob::LargeFile { path, mode, mtime })
-                        .ok();
+                        .send(ExtractJob::LargeFile {
+                            full_path,
+                            mode,
+                            mtime,
+                        })
+                        .map_err(|_| anyhow!("Archive extraction worker channel closed"))?;
                 }
             }
             tar::EntryType::Symlink | tar::EntryType::Link => {
                 if let Ok(Some(link_target)) = entry.link_name() {
+                    let full_path = crate::cas_file::safe_join_path(&target_path, &path)?;
+                    crate::cas_file::validate_symlink_target(
+                        &target_path,
+                        &full_path,
+                        &link_target,
+                    )?;
                     job_tx
                         .send(ExtractJob::Symlink {
-                            path,
+                            full_path,
                             target: link_target.into_owned(),
                         })
-                        .ok();
+                        .map_err(|_| anyhow!("Archive extraction worker channel closed"))?;
                 }
             }
             _ => {
@@ -508,13 +568,17 @@ fn extract_parallel(
     }
 
     for dir_job in directories {
-        job_tx.send(dir_job).ok();
+        job_tx
+            .send(dir_job)
+            .map_err(|_| anyhow!("Archive extraction worker channel closed"))?;
     }
 
     drop(job_tx);
 
     for worker in workers {
-        let _ = worker.join();
+        worker
+            .join()
+            .map_err(|_| anyhow!("Archive extraction worker panicked"))??;
     }
 
     if let Some(ref callback) = progress_callback {
@@ -614,7 +678,7 @@ fn format_strategy(strategy: &MemoryStrategy) -> &'static str {
 pub fn encrypt_archive(
     archive_path: &Path,
     recipient: &age::x25519::Recipient,
-) -> Result<tempfile::TempPath> {
+) -> Result<EncryptedArchive> {
     let start_time = Instant::now();
     let input_size = fs::metadata(archive_path)?.len();
 
@@ -628,9 +692,11 @@ pub fn encrypt_archive(
     let output_file =
         File::create(&encrypted_path).context("Failed to create encrypted archive file")?;
     let output_writer = BufWriter::with_capacity(1024 * 1024, output_file);
+    let mut hashing_writer = HashingWriter::new(output_writer);
 
-    crate::encryption::encrypt_stream(input_reader, output_writer, recipient)
+    crate::encryption::encrypt_stream(input_reader, &mut hashing_writer, recipient)
         .context("Failed to encrypt archive")?;
+    hashing_writer.flush()?;
 
     let output_size = fs::metadata(&encrypted_path)?.len();
     let elapsed = start_time.elapsed();
@@ -642,7 +708,11 @@ pub fn encrypt_archive(
         elapsed.as_secs_f64()
     );
 
-    Ok(encrypted_path)
+    Ok(EncryptedArchive {
+        archive_path: encrypted_path,
+        size_bytes: output_size,
+        content_hash: hashing_writer.finish_hash(),
+    })
 }
 
 pub fn decrypt_archive(
@@ -678,4 +748,48 @@ pub fn decrypt_archive(
     );
 
     Ok(decrypted_path)
+}
+
+pub fn compute_archive_digest(path: &Path) -> Result<String> {
+    let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut reader = BufReader::with_capacity(1024 * 1024, file);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(digest.len() * 2 + 7);
+    output.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+    }
+    Ok(output)
+}
+
+#[cfg(unix)]
+fn create_symlink(path: &Path, target: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(target, path)
+        .with_context(|| format!("Failed to create symlink {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_symlink(path: &Path, target: &Path) -> Result<()> {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+
+    if symlink_file(target, path).is_err() {
+        symlink_dir(target, path)
+            .with_context(|| format!("Failed to create symlink {}", path.display()))?;
+    }
+    Ok(())
 }

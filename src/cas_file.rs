@@ -211,8 +211,12 @@ pub fn parse_pointer(bytes: &[u8]) -> Result<FilePointer> {
 }
 
 pub fn safe_join(root: &Path, relative: &str) -> Result<PathBuf> {
-    validate_relative_path(relative)?;
-    Ok(root.join(Path::new(relative)))
+    safe_join_path(root, Path::new(relative))
+}
+
+pub fn safe_join_path(root: &Path, relative: &Path) -> Result<PathBuf> {
+    validate_relative_path_components(relative)?;
+    Ok(root.join(relative))
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -236,9 +240,72 @@ pub fn digest_matches(expected: &str, actual_hex: &str) -> bool {
 }
 
 fn validate_relative_path(relative: &str) -> Result<()> {
-    let relative_path = Path::new(relative);
+    validate_relative_path_components(Path::new(relative))
+}
+
+pub fn validate_symlink_target(root: &Path, destination: &Path, target: &Path) -> Result<()> {
+    if target.as_os_str().is_empty() {
+        return Err(anyhow!(
+            "Symlink target is empty for {}",
+            destination.display()
+        ));
+    }
+    if target.is_absolute() {
+        return Err(anyhow!(
+            "Absolute symlink target is not allowed for {}: {}",
+            destination.display(),
+            target.display()
+        ));
+    }
+
+    let link_parent = destination.parent().ok_or_else(|| {
+        anyhow!(
+            "Symlink destination has no parent directory: {}",
+            destination.display()
+        )
+    })?;
+    let mut resolved = link_parent.to_path_buf();
+
+    for component in target.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => resolved.push(part),
+            Component::ParentDir => {
+                if !resolved.pop() || !resolved.starts_with(root) {
+                    return Err(anyhow!(
+                        "Symlink target escapes restore root for {}: {}",
+                        destination.display(),
+                        target.display()
+                    ));
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(anyhow!(
+                    "Absolute symlink target is not allowed for {}: {}",
+                    destination.display(),
+                    target.display()
+                ));
+            }
+        }
+    }
+
+    if !resolved.starts_with(root) {
+        return Err(anyhow!(
+            "Symlink target escapes restore root for {}: {}",
+            destination.display(),
+            target.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_relative_path_components(relative_path: &Path) -> Result<()> {
     if relative_path.is_absolute() {
-        return Err(anyhow!("Absolute path is not allowed: {}", relative));
+        return Err(anyhow!(
+            "Absolute path is not allowed: {}",
+            relative_path.display()
+        ));
     }
     for component in relative_path.components() {
         match component {
@@ -246,7 +313,7 @@ fn validate_relative_path(relative: &str) -> Result<()> {
             _ => {
                 return Err(anyhow!(
                     "File CAS pointer contains unsupported path component: {}",
-                    relative
+                    relative_path.display()
                 ));
             }
         }
@@ -292,5 +359,32 @@ mod tests {
         let root = PathBuf::from("/tmp/root");
         let error = safe_join(&root, "../x").unwrap_err().to_string();
         assert!(error.contains("unsupported path component"));
+    }
+
+    #[test]
+    fn validate_symlink_target_allows_relative_target_inside_root() {
+        let root = PathBuf::from("/tmp/root");
+        let destination = root.join("nested/link");
+        validate_symlink_target(&root, &destination, Path::new("../file.txt")).unwrap();
+    }
+
+    #[test]
+    fn validate_symlink_target_rejects_absolute_target() {
+        let root = PathBuf::from("/tmp/root");
+        let destination = root.join("nested/link");
+        let error = validate_symlink_target(&root, &destination, Path::new("/etc/passwd"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Absolute symlink target"));
+    }
+
+    #[test]
+    fn validate_symlink_target_rejects_escape() {
+        let root = PathBuf::from("/tmp/root");
+        let destination = root.join("nested/link");
+        let error = validate_symlink_target(&root, &destination, Path::new("../../../secret"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("escapes restore root"));
     }
 }

@@ -681,6 +681,157 @@ async fn test_save_workflow_success() {
 }
 
 #[tokio::test]
+async fn test_restore_ignores_archive_with_digest_mismatch() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!("skipping test_restore_ignores_archive_with_digest_mismatch: networking disabled in sandbox");
+        return;
+    }
+    let mut server = Server::new_async().await;
+
+    let _auth_mock = server
+        .mock("GET", "/v2/session")
+        .with_status(200)
+        .with_body(
+            json!({
+                "user": {"name": "Test User", "email": "test@example.com"},
+                "organization": {"name": "Test Org"},
+                "token": {"expires_in_days": 90}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config_dir = temp_dir.path().join(".boringcache");
+    fs::create_dir(&config_dir).expect("Failed to create config dir");
+    fs::write(
+        config_dir.join("config.json"),
+        json!({
+            "token": "test-token-123",
+            "api_url": server.url()
+        })
+        .to_string(),
+    )
+    .expect("Failed to write config");
+    env::set_var("HOME", temp_dir.path());
+
+    let data_dir = temp_dir.path().join("data");
+    fs::create_dir(&data_dir).expect("Failed to create data dir");
+    fs::write(data_dir.join("hello.txt"), "hello").expect("Failed to write data file");
+
+    let (mut manifest, _manifest_bytes, archive_bytes) =
+        build_manifest_and_archive(&data_dir, "cache-tag", None).await;
+    manifest.archive = Some(manifest::ManifestArchive {
+        content_hash: Some(
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string(),
+        ),
+        compression: "zstd".to_string(),
+        created_at: Utc::now(),
+    });
+    let manifest_cbor =
+        manifest::io::encode_manifest(&manifest).expect("Failed to encode manifest");
+    let manifest_bytes =
+        manifest::io::compress_manifest(&manifest_cbor).expect("Failed to compress manifest");
+
+    let manifest_url = format!("{}/manifest-digest-mismatch", server.url());
+    let archive_url = format!("{}/archive-digest-mismatch", server.url());
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([
+                {
+                    "tag": "cache-tag",
+                    "status": "hit",
+                    "cache_entry_id": "123",
+                    "manifest_url": manifest_url,
+                    "archive_urls": [archive_url],
+                    "manifest_root_digest": manifest.root.digest,
+                    "metadata": {
+                        "total_size_bytes": archive_bytes.len(),
+                        "uncompressed_size": manifest.summary.raw_size,
+                        "compressed_size": archive_bytes.len(),
+                        "file_count": manifest.summary.file_count,
+                        "compression_algorithm": "zstd"
+                    }
+                }
+            ])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _manifest_mock = server
+        .mock("GET", "/manifest-digest-mismatch")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(manifest_bytes)
+        .create_async()
+        .await;
+
+    let archive_len = archive_bytes.len().to_string();
+    let _archive_head_mock = server
+        .mock("HEAD", "/archive-digest-mismatch")
+        .with_status(200)
+        .with_header("content-length", archive_len.as_str())
+        .create_async()
+        .await;
+
+    let _archive_get_mock = server
+        .mock("GET", "/archive-digest-mismatch")
+        .with_status(200)
+        .with_header("content-length", archive_len.as_str())
+        .with_body(archive_bytes)
+        .create_async()
+        .await;
+
+    let _metrics_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/metrics")
+        .with_status(200)
+        .with_body("{}")
+        .create_async()
+        .await;
+
+    let target_dir = temp_dir.path().join("restore-target");
+    let tag_path = format!("cache-tag:{}", target_dir.to_str().unwrap());
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "restore",
+            "test/workspace",
+            tag_path.as_str(),
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if output.status.code() != Some(0) {
+        eprintln!("STDOUT: {}", stdout);
+        eprintln!("STDERR: {}", stderr);
+    }
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stderr.contains("Archive bytes digest mismatch"));
+    assert!(!target_dir.join("hello.txt").exists());
+
+    env::remove_var("BORINGCACHE_API_URL");
+    env::remove_var("HOME");
+}
+
+#[tokio::test]
 async fn test_run_workflow_restore_then_save_lifecycle_success() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {
