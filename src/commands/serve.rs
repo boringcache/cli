@@ -49,6 +49,7 @@ pub async fn execute(
     no_git: bool,
     metadata_hints: Vec<String>,
     fail_on_cache_error: bool,
+    read_only: bool,
 ) -> Result<()> {
     ensure!(
         workspace.contains('/'),
@@ -59,7 +60,11 @@ pub async fn execute(
         return Ok(());
     }
 
-    let api_client = ApiClient::new()?;
+    let api_client = if read_only {
+        ApiClient::for_restore()?
+    } else {
+        ApiClient::for_save()?
+    };
     let platform = if no_platform {
         None
     } else {
@@ -86,6 +91,7 @@ pub async fn execute(
         registry_root_tag,
         proxy_metadata_hints,
         fail_on_cache_error,
+        read_only,
     )
     .await
 }
@@ -100,13 +106,18 @@ pub async fn start_proxy_background(
     no_git: bool,
     proxy_metadata_hints: BTreeMap<String, String>,
     fail_on_cache_error: bool,
+    read_only: bool,
 ) -> Result<ProxyServerHandle> {
     ensure!(
         workspace.contains('/'),
         "Workspace must be in org/project format"
     );
 
-    let api_client = ApiClient::new()?;
+    let api_client = if read_only {
+        ApiClient::for_restore()?
+    } else {
+        ApiClient::for_save()?
+    };
     let platform = if no_platform {
         None
     } else {
@@ -139,6 +150,7 @@ pub async fn start_proxy_background(
         registry_root_tag,
         proxy_metadata_hints,
         fail_on_cache_error,
+        read_only,
     )
     .await?;
 

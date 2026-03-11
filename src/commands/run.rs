@@ -115,6 +115,7 @@ pub async fn execute(
             no_git,
             proxy_metadata_hints.clone(),
             fail_on_cache_error,
+            false,
         )
         .await
         .map_err(|error| ExitCodeError::with_message(EXIT_CONFIG, format!("{:#}", error)))?;

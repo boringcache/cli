@@ -74,6 +74,7 @@ async fn setup(
     let state = AppState {
         api_client,
         workspace: "org/repo".to_string(),
+        read_only: false,
         tag_resolver: TagResolver::new(None, GitContext::default(), false),
         configured_human_tags: Vec::new(),
         registry_root_tag: "registry".to_string(),
@@ -209,6 +210,7 @@ async fn test_startup_manifest_warm_runs_by_default() {
         "registry".to_string(),
         BTreeMap::new(),
         true,
+        false,
     )
     .await
     .expect("start proxy");
@@ -384,6 +386,7 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
         "registry".to_string(),
         BTreeMap::new(),
         true,
+        false,
     )
     .await
     .expect("start proxy");

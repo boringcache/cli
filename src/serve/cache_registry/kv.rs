@@ -386,6 +386,19 @@ pub(crate) async fn put_kv_object(
 ) -> Result<Response, RegistryError> {
     let put_start = std::time::Instant::now();
     let scoped_key = namespace.scoped_key(key);
+    if state.read_only {
+        state.cache_ops.record(
+            namespace.into(),
+            super::cache_ops::Op::Put,
+            super::cache_ops::OpResult::Hit,
+            false,
+            0,
+            put_start.elapsed().as_millis() as u64,
+        );
+        log::debug!("KV PUT {scoped_key}: ignored in read-only mode");
+        return Ok((put_status, Body::empty()).into_response());
+    }
+
     let use_miss_cache = use_kv_miss_cache(namespace);
     let put_probe = super::PutProbeGuard::start(&scoped_key);
     put_probe.stage("precheck_spool");
@@ -4434,6 +4447,7 @@ mod tests {
         let state = AppState {
             api_client,
             workspace: "org/repo".to_string(),
+            read_only: false,
             tag_resolver: TagResolver::new(None, GitContext::default(), false),
             configured_human_tags: Vec::new(),
             registry_root_tag: "registry".to_string(),
@@ -4504,6 +4518,83 @@ mod tests {
             storage_mode: Some("cas".to_string()),
             tag: Some(tag.to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn put_kv_object_is_noop_in_read_only_mode() {
+        let temp_home = tempfile::tempdir().expect("temp dir");
+        let api_client =
+            ApiClient::new_with_token_override(Some("test-token".to_string())).expect("client");
+        let (kv_replication_work_tx, _kv_replication_work_rx) =
+            tokio::sync::mpsc::channel(crate::serve::state::KV_REPLICATION_WORK_QUEUE_CAPACITY);
+
+        let state = AppState {
+            api_client,
+            workspace: "org/repo".to_string(),
+            read_only: true,
+            tag_resolver: TagResolver::new(None, GitContext::default(), false),
+            configured_human_tags: Vec::new(),
+            registry_root_tag: "registry".to_string(),
+            fail_on_cache_error: true,
+            kv_manifest_warm_enabled: true,
+            blob_locator: std::sync::Arc::new(RwLock::new(BlobLocatorCache::default())),
+            upload_sessions: std::sync::Arc::new(RwLock::new(UploadSessionStore::default())),
+            kv_pending: std::sync::Arc::new(RwLock::new(KvPendingStore::default())),
+            kv_flush_lock: std::sync::Arc::new(TokioMutex::new(())),
+            kv_lookup_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
+            kv_last_put: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_backlog_rejects: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_replication_enqueue_deferred: std::sync::Arc::new(
+                std::sync::atomic::AtomicU64::new(0),
+            ),
+            kv_replication_flush_ok: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_replication_flush_conflict: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+                0,
+            )),
+            kv_replication_flush_error: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_replication_flush_permanent: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+                0,
+            )),
+            kv_replication_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_replication_work_tx,
+            kv_next_flush_at: std::sync::Arc::new(RwLock::new(None)),
+            kv_flush_scheduled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            kv_published_index: std::sync::Arc::new(RwLock::new(KvPublishedIndex::default())),
+            kv_flushing: std::sync::Arc::new(RwLock::new(None)),
+            shutdown_requested: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            kv_recent_misses: std::sync::Arc::new(dashmap::DashMap::new()),
+            kv_miss_generations: std::sync::Arc::new(dashmap::DashMap::new()),
+            blob_read_cache: std::sync::Arc::new(
+                BlobReadCache::new_at(
+                    temp_home.path().join("blob-read-cache"),
+                    2 * 1024 * 1024 * 1024,
+                )
+                .expect("blob read cache"),
+            ),
+            blob_download_max_concurrency: 16,
+            blob_download_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
+            blob_prefetch_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+            cache_ops: std::sync::Arc::new(
+                crate::serve::cache_registry::cache_ops::Aggregator::new(),
+            ),
+            oci_manifest_cache: std::sync::Arc::new(dashmap::DashMap::new()),
+            backend_breaker: std::sync::Arc::new(BackendCircuitBreaker::new()),
+            prefetch_complete: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        };
+
+        let response = put_kv_object(
+            &state,
+            KvNamespace::Gradle,
+            "cache-key",
+            Body::from("payload"),
+            StatusCode::OK,
+        )
+        .await
+        .expect("read-only puts should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let pending = state.kv_pending.read().await;
+        assert_eq!(pending.blob_count(), 0);
     }
 
     #[test]

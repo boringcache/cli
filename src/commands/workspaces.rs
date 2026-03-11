@@ -23,7 +23,7 @@ struct WorkspacesSummary {
 }
 
 pub async fn execute(json_output: bool) -> Result<()> {
-    let api_client = ApiClient::new()?;
+    let api_client = ApiClient::for_restore()?;
     let mut sorted_workspaces = api_client.list_workspaces().await?;
     sorted_workspaces.sort_by(|a, b| a.name.cmp(&b.name));
 

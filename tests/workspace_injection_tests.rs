@@ -30,7 +30,35 @@ fn run_cli_with_default_workspace(args: &[&str]) -> std::process::Output {
         .env("BORINGCACHE_DEFAULT_WORKSPACE", TEST_WORKSPACE)
         .env_remove("BORINGCACHE_AUTH_TOKEN")
         .env_remove("BORINGCACHE_TOKEN")
+        .env_remove("BORINGCACHE_RESTORE_TOKEN")
+        .env_remove("BORINGCACHE_SAVE_TOKEN")
         .env_remove("BORINGCACHE_API_TOKEN")
+        .output()
+        .expect("Failed to execute CLI command")
+}
+
+fn run_cli_with_default_workspace_and_env(
+    args: &[&str],
+    env_pairs: &[(&str, &str)],
+) -> std::process::Output {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    command
+        .args(args)
+        .env("HOME", temp_dir.path())
+        .env("BORINGCACHE_DEFAULT_WORKSPACE", TEST_WORKSPACE)
+        .env_remove("BORINGCACHE_AUTH_TOKEN")
+        .env_remove("BORINGCACHE_TOKEN")
+        .env_remove("BORINGCACHE_RESTORE_TOKEN")
+        .env_remove("BORINGCACHE_SAVE_TOKEN")
+        .env_remove("BORINGCACHE_API_TOKEN");
+
+    for (key, value) in env_pairs {
+        command.env(key, value);
+    }
+
+    command
         .output()
         .expect("Failed to execute CLI command")
 }
@@ -320,16 +348,19 @@ fn test_run_with_value_option_before_tag_path_injects_workspace() {
 fn test_run_proxy_only_with_default_workspace_injects_workspace() {
     let cli = cli_binary();
     let cli = cli.to_str().expect("CLI path must be valid UTF-8");
-    let output = run_cli_with_default_workspace(&[
-        "run",
-        "--proxy",
-        "main",
-        "--port",
-        "0",
-        "--",
-        cli,
-        "--version",
-    ]);
+    let output = run_cli_with_default_workspace_and_env(
+        &[
+            "run",
+            "--proxy",
+            "main",
+            "--port",
+            "0",
+            "--",
+            cli,
+            "--version",
+        ],
+        &[("BORINGCACHE_SAVE_TOKEN", "test-save-token")],
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

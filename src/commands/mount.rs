@@ -120,7 +120,7 @@ pub async fn execute(
     let tag_resolver = crate::tag_utils::TagResolver::new(platform, git_context, git_enabled);
     let resolved_tag = tag_resolver.effective_save_tag(&tag)?;
 
-    let api_client = ApiClient::new()?;
+    let api_client = ApiClient::for_save()?;
 
     api_client
         .get_token()

@@ -124,6 +124,7 @@ pub async fn run_server(
     registry_root_tag: String,
     proxy_metadata_hints: BTreeMap<String, String>,
     fail_on_cache_error: bool,
+    read_only: bool,
 ) -> Result<()> {
     let (state, listener, replication_rx) = build_server_runtime(
         api_client,
@@ -135,6 +136,7 @@ pub async fn run_server(
         registry_root_tag,
         proxy_metadata_hints,
         fail_on_cache_error,
+        read_only,
     )
     .await?;
 
@@ -187,6 +189,7 @@ pub async fn start_server_background(
     registry_root_tag: String,
     proxy_metadata_hints: BTreeMap<String, String>,
     fail_on_cache_error: bool,
+    read_only: bool,
 ) -> Result<ServeHandle> {
     let (state, listener, replication_rx) = build_server_runtime(
         api_client,
@@ -198,6 +201,7 @@ pub async fn start_server_background(
         registry_root_tag,
         proxy_metadata_hints,
         fail_on_cache_error,
+        read_only,
     )
     .await?;
 
@@ -262,6 +266,7 @@ async fn build_server_runtime(
     registry_root_tag: String,
     proxy_metadata_hints: BTreeMap<String, String>,
     fail_on_cache_error: bool,
+    read_only: bool,
 ) -> Result<(AppState, TcpListener, mpsc::Receiver<KvReplicationWork>)> {
     let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
@@ -273,6 +278,7 @@ async fn build_server_runtime(
     let state = AppState {
         api_client,
         workspace: workspace.clone(),
+        read_only,
         tag_resolver,
         configured_human_tags,
         registry_root_tag,
@@ -333,6 +339,9 @@ async fn build_server_runtime(
 
     eprintln!("BoringCache cache registry proxy listening on {addr}");
     eprintln!("  Workspace: {workspace}");
+    if state.read_only {
+        eprintln!("  Mode: read-only");
+    }
     if !state.configured_human_tags.is_empty() {
         eprintln!(
             "  OCI Human Tags: {}",
@@ -1119,6 +1128,9 @@ async fn serve_with_h2c(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn update_consecutive_failures_resets_on_conflict() {
@@ -1159,6 +1171,7 @@ mod tests {
 
     #[test]
     fn tcp_listen_backlog_defaults_when_unset_or_invalid() {
+        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         unsafe {
             std::env::remove_var(TCP_LISTEN_BACKLOG_ENV);
         }
@@ -1181,6 +1194,7 @@ mod tests {
 
     #[test]
     fn tcp_listen_backlog_honors_positive_env_override() {
+        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         unsafe {
             std::env::set_var(TCP_LISTEN_BACKLOG_ENV, "4096");
         }

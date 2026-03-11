@@ -433,6 +433,7 @@ async fn main() -> Result<()> {
             no_git,
             metadata_hint,
             fail_on_cache_error,
+            read_only,
         } => {
             commands::serve::execute(
                 workspace,
@@ -443,6 +444,7 @@ async fn main() -> Result<()> {
                 no_git,
                 metadata_hint,
                 fail_on_cache_error,
+                read_only,
             )
             .await
         }

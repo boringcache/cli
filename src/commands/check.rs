@@ -137,7 +137,7 @@ async fn execute_inner(
         tag_to_candidates.push((tag.clone(), candidates));
     }
 
-    let api_client = ApiClient::new()?;
+    let api_client = ApiClient::for_restore()?;
 
     if !json_output {
         ui::info(&format!(

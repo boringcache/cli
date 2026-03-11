@@ -19,7 +19,7 @@ pub async fn execute(
 ) -> Result<()> {
     let workspace = crate::commands::utils::get_workspace_name(workspace_option)?;
     crate::api::parse_workspace_slug(&workspace)?;
-    let api_client = ApiClient::new()?;
+    let api_client = ApiClient::for_admin()?;
     let platform = if no_platform {
         None
     } else {

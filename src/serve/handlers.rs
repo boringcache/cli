@@ -2171,6 +2171,7 @@ mod tests {
             api_client: ApiClient::new_with_token_override(Some("test-token".to_string()))
                 .expect("api client"),
             workspace: "boringcache/benchmarks".to_string(),
+            read_only: false,
             tag_resolver: TagResolver::new(None, GitContext::default(), false),
             configured_human_tags: Vec::new(),
             registry_root_tag: "registry".to_string(),

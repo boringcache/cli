@@ -455,7 +455,7 @@ async fn execute_batch_restore_inner(
         });
     }
 
-    let api_client = ApiClient::new()?;
+    let api_client = ApiClient::for_restore()?;
 
     let session_id = format!("resolve:{}", workspace);
 

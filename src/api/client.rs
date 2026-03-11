@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{AuthPurpose, Config};
 use crate::error::{BoringCacheError, ConflictMetadata, PendingMetadata};
 use crate::observability;
 use crate::retry_resume::RetryConfig;
@@ -111,8 +111,37 @@ impl ApiClient {
         Self::new_with_token_override(None)
     }
 
+    pub fn for_restore() -> Result<Self> {
+        Self::new_for_purpose(AuthPurpose::Restore)
+    }
+
+    pub fn for_save() -> Result<Self> {
+        Self::new_for_purpose(AuthPurpose::Save)
+    }
+
+    pub fn for_admin() -> Result<Self> {
+        Self::new_for_purpose(AuthPurpose::Admin)
+    }
+
+    pub fn new_for_purpose(purpose: AuthPurpose) -> Result<Self> {
+        Self::new_with_token_override_for_purpose(None, purpose)
+    }
+
     pub fn new_with_token_override(token_override: Option<String>) -> Result<Self> {
-        let config = Config::load().ok();
+        Self::new_with_token_override_for_purpose(token_override, AuthPurpose::Default)
+    }
+
+    pub fn new_with_token_override_for_purpose(
+        token_override: Option<String>,
+        purpose: AuthPurpose,
+    ) -> Result<Self> {
+        let config = if token_override.is_some()
+            || matches!(purpose, AuthPurpose::Default | AuthPurpose::Restore)
+        {
+            Config::load_for_auth_purpose(purpose).ok()
+        } else {
+            Some(Config::load_for_auth_purpose(purpose)?)
+        };
 
         let cli_version = env!("CARGO_PKG_VERSION");
         let user_agent = format!("BoringCache-CLI/{cli_version}");
@@ -734,10 +763,15 @@ impl ApiClient {
                 }
             }
             StatusCode::FORBIDDEN => {
-                anyhow::anyhow!(
-                    "Access forbidden: You don't have permission to access this resource.\n\
-                     Please check your authentication token and permissions."
-                )
+                let message = parsed_payload
+                    .as_ref()
+                    .map(|payload| payload.message.clone())
+                    .unwrap_or_else(|| {
+                        "Access forbidden: You don't have permission to access this resource.\n\
+                         Please check your authentication token and permissions."
+                            .to_string()
+                    });
+                anyhow::anyhow!(message)
             }
             StatusCode::NOT_FOUND => {
                 anyhow::anyhow!("Resource not found: {}", url)

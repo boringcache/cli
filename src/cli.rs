@@ -334,6 +334,12 @@ pub enum Commands {
             help = "Return strict backend/cache errors instead of best-effort cache responses"
         )]
         fail_on_cache_error: bool,
+
+        #[arg(
+            long,
+            help = "Serve cache reads only and treat proxy writes as successful no-ops"
+        )]
+        read_only: bool,
     },
 
     #[command(

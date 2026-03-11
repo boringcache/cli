@@ -116,7 +116,6 @@ async fn execute_batch_save_inner(
 ) -> Result<()> {
     let workspace = crate::commands::utils::get_workspace_name(workspace)?;
     crate::api::parse_workspace_slug(&workspace)?;
-    let api_client = ApiClient::new()?;
 
     let (encrypt, recipient) =
         crate::commands::utils::resolve_encryption_config(&workspace, recipient)?;
@@ -187,13 +186,11 @@ async fn execute_batch_save_inner(
     let mut successful_saves = 0usize;
     let mut failed_attempts = 0usize;
     let mut errors: Vec<anyhow::Error> = Vec::new();
-
     let max_concurrent = crate::commands::utils::get_optimal_concurrency(total_entries, "save");
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent.max(1)));
     let mut tasks = Vec::with_capacity(total_entries);
 
     for (position, (tag, expanded_path)) in prepared_entries.into_iter().enumerate() {
-        let api_client = api_client.clone();
         let workspace = workspace.clone();
         let exclude = exclude.clone();
         let recipient = recipient.clone();
@@ -204,7 +201,6 @@ async fn execute_batch_save_inner(
                 .await
                 .map_err(|e| anyhow!("Save worker semaphore closed: {e}"))?;
             let result = save_single_entry(
-                api_client,
                 workspace,
                 tag.clone(),
                 expanded_path,
@@ -283,7 +279,6 @@ async fn execute_batch_save_inner(
 
 #[allow(clippy::too_many_arguments)]
 async fn save_single_entry(
-    api_client: ApiClient,
     workspace: String,
     tag: String,
     path: String,
@@ -335,7 +330,6 @@ async fn save_single_entry(
     match adapter {
         crate::adapters::AdapterDispatchKind::Archive => {
             save_single_archive_entry(
-                api_client,
                 workspace,
                 tag,
                 path,
@@ -351,7 +345,7 @@ async fn save_single_entry(
         }
         crate::adapters::AdapterDispatchKind::Oci => {
             save_single_oci_entry(
-                api_client,
+                ApiClient::for_save()?,
                 workspace,
                 tag,
                 path,
@@ -364,7 +358,7 @@ async fn save_single_entry(
         }
         crate::adapters::AdapterDispatchKind::File => {
             save_single_file_entry(
-                api_client,
+                ApiClient::for_save()?,
                 workspace,
                 tag,
                 path,
@@ -382,7 +376,6 @@ async fn save_single_entry(
 
 #[allow(clippy::too_many_arguments)]
 async fn save_single_archive_entry(
-    api_client: ApiClient,
     workspace: String,
     tag: String,
     path: String,
@@ -435,6 +428,8 @@ async fn save_single_archive_entry(
         progress_system.shutdown()?;
         anyhow::bail!(message);
     }
+
+    let api_client = ApiClient::for_save()?;
 
     let recipient_str = if encrypt {
         Some(
