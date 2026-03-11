@@ -748,28 +748,52 @@ fn scoped_save_tag(
     Ok(ref_tag_for_input(&scoped))
 }
 
+fn scoped_write_scope_tag(
+    tag_resolver: &TagResolver,
+    name: &str,
+    reference: &str,
+) -> Result<String, OciError> {
+    let scoped_input = format!("{name}:{reference}");
+    tag_resolver
+        .effective_save_tag(&scoped_input)
+        .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AliasBinding {
+    tag: String,
+    write_scope_tag: Option<String>,
+}
+
 fn alias_tags_for_manifest(
     primary_tag: &str,
     manifest_digest: &str,
+    primary_write_scope_tag: Option<&str>,
     configured_human_tags: &[String],
-    additional_aliases: &[String],
-) -> Vec<String> {
+    additional_aliases: &[AliasBinding],
+) -> Vec<AliasBinding> {
     let mut seen = HashSet::new();
     let mut aliases = Vec::new();
 
     let digest_alias = digest_tag(manifest_digest);
     if digest_alias != primary_tag && seen.insert(digest_alias.clone()) {
-        aliases.push(digest_alias);
+        aliases.push(AliasBinding {
+            tag: digest_alias,
+            write_scope_tag: primary_write_scope_tag.map(ToOwned::to_owned),
+        });
     }
 
     for human_tag in configured_human_tags {
         if human_tag != primary_tag && seen.insert(human_tag.clone()) {
-            aliases.push(human_tag.clone());
+            aliases.push(AliasBinding {
+                tag: human_tag.clone(),
+                write_scope_tag: None,
+            });
         }
     }
 
     for alias in additional_aliases {
-        if alias != primary_tag && seen.insert(alias.clone()) {
+        if alias.tag != primary_tag && seen.insert(alias.tag.clone()) {
             aliases.push(alias.clone());
         }
     }
@@ -780,6 +804,7 @@ fn alias_tags_for_manifest(
 async fn bind_alias_tag(
     state: &AppState,
     alias_tag: &str,
+    write_scope_tag: Option<&str>,
     manifest_root_digest: &str,
     manifest_size: u64,
     blob_count: u64,
@@ -788,6 +813,7 @@ async fn bind_alias_tag(
 ) -> Result<(), String> {
     let alias_request = SaveRequest {
         tag: alias_tag.to_string(),
+        write_scope_tag: write_scope_tag.map(ToOwned::to_owned),
         manifest_root_digest: manifest_root_digest.to_string(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
@@ -837,6 +863,7 @@ async fn bind_alias_tag(
         compressed_size: None,
         storage_mode: Some("cas".to_string()),
         tag: Some(alias_tag.to_string()),
+        write_scope_tag: write_scope_tag.map(ToOwned::to_owned),
     };
 
     tokio::time::timeout(
@@ -1768,6 +1795,7 @@ async fn put_manifest(
         .map_err(|e| OciError::internal(format!("Failed to serialize pointer: {e}")))?;
     let manifest_root_digest = cas_oci::prefixed_sha256_digest(&pointer_bytes);
 
+    let write_scope_tag = scoped_write_scope_tag(&state.tag_resolver, &name, &reference)?;
     let tag = if reference.starts_with("sha256:") {
         digest_tag(&reference)
     } else {
@@ -1777,7 +1805,14 @@ async fn put_manifest(
     // (defaulting to `latest` when omitted). Bind `name:latest` so fresh importers
     // resolve the just-published cache manifest.
     let additional_aliases = if reference.starts_with("sha256:") {
-        vec![scoped_save_tag(&state.tag_resolver, &name, "latest")?]
+        vec![AliasBinding {
+            tag: scoped_save_tag(&state.tag_resolver, &name, "latest")?,
+            write_scope_tag: Some(scoped_write_scope_tag(
+                &state.tag_resolver,
+                &name,
+                "latest",
+            )?),
+        }]
     } else {
         Vec::new()
     };
@@ -1787,6 +1822,7 @@ async fn put_manifest(
 
     let save_request = SaveRequest {
         tag: tag.clone(),
+        write_scope_tag: Some(write_scope_tag.clone()),
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
@@ -1970,6 +2006,7 @@ async fn put_manifest(
             compressed_size: None,
             storage_mode: Some("cas".to_string()),
             tag: Some(tag.clone()),
+            write_scope_tag: Some(write_scope_tag.clone()),
         };
 
         tokio::time::timeout(
@@ -2011,13 +2048,15 @@ async fn put_manifest(
         let alias_tags = alias_tags_for_manifest(
             &tag,
             &manifest_digest,
+            Some(write_scope_tag.as_str()),
             &state.configured_human_tags,
             &additional_aliases,
         );
-        for alias_tag in alias_tags {
+        for alias in alias_tags {
             if let Err(error) = bind_alias_tag(
                 &state,
-                &alias_tag,
+                &alias.tag,
+                alias.write_scope_tag.as_deref(),
                 &manifest_root_digest,
                 pointer_bytes.len() as u64,
                 blob_count,
@@ -2028,13 +2067,13 @@ async fn put_manifest(
             {
                 if state.fail_on_cache_error {
                     return Err(OciError::internal(format!(
-                        "Alias write failed for {alias_tag} (workspace={}): {error}",
-                        state.workspace
+                        "Alias write failed for {} (workspace={}): {error}",
+                        alias.tag, state.workspace
                     )));
                 }
                 let warning = format!(
                     "Alias write skipped for {} (workspace={}): {}",
-                    alias_tag, state.workspace, error
+                    alias.tag, state.workspace, error
                 );
                 eprintln!("{warning}");
                 log::warn!("{warning}");
@@ -2800,14 +2839,21 @@ mod tests {
         let tags = alias_tags_for_manifest(
             "oci_ref_primary",
             "sha256:abc123",
+            Some("posthog-build:pr-123"),
             &["posthog-docker-build".to_string()],
             &[],
         );
         assert_eq!(
             tags,
             vec![
-                "oci_digest_abc123".to_string(),
-                "posthog-docker-build".to_string()
+                AliasBinding {
+                    tag: "oci_digest_abc123".to_string(),
+                    write_scope_tag: Some("posthog-build:pr-123".to_string())
+                },
+                AliasBinding {
+                    tag: "posthog-docker-build".to_string(),
+                    write_scope_tag: None
+                }
             ]
         );
     }
@@ -2817,6 +2863,7 @@ mod tests {
         let tags = alias_tags_for_manifest(
             "oci_digest_abc123",
             "sha256:abc123",
+            Some("posthog-build:pr-123"),
             &["oci_digest_abc123".to_string()],
             &[],
         );
@@ -2828,6 +2875,7 @@ mod tests {
         let tags = alias_tags_for_manifest(
             "oci_ref_primary",
             "sha256:abc123",
+            Some("posthog-build:pr-123"),
             &[
                 "posthog-build".to_string(),
                 "posthog-stable".to_string(),
@@ -2838,9 +2886,18 @@ mod tests {
         assert_eq!(
             tags,
             vec![
-                "oci_digest_abc123".to_string(),
-                "posthog-build".to_string(),
-                "posthog-stable".to_string(),
+                AliasBinding {
+                    tag: "oci_digest_abc123".to_string(),
+                    write_scope_tag: Some("posthog-build:pr-123".to_string())
+                },
+                AliasBinding {
+                    tag: "posthog-build".to_string(),
+                    write_scope_tag: None
+                },
+                AliasBinding {
+                    tag: "posthog-stable".to_string(),
+                    write_scope_tag: None
+                },
             ]
         );
     }
@@ -2850,16 +2907,35 @@ mod tests {
         let tags = alias_tags_for_manifest(
             "oci_digest_abc123",
             "sha256:abc123",
+            Some("posthog-build:pr-123"),
             &["posthog-build".to_string()],
             &[
-                "oci_ref_latest".to_string(),
-                "posthog-build".to_string(),
-                "oci_ref_latest".to_string(),
+                AliasBinding {
+                    tag: "oci_ref_latest".to_string(),
+                    write_scope_tag: Some("posthog-build:latest".to_string()),
+                },
+                AliasBinding {
+                    tag: "posthog-build".to_string(),
+                    write_scope_tag: None,
+                },
+                AliasBinding {
+                    tag: "oci_ref_latest".to_string(),
+                    write_scope_tag: Some("posthog-build:latest".to_string()),
+                },
             ],
         );
         assert_eq!(
             tags,
-            vec!["posthog-build".to_string(), "oci_ref_latest".to_string()]
+            vec![
+                AliasBinding {
+                    tag: "posthog-build".to_string(),
+                    write_scope_tag: None
+                },
+                AliasBinding {
+                    tag: "oci_ref_latest".to_string(),
+                    write_scope_tag: Some("posthog-build:latest".to_string())
+                }
+            ]
         );
     }
 }

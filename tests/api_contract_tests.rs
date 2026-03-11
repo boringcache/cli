@@ -10,6 +10,7 @@ mod request_validation {
     fn test_save_request_serializes_correctly() {
         let request = SaveRequest {
             tag: "ruby-3.4.4-darwin-arm64".to_string(),
+            write_scope_tag: None,
             manifest_root_digest: "a".repeat(64),
             compression_algorithm: "zstd".to_string(),
             storage_mode: None,
@@ -50,6 +51,7 @@ mod request_validation {
     fn test_save_request_minimal() {
         let request = SaveRequest {
             tag: "test-cache".to_string(),
+            write_scope_tag: None,
             manifest_root_digest: "c".repeat(64),
             compression_algorithm: "zstd".to_string(),
             storage_mode: None,
@@ -95,6 +97,7 @@ mod request_validation {
             compressed_size: Some(1_000_000),
             storage_mode: None,
             tag: None,
+            write_scope_tag: None,
         };
 
         let json = serde_json::to_value(&request).unwrap();
@@ -125,6 +128,7 @@ mod request_validation {
             compressed_size: Some(1_000_000),
             storage_mode: None,
             tag: Some("my-cache-tag".to_string()),
+            write_scope_tag: None,
         };
 
         let json = serde_json::to_value(&request).unwrap();

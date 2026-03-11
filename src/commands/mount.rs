@@ -1674,6 +1674,7 @@ async fn sync_to_remote_archive(
     let ci_provider = detect_ci_environment();
     let request = SaveRequest {
         tag: resolved_tag.to_string(),
+        write_scope_tag: None,
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: None,
@@ -1819,6 +1820,7 @@ async fn sync_to_remote_archive(
         compressed_size: Some(final_compressed_size),
         storage_mode: Some("archive".to_string()),
         tag: Some(resolved_tag.to_string()),
+        write_scope_tag: None,
     };
 
     api_client
@@ -1904,6 +1906,7 @@ async fn sync_to_remote_oci(
     let ci_provider = detect_ci_environment();
     let request = SaveRequest {
         tag: resolved_tag.to_string(),
+        write_scope_tag: None,
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
@@ -2100,6 +2103,7 @@ async fn sync_to_remote_oci(
         compressed_size: None,
         storage_mode: Some("cas".to_string()),
         tag: Some(resolved_tag.to_string()),
+        write_scope_tag: None,
     };
 
     api_client
@@ -2202,6 +2206,7 @@ async fn sync_to_remote_file(
     let ci_provider = detect_ci_environment();
     let request = SaveRequest {
         tag: resolved_tag.to_string(),
+        write_scope_tag: None,
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
@@ -2398,6 +2403,7 @@ async fn sync_to_remote_file(
         compressed_size: None,
         storage_mode: Some("cas".to_string()),
         tag: Some(resolved_tag.to_string()),
+        write_scope_tag: None,
     };
 
     api_client

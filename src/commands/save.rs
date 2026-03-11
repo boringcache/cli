@@ -663,6 +663,7 @@ async fn save_single_archive_entry(
             compressed_size: None,
             storage_mode: Some("archive".to_string()),
             tag: Some(tag.clone()),
+            write_scope_tag: None,
         };
 
         match api_client
@@ -714,6 +715,7 @@ async fn save_single_archive_entry(
     let ci_provider = detect_ci_environment();
     let request = SaveRequest {
         tag: tag.clone(),
+        write_scope_tag: None,
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: None,
@@ -899,6 +901,7 @@ async fn save_single_archive_entry(
                 compressed_size: Some(archive_info.compressed_size),
                 storage_mode: Some("archive".to_string()),
                 tag: Some(tag.clone()),
+                write_scope_tag: None,
             };
 
             let piggyback_confirm_response = api_client
@@ -1094,6 +1097,7 @@ async fn save_single_archive_entry(
         storage_mode: Some("archive".to_string()),
 
         tag: Some(tag.clone()),
+        write_scope_tag: None,
     };
 
     let confirm_response = api_client
@@ -1261,6 +1265,7 @@ async fn save_single_file_entry(
     let ci_provider = detect_ci_environment();
     let request = SaveRequest {
         tag: tag.clone(),
+        write_scope_tag: None,
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
@@ -1425,6 +1430,7 @@ async fn save_single_file_entry(
                 compressed_size: None,
                 storage_mode: Some("cas".to_string()),
                 tag: Some(tag.clone()),
+                write_scope_tag: None,
             };
             api_client
                 .confirm(&workspace, &save_response.cache_entry_id, &confirm_request)
@@ -1599,6 +1605,7 @@ async fn save_single_file_entry(
         compressed_size: None,
         storage_mode: Some("cas".to_string()),
         tag: Some(tag.clone()),
+        write_scope_tag: None,
     };
     if let Err(err) = api_client
         .confirm(&workspace, &save_response.cache_entry_id, &confirm_request)
@@ -1745,6 +1752,7 @@ async fn save_single_oci_entry(
     let ci_provider = detect_ci_environment();
     let request = SaveRequest {
         tag: tag.clone(),
+        write_scope_tag: None,
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
@@ -1909,6 +1917,7 @@ async fn save_single_oci_entry(
                 compressed_size: None,
                 storage_mode: Some("cas".to_string()),
                 tag: Some(tag.clone()),
+                write_scope_tag: None,
             };
             api_client
                 .confirm(&workspace, &save_response.cache_entry_id, &confirm_request)
@@ -2083,6 +2092,7 @@ async fn save_single_oci_entry(
         compressed_size: None,
         storage_mode: Some("cas".to_string()),
         tag: Some(tag.clone()),
+        write_scope_tag: None,
     };
     if let Err(err) = api_client
         .confirm(&workspace, &save_response.cache_entry_id, &confirm_request)

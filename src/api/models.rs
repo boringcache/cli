@@ -6,6 +6,8 @@ pub mod cache {
     #[derive(Debug, Serialize, Clone)]
     pub struct SaveRequest {
         pub tag: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub write_scope_tag: Option<String>,
         pub manifest_root_digest: String,
         pub compression_algorithm: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,6 +47,8 @@ pub mod cache {
 
     #[derive(Debug, Serialize, Clone)]
     pub struct PreflightRequest {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub write_scope_tag: Option<String>,
         pub manifest_root_digest: String,
         pub compression_algorithm: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -195,6 +199,8 @@ pub mod cache {
 
         #[serde(skip_serializing_if = "Option::is_none")]
         pub tag: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub write_scope_tag: Option<String>,
     }
 
     #[derive(Debug, Serialize)]

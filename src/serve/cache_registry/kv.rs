@@ -705,6 +705,14 @@ fn kv_alias_tags(state: &AppState) -> Vec<String> {
     kv_alias_tags_from_values(&state.registry_root_tag, &state.configured_human_tags)
 }
 
+fn kv_primary_write_scope_tag(state: &AppState) -> Option<String> {
+    state
+        .configured_human_tags
+        .first()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+}
+
 fn clear_root_tag_misses(state: &AppState) {
     for tag in kv_root_tags(state) {
         clear_tag_misses(state, &tag);
@@ -3373,6 +3381,7 @@ async fn do_flush(
 
     let request = SaveRequest {
         tag: tag.clone(),
+        write_scope_tag: kv_primary_write_scope_tag(state),
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
@@ -3544,6 +3553,7 @@ async fn do_flush(
         compressed_size: None,
         storage_mode: Some("cas".to_string()),
         tag: Some(tag.clone()),
+        write_scope_tag: kv_primary_write_scope_tag(state),
     };
 
     let confirm_outcome =
@@ -3685,6 +3695,7 @@ async fn bind_kv_alias_tag(
 ) -> anyhow::Result<bool> {
     let alias_request = SaveRequest {
         tag: alias_tag.to_string(),
+        write_scope_tag: None,
         manifest_root_digest: manifest_root_digest.to_string(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
@@ -3724,6 +3735,7 @@ async fn bind_kv_alias_tag(
         compressed_size: None,
         storage_mode: Some("cas".to_string()),
         tag: Some(alias_tag.to_string()),
+        write_scope_tag: None,
     };
 
     let result = if flush_mode == FlushMode::Shutdown {
@@ -4535,6 +4547,7 @@ mod tests {
             compressed_size: None,
             storage_mode: Some("cas".to_string()),
             tag: Some(tag.to_string()),
+            write_scope_tag: None,
         }
     }
 

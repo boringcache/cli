@@ -1460,6 +1460,8 @@ impl ApiClient {
         struct PublishPayload {
             cache_entry_id: String,
             publish_mode: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            write_scope_tag: Option<String>,
             cache: PublishFinalizePayload,
         }
 
@@ -1485,6 +1487,7 @@ impl ApiClient {
         let publish_payload = PublishPayload {
             cache_entry_id: cache_entry_id.to_string(),
             publish_mode: publish_mode.to_string(),
+            write_scope_tag: request.write_scope_tag.clone(),
             cache: PublishFinalizePayload {
                 manifest_digest: request.manifest_digest.clone(),
                 manifest_size: request.manifest_size,
@@ -2696,6 +2699,7 @@ mod tests {
             compressed_size: None,
             storage_mode: Some("archive".to_string()),
             tag: None,
+            write_scope_tag: None,
         };
 
         assert_eq!(determine_publish_mode(&request), "replace");
