@@ -94,6 +94,29 @@ flushed_entry_count() {
   ' "$PROXY_LOG"
 }
 
+latest_blob_upload_progress() {
+  awk '
+    /KV blob upload progress:/ {
+      uploaded = ""
+      total = ""
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^uploaded=/) {
+          value = $i
+          sub(/^uploaded=/, "", value)
+          split(value, parts, "/")
+          uploaded = parts[1]
+          total = parts[2]
+        }
+      }
+    }
+    END {
+      if (uploaded != "" && total != "") {
+        printf "%s/%s", uploaded, total
+      }
+    }
+  ' "$PROXY_LOG"
+}
+
 wait_for_seed_flush() {
   local target="$1"
   local waited=0
@@ -130,7 +153,13 @@ wait_for_seed_flush() {
     sleep 2
     waited=$((waited + 2))
     if (( waited % 10 == 0 )); then
-      echo "  waiting for seed flush progress... (${flushed:-0}/${target} entries, ${waited}s)"
+      local upload_progress=""
+      upload_progress="$(latest_blob_upload_progress)"
+      if [[ -n "$upload_progress" ]]; then
+        echo "  waiting for seed flush progress... (${flushed:-0}/${target} entries published, uploads ${upload_progress}, ${waited}s)"
+      else
+        echo "  waiting for seed flush progress... (${flushed:-0}/${target} entries, ${waited}s)"
+      fi
     fi
   done
 

@@ -4078,9 +4078,10 @@ async fn upload_blobs(
 
     let (initial, max) = kv_blob_upload_concurrency(upload_plan.upload_urls.len());
     let limiter = Arc::new(AdaptiveUploadConcurrency::new(initial, max));
+    let total_requested = upload_plan.upload_urls.len() as u64;
     eprintln!(
         "KV blob upload plan: requested={} already_present={} concurrency={}/{}",
-        upload_plan.upload_urls.len(),
+        total_requested,
         upload_plan.already_present.len(),
         initial,
         max,
@@ -4150,6 +4151,23 @@ async fn upload_blobs(
             BlobUploadOutcome::AlreadyPresent => {
                 stats.already_present_count = stats.already_present_count.saturating_add(1);
             }
+        }
+
+        let completed_requested = stats
+            .uploaded_count
+            .saturating_add(stats.missing_local_count);
+        if total_requested > 0
+            && (completed_requested == total_requested
+                || completed_requested % 1000 == 0
+                || completed_requested == 1)
+        {
+            eprintln!(
+                "KV blob upload progress: uploaded={}/{} missing_local={} current_concurrency={}",
+                completed_requested,
+                total_requested,
+                stats.missing_local_count,
+                limiter.current(),
+            );
         }
     }
 
