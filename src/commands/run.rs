@@ -28,6 +28,7 @@ pub async fn execute(
     workspace: Option<String>,
     tag_path_pairs: Vec<String>,
     verbose: bool,
+    require_server_signature: bool,
     no_platform: bool,
     no_git: bool,
     force: bool,
@@ -94,6 +95,7 @@ pub async fn execute(
             false,
             identity.clone(),
             fail_on_cache_error,
+            require_server_signature,
         )
         .await;
 

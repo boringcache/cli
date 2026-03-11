@@ -1647,7 +1647,7 @@ pub(crate) async fn resolve_hit(
         KV_RESOLVE_HIT_TIMEOUT,
         state
             .api_client
-            .restore(&state.workspace, &[tag.to_string()]),
+            .restore(&state.workspace, &[tag.to_string()], false),
     )
     .await
     .map_err(|_| {

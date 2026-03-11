@@ -95,6 +95,84 @@ fn signature_display_tag<'a>(
         .unwrap_or(fallback)
 }
 
+fn enforce_server_signature(
+    hit: &crate::api::models::cache::CacheResolutionEntry,
+    root_digest: &str,
+    manifest_tag: Option<&str>,
+    verbose: bool,
+    require_server_signature: bool,
+) -> Result<()> {
+    let signature_tag = signature_subject_tag(hit, manifest_tag);
+    let display_tag = signature_display_tag(hit, manifest_tag.unwrap_or(hit.tag.as_str()));
+
+    match (&hit.workspace_signing_public_key, &hit.server_signature) {
+        (Some(workspace_key), Some(server_sig)) => {
+            match crate::commands::restore::verify_server_signature(
+                signature_tag,
+                root_digest,
+                workspace_key,
+                server_sig,
+            ) {
+                Ok(()) => {
+                    if verbose {
+                        ui::info("  Server signature verified");
+                    }
+                    Ok(())
+                }
+                Err(error) => {
+                    if require_server_signature {
+                        anyhow::bail!(
+                            "Server signature verification failed for {}: {}",
+                            display_tag,
+                            error
+                        );
+                    }
+                    ui::warn(&format!(
+                        "Server signature verification failed for {}: {}",
+                        display_tag, error
+                    ));
+                    Ok(())
+                }
+            }
+        }
+        (Some(_), None) => {
+            if require_server_signature {
+                anyhow::bail!(
+                    "Server signature missing for {}; strict signature mode is enabled",
+                    display_tag
+                );
+            }
+            ui::warn(&format!(
+                "Server signature missing for {}; authenticity not verified",
+                display_tag
+            ));
+            Ok(())
+        }
+        (None, Some(_)) => {
+            if require_server_signature {
+                anyhow::bail!(
+                    "Workspace signing key missing for {}; strict signature mode is enabled",
+                    display_tag
+                );
+            }
+            ui::warn(&format!(
+                "Workspace signing key missing for {}; cannot verify server signature",
+                display_tag
+            ));
+            Ok(())
+        }
+        (None, None) => {
+            if require_server_signature {
+                anyhow::bail!(
+                    "Server signature missing for {}; strict signature mode is enabled",
+                    display_tag
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
 pub async fn execute(
     workspace: String,
     tag_path: String,
@@ -102,6 +180,7 @@ pub async fn execute(
     force: bool,
     recipient: Option<String>,
     identity: Option<String>,
+    require_server_signature: bool,
 ) -> Result<()> {
     let (tag, local_path) = parse_tag_path(&tag_path)?;
     let expanded_path = crate::commands::utils::expand_tilde_path(&local_path);
@@ -145,6 +224,7 @@ pub async fn execute(
         force,
         identity.clone(),
         passphrase_cache.clone(),
+        require_server_signature,
     )
     .await?;
 
@@ -305,9 +385,14 @@ async fn initial_restore(
     force: bool,
     identity: Option<String>,
     passphrase_cache: Arc<Mutex<crate::encryption::PassphraseCache>>,
+    require_server_signature: bool,
 ) -> Result<RestoreAction> {
     let resolution_result = api_client
-        .restore(workspace, &[resolved_tag.to_string()])
+        .restore(
+            workspace,
+            &[resolved_tag.to_string()],
+            require_server_signature,
+        )
         .await;
 
     let hits = match resolution_result {
@@ -340,12 +425,28 @@ async fn initial_restore(
     );
     match adapter {
         crate::adapters::AdapterDispatchKind::Oci => {
-            return initial_restore_oci(api_client, workspace, hit, local_path, verbose, force)
-                .await;
+            return initial_restore_oci(
+                api_client,
+                workspace,
+                hit,
+                local_path,
+                verbose,
+                force,
+                require_server_signature,
+            )
+            .await;
         }
         crate::adapters::AdapterDispatchKind::File => {
-            return initial_restore_file(api_client, workspace, hit, local_path, verbose, force)
-                .await;
+            return initial_restore_file(
+                api_client,
+                workspace,
+                hit,
+                local_path,
+                verbose,
+                force,
+                require_server_signature,
+            )
+            .await;
         }
         crate::adapters::AdapterDispatchKind::Archive => {}
     }
@@ -493,43 +594,13 @@ async fn initial_restore(
         return Ok(RestoreAction::NoRemoteCache);
     }
 
-    let signature_tag = signature_subject_tag(hit, Some(manifest.tag.as_str()));
-    match (&hit.workspace_signing_public_key, &hit.server_signature) {
-        (Some(workspace_key), Some(server_sig)) => {
-            match crate::signing::parse_public_key(workspace_key)
-                .and_then(|pk| {
-                    crate::signing::signature_from_base64(server_sig).map(|sig| (pk, sig))
-                })
-                .and_then(|(pk, sig)| {
-                    let data = format!("{}:{}", signature_tag, manifest.root.digest);
-                    crate::signing::verify_signature(data.as_bytes(), &sig, &pk)
-                }) {
-                Ok(()) => {
-                    if verbose {
-                        ui::info("  Server signature verified");
-                    }
-                }
-                Err(e) => {
-                    ui::warn(&format!("Server signature verification failed: {}", e));
-                }
-            }
-        }
-        (Some(_), None) => {
-            let display_tag = signature_display_tag(hit, manifest.tag.as_str());
-            ui::warn(&format!(
-                "Server signature missing for {}; authenticity not verified",
-                display_tag
-            ));
-        }
-        (None, Some(_)) => {
-            let display_tag = signature_display_tag(hit, manifest.tag.as_str());
-            ui::warn(&format!(
-                "Workspace signing key missing for {}; cannot verify server signature",
-                display_tag
-            ));
-        }
-        (None, None) => {}
-    }
+    enforce_server_signature(
+        hit,
+        &manifest.root.digest,
+        Some(manifest.tag.as_str()),
+        verbose,
+        require_server_signature,
+    )?;
 
     if actual_archive_size.is_none() && hit.compressed_size.is_none() {
         actual_archive_size =
@@ -688,6 +759,7 @@ async fn initial_restore_oci(
     local_path: &Path,
     verbose: bool,
     force: bool,
+    require_server_signature: bool,
 ) -> Result<RestoreAction> {
     let remote_manifest_digest = hit
         .manifest_root_digest
@@ -756,43 +828,13 @@ async fn initial_restore_oci(
 
     let pointer = crate::cas_oci::parse_pointer(&pointer_bytes)?;
 
-    let signature_tag = signature_subject_tag(hit, None);
-    match (&hit.workspace_signing_public_key, &hit.server_signature) {
-        (Some(workspace_key), Some(server_sig)) => {
-            match crate::signing::parse_public_key(workspace_key)
-                .and_then(|pk| {
-                    crate::signing::signature_from_base64(server_sig).map(|sig| (pk, sig))
-                })
-                .and_then(|(pk, sig)| {
-                    let data = format!("{}:{}", signature_tag, remote_manifest_digest);
-                    crate::signing::verify_signature(data.as_bytes(), &sig, &pk)
-                }) {
-                Ok(()) => {
-                    if verbose {
-                        ui::info("  Server signature verified");
-                    }
-                }
-                Err(e) => {
-                    ui::warn(&format!("Server signature verification failed: {}", e));
-                }
-            }
-        }
-        (Some(_), None) => {
-            let display_tag = signature_display_tag(hit, hit.tag.as_str());
-            ui::warn(&format!(
-                "Server signature missing for {}; authenticity not verified",
-                display_tag
-            ));
-        }
-        (None, Some(_)) => {
-            let display_tag = signature_display_tag(hit, hit.tag.as_str());
-            ui::warn(&format!(
-                "Workspace signing key missing for {}; cannot verify server signature",
-                display_tag
-            ));
-        }
-        (None, None) => {}
-    }
+    enforce_server_signature(
+        hit,
+        remote_manifest_digest,
+        None,
+        verbose,
+        require_server_signature,
+    )?;
 
     if local_path.exists() && force {
         tokio::fs::remove_dir_all(local_path)
@@ -931,6 +973,7 @@ async fn initial_restore_file(
     local_path: &Path,
     verbose: bool,
     force: bool,
+    require_server_signature: bool,
 ) -> Result<RestoreAction> {
     let remote_manifest_digest = hit
         .manifest_root_digest
@@ -1000,43 +1043,13 @@ async fn initial_restore_file(
 
     let pointer = crate::cas_file::parse_pointer(&pointer_bytes)?;
 
-    let signature_tag = signature_subject_tag(hit, None);
-    match (&hit.workspace_signing_public_key, &hit.server_signature) {
-        (Some(workspace_key), Some(server_sig)) => {
-            match crate::signing::parse_public_key(workspace_key)
-                .and_then(|pk| {
-                    crate::signing::signature_from_base64(server_sig).map(|sig| (pk, sig))
-                })
-                .and_then(|(pk, sig)| {
-                    let data = format!("{}:{}", signature_tag, remote_manifest_digest);
-                    crate::signing::verify_signature(data.as_bytes(), &sig, &pk)
-                }) {
-                Ok(()) => {
-                    if verbose {
-                        ui::info("  Server signature verified");
-                    }
-                }
-                Err(e) => {
-                    ui::warn(&format!("Server signature verification failed: {}", e));
-                }
-            }
-        }
-        (Some(_), None) => {
-            let display_tag = signature_display_tag(hit, hit.tag.as_str());
-            ui::warn(&format!(
-                "Server signature missing for {}; authenticity not verified",
-                display_tag
-            ));
-        }
-        (None, Some(_)) => {
-            let display_tag = signature_display_tag(hit, hit.tag.as_str());
-            ui::warn(&format!(
-                "Workspace signing key missing for {}; cannot verify server signature",
-                display_tag
-            ));
-        }
-        (None, None) => {}
-    }
+    enforce_server_signature(
+        hit,
+        remote_manifest_digest,
+        None,
+        verbose,
+        require_server_signature,
+    )?;
 
     if local_path.exists() && force {
         tokio::fs::remove_dir_all(local_path)

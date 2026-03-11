@@ -337,6 +337,7 @@ pub async fn execute_batch_restore(
     lookup_only: bool,
     identity: Option<String>,
     fail_on_cache_error: bool,
+    require_server_signature: bool,
 ) -> Result<()> {
     if let Err(err) = execute_batch_restore_inner(
         workspace_option,
@@ -348,10 +349,11 @@ pub async fn execute_batch_restore(
         lookup_only,
         identity,
         fail_on_cache_error,
+        require_server_signature,
     )
     .await
     {
-        if fail_on_cache_miss || fail_on_cache_error {
+        if fail_on_cache_miss || fail_on_cache_error || require_server_signature {
             return Err(err);
         }
         ui::warn(&format!("{:#}", err));
@@ -370,6 +372,7 @@ async fn execute_batch_restore_inner(
     lookup_only: bool,
     identity: Option<String>,
     fail_on_cache_error: bool,
+    require_server_signature: bool,
 ) -> Result<()> {
     let workspace = crate::commands::utils::get_workspace_name(workspace_option)?;
 
@@ -471,7 +474,10 @@ async fn execute_batch_restore_inner(
     let max_pending_retries = 5u32;
     let mut pending_attempt = 0u32;
     let resolution_result = loop {
-        match api_client.restore(&workspace, &all_candidates).await {
+        match api_client
+            .restore(&workspace, &all_candidates, require_server_signature)
+            .await
+        {
             Ok(result) => {
                 let has_hit = result.iter().any(|entry| entry.status == "hit");
                 let has_retryable = result.iter().any(is_entry_retryable);
@@ -706,6 +712,7 @@ async fn execute_batch_restore_inner(
                 verbose,
                 identity,
                 passphrase_cache,
+                require_server_signature,
             )
             .await
         });
@@ -817,7 +824,7 @@ async fn execute_batch_restore_inner(
         }
     }
 
-    if fail_on_cache_error {
+    if fail_on_cache_error || require_server_signature {
         finalize_restore_outcome(restore_errors, skipped_entries)?;
     } else {
         let _ = finalize_restore_outcome(restore_errors, skipped_entries);
@@ -978,6 +985,7 @@ async fn process_restore(
     verbose: bool,
     identity: Option<String>,
     passphrase_cache: Arc<Mutex<crate::encryption::PassphraseCache>>,
+    require_server_signature: bool,
 ) -> Result<RestoreOutcome> {
     let restore_adapter = crate::cache_adapter::detect_restore_transport(
         hit.storage_mode.as_deref(),
@@ -1011,6 +1019,7 @@ async fn process_restore(
                 verbose,
                 identity,
                 passphrase_cache,
+                require_server_signature,
             )
             .await
         }
@@ -1024,6 +1033,7 @@ async fn process_restore(
                 hit,
                 target_path,
                 verbose,
+                require_server_signature,
             )
             .await
         }
@@ -1037,6 +1047,7 @@ async fn process_restore(
                 hit,
                 target_path,
                 verbose,
+                require_server_signature,
             )
             .await
         }
@@ -1055,6 +1066,7 @@ async fn process_restore_archive(
     verbose: bool,
     identity: Option<String>,
     passphrase_cache: Arc<Mutex<crate::encryption::PassphraseCache>>,
+    require_server_signature: bool,
 ) -> Result<RestoreOutcome> {
     let client = api_client.transfer_client().clone();
 
@@ -1202,47 +1214,14 @@ async fn process_restore_archive(
         }
     }
 
-    let signature_tag = signature_subject_tag(&hit, Some(manifest.tag.as_str()));
-    match (&hit.workspace_signing_public_key, &hit.server_signature) {
-        (Some(workspace_key), Some(server_sig)) => {
-            match verify_server_signature(
-                signature_tag,
-                &manifest.root.digest,
-                workspace_key,
-                server_sig,
-            ) {
-                Ok(()) => {
-                    if verbose {
-                        let public_key = crate::signing::parse_public_key(workspace_key).ok();
-                        let fingerprint = public_key
-                            .as_ref()
-                            .map(crate::signing::public_key_fingerprint)
-                            .unwrap_or_else(|| "unknown".to_string());
-                        let _ =
-                            reporter.info(format!("  Server signature verified ({})", fingerprint));
-                    }
-                }
-                Err(e) => {
-                    ui::warn(&format!("Server signature verification failed: {}", e));
-                }
-            }
-        }
-        (Some(_), None) => {
-            let display_tag = signature_display_tag(&hit, manifest.tag.as_str());
-            ui::warn(&format!(
-                "Server signature missing for {}; authenticity not verified",
-                display_tag
-            ));
-        }
-        (None, Some(_)) => {
-            let display_tag = signature_display_tag(&hit, manifest.tag.as_str());
-            ui::warn(&format!(
-                "Workspace signing key missing for {}; cannot verify server signature",
-                display_tag
-            ));
-        }
-        (None, None) => {}
-    }
+    verify_restore_signature(
+        &hit,
+        &manifest.root.digest,
+        Some(manifest.tag.as_str()),
+        verbose,
+        Some(&reporter),
+        require_server_signature,
+    )?;
 
     if actual_archive_size.is_none() && hit.compressed_size.is_none() {
         actual_archive_size = probe_archive_size(&client, &archive_url).await;
@@ -1523,6 +1502,7 @@ async fn process_restore_oci(
     hit: CacheResolutionEntry,
     target_path: String,
     verbose: bool,
+    require_server_signature: bool,
 ) -> Result<RestoreOutcome> {
     let transfer_client = api_client.transfer_client().clone();
     let mut session = ProgressSession::new(reporter.clone(), session_id.clone(), title, 3)?;
@@ -1580,34 +1560,14 @@ async fn process_restore_oci(
     }
     fetch_step.complete()?;
 
-    let signature_tag = signature_subject_tag(&hit, None);
-    match (&hit.workspace_signing_public_key, &hit.server_signature) {
-        (Some(workspace_key), Some(server_sig)) => {
-            if let Err(err) = verify_server_signature(
-                signature_tag,
-                &resolved_manifest_root_digest,
-                workspace_key,
-                server_sig,
-            ) {
-                ui::warn(&format!("Server signature verification failed: {}", err));
-            }
-        }
-        (Some(_), None) => {
-            let display_tag = signature_display_tag(&hit, hit.tag.as_str());
-            ui::warn(&format!(
-                "Server signature missing for {}; authenticity not verified",
-                display_tag
-            ));
-        }
-        (None, Some(_)) => {
-            let display_tag = signature_display_tag(&hit, hit.tag.as_str());
-            ui::warn(&format!(
-                "Workspace signing key missing for {}; cannot verify server signature",
-                display_tag
-            ));
-        }
-        (None, None) => {}
-    }
+    verify_restore_signature(
+        &hit,
+        &resolved_manifest_root_digest,
+        None,
+        verbose,
+        None,
+        require_server_signature,
+    )?;
 
     let blobs_dir = Path::new(&target_path).join("blobs").join("sha256");
     fs::create_dir_all(&blobs_dir)
@@ -1789,6 +1749,7 @@ async fn process_restore_file(
     hit: CacheResolutionEntry,
     target_path: String,
     verbose: bool,
+    require_server_signature: bool,
 ) -> Result<RestoreOutcome> {
     match ensure_empty_target(&target_path).await? {
         EnsureTargetStatus::Ready => {}
@@ -1861,34 +1822,14 @@ async fn process_restore_file(
     }
     fetch_step.complete()?;
 
-    let signature_tag = signature_subject_tag(&hit, None);
-    match (&hit.workspace_signing_public_key, &hit.server_signature) {
-        (Some(workspace_key), Some(server_sig)) => {
-            if let Err(err) = verify_server_signature(
-                signature_tag,
-                &resolved_manifest_root_digest,
-                workspace_key,
-                server_sig,
-            ) {
-                ui::warn(&format!("Server signature verification failed: {}", err));
-            }
-        }
-        (Some(_), None) => {
-            let display_tag = signature_display_tag(&hit, hit.tag.as_str());
-            ui::warn(&format!(
-                "Server signature missing for {}; authenticity not verified",
-                display_tag
-            ));
-        }
-        (None, Some(_)) => {
-            let display_tag = signature_display_tag(&hit, hit.tag.as_str());
-            ui::warn(&format!(
-                "Workspace signing key missing for {}; cannot verify server signature",
-                display_tag
-            ));
-        }
-        (None, None) => {}
-    }
+    verify_restore_signature(
+        &hit,
+        &resolved_manifest_root_digest,
+        None,
+        verbose,
+        None,
+        require_server_signature,
+    )?;
 
     let tmp_dir = tempdir().context("Failed to create CAS download temp directory")?;
     let blobs_dir = tmp_dir.path().join("blobs").join("sha256");
@@ -2313,7 +2254,77 @@ async fn ensure_empty_target(path: &str) -> Result<EnsureTargetStatus> {
     Ok(EnsureTargetStatus::Ready)
 }
 
-fn verify_server_signature(
+fn signature_policy_failure(message: String, require_server_signature: bool) -> Result<()> {
+    if require_server_signature {
+        anyhow::bail!(message);
+    }
+
+    ui::warn(&message);
+    Ok(())
+}
+
+fn verify_restore_signature(
+    hit: &CacheResolutionEntry,
+    root_digest: &str,
+    manifest_tag: Option<&str>,
+    verbose: bool,
+    reporter: Option<&crate::progress::Reporter>,
+    require_server_signature: bool,
+) -> Result<()> {
+    let signature_tag = signature_subject_tag(hit, manifest_tag);
+    let display_tag = signature_display_tag(hit, manifest_tag.unwrap_or(hit.tag.as_str()));
+
+    match (&hit.workspace_signing_public_key, &hit.server_signature) {
+        (Some(workspace_key), Some(server_sig)) => {
+            match verify_server_signature(signature_tag, root_digest, workspace_key, server_sig) {
+                Ok(()) => {
+                    if verbose {
+                        let public_key = crate::signing::parse_public_key(workspace_key).ok();
+                        let fingerprint = public_key
+                            .as_ref()
+                            .map(crate::signing::public_key_fingerprint)
+                            .unwrap_or_else(|| "unknown".to_string());
+                        if let Some(reporter) = reporter {
+                            let _ = reporter
+                                .info(format!("  Server signature verified ({})", fingerprint));
+                        }
+                    }
+                    Ok(())
+                }
+                Err(error) => signature_policy_failure(
+                    format!(
+                        "Server signature verification failed for {}: {}",
+                        display_tag, error
+                    ),
+                    require_server_signature,
+                ),
+            }
+        }
+        (Some(_), None) => signature_policy_failure(
+            format!(
+                "Server signature missing for {}; authenticity not verified",
+                display_tag
+            ),
+            require_server_signature,
+        ),
+        (None, Some(_)) => signature_policy_failure(
+            format!(
+                "Workspace signing key missing for {}; cannot verify server signature",
+                display_tag
+            ),
+            require_server_signature,
+        ),
+        (None, None) => signature_policy_failure(
+            format!(
+                "Server signature missing for {}; authenticity not verified",
+                display_tag
+            ),
+            require_server_signature,
+        ),
+    }
+}
+
+pub(crate) fn verify_server_signature(
     tag: &str,
     root_digest: &str,
     workspace_signing_public_key: &str,

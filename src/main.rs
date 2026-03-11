@@ -224,6 +224,9 @@ async fn main() -> Result<()> {
         }
     };
 
+    let require_server_signature =
+        cli.require_server_signature || config::env_bool("BORINGCACHE_REQUIRE_SERVER_SIGNATURE");
+
     let result = match cli.command {
         cli::Commands::Auth { token } => commands::auth::execute(token).await,
         cli::Commands::Mount {
@@ -234,7 +237,16 @@ async fn main() -> Result<()> {
             recipient,
             identity,
         } => {
-            commands::mount::execute(workspace, tag_path, verbose, force, recipient, identity).await
+            commands::mount::execute(
+                workspace,
+                tag_path,
+                verbose,
+                force,
+                recipient,
+                identity,
+                require_server_signature,
+            )
+            .await
         }
         cli::Commands::Save {
             workspace,
@@ -293,6 +305,7 @@ async fn main() -> Result<()> {
                 lookup_only,
                 identity,
                 fail_on_cache_error,
+                require_server_signature,
             )
             .await
         }
@@ -330,6 +343,7 @@ async fn main() -> Result<()> {
                 effective_workspace,
                 tag_path_strings,
                 cli.verbose,
+                require_server_signature,
                 no_platform,
                 no_git,
                 force,
@@ -373,6 +387,7 @@ async fn main() -> Result<()> {
                 no_git,
                 fail_on_miss,
                 json,
+                require_server_signature,
             )
             .await
         }

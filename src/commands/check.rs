@@ -1,6 +1,6 @@
 use crate::api::ApiClient;
 use crate::ui;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -30,6 +30,7 @@ pub async fn execute(
     no_git: bool,
     fail_on_miss: bool,
     json_output: bool,
+    require_server_signature: bool,
 ) -> Result<()> {
     if let Err(err) = execute_inner(
         workspace,
@@ -38,10 +39,11 @@ pub async fn execute(
         no_git,
         fail_on_miss,
         json_output,
+        require_server_signature,
     )
     .await
     {
-        if fail_on_miss {
+        if fail_on_miss || require_server_signature {
             return Err(err);
         }
         ui::warn(&format!("{:#}", err));
@@ -56,6 +58,7 @@ async fn execute_inner(
     no_git: bool,
     fail_on_miss: bool,
     json_output: bool,
+    require_server_signature: bool,
 ) -> Result<()> {
     let workspace = crate::commands::utils::get_workspace_name(workspace)?;
 
@@ -148,11 +151,16 @@ async fn execute_inner(
         ));
     }
 
-    let resolution_result = api_client.restore(&workspace, &all_candidates).await?;
+    let resolution_result = api_client
+        .restore(&workspace, &all_candidates, require_server_signature)
+        .await?;
 
     let mut results_by_tag: std::collections::HashMap<String, crate::api::CacheResolutionEntry> =
         std::collections::HashMap::new();
     for entry in resolution_result {
+        if require_server_signature && entry.status == "hit" {
+            verify_check_signature(&entry)?;
+        }
         results_by_tag.insert(entry.tag.clone(), entry);
     }
 
@@ -257,4 +265,47 @@ async fn execute_inner(
     }
 
     Ok(())
+}
+
+fn verify_check_signature(entry: &crate::api::CacheResolutionEntry) -> Result<()> {
+    let root_digest = entry.manifest_root_digest.as_deref().ok_or_else(|| {
+        anyhow!(
+            "Signed cache hit for {} is missing manifest_root_digest",
+            entry.tag
+        )
+    })?;
+    let signature_tag = entry
+        .signature_tag
+        .as_deref()
+        .or(entry.primary_tag.as_deref())
+        .unwrap_or(entry.tag.as_str());
+    let public_key = entry
+        .workspace_signing_public_key
+        .as_deref()
+        .ok_or_else(|| {
+            anyhow!(
+                "Workspace signing key missing for {}; strict signature mode is enabled",
+                signature_tag
+            )
+        })?;
+    let server_signature = entry.server_signature.as_deref().ok_or_else(|| {
+        anyhow!(
+            "Server signature missing for {}; strict signature mode is enabled",
+            signature_tag
+        )
+    })?;
+
+    crate::commands::restore::verify_server_signature(
+        signature_tag,
+        root_digest,
+        public_key,
+        server_signature,
+    )
+    .map_err(|error| {
+        anyhow!(
+            "Server signature verification failed for {}: {}",
+            signature_tag,
+            error
+        )
+    })
 }

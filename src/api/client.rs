@@ -1359,6 +1359,7 @@ impl ApiClient {
         &self,
         workspace: &str,
         entries: &[String],
+        require_signed: bool,
     ) -> Result<Vec<super::models::cache::CacheResolutionEntry>> {
         ensure!(
             !entries.is_empty(),
@@ -1366,7 +1367,7 @@ impl ApiClient {
         );
 
         let response = self
-            .fetch_restore_response(workspace, entries)
+            .fetch_restore_response(workspace, entries, require_signed)
             .await?
             .unwrap_or_default();
 
@@ -1382,9 +1383,10 @@ impl ApiClient {
         &self,
         workspace: &str,
         tag: &str,
+        require_signed: bool,
     ) -> Result<Option<super::models::cache::CacheResolutionEntry>> {
         let response = self
-            .fetch_restore_response(workspace, &[tag.to_string()])
+            .fetch_restore_response(workspace, &[tag.to_string()], require_signed)
             .await?;
 
         let Some(items) = response else {
@@ -1757,6 +1759,7 @@ impl ApiClient {
         &self,
         workspace: &str,
         entries: &[String],
+        require_signed: bool,
     ) -> Result<Option<super::models::cache::RestoreResponse>> {
         use crate::api::models::cache::RestoreResponse;
 
@@ -1767,7 +1770,10 @@ impl ApiClient {
 
         let entries_param = entries.join(",");
         let base = self.workspace_endpoint(workspace, "caches")?;
-        let url = format!("{}?entries={}", base, urlencoding::encode(&entries_param));
+        let mut url = format!("{}?entries={}", base, urlencoding::encode(&entries_param));
+        if require_signed {
+            url.push_str("&require_signed=1");
+        }
         let response = self.get_response_with_base(&self.v2_base_url, &url).await?;
 
         let status = response.status();

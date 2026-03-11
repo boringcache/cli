@@ -465,6 +465,165 @@ async fn test_restore_warns_on_invalid_signature_with_encrypted_manifest() {
 }
 
 #[tokio::test]
+async fn test_restore_fails_on_invalid_signature_in_strict_mode() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!("skipping test_restore_fails_on_invalid_signature_in_strict_mode: networking disabled in sandbox");
+        return;
+    }
+    let mut server = Server::new_async().await;
+
+    let _auth_mock = server
+        .mock("GET", "/v2/session")
+        .with_status(200)
+        .with_body(
+            json!({
+                "user": {"name": "Test User", "email": "test@example.com"},
+                "organization": {"name": "Test Org"},
+                "token": {"expires_in_days": 90}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config_dir = temp_dir.path().join(".boringcache");
+    fs::create_dir(&config_dir).expect("Failed to create config dir");
+    fs::write(
+        config_dir.join("config.json"),
+        json!({
+            "token": "test-token-123",
+            "api_url": server.url()
+        })
+        .to_string(),
+    )
+    .expect("Failed to write config");
+    env::set_var("HOME", temp_dir.path());
+
+    let data_dir = temp_dir.path().join("data");
+    fs::create_dir(&data_dir).expect("Failed to create data dir");
+    fs::write(data_dir.join("hello.txt"), "hello").expect("Failed to write data file");
+
+    let (identity, recipient) = encryption::generate_keypair();
+    let identity_path = temp_dir.path().join("age-identity.txt");
+    encryption::save_identity(&identity, &identity_path).expect("Failed to save identity");
+
+    let recipient_str = recipient.to_string();
+    let encryption_meta = manifest::EncryptionMetadata {
+        algorithm: encryption::ENCRYPTION_ALGORITHM_AGE_X25519.to_string(),
+        recipient_hint: Some(encryption::recipient_hint(&recipient_str)),
+        encrypted_at: Utc::now(),
+    };
+
+    let (manifest, manifest_bytes, archive_bytes) =
+        build_manifest_and_archive(&data_dir, "cache-tag", Some(encryption_meta)).await;
+
+    let manifest_encrypted =
+        encryption::encrypt_data(&manifest_bytes, &recipient).expect("Failed to encrypt manifest");
+    let archive_encrypted =
+        encryption::encrypt_data(&archive_bytes, &recipient).expect("Failed to encrypt archive");
+
+    let (signing_key, verifying_key) = signing::generate_keypair();
+    let public_key = signing::format_public_key(&verifying_key);
+    let bad_signature = signing::signature_to_base64(&signing::sign_data(b"invalid", &signing_key));
+
+    let manifest_url = format!("{}/manifest-strict", server.url());
+    let archive_url = format!("{}/archive-strict", server.url());
+    let manifest_root_digest = manifest.root.digest.clone();
+    let manifest_raw_size = manifest.summary.raw_size;
+    let manifest_file_count = manifest.summary.file_count;
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(
+                r"^/v2/workspaces/test/workspace/caches\?entries=.*&require_signed=1$".to_string(),
+            ),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([
+                {
+                    "tag": "cache-tag",
+                    "status": "hit",
+                    "cache_entry_id": "123",
+                    "manifest_url": manifest_url,
+                    "archive_urls": [archive_url],
+                    "manifest_root_digest": manifest_root_digest,
+                    "workspace_signing_public_key": public_key,
+                    "server_signature": bad_signature,
+                    "server_signed_at": "2025-01-01T00:00:00Z",
+                    "encrypted": true,
+                    "metadata": {
+                        "total_size_bytes": archive_encrypted.len(),
+                        "uncompressed_size": manifest_raw_size,
+                        "compressed_size": archive_encrypted.len(),
+                        "file_count": manifest_file_count,
+                        "compression_algorithm": "zstd"
+                    }
+                }
+            ])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _manifest_mock = server
+        .mock("GET", "/manifest-strict")
+        .with_status(200)
+        .with_header("content-type", "application/octet-stream")
+        .with_body(manifest_encrypted)
+        .create_async()
+        .await;
+
+    let archive_len = archive_encrypted.len().to_string();
+    let _archive_head_mock = server
+        .mock("HEAD", "/archive-strict")
+        .with_status(200)
+        .with_header("content-length", archive_len.as_str())
+        .create_async()
+        .await;
+
+    let _archive_get_mock = server
+        .mock("GET", "/archive-strict")
+        .with_status(200)
+        .with_header("content-length", archive_len.as_str())
+        .with_body(archive_encrypted)
+        .create_async()
+        .await;
+
+    let target_dir = temp_dir.path().join("restore-target");
+    let tag_path = format!("cache-tag:{}", target_dir.to_str().unwrap());
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "--require-server-signature",
+            "restore",
+            "test/workspace",
+            tag_path.as_str(),
+            "--no-platform",
+            "--no-git",
+            "--identity",
+            identity_path.to_str().unwrap(),
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_ne!(output.status.code(), Some(0));
+    assert!(stderr.contains("Server signature verification failed for cache-tag"));
+    assert!(!target_dir.join("hello.txt").exists());
+
+    env::remove_var("BORINGCACHE_API_URL");
+    env::remove_var("HOME");
+}
+
+#[tokio::test]
 async fn test_restore_passphrase_manifest_requires_passphrase() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {

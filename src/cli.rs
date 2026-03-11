@@ -13,6 +13,13 @@ pub struct Cli {
 
     #[arg(short, long, global = true)]
     pub verbose: bool,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Require signed cache hits and fail if a returned server signature cannot be verified"
+    )]
+    pub require_server_signature: bool,
 }
 
 #[derive(Subcommand)]

@@ -504,7 +504,7 @@ async fn resolve_manifest(
 
     let entries = tokio::time::timeout(
         OCI_API_CALL_TIMEOUT,
-        state.api_client.restore(&state.workspace, &tags),
+        state.api_client.restore(&state.workspace, &tags, false),
     )
     .await
     .map_err(|_| {

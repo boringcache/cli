@@ -25,6 +25,18 @@ pub fn env_var(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.trim().is_empty())
 }
 
+pub fn env_bool(key: &str) -> bool {
+    env_var(key)
+        .map(|raw| {
+            let value = raw.trim();
+            value == "1"
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false)
+}
+
 fn token_from_file() -> Option<String> {
     let token_file = env_var("BORINGCACHE_TOKEN_FILE")?;
     let token = fs::read_to_string(token_file).ok()?;
