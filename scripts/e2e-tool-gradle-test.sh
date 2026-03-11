@@ -119,6 +119,7 @@ fi
 GRADLEW="${PROJECT_DIR}/gradlew"
 chmod +x "${GRADLEW}"
 
+export BORINGCACHE_PROXY_METADATA_HINTS="project=e2e-tool-gradle,tool=gradle"
 start_proxy "${BINARY}" "${WORKSPACE}" "${TAG}" "${PROXY_PORT}" "${GRADLE_LOG_DIR}/proxy.log"
 wait_for_proxy "${PROXY_PORT}"
 
@@ -171,6 +172,7 @@ else
 fi
 
 stop_proxy
+dump_cache_ops_summary
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
   verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${GRADLE_LOG_DIR}" \

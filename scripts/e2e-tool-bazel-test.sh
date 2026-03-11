@@ -89,6 +89,7 @@ bazel_cleanup() {
 }
 register_cleanup_callback bazel_cleanup
 
+export BORINGCACHE_PROXY_METADATA_HINTS="project=e2e-tool-bazel,tool=bazel"
 start_proxy "${BINARY}" "${WORKSPACE}" "${TAG}" "${PROXY_PORT}" "${BAZEL_LOG_DIR}/proxy.log"
 wait_for_proxy "${PROXY_PORT}"
 
@@ -146,6 +147,7 @@ fi
 (cd "${PROJECT_DIR}" && ${BAZEL_CMD} shutdown --output_base="${WARM_OUTPUT_BASE}" 2>/dev/null || true)
 
 stop_proxy
+dump_cache_ops_summary
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
   verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${BAZEL_LOG_DIR}" \

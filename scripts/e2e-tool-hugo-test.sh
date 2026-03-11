@@ -77,6 +77,7 @@ docker buildx create \
   --use
 docker buildx inspect "${BUILDER}" --bootstrap
 
+export BORINGCACHE_PROXY_METADATA_HINTS="project=e2e-tool-hugo,tool=oci"
 start_proxy "${BINARY}" "${WORKSPACE}" "${REGISTRY_TAG}" "${PORT}" "${HUGO_LOG_DIR}/proxy.log"
 wait_for_proxy "${PORT}"
 
@@ -133,6 +134,7 @@ else
 fi
 
 stop_proxy
+dump_cache_ops_summary
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
   verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${REGISTRY_TAG}" "${HUGO_LOG_DIR}" \

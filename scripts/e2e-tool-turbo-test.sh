@@ -91,6 +91,7 @@ cat > "${PROJECT_DIR}/packages/pkg-b/package.json" <<'EOF'
 }
 EOF
 
+export BORINGCACHE_PROXY_METADATA_HINTS="project=e2e-tool-turbo,tool=turborepo"
 start_proxy "${BINARY}" "${WORKSPACE}" "${TAG}" "${PROXY_PORT}" "${TURBO_LOG_DIR}/proxy.log"
 wait_for_proxy "${PROXY_PORT}"
 
@@ -161,6 +162,7 @@ else
 fi
 
 stop_proxy
+dump_cache_ops_summary
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
   verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${TURBO_LOG_DIR}" \

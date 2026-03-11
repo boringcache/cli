@@ -112,6 +112,7 @@ public class App {
 }
 EOF
 
+export BORINGCACHE_PROXY_METADATA_HINTS="project=e2e-tool-maven,tool=maven"
 start_proxy "${BINARY}" "${WORKSPACE}" "${TAG}" "${PROXY_PORT}" "${MAVEN_LOG_DIR}/proxy.log"
 wait_for_proxy "${PROXY_PORT}"
 
@@ -169,6 +170,7 @@ else
 fi
 
 stop_proxy
+dump_cache_ops_summary
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
   verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${MAVEN_LOG_DIR}" \

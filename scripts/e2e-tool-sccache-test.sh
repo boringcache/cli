@@ -87,6 +87,7 @@ stop_sccache_server() {
 }
 register_cleanup_callback stop_sccache_server
 
+export BORINGCACHE_PROXY_METADATA_HINTS="project=e2e-tool-sccache,tool=sccache"
 start_proxy "${BINARY}" "${WORKSPACE}" "${TAG}" "${PROXY_PORT}" "${SCCACHE_LOG_DIR}/proxy.log"
 wait_for_proxy "${PROXY_PORT}"
 
@@ -159,6 +160,7 @@ fi
 
 stop_sccache_server
 stop_proxy
+dump_cache_ops_summary
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
   verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${SCCACHE_LOG_DIR}" \

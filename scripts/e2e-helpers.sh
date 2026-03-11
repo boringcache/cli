@@ -13,6 +13,7 @@ PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
 
 _HELPER_PROXY_PID=""
 _HELPER_PROXY_LOG=""
+_HELPER_PROXY_METRICS=""
 _HELPER_INTERRUPTED="0"
 _HELPER_PORT_TOOL=""
 declare -a _HELPER_TAGS_TO_DELETE=()
@@ -148,13 +149,21 @@ start_proxy() {
   reclaim_stale_proxy_port "$port"
 
   _HELPER_PROXY_LOG="$log_file"
+  local metrics_dir
+  metrics_dir="$(dirname "$log_file")"
+  _HELPER_PROXY_METRICS="${metrics_dir}/cache-registry-request-metrics.jsonl"
   {
     echo ""
     echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} ==="
   } >>"$log_file"
 
+  local metadata_hints="${BORINGCACHE_PROXY_METADATA_HINTS:-}"
+
   if [[ -n "$extra_args" ]]; then
     RUST_LOG="${RUST_LOG:-warn}" \
+    BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
+    BORINGCACHE_OBSERVABILITY_JSONL_PATH="${_HELPER_PROXY_METRICS}" \
+    BORINGCACHE_PROXY_METADATA_HINTS="${metadata_hints}" \
       "$binary" cache-registry "$workspace" "$tag" \
       --host "$PROXY_HOST" \
       --port "$port" \
@@ -163,6 +172,9 @@ start_proxy() {
       $extra_args >>"$log_file" 2>&1 &
   else
     RUST_LOG="${RUST_LOG:-warn}" \
+    BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
+    BORINGCACHE_OBSERVABILITY_JSONL_PATH="${_HELPER_PROXY_METRICS}" \
+    BORINGCACHE_PROXY_METADATA_HINTS="${metadata_hints}" \
       "$binary" cache-registry "$workspace" "$tag" \
       --host "$PROXY_HOST" \
       --port "$port" \
@@ -216,6 +228,30 @@ proxy_pid() {
 
 proxy_log() {
   printf '%s' "${_HELPER_PROXY_LOG:-}"
+}
+
+proxy_metrics_file() {
+  printf '%s' "${_HELPER_PROXY_METRICS:-}"
+}
+
+dump_cache_ops_summary() {
+  local metrics_file="${1:-$(proxy_metrics_file)}"
+  local summary_file="${2:-}"
+  if [[ ! -f "${metrics_file}" ]]; then
+    echo "  cache ops: no metrics file found"
+    return 0
+  fi
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -z "${summary_file}" ]]; then
+    summary_file="$(dirname "${metrics_file}")/cache-ops-summary.env"
+  fi
+  if python3 "${script_dir}/request-metrics-summary.py" "${metrics_file}" > "${summary_file}" 2>/dev/null; then
+    source "${summary_file}"
+    echo "  cache ops: records=${request_metrics_cache_ops_records_total:-0} hits=${request_metrics_cache_ops_sccache_get_hits:-0} misses=${request_metrics_cache_ops_sccache_get_misses:-0}"
+  else
+    echo "  cache ops: summary unavailable"
+  fi
 }
 
 register_tag_for_cleanup() {
