@@ -125,7 +125,8 @@ jobs:
           }
 
           CI_RUN_ID="$(wait_for_workflow_success "CLI CI")"
-          E2E_RUN_ID="$(wait_for_workflow_success "Cache Registry Benchmarks")"
+          BENCH_RUN_ID="$(wait_for_workflow_success "Cache Registry Benchmarks")"
+          E2E_RUN_ID="$(wait_for_workflow_success "E2E Tests")"
 
           echo "ci_run_id=${CI_RUN_ID}" >> "$GITHUB_OUTPUT"
           echo "e2e_run_id=${E2E_RUN_ID}" >> "$GITHUB_OUTPUT"
