@@ -58,9 +58,7 @@ fn run_cli_with_default_workspace_and_env(
         command.env(key, value);
     }
 
-    command
-        .output()
-        .expect("Failed to execute CLI command")
+    command.output().expect("Failed to execute CLI command")
 }
 
 fn run_cli_with_default_workspace_config(args: &[&str]) -> std::process::Output {
