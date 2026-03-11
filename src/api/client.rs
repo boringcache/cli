@@ -33,6 +33,7 @@ const CONFIRM_PUBLISH_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_CONFIRM_PUBLISH_TIME
 const DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS: u64 = 10;
 const PENDING_PUBLISH_POLL_TIMEOUT: Duration = Duration::from_secs(60);
 const PENDING_PUBLISH_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const BLOB_RECEIPT_COMMIT_BATCH_MAX: usize = 500;
 
 #[derive(Debug)]
 pub enum ConfirmPublishResult {
@@ -1147,10 +1148,14 @@ impl ApiClient {
             workspace,
             &format!("upload-sessions/{upload_session_id}/blobs/commit"),
         )?;
-        let body = super::models::cache::BlobReceiptCommitRequest {
-            receipts: receipts.to_vec(),
-        };
-        self.post_v2(&endpoint, &body).await.map(Some)
+        let mut last_response = None;
+        for chunk in receipts.chunks(BLOB_RECEIPT_COMMIT_BATCH_MAX) {
+            let body = super::models::cache::BlobReceiptCommitRequest {
+                receipts: chunk.to_vec(),
+            };
+            last_response = Some(self.post_v2(&endpoint, &body).await?);
+        }
+        Ok(last_response)
     }
 
     pub async fn commit_manifest_receipt(
