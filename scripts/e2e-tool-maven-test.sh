@@ -151,22 +151,34 @@ WARM_SECS="$((WARM_END - WARM_START))"
 echo "Warm build completed in ${WARM_SECS}s"
 
 maven_cache_hit=0
+remote_save_count=0
+remote_restore_count=0
 if grep -qi "restored from the build cache\|build cache.*hit\|found cached" "${WARM_LOG}" 2>/dev/null; then
   maven_cache_hit=1
   echo "  Maven build cache hit confirmed"
 fi
 
-proxy_gets="$(grep -c ' GET ' "${MAVEN_LOG_DIR}/proxy.log" 2>/dev/null || true)"
-proxy_puts="$(grep -c ' PUT ' "${MAVEN_LOG_DIR}/proxy.log" 2>/dev/null || true)"
-echo "  proxy traffic: PUTs=${proxy_puts} GETs=${proxy_gets}"
+if grep -q "Saved to remote cache" "${COLD_LOG}" 2>/dev/null; then
+  remote_save_count="$(grep -c "Saved to remote cache" "${COLD_LOG}" || true)"
+fi
+if grep -q "Build info downloaded from remote repo\|Downloading ${PROXY_URL}/v1.1/" "${WARM_LOG}" 2>/dev/null; then
+  remote_restore_count="$(grep -Ec "Build info downloaded from remote repo|Downloading ${PROXY_URL}/v1.1/" "${WARM_LOG}" || true)"
+fi
+echo "  remote cache activity: saves=${remote_save_count} restores=${remote_restore_count}"
 
-if [[ "${proxy_puts}" -gt 0 && "${proxy_gets}" -gt 0 ]]; then
-  echo "  proxy saw both writes (cold) and reads (warm)"
-elif [[ "${proxy_puts}" -gt 0 ]]; then
-  echo "  proxy saw writes but no reads (maven may use local cache for warm)"
+if [[ "${maven_cache_hit}" -eq 0 ]]; then
+  echo "ERROR: Maven warm build showed no cache-hit markers"
+  cat "${WARM_LOG}"
+  exit 1
+fi
+
+if [[ "${remote_save_count}" -gt 0 && "${remote_restore_count}" -gt 0 ]]; then
+  echo "  Maven remote cache save and restore confirmed"
+elif [[ "${remote_save_count}" -gt 0 ]]; then
+  echo "  Maven saved remotely but did not show explicit remote restore markers"
 else
-  echo "ERROR: proxy saw no PUT traffic — maven-build-cache-extension may not be configured correctly"
-  cat "${MAVEN_LOG_DIR}/proxy.log"
+  echo "ERROR: Maven build showed no remote cache save markers"
+  cat "${COLD_LOG}"
   exit 1
 fi
 

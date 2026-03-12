@@ -91,11 +91,12 @@ start_proxy "${BINARY}" "${WORKSPACE}" "${TAG}" "${PROXY_PORT}" "${SCCACHE_LOG_D
 wait_for_proxy "${PROXY_PORT}"
 
 echo "=== Phase 1: Cold Rust build (seed sccache via proxy) ==="
-COLD_TARGET="${SCCACHE_LOG_DIR}/target-cold"
+TARGET_DIR="${SCCACHE_LOG_DIR}/target-shared"
 COLD_SCCACHE_DIR="${SCCACHE_LOG_DIR}/sccache-cold"
 COLD_LOG="${SCCACHE_LOG_DIR}/cold-build.log"
 
 stop_sccache_server
+rm -rf "${TARGET_DIR}"
 mkdir -p "${COLD_SCCACHE_DIR}"
 
 COLD_START="$(date +%s)"
@@ -106,7 +107,8 @@ COLD_START="$(date +%s)"
   SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT}" \
   SCCACHE_LOG=info \
   RUSTC_WRAPPER=sccache \
-  CARGO_TARGET_DIR="${COLD_TARGET}" \
+  CARGO_INCREMENTAL=0 \
+  CARGO_TARGET_DIR="${TARGET_DIR}" \
     cargo build --release 2>&1 | tee "${COLD_LOG}"
 )
 COLD_END="$(date +%s)"
@@ -122,11 +124,11 @@ cold_misses="$(grep -o 'Cache misses[[:space:]]*[0-9]*' "${SCCACHE_LOG_DIR}/cold
 echo "  cold: requests=${cold_requests} hits=${cold_hits} misses=${cold_misses}"
 
 echo "=== Phase 2: Warm Rust build (sccache cache hit via proxy) ==="
-WARM_TARGET="${SCCACHE_LOG_DIR}/target-warm"
 WARM_SCCACHE_DIR="${SCCACHE_LOG_DIR}/sccache-warm"
 WARM_LOG="${SCCACHE_LOG_DIR}/warm-build.log"
 
 stop_sccache_server
+rm -rf "${TARGET_DIR}"
 mkdir -p "${WARM_SCCACHE_DIR}"
 
 WARM_START="$(date +%s)"
@@ -137,7 +139,8 @@ WARM_START="$(date +%s)"
   SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT}" \
   SCCACHE_LOG=info \
   RUSTC_WRAPPER=sccache \
-  CARGO_TARGET_DIR="${WARM_TARGET}" \
+  CARGO_INCREMENTAL=0 \
+  CARGO_TARGET_DIR="${TARGET_DIR}" \
     cargo build --release 2>&1 | tee "${WARM_LOG}"
 )
 WARM_END="$(date +%s)"
