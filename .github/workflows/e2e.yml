@@ -340,9 +340,9 @@ jobs:
           LOG_DIR="${GITHUB_WORKSPACE}/e2e-logs/${LEG}"
           status="${{ steps.run_e2e.outcome }}"
           {
-            echo "leg=${LEG}"
-            echo "label=${LABEL}"
-            echo "status=${status}"
+            echo "leg='${LEG}'"
+            echo "label='${LABEL}'"
+            echo "status='${status}'"
           } > "${LOG_DIR}/e2e-metrics.env"
 
       - name: Upload e2e artifacts
