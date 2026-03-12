@@ -1799,6 +1799,90 @@ async fn test_restore_fail_on_cache_error_flag() {
 }
 
 #[tokio::test]
+async fn test_restore_require_server_signature_fails_on_resolution_error() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!(
+            "skipping test_restore_require_server_signature_fails_on_resolution_error: networking disabled in sandbox"
+        );
+        return;
+    }
+    let mut server = Server::new_async().await;
+
+    let _auth_mock = server
+        .mock("GET", "/v2/session")
+        .with_status(200)
+        .with_body(
+            json!({
+                "user": {"name": "Test User", "email": "test@example.com"},
+                "organization": {"name": "Test Org"},
+                "token": {"expires_in_days": 90}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _cache_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+        )
+        .with_status(500)
+        .with_header("content-type", "text/plain")
+        .with_body("builder error")
+        .create_async()
+        .await;
+
+    env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config_dir = temp_dir.path().join(".boringcache");
+    fs::create_dir(&config_dir).expect("Failed to create config dir");
+    fs::write(
+        config_dir.join("config.json"),
+        json!({
+            "token": "test-token-123",
+            "api_url": server.url()
+        })
+        .to_string(),
+    )
+    .expect("Failed to write config");
+
+    env::set_var("HOME", temp_dir.path());
+    env::set_var("BORINGCACHE_REQUIRE_SERVER_SIGNATURE", "1");
+
+    let restore_target = temp_dir.path().join("restore-target");
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "restore",
+            "test/workspace",
+            &format!("strict-cache:{}", restore_target.display()),
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        !output.status.success(),
+        "Expected non-zero exit code with BORINGCACHE_REQUIRE_SERVER_SIGNATURE on resolution failure"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("builder error")
+            || stderr.contains("Cache restore failed")
+            || stderr.contains("Server returned error response"),
+        "Unexpected stderr: {}",
+        stderr
+    );
+
+    env::remove_var("BORINGCACHE_API_URL");
+    env::remove_var("BORINGCACHE_REQUIRE_SERVER_SIGNATURE");
+    env::remove_var("HOME");
+}
+
+#[tokio::test]
 async fn test_restore_lookup_only_flag() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {

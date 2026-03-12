@@ -154,6 +154,13 @@ fn ensure_restore_target_write_ready(target_path: &Path) -> Result<()> {
     assert_directory_writable(&directory_to_check)
 }
 
+fn should_fail_on_restore_error(
+    fail_on_cache_error: bool,
+    require_server_signature: bool,
+) -> bool {
+    fail_on_cache_error || require_server_signature
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +278,13 @@ mod tests {
     }
 
     #[test]
+    fn strict_restore_errors_include_signature_requirement() {
+        assert!(super::should_fail_on_restore_error(true, false));
+        assert!(super::should_fail_on_restore_error(false, true));
+        assert!(!super::should_fail_on_restore_error(false, false));
+    }
+
+    #[test]
     fn finalize_restore_outcome_errors_on_restore_failure() {
         let err: Error = anyhow!("boom");
         let result = super::finalize_restore_outcome(vec![err], Vec::new());
@@ -353,7 +367,7 @@ pub async fn execute_batch_restore(
     )
     .await
     {
-        if fail_on_cache_miss || fail_on_cache_error || require_server_signature {
+        if fail_on_cache_miss || should_fail_on_restore_error(fail_on_cache_error, require_server_signature) {
             return Err(err);
         }
         ui::warn(&format!("{:#}", err));
@@ -382,6 +396,9 @@ async fn execute_batch_restore_inner(
     }
 
     crate::api::parse_workspace_slug(&workspace)?;
+
+    let strict_restore_errors =
+        should_fail_on_restore_error(fail_on_cache_error, require_server_signature);
 
     let parsed_specs: Vec<RestoreSpec> = tag_path_pairs
         .iter()
@@ -550,7 +567,7 @@ async fn execute_batch_restore_inner(
                     reporter.warning(warning_message.to_string())?;
                     drop(reporter);
                     progress_system.shutdown()?;
-                    if fail_on_cache_error {
+                    if strict_restore_errors {
                         anyhow::bail!(warning_message);
                     }
                     return Ok(());
@@ -560,7 +577,7 @@ async fn execute_batch_restore_inner(
                     reporter.warning(format!("Cache unavailable: {}", err))?;
                     drop(reporter);
                     progress_system.shutdown()?;
-                    if fail_on_cache_error {
+                    if strict_restore_errors {
                         return Err(err);
                     }
                     return Ok(());
@@ -568,7 +585,7 @@ async fn execute_batch_restore_inner(
                 reporter.warning(format!("Cache restore failed: {}", err))?;
                 drop(reporter);
                 progress_system.shutdown()?;
-                if fail_on_cache_error {
+                if strict_restore_errors {
                     return Err(err);
                 }
                 return Ok(());
@@ -824,7 +841,7 @@ async fn execute_batch_restore_inner(
         }
     }
 
-    if fail_on_cache_error || require_server_signature {
+    if strict_restore_errors {
         finalize_restore_outcome(restore_errors, skipped_entries)?;
     } else {
         let _ = finalize_restore_outcome(restore_errors, skipped_entries);
