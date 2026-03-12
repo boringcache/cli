@@ -51,7 +51,7 @@ Local CLI use is simplest with `boringcache auth --token ...`.
 In CI, prefer split tokens:
 - `BORINGCACHE_RESTORE_TOKEN` for restore and other read-only paths
 - `BORINGCACHE_SAVE_TOKEN` for trusted jobs that should also publish updates
-- `BORINGCACHE_API_TOKEN` only as a legacy fallback for older setups
+- `BORINGCACHE_API_TOKEN` only as a compatibility fallback for older setups that have not moved to split tokens yet
 
 Restore resolution order:
 - `BORINGCACHE_RESTORE_TOKEN`
@@ -69,7 +69,13 @@ Save resolution order:
 Security defaults:
 - save commands fail fast when only a restore token is configured
 - `cache-registry` and `run --proxy` downgrade to read-only when only a restore token is available
-- set `BORINGCACHE_REQUIRE_SERVER_SIGNATURE=1` or pass `--require-server-signature` to fail restore when the server signature is missing or invalid
+- official actions enable strict signature verification for you
+- set `BORINGCACHE_REQUIRE_SERVER_SIGNATURE=1` or pass `--require-server-signature` to fail restore when the server signature is missing or invalid in other environments
+
+What still matters operationally:
+- if an untrusted job gets a `save` or `admin` token, it can still poison shared cache tags
+- if a workflow still uses one broad `BORINGCACHE_API_TOKEN` everywhere, it recreates the trust collapse split tokens were meant to avoid
+- signature verification is about authenticity of what the server returned, not about deciding which jobs are allowed to publish
 
 ## Pick a mode
 
@@ -184,11 +190,13 @@ Tags are git-aware by default.
 
 Use `--no-git` to disable git-aware suffixing and `--no-platform` only when the cached directory is genuinely portable across operating systems and architectures.
 
+`--no-git` changes cache layout. It is not a security feature. The real trust boundary is still which jobs get `restore`, `save`, or `admin` tokens.
+
 ## Environment variables
 
 - `BORINGCACHE_RESTORE_TOKEN`
 - `BORINGCACHE_SAVE_TOKEN`
-- `BORINGCACHE_API_TOKEN`
+- `BORINGCACHE_API_TOKEN` (legacy compatibility fallback)
 - `BORINGCACHE_REQUIRE_SERVER_SIGNATURE`
 - `BORINGCACHE_TOKEN_FILE`
 - `BORINGCACHE_DEFAULT_WORKSPACE`
