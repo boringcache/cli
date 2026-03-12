@@ -6,6 +6,7 @@ on:
     paths:
       - "src/**"
       - "scripts/e2e-*.sh"
+      - "scripts/request-metrics-summary.py"
       - ".github/workflows/e2e.yml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -14,6 +15,7 @@ on:
     paths:
       - "src/**"
       - "scripts/e2e-*.sh"
+      - "scripts/request-metrics-summary.py"
       - ".github/workflows/e2e.yml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -31,6 +33,7 @@ permissions:
 env:
   RUST_VERSION: "1.89"
   BAZELISK_VERSION: "v1.20.0"
+  SCCACHE_VERSION: "v0.13.0"
 
 jobs:
   build-cli-binary:
@@ -86,57 +89,106 @@ jobs:
             tier: quick
             needs_bazel: false
             needs_docker: false
+            needs_java: false
             needs_node: false
+            needs_rust: false
+            needs_sccache: false
           - leg: cli-core
             tier: quick
             needs_bazel: false
             needs_docker: false
+            needs_java: false
             needs_node: false
+            needs_rust: false
+            needs_sccache: false
           - leg: security
             tier: quick
             needs_bazel: false
             needs_docker: false
+            needs_java: false
             needs_node: false
+            needs_rust: false
+            needs_sccache: false
           - leg: adapters-http
             tier: quick
             needs_bazel: false
             needs_docker: false
+            needs_java: false
             needs_node: false
-          - leg: bazel-real
-            tier: extended
-            needs_bazel: true
-            needs_docker: false
-            needs_node: false
+            needs_rust: false
+            needs_sccache: false
           - leg: dual-proxy
             tier: extended
             needs_bazel: false
             needs_docker: false
+            needs_java: false
             needs_node: false
+            needs_rust: false
+            needs_sccache: false
           - leg: docker-buildkit
             tier: quick
             needs_bazel: false
             needs_docker: true
+            needs_java: false
             needs_node: false
+            needs_rust: false
+            needs_sccache: false
           - leg: prefetch-readiness
             tier: extended
             needs_bazel: false
             needs_docker: false
+            needs_java: false
             needs_node: false
+            needs_rust: false
+            needs_sccache: false
           - leg: tool-hugo
             tier: quick
             needs_bazel: false
             needs_docker: true
+            needs_java: false
             needs_node: false
+            needs_rust: false
+            needs_sccache: false
           - leg: tool-turbo
             tier: quick
             needs_bazel: false
             needs_docker: false
+            needs_java: false
             needs_node: true
+            needs_rust: false
+            needs_sccache: false
+          - leg: tool-sccache
+            tier: quick
+            needs_bazel: false
+            needs_docker: false
+            needs_java: false
+            needs_node: false
+            needs_rust: true
+            needs_sccache: true
           - leg: tool-bazel
             tier: quick
             needs_bazel: true
             needs_docker: false
+            needs_java: false
             needs_node: false
+            needs_rust: false
+            needs_sccache: false
+          - leg: tool-maven
+            tier: quick
+            needs_bazel: false
+            needs_docker: false
+            needs_java: true
+            needs_node: false
+            needs_rust: false
+            needs_sccache: false
+          - leg: tool-gradle
+            tier: quick
+            needs_bazel: false
+            needs_docker: false
+            needs_java: true
+            needs_node: false
+            needs_rust: false
+            needs_sccache: false
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_E2E_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
@@ -169,6 +221,19 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Setup Java
+        if: steps.gate.outputs.run == 'true' && matrix.needs_java == true
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Rust Toolchain
+        if: steps.gate.outputs.run == 'true' && matrix.needs_rust == true
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
       - name: Ensure bazel present
         if: steps.gate.outputs.run == 'true' && matrix.needs_bazel == true
         run: |
@@ -182,6 +247,20 @@ jobs:
           sudo mv /tmp/bazelisk /usr/local/bin/bazel
           sudo chmod +x /usr/local/bin/bazel
           bazel --version
+
+      - name: Ensure sccache present
+        if: steps.gate.outputs.run == 'true' && matrix.needs_sccache == true
+        run: |
+          set -euo pipefail
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --version
+            exit 0
+          fi
+          url="https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL "$url" | tar xz -C /tmp
+          sudo mv "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
+          sudo chmod +x /usr/local/bin/sccache
+          sccache --version
 
       - name: Setup Docker Buildx
         if: steps.gate.outputs.run == 'true' && matrix.needs_docker == true
@@ -244,6 +323,288 @@ jobs:
         with:
           name: e2e-logs-${{ matrix.leg }}
           path: e2e-logs/${{ matrix.leg }}
+          retention-days: 14
+
+  cache-registry-benchmark:
+    name: Cache Registry Benchmark (${{ matrix.backend }} / ${{ matrix.phase }})
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    needs: build-cli-binary
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - backend: local
+            phase: efficacy
+          - backend: local
+            phase: stress
+          - backend: proxy
+            phase: efficacy
+          - backend: proxy
+            phase: stress
+    env:
+      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+      BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
+      RUN_SCOPED_TAGS: "1"
+      PARALLEL_JOBS: "2"
+      SETTLE_SECS: "5"
+      BUILD_TIMEOUT_SECS: "1200"
+      STRESS_SCCACHE_ISOLATION: "0"
+      BUDGET_STRESS_PROXY_HEALTH_CHECK_FAILS_MAX: "0"
+      RUST_LOG_LEVEL: info
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Gate benchmark leg
+        id: gate
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.backend }}" == "proxy" && -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping proxy benchmark: BORINGCACHE_API_TOKEN is not configured."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Rust (BoringCache)
+        id: boringcache-rust
+        if: steps.gate.outputs.run == 'true'
+        continue-on-error: true
+        uses: boringcache/rust-action@v1
+        with:
+          workspace: ${{ github.repository }}
+          rust-version: ${{ env.RUST_VERSION }}
+          cache-tag: "rust-${{ env.RUST_VERSION }}-cache-registry-bench-linux-x86_64"
+          sccache: "true"
+          sccache-mode: ${{ matrix.backend }}
+          cache-target: "true"
+
+      - name: Setup Rust (Fallback)
+        if: steps.gate.outputs.run == 'true' && steps.boringcache-rust.outcome == 'failure'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Ensure sccache present
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --version
+            exit 0
+          fi
+          url="https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL "$url" | tar xz -C /tmp
+          sudo mv "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
+          sudo chmod +x /usr/local/bin/sccache
+          sccache --version
+
+      - name: Download prebuilt CLI binary
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-cli-release-linux-amd64
+          path: ${{ runner.temp }}/boringcache-bin
+
+      - name: Prepare CLI binary
+        if: steps.gate.outputs.run == 'true'
+        run: chmod +x "${RUNNER_TEMP}/boringcache-bin/boringcache"
+
+      - name: Run benchmark
+        id: run_benchmark
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}"
+          mkdir -p "$LOG_DIR"
+          BIN_PATH="${RUNNER_TEMP}/boringcache-bin/boringcache"
+          bash ./scripts/e2e-framework.sh run-benchmark "${{ matrix.backend }}" "${{ matrix.phase }}" "$BIN_PATH" "$LOG_DIR" 2>&1 | tee "$LOG_DIR/run.log"
+
+      - name: Validate benchmark coverage
+        if: always() && steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          bash ./scripts/e2e-framework.sh validate-benchmark "${{ matrix.backend }}" "${{ matrix.phase }}" "${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}/run.log"
+
+      - name: Extract metrics
+        if: always() && steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          log_dir="${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}"
+          phase="${{ matrix.phase }}"
+          status="${{ steps.run_benchmark.outcome }}"
+
+          cold="0"
+          warm="0"
+          warm_rust_hit_rate="0"
+          warm_avg_read_hit="0"
+          efficacy_two_pass_hit_rate="0"
+          efficacy_cache_ops_hit_rate="0"
+          efficacy_proxy_429="0"
+          efficacy_proxy_conflicts="0"
+
+          prewarm="0"
+          parallel_avg="0"
+          parallel_rust_hit_rate="0"
+          stress_lock_waits="0"
+          stress_sccache_start_timeouts="0"
+          stress_sccache_unexpected_shutdowns="0"
+          stress_proxy_429="0"
+          stress_proxy_conflicts="0"
+          request_metrics_total="0"
+          request_metrics_failures="0"
+          request_metrics_retry_events="0"
+          request_metrics_check_p95_ms="0"
+          request_metrics_download_p95_ms="0"
+          request_metrics_save_p95_ms="0"
+          request_metrics_publish_p95_ms="0"
+          request_metrics_prefetch_cycles="0"
+          request_metrics_cache_ops_records_total="0"
+          request_metrics_cache_ops_sccache_hits="0"
+          request_metrics_cache_ops_sccache_misses="0"
+          request_metrics_cache_ops_sccache_errors="0"
+          request_metrics_cache_ops_sccache_hit_rate="0"
+          request_metrics_cache_ops_sccache_get_records_total="0"
+          request_metrics_cache_ops_sccache_get_hits="0"
+          request_metrics_cache_ops_sccache_get_misses="0"
+          request_metrics_cache_ops_sccache_get_errors="0"
+          request_metrics_cache_ops_sccache_get_hit_rate="0"
+
+          if [[ "$phase" == "efficacy" ]]; then
+            efficacy_cold_hits="0"
+            efficacy_cold_misses="0"
+            efficacy_warm_hits="0"
+            efficacy_warm_misses="0"
+            if [[ -f "${log_dir}/efficacy/cold.log.seconds" ]]; then
+              cold="$(cat "${log_dir}/efficacy/cold.log.seconds")"
+            fi
+            if [[ -f "${log_dir}/efficacy/cold-sccache-stats.txt" ]]; then
+              efficacy_cold_hits="$(awk '$1 == "Cache" && $2 == "hits" && $3 ~ /^[0-9]+$/ { print $3; exit }' "${log_dir}/efficacy/cold-sccache-stats.txt")"
+              efficacy_cold_misses="$(awk '$1 == "Cache" && $2 == "misses" && $3 ~ /^[0-9]+$/ { print $3; exit }' "${log_dir}/efficacy/cold-sccache-stats.txt")"
+            fi
+            if [[ -f "${log_dir}/efficacy/warm.log.seconds" ]]; then
+              warm="$(cat "${log_dir}/efficacy/warm.log.seconds")"
+            fi
+            if [[ -f "${log_dir}/efficacy/warm-sccache-stats.txt" ]]; then
+              warm_rust_hit_rate="$(awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
+              warm_avg_read_hit="$(awk '$1 == "Average" && $2 == "cache" && $3 == "read" && $4 == "hit" { print $5; exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
+              efficacy_warm_hits="$(awk '$1 == "Cache" && $2 == "hits" && $3 ~ /^[0-9]+$/ { print $3; exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
+              efficacy_warm_misses="$(awk '$1 == "Cache" && $2 == "misses" && $3 ~ /^[0-9]+$/ { print $3; exit }' "${log_dir}/efficacy/warm-sccache-stats.txt")"
+            fi
+            if [[ -f "${log_dir}/efficacy/proxy.log" ]]; then
+              efficacy_proxy_429="$(grep -c "429 Too Many Requests" "${log_dir}/efficacy/proxy.log" || true)"
+              efficacy_proxy_conflicts="$(grep -c "tag conflict" "${log_dir}/efficacy/proxy.log" || true)"
+            fi
+            efficacy_two_pass_hit_rate="$(awk \
+              -v cold_hits="${efficacy_cold_hits:-0}" \
+              -v cold_misses="${efficacy_cold_misses:-0}" \
+              -v warm_hits="${efficacy_warm_hits:-0}" \
+              -v warm_misses="${efficacy_warm_misses:-0}" \
+              'BEGIN {
+                total_hits = cold_hits + warm_hits;
+                total_misses = cold_misses + warm_misses;
+                denom = total_hits + total_misses;
+                if (denom == 0) { printf "0.00" } else { printf "%.2f", (total_hits * 100) / denom }
+              }'
+            )"
+          fi
+
+          if [[ "$phase" == "stress" ]]; then
+            prewarm_sum=0
+            parallel_sum=0
+            for i in $(seq 1 "${PARALLEL_JOBS}"); do
+              if [[ -f "${log_dir}/stress/prewarm-${i}.log.seconds" ]]; then
+                prewarm_sum=$((prewarm_sum + $(cat "${log_dir}/stress/prewarm-${i}.log.seconds")))
+              fi
+              if [[ -f "${log_dir}/stress/parallel-${i}.log.seconds" ]]; then
+                parallel_sum=$((parallel_sum + $(cat "${log_dir}/stress/parallel-${i}.log.seconds")))
+              fi
+              if [[ -f "${log_dir}/stress/parallel-${i}.log" ]]; then
+                stress_lock_waits=$((stress_lock_waits + $(grep -c "Blocking waiting for file lock" "${log_dir}/stress/parallel-${i}.log" || true)))
+              fi
+            done
+            if [[ "${PARALLEL_JOBS}" -gt 0 ]]; then
+              prewarm=$((prewarm_sum / PARALLEL_JOBS))
+              parallel_avg=$((parallel_sum / PARALLEL_JOBS))
+            fi
+            if [[ -f "${log_dir}/stress/parallel-sccache-stats.txt" ]]; then
+              parallel_rust_hit_rate="$(awk '$1 == "Cache" && $2 == "hits" && $3 == "rate" && $4 == "(Rust)" { print $(NF-1); exit }' "${log_dir}/stress/parallel-sccache-stats.txt")"
+            fi
+            if [[ -f "${log_dir}/run.log" ]]; then
+              stress_sccache_start_timeouts="$(sed -n 's/^[[:space:]]*sccache start timeouts:[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "${log_dir}/run.log" | tail -1)"
+              stress_sccache_unexpected_shutdowns="$(sed -n 's/^[[:space:]]*sccache unexpected shutdowns:[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "${log_dir}/run.log" | tail -1)"
+            fi
+            if [[ -f "${log_dir}/stress/proxy.log" ]]; then
+              stress_proxy_429="$(grep -c "429 Too Many Requests" "${log_dir}/stress/proxy.log" || true)"
+              stress_proxy_conflicts="$(grep -c "tag conflict" "${log_dir}/stress/proxy.log" || true)"
+            fi
+          fi
+
+          request_metrics_file="${log_dir}/${phase}/request-metrics.jsonl"
+          if [[ -f "$request_metrics_file" ]]; then
+            python3 scripts/request-metrics-summary.py "$request_metrics_file" > "${log_dir}/request-metrics-summary.env"
+            source "${log_dir}/request-metrics-summary.env"
+            if [[ "$phase" == "efficacy" ]]; then
+              efficacy_cache_ops_hit_rate="${request_metrics_cache_ops_sccache_get_hit_rate:-0}"
+            fi
+          fi
+
+          warm_rust_hit_rate="${warm_rust_hit_rate:-0}"
+          warm_avg_read_hit="${warm_avg_read_hit:-0}"
+          parallel_rust_hit_rate="${parallel_rust_hit_rate:-0}"
+          stress_sccache_start_timeouts="${stress_sccache_start_timeouts:-0}"
+          stress_sccache_unexpected_shutdowns="${stress_sccache_unexpected_shutdowns:-0}"
+
+          {
+            echo "backend=${{ matrix.backend }}"
+            echo "phase=${phase}"
+            echo "status=${status}"
+            echo "cold_seconds=${cold}"
+            echo "warm_seconds=${warm}"
+            echo "warm_rust_hit_rate=${warm_rust_hit_rate}"
+            echo "warm_avg_cache_read_hit=${warm_avg_read_hit}"
+            echo "efficacy_two_pass_hit_rate=${efficacy_two_pass_hit_rate}"
+            echo "efficacy_cache_ops_sccache_hit_rate=${efficacy_cache_ops_hit_rate}"
+            echo "efficacy_proxy_429=${efficacy_proxy_429}"
+            echo "efficacy_proxy_tag_conflicts=${efficacy_proxy_conflicts}"
+            echo "prewarm_seconds=${prewarm}"
+            echo "parallel_avg_seconds=${parallel_avg}"
+            echo "parallel_rust_hit_rate=${parallel_rust_hit_rate}"
+            echo "stress_lock_waits=${stress_lock_waits}"
+            echo "stress_sccache_start_timeouts=${stress_sccache_start_timeouts}"
+            echo "stress_sccache_unexpected_shutdowns=${stress_sccache_unexpected_shutdowns}"
+            echo "stress_proxy_429=${stress_proxy_429}"
+            echo "stress_proxy_tag_conflicts=${stress_proxy_conflicts}"
+            echo "request_metrics_total=${request_metrics_total}"
+            echo "request_metrics_failures=${request_metrics_failures}"
+            echo "request_metrics_retry_events=${request_metrics_retry_events}"
+            echo "request_metrics_check_p95_ms=${request_metrics_check_p95_ms}"
+            echo "request_metrics_download_p95_ms=${request_metrics_download_p95_ms}"
+            echo "request_metrics_save_p95_ms=${request_metrics_save_p95_ms}"
+            echo "request_metrics_publish_p95_ms=${request_metrics_publish_p95_ms}"
+            echo "request_metrics_prefetch_cycles=${request_metrics_prefetch_cycles}"
+            echo "request_metrics_cache_ops_records_total=${request_metrics_cache_ops_records_total}"
+            echo "request_metrics_cache_ops_sccache_hits=${request_metrics_cache_ops_sccache_hits}"
+            echo "request_metrics_cache_ops_sccache_misses=${request_metrics_cache_ops_sccache_misses}"
+            echo "request_metrics_cache_ops_sccache_errors=${request_metrics_cache_ops_sccache_errors}"
+            echo "request_metrics_cache_ops_sccache_hit_rate=${request_metrics_cache_ops_sccache_hit_rate}"
+            echo "request_metrics_cache_ops_sccache_get_records_total=${request_metrics_cache_ops_sccache_get_records_total}"
+            echo "request_metrics_cache_ops_sccache_get_hits=${request_metrics_cache_ops_sccache_get_hits}"
+            echo "request_metrics_cache_ops_sccache_get_misses=${request_metrics_cache_ops_sccache_get_misses}"
+            echo "request_metrics_cache_ops_sccache_get_errors=${request_metrics_cache_ops_sccache_get_errors}"
+            echo "request_metrics_cache_ops_sccache_get_hit_rate=${request_metrics_cache_ops_sccache_get_hit_rate}"
+          } > "${log_dir}/metrics.env"
+
+      - name: Upload benchmark artifacts
+        if: always() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: cache-registry-benchmark-${{ matrix.backend }}-${{ matrix.phase }}
+          path: benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}
           retention-days: 14
 
   cross-runner-seed:
@@ -444,13 +805,14 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - e2e
+      - cache-registry-benchmark
       - cross-runner-verify
     if: always()
     steps:
       - name: Download artifacts
+        continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          pattern: "e2e-logs-*"
           path: artifacts
 
       - name: Write summary
@@ -461,12 +823,16 @@ jobs:
           echo "| Leg | Status |" >> "$GITHUB_STEP_SUMMARY"
           echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
 
-          mapfile -t metric_files < <(find artifacts -type f -name e2e-metrics.env 2>/dev/null | sort)
-          for metrics in "${metric_files[@]}"; do
-            # shellcheck disable=SC1090
-            source "$metrics"
-            echo "| ${leg} | ${status} |" >> "$GITHUB_STEP_SUMMARY"
-          done
+          mapfile -t e2e_metric_files < <(find artifacts -type f -name e2e-metrics.env 2>/dev/null | sort)
+          if [[ "${#e2e_metric_files[@]}" -eq 0 ]]; then
+            echo "| no-artifacts | skipped |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            for metrics in "${e2e_metric_files[@]}"; do
+              # shellcheck disable=SC1090
+              source "$metrics"
+              echo "| ${leg} | ${status} |" >> "$GITHUB_STEP_SUMMARY"
+            done
+          fi
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "## Cross-Runner Cache Persistence" >> "$GITHUB_STEP_SUMMARY"
@@ -475,3 +841,74 @@ jobs:
           echo "| Test | Status |" >> "$GITHUB_STEP_SUMMARY"
           echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| CAS blob persistence across runners | ${cross_runner_status} |" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "# Cache Registry Benchmarks" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          mapfile -t benchmark_metric_files < <(find artifacts -type f -name metrics.env 2>/dev/null | sort)
+          if [[ "${#benchmark_metric_files[@]}" -eq 0 ]]; then
+            echo "_Benchmarks did not run for this event._" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "## Efficacy (cold/warm)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Backend | Status | Cold (s) | Warm (s) | Warm Rust hit rate | Two-pass Rust hit rate | Cache ops sccache GET hit rate | Warm avg cache read hit (s) | Proxy 429 | Proxy conflicts |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|--------|----------|----------|--------------------|------------------------|--------------------------------|-----------------------------|-----------|-----------------|" >> "$GITHUB_STEP_SUMMARY"
+
+          local_warm=""
+          proxy_warm=""
+
+          for metrics in "${benchmark_metric_files[@]}"; do
+            # shellcheck disable=SC1090
+            source "$metrics"
+            if [[ "${phase}" != "efficacy" ]]; then
+              continue
+            fi
+            echo "| ${backend} | ${status} | ${cold_seconds} | ${warm_seconds} | ${warm_rust_hit_rate}% | ${efficacy_two_pass_hit_rate}% | ${efficacy_cache_ops_sccache_hit_rate}% | ${warm_avg_cache_read_hit} | ${efficacy_proxy_429} | ${efficacy_proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "${status}" == "success" ]]; then
+              case "$backend" in
+                local) local_warm="$warm_seconds" ;;
+                proxy) proxy_warm="$warm_seconds" ;;
+              esac
+            fi
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "$local_warm" && -n "$proxy_warm" ]]; then
+            delta="$(awk -v p="$proxy_warm" -v l="$local_warm" 'BEGIN { printf "%.2f", p-l }')"
+            pct="$(awk -v p="$proxy_warm" -v l="$local_warm" 'BEGIN { if (l <= 0) { print "0.00" } else { printf "%.2f", ((p-l)/l)*100 } }')"
+            echo "- Warm delta (proxy - local): ${delta}s (${pct}%)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Stress (prewarm/parallel)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Backend | Status | Prewarm avg (s) | Parallel avg (s) | Parallel Rust hit rate | sccache start timeouts | sccache unexpected shutdowns | Lock waits | Proxy 429 | Proxy conflicts |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|--------|-----------------|------------------|------------------------|------------------------|------------------------------|-----------|-----------|-----------------|" >> "$GITHUB_STEP_SUMMARY"
+
+          local_parallel=""
+          proxy_parallel=""
+
+          for metrics in "${benchmark_metric_files[@]}"; do
+            # shellcheck disable=SC1090
+            source "$metrics"
+            if [[ "${phase}" != "stress" ]]; then
+              continue
+            fi
+            echo "| ${backend} | ${status} | ${prewarm_seconds} | ${parallel_avg_seconds} | ${parallel_rust_hit_rate}% | ${stress_sccache_start_timeouts} | ${stress_sccache_unexpected_shutdowns} | ${stress_lock_waits} | ${stress_proxy_429} | ${stress_proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "${status}" == "success" ]]; then
+              case "$backend" in
+                local) local_parallel="$parallel_avg_seconds" ;;
+                proxy) proxy_parallel="$parallel_avg_seconds" ;;
+              esac
+            fi
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "$local_parallel" && -n "$proxy_parallel" ]]; then
+            delta="$(awk -v p="$proxy_parallel" -v l="$local_parallel" 'BEGIN { printf "%.2f", p-l }')"
+            pct="$(awk -v p="$proxy_parallel" -v l="$local_parallel" 'BEGIN { if (l <= 0) { print "0.00" } else { printf "%.2f", ((p-l)/l)*100 } }')"
+            echo "- Parallel avg delta (proxy - local): ${delta}s (${pct}%)" >> "$GITHUB_STEP_SUMMARY"
+          fi

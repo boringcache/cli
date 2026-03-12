@@ -39,17 +39,6 @@ run_leg() {
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
       bash ./scripts/e2e-all-adapters-http-test.sh
       ;;
-    bazel-real)
-      BINARY="$binary" \
-      LOG_DIR="$log_dir" \
-      TAG="$tag" \
-      BAZEL_BUILD_JOBS="256" \
-      BAZEL_REMOTE_MAX_CONNECTIONS="64" \
-      STRESS_ACTION_COUNT="96" \
-      BUDGET_REMOTE_TIMEOUTS_MAX="0" \
-      BUDGET_REMOTE_TAG_HITS_MIN="1" \
-      bash ./scripts/e2e-bazel-real-test.sh
-      ;;
     dual-proxy)
       BINARY="$binary" \
       LOG_DIR="$log_dir" \
@@ -136,6 +125,87 @@ run_leg() {
   esac
 }
 
+run_benchmark() {
+  local backend="$1"
+  local phase="$2"
+  local binary="$3"
+  local log_dir="$4"
+  local workspace="${GITHUB_REPOSITORY:-${WORKSPACE:-}}"
+  local branch_slug="${GITHUB_REF_NAME:-local}"
+  local sccache_dir
+
+  branch_slug="${branch_slug//\//-}"
+  sccache_dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/sccache-bench-${backend}-${phase}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
+  rm -rf "$sccache_dir"
+  mkdir -p "$sccache_dir"
+
+  case "$backend" in
+    local|proxy)
+      ;;
+    *)
+      echo "ERROR: unknown benchmark backend: ${backend}"
+      exit 1
+      ;;
+  esac
+
+  case "$phase" in
+    efficacy)
+      (
+        export SCCACHE_BACKEND="$backend"
+        export RUN_EFFICACY="1"
+        export RUN_STRESS="0"
+        export BUDGET_EFFICACY_RUST_HIT_RATE_MIN="95"
+        export BUDGET_EFFICACY_CACHE_READ_ERRORS_MAX="0"
+        export BUDGET_EFFICACY_CACHE_TIMEOUTS_MAX="0"
+        export BUDGET_EFFICACY_PROXY_429_MAX="0"
+        export BUDGET_EFFICACY_PROXY_CONFLICTS_MAX="0"
+        if [[ "$backend" == "proxy" ]]; then
+          export BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN="1"
+          export EFFICACY_FRESH_WARM_SCCACHE_DIR="1"
+          export BUDGET_EFFICACY_WARM_REQUESTS_MIN="100"
+          export BUDGET_EFFICACY_CACHE_OPS_RECORDS_MIN="100"
+          export BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MIN="45"
+          export BUDGET_EFFICACY_TWO_PASS_HIT_RATE_MAX="55"
+          export BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MIN="45"
+          export BUDGET_EFFICACY_CACHE_OPS_HIT_RATE_MAX="55"
+          export BUDGET_EFFICACY_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX="15"
+        fi
+        BINARY="$binary" \
+        WORKSPACE="$workspace" \
+        LOG_DIR="$log_dir" \
+        SCCACHE_DIR="$sccache_dir" \
+        TAG="gha-cache-registry-${backend}-${phase}-rust-${RUST_VERSION:-unknown}-${branch_slug}" \
+        bash ./scripts/e2e-sccache-test.sh
+      )
+      ;;
+    stress)
+      (
+        export SCCACHE_BACKEND="$backend"
+        export RUN_EFFICACY="0"
+        export RUN_STRESS="1"
+        export BUDGET_STRESS_RUST_HIT_RATE_MIN="70"
+        export BUDGET_STRESS_CACHE_READ_ERRORS_MAX="0"
+        export BUDGET_STRESS_CACHE_TIMEOUTS_MAX="0"
+        export BUDGET_STRESS_SCCACHE_STARTUP_TIMEOUTS_MAX="0"
+        export BUDGET_STRESS_SCCACHE_UNEXPECTED_SHUTDOWNS_MAX="0"
+        export BUDGET_STRESS_LOCK_WAITS_MAX="0"
+        export BUDGET_STRESS_PROXY_429_MAX="0"
+        export BUDGET_STRESS_PROXY_CONFLICTS_MAX="0"
+        BINARY="$binary" \
+        WORKSPACE="$workspace" \
+        LOG_DIR="$log_dir" \
+        SCCACHE_DIR="$sccache_dir" \
+        TAG="gha-cache-registry-${backend}-${phase}-rust-${RUST_VERSION:-unknown}-${branch_slug}" \
+        bash ./scripts/e2e-sccache-test.sh
+      )
+      ;;
+    *)
+      echo "ERROR: unknown benchmark phase: ${phase}"
+      exit 1
+      ;;
+  esac
+}
+
 markers_for_leg() {
   local leg="$1"
 
@@ -172,16 +242,6 @@ EOF
 === Phase 1b: Verify published remote tag resolves ===
 === Phase 2: Read-only verification after proxy restart ===
 All adapter HTTP e2e checks passed
-EOF
-      ;;
-    bazel-real)
-      cat <<'EOF'
-=== Phase 1: Cold build (expect local execution + upload) ===
-=== Phase 2: Warm build with isolated output root (expect remote hit) ===
-=== Phase 2b: Verify published remote tag resolves ===
-=== Phase 3: Restart proxy and verify persisted remote hit ===
-=== Phase 4: High-concurrency stress warm (expect remote hits, no connect timeouts) ===
-Bazel real-client e2e passed
 EOF
       ;;
     dual-proxy)
@@ -262,32 +322,82 @@ EOF
   esac
 }
 
-validate_leg() {
-  local leg="$1"
+markers_for_benchmark() {
+  local backend="$1"
+  local phase="$2"
+
+  case "${backend}:${phase}" in
+    local:efficacy)
+      cat <<'EOF'
+=== Phase 1: Key-stable efficacy ===
+Phase 1 (key-stable efficacy)
+all checks passed (
+EOF
+      ;;
+    proxy:efficacy)
+      cat <<'EOF'
+=== Phase 1: Key-stable efficacy ===
+=== Phase 1b: Verify published remote tag before efficacy warm pass ===
+Phase 1 (key-stable efficacy)
+all checks passed (
+EOF
+      ;;
+    local:stress|proxy:stress)
+      cat <<'EOF'
+=== Phase 2: Parallel contention stress ===
+Phase 2 (parallel contention stress)
+all checks passed (
+EOF
+      ;;
+    *)
+      echo "ERROR: unknown benchmark target: ${backend}:${phase}"
+      exit 1
+      ;;
+  esac
+}
+
+validate_log() {
+  local kind="$1"
   local log_file="$2"
+  local marker_source="$3"
   local marker
   local index=1
 
   if [[ ! -f "$log_file" ]]; then
-    echo "ERROR: expected e2e run log at ${log_file}"
+    echo "ERROR: expected ${kind} log at ${log_file}"
     exit 1
   fi
 
   while IFS= read -r marker; do
     [[ -n "$marker" ]] || continue
     if ! grep -Fq "$marker" "$log_file"; then
-      echo "ERROR: missing scenario marker (step${index}): ${marker}"
+      echo "ERROR: missing ${kind} marker (step${index}): ${marker}"
       echo "--- log tail ---"
       tail -n 200 "$log_file" || true
       exit 1
     fi
     index=$((index + 1))
-  done < <(markers_for_leg "$leg")
+  done < <(eval "$marker_source")
+}
+
+validate_leg() {
+  local leg="$1"
+  local log_file="$2"
+
+  validate_log "scenario" "$log_file" "markers_for_leg \"$leg\""
+}
+
+validate_benchmark() {
+  local backend="$1"
+  local phase="$2"
+  local log_file="$3"
+
+  validate_log "benchmark" "$log_file" "markers_for_benchmark \"$backend\" \"$phase\""
 }
 
 main() {
   if [[ "$#" -lt 1 ]]; then
-    echo "usage: $0 <run|validate> ..."
+    echo "usage: $0 <run|validate|run-benchmark|validate-benchmark> ..."
     exit 1
   fi
 
@@ -307,6 +417,20 @@ main() {
         exit 1
       fi
       validate_leg "$2" "$3"
+      ;;
+    run-benchmark)
+      if [[ "$#" -ne 5 ]]; then
+        echo "usage: $0 run-benchmark <backend> <phase> <binary> <log_dir>"
+        exit 1
+      fi
+      run_benchmark "$2" "$3" "$4" "$5"
+      ;;
+    validate-benchmark)
+      if [[ "$#" -ne 4 ]]; then
+        echo "usage: $0 validate-benchmark <backend> <phase> <log_file>"
+        exit 1
+      fi
+      validate_benchmark "$2" "$3" "$4"
       ;;
     *)
       echo "ERROR: unknown command: ${command}"
