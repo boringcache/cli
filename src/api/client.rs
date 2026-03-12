@@ -368,7 +368,7 @@ impl ApiClient {
 
         if response.status() == StatusCode::UNAUTHORIZED {
             anyhow::bail!(
-                "CLI connect poll rejected. Restart optimize onboarding and approve the new session."
+                "CLI connect poll rejected. Restart onboarding and approve the new session."
             );
         }
 

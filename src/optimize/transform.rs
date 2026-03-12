@@ -107,13 +107,16 @@ pub fn validate_output(original: &str, optimized: &str) -> std::result::Result<(
         || optimized.contains("boringcache save")
         || optimized.contains("boringcache restore");
 
-    let has_any_token = optimized.contains("BORINGCACHE_API_TOKEN")
-        || optimized.contains("BORINGCACHE_RESTORE_TOKEN")
-        || optimized.contains("BORINGCACHE_SAVE_TOKEN");
-
-    if uses_boringcache && !has_any_token {
-        return Err("output uses BoringCache but is missing token configuration".to_string());
-    }
+    let has_any_token = optimized.lines().any(|line| {
+        let trimmed = line.trim();
+        !trimmed.starts_with('#')
+            && BORINGCACHE_TOKEN_NAMES
+                .iter()
+                .any(|token_name| {
+                    token_reference_assignment(trimmed, token_name)
+                        && token_reference_is_safe(trimmed, token_name)
+                })
+    });
 
     if contains_secret_exfiltration(optimized) {
         return Err("output contains insecure secret handling patterns".to_string());
@@ -121,13 +124,22 @@ pub fn validate_output(original: &str, optimized: &str) -> std::result::Result<(
 
     if uses_boringcache {
         let insecure_token_line = optimized.lines().find(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                return false;
+            }
+
             BORINGCACHE_TOKEN_NAMES
                 .iter()
-                .any(|t| line.contains(t) && !token_reference_is_safe(line, t))
+                .any(|t| trimmed.contains(t) && !token_reference_is_safe(trimmed, t))
         });
         if insecure_token_line.is_some() {
             return Err("output contains insecure token reference".to_string());
         }
+    }
+
+    if uses_boringcache && !has_any_token {
+        return Err("output uses BoringCache but is missing token configuration".to_string());
     }
 
     let original_len = original.len();
@@ -161,10 +173,6 @@ fn contains_secret_exfiltration(content: &str) -> bool {
 fn token_reference_is_safe(line: &str, token_name: &str) -> bool {
     let trimmed = line.trim();
 
-    if trimmed.starts_with('#') {
-        return true;
-    }
-
     let colon_pattern = format!("{}:", token_name);
     if trimmed.contains(&colon_pattern) {
         let secret_ref = format!("secrets.{}", token_name);
@@ -184,7 +192,11 @@ fn token_reference_is_safe(line: &str, token_name: &str) -> bool {
             || rhs.starts_with("$(cat /run/secrets/boringcache_token)");
     }
 
-    true
+    !trimmed.contains(token_name)
+}
+
+fn token_reference_assignment(line: &str, token_name: &str) -> bool {
+    line.contains(&format!("{}:", token_name)) || line.contains(&format!("{}=", token_name))
 }
 
 pub fn preserve_trailing_newline(original: &str, optimized: &str) -> String {
@@ -273,6 +285,13 @@ mod tests {
     fn validate_output_rejects_plaintext_token_assignment() {
         let optimized =
             "- uses: boringcache/action@v1\n  env:\n    BORINGCACHE_API_TOKEN: abc123plaintext";
+        assert!(validate_output("orig", optimized).is_err());
+    }
+
+    #[test]
+    fn validate_output_rejects_comment_only_token_mentions() {
+        let optimized =
+            "- uses: boringcache/one@v1\n  # BORINGCACHE_RESTORE_TOKEN should come from secrets";
         assert!(validate_output("orig", optimized).is_err());
     }
 
