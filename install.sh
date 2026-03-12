@@ -69,7 +69,7 @@ get_latest_release() {
     
     # If API fails (e.g., private repo), fall back to known version
     # This should be updated when new versions are released
-    local fallback_version="v1.12.3"
+    local fallback_version="v1.12.4"
     
     print_warning "GitHub API unavailable, using fallback version: $fallback_version" >&2
     print_warning "This may not be the latest version. Check https://github.com/${repo}/releases manually." >&2
@@ -305,16 +305,8 @@ main() {
     print_success "🎉 Installation complete!"
     echo
     print_status "Next steps:"
-    print_status "1. Authenticate with your API token:"
-    print_status "   ${BINARY_NAME} auth --token YOUR_API_TOKEN"
-    echo
-    print_status "2. Save cache (tag:path format):"
-    print_status "   ${BINARY_NAME} save my-workspace \"node-deps:node_modules,build-cache:target\""
-    echo
-    print_status "3. Restore cache (tag:path format):"
-    print_status "   ${BINARY_NAME} restore my-workspace \"node-deps:node_modules,build-cache:target\""
-    echo
-    print_status "📖 For more information, visit: https://github.com/${REPO}"
+    print_status "  cd your-project"
+    print_status "  ${BINARY_NAME} onboard"
 }
 
 # Run main function
