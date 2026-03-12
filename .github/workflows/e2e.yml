@@ -134,7 +134,7 @@ jobs:
             needs_java: false
             needs_node: false
             needs_rust: false
-            needs_sccache: false
+            needs_sccache: true
           - leg: docker-buildkit
             label: Registry / Docker BuildKit
             artifact: registry-docker-buildkit

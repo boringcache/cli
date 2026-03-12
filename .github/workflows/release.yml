@@ -59,6 +59,8 @@ jobs:
           wait_for_workflow_success() {
             local workflow_name="$1"
             local run_id=""
+            local dispatched=false
+            local discover_deadline="$(( $(date +%s) + 120 ))"
 
             while [[ -z "${run_id}" ]]; do
               run_id="$(gh run list \
@@ -70,6 +72,11 @@ jobs:
                 | head -n1)"
               if [[ -n "${run_id}" ]]; then
                 break
+              fi
+              if [[ "${dispatched}" == "false" && "$(date +%s)" -ge "${discover_deadline}" ]]; then
+                echo "No '${workflow_name}' run found for ${TARGET_SHA}; dispatching..." >&2
+                gh workflow run "${workflow_name}" --repo "${{ github.repository }}" --ref "${TARGET_SHA}"
+                dispatched=true
               fi
               if [[ "$(date +%s)" -ge "${DEADLINE_EPOCH}" ]]; then
                 echo "Timed out waiting for '${workflow_name}' to start for commit ${TARGET_SHA}." >&2
