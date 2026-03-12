@@ -52,7 +52,7 @@ buildCache {
         isEnabled = false
     }
     remote<HttpBuildCache> {
-        url = uri("${PROXY_URL}/")
+        url = uri("${PROXY_URL}/cache/")
         isPush = true
         isAllowUntrustedServer = true
         isAllowInsecureProtocol = true
@@ -157,8 +157,8 @@ if grep -q "FROM-CACHE" "${WARM_LOG}" 2>/dev/null; then
   echo "  Gradle cache hits: ${from_cache_count} tasks FROM-CACHE"
 fi
 
-proxy_gets="$(grep -c ' GET ' "${GRADLE_LOG_DIR}/proxy.log" 2>/dev/null || echo 0)"
-proxy_puts="$(grep -c ' PUT ' "${GRADLE_LOG_DIR}/proxy.log" 2>/dev/null || echo 0)"
+proxy_gets="$(grep -c ' GET ' "${GRADLE_LOG_DIR}/proxy.log" 2>/dev/null || true)"
+proxy_puts="$(grep -c ' PUT ' "${GRADLE_LOG_DIR}/proxy.log" 2>/dev/null || true)"
 echo "  proxy traffic: PUTs=${proxy_puts} GETs=${proxy_gets}"
 
 if [[ "${from_cache_count}" -gt 0 ]]; then

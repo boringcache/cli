@@ -116,8 +116,8 @@ export BORINGCACHE_PROXY_METADATA_HINTS="project=e2e-tool-maven,tool=maven"
 start_proxy "${BINARY}" "${WORKSPACE}" "${TAG}" "${PROXY_PORT}" "${MAVEN_LOG_DIR}/proxy.log"
 wait_for_proxy "${PROXY_PORT}"
 
-COLD_M2="${MAVEN_LOG_DIR}/m2-cold"
-WARM_M2="${MAVEN_LOG_DIR}/m2-warm"
+COLD_M2="${MAVEN_LOG_DIR}/cold/repository"
+WARM_M2="${MAVEN_LOG_DIR}/warm/repository"
 
 echo "=== Phase 1: Cold Maven build (seed build cache) ==="
 COLD_LOG="${MAVEN_LOG_DIR}/cold-build.log"
@@ -126,6 +126,7 @@ COLD_START="$(date +%s)"
   cd "${PROJECT_DIR}"
   mvn install -DskipTests \
     --batch-mode -ntp \
+    -Dmaven.build.cache.remote.save.enabled=true \
     -Dmaven.repo.local="${COLD_M2}" \
     2>&1 | tee "${COLD_LOG}"
 )
@@ -155,8 +156,8 @@ if grep -qi "restored from the build cache\|build cache.*hit\|found cached" "${W
   echo "  Maven build cache hit confirmed"
 fi
 
-proxy_gets="$(grep -c ' GET ' "${MAVEN_LOG_DIR}/proxy.log" 2>/dev/null || echo 0)"
-proxy_puts="$(grep -c ' PUT ' "${MAVEN_LOG_DIR}/proxy.log" 2>/dev/null || echo 0)"
+proxy_gets="$(grep -c ' GET ' "${MAVEN_LOG_DIR}/proxy.log" 2>/dev/null || true)"
+proxy_puts="$(grep -c ' PUT ' "${MAVEN_LOG_DIR}/proxy.log" 2>/dev/null || true)"
 echo "  proxy traffic: PUTs=${proxy_puts} GETs=${proxy_gets}"
 
 if [[ "${proxy_puts}" -gt 0 && "${proxy_gets}" -gt 0 ]]; then

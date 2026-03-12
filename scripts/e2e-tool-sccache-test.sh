@@ -52,13 +52,12 @@ edition = "2021"
 EOF
 
 cat > "${PROJECT_DIR}/src/main.rs" <<'EOF'
-mod math;
 fn main() {
-    println!("result = {}", math::compute(42));
+    println!("result = {}", sccache_e2e_project::compute(42));
 }
 EOF
 
-cat > "${PROJECT_DIR}/src/math.rs" <<'EOF'
+cat > "${PROJECT_DIR}/src/lib.rs" <<'EOF'
 pub fn compute(n: u64) -> u64 {
     let mut result = 0u64;
     for i in 0..n {

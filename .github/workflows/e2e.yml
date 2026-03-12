@@ -37,7 +37,7 @@ env:
 
 jobs:
   build-cli-binary:
-    name: Build CLI Binary
+    name: E2E / Build CLI Binary
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -76,7 +76,7 @@ jobs:
           if-no-files-found: error
 
   e2e:
-    name: E2E (${{ matrix.leg }})
+    name: E2E / ${{ matrix.label }}
     runs-on: ubuntu-latest
     needs: build-cli-binary
     timeout-minutes: 60
@@ -86,6 +86,8 @@ jobs:
       matrix:
         include:
           - leg: integrity
+            label: Archive / Integrity
+            artifact: archive-integrity
             tier: quick
             needs_bazel: false
             needs_docker: false
@@ -94,6 +96,8 @@ jobs:
             needs_rust: false
             needs_sccache: false
           - leg: cli-core
+            label: CLI / Core
+            artifact: cli-core
             tier: quick
             needs_bazel: false
             needs_docker: false
@@ -102,6 +106,8 @@ jobs:
             needs_rust: false
             needs_sccache: false
           - leg: security
+            label: Security / Tokens and Poisoning
+            artifact: security-tokens-poisoning
             tier: quick
             needs_bazel: false
             needs_docker: false
@@ -110,6 +116,8 @@ jobs:
             needs_rust: false
             needs_sccache: false
           - leg: adapters-http
+            label: Proxy / HTTP Adapters
+            artifact: proxy-http-adapters
             tier: quick
             needs_bazel: false
             needs_docker: false
@@ -118,6 +126,8 @@ jobs:
             needs_rust: false
             needs_sccache: false
           - leg: dual-proxy
+            label: Proxy / Dual Proxy
+            artifact: proxy-dual-proxy
             tier: extended
             needs_bazel: false
             needs_docker: false
@@ -126,6 +136,8 @@ jobs:
             needs_rust: false
             needs_sccache: false
           - leg: docker-buildkit
+            label: Registry / Docker BuildKit
+            artifact: registry-docker-buildkit
             tier: quick
             needs_bazel: false
             needs_docker: true
@@ -134,6 +146,8 @@ jobs:
             needs_rust: false
             needs_sccache: false
           - leg: prefetch-readiness
+            label: Registry / Prefetch Readiness
+            artifact: registry-prefetch-readiness
             tier: extended
             needs_bazel: false
             needs_docker: false
@@ -142,6 +156,8 @@ jobs:
             needs_rust: false
             needs_sccache: false
           - leg: tool-hugo
+            label: Tool / Hugo
+            artifact: tool-hugo
             tier: quick
             needs_bazel: false
             needs_docker: true
@@ -150,6 +166,8 @@ jobs:
             needs_rust: false
             needs_sccache: false
           - leg: tool-turbo
+            label: Tool / Turbo
+            artifact: tool-turbo
             tier: quick
             needs_bazel: false
             needs_docker: false
@@ -158,6 +176,8 @@ jobs:
             needs_rust: false
             needs_sccache: false
           - leg: tool-sccache
+            label: Tool / sccache
+            artifact: tool-sccache
             tier: quick
             needs_bazel: false
             needs_docker: false
@@ -166,6 +186,8 @@ jobs:
             needs_rust: true
             needs_sccache: true
           - leg: tool-bazel
+            label: Tool / Bazel
+            artifact: tool-bazel
             tier: quick
             needs_bazel: true
             needs_docker: false
@@ -174,6 +196,8 @@ jobs:
             needs_rust: false
             needs_sccache: false
           - leg: tool-maven
+            label: Tool / Maven
+            artifact: tool-maven
             tier: quick
             needs_bazel: false
             needs_docker: false
@@ -182,6 +206,8 @@ jobs:
             needs_rust: false
             needs_sccache: false
           - leg: tool-gradle
+            label: Tool / Gradle
+            artifact: tool-gradle
             tier: quick
             needs_bazel: false
             needs_docker: false
@@ -310,10 +336,12 @@ jobs:
         run: |
           set -euo pipefail
           LEG="${{ matrix.leg }}"
+          LABEL="${{ matrix.label }}"
           LOG_DIR="${GITHUB_WORKSPACE}/e2e-logs/${LEG}"
           status="${{ steps.run_e2e.outcome }}"
           {
             echo "leg=${LEG}"
+            echo "label=${LABEL}"
             echo "status=${status}"
           } > "${LOG_DIR}/e2e-metrics.env"
 
@@ -321,12 +349,12 @@ jobs:
         if: always() && steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-logs-${{ matrix.leg }}
+          name: e2e-leg-${{ matrix.artifact }}
           path: e2e-logs/${{ matrix.leg }}
           retention-days: 14
 
   cache-registry-benchmark:
-    name: Cache Registry Benchmark (${{ matrix.backend }} / ${{ matrix.phase }})
+    name: E2E / Benchmark / Cache Registry / ${{ matrix.backend_label }} / ${{ matrix.phase_label }}
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     needs: build-cli-binary
@@ -337,13 +365,25 @@ jobs:
       matrix:
         include:
           - backend: local
+            backend_label: Local
             phase: efficacy
+            phase_label: Efficacy
+            artifact: cache-registry-local-efficacy
           - backend: local
+            backend_label: Local
             phase: stress
+            phase_label: Stress
+            artifact: cache-registry-local-stress
           - backend: proxy
+            backend_label: Proxy
             phase: efficacy
+            phase_label: Efficacy
+            artifact: cache-registry-proxy-efficacy
           - backend: proxy
+            backend_label: Proxy
             phase: stress
+            phase_label: Stress
+            artifact: cache-registry-proxy-stress
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
@@ -561,7 +601,9 @@ jobs:
 
           {
             echo "backend=${{ matrix.backend }}"
+            echo "backend_label=${{ matrix.backend_label }}"
             echo "phase=${phase}"
+            echo "phase_label=${{ matrix.phase_label }}"
             echo "status=${status}"
             echo "cold_seconds=${cold}"
             echo "warm_seconds=${warm}"
@@ -603,12 +645,12 @@ jobs:
         if: always() && steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: cache-registry-benchmark-${{ matrix.backend }}-${{ matrix.phase }}
+          name: e2e-benchmark-${{ matrix.artifact }}
           path: benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}
           retention-days: 14
 
   cross-runner-seed:
-    name: Cross-Runner CAS Seed
+    name: E2E / Cache Registry / Cross-Runner Seed
     runs-on: ubuntu-latest
     needs: build-cli-binary
     timeout-minutes: 10
@@ -715,7 +757,7 @@ jobs:
           echo "Seed complete: tag=${TAG} cas=${CAS_DIGEST} ac=${AC_DIGEST}"
 
   cross-runner-verify:
-    name: Cross-Runner CAS Verify
+    name: E2E / Cache Registry / Cross-Runner Verify
     runs-on: ubuntu-latest
     needs: [build-cli-binary, cross-runner-seed]
     if: needs.cross-runner-seed.outputs.tag != ''
@@ -801,7 +843,7 @@ jobs:
           "$CLI" delete --no-platform --no-git "${{ github.repository }}" "${TAG}" || true
 
   e2e-summary:
-    name: E2E Summary
+    name: E2E / Summary
     runs-on: ubuntu-latest
     needs:
       - e2e
@@ -818,10 +860,10 @@ jobs:
       - name: Write summary
         run: |
           set -euo pipefail
-          echo "# E2E Test Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "# E2E / Test Results" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Leg | Status |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Test | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
 
           mapfile -t e2e_metric_files < <(find artifacts -type f -name e2e-metrics.env 2>/dev/null | sort)
           if [[ "${#e2e_metric_files[@]}" -eq 0 ]]; then
@@ -830,12 +872,12 @@ jobs:
             for metrics in "${e2e_metric_files[@]}"; do
               # shellcheck disable=SC1090
               source "$metrics"
-              echo "| ${leg} | ${status} |" >> "$GITHUB_STEP_SUMMARY"
+              echo "| ${label:-$leg} | ${status} |" >> "$GITHUB_STEP_SUMMARY"
             done
           fi
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "## Cross-Runner Cache Persistence" >> "$GITHUB_STEP_SUMMARY"
+          echo "## E2E / Cache Registry / Cross-Runner Persistence" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           cross_runner_status="${{ needs.cross-runner-verify.result }}"
           echo "| Test | Status |" >> "$GITHUB_STEP_SUMMARY"
@@ -843,7 +885,7 @@ jobs:
           echo "| CAS blob persistence across runners | ${cross_runner_status} |" >> "$GITHUB_STEP_SUMMARY"
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "# Cache Registry Benchmarks" >> "$GITHUB_STEP_SUMMARY"
+          echo "# E2E / Cache Registry Benchmarks" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           mapfile -t benchmark_metric_files < <(find artifacts -type f -name metrics.env 2>/dev/null | sort)
@@ -866,7 +908,7 @@ jobs:
             if [[ "${phase}" != "efficacy" ]]; then
               continue
             fi
-            echo "| ${backend} | ${status} | ${cold_seconds} | ${warm_seconds} | ${warm_rust_hit_rate}% | ${efficacy_two_pass_hit_rate}% | ${efficacy_cache_ops_sccache_hit_rate}% | ${warm_avg_cache_read_hit} | ${efficacy_proxy_429} | ${efficacy_proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| ${backend_label:-$backend} | ${status} | ${cold_seconds} | ${warm_seconds} | ${warm_rust_hit_rate}% | ${efficacy_two_pass_hit_rate}% | ${efficacy_cache_ops_sccache_hit_rate}% | ${warm_avg_cache_read_hit} | ${efficacy_proxy_429} | ${efficacy_proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
             if [[ "${status}" == "success" ]]; then
               case "$backend" in
                 local) local_warm="$warm_seconds" ;;
@@ -897,7 +939,7 @@ jobs:
             if [[ "${phase}" != "stress" ]]; then
               continue
             fi
-            echo "| ${backend} | ${status} | ${prewarm_seconds} | ${parallel_avg_seconds} | ${parallel_rust_hit_rate}% | ${stress_sccache_start_timeouts} | ${stress_sccache_unexpected_shutdowns} | ${stress_lock_waits} | ${stress_proxy_429} | ${stress_proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| ${backend_label:-$backend} | ${status} | ${prewarm_seconds} | ${parallel_avg_seconds} | ${parallel_rust_hit_rate}% | ${stress_sccache_start_timeouts} | ${stress_sccache_unexpected_shutdowns} | ${stress_lock_waits} | ${stress_proxy_429} | ${stress_proxy_tag_conflicts} |" >> "$GITHUB_STEP_SUMMARY"
             if [[ "${status}" == "success" ]]; then
               case "$backend" in
                 local) local_parallel="$parallel_avg_seconds" ;;
