@@ -101,8 +101,9 @@ COLD_LOG="${BAZEL_LOG_DIR}/cold-build.log"
 COLD_START="$(date +%s)"
 (
   cd "${PROJECT_DIR}"
-  ${BAZEL_CMD} build \
+  ${BAZEL_CMD} \
     --output_base="${COLD_OUTPUT_BASE}" \
+    build \
     --remote_cache="${PROXY_URL}" \
     --remote_upload_local_results \
     //:emit //:transform //:hash 2>&1 | tee "${COLD_LOG}"
@@ -120,8 +121,9 @@ WARM_LOG="${BAZEL_LOG_DIR}/warm-build.log"
 WARM_START="$(date +%s)"
 (
   cd "${PROJECT_DIR}"
-  ${BAZEL_CMD} build \
+  ${BAZEL_CMD} \
     --output_base="${WARM_OUTPUT_BASE}" \
+    build \
     --remote_cache="${PROXY_URL}" \
     //:emit //:transform //:hash 2>&1 | tee "${WARM_LOG}"
 )
@@ -143,8 +145,8 @@ else
   exit 1
 fi
 
-(cd "${PROJECT_DIR}" && ${BAZEL_CMD} shutdown --output_base="${COLD_OUTPUT_BASE}" 2>/dev/null || true)
-(cd "${PROJECT_DIR}" && ${BAZEL_CMD} shutdown --output_base="${WARM_OUTPUT_BASE}" 2>/dev/null || true)
+(cd "${PROJECT_DIR}" && ${BAZEL_CMD} --output_base="${COLD_OUTPUT_BASE}" shutdown 2>/dev/null || true)
+(cd "${PROJECT_DIR}" && ${BAZEL_CMD} --output_base="${WARM_OUTPUT_BASE}" shutdown 2>/dev/null || true)
 
 stop_proxy
 dump_cache_ops_summary

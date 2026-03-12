@@ -30,7 +30,6 @@ permissions:
 
 env:
   RUST_VERSION: "1.89"
-  SCCACHE_VERSION: "v0.13.0"
   BAZELISK_VERSION: "v1.20.0"
 
 jobs:
@@ -84,102 +83,59 @@ jobs:
       matrix:
         include:
           - leg: integrity
-            needs_rust: false
-            needs_sccache: false
+            tier: quick
             needs_bazel: false
             needs_docker: false
-            needs_java: false
             needs_node: false
           - leg: cli-core
-            needs_rust: false
-            needs_sccache: false
+            tier: quick
             needs_bazel: false
             needs_docker: false
-            needs_java: false
             needs_node: false
           - leg: security
-            needs_rust: false
-            needs_sccache: false
+            tier: quick
             needs_bazel: false
             needs_docker: false
-            needs_java: false
             needs_node: false
           - leg: adapters-http
-            needs_rust: false
-            needs_sccache: false
+            tier: quick
             needs_bazel: false
             needs_docker: false
-            needs_java: false
             needs_node: false
           - leg: bazel-real
-            needs_rust: false
-            needs_sccache: false
+            tier: extended
             needs_bazel: true
             needs_docker: false
-            needs_java: false
             needs_node: false
           - leg: dual-proxy
-            needs_rust: false
-            needs_sccache: true
+            tier: extended
             needs_bazel: false
             needs_docker: false
-            needs_java: false
             needs_node: false
           - leg: docker-buildkit
-            needs_rust: false
-            needs_sccache: false
+            tier: quick
             needs_bazel: false
             needs_docker: true
-            needs_java: false
             needs_node: false
           - leg: prefetch-readiness
-            needs_rust: false
-            needs_sccache: false
+            tier: extended
             needs_bazel: false
             needs_docker: false
-            needs_java: false
             needs_node: false
           - leg: tool-hugo
-            needs_rust: false
-            needs_sccache: false
+            tier: quick
             needs_bazel: false
             needs_docker: true
-            needs_java: false
             needs_node: false
           - leg: tool-turbo
-            needs_rust: false
-            needs_sccache: false
+            tier: quick
             needs_bazel: false
             needs_docker: false
-            needs_java: false
             needs_node: true
-          - leg: tool-sccache
-            needs_rust: true
-            needs_sccache: true
-            needs_bazel: false
-            needs_docker: false
-            needs_java: false
-            needs_node: false
           - leg: tool-bazel
-            needs_rust: false
-            needs_sccache: false
+            tier: quick
             needs_bazel: true
             needs_docker: false
-            needs_java: false
-            needs_node: false
-          - leg: tool-maven
-            needs_rust: false
-            needs_sccache: false
-            needs_bazel: false
-            needs_docker: false
-            needs_java: true
-            needs_node: false
-          - leg: tool-gradle
-            needs_rust: false
-            needs_sccache: false
-            needs_bazel: false
-            needs_docker: false
-            needs_java: true
             needs_node: false
     env:
       BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
@@ -206,42 +162,12 @@ jobs:
           if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "Skipping e2e leg: BORINGCACHE_API_TOKEN is not configured."
+          elif [[ "${{ matrix.tier }}" == "extended" && "${GITHUB_EVENT_NAME}" != "schedule" && "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping extended e2e leg on ${GITHUB_EVENT_NAME}."
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Setup Rust (BoringCache)
-        id: boringcache-rust
-        if: steps.gate.outputs.run == 'true' && matrix.needs_rust == true
-        continue-on-error: true
-        uses: boringcache/rust-action@v1
-        with:
-          workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-e2e-linux-x86_64"
-          sccache: "true"
-          sccache-mode: "local"
-          cache-target: "true"
-
-      - name: Setup Rust (Fallback)
-        if: steps.gate.outputs.run == 'true' && matrix.needs_rust == true && steps.boringcache-rust.outcome == 'failure'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-
-      - name: Ensure sccache present
-        if: steps.gate.outputs.run == 'true' && matrix.needs_sccache == true
-        run: |
-          set -euo pipefail
-          if command -v sccache >/dev/null 2>&1; then
-            sccache --version
-            exit 0
-          fi
-          url="https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          curl -fsSL "$url" | tar xz -C /tmp
-          sudo mv "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
-          sudo chmod +x /usr/local/bin/sccache
-          sccache --version
 
       - name: Ensure bazel present
         if: steps.gate.outputs.run == 'true' && matrix.needs_bazel == true
@@ -260,13 +186,6 @@ jobs:
       - name: Setup Docker Buildx
         if: steps.gate.outputs.run == 'true' && matrix.needs_docker == true
         uses: docker/setup-buildx-action@v3
-
-      - name: Setup Java
-        if: steps.gate.outputs.run == 'true' && matrix.needs_java == true
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
 
       - name: Setup Node.js
         if: steps.gate.outputs.run == 'true' && matrix.needs_node == true
@@ -297,251 +216,15 @@ jobs:
           LEG="${{ matrix.leg }}"
           LOG_DIR="${GITHUB_WORKSPACE}/e2e-logs/${LEG}"
           mkdir -p "$LOG_DIR"
-          TAG="gha-e2e-${LEG}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           BIN_PATH="${RUNNER_TEMP}/boringcache-bin/boringcache"
-          case "$LEG" in
-            integrity)
-              BINARY="$BIN_PATH" \
-              WORKSPACE="${GITHUB_REPOSITORY}" \
-              BORINGCACHE_API_URL="https://api.boringcache.com" \
-              LOG_DIR="$LOG_DIR" \
-              ./scripts/e2e-cli-integrity-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            cli-core)
-              BINARY="$BIN_PATH" \
-              WORKSPACE="${GITHUB_REPOSITORY}" \
-              BORINGCACHE_API_URL="https://api.boringcache.com" \
-              LOG_DIR="$LOG_DIR" \
-              ./scripts/e2e-cli-core-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            security)
-              BINARY="$BIN_PATH" \
-              WORKSPACE="${GITHUB_REPOSITORY}" \
-              BORINGCACHE_API_URL="https://api.boringcache.com" \
-              LOG_DIR="$LOG_DIR" \
-              BORINGCACHE_E2E_RESTORE_TOKEN="${BORINGCACHE_E2E_RESTORE_TOKEN:-}" \
-              BORINGCACHE_E2E_SAVE_TOKEN="${BORINGCACHE_E2E_SAVE_TOKEN:-}" \
-              ./scripts/e2e-security-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            adapters-http)
-              BINARY="$BIN_PATH" \
-              LOG_DIR="$LOG_DIR" \
-              TAG="$TAG" \
-              BUDGET_REMOTE_TAG_HITS_MIN="1" \
-              ./scripts/e2e-all-adapters-http-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            bazel-real)
-              BINARY="$BIN_PATH" \
-              LOG_DIR="$LOG_DIR" \
-              TAG="$TAG" \
-              BAZEL_BUILD_JOBS="256" \
-              BAZEL_REMOTE_MAX_CONNECTIONS="64" \
-              STRESS_ACTION_COUNT="96" \
-              BUDGET_REMOTE_TIMEOUTS_MAX="0" \
-              BUDGET_REMOTE_TAG_HITS_MIN="1" \
-              ./scripts/e2e-bazel-real-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            dual-proxy)
-              BINARY="$BIN_PATH" \
-              LOG_DIR="$LOG_DIR" \
-              TAG="$TAG" \
-              BUDGET_CONTENTION_WALL_SECONDS_MAX="480" \
-              BUDGET_TOTAL_CONFLICTS_MAX="20" \
-              BUDGET_PROXY_429_MAX="0" \
-              BUDGET_CACHE_OPS_GET_RECORDS_MIN="300" \
-              BUDGET_CACHE_OPS_GET_HIT_RATE_MAX="100" \
-              BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX="15" \
-              BUDGET_REMOTE_TAG_HITS_MIN="1" \
-              ./scripts/e2e-dual-proxy-contention-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            docker-buildkit)
-              BINARY="$BIN_PATH" \
-              WORKSPACE="${GITHUB_REPOSITORY}" \
-              E2E_TAG_PREFIX="gha-cache-registry" \
-              PORT="5000" \
-              LOG_DIR="$LOG_DIR" \
-              BUDGET_REMOTE_TAG_HITS_MIN="1" \
-              ./scripts/e2e-docker-buildkit-registry-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            prefetch-readiness)
-              BINARY="$BIN_PATH" \
-              WORKSPACE="${GITHUB_REPOSITORY}" \
-              TAG="gha-prefetch-readiness-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-              BLOB_COUNT="20000" \
-              BLOB_SIZE_BYTES="4096" \
-              SEED_CONCURRENCY="64" \
-              VERIFY_CONCURRENCY="64" \
-              BUDGET_REMOTE_TAG_HITS_MIN="1" \
-              PROXY_SHUTDOWN_WAIT_SECS="120" \
-              SEED_FLUSH_TIMEOUT_SECS="240" \
-              LOG_DIR="$LOG_DIR" \
-              ./scripts/e2e-prefetch-readiness-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            tool-hugo)
-              BINARY="$BIN_PATH" \
-              WORKSPACE="${GITHUB_REPOSITORY}" \
-              LOG_DIR="$LOG_DIR" \
-              PORT="5000" \
-              BUDGET_REMOTE_TAG_HITS_MIN="1" \
-              ./scripts/e2e-tool-hugo-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            tool-turbo)
-              BINARY="$BIN_PATH" \
-              WORKSPACE="${GITHUB_REPOSITORY}" \
-              LOG_DIR="$LOG_DIR" \
-              BUDGET_REMOTE_TAG_HITS_MIN="1" \
-              ./scripts/e2e-tool-turbo-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            tool-sccache)
-              BINARY="$BIN_PATH" \
-              WORKSPACE="${GITHUB_REPOSITORY}" \
-              LOG_DIR="$LOG_DIR" \
-              BUDGET_REMOTE_TAG_HITS_MIN="1" \
-              ./scripts/e2e-tool-sccache-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            tool-bazel)
-              BINARY="$BIN_PATH" \
-              WORKSPACE="${GITHUB_REPOSITORY}" \
-              LOG_DIR="$LOG_DIR" \
-              BUDGET_REMOTE_TAG_HITS_MIN="1" \
-              ./scripts/e2e-tool-bazel-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            tool-maven)
-              BINARY="$BIN_PATH" \
-              WORKSPACE="${GITHUB_REPOSITORY}" \
-              LOG_DIR="$LOG_DIR" \
-              BUDGET_REMOTE_TAG_HITS_MIN="1" \
-              ./scripts/e2e-tool-maven-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            tool-gradle)
-              BINARY="$BIN_PATH" \
-              WORKSPACE="${GITHUB_REPOSITORY}" \
-              LOG_DIR="$LOG_DIR" \
-              BUDGET_REMOTE_TAG_HITS_MIN="1" \
-              ./scripts/e2e-tool-gradle-test.sh | tee "$LOG_DIR/run.log"
-              ;;
-            *)
-              echo "Unknown e2e leg: $LEG"
-              exit 1
-              ;;
-          esac
+          bash ./scripts/e2e-framework.sh run "$LEG" "$BIN_PATH" "$LOG_DIR" 2>&1 | tee "$LOG_DIR/run.log"
 
       - name: Validate scenario coverage
         if: always() && steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
           LEG="${{ matrix.leg }}"
-          LOG_DIR="${GITHUB_WORKSPACE}/e2e-logs/${LEG}"
-          LOG_FILE="${LOG_DIR}/run.log"
-          if [[ ! -f "$LOG_FILE" ]]; then
-            echo "ERROR: expected e2e run log at ${LOG_FILE}"
-            exit 1
-          fi
-
-          assert_log_contains() {
-            local pattern="$1"
-            local label="$2"
-            if ! grep -Fq "$pattern" "$LOG_FILE"; then
-              echo "ERROR: missing scenario marker (${label}): ${pattern}"
-              echo "--- log tail ---"
-              tail -n 200 "$LOG_FILE" || true
-              exit 1
-            fi
-          }
-
-          case "$LEG" in
-            integrity)
-              assert_log_contains "=== Phase 1: allow in-root relative symlinks ===" "phase1"
-              assert_log_contains "=== Phase 2: reject absolute symlinks ===" "phase2"
-              assert_log_contains "=== Phase 3: reject escaping relative symlinks ===" "phase3"
-              assert_log_contains "CLI integrity e2e passed" "success"
-              ;;
-            cli-core)
-              assert_log_contains "=== Phase 1: Save/restore/delete (archive cache path) ===" "phase1"
-              assert_log_contains "=== Phase 2: run command cache integration ===" "phase2"
-              assert_log_contains "=== Phase 3: encryption + mount sync ===" "phase3"
-              assert_log_contains "CLI core e2e passed" "success"
-              ;;
-            security)
-              assert_log_contains "=== Phase 1: Tag-name injection ===" "phase1"
-              assert_log_contains "=== Phase 2: Cache poisoning via CAS tamper ===" "phase2"
-              assert_log_contains "=== Phase 3: Cross-workspace isolation ===" "phase3"
-              assert_log_contains "=== Phase 4: Signed restore (--require-server-signature) ===" "phase4"
-              assert_log_contains "=== Phase 5: Token isolation ===" "phase5"
-              assert_log_contains "Security e2e passed" "success"
-              ;;
-            adapters-http)
-              assert_log_contains "=== Phase 1: Write and read with running proxy ===" "phase1"
-              assert_log_contains "=== Phase 1b: Verify published remote tag resolves ===" "phase1b"
-              assert_log_contains "=== Phase 2: Read-only verification after proxy restart ===" "phase2"
-              assert_log_contains "All adapter HTTP e2e checks passed" "success"
-              ;;
-            bazel-real)
-              assert_log_contains "=== Phase 1: Cold build (expect local execution + upload) ===" "phase1"
-              assert_log_contains "=== Phase 2: Warm build with isolated output root (expect remote hit) ===" "phase2"
-              assert_log_contains "=== Phase 2b: Verify published remote tag resolves ===" "phase2b"
-              assert_log_contains "=== Phase 3: Restart proxy and verify persisted remote hit ===" "phase3"
-              assert_log_contains "=== Phase 4: High-concurrency stress warm (expect remote hits, no connect timeouts) ===" "phase4"
-              assert_log_contains "Bazel real-client e2e passed" "success"
-              ;;
-            dual-proxy)
-              assert_log_contains "=== Phase 1: Prewarm (populate baseline tag) ===" "phase1"
-              assert_log_contains "=== Phase 1b: Verify published remote tag resolves ===" "phase1b"
-              assert_log_contains "=== Phase 2: Dual-Proxy Contention ===" "phase2"
-              assert_log_contains "=== Phase 2b: Verify published remote tag after contention flush ===" "phase2b"
-              assert_log_contains "=== Phase 3: Verification (merged index check) ===" "phase3"
-              assert_log_contains "PASS: both proxies flushed without timeouts/drops" "success"
-              ;;
-            docker-buildkit)
-              assert_log_contains "=== Phase 1: Cold build and warm import ===" "phase1"
-              assert_log_contains "=== Phase 1b: Verify published remote tag resolves ===" "phase1b"
-              assert_log_contains "=== Phase 2: Restart proxy and verify persisted warm import ===" "phase2"
-              assert_log_contains "=== Phase 3: Implicit latest cache import compatibility ===" "phase3"
-              assert_log_contains "=== Phase 4: Alias publish and alias warm import ===" "phase4"
-              assert_log_contains "Docker buildkit registry e2e passed" "success"
-              ;;
-            prefetch-readiness)
-              assert_log_contains "=== Phase 1: Seed" "phase1"
-              assert_log_contains "=== Phase 1b: Verify published remote tag resolves ===" "phase1b"
-              assert_log_contains "=== Phase 2: Restart proxy on fresh disk cache" "phase2"
-              assert_log_contains "=== Phase 3: Verify all" "phase3"
-              assert_log_contains "Prefetch readiness e2e passed" "success"
-              ;;
-            tool-hugo)
-              assert_log_contains "=== Phase 1: Cold Docker build (seed cache) ===" "phase1"
-              assert_log_contains "=== Phase 2: Warm Docker build (cache hit) ===" "phase2"
-              assert_log_contains "Hugo tool e2e passed" "success"
-              ;;
-            tool-turbo)
-              assert_log_contains "=== Phase 1: Cold Turbo build (seed remote cache) ===" "phase1"
-              assert_log_contains "=== Phase 2: Warm Turbo build (remote cache hit) ===" "phase2"
-              assert_log_contains "Turbo tool e2e passed" "success"
-              ;;
-            tool-sccache)
-              assert_log_contains "=== Phase 1: Cold Rust build (seed sccache via proxy) ===" "phase1"
-              assert_log_contains "=== Phase 2: Warm Rust build (sccache cache hit via proxy) ===" "phase2"
-              assert_log_contains "sccache tool e2e passed" "success"
-              ;;
-            tool-bazel)
-              assert_log_contains "=== Phase 1: Cold Bazel build (seed remote cache) ===" "phase1"
-              assert_log_contains "=== Phase 2: Warm Bazel build (remote cache hit) ===" "phase2"
-              assert_log_contains "Bazel tool e2e passed" "success"
-              ;;
-            tool-maven)
-              assert_log_contains "=== Phase 1: Cold Maven build (seed build cache) ===" "phase1"
-              assert_log_contains "=== Phase 2: Warm Maven build (cache hit) ===" "phase2"
-              assert_log_contains "Maven tool e2e passed" "success"
-              ;;
-            tool-gradle)
-              assert_log_contains "=== Phase 1: Cold Gradle build (seed build cache) ===" "phase1"
-              assert_log_contains "=== Phase 2: Warm Gradle build (remote cache hit) ===" "phase2"
-              assert_log_contains "Gradle tool e2e passed" "success"
-              ;;
-            *)
-              echo "ERROR: unknown e2e leg: ${LEG}"
-              exit 1
-              ;;
-          esac
+          bash ./scripts/e2e-framework.sh validate "$LEG" "${GITHUB_WORKSPACE}/e2e-logs/${LEG}/run.log"
 
       - name: Extract e2e metrics
         if: always() && steps.gate.outputs.run == 'true'

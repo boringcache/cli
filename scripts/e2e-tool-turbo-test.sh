@@ -52,6 +52,7 @@ cat > "${PROJECT_DIR}/package.json" <<'EOF'
 {
   "name": "turbo-e2e-monorepo",
   "private": true,
+  "packageManager": "npm@10.9.0",
   "workspaces": ["packages/*"]
 }
 EOF
@@ -86,7 +87,7 @@ cat > "${PROJECT_DIR}/packages/pkg-b/package.json" <<'EOF'
     "build": "mkdir -p dist && echo \"pkg-b-built-$(date +%s%N)\" > dist/output.txt && echo 'pkg-b built'"
   },
   "dependencies": {
-    "pkg-a": "*"
+    "pkg-a": "workspace:*"
   }
 }
 EOF

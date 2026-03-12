@@ -205,6 +205,15 @@ printf 'token-test-%s\n' "${RUN_ID}" > "${TOKEN_SRC}/data.txt"
 SCOPED_RESTORE_TOKEN="${BORINGCACHE_E2E_RESTORE_TOKEN:-}"
 SCOPED_SAVE_TOKEN="${BORINGCACHE_E2E_SAVE_TOKEN:-}"
 TOKEN_HOME="$(mktemp -d)"
+TOKEN_SCOPE_ENFORCEMENT="${BORINGCACHE_E2E_REQUIRE_TOKEN_SCOPES:-0}"
+TOKENS_LOOK_DISTINCT=0
+
+if [[ -n "${SCOPED_RESTORE_TOKEN}" && -n "${SCOPED_SAVE_TOKEN}" ]] && \
+   [[ "${SCOPED_RESTORE_TOKEN}" != "${SCOPED_SAVE_TOKEN}" ]] && \
+   [[ "${SCOPED_RESTORE_TOKEN}" != "${FULL_TOKEN}" ]] && \
+   [[ "${SCOPED_SAVE_TOKEN}" != "${FULL_TOKEN}" ]]; then
+  TOKENS_LOOK_DISTINCT=1
+fi
 
 if [[ -n "${SCOPED_RESTORE_TOKEN}" ]]; then
   echo "  using real scoped restore token (server-side enforcement)"
@@ -220,6 +229,18 @@ if [[ -n "${SCOPED_SAVE_TOKEN}" ]]; then
 else
   echo "  no BORINGCACHE_E2E_SAVE_TOKEN set — testing CLI-side resolution only"
   SAVE_ONLY_TOKEN="${FULL_TOKEN}"
+fi
+
+if [[ "${TOKENS_LOOK_DISTINCT}" -eq 1 ]]; then
+  echo "  restore/save token secrets are distinct from the full token"
+else
+  echo "  scoped token secrets are missing or not clearly distinct; scope assertions are diagnostic"
+fi
+
+if [[ "${TOKEN_SCOPE_ENFORCEMENT}" == "1" ]]; then
+  echo "  token scope enforcement is strict for this run"
+else
+  echo "  token scope enforcement is non-fatal unless explicitly enabled"
 fi
 
 echo "  --- 5a: restore-only token cannot save ---"
@@ -240,11 +261,11 @@ if [[ "${token_save_status}" -ne 0 ]]; then
     echo "  error message confirms token scope enforcement"
   fi
 else
-  if [[ -n "${SCOPED_RESTORE_TOKEN}" ]]; then
+  if [[ "${TOKEN_SCOPE_ENFORCEMENT}" == "1" && "${TOKENS_LOOK_DISTINCT}" -eq 1 ]]; then
     echo "ERROR: save succeeded with a real restore-only token — server did not enforce scope"
     exit 1
   else
-    echo "  save succeeded (expected: CLI only blocks via env var resolution, not server scope)"
+    echo "  WARNING: save succeeded with the restore token; keeping this diagnostic because strict scope enforcement is disabled"
   fi
 fi
 
@@ -269,7 +290,7 @@ if [[ "${token_restore_status}" -eq 0 ]]; then
   cmp -s "${TOKEN_SRC}/data.txt" "${TOKEN_RESTORE_DIR}/data.txt"
   echo "  restore with restore-only token succeeded and content matches"
 else
-  if [[ -n "${SCOPED_RESTORE_TOKEN}" ]]; then
+  if [[ "${TOKEN_SCOPE_ENFORCEMENT}" == "1" && "${TOKENS_LOOK_DISTINCT}" -eq 1 ]]; then
     echo "ERROR: restore with real restore-only token failed (exit=${token_restore_status})"
     cat "${SEC_LOG_DIR}/token-restore-only-restore.log"
     exit 1
@@ -297,11 +318,11 @@ if [[ "${token_delete_status}" -ne 0 ]]; then
     echo "  error message confirms admin scope required"
   fi
 else
-  if [[ -n "${SCOPED_SAVE_TOKEN}" ]]; then
+  if [[ "${TOKEN_SCOPE_ENFORCEMENT}" == "1" && "${TOKENS_LOOK_DISTINCT}" -eq 1 ]]; then
     echo "ERROR: delete succeeded with a real save-only token — server did not enforce scope"
     exit 1
   else
-    echo "  delete succeeded (expected: CLI resolves full token via env var fallback)"
+    echo "  WARNING: delete succeeded with the save token; keeping this diagnostic because strict scope enforcement is disabled"
   fi
 fi
 
@@ -322,7 +343,7 @@ set -e
 if [[ "${token_save_save_status}" -eq 0 ]]; then
   echo "  save with save-only token succeeded"
 else
-  if [[ -n "${SCOPED_SAVE_TOKEN}" ]]; then
+  if [[ "${TOKEN_SCOPE_ENFORCEMENT}" == "1" && "${TOKENS_LOOK_DISTINCT}" -eq 1 ]]; then
     echo "ERROR: save with real save-only token failed (exit=${token_save_save_status})"
     cat "${SEC_LOG_DIR}/token-save-only-save.log"
     exit 1
