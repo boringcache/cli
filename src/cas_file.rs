@@ -251,11 +251,7 @@ pub fn validate_symlink_target(root: &Path, destination: &Path, target: &Path) -
         ));
     }
     if target.is_absolute() {
-        return Err(anyhow!(
-            "Absolute symlink target is not allowed for {}: {}",
-            destination.display(),
-            target.display()
-        ));
+        return Err(absolute_symlink_target_error(destination, target));
     }
 
     let link_parent = destination.parent().ok_or_else(|| {
@@ -280,11 +276,7 @@ pub fn validate_symlink_target(root: &Path, destination: &Path, target: &Path) -
                 }
             }
             Component::RootDir | Component::Prefix(_) => {
-                return Err(anyhow!(
-                    "Absolute symlink target is not allowed for {}: {}",
-                    destination.display(),
-                    target.display()
-                ));
+                return Err(absolute_symlink_target_error(destination, target));
             }
         }
     }
@@ -298,6 +290,27 @@ pub fn validate_symlink_target(root: &Path, destination: &Path, target: &Path) -
     }
 
     Ok(())
+}
+
+fn absolute_symlink_target_error(destination: &Path, target: &Path) -> anyhow::Error {
+    let mut message = format!(
+        "Absolute symlink target is not allowed for {}: {}",
+        destination.display(),
+        target.display()
+    );
+
+    if is_mise_shim_path(destination) {
+        message.push_str(
+            ". Cache the mise installs directory instead of shims and regenerate shims with `mise reshim` after restore."
+        );
+    }
+
+    anyhow!(message)
+}
+
+fn is_mise_shim_path(path: &Path) -> bool {
+    let display = path.to_string_lossy();
+    display.contains("/mise/shims/") || display.contains("\\mise\\shims\\")
 }
 
 fn validate_relative_path_components(relative_path: &Path) -> Result<()> {
@@ -376,6 +389,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("Absolute symlink target"));
+    }
+
+    #[test]
+    fn validate_symlink_target_hints_for_mise_shims() {
+        let root = PathBuf::from("/tmp/root");
+        let destination = root.join(".local/share/mise/shims/bundle");
+        let error =
+            validate_symlink_target(&root, &destination, Path::new("/tmp/root/.local/bin/mise"))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("Cache the mise installs directory instead of shims"));
+        assert!(error.contains("mise reshim"));
     }
 
     #[test]

@@ -601,7 +601,7 @@ async fn execute_batch_restore_inner(
                 target_path: plan.target_path.clone(),
             });
         } else {
-            reporter.warning(format!("Cache miss for {}", plan.display_tag))?;
+            reporter.info(format!("Cache miss for {}", plan.display_tag))?;
             misses.push(plan.display_tag.clone());
         }
     }
@@ -615,14 +615,14 @@ async fn execute_batch_restore_inner(
     }
 
     if selected_hits.is_empty() {
-        reporter.warning("No cache entries found for the specified tags".to_string())?;
+        reporter.info("No cache entries found for the specified tags".to_string())?;
         drop(reporter);
         progress_system.shutdown()?;
 
         ui::blank_line();
         ui::workflow_summary("found", 0, tags_display.len(), &workspace);
         if !misses.is_empty() {
-            ui::warn(&format!("Not found: {}", misses.join(", ")));
+            ui::info(&format!("Cache miss: {}", misses.join(", ")));
         }
         return Ok(());
     }
@@ -644,7 +644,7 @@ async fn execute_batch_restore_inner(
         }
 
         if !misses.is_empty() {
-            ui::warn(&format!("Not found: {}", misses.join(", ")));
+            ui::info(&format!("Cache miss: {}", misses.join(", ")));
         }
 
         return Ok(());

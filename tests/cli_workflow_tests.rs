@@ -1900,7 +1900,7 @@ async fn test_restore_lookup_only_flag() {
     let output_text = format!("{stdout}{stderr}");
 
     assert!(output_text.contains(&format!("Available cache entries: {}", hit_tag)));
-    assert!(output_text.contains("Not found: missing-cache"));
+    assert!(output_text.contains("Cache miss: missing-cache"));
 
     assert!(!output_text.contains("Downloading"));
     assert!(!output_text.contains("Restoring"));
