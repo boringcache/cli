@@ -80,6 +80,37 @@ pub async fn execute(
     dry_run: bool,
     json_output: bool,
 ) -> Result<()> {
+    if !json_output && std::io::stdin().is_terminal() {
+        let needs_auth = if optimize_auth_configured() {
+            let client = ApiClient::new()?;
+            client.get_session_info().await.is_err()
+        } else {
+            true
+        };
+
+        if needs_auth {
+            ui::info("Welcome to BoringCache.");
+            ui::blank_line();
+            ui::info("Let's connect your account and set up caching for this project.");
+            ui::blank_line();
+
+            let token = match run_cli_connect_onboarding().await {
+                Ok(token) => token,
+                Err(err) => {
+                    ui::warn(&format!("Browser sign-in failed: {err}"));
+                    if !prompt_yes_no("Paste a token manually instead? [Y/n] ", true)? {
+                        return Err(err);
+                    }
+                    prompt_non_empty("BoringCache API token: ")?
+                }
+            };
+
+            crate::commands::auth::execute(token.clone()).await?;
+            ensure_default_workspace_after_onboarding(&token).await?;
+            ui::blank_line();
+        }
+    }
+
     let files = if let Some(ref path) = path {
         scan_single_file(path)?
     } else {
@@ -92,13 +123,22 @@ pub async fn execute(
         } else {
             ui::info("No CI/CD configuration files found.");
             ui::blank_line();
-            ui::info("Searched for:");
-            ui::info("  .github/workflows/*.yml / *.yaml");
-            ui::info("  Dockerfile, Dockerfile.*, *.dockerfile");
-            ui::info("  .gitlab-ci.yml, .circleci/config.yml");
-            ui::info("  .buildkite/pipeline.yml, .travis.yml");
-            ui::info("  azure-pipelines.yml, bitbucket-pipelines.yml");
-            ui::info("  .drone.yml, Jenkinsfile");
+
+            let workspace = Config::load().ok().and_then(|c| c.default_workspace);
+
+            if let Some(ref ws) = workspace {
+                ui::info("You can use BoringCache locally:");
+                ui::info(&format!(
+                    "  boringcache run {} \"deps:node_modules\" -- npm ci",
+                    ws
+                ));
+            } else {
+                ui::info("You can use BoringCache locally:");
+                ui::info("  boringcache run <workspace> \"deps:node_modules\" -- npm ci");
+            }
+
+            ui::blank_line();
+            ui::info("Or add a CI config and run 'boringcache onboard' again.");
         }
         return Ok(());
     }
@@ -330,6 +370,18 @@ pub async fn execute(
 
         if written == 0 {
             ui::warn("No files were written.");
+        } else {
+            ui::blank_line();
+            ui::info("Done! Next steps:");
+            ui::info("  1. Review: git diff");
+            ui::info("  2. Commit and push to trigger your first cached CI run");
+
+            if let Ok(config) = Config::load() {
+                if let Some(ref ws) = config.default_workspace {
+                    ui::blank_line();
+                    ui::info(&format!("Your workspace: {}", ws));
+                }
+            }
         }
     }
 
@@ -615,38 +667,16 @@ async fn ensure_ai_assist_ready(json_output: bool) -> Result<()> {
 
     if json_output || !std::io::stdin().is_terminal() {
         anyhow::bail!(
-            "AI assist fallback requires authentication. Run 'boringcache auth --token <token>' first."
+            "AI assist fallback requires authentication. Run 'boringcache onboard' interactively or 'boringcache auth --token <token>' first."
         );
     }
 
-    ui::blank_line();
-    ui::warn("AI assist fallback needs BoringCache authentication.");
-
-    if !prompt_yes_no("Continue with browser sign-in? [Y/n] ", true)? {
-        anyhow::bail!(
-            "AI assist fallback cancelled. Run 'boringcache auth --token <token>' when ready."
-        );
-    }
-
-    let token = match run_cli_connect_onboarding().await {
-        Ok(token) => token,
-        Err(err) => {
-            ui::warn(&format!("Browser onboarding failed: {err}"));
-            if !prompt_yes_no("Paste a token manually instead? [Y/n] ", true)? {
-                return Err(err);
-            }
-            prompt_non_empty("BoringCache API token: ")?
-        }
-    };
-
-    crate::commands::auth::execute(token.clone()).await?;
-    ensure_default_workspace_after_onboarding(&token).await?;
-    ui::blank_line();
-
-    Ok(())
+    anyhow::bail!(
+        "Authentication required for AI assist fallback. Run 'boringcache auth --token <token>' first."
+    );
 }
 
-async fn run_cli_connect_onboarding() -> Result<String> {
+pub async fn run_cli_connect_onboarding() -> Result<String> {
     let client = ApiClient::new()?;
     let connect = client.create_cli_connect_session().await?;
 
@@ -666,7 +696,7 @@ async fn run_cli_connect_onboarding() -> Result<String> {
 
     loop {
         if expires_at.is_some_and(|deadline| Utc::now() >= deadline) {
-            anyhow::bail!("CLI connect session expired before approval. Restart optimize.");
+            anyhow::bail!("CLI connect session expired before approval. Restart onboard.");
         }
 
         let poll = client
@@ -685,13 +715,13 @@ async fn run_cli_connect_onboarding() -> Result<String> {
                 tokio::time::sleep(poll_interval).await;
             }
             "expired" => {
-                anyhow::bail!("CLI connect session expired. Restart optimize.");
+                anyhow::bail!("CLI connect session expired. Restart onboard.");
             }
             "consumed" => {
-                anyhow::bail!("CLI connect token was already consumed. Restart optimize.");
+                anyhow::bail!("CLI connect token was already consumed. Restart onboard.");
             }
             other => {
-                anyhow::bail!("Unexpected CLI connect status '{other}'. Restart optimize.");
+                anyhow::bail!("Unexpected CLI connect status '{other}'. Restart onboard.");
             }
         }
     }
@@ -748,7 +778,7 @@ fn optimize_auth_configured() -> bool {
         .unwrap_or(false)
 }
 
-async fn ensure_default_workspace_after_onboarding(token: &str) -> Result<()> {
+pub async fn ensure_default_workspace_after_onboarding(token: &str) -> Result<()> {
     if config::env_var("BORINGCACHE_DEFAULT_WORKSPACE").is_some() {
         return Ok(());
     }

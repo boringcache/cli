@@ -29,6 +29,9 @@ pub enum Commands {
         token: String,
     },
 
+    #[command(about = "Sign in via browser (opens browser for OAuth)")]
+    Login,
+
     Mount {
         #[arg(help = "Workspace name (org/project or user/project)")]
         workspace: String,
@@ -288,7 +291,22 @@ pub enum Commands {
         json: bool,
     },
 
-    #[command(about = "Optimize CI/CD configs to use BoringCache")]
+    #[command(about = "Set up BoringCache for this project")]
+    Onboard {
+        #[arg(help = "Path to a specific file to optimize (scans project if omitted)")]
+        path: Option<String>,
+
+        #[arg(long, help = "Apply changes without prompting")]
+        apply: bool,
+
+        #[arg(long, help = "Show changes without applying")]
+        dry_run: bool,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
+    #[command(name = "optimize", hide = true, about = "Alias for onboard")]
     Optimize {
         #[arg(help = "Path to a specific file to optimize (scans project if omitted)")]
         path: Option<String>,

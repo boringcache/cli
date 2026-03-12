@@ -9,7 +9,7 @@ pub async fn execute(token: String) -> Result<()> {
     let api_client = ApiClient::new_with_token_override(Some(token.clone()))?;
     let session_info = api_client.validate_token(&token).await?;
 
-    Config::save(token)?;
+    Config::save(token.clone())?;
 
     ui::info("Token validated successfully!");
 
@@ -59,5 +59,16 @@ pub async fn execute(token: String) -> Result<()> {
     }
 
     ui::info("Token saved to ~/.boringcache/config.json");
+
+    crate::commands::onboard::ensure_default_workspace_after_onboarding(&token).await?;
+
+    if let Ok(config) = Config::load() {
+        if config.default_workspace.is_some() {
+            ui::blank_line();
+            ui::info("Ready. Try:");
+            ui::info("  boringcache onboard");
+        }
+    }
+
     Ok(())
 }

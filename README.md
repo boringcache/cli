@@ -24,7 +24,7 @@ Reach for the CLI when you want to:
 - run one command with restore before it and save after it
 - expose a local cache endpoint for BuildKit, Bazel, Gradle, Nx, Turborepo, sccache, or Go
 
-If you are already on GitHub Actions and want the workflow wiring done for you, start with the published actions instead.
+If you are already on GitHub Actions and want the workflow wiring done for you, start with [`boringcache/one`](https://github.com/boringcache/one).
 
 ## Quick start
 
@@ -176,8 +176,8 @@ boringcache config set default_workspace my-org/app
 # Generate an Age keypair and configure workspace encryption
 boringcache setup-encryption my-org/app
 
-# Analyze CI config and propose BoringCache migrations
-boringcache optimize
+# Set up BoringCache for this project (auth, scan CI configs, apply)
+boringcache onboard
 ```
 
 ## Tag behavior

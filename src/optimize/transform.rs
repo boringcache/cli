@@ -107,8 +107,12 @@ pub fn validate_output(original: &str, optimized: &str) -> std::result::Result<(
         || optimized.contains("boringcache save")
         || optimized.contains("boringcache restore");
 
-    if uses_boringcache && !optimized.contains("BORINGCACHE_API_TOKEN") {
-        return Err("output uses BoringCache but is missing BORINGCACHE_API_TOKEN".to_string());
+    let has_any_token = optimized.contains("BORINGCACHE_API_TOKEN")
+        || optimized.contains("BORINGCACHE_RESTORE_TOKEN")
+        || optimized.contains("BORINGCACHE_SAVE_TOKEN");
+
+    if uses_boringcache && !has_any_token {
+        return Err("output uses BoringCache but is missing token configuration".to_string());
     }
 
     if contains_secret_exfiltration(optimized) {
@@ -116,11 +120,13 @@ pub fn validate_output(original: &str, optimized: &str) -> std::result::Result<(
     }
 
     if uses_boringcache {
-        let insecure_token_line = optimized
-            .lines()
-            .find(|line| line.contains("BORINGCACHE_API_TOKEN") && !token_reference_is_safe(line));
+        let insecure_token_line = optimized.lines().find(|line| {
+            BORINGCACHE_TOKEN_NAMES
+                .iter()
+                .any(|t| line.contains(t) && !token_reference_is_safe(line, t))
+        });
         if insecure_token_line.is_some() {
-            return Err("output contains insecure BORINGCACHE_API_TOKEN reference".to_string());
+            return Err("output contains insecure token reference".to_string());
         }
     }
 
@@ -136,29 +142,41 @@ pub fn validate_output(original: &str, optimized: &str) -> std::result::Result<(
     Ok(())
 }
 
+const BORINGCACHE_TOKEN_NAMES: &[&str] = &[
+    "BORINGCACHE_API_TOKEN",
+    "BORINGCACHE_RESTORE_TOKEN",
+    "BORINGCACHE_SAVE_TOKEN",
+];
+
 fn contains_secret_exfiltration(content: &str) -> bool {
     let lowered = content.to_lowercase();
-    lowered.contains("echo $boringcache_api_token")
-        || lowered.contains("printenv boringcache_api_token")
-        || lowered.contains("env | grep boringcache_api_token")
+    BORINGCACHE_TOKEN_NAMES.iter().any(|t| {
+        let t_lower = t.to_lowercase();
+        lowered.contains(&format!("echo ${}", t_lower))
+            || lowered.contains(&format!("printenv {}", t_lower))
+            || lowered.contains(&format!("env | grep {}", t_lower))
+    })
 }
 
-fn token_reference_is_safe(line: &str) -> bool {
+fn token_reference_is_safe(line: &str, token_name: &str) -> bool {
     let trimmed = line.trim();
 
     if trimmed.starts_with('#') {
         return true;
     }
 
-    if trimmed.contains("BORINGCACHE_API_TOKEN:") {
-        return trimmed.contains("${{ secrets.")
-            || trimmed.contains("$BORINGCACHE_API_TOKEN")
-            || trimmed.contains("${BORINGCACHE_API_TOKEN}")
+    let colon_pattern = format!("{}:", token_name);
+    if trimmed.contains(&colon_pattern) {
+        let secret_ref = format!("secrets.{}", token_name);
+        return trimmed.contains(&secret_ref)
+            || trimmed.contains(&format!("${}", token_name))
+            || trimmed.contains(&format!("${{{}}}", token_name))
             || trimmed.contains("$(cat /run/secrets/boringcache_token)");
     }
 
-    if let Some(index) = trimmed.find("BORINGCACHE_API_TOKEN=") {
-        let rhs = trimmed[index + "BORINGCACHE_API_TOKEN=".len()..].trim();
+    let assign_pattern = format!("{}=", token_name);
+    if let Some(index) = trimmed.find(&assign_pattern) {
+        let rhs = trimmed[index + assign_pattern.len()..].trim();
         return rhs.starts_with('$')
             || rhs.starts_with("${")
             || rhs.starts_with("\"$")
@@ -224,6 +242,18 @@ mod tests {
     fn validate_output_with_token() {
         let optimized =
             "- uses: boringcache/action@v1\n  env:\n    BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}";
+        assert!(validate_output("original content here", optimized).is_ok());
+    }
+
+    #[test]
+    fn validate_output_with_split_tokens() {
+        let optimized = "- uses: boringcache/one@v1\n  env:\n    BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}\n    BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}";
+        assert!(validate_output("original content here", optimized).is_ok());
+    }
+
+    #[test]
+    fn validate_output_with_restore_token_only() {
+        let optimized = "- uses: boringcache/one@v1\n  env:\n    BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}";
         assert!(validate_output("original content here", optimized).is_ok());
     }
 
