@@ -24,6 +24,7 @@ pub enum BoringCacheError {
     IoError(String),
     NetworkError(String),
     ConnectionError(String),
+    RequestConfiguration(String),
     CacheMiss,
     CachePending {
         metadata: Option<PendingMetadata>,
@@ -101,6 +102,7 @@ impl fmt::Display for BoringCacheError {
             BoringCacheError::IoError(msg) => write!(f, "IO Error: {msg}"),
             BoringCacheError::NetworkError(msg) => write!(f, "Network Error: {msg}"),
             BoringCacheError::ConnectionError(msg) => write!(f, "{msg}"),
+            BoringCacheError::RequestConfiguration(msg) => write!(f, "{msg}"),
             BoringCacheError::CacheMiss => write!(f, "Cache miss"),
             BoringCacheError::CachePending { .. } => write!(f, "Cache upload in progress"),
             BoringCacheError::CacheConflict { message, .. } => write!(f, "{message}"),
@@ -117,12 +119,21 @@ impl fmt::Display for BoringCacheError {
 impl std::error::Error for BoringCacheError {}
 
 pub fn is_connection_error(err: &anyhow::Error) -> bool {
+    if let Some(bc_error) = err.downcast_ref::<BoringCacheError>() {
+        return matches!(bc_error, BoringCacheError::ConnectionError(_));
+    }
+
     let err_str = err.to_string().to_lowercase();
     err_str.contains("cannot connect")
         || err_str.contains("connection refused")
         || err_str.contains("timed out")
         || err_str.contains("timeout")
         || err_str.contains("authentication failed")
+}
+
+pub fn is_non_retryable_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<BoringCacheError>()
+        .is_some_and(|bc_error| matches!(bc_error, BoringCacheError::RequestConfiguration(_)))
 }
 
 impl From<std::io::Error> for BoringCacheError {
@@ -145,6 +156,10 @@ impl From<reqwest::Error> for BoringCacheError {
                 "TIMEOUT: Connection timed out. The server might be overloaded or unreachable."
                     .to_string(),
             )
+        } else if err.is_builder() {
+            BoringCacheError::RequestConfiguration(format!(
+                "Invalid API request before send: {err}. Check BORINGCACHE_API_URL and auth token formatting, especially leading or trailing whitespace."
+            ))
         } else if err.is_request() {
             BoringCacheError::NetworkError(format!("Request failed: {err}"))
         } else {
@@ -196,6 +211,10 @@ mod tests {
 
         let auth_err = BoringCacheError::AuthenticationFailed("invalid token".to_string());
         assert!(auth_err.to_string().contains("invalid token"));
+
+        let request_config_err =
+            BoringCacheError::RequestConfiguration("invalid request".to_string());
+        assert!(request_config_err.to_string().contains("invalid request"));
     }
 
     #[test]
@@ -210,5 +229,13 @@ mod tests {
         let json_err = serde_json::from_str::<String>("invalid json").unwrap_err();
         let boring_err: BoringCacheError = json_err.into();
         assert!(matches!(boring_err, BoringCacheError::ApiError(_)));
+    }
+
+    #[test]
+    fn test_non_retryable_error_detection() {
+        let err: anyhow::Error =
+            BoringCacheError::RequestConfiguration("bad header".to_string()).into();
+        assert!(is_non_retryable_error(&err));
+        assert!(!is_connection_error(&err));
     }
 }

@@ -49,7 +49,9 @@ impl RetryConfig {
             match operation().await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    if crate::error::is_connection_error(&e) {
+                    if crate::error::is_connection_error(&e)
+                        || crate::error::is_non_retryable_error(&e)
+                    {
                         return Err(e);
                     }
 

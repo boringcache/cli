@@ -169,12 +169,12 @@ impl ApiClient {
         let client = build_api_client_with_headers(Some(headers.clone()))?;
         let transfer_client = build_transfer_client_with_headers(Some(headers))?;
 
-        let mut auth_token = token_override;
+        let mut auth_token = normalize_optional_token(token_override);
         let mut base_url = crate::config::env_var("BORINGCACHE_API_URL");
 
         if let Some(cfg) = config.as_ref() {
             if auth_token.is_none() {
-                auth_token = Some(cfg.token.clone());
+                auth_token = normalize_optional_token(Some(cfg.token.clone()));
             }
             if base_url.is_none() {
                 base_url = Some(cfg.api_url.clone());
@@ -457,7 +457,7 @@ impl ApiClient {
                             .to_string(),
                     )
                     .into()),
-                    Err(err) => Err(err.into()),
+                    Err(err) => Err(map_request_send_error(err)),
                 },
                 0,
             );
@@ -499,7 +499,7 @@ impl ApiClient {
                         Err(err) if err.is_timeout() => {
                             anyhow::bail!("Request timeout: {}", err)
                         }
-                        Err(err) => Err(err.into()),
+                        Err(err) => Err(map_request_send_error(err)),
                     }
                 }
             })
@@ -691,7 +691,7 @@ impl ApiClient {
                         .to_string(),
                 )
                 .into()),
-                Err(err) => Err(err.into()),
+                Err(err) => Err(map_request_send_error(err)),
             };
         }
 
@@ -723,7 +723,7 @@ impl ApiClient {
                         Err(err) if err.is_timeout() => {
                             anyhow::bail!("Request timeout: {}", err)
                         }
-                        Err(err) => Err(err.into()),
+                        Err(err) => Err(map_request_send_error(err)),
                     }
                 }
             })
@@ -2199,6 +2199,22 @@ fn blob_url_batch_concurrency(chunk_count: usize) -> usize {
         .clamp(1, chunk_count)
 }
 
+fn normalize_optional_token(token: Option<String>) -> Option<String> {
+    token.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn map_request_send_error(err: reqwest::Error) -> anyhow::Error {
+    let boringcache_error: BoringCacheError = err.into();
+    boringcache_error.into()
+}
+
 fn derive_api_base_urls(configured_base_url: &str) -> (String, String) {
     let configured = configured_base_url.trim().trim_end_matches('/');
     let default = crate::config::Config::default_api_url_value()
@@ -2537,6 +2553,98 @@ mod tests {
         let (_v1, expected_v2) =
             derive_api_base_urls(crate::config::Config::default_api_url_value());
         assert_eq!(client.base_url(), expected_v2);
+    }
+
+    #[tokio::test]
+    async fn test_reqwest_rejects_newline_authorization_header_as_builder_error() {
+        super::ensure_crypto_provider();
+        let request = Client::new()
+            .get("https://example.com")
+            .header("Authorization", "Bearer test-token\n");
+        let error = request
+            .send()
+            .await
+            .expect_err("newline header should fail before send");
+
+        assert!(error.is_builder(), "expected builder error, got: {error}");
+    }
+
+    #[test]
+    fn test_new_with_token_override_trims_whitespace() {
+        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
+        let _guard = mutex.lock().unwrap();
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_home.path());
+        std::env::remove_var("BORINGCACHE_API_TOKEN");
+
+        let client = ApiClient::new_with_token_override(Some("  test-token\n".to_string()))
+            .expect("client should initialize");
+        assert_eq!(client.get_token().unwrap(), "test-token");
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_authenticated_builder_errors_do_not_retry() {
+        super::ensure_crypto_provider();
+        let client = ApiClient {
+            client: Client::new(),
+            transfer_client: Client::new(),
+            base_url: "https://api.example.com/v2".to_string(),
+            v1_base_url: "https://api.example.com/v1".to_string(),
+            v2_base_url: "https://api.example.com/v2".to_string(),
+            auth_token: Some("test-token\n".to_string()),
+            capabilities: Arc::new(RwLock::new(None)),
+        };
+
+        let (result, retry_count) = client
+            .send_authenticated_request_with_retry_count(
+                client.get_client().get("https://example.com"),
+            )
+            .await;
+
+        let error = result.expect_err("invalid token header should fail");
+        let message = error.to_string();
+        assert_eq!(retry_count, 0);
+        assert!(
+            message.contains("Invalid API request before send"),
+            "unexpected error message: {message}"
+        );
+        assert!(!message.contains("after 3 attempts"));
+    }
+
+    #[tokio::test]
+    async fn test_public_builder_errors_do_not_retry() {
+        super::ensure_crypto_provider();
+        let client = ApiClient {
+            client: Client::new(),
+            transfer_client: Client::new(),
+            base_url: "https://api.example.com/v2".to_string(),
+            v1_base_url: "https://api.example.com/v1".to_string(),
+            v2_base_url: "https://api.example.com/v2".to_string(),
+            auth_token: None,
+            capabilities: Arc::new(RwLock::new(None)),
+        };
+
+        let error = client
+            .send_public_request(
+                client
+                    .get_client()
+                    .get("https://example.com")
+                    .header("Authorization", "Bearer test-token\n"),
+            )
+            .await
+            .expect_err("invalid header should fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("Invalid API request before send"),
+            "unexpected error message: {message}"
+        );
+        assert!(!message.contains("after 3 attempts"));
     }
 
     #[test]

@@ -1946,6 +1946,7 @@ fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
             }
             BoringCacheError::ConfigNotFound
             | BoringCacheError::TokenNotFound
+            | BoringCacheError::RequestConfiguration(_)
             | BoringCacheError::WorkspaceNotFound(_)
             | BoringCacheError::AuthenticationFailed(_) => {
                 return FlushError::Permanent(message);

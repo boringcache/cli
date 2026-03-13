@@ -22,7 +22,14 @@ pub enum AuthPurpose {
 }
 
 pub fn env_var(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|s| !s.trim().is_empty())
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 pub fn env_bool(key: &str) -> bool {
@@ -522,6 +529,42 @@ mod tests {
             env_api_token_for(AuthPurpose::Restore).as_deref(),
             Some("token-from-env")
         );
+    }
+
+    #[test]
+    fn test_env_var_trims_whitespace_and_drops_empty_values() {
+        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
+        let workspace_guard = EnvVarGuard::new("BORINGCACHE_DEFAULT_WORKSPACE");
+
+        api_token_guard.set(Some("  token-from-env\n"));
+        workspace_guard.set(Some("   \n\t"));
+
+        assert_eq!(
+            env_var("BORINGCACHE_API_TOKEN").as_deref(),
+            Some("token-from-env")
+        );
+        assert_eq!(env_var("BORINGCACHE_DEFAULT_WORKSPACE"), None);
+    }
+
+    #[test]
+    fn test_load_for_auth_purpose_trims_env_token() {
+        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
+        let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
+        let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
+        let token_file_guard = EnvVarGuard::new("BORINGCACHE_TOKEN_FILE");
+        let api_url_guard = EnvVarGuard::new("BORINGCACHE_API_URL");
+
+        api_token_guard.set(None);
+        restore_token_guard.set(Some("  restore-token\n"));
+        save_token_guard.set(None);
+        token_file_guard.set(None);
+        api_url_guard.set(Some("  https://api.example.test/v2 \n"));
+
+        let config = Config::load_for_auth_purpose(AuthPurpose::Restore).unwrap();
+        assert_eq!(config.token, "restore-token");
+        assert_eq!(config.api_url, "https://api.example.test/v2");
     }
 
     #[test]
