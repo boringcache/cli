@@ -154,10 +154,7 @@ fn ensure_restore_target_write_ready(target_path: &Path) -> Result<()> {
     assert_directory_writable(&directory_to_check)
 }
 
-fn should_fail_on_restore_error(
-    fail_on_cache_error: bool,
-    require_server_signature: bool,
-) -> bool {
+fn should_fail_on_restore_error(fail_on_cache_error: bool, require_server_signature: bool) -> bool {
     fail_on_cache_error || require_server_signature
 }
 
@@ -367,7 +364,9 @@ pub async fn execute_batch_restore(
     )
     .await
     {
-        if fail_on_cache_miss || should_fail_on_restore_error(fail_on_cache_error, require_server_signature) {
+        if fail_on_cache_miss
+            || should_fail_on_restore_error(fail_on_cache_error, require_server_signature)
+        {
             return Err(err);
         }
         ui::warn(&format!("{:#}", err));

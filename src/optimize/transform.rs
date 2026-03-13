@@ -110,12 +110,10 @@ pub fn validate_output(original: &str, optimized: &str) -> std::result::Result<(
     let has_any_token = optimized.lines().any(|line| {
         let trimmed = line.trim();
         !trimmed.starts_with('#')
-            && BORINGCACHE_TOKEN_NAMES
-                .iter()
-                .any(|token_name| {
-                    token_reference_assignment(trimmed, token_name)
-                        && token_reference_is_safe(trimmed, token_name)
-                })
+            && BORINGCACHE_TOKEN_NAMES.iter().any(|token_name| {
+                token_reference_assignment(trimmed, token_name)
+                    && token_reference_is_safe(trimmed, token_name)
+            })
     });
 
     if contains_secret_exfiltration(optimized) {
