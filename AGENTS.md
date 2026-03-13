@@ -83,10 +83,16 @@ Config locations:
 
 Run before committing:
 ```
-cargo fmt
+cargo fmt --check
 cargo clippy -- -D warnings
 cargo test
 ```
+
+Run before pushing too. Do not rely on CI to catch a missed local formatting or lint pass.
+
+Recent reminder:
+- GitHub Actions run `23025952437` (`Test CLI (BoringCache)`, March 12, 2026) passed build and tests, then failed at `cargo fmt -- --check`.
+- Treat `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` as the required local pre-push gate for CLI changes.
 
 ## Operational Notes
 
