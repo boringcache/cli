@@ -1225,7 +1225,7 @@ mod tests {
     #[test]
     fn extract_cache_paths_handles_entries_and_cli_specs() {
         let content = r#"
-- uses: boringcache/action@v1
+- uses: boringcache/one@v1
   with:
     entries: deps:node_modules,build:dist
 - run: boringcache save my-org/app "gems:vendor/bundle"

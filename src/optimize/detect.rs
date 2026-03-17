@@ -107,15 +107,7 @@ pub fn score_relevance(content: &str, ci_type: CiType) -> FileRelevance {
     }
 
     let already_optimized_patterns = [
-        "boringcache/action",
-        "boringcache/save",
-        "boringcache/restore",
-        "boringcache/docker-action",
-        "boringcache/rust-action",
-        "boringcache/ruby-action",
-        "boringcache/nodejs-action",
-        "boringcache/setup-boringcache",
-        "boringcache/buildkit-action",
+        "boringcache/one",
         "boringcache save",
         "boringcache restore",
     ];
@@ -260,7 +252,7 @@ mod tests {
 
     #[test]
     fn score_already_optimized() {
-        let content = "uses: boringcache/action@v1\n  with:\n    workspace: my-org/app";
+        let content = "uses: boringcache/one@v1\n  with:\n    workspace: my-org/app";
         assert_eq!(
             score_relevance(content, CiType::GitHubActions),
             FileRelevance::AlreadyOptimized
@@ -269,6 +261,15 @@ mod tests {
         let dockerfile = "RUN boringcache restore my-org/app \"deps:node_modules\"";
         assert_eq!(
             score_relevance(dockerfile, CiType::Dockerfile),
+            FileRelevance::AlreadyOptimized
+        );
+    }
+
+    #[test]
+    fn legacy_boringcache_wrappers_are_not_treated_as_already_optimized() {
+        let content = "uses: boringcache/docker-action@v1\n  with:\n    workspace: my-org/app";
+        assert_ne!(
+            score_relevance(content, CiType::GitHubActions),
             FileRelevance::AlreadyOptimized
         );
     }

@@ -8,6 +8,10 @@ pub struct RuleResult {
 }
 
 pub fn apply(content: &str) -> Option<RuleResult> {
+    if contains_split_actions_cache_steps(content) {
+        return None;
+    }
+
     let (rewritten, mut changes, replaced) = rewrite_actions_cache_usages(content);
     if !replaced {
         return None;
@@ -27,9 +31,8 @@ pub fn apply(content: &str) -> Option<RuleResult> {
     Some(RuleResult {
         optimized_content,
         changes,
-        explanation:
-            "Deterministic pass migrated actions/cache usage to BoringCache compatibility mode."
-                .to_string(),
+        explanation: "Deterministic pass migrated actions/cache usage to boringcache/one."
+            .to_string(),
     })
 }
 
@@ -43,77 +46,27 @@ fn rewrite_actions_cache_usages(content: &str) -> (String, Vec<OptimizeChange>, 
 
         if let Some(new_line) = replace_action_reference(
             &rewritten_line,
-            "uses: actions/cache/restore@",
-            "uses: boringcache/restore@v1",
-        ) {
-            rewritten_line = new_line;
-            changed = true;
-            changes.push(OptimizeChange {
-                description: "Replaced actions/cache/restore with boringcache/restore@v1"
-                    .to_string(),
-                before_snippet: Some("uses: actions/cache/restore@...".to_string()),
-                after_snippet: Some("uses: boringcache/restore@v1".to_string()),
-            });
-        } else if let Some(new_line) = replace_action_reference(
-            &rewritten_line,
-            "uses: actions/cache/save@",
-            "uses: boringcache/save@v1",
-        ) {
-            rewritten_line = new_line;
-            changed = true;
-            changes.push(OptimizeChange {
-                description: "Replaced actions/cache/save with boringcache/save@v1".to_string(),
-                before_snippet: Some("uses: actions/cache/save@...".to_string()),
-                after_snippet: Some("uses: boringcache/save@v1".to_string()),
-            });
-        } else if let Some(new_line) = replace_action_reference(
-            &rewritten_line,
             "uses: actions/cache@",
-            "uses: boringcache/action@v1",
+            "uses: boringcache/one@v1",
         ) {
             rewritten_line = new_line;
             changed = true;
             changes.push(OptimizeChange {
-                description: "Replaced actions/cache with boringcache/action@v1".to_string(),
+                description: "Replaced actions/cache with boringcache/one@v1".to_string(),
                 before_snippet: Some("uses: actions/cache@...".to_string()),
-                after_snippet: Some("uses: boringcache/action@v1".to_string()),
-            });
-        } else if let Some(new_line) = replace_action_reference(
-            &rewritten_line,
-            "uses: actions/cache/restore",
-            "uses: boringcache/restore@v1",
-        ) {
-            rewritten_line = new_line;
-            changed = true;
-            changes.push(OptimizeChange {
-                description: "Replaced actions/cache/restore with boringcache/restore@v1"
-                    .to_string(),
-                before_snippet: Some("uses: actions/cache/restore".to_string()),
-                after_snippet: Some("uses: boringcache/restore@v1".to_string()),
-            });
-        } else if let Some(new_line) = replace_action_reference(
-            &rewritten_line,
-            "uses: actions/cache/save",
-            "uses: boringcache/save@v1",
-        ) {
-            rewritten_line = new_line;
-            changed = true;
-            changes.push(OptimizeChange {
-                description: "Replaced actions/cache/save with boringcache/save@v1".to_string(),
-                before_snippet: Some("uses: actions/cache/save".to_string()),
-                after_snippet: Some("uses: boringcache/save@v1".to_string()),
+                after_snippet: Some("uses: boringcache/one@v1".to_string()),
             });
         } else if let Some(new_line) = replace_action_reference(
             &rewritten_line,
             "uses: actions/cache",
-            "uses: boringcache/action@v1",
+            "uses: boringcache/one@v1",
         ) {
             rewritten_line = new_line;
             changed = true;
             changes.push(OptimizeChange {
-                description: "Replaced actions/cache with boringcache/action@v1".to_string(),
+                description: "Replaced actions/cache with boringcache/one@v1".to_string(),
                 before_snippet: Some("uses: actions/cache".to_string()),
-                after_snippet: Some("uses: boringcache/action@v1".to_string()),
+                after_snippet: Some("uses: boringcache/one@v1".to_string()),
             });
         }
 
@@ -121,6 +74,11 @@ fn rewrite_actions_cache_usages(content: &str) -> (String, Vec<OptimizeChange>, 
     }
 
     (out, changes, changed)
+}
+
+fn contains_split_actions_cache_steps(content: &str) -> bool {
+    content.contains("uses: actions/cache/restore")
+        || content.contains("uses: actions/cache/save")
 }
 
 fn replace_action_reference(line: &str, old_marker: &str, replacement: &str) -> Option<String> {
@@ -288,7 +246,7 @@ jobs:
         let result = apply(input).expect("expected deterministic rewrite");
         assert!(result
             .optimized_content
-            .contains("uses: boringcache/action@v1"));
+            .contains("uses: boringcache/one@v1"));
         assert!(result
             .optimized_content
             .contains("BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}"));
@@ -297,7 +255,7 @@ jobs:
     }
 
     #[test]
-    fn transforms_restore_and_save_variants() {
+    fn returns_none_for_restore_and_save_variants() {
         let input = r#"jobs:
   test:
     steps:
@@ -306,13 +264,7 @@ jobs:
       - uses: actions/cache/save@v4
 "#;
 
-        let result = apply(input).expect("expected rewrite");
-        assert!(result
-            .optimized_content
-            .contains("uses: boringcache/restore@v1"));
-        assert!(result
-            .optimized_content
-            .contains("uses: boringcache/save@v1"));
+        assert!(apply(input).is_none());
     }
 
     #[test]

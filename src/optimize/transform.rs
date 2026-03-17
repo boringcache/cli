@@ -244,14 +244,14 @@ mod tests {
 
     #[test]
     fn validate_output_missing_token() {
-        let optimized = "- uses: boringcache/action@v1\n  with:\n    workspace: test";
+        let optimized = "- uses: boringcache/one@v1\n  with:\n    workspace: test";
         assert!(validate_output("original", optimized).is_err());
     }
 
     #[test]
     fn validate_output_with_token() {
         let optimized =
-            "- uses: boringcache/action@v1\n  env:\n    BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}";
+            "- uses: boringcache/one@v1\n  env:\n    BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}";
         assert!(validate_output("original content here", optimized).is_ok());
     }
 
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn validate_output_rejects_plaintext_token_assignment() {
         let optimized =
-            "- uses: boringcache/action@v1\n  env:\n    BORINGCACHE_API_TOKEN: abc123plaintext";
+            "- uses: boringcache/one@v1\n  env:\n    BORINGCACHE_API_TOKEN: abc123plaintext";
         assert!(validate_output("orig", optimized).is_err());
     }
 
