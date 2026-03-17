@@ -293,7 +293,7 @@ pub enum Commands {
 
     #[command(about = "Set up BoringCache for this project")]
     Onboard {
-        #[arg(help = "Path to a specific file to optimize (scans project if omitted)")]
+        #[arg(help = "Path to a specific CI/CD file to scan (scans project if omitted)")]
         path: Option<String>,
 
         #[arg(long, help = "Apply changes without prompting")]
@@ -306,9 +306,9 @@ pub enum Commands {
         json: bool,
     },
 
-    #[command(name = "optimize", hide = true, about = "Alias for onboard")]
+    #[command(name = "optimize", hide = true, about = "Legacy alias for onboard")]
     Optimize {
-        #[arg(help = "Path to a specific file to optimize (scans project if omitted)")]
+        #[arg(help = "Path to a specific CI/CD file to scan (scans project if omitted)")]
         path: Option<String>,
 
         #[arg(long, help = "Apply changes without prompting")]
