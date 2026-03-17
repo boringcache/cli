@@ -280,8 +280,10 @@ jobs:
         id: boringcache-docker-build
         if: matrix.use_docker == true
         continue-on-error: true
-        uses: boringcache/docker-action@v1
+        uses: boringcache/one@v1
         with:
+          setup: none
+          mode: docker
           workspace: ${{ github.repository }}
           image: boringcache-cli-release-build-${{ matrix.name }}
           tags: latest
@@ -293,6 +295,7 @@ jobs:
           registry-tag: "docker-release-build-base-${{ matrix.name }}"
           push: "false"
           load: "true"
+          save-always: "true"
 
       - name: Copy BoringCache CLI for Docker mount
         if: matrix.use_docker == true
@@ -395,7 +398,7 @@ jobs:
               rustup target add ${{ matrix.target }}
 
               # Build with appropriate flags.
-              # Docker layer caching is handled by boringcache/docker-action above.
+              # Docker layer caching is handled by boringcache/one above.
               if [ "${{ matrix.musl }}" = "true" ]; then
                 RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target ${{ matrix.target }}
               else
@@ -415,8 +418,10 @@ jobs:
         id: boringcache-rust-native
         if: matrix.use_docker != true
         continue-on-error: true
-        uses: boringcache/rust-action@v1
+        uses: boringcache/one@v1
         with:
+          setup: none
+          mode: rust-sccache
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
           cache-tag: "rust-${{ env.RUST_VERSION }}-release-build-${{ matrix.name }}"

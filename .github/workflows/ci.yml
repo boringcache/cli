@@ -27,8 +27,10 @@ jobs:
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         continue-on-error: true
-        uses: boringcache/rust-action@v1
+        uses: boringcache/one@v1
         with:
+          setup: none
+          mode: rust-sccache
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
           cache-tag: "rust-${{ env.RUST_VERSION }}-ci-test"
@@ -136,8 +138,10 @@ jobs:
       - name: Setup BoringCache Docker cache
         id: boringcache-docker-test
         continue-on-error: true
-        uses: boringcache/docker-action@v1
+        uses: boringcache/one@v1
         with:
+          setup: none
+          mode: docker
           workspace: ${{ github.repository }}
           image: boringcache-cli-ci-docker-test
           tags: latest
@@ -149,6 +153,7 @@ jobs:
           registry-tag: "docker-ci-rust-${{ env.RUST_VERSION }}-bookworm"
           push: "false"
           load: "true"
+          save-always: "true"
 
       - name: Copy BoringCache CLI for Docker mount
         run: |
@@ -391,8 +396,10 @@ jobs:
         id: boringcache-docker-build
         if: matrix.use_docker == true
         continue-on-error: true
-        uses: boringcache/docker-action@v1
+        uses: boringcache/one@v1
         with:
+          setup: none
+          mode: docker
           workspace: ${{ github.repository }}
           image: boringcache-cli-ci-build-${{ matrix.name }}
           tags: latest
@@ -404,6 +411,7 @@ jobs:
           registry-tag: "docker-ci-build-base-${{ matrix.name }}"
           push: "false"
           load: "true"
+          save-always: "true"
 
       - name: Copy BoringCache CLI for Docker mount
         if: matrix.use_docker == true
@@ -491,7 +499,7 @@ jobs:
               rustup target add ${{ matrix.target }}
 
               # Build with appropriate flags.
-              # Docker layer caching is handled by boringcache/docker-action above.
+              # Docker layer caching is handled by boringcache/one above.
               if [ "${{ matrix.musl }}" = "true" ]; then
                 RUSTFLAGS="-C target-feature=+crt-static" cargo build --locked --release --target ${{ matrix.target }}
               else
@@ -516,8 +524,10 @@ jobs:
         id: boringcache-rust-native
         if: matrix.use_docker != true
         continue-on-error: true
-        uses: boringcache/rust-action@v1
+        uses: boringcache/one@v1
         with:
+          setup: none
+          mode: rust-sccache
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
           cache-tag: "rust-${{ env.RUST_VERSION }}-ci-build-${{ matrix.name }}"

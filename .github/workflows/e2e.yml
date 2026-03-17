@@ -50,8 +50,10 @@ jobs:
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         continue-on-error: true
-        uses: boringcache/rust-action@v1
+        uses: boringcache/one@v1
         with:
+          setup: none
+          mode: rust-sccache
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
           cache-tag: "rust-${{ env.RUST_VERSION }}-e2e-linux-x86_64"
@@ -414,8 +416,10 @@ jobs:
         id: boringcache-rust
         if: steps.gate.outputs.run == 'true'
         continue-on-error: true
-        uses: boringcache/rust-action@v1
+        uses: boringcache/one@v1
         with:
+          setup: none
+          mode: rust-sccache
           workspace: ${{ github.repository }}
           rust-version: ${{ env.RUST_VERSION }}
           cache-tag: "rust-${{ env.RUST_VERSION }}-cache-registry-bench-linux-x86_64"
