@@ -35,8 +35,15 @@ fn networking_available() -> bool {
 
 async fn acquire_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
     let guard = CLI_TEST_MUTEX.lock().await;
+    clear_test_env_overrides();
     std::env::set_var("BORINGCACHE_TEST_MODE", "1");
     guard
+}
+
+fn clear_test_env_overrides() {
+    env::remove_var("BORINGCACHE_REQUIRE_SERVER_SIGNATURE");
+    env::remove_var("BORINGCACHE_RESTORE_TOKEN");
+    env::remove_var("BORINGCACHE_SAVE_TOKEN");
 }
 
 fn setup_test_config(temp_dir: &TempDir, server_url: &str) {

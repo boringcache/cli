@@ -16,7 +16,10 @@ fn apply_test_env(cmd: &mut Command) -> &mut Command {
     if std::env::var("BORINGCACHE_API_URL").is_err() {
         cmd.env("BORINGCACHE_API_URL", DUMMY_API_URL);
     }
-    cmd.env("BORINGCACHE_TEST_MODE", "1");
+    cmd.env("BORINGCACHE_TEST_MODE", "1")
+        .env_remove("BORINGCACHE_REQUIRE_SERVER_SIGNATURE")
+        .env_remove("BORINGCACHE_RESTORE_TOKEN")
+        .env_remove("BORINGCACHE_SAVE_TOKEN");
     cmd
 }
 

@@ -436,6 +436,13 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
 
+      - name: Normalize Windows compiler env
+        if: matrix.use_docker != true && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "CC=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Install Rust target (Native builds)
         if: matrix.use_docker != true
         run: rustup target add ${{ matrix.target }}
