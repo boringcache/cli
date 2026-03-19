@@ -1227,13 +1227,53 @@ fn detect_manifest_content_type(json_bytes: &[u8]) -> String {
     "application/vnd.oci.image.manifest.v1+json".to_string()
 }
 
+async fn find_local_uploaded_blob(
+    state: &AppState,
+    name: &str,
+    digest: &str,
+) -> Option<BlobReadHandle> {
+    let sessions = state.upload_sessions.read().await;
+    let session = sessions.find_by_name_and_digest(name, digest)?;
+    let size_bytes = session.finalized_size.unwrap_or(session.bytes_received);
+    if size_bytes == 0 {
+        return None;
+    }
+    Some(BlobReadHandle::from_file(
+        session.temp_path.clone(),
+        size_bytes,
+    ))
+}
+
 async fn get_blob(
     method: Method,
     state: AppState,
     name: String,
     digest: String,
 ) -> Result<Response, OciError> {
-    let (cache_entry_id, size_bytes, cached_download_url) = {
+    if let Some(handle) = find_local_uploaded_blob(&state, &name, &digest).await {
+        let mut headers = HeaderMap::new();
+        insert_header(&mut headers, "Docker-Content-Digest", &digest)?;
+        insert_header(&mut headers, "Content-Type", "application/octet-stream")?;
+        insert_header(
+            &mut headers,
+            "Content-Length",
+            &handle.size_bytes().to_string(),
+        )?;
+        insert_header(
+            &mut headers,
+            "Docker-Distribution-API-Version",
+            "registry/2.0",
+        )?;
+
+        if method == Method::HEAD {
+            return Ok((StatusCode::OK, headers, Body::empty()).into_response());
+        }
+
+        let body = cached_blob_body(&handle).await?;
+        return Ok((StatusCode::OK, headers, body).into_response());
+    }
+
+    let Some((cache_entry_id, size_bytes, cached_download_url)) = ({
         let locator_start = std::time::Instant::now();
         let locator = state.blob_locator.read().await;
         let elapsed = locator_start.elapsed();
@@ -1245,15 +1285,48 @@ async fn get_blob(
                 &digest[..8]
             );
         }
-        let entry = locator
-            .get(&name, &digest)
-            .ok_or_else(|| OciError::blob_unknown(format!("{name}@{digest}")))?;
-        (
-            entry.cache_entry_id.clone(),
-            entry.size_bytes,
-            fresh_download_url(entry),
-        )
+        locator.get(&name, &digest).map(|entry| {
+            (
+                entry.cache_entry_id.clone(),
+                entry.size_bytes,
+                fresh_download_url(entry),
+            )
+        })
+    }) else {
+        return Err(OciError::blob_unknown(format!("{name}@{digest}")));
     };
+
+    if method == Method::HEAD {
+        let blob_exists = if cached_download_url.is_some() {
+            true
+        } else {
+            match has_remote_blob(&state, &digest).await {
+                Ok(exists) => exists,
+                Err(error) => {
+                    log::warn!(
+                        "OCI HEAD degraded to miss after remote blob existence check failed for {}@{} ({})",
+                        name,
+                        digest,
+                        error.message()
+                    );
+                    false
+                }
+            }
+        };
+        if !blob_exists {
+            return Err(OciError::blob_unknown(format!("{name}@{digest}")));
+        }
+        let mut headers = HeaderMap::new();
+        insert_header(&mut headers, "Docker-Content-Digest", &digest)?;
+        insert_header(&mut headers, "Content-Type", "application/octet-stream")?;
+        insert_header(&mut headers, "Content-Length", &size_bytes.to_string())?;
+        insert_header(
+            &mut headers,
+            "Docker-Distribution-API-Version",
+            "registry/2.0",
+        )?;
+        return Ok((StatusCode::OK, headers, Body::empty()).into_response());
+    }
 
     let blob_desc = BlobDescriptor {
         digest: digest.clone(),
@@ -1277,10 +1350,6 @@ async fn get_blob(
         "Docker-Distribution-API-Version",
         "registry/2.0",
     )?;
-
-    if method == Method::HEAD {
-        return Ok((StatusCode::OK, headers, Body::empty()).into_response());
-    }
 
     if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
         let body = cached_blob_body(&handle).await?;

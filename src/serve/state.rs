@@ -965,6 +965,13 @@ impl UploadSessionStore {
             .filter(|s| s.finalized_digest.as_deref() == Some(digest))
             .max_by_key(|s| s.finalized_size.unwrap_or(s.bytes_received))
     }
+
+    pub fn find_by_name_and_digest(&self, name: &str, digest: &str) -> Option<&UploadSession> {
+        self.sessions
+            .values()
+            .filter(|s| s.name == name && s.finalized_digest.as_deref() == Some(digest))
+            .max_by_key(|s| s.finalized_size.unwrap_or(s.bytes_received))
+    }
 }
 
 const DEFAULT_MAX_SPOOL_BYTES: u64 = 512 * 1024 * 1024;

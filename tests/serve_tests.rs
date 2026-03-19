@@ -9,7 +9,7 @@ use boring_cache_cli::manifest::EntryType;
 use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
     digest_tag, ref_tag, AppState, BlobLocatorCache, BlobLocatorEntry, BlobReadCache,
-    KvPendingStore, KvPublishedIndex, OciManifestCacheEntry, UploadSessionStore,
+    KvPendingStore, KvPublishedIndex, OciManifestCacheEntry, UploadSession, UploadSessionStore,
 };
 use boring_cache_cli::tag_utils::TagResolver;
 use http_body_util::BodyExt;
@@ -1210,6 +1210,207 @@ async fn test_blob_unknown_without_manifest_returns_404() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(parsed["errors"][0]["code"], "BLOB_UNKNOWN");
+}
+
+#[tokio::test]
+async fn test_blob_head_and_get_return_local_finalized_upload_session() {
+    let server = Server::new_async().await;
+    let (state, temp_home, _guard) = setup(&server).await;
+
+    let blob_content = b"local-uploaded-blob";
+    let blob_digest = cas_oci::prefixed_sha256_digest(blob_content);
+    let temp_path = temp_home.path().join("uploaded-blob");
+    tokio::fs::write(&temp_path, blob_content).await.unwrap();
+
+    {
+        let mut sessions = state.upload_sessions.write().await;
+        sessions.create(UploadSession {
+            id: "upload-local".to_string(),
+            name: "my-cache".to_string(),
+            temp_path,
+            write_lock: Arc::new(Mutex::new(())),
+            bytes_received: blob_content.len() as u64,
+            finalized_digest: Some(blob_digest.clone()),
+            finalized_size: Some(blob_content.len() as u64),
+            created_at: Instant::now(),
+        });
+    }
+
+    let app = build_router(state.clone());
+    let head_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/v2/my-cache/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(head_response.status(), StatusCode::OK);
+    assert_eq!(
+        head_response
+            .headers()
+            .get("Content-Length")
+            .and_then(|value| value.to_str().ok()),
+        Some(blob_content.len().to_string().as_str())
+    );
+
+    let app = build_router(state);
+    let get_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri(format!("/v2/my-cache/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let body = get_response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], blob_content);
+}
+
+#[tokio::test]
+async fn test_blob_head_after_manifest_resolution_uses_remote_existence_check() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let blob_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let blob_size = 23u64;
+    let index_json =
+        br#"{"schemaVersion":2,"config":{"digest":"sha256:cc","size":10},"layers":[]}"#;
+    let pointer_bytes = make_pointer(index_json, &[(blob_digest, blob_size)]);
+    let tag = ref_tag("img", "v1");
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": tag,
+                "status": "hit",
+                "cache_entry_id": "entry-head-check",
+                "manifest_url": format!("{}/pointers/entry-head-check", server.url()),
+                "manifest_root_digest": cas_oci::prefixed_sha256_digest(&pointer_bytes),
+                "storage_mode": "cas",
+                "cas_layout": "oci-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _pointer_mock = server
+        .mock("GET", "/pointers/entry-head-check")
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let _check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": blob_digest,
+                    "exists": true
+                }]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let manifest_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri("/v2/img/manifests/v1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(manifest_response.status(), StatusCode::OK);
+
+    let app = build_router(state);
+    let head_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/v2/img/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(head_response.status(), StatusCode::OK);
+    assert_eq!(
+        head_response
+            .headers()
+            .get("Content-Length")
+            .and_then(|value| value.to_str().ok()),
+        Some(blob_size.to_string().as_str())
+    );
+}
+
+#[tokio::test]
+async fn test_blob_head_degrades_remote_check_failures_to_404() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let blob_digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    {
+        let mut locator = state.blob_locator.write().await;
+        locator.insert(
+            "img",
+            blob_digest,
+            BlobLocatorEntry {
+                cache_entry_id: "entry-head-failure".to_string(),
+                size_bytes: 42,
+                download_url: None,
+                download_url_cached_at: None,
+            },
+        );
+    }
+
+    let _check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_body(Matcher::Any)
+        .with_status(500)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":"backend failure"}"#)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/v2/img/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
