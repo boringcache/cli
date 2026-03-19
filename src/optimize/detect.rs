@@ -106,11 +106,7 @@ pub fn score_relevance(content: &str, ci_type: CiType) -> FileRelevance {
         return FileRelevance::TooLarge;
     }
 
-    let already_optimized_patterns = [
-        "boringcache/one",
-        "boringcache save",
-        "boringcache restore",
-    ];
+    let already_optimized_patterns = ["boringcache/one", "boringcache save", "boringcache restore"];
 
     if already_optimized_patterns
         .iter()

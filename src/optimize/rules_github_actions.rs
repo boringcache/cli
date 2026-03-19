@@ -77,8 +77,7 @@ fn rewrite_actions_cache_usages(content: &str) -> (String, Vec<OptimizeChange>, 
 }
 
 fn contains_split_actions_cache_steps(content: &str) -> bool {
-    content.contains("uses: actions/cache/restore")
-        || content.contains("uses: actions/cache/save")
+    content.contains("uses: actions/cache/restore") || content.contains("uses: actions/cache/save")
 }
 
 fn replace_action_reference(line: &str, old_marker: &str, replacement: &str) -> Option<String> {
