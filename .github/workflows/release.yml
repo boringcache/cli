@@ -427,7 +427,7 @@ jobs:
           cache-tag: "rust-${{ env.RUST_VERSION }}-release-build-${{ matrix.name }}"
           sccache: "true"
           sccache-mode: "proxy"
-          cache-target: "true"
+          cache-target: "false"
 
       - name: Setup Rust (Native Fallback)
         if: matrix.use_docker != true && steps.boringcache-rust-native.outcome == 'failure'

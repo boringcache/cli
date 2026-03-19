@@ -59,7 +59,7 @@ jobs:
           cache-tag: "rust-${{ env.RUST_VERSION }}-e2e-linux-x86_64"
           sccache: "true"
           sccache-mode: "local"
-          cache-target: "true"
+          cache-target: "false"
 
       - name: Setup Rust (Fallback)
         if: steps.boringcache-rust.outcome == 'failure'
@@ -425,7 +425,7 @@ jobs:
           cache-tag: "rust-${{ env.RUST_VERSION }}-cache-registry-bench-linux-x86_64"
           sccache: "true"
           sccache-mode: ${{ matrix.backend }}
-          cache-target: "true"
+          cache-target: "false"
 
       - name: Setup Rust (Fallback)
         if: steps.gate.outputs.run == 'true' && steps.boringcache-rust.outcome == 'failure'
