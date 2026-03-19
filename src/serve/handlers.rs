@@ -25,12 +25,14 @@ use crate::tag_utils::TagResolver;
 
 const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
 const OCI_PREFETCH_BLOB_URL_LIMIT: usize = 128;
+const OCI_BLOB_RETRIEVABILITY_VALIDATION_TTL: Duration = Duration::from_secs(10);
 const EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS: usize = 20;
 const EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS: u64 = 75;
 const EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS: usize = 3;
 const EMPTY_FINALIZE_REMOTE_RETRY_DELAY_MS: u64 = 100;
 const OCI_DEGRADED_HEADER: &str = "X-BoringCache-Cache-Degraded";
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+const OCI_BLOB_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_POINTER_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -477,24 +479,21 @@ async fn resolve_manifest(
     };
 
     if let Some(cached) = lookup_oci_manifest_cache(state, &tags) {
-        {
-            let mut locator = state.blob_locator.write().await;
-            for blob in &cached.blobs {
-                if locator.get(&cached.name, &blob.digest).is_none() {
-                    locator.insert(
-                        &cached.name,
-                        &blob.digest,
-                        BlobLocatorEntry {
-                            cache_entry_id: cached.cache_entry_id.clone(),
-                            size_bytes: blob.size_bytes,
-                            download_url: None,
-                            download_url_cached_at: None,
-                        },
-                    );
-                }
-            }
-        }
-        let content_type = detect_manifest_content_type(&cached.index_json);
+        let prefetched_urls =
+            ensure_cached_manifest_blob_retrievability(state, &cached, reference, &tags).await?;
+        cache_blob_locator_entries(
+            state,
+            &cached.name,
+            &cached.cache_entry_id,
+            &cached.blobs,
+            &prefetched_urls,
+        )
+        .await;
+        let content_type = if cached.content_type.is_empty() {
+            detect_manifest_content_type(&cached.index_json)
+        } else {
+            cached.content_type.clone()
+        };
         return Ok((
             cached.index_json.clone(),
             content_type,
@@ -586,77 +585,49 @@ async fn resolve_manifest(
         })
         .collect();
 
-    if !state.fail_on_cache_error && !blob_descriptors.is_empty() {
-        match missing_oci_blobs(state, &blob_descriptors).await {
-            Ok(missing) if !missing.is_empty() => {
-                let sample = missing
-                    .iter()
-                    .take(3)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                log::warn!(
-                    "OCI manifest degraded to miss: cache entry {} has {} missing blobs (sample: {})",
-                    cache_entry_id,
-                    missing.len(),
-                    sample
-                );
-                return Err(OciError::manifest_unknown(format!("{name}:{reference}")));
-            }
-            Ok(_) => {}
-            Err(error) => {
-                log::warn!(
-                    "OCI manifest degraded to miss: blob availability check failed for {}:{} ({:?})",
-                    name,
-                    reference,
-                    error
-                );
-                return Err(OciError::manifest_unknown(format!("{name}:{reference}")));
-            }
-        }
-    }
-
-    let should_prefetch_blob_urls =
-        prefetch_blob_urls && pointer.blobs.len() <= OCI_PREFETCH_BLOB_URL_LIMIT;
-    let mut prefetched_urls: HashMap<String, String> = HashMap::new();
-    if should_prefetch_blob_urls && !blob_descriptors.is_empty() {
-        if let Ok(Ok(response)) = tokio::time::timeout(
-            OCI_API_CALL_TIMEOUT,
-            state.api_client.blob_download_urls(
-                &state.workspace,
-                cache_entry_id,
-                &blob_descriptors,
-            ),
+    let mut validated_retrievability = false;
+    let prefetched_urls = if !state.fail_on_cache_error && !blob_descriptors.is_empty() {
+        let prefetched_urls = validate_manifest_blob_retrievability(
+            state,
+            cache_entry_id,
+            name,
+            reference,
+            &blob_descriptors,
         )
-        .await
-        {
-            for entry in response.download_urls {
-                prefetched_urls.insert(entry.digest, entry.url);
+        .await?;
+        validated_retrievability = true;
+        prefetched_urls
+    } else {
+        let should_prefetch_blob_urls =
+            prefetch_blob_urls && pointer.blobs.len() <= OCI_PREFETCH_BLOB_URL_LIMIT;
+        let mut prefetched_urls: HashMap<String, String> = HashMap::new();
+        if should_prefetch_blob_urls && !blob_descriptors.is_empty() {
+            if let Ok(Ok(response)) = tokio::time::timeout(
+                OCI_API_CALL_TIMEOUT,
+                state.api_client.blob_download_urls(
+                    &state.workspace,
+                    cache_entry_id,
+                    &blob_descriptors,
+                ),
+            )
+            .await
+            {
+                for entry in response.download_urls {
+                    prefetched_urls.insert(entry.digest, entry.url);
+                }
             }
         }
-    }
-    let prefetched_at = if should_prefetch_blob_urls {
-        Some(std::time::Instant::now())
-    } else {
-        None
+        prefetched_urls
     };
 
-    {
-        let mut locator = state.blob_locator.write().await;
-        for blob in &pointer.blobs {
-            let download_url = prefetched_urls.get(&blob.digest).cloned();
-            locator.insert(
-                name,
-                &blob.digest,
-                BlobLocatorEntry {
-                    cache_entry_id: cache_entry_id.clone(),
-                    size_bytes: blob.size_bytes,
-                    download_url: download_url.clone(),
-                    download_url_cached_at: download_url.as_ref().and(prefetched_at),
-                },
-            );
-        }
-    }
+    cache_blob_locator_entries(
+        state,
+        name,
+        cache_entry_id,
+        &blob_descriptors,
+        &prefetched_urls,
+    )
+    .await;
 
     let content_type = detect_manifest_content_type(&index_json);
     let digest = cas_oci::prefixed_sha256_digest(&index_json);
@@ -669,6 +640,12 @@ async fn resolve_manifest(
         blobs: blob_descriptors.clone(),
         name: name.to_string(),
         inserted_at: Instant::now(),
+        blob_retrievability_validated_at: std::sync::Mutex::new(if validated_retrievability {
+            Some(Instant::now())
+        } else {
+            None
+        }),
+        blob_retrievability_validation_lock: tokio::sync::Mutex::new(()),
     });
     let mut cache_keys = HashSet::new();
     for tag in &tags {
@@ -726,6 +703,342 @@ async fn missing_oci_blobs(
     missing.sort();
     missing.dedup();
     Ok(missing)
+}
+
+async fn ensure_cached_manifest_blob_retrievability(
+    state: &AppState,
+    cached: &Arc<OciManifestCacheEntry>,
+    reference: &str,
+    tags: &[String],
+) -> Result<HashMap<String, String>, OciError> {
+    if state.fail_on_cache_error
+        || cached.blobs.is_empty()
+        || manifest_blob_retrievability_recently_validated(cached)
+    {
+        return Ok(HashMap::new());
+    }
+
+    let _validation_guard = cached.blob_retrievability_validation_lock.lock().await;
+    if manifest_blob_retrievability_recently_validated(cached) {
+        return Ok(HashMap::new());
+    }
+
+    match validate_manifest_blob_retrievability(
+        state,
+        &cached.cache_entry_id,
+        &cached.name,
+        reference,
+        &cached.blobs,
+    )
+    .await
+    {
+        Ok(prefetched_urls) => {
+            mark_manifest_blob_retrievability_validated_at(cached);
+            Ok(prefetched_urls)
+        }
+        Err(error) => {
+            clear_manifest_blob_retrievability_validated_at(cached);
+            evict_cached_manifest(state, tags, &cached.manifest_digest);
+            Err(error)
+        }
+    }
+}
+
+fn manifest_blob_retrievability_recently_validated(cached: &OciManifestCacheEntry) -> bool {
+    let guard = cached
+        .blob_retrievability_validated_at
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match *guard {
+        Some(validated_at) => validated_at.elapsed() < OCI_BLOB_RETRIEVABILITY_VALIDATION_TTL,
+        None => false,
+    }
+}
+
+fn mark_manifest_blob_retrievability_validated_at(cached: &OciManifestCacheEntry) {
+    let mut guard = cached
+        .blob_retrievability_validated_at
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(Instant::now());
+}
+
+fn clear_manifest_blob_retrievability_validated_at(cached: &OciManifestCacheEntry) {
+    let mut guard = cached
+        .blob_retrievability_validated_at
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = None;
+}
+
+async fn validate_manifest_blob_retrievability(
+    state: &AppState,
+    cache_entry_id: &str,
+    name: &str,
+    reference: &str,
+    blob_descriptors: &[BlobDescriptor],
+) -> Result<HashMap<String, String>, OciError> {
+    if blob_descriptors.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    match missing_oci_blobs(state, blob_descriptors).await {
+        Ok(missing) if !missing.is_empty() => {
+            let sample = missing
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            log::warn!(
+                "OCI manifest degraded to miss: cache entry {} has {} missing blobs (sample: {})",
+                cache_entry_id,
+                missing.len(),
+                sample
+            );
+            return Err(OciError::manifest_unknown(format!("{name}:{reference}")));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!(
+                "OCI manifest degraded to miss: blob availability check failed for {}:{} ({:?})",
+                name,
+                reference,
+                error
+            );
+            return Err(OciError::manifest_unknown(format!("{name}:{reference}")));
+        }
+    }
+
+    let download_urls =
+        match resolve_manifest_blob_download_urls(state, cache_entry_id, blob_descriptors).await {
+            Ok(download_urls) => download_urls,
+            Err(detail) => {
+                log::warn!(
+                    "OCI manifest degraded to miss: blob URL resolution failed for {}:{} ({})",
+                    name,
+                    reference,
+                    detail
+                );
+                return Err(OciError::manifest_unknown(format!("{name}:{reference}")));
+            }
+        };
+
+    let max_concurrent = adaptive_blob_upload_concurrency(blob_descriptors.len())
+        .min(state.blob_download_max_concurrency.max(1));
+    let state = state.clone();
+    let cache_entry_id = cache_entry_id.to_string();
+    let name = name.to_string();
+    let mut readable_urls = HashMap::with_capacity(download_urls.len());
+    let mut unreadable = Vec::new();
+    let preflight_blobs = blob_descriptors.to_vec();
+    let mut stream = futures_util::stream::iter(preflight_blobs.into_iter().map(|blob| {
+        let state = state.clone();
+        let cache_entry_id = cache_entry_id.clone();
+        let name = name.clone();
+        let initial_url = download_urls.get(&blob.digest).cloned();
+        async move {
+            let Some(initial_url) = initial_url else {
+                return Err((blob.digest.clone(), "download URL missing".to_string()));
+            };
+            preflight_manifest_blob_url(state, cache_entry_id, name, blob, initial_url).await
+        }
+    }))
+    .buffer_unordered(max_concurrent);
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok((digest, url)) => {
+                readable_urls.insert(digest, url);
+            }
+            Err((digest, detail)) => unreadable.push(format!("{digest} ({detail})")),
+        }
+    }
+
+    if !unreadable.is_empty() {
+        let sample = unreadable
+            .into_iter()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(", ");
+        log::warn!(
+            "OCI manifest degraded to miss: cache entry {} has unreadable blobs (sample: {})",
+            cache_entry_id,
+            sample
+        );
+        return Err(OciError::manifest_unknown(format!("{name}:{reference}")));
+    }
+
+    Ok(readable_urls)
+}
+
+async fn resolve_manifest_blob_download_urls(
+    state: &AppState,
+    cache_entry_id: &str,
+    blob_descriptors: &[BlobDescriptor],
+) -> Result<HashMap<String, String>, String> {
+    let response = tokio::time::timeout(
+        OCI_API_CALL_TIMEOUT,
+        state
+            .api_client
+            .blob_download_urls(&state.workspace, cache_entry_id, blob_descriptors),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "timed out resolving blob URLs after {}s",
+            OCI_API_CALL_TIMEOUT.as_secs()
+        )
+    })?
+    .map_err(|e| format!("blob_download_urls failed: {e}"))?;
+
+    let mut urls = HashMap::with_capacity(response.download_urls.len());
+    for entry in response.download_urls {
+        urls.insert(entry.digest, entry.url);
+    }
+
+    let mut missing = response.missing;
+    for blob in blob_descriptors {
+        if !urls.contains_key(blob.digest.as_str()) {
+            missing.push(blob.digest.clone());
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    if !missing.is_empty() {
+        let sample = missing.into_iter().take(3).collect::<Vec<_>>().join(", ");
+        return Err(format!("download URLs missing for blobs: {sample}"));
+    }
+
+    Ok(urls)
+}
+
+async fn preflight_manifest_blob_url(
+    state: AppState,
+    cache_entry_id: String,
+    name: String,
+    blob: BlobDescriptor,
+    initial_url: String,
+) -> Result<(String, String), (String, String)> {
+    let digest = blob.digest.clone();
+    let mut current_url = initial_url;
+    let mut allow_same_url_retry = true;
+    let mut allow_refresh_retry = true;
+
+    loop {
+        match blob_preflight_status(&state, &current_url, blob.size_bytes).await {
+            Ok(status) if status == StatusCode::OK || status == StatusCode::PARTIAL_CONTENT => {
+                return Ok((digest, current_url));
+            }
+            Ok(status)
+                if allow_refresh_retry
+                    && (status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND) =>
+            {
+                allow_refresh_retry = false;
+                current_url = match resolve_oci_download_url(
+                    &state,
+                    &cache_entry_id,
+                    &blob,
+                    &name,
+                    &blob.digest,
+                )
+                .await
+                {
+                    Ok(url) => url,
+                    Err(error) => {
+                        return Err((digest, format!("refresh failed: {}", error.message())))
+                    }
+                };
+            }
+            Ok(status) if allow_same_url_retry && status.is_server_error() => {
+                allow_same_url_retry = false;
+            }
+            Ok(status) => {
+                return Err((digest, format!("storage returned {}", status.as_u16())));
+            }
+            Err(_detail) if allow_same_url_retry => {
+                allow_same_url_retry = false;
+            }
+            Err(detail) => return Err((digest, detail)),
+        }
+    }
+}
+
+async fn blob_preflight_status(
+    state: &AppState,
+    url: &str,
+    size_bytes: u64,
+) -> Result<StatusCode, String> {
+    let mut request = state.api_client.transfer_client().get(url);
+    if size_bytes > 0 {
+        request = request.header(reqwest::header::RANGE, "bytes=0-0");
+    }
+    let response = tokio::time::timeout(OCI_BLOB_PREFLIGHT_TIMEOUT, request.send())
+        .await
+        .map_err(|_| {
+            format!(
+                "timed out preflighting blob after {}s",
+                OCI_BLOB_PREFLIGHT_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|e| format!("preflight request failed: {e}"))?;
+    Ok(response.status())
+}
+
+async fn cache_blob_locator_entries(
+    state: &AppState,
+    name: &str,
+    cache_entry_id: &str,
+    blob_descriptors: &[BlobDescriptor],
+    prefetched_urls: &HashMap<String, String>,
+) {
+    let prefetched_at = if prefetched_urls.is_empty() {
+        None
+    } else {
+        Some(std::time::Instant::now())
+    };
+    let mut locator = state.blob_locator.write().await;
+    for blob in blob_descriptors {
+        let existing = locator.get(name, &blob.digest).cloned();
+        let (download_url, download_url_cached_at) =
+            if let Some(download_url) = prefetched_urls.get(&blob.digest).cloned() {
+                (Some(download_url), prefetched_at)
+            } else if let Some(existing) = existing.as_ref() {
+                if existing.cache_entry_id == cache_entry_id {
+                    (
+                        existing.download_url.clone(),
+                        existing.download_url_cached_at,
+                    )
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
+        let size_bytes = existing
+            .as_ref()
+            .map(|entry| entry.size_bytes.max(blob.size_bytes))
+            .unwrap_or(blob.size_bytes);
+        locator.insert(
+            name,
+            &blob.digest,
+            BlobLocatorEntry {
+                cache_entry_id: cache_entry_id.to_string(),
+                size_bytes,
+                download_url,
+                download_url_cached_at,
+            },
+        );
+    }
+}
+
+fn evict_cached_manifest(state: &AppState, tags: &[String], manifest_digest: &str) {
+    for tag in tags {
+        state.oci_manifest_cache.remove(tag);
+    }
+    state
+        .oci_manifest_cache
+        .remove(&digest_tag(manifest_digest));
 }
 
 fn scoped_restore_tags(tag_resolver: &TagResolver, name: &str, reference: &str) -> Vec<String> {
@@ -1026,34 +1339,9 @@ async fn download_oci_blob_to_cache(
 ) -> Result<BlobReadHandle, OciError> {
     use tokio::io::AsyncWriteExt;
 
-    let mut response = tokio::time::timeout(
-        OCI_TRANSFER_CALL_TIMEOUT,
-        state.api_client.transfer_client().get(&download_url).send(),
-    )
-    .await
-    .map_err(|_| {
-        OciError::internal(format!(
-            "Timed out downloading blob after {}s",
-            OCI_TRANSFER_CALL_TIMEOUT.as_secs()
-        ))
-    })?
-    .map_err(|e| OciError::internal(format!("Failed to download blob: {e}")))?;
-
-    if from_cached_url
-        && (response.status() == StatusCode::FORBIDDEN
-            || response.status() == StatusCode::NOT_FOUND)
-    {
-        {
-            let mut locator = state.blob_locator.write().await;
-            if let Some(entry) = locator.get_mut(name, digest) {
-                entry.download_url = None;
-                entry.download_url_cached_at = None;
-            }
-        }
-        download_url =
-            resolve_oci_download_url(state, cache_entry_id, blob_desc, name, digest).await?;
-        from_cached_url = false;
-        response = tokio::time::timeout(
+    let mut retried = false;
+    let response = loop {
+        let response = tokio::time::timeout(
             OCI_TRANSFER_CALL_TIMEOUT,
             state.api_client.transfer_client().get(&download_url).send(),
         )
@@ -1065,7 +1353,26 @@ async fn download_oci_blob_to_cache(
             ))
         })?
         .map_err(|e| OciError::internal(format!("Failed to download blob: {e}")))?;
-    }
+
+        if retried
+            || (response.status() != StatusCode::FORBIDDEN
+                && response.status() != StatusCode::NOT_FOUND)
+        {
+            break response;
+        }
+
+        if from_cached_url {
+            let mut locator = state.blob_locator.write().await;
+            if let Some(entry) = locator.get_mut(name, digest) {
+                entry.download_url = None;
+                entry.download_url_cached_at = None;
+            }
+        }
+        download_url =
+            resolve_oci_download_url(state, cache_entry_id, blob_desc, name, digest).await?;
+        from_cached_url = false;
+        retried = true;
+    };
 
     let response = response
         .error_for_status()
@@ -2048,6 +2355,8 @@ async fn put_manifest(
                 blobs: blob_descriptors.clone(),
                 name: name.clone(),
                 inserted_at: Instant::now(),
+                blob_retrievability_validated_at: std::sync::Mutex::new(Some(Instant::now())),
+                blob_retrievability_validation_lock: tokio::sync::Mutex::new(()),
             };
             let cached = Arc::new(cached);
             state

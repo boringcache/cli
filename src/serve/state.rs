@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 
@@ -120,6 +120,8 @@ pub struct OciManifestCacheEntry {
     pub blobs: Vec<BlobDescriptor>,
     pub name: String,
     pub inserted_at: Instant,
+    pub blob_retrievability_validated_at: StdMutex<Option<Instant>>,
+    pub blob_retrievability_validation_lock: Mutex<()>,
 }
 
 struct BlobReadInFlightGuard {

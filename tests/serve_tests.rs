@@ -8,8 +8,8 @@ use boring_cache_cli::git::GitContext;
 use boring_cache_cli::manifest::EntryType;
 use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
-    digest_tag, ref_tag, AppState, BlobLocatorCache, BlobReadCache, KvPendingStore,
-    KvPublishedIndex, UploadSessionStore,
+    digest_tag, ref_tag, AppState, BlobLocatorCache, BlobLocatorEntry, BlobReadCache,
+    KvPendingStore, KvPublishedIndex, OciManifestCacheEntry, UploadSessionStore,
 };
 use boring_cache_cli::tag_utils::TagResolver;
 use http_body_util::BodyExt;
@@ -17,7 +17,7 @@ use mockito::{Matcher, Server};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 
 static ENV_MUTEX: Mutex<()> = Mutex::const_new(());
@@ -645,6 +645,453 @@ async fn test_manifest_degrades_to_miss_when_pointer_blobs_missing_in_best_effor
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(parsed["errors"][0]["code"], "MANIFEST_UNKNOWN");
+}
+
+#[tokio::test]
+async fn test_manifest_degrades_to_miss_when_storage_blob_is_unreadable_in_best_effort() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.fail_on_cache_error = false;
+
+    let blob_digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let index_json =
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:aaaa","size":100},"layers":[]}"#;
+    let pointer_bytes = make_pointer(index_json, &[(blob_digest, 4096)]);
+    let tag = ref_tag("my-cache", "main");
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": tag,
+                "status": "hit",
+                "cache_entry_id": "entry-storage-miss",
+                "manifest_url": format!("{}/pointers/entry-storage-miss", server.url()),
+                "manifest_root_digest": cas_oci::prefixed_sha256_digest(&pointer_bytes),
+                "storage_mode": "cas",
+                "cas_layout": "oci-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _pointer_mock = server
+        .mock("GET", "/pointers/entry-storage-miss")
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let _check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": blob_digest,
+                    "exists": true
+                }]
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _download_urls_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": blob_digest,
+                    "url": format!("{}/blobs/{}", server.url(), blob_digest),
+                }],
+                "missing": [],
+            })
+            .to_string(),
+        )
+        .expect(2)
+        .create_async()
+        .await;
+
+    let _blob_mock = server
+        .mock("GET", format!("/blobs/{}", blob_digest).as_str())
+        .with_status(404)
+        .with_body("missing")
+        .expect(2)
+        .create_async()
+        .await;
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri("/v2/my-cache/manifests/main")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["errors"][0]["code"], "MANIFEST_UNKNOWN");
+}
+
+#[tokio::test]
+async fn test_cached_manifest_hit_revalidates_blob_retrievability_in_best_effort() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.fail_on_cache_error = false;
+
+    let blob_digest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let index_json =
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:aaaa","size":100},"layers":[]}"#
+            .to_vec();
+    let tag = ref_tag("cached", "v1");
+    let manifest_digest = cas_oci::prefixed_sha256_digest(&index_json);
+    let cached = Arc::new(OciManifestCacheEntry {
+        index_json,
+        content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+        manifest_digest: manifest_digest.clone(),
+        cache_entry_id: "entry-cached-miss".to_string(),
+        blobs: vec![boring_cache_cli::api::models::cache::BlobDescriptor {
+            digest: blob_digest.to_string(),
+            size_bytes: 2048,
+        }],
+        name: "cached".to_string(),
+        inserted_at: Instant::now(),
+        blob_retrievability_validated_at: std::sync::Mutex::new(None),
+        blob_retrievability_validation_lock: Mutex::new(()),
+    });
+    state
+        .oci_manifest_cache
+        .insert(tag.clone(), Arc::clone(&cached));
+    state
+        .oci_manifest_cache
+        .insert(digest_tag(&manifest_digest), cached);
+
+    let _check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": blob_digest,
+                    "exists": true
+                }]
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _download_urls_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": blob_digest,
+                    "url": format!("{}/blobs/{}", server.url(), blob_digest),
+                }],
+                "missing": [],
+            })
+            .to_string(),
+        )
+        .expect(2)
+        .create_async()
+        .await;
+
+    let _blob_mock = server
+        .mock("GET", format!("/blobs/{}", blob_digest).as_str())
+        .with_status(404)
+        .with_body("missing")
+        .expect(2)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri("/v2/cached/manifests/v1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(state.oci_manifest_cache.get(&tag).is_none());
+    assert!(state
+        .oci_manifest_cache
+        .get(&digest_tag(&manifest_digest))
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_recently_validated_cached_manifest_skips_revalidation_and_keeps_locator_urls() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.fail_on_cache_error = false;
+
+    let blob_digest = "sha256:abababababababababababababababababababababababababababababababab";
+    let index_json =
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:aaaa","size":100},"layers":[]}"#
+            .to_vec();
+    let tag = ref_tag("cached-fast", "v2");
+    let manifest_digest = cas_oci::prefixed_sha256_digest(&index_json);
+    let cached = Arc::new(OciManifestCacheEntry {
+        index_json,
+        content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+        manifest_digest: manifest_digest.clone(),
+        cache_entry_id: "entry-cached-fast".to_string(),
+        blobs: vec![boring_cache_cli::api::models::cache::BlobDescriptor {
+            digest: blob_digest.to_string(),
+            size_bytes: 2048,
+        }],
+        name: "cached-fast".to_string(),
+        inserted_at: Instant::now(),
+        blob_retrievability_validated_at: std::sync::Mutex::new(Some(Instant::now())),
+        blob_retrievability_validation_lock: Mutex::new(()),
+    });
+    state
+        .oci_manifest_cache
+        .insert(tag.clone(), Arc::clone(&cached));
+    state
+        .oci_manifest_cache
+        .insert(digest_tag(&manifest_digest), cached);
+
+    {
+        let mut locator = state.blob_locator.write().await;
+        locator.insert(
+            "cached-fast",
+            blob_digest,
+            BlobLocatorEntry {
+                cache_entry_id: "entry-cached-fast".to_string(),
+                size_bytes: 2048,
+                download_url: Some(format!("{}/blobs/{}", server.url(), blob_digest)),
+                download_url_cached_at: Some(Instant::now()),
+            },
+        );
+    }
+
+    let _blob_mock = server
+        .mock("GET", format!("/blobs/{}", blob_digest).as_str())
+        .with_status(200)
+        .with_body("cached-fast-blob")
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let manifest_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri("/v2/cached-fast/manifests/v2")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(manifest_response.status(), StatusCode::OK);
+
+    let app = build_router(state);
+    let blob_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri(format!("/v2/cached-fast/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(blob_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_manifest_refreshes_stale_blob_urls_before_returning_manifest() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.fail_on_cache_error = false;
+
+    let blob_a = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let blob_b = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let index_json =
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:aaaa","size":100},"layers":[]}"#;
+    let pointer_bytes = make_pointer(index_json, &[(blob_a, 1024), (blob_b, 2048)]);
+    let tag = ref_tag("img", "latest");
+    let batch_request = json!({
+        "cache_entry_id": "entry-refresh",
+        "blobs": [
+            {"digest": blob_a, "size_bytes": 1024},
+            {"digest": blob_b, "size_bytes": 2048}
+        ]
+    });
+    let single_request = json!({
+        "cache_entry_id": "entry-refresh",
+        "blobs": [
+            {"digest": blob_a, "size_bytes": 1024}
+        ]
+    });
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": tag,
+                "status": "hit",
+                "cache_entry_id": "entry-refresh",
+                "manifest_url": format!("{}/pointers/entry-refresh", server.url()),
+                "manifest_root_digest": cas_oci::prefixed_sha256_digest(&pointer_bytes),
+                "storage_mode": "cas",
+                "cas_layout": "oci-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _pointer_mock = server
+        .mock("GET", "/pointers/entry-refresh")
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let _check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [
+                    {"digest": blob_a, "exists": true},
+                    {"digest": blob_b, "exists": true}
+                ]
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _download_urls_batch_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Json(batch_request))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [
+                    {
+                        "digest": blob_a,
+                        "url": format!("{}/blobs/stale/{}", server.url(), blob_a),
+                    },
+                    {
+                        "digest": blob_b,
+                        "url": format!("{}/blobs/good/{}", server.url(), blob_b),
+                    }
+                ],
+                "missing": [],
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let _download_urls_retry_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Json(single_request))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": blob_a,
+                    "url": format!("{}/blobs/fresh/{}", server.url(), blob_a),
+                }],
+                "missing": [],
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let _stale_blob_mock = server
+        .mock("GET", format!("/blobs/stale/{}", blob_a).as_str())
+        .with_status(403)
+        .with_body("Forbidden - signed URL expired")
+        .expect(1)
+        .create_async()
+        .await;
+
+    let _fresh_blob_mock = server
+        .mock("GET", format!("/blobs/fresh/{}", blob_a).as_str())
+        .with_status(200)
+        .with_body("fresh-a")
+        .expect(2)
+        .create_async()
+        .await;
+
+    let _good_blob_mock = server
+        .mock("GET", format!("/blobs/good/{}", blob_b).as_str())
+        .with_status(200)
+        .with_body("good-b")
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let manifest_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri("/v2/img/manifests/latest")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(manifest_response.status(), StatusCode::OK);
+
+    let app = build_router(state);
+    let blob_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri(format!("/v2/img/blobs/{blob_a}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(blob_response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -2553,6 +3000,23 @@ async fn test_blob_proxy_best_effort_returns_404_on_storage_failure() {
         .mock("GET", "/pointers/entry-err")
         .with_status(200)
         .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let _check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": blob_digest,
+                    "exists": true
+                }]
+            })
+            .to_string(),
+        )
         .create_async()
         .await;
 
