@@ -41,6 +41,9 @@ jobs:
         run: |
           if [ -n "${{ inputs.cli_version }}" ]; then
             VERSION="${{ inputs.cli_version }}"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            # Extract the tag that triggered the release workflow
+            VERSION=$(gh run view ${{ github.event.workflow_run.id }} --json headBranch -q .headBranch)
           else
             VERSION=$(gh release view --json tagName -q .tagName)
           fi
