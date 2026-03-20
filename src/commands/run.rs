@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::process::Stdio;
 
 use crate::commands::{restore, save, serve, utils};
+use crate::config::{AuthPurpose, Config};
 use crate::exit_code::ExitCodeError;
 use crate::ui;
 
@@ -82,6 +83,22 @@ pub async fn execute(
             &command,
         );
         return Ok(());
+    }
+
+    if Config::load_for_auth_purpose(AuthPurpose::Restore).is_err() {
+        ui::info("[boringcache] No token found — running command without caching");
+        let child_outcome = spawn_command(&command, None).await?;
+        return match child_outcome {
+            ChildOutcome::Signaled(signal) => Err(ExitCodeError::silent(128 + signal).into()),
+            ChildOutcome::Exited(status) => {
+                let code = status_exit_code(&status);
+                if code == 0 {
+                    Ok(())
+                } else {
+                    Err(ExitCodeError::silent(code).into())
+                }
+            }
+        };
     }
 
     if archive_enabled && !skip_restore {

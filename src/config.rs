@@ -44,8 +44,13 @@ pub fn env_bool(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+const DOCKER_SECRET_PATH: &str = "/run/secrets/bc_token";
+
 fn token_from_file() -> Option<String> {
-    let token_file = env_var("BORINGCACHE_TOKEN_FILE")?;
+    let token_file = env_var("BORINGCACHE_TOKEN_FILE").or_else(|| {
+        let path = std::path::Path::new(DOCKER_SECRET_PATH);
+        path.exists().then(|| DOCKER_SECRET_PATH.to_string())
+    })?;
     let token = fs::read_to_string(token_file).ok()?;
     let token = token.trim().to_string();
 
@@ -632,5 +637,38 @@ mod tests {
         let message = purpose_missing_token_message(AuthPurpose::Save);
         assert!(message.contains("BORINGCACHE_RESTORE_TOKEN"));
         assert!(message.contains("BORINGCACHE_SAVE_TOKEN"));
+    }
+
+    #[test]
+    fn test_token_from_file_reads_docker_secret_when_env_unset() {
+        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let token_file_guard = EnvVarGuard::new("BORINGCACHE_TOKEN_FILE");
+        token_file_guard.set(None);
+
+        let result = token_from_file();
+        if std::path::Path::new(DOCKER_SECRET_PATH).exists() {
+            assert!(result.is_some());
+        } else {
+            assert!(result.is_none());
+        }
+    }
+
+    #[test]
+    fn test_token_from_file_prefers_env_over_docker_secret() {
+        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let token_file_guard = EnvVarGuard::new("BORINGCACHE_TOKEN_FILE");
+        let temp_dir = TempDir::new().unwrap();
+        let token_path = temp_dir.path().join("explicit-token.txt");
+        fs::write(&token_path, "explicit-token").unwrap();
+
+        token_file_guard.set(Some(token_path.to_str().unwrap()));
+
+        let result = token_from_file();
+        assert_eq!(result.as_deref(), Some("explicit-token"));
+    }
+
+    #[test]
+    fn test_docker_secret_constant_is_conventional_path() {
+        assert_eq!(DOCKER_SECRET_PATH, "/run/secrets/bc_token");
     }
 }
