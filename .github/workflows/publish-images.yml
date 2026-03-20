@@ -209,7 +209,7 @@ jobs:
             boringcache --version
           '
 
-      - name: Verify mise installs Ruby
+      - name: Verify mise + boringcache run (Ruby + bundle install)
         run: |
           docker run --rm ${{ env.IMAGE }}:bookworm-build sh -c '
             set -e
@@ -218,15 +218,7 @@ jobs:
             mise install
             ruby --version
             gem --version
-          '
 
-      - name: Verify boringcache run fallback with bundle install
-        run: |
-          docker run --rm ${{ env.IMAGE }}:bookworm-build sh -c '
-            set -e
-            cd /tmp
-            printf "[tools]\nruby = \"3.4.4\"\n" > mise.toml
-            mise install
             mkdir -p myapp && cd myapp
             echo "source \"https://rubygems.org\"" > Gemfile
             echo "gem \"rake\"" >> Gemfile
@@ -240,5 +232,4 @@ jobs:
           echo "## Smoke tests passed" >> "$GITHUB_STEP_SUMMARY"
           echo "- bookworm: mise, boringcache CLI, no-token fallback" >> "$GITHUB_STEP_SUMMARY"
           echo "- bookworm-build: build tools, mise, boringcache CLI" >> "$GITHUB_STEP_SUMMARY"
-          echo "- mise install: Ruby 3.4.4 from mise.toml" >> "$GITHUB_STEP_SUMMARY"
-          echo "- boringcache run + bundle install: no-token fallback" >> "$GITHUB_STEP_SUMMARY"
+          echo "- mise + boringcache run: Ruby 3.4.4, bundle install, no-token fallback" >> "$GITHUB_STEP_SUMMARY"
