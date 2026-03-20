@@ -58,11 +58,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check if images already exist
+        if: github.event_name != 'pull_request'
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.cli_version }}"
+          if docker manifest inspect "${{ env.IMAGE }}:bookworm-${VERSION}" > /dev/null 2>&1; then
+            echo "Images for ${VERSION} already exist — skipping build"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # ---------------------------------------------------------------
       # Release / push / dispatch — boringcache/one with multi-arch push
       # ---------------------------------------------------------------
       - name: Build & push bookworm
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.exists.outputs.skip != 'true'
         uses: boringcache/one@v1
         with:
           mode: docker
@@ -82,7 +96,7 @@ jobs:
           BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
 
       - name: Build & push bookworm-build
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.exists.outputs.skip != 'true'
         uses: boringcache/one@v1
         with:
           mode: docker
@@ -136,8 +150,14 @@ jobs:
             boringcache --version
           '
 
+      - name: Summary (skipped)
+        if: github.event_name != 'pull_request' && steps.exists.outputs.skip == 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.cli_version }}"
+          echo "## Base images already exist for ${VERSION} — skipped" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Summary
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.exists.outputs.skip != 'true'
         run: |
           VERSION="${{ steps.version.outputs.cli_version }}"
           echo "## Base images published" >> "$GITHUB_STEP_SUMMARY"
