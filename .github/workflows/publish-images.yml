@@ -215,6 +215,7 @@ jobs:
             set -e
             cd /tmp
             printf "[tools]\nruby = \"3.4.4\"\n" > mise.toml
+            mise settings ruby.compile=false
             mise install
             ruby --version
             gem --version
