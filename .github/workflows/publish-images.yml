@@ -78,6 +78,10 @@ jobs:
         env:
           BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
 
+      - name: Remove buildx builder from bookworm step
+        if: github.event_name != 'pull_request'
+        run: docker buildx rm "boringcache-${GITHUB_RUN_ID}" || true
+
       - name: Build & push bookworm-build
         if: github.event_name != 'pull_request'
         uses: boringcache/one@v1
