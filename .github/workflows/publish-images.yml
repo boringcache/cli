@@ -214,7 +214,7 @@ jobs:
           docker run --rm ${{ env.IMAGE }}:bookworm-build sh -c '
             set -e
             cd /tmp
-            echo -e "[tools]\nruby = \"3.4.4\"" > mise.toml
+            printf "[tools]\nruby = \"3.4.4\"\n" > mise.toml
             mise install
             ruby --version
             gem --version
@@ -225,7 +225,7 @@ jobs:
           docker run --rm ${{ env.IMAGE }}:bookworm-build sh -c '
             set -e
             cd /tmp
-            echo -e "[tools]\nruby = \"3.4.4\"" > mise.toml
+            printf "[tools]\nruby = \"3.4.4\"\n" > mise.toml
             mise install
             mkdir -p myapp && cd myapp
             echo "source \"https://rubygems.org\"" > Gemfile
