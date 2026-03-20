@@ -48,6 +48,8 @@ ENV MISE_DATA_DIR="/mise" \
     MISE_CACHE_DIR="/mise/cache" \
     MISE_YES="1" \
     MISE_SELF_UPDATE_AVAILABLE="false" \
+    MISE_RUBY_COMPILE="false" \
+    MISE_PYTHON_COMPILE="false" \
     PATH="/mise/shims:/usr/local/bin:${PATH}"
 
 RUN mkdir -p /mise/shims /mise/cache
