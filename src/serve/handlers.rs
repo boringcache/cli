@@ -2155,6 +2155,7 @@ async fn put_manifest(
         .map_err(|e| OciError::internal(format!("Invalid manifest JSON: {e}")))?;
 
     let blob_descriptors = extract_blob_descriptors(&parsed)?;
+    stage_manifest_reference_uploads(&state, &name, &blob_descriptors, &parsed).await?;
 
     let pointer = cas_oci::OciPointer {
         format_version: 1,
@@ -2507,6 +2508,25 @@ async fn put_manifest(
 fn extract_blob_descriptors(manifest: &serde_json::Value) -> Result<Vec<BlobDescriptor>, OciError> {
     let mut blobs = Vec::new();
 
+    if let Some(manifests) = manifest.get("manifests").and_then(|m| m.as_array()) {
+        for child in manifests {
+            if let (Some(digest), Some(size)) = (
+                child.get("digest").and_then(|d| d.as_str()),
+                child.get("size").and_then(|s| s.as_u64()),
+            ) {
+                if !cas_oci::is_valid_sha256_digest(digest) {
+                    return Err(OciError::digest_invalid(format!(
+                        "unsupported manifest digest format: {digest}"
+                    )));
+                }
+                blobs.push(BlobDescriptor {
+                    digest: digest.to_string(),
+                    size_bytes: size,
+                });
+            }
+        }
+    }
+
     if let Some(config) = manifest.get("config") {
         if let (Some(digest), Some(size)) = (
             config.get("digest").and_then(|d| d.as_str()),
@@ -2562,6 +2582,107 @@ fn extract_blob_descriptors(manifest: &serde_json::Value) -> Result<Vec<BlobDesc
     }
 
     Ok(deduped)
+}
+
+async fn stage_manifest_reference_uploads(
+    state: &AppState,
+    name: &str,
+    blob_descriptors: &[BlobDescriptor],
+    manifest: &serde_json::Value,
+) -> Result<(), OciError> {
+    let Some(manifests) = manifest.get("manifests").and_then(|value| value.as_array()) else {
+        return Ok(());
+    };
+
+    let manifest_digests: HashSet<&str> = manifests
+        .iter()
+        .filter_map(|child| child.get("digest").and_then(|value| value.as_str()))
+        .collect();
+
+    for descriptor in blob_descriptors {
+        if !manifest_digests.contains(descriptor.digest.as_str()) {
+            continue;
+        }
+        stage_manifest_reference_upload(state, name, descriptor).await?;
+    }
+
+    Ok(())
+}
+
+async fn stage_manifest_reference_upload(
+    state: &AppState,
+    name: &str,
+    descriptor: &BlobDescriptor,
+) -> Result<(), OciError> {
+    if has_non_empty_local_blob(state, &descriptor.digest).await {
+        return Ok(());
+    }
+
+    let digest_tag = digest_tag(&descriptor.digest);
+    let manifest_bytes = if let Some(cached) = lookup_oci_manifest_cache(state, &[digest_tag]) {
+        cached.index_json.clone()
+    } else {
+        let (manifest_bytes, _content_type, resolved_digest) =
+            resolve_manifest(state, name, &descriptor.digest, false).await?;
+        if resolved_digest != descriptor.digest {
+            return Err(OciError::internal(format!(
+                "resolved child manifest digest mismatch for {}: got {}",
+                descriptor.digest, resolved_digest
+            )));
+        }
+        manifest_bytes
+    };
+
+    let actual_digest = cas_oci::prefixed_sha256_digest(&manifest_bytes);
+    if actual_digest != descriptor.digest {
+        return Err(OciError::internal(format!(
+            "child manifest digest mismatch for {}: got {}",
+            descriptor.digest, actual_digest
+        )));
+    }
+
+    let actual_size = manifest_bytes.len() as u64;
+    if actual_size != descriptor.size_bytes {
+        return Err(OciError::internal(format!(
+            "child manifest size mismatch for {}: expected {} got {}",
+            descriptor.digest, descriptor.size_bytes, actual_size
+        )));
+    }
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("boringcache-oci-manifest-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to create temp dir: {e}")))?;
+    let session_id = format!("oci-manifest-{}", uuid::Uuid::new_v4());
+    let temp_path = temp_dir.join(&session_id);
+    tokio::fs::write(&temp_path, &manifest_bytes)
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to stage child manifest blob: {e}")))?;
+
+    let mut sessions = state.upload_sessions.write().await;
+    if sessions
+        .find_by_name_and_digest(name, &descriptor.digest)
+        .is_some()
+        || sessions.find_by_digest(&descriptor.digest).is_some()
+    {
+        drop(sessions);
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Ok(());
+    }
+
+    sessions.create(UploadSession {
+        id: session_id,
+        name: name.to_string(),
+        temp_path,
+        write_lock: Arc::new(tokio::sync::Mutex::new(())),
+        bytes_received: actual_size,
+        finalized_digest: Some(descriptor.digest.clone()),
+        finalized_size: Some(actual_size),
+        created_at: Instant::now(),
+    });
+
+    Ok(())
 }
 
 async fn cleanup_blob_sessions(state: &AppState, blob_descriptors: &[BlobDescriptor]) {
@@ -3044,16 +3165,24 @@ mod tests {
     }
 
     #[test]
-    fn extract_blob_descriptors_excludes_child_manifests() {
+    fn extract_blob_descriptors_includes_child_manifests_for_index() {
         let index_json = serde_json::json!({
             "schemaVersion": 2,
             "manifests": [
-                {"digest": "sha256:child1", "size": 500, "mediaType": "application/vnd.oci.image.manifest.v1+json"},
-                {"digest": "sha256:child2", "size": 600, "mediaType": "application/vnd.oci.image.manifest.v1+json"}
+                {"digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 500, "mediaType": "application/vnd.oci.image.manifest.v1+json"},
+                {"digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size": 600, "mediaType": "application/vnd.oci.image.manifest.v1+json"}
             ]
         });
         let blobs = extract_blob_descriptors(&index_json).unwrap();
-        assert!(blobs.is_empty());
+        assert_eq!(blobs.len(), 2);
+        assert_eq!(
+            blobs[0].digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(
+            blobs[1].digest,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
     }
 
     #[test]
@@ -3131,6 +3260,50 @@ mod tests {
         let error = extract_blob_descriptors(&manifest_json).unwrap_err();
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn stage_manifest_reference_uploads_seeds_child_manifest_sessions() {
+        let state = test_state();
+        let child_manifest = br#"{"schemaVersion":2,"config":{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":12},"layers":[]}"#;
+        let child_digest = cas_oci::prefixed_sha256_digest(child_manifest);
+        let child_size = child_manifest.len() as u64;
+        let child_tag = digest_tag(&child_digest);
+        state.oci_manifest_cache.insert(
+            child_tag,
+            Arc::new(OciManifestCacheEntry {
+                index_json: child_manifest.to_vec(),
+                content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                manifest_digest: child_digest.clone(),
+                cache_entry_id: "entry-1".to_string(),
+                blobs: vec![],
+                name: "cache".to_string(),
+                inserted_at: Instant::now(),
+                blob_retrievability_validated_at: std::sync::Mutex::new(None),
+                blob_retrievability_validation_lock: tokio::sync::Mutex::new(()),
+            }),
+        );
+
+        let index_json = serde_json::json!({
+            "schemaVersion": 2,
+            "manifests": [
+                {"digest": child_digest, "size": child_size, "mediaType": "application/vnd.oci.image.manifest.v1+json"}
+            ]
+        });
+        let blob_descriptors = extract_blob_descriptors(&index_json).unwrap();
+        stage_manifest_reference_uploads(&state, "cache", &blob_descriptors, &index_json)
+            .await
+            .expect("stage child manifest");
+
+        let sessions = state.upload_sessions.read().await;
+        let session = sessions
+            .find_by_name_and_digest("cache", &blob_descriptors[0].digest)
+            .expect("staged upload session");
+        assert_eq!(session.finalized_size, Some(child_size));
+        assert_eq!(
+            session.finalized_digest.as_deref(),
+            Some(blob_descriptors[0].digest.as_str())
+        );
     }
 
     #[test]
