@@ -55,6 +55,6 @@ RUN mkdir -p /mise/shims /mise/cache
 # boringcache CLI — content-addressed artifact cache
 # Auto-detects /run/secrets/bc_token for Docker BuildKit secret mounts.
 # Falls back to running commands directly when no token is available.
-RUN curl -fsSL "https://github.com/boringcache/cli/releases/download/${BORINGCACHE_VERSION}/boringcache-debian-bookworm-${TARGETARCH}" \
+RUN curl -fsSL "https://github.com/boringcache/cli/releases/download/${BORINGCACHE_VERSION}/boringcache-linux-${TARGETARCH}" \
       -o /usr/local/bin/boringcache && \
     chmod +x /usr/local/bin/boringcache
