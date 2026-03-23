@@ -113,8 +113,8 @@ pub fn identity_to_recipient(identity: &age::x25519::Identity) -> Result<age::x2
 }
 
 pub fn encrypt_data(data: &[u8], recipient: &age::x25519::Recipient) -> Result<Vec<u8>> {
-    let encryptor = age::Encryptor::with_recipients(vec![Box::new(recipient.clone())])
-        .expect("Failed to create encryptor");
+    let encryptor = age::Encryptor::with_recipients(std::iter::once(recipient as &dyn age::Recipient))
+        .context("Failed to create encryptor")?;
 
     let mut encrypted = Vec::new();
     let mut writer = encryptor
@@ -128,11 +128,7 @@ pub fn encrypt_data(data: &[u8], recipient: &age::x25519::Recipient) -> Result<V
 }
 
 pub fn decrypt_data(encrypted: &[u8], identity: &age::x25519::Identity) -> Result<Vec<u8>> {
-    let decryptor =
-        match age::Decryptor::new(encrypted).context("Failed to parse encrypted data")? {
-            age::Decryptor::Recipients(d) => d,
-            _ => anyhow::bail!("Unexpected encryption format"),
-        };
+    let decryptor = age::Decryptor::new(encrypted).context("Failed to parse encrypted data")?;
 
     let mut decrypted = Vec::new();
     let mut reader = decryptor
@@ -161,8 +157,8 @@ pub fn encrypt_stream<R: Read, W: Write>(
     output: W,
     recipient: &age::x25519::Recipient,
 ) -> Result<u64> {
-    let encryptor = age::Encryptor::with_recipients(vec![Box::new(recipient.clone())])
-        .expect("Failed to create encryptor");
+    let encryptor = age::Encryptor::with_recipients(std::iter::once(recipient as &dyn age::Recipient))
+        .context("Failed to create encryptor")?;
 
     let mut writer = encryptor
         .wrap_output(output)
@@ -182,20 +178,19 @@ pub fn decrypt_stream<R: Read, W: Write>(
     identity: Option<&age::x25519::Identity>,
     passphrase: Option<&SecretString>,
 ) -> Result<u64> {
-    let decryptor = match age::Decryptor::new(input).context("Failed to parse encrypted data")? {
-        age::Decryptor::Recipients(d) => {
-            let identity = identity.ok_or(IdentityRequired)?;
-            d.decrypt(std::iter::once(identity as &dyn age::Identity))
-                .context("Failed to decrypt data (wrong key?)")?
-        }
-        age::Decryptor::Passphrase(d) => {
-            let passphrase = passphrase.ok_or(PassphraseRequired)?;
-            d.decrypt(passphrase, None)
-                .context("Failed to decrypt data (wrong passphrase?)")?
-        }
-    };
+    let decryptor = age::Decryptor::new(input).context("Failed to parse encrypted data")?;
 
-    let mut reader = decryptor;
+    let mut reader = if decryptor.is_scrypt() {
+        let passphrase = passphrase.ok_or(PassphraseRequired)?;
+        decryptor
+            .decrypt(std::iter::once(&age::scrypt::Identity::new(passphrase.clone()) as &dyn age::Identity))
+            .context("Failed to decrypt data (wrong passphrase?)")?
+    } else {
+        let identity = identity.ok_or(IdentityRequired)?;
+        decryptor
+            .decrypt(std::iter::once(identity as &dyn age::Identity))
+            .context("Failed to decrypt data (wrong key?)")?
+    };
     let bytes_read = std::io::copy(&mut reader, &mut output).context("Failed to decrypt stream")?;
 
     Ok(bytes_read)
@@ -261,7 +256,7 @@ pub fn prompt_optional_passphrase(prompt: &str) -> Result<Option<SecretString>> 
     if passphrase.is_empty() {
         return Ok(None);
     }
-    Ok(Some(SecretString::new(passphrase)))
+    Ok(Some(SecretString::from(passphrase)))
 }
 
 pub fn load_identity_for_decryption(

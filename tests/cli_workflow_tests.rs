@@ -105,7 +105,7 @@ async fn build_manifest_and_archive(
 }
 
 fn encrypt_with_passphrase(data: &[u8], passphrase: &str) -> Vec<u8> {
-    let encryptor = age::Encryptor::with_user_passphrase(SecretString::new(passphrase.to_string()));
+    let encryptor = age::Encryptor::with_user_passphrase(SecretString::from(passphrase.to_string()));
     let mut encrypted = Vec::new();
     let mut writer = encryptor
         .wrap_output(&mut encrypted)
