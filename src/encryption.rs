@@ -113,8 +113,9 @@ pub fn identity_to_recipient(identity: &age::x25519::Identity) -> Result<age::x2
 }
 
 pub fn encrypt_data(data: &[u8], recipient: &age::x25519::Recipient) -> Result<Vec<u8>> {
-    let encryptor = age::Encryptor::with_recipients(std::iter::once(recipient as &dyn age::Recipient))
-        .context("Failed to create encryptor")?;
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(recipient as &dyn age::Recipient))
+            .context("Failed to create encryptor")?;
 
     let mut encrypted = Vec::new();
     let mut writer = encryptor
@@ -157,8 +158,9 @@ pub fn encrypt_stream<R: Read, W: Write>(
     output: W,
     recipient: &age::x25519::Recipient,
 ) -> Result<u64> {
-    let encryptor = age::Encryptor::with_recipients(std::iter::once(recipient as &dyn age::Recipient))
-        .context("Failed to create encryptor")?;
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(recipient as &dyn age::Recipient))
+            .context("Failed to create encryptor")?;
 
     let mut writer = encryptor
         .wrap_output(output)
@@ -183,7 +185,9 @@ pub fn decrypt_stream<R: Read, W: Write>(
     let mut reader = if decryptor.is_scrypt() {
         let passphrase = passphrase.ok_or(PassphraseRequired)?;
         decryptor
-            .decrypt(std::iter::once(&age::scrypt::Identity::new(passphrase.clone()) as &dyn age::Identity))
+            .decrypt(std::iter::once(
+                &age::scrypt::Identity::new(passphrase.clone()) as &dyn age::Identity,
+            ))
             .context("Failed to decrypt data (wrong passphrase?)")?
     } else {
         let identity = identity.ok_or(IdentityRequired)?;
