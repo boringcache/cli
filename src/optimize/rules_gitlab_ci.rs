@@ -39,7 +39,9 @@ pub fn apply(content: &str) -> Option<RuleResult> {
         OptimizeChange {
             description: "Removed GitLab cache: block in favor of boringcache CLI".to_string(),
             before_snippet: Some("cache:\n  key: ...\n  paths: ...".to_string()),
-            after_snippet: Some("before_script/after_script with boringcache restore/save".to_string()),
+            after_snippet: Some(
+                "before_script/after_script with boringcache restore/save".to_string(),
+            ),
         },
         OptimizeChange {
             description: "Added boringcache restore/save commands to GitLab scripts".to_string(),

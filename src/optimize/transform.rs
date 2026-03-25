@@ -250,8 +250,7 @@ mod tests {
 
     #[test]
     fn validate_output_with_token() {
-        let optimized =
-            "- uses: boringcache/one@v1\n  env:\n    BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}";
+        let optimized = "- uses: boringcache/one@v1\n  env:\n    BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}";
         assert!(validate_output("original content here", optimized).is_ok());
     }
 

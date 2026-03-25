@@ -304,7 +304,9 @@ async fn test_workspaces_workflow_success() {
 async fn test_restore_warns_on_invalid_signature_with_encrypted_manifest() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {
-        eprintln!("skipping test_restore_warns_on_invalid_signature_with_encrypted_manifest: networking disabled in sandbox");
+        eprintln!(
+            "skipping test_restore_warns_on_invalid_signature_with_encrypted_manifest: networking disabled in sandbox"
+        );
         return;
     }
     let mut server = Server::new_async().await;
@@ -476,7 +478,9 @@ async fn test_restore_warns_on_invalid_signature_with_encrypted_manifest() {
 async fn test_restore_fails_on_invalid_signature_in_strict_mode() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {
-        eprintln!("skipping test_restore_fails_on_invalid_signature_in_strict_mode: networking disabled in sandbox");
+        eprintln!(
+            "skipping test_restore_fails_on_invalid_signature_in_strict_mode: networking disabled in sandbox"
+        );
         return;
     }
     let mut server = Server::new_async().await;
@@ -635,7 +639,9 @@ async fn test_restore_fails_on_invalid_signature_in_strict_mode() {
 async fn test_restore_passphrase_manifest_requires_passphrase() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {
-        eprintln!("skipping test_restore_passphrase_manifest_requires_passphrase: networking disabled in sandbox");
+        eprintln!(
+            "skipping test_restore_passphrase_manifest_requires_passphrase: networking disabled in sandbox"
+        );
         return;
     }
     let mut server = Server::new_async().await;
@@ -851,7 +857,9 @@ async fn test_save_workflow_success() {
 async fn test_restore_ignores_archive_with_digest_mismatch() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {
-        eprintln!("skipping test_restore_ignores_archive_with_digest_mismatch: networking disabled in sandbox");
+        eprintln!(
+            "skipping test_restore_ignores_archive_with_digest_mismatch: networking disabled in sandbox"
+        );
         return;
     }
     let mut server = Server::new_async().await;
@@ -1600,7 +1608,9 @@ async fn test_restore_fail_on_cache_miss_flag() {
 async fn test_restore_fail_on_cache_miss_with_partial_hits() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {
-        eprintln!("skipping test_restore_fail_on_cache_miss_with_partial_hits: networking disabled in sandbox");
+        eprintln!(
+            "skipping test_restore_fail_on_cache_miss_with_partial_hits: networking disabled in sandbox"
+        );
         return;
     }
     let mut server = Server::new_async().await;
@@ -2115,7 +2125,9 @@ async fn test_restore_lookup_only_all_found() {
 async fn test_restore_lookup_only_does_not_create_target_directories() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {
-        eprintln!("skipping test_restore_lookup_only_does_not_create_target_directories: networking disabled in sandbox");
+        eprintln!(
+            "skipping test_restore_lookup_only_does_not_create_target_directories: networking disabled in sandbox"
+        );
         return;
     }
     let mut server = Server::new_async().await;
@@ -2350,7 +2362,9 @@ async fn test_save_workflow_with_force_flag() {
 async fn test_save_workflow_without_force_flag_skips_existing() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {
-        eprintln!("skipping test_save_workflow_without_force_flag_skips_existing: networking disabled in sandbox");
+        eprintln!(
+            "skipping test_save_workflow_without_force_flag_skips_existing: networking disabled in sandbox"
+        );
         return;
     }
     let mut server = Server::new_async().await;

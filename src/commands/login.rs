@@ -8,7 +8,9 @@ use std::io::IsTerminal;
 
 pub async fn execute() -> Result<()> {
     if !std::io::stdin().is_terminal() {
-        anyhow::bail!("'boringcache login' requires an interactive terminal. Use 'boringcache auth --token <token>' for non-interactive auth.");
+        anyhow::bail!(
+            "'boringcache login' requires an interactive terminal. Use 'boringcache auth --token <token>' for non-interactive auth."
+        );
     }
 
     let token = run_cli_connect_onboarding().await?;

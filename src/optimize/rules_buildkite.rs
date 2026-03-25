@@ -44,7 +44,8 @@ pub fn apply(content: &str) -> Option<RuleResult> {
             after_snippet: Some("commands with boringcache restore/save".to_string()),
         },
         OptimizeChange {
-            description: "Added boringcache restore/save commands to Buildkite commands".to_string(),
+            description: "Added boringcache restore/save commands to Buildkite commands"
+                .to_string(),
             before_snippet: None,
             after_snippet: Some(format!(
                 "- BORINGCACHE_API_TOKEN=${{BORINGCACHE_API_TOKEN}} boringcache restore ${{BUILDKITE_ORGANIZATION_SLUG}}/${{BUILDKITE_PIPELINE_SLUG}} \"{}\"\n- BORINGCACHE_API_TOKEN=${{BORINGCACHE_API_TOKEN}} boringcache save ${{BUILDKITE_ORGANIZATION_SLUG}}/${{BUILDKITE_PIPELINE_SLUG}} \"{}\"",
@@ -135,7 +136,10 @@ fn inject_commands(lines: &mut Vec<String>, entry: &str) -> bool {
     }
 
     let prepend = vec![
-        format!("{}curl -sSL https://install.boringcache.com/install.sh | sh", command_item_prefix),
+        format!(
+            "{}curl -sSL https://install.boringcache.com/install.sh | sh",
+            command_item_prefix
+        ),
         format!(
             "{}BORINGCACHE_API_TOKEN=${{BORINGCACHE_API_TOKEN}} boringcache restore ${{BUILDKITE_ORGANIZATION_SLUG}}/${{BUILDKITE_PIPELINE_SLUG}} \"{}\"",
             command_item_prefix, entry

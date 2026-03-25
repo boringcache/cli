@@ -3479,10 +3479,14 @@ async fn do_flush(
         )
         .await?;
 
-        eprintln!("KV flush: save_entry returned exists=true ({total_count} entries, {blob_count} blobs, digest={manifest_root_digest})");
+        eprintln!(
+            "KV flush: save_entry returned exists=true ({total_count} entries, {blob_count} blobs, digest={manifest_root_digest})"
+        );
         return Ok((entries, merged_blob_order, save_response.cache_entry_id));
     }
-    eprintln!("KV flush: uploading {total_count} entries, {blob_count} blobs, pointer={expected_manifest_size} bytes");
+    eprintln!(
+        "KV flush: uploading {total_count} entries, {blob_count} blobs, pointer={expected_manifest_size} bytes"
+    );
 
     let upload_stats_holder = Arc::new(std::sync::Mutex::new(BlobUploadStats::default()));
     let publish_upload_stats = upload_stats_holder.clone();
@@ -3594,8 +3598,7 @@ async fn do_flush(
     } else if pending_alias_count > 0 {
         eprintln!(
             "KV alias publish accepted for server-side completion: cache_entry_id={} pending_alias_tags={}",
-            save_response.cache_entry_id,
-            pending_alias_count
+            save_response.cache_entry_id, pending_alias_count
         );
     }
 

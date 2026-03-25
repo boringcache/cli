@@ -26,12 +26,14 @@ pub fn get_workspace_name(workspace_option: Option<String>) -> Result<String> {
             if let Some(default_workspace) = config.default_workspace {
                 Ok(default_workspace)
             } else {
-                Err(anyhow::anyhow!("No workspace specified. Set BORINGCACHE_DEFAULT_WORKSPACE env var or use 'boringcache config set default_workspace <name>'"))
+                Err(anyhow::anyhow!(
+                    "No workspace specified. Set BORINGCACHE_DEFAULT_WORKSPACE env var or use 'boringcache config set default_workspace <name>'"
+                ))
             }
         }
-        Err(_) => {
-            Err(anyhow::anyhow!("No workspace specified and config not found. Set BORINGCACHE_DEFAULT_WORKSPACE env var or run 'boringcache auth' first"))
-        }
+        Err(_) => Err(anyhow::anyhow!(
+            "No workspace specified and config not found. Set BORINGCACHE_DEFAULT_WORKSPACE env var or run 'boringcache auth' first"
+        )),
     }
 }
 
@@ -68,7 +70,9 @@ pub struct RestoreSpec {
 
 #[derive(Debug, Error)]
 pub enum IdentifierParseError {
-    #[error("Invalid cache specifier '{input}'. Expected format 'tag:path' (example: 'ruby-deps:vendor/bundle').")]
+    #[error(
+        "Invalid cache specifier '{input}'. Expected format 'tag:path' (example: 'ruby-deps:vendor/bundle')."
+    )]
     InvalidFormat { input: String },
     #[error("Tag is missing in '{input}'. Add a tag before ':'.")]
     MissingTag { input: String },

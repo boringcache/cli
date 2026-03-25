@@ -1594,7 +1594,7 @@ async fn process_restore_oci(
             Ok(metadata) => metadata.is_file() && metadata.len() == blob.size_bytes,
             Err(err) if err.kind() == ErrorKind::NotFound => false,
             Err(err) => {
-                return Err(err).with_context(|| format!("Failed to stat {}", blob_path.display()))
+                return Err(err).with_context(|| format!("Failed to stat {}", blob_path.display()));
             }
         };
         if !is_present {

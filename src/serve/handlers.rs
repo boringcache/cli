@@ -749,7 +749,7 @@ async fn preflight_manifest_blob_url(
                 {
                     Ok(url) => url,
                     Err(error) => {
-                        return Err((digest, format!("refresh failed: {}", error.message())))
+                        return Err((digest, format!("refresh failed: {}", error.message())));
                     }
                 };
             }
@@ -1674,11 +1674,7 @@ async fn put_upload(
             EmptyFinalizeReuse::Missing => {
                 eprintln!(
                     "OCI finalize empty payload (no local/remote reuse): upload={} digest={} bytes_before={} bytes_written={} write_offset={}",
-                    uuid,
-                    digest_param,
-                    bytes_before,
-                    bytes_written,
-                    write_offset
+                    uuid, digest_param, bytes_before, bytes_written, write_offset
                 );
                 return Err(OciError::digest_invalid(format!(
                     "expected {digest_param}, got {actual_digest}"

@@ -95,7 +95,7 @@ impl<'a> ManifestBuilder<'a> {
             .skip_hidden(false)
             .process_read_dir(move |_depth, _path, _read_dir_state, children| {
                 children.retain(|entry| {
-                    if let Ok(ref dir_entry) = entry {
+                    if let Ok(dir_entry) = entry {
                         let path = dir_entry.path();
                         if let Ok(rel) = path.strip_prefix(&root_for_filter) {
                             let rel_str = normalize_manifest_path(rel);

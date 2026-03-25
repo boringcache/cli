@@ -200,7 +200,7 @@ fn write_archive(
                 Err(err) => {
                     return Err(err).with_context(|| {
                         format!("Failed to inspect path for tar: {}", manifest_file.path)
-                    })
+                    });
                 }
             }
 
