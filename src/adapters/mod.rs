@@ -4,6 +4,39 @@ pub const CONTENT_ADDRESSED_ENCRYPTION_FALLBACK_WARNING: &str =
     "Detected content-addressed layout but encryption is enabled; using archive transport";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CasAdapterKind {
+    Oci,
+    File,
+}
+
+impl CasAdapterKind {
+    pub fn accepts_server_kind(self, server_kind: crate::cache_adapter::CacheAdapterKind) -> bool {
+        match self {
+            CasAdapterKind::Oci => matches!(
+                server_kind,
+                crate::cache_adapter::CacheAdapterKind::Cas
+                    | crate::cache_adapter::CacheAdapterKind::CasOci
+            ),
+            CasAdapterKind::File => matches!(
+                server_kind,
+                crate::cache_adapter::CacheAdapterKind::Cas
+                    | crate::cache_adapter::CacheAdapterKind::CasBazel
+            ),
+        }
+    }
+
+    pub fn cas_layout(self, detected_kind: crate::cache_adapter::CacheAdapterKind) -> &'static str {
+        match self {
+            CasAdapterKind::Oci => "oci-v1",
+            CasAdapterKind::File => match detected_kind {
+                crate::cache_adapter::CacheAdapterKind::CasBazel => "bazel-v2",
+                _ => "file-v1",
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterDispatchKind {
     Archive,
     Oci,
@@ -17,6 +50,29 @@ impl AdapterDispatchKind {
             AdapterDispatchKind::Oci => crate::cache_adapter::CacheAdapterKind::CasOci,
             AdapterDispatchKind::File => crate::cache_adapter::CacheAdapterKind::Cas,
         }
+    }
+
+    pub fn cas(self) -> Option<CasAdapterKind> {
+        match self {
+            AdapterDispatchKind::Archive => None,
+            AdapterDispatchKind::Oci => Some(CasAdapterKind::Oci),
+            AdapterDispatchKind::File => Some(CasAdapterKind::File),
+        }
+    }
+
+    pub fn accepts_server_kind(self, server_kind: crate::cache_adapter::CacheAdapterKind) -> bool {
+        match self.cas() {
+            Some(cas_adapter) => cas_adapter.accepts_server_kind(server_kind),
+            None => server_kind == crate::cache_adapter::CacheAdapterKind::Archive,
+        }
+    }
+
+    pub fn cas_layout(
+        self,
+        detected_kind: crate::cache_adapter::CacheAdapterKind,
+    ) -> Option<&'static str> {
+        self.cas()
+            .map(|cas_adapter| cas_adapter.cas_layout(detected_kind))
     }
 }
 
@@ -78,16 +134,37 @@ pub struct LayoutAdapterSelection {
     pub used_encryption_fallback: bool,
 }
 
-pub fn cas_layout_for(
-    detected_kind: crate::cache_adapter::CacheAdapterKind,
-    adapter: AdapterDispatchKind,
-) -> Option<&'static str> {
-    match adapter {
-        AdapterDispatchKind::Archive => None,
-        AdapterDispatchKind::Oci => Some("oci-v1"),
-        AdapterDispatchKind::File => match detected_kind {
-            crate::cache_adapter::CacheAdapterKind::CasBazel => Some("bazel-v2"),
-            _ => Some("file-v1"),
-        },
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_adapter_uses_bazel_layout_when_detected() {
+        assert_eq!(
+            AdapterDispatchKind::File.cas_layout(crate::cache_adapter::CacheAdapterKind::CasBazel),
+            Some("bazel-v2")
+        );
+        assert_eq!(
+            AdapterDispatchKind::File.cas_layout(crate::cache_adapter::CacheAdapterKind::Cas),
+            Some("file-v1")
+        );
+    }
+
+    #[test]
+    fn oci_adapter_accepts_generic_cas_server_mode() {
+        assert!(AdapterDispatchKind::Oci
+            .accepts_server_kind(crate::cache_adapter::CacheAdapterKind::Cas));
+        assert!(AdapterDispatchKind::Oci
+            .accepts_server_kind(crate::cache_adapter::CacheAdapterKind::CasOci));
+        assert!(!AdapterDispatchKind::Oci
+            .accepts_server_kind(crate::cache_adapter::CacheAdapterKind::CasBazel));
+    }
+
+    #[test]
+    fn encrypted_content_addressed_layouts_fall_back_to_archive() {
+        let selection =
+            select_layout_adapter(crate::cache_adapter::CacheAdapterKind::CasOci, true).unwrap();
+        assert_eq!(selection.adapter, AdapterDispatchKind::Archive);
+        assert!(selection.used_encryption_fallback);
     }
 }

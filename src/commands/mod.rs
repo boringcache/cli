@@ -1,4 +1,6 @@
 pub mod auth;
+pub mod cas_publish;
+pub mod cas_restore;
 pub mod check;
 pub mod config;
 pub mod delete;
@@ -12,5 +14,6 @@ pub mod run;
 pub mod save;
 pub mod serve;
 pub mod setup_encryption;
+pub mod upload_receipts;
 pub mod utils;
 pub mod workspaces;
