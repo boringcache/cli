@@ -182,6 +182,7 @@ mod error;
 mod go_cache;
 mod gradle;
 mod kv;
+mod kv_publish;
 mod maven;
 mod nx;
 mod route;
