@@ -9,7 +9,10 @@ use anyhow::Result;
 pub fn parse_workspace_slug(workspace: &str) -> Result<(String, String)> {
     let parts: Vec<&str> = workspace.split('/').collect();
     if parts.len() != 2 {
-        anyhow::bail!("Invalid workspace format '{}'. Expected format: namespace/workspace (e.g., 'myorg/app')", workspace);
+        anyhow::bail!(
+            "Invalid workspace format '{}'. Expected format: namespace/workspace (e.g., 'myorg/app')",
+            workspace
+        );
     }
 
     let namespace = parts[0];
@@ -29,11 +32,17 @@ pub fn parse_workspace_slug(workspace: &str) -> Result<(String, String)> {
     };
 
     if !is_valid_name(namespace) {
-        anyhow::bail!("Invalid namespace '{}'. Must contain only alphanumeric characters, hyphens, underscores, and dots. Cannot start or end with hyphens or dots.", namespace);
+        anyhow::bail!(
+            "Invalid namespace '{}'. Must contain only alphanumeric characters, hyphens, underscores, and dots. Cannot start or end with hyphens or dots.",
+            namespace
+        );
     }
 
     if !is_valid_name(workspace) {
-        anyhow::bail!("Invalid workspace '{}'. Must contain only alphanumeric characters, hyphens, underscores, and dots. Cannot start or end with hyphens or dots.", workspace);
+        anyhow::bail!(
+            "Invalid workspace '{}'. Must contain only alphanumeric characters, hyphens, underscores, and dots. Cannot start or end with hyphens or dots.",
+            workspace
+        );
     }
 
     Ok((namespace.to_string(), workspace.to_string()))

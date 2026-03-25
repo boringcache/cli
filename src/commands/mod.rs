@@ -13,6 +13,7 @@ pub mod onboard;
 pub mod restore;
 pub mod run;
 pub mod save;
+pub mod save_support;
 pub mod serve;
 pub mod setup_encryption;
 pub mod signature_policy;

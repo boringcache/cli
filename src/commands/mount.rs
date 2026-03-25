@@ -17,7 +17,7 @@ use crate::ci_detection::detect_ci_environment;
 use crate::commands::cas_publish::{self, BlobUploadSource};
 use crate::commands::cas_restore::{self, BlobDownloadTarget, FetchCasPointerOutcome};
 use crate::commands::file_materialize::materialize_file_cas_entries;
-use crate::commands::signature_policy::enforce_server_signature;
+use crate::commands::signature_policy::verify_restore_signature;
 use crate::manifest::{EntryType, ManifestBuilder};
 use crate::transfer::send_transfer_request_with_retry;
 use crate::ui;
@@ -278,7 +278,7 @@ async fn initial_restore(
         hit.storage_mode.as_deref(),
         hit.cas_layout.as_deref(),
     );
-    let adapter = crate::adapters::select_transport_adapter(restore_adapter)?;
+    let adapter = crate::adapters::select_transport_adapter(restore_adapter);
     log::debug!(
         "Mount restore adapter dispatch tag={} adapter={}",
         hit.tag,
@@ -480,11 +480,12 @@ async fn initial_restore_archive(
         return Ok(RestoreAction::NoRemoteCache);
     }
 
-    enforce_server_signature(
+    verify_restore_signature(
         hit,
         &manifest.root.digest,
         Some(manifest.tag.as_str()),
         verbose,
+        None,
         require_server_signature,
     )?;
 
@@ -684,7 +685,14 @@ async fn initial_restore_oci(
         hit,
         crate::adapters::CasAdapterKind::Oci,
         |hit, root_digest| {
-            enforce_server_signature(hit, root_digest, None, verbose, require_server_signature)
+            verify_restore_signature(
+                hit,
+                root_digest,
+                None,
+                verbose,
+                None,
+                require_server_signature,
+            )
         },
     )
     .await?
@@ -820,7 +828,14 @@ async fn initial_restore_file(
         hit,
         crate::adapters::CasAdapterKind::File,
         |hit, root_digest| {
-            enforce_server_signature(hit, root_digest, None, verbose, require_server_signature)
+            verify_restore_signature(
+                hit,
+                root_digest,
+                None,
+                verbose,
+                None,
+                require_server_signature,
+            )
         },
     )
     .await?
@@ -1035,8 +1050,7 @@ async fn sync_to_remote(
         adapter_detection.kind.as_str(),
         adapter_detection.reason
     );
-    let adapter_selection =
-        crate::adapters::select_layout_adapter(adapter_detection.kind, encrypt)?;
+    let adapter_selection = crate::adapters::select_layout_adapter(adapter_detection.kind, encrypt);
     if adapter_selection.used_encryption_fallback {
         ui::warn(crate::adapters::CONTENT_ADDRESSED_ENCRYPTION_FALLBACK_WARNING);
     }
@@ -1134,30 +1148,14 @@ async fn sync_to_remote_cas(
         }
     }
 
-    let ci_provider = detect_ci_environment();
-    let request = SaveRequest {
-        tag: resolved_tag.to_string(),
-        write_scope_tag: None,
-        manifest_root_digest: bundle.manifest_root_digest.clone(),
-        compression_algorithm: "zstd".to_string(),
-        storage_mode: Some("cas".to_string()),
-        blob_count: Some(bundle.confirm_spec.blob_count),
-        blob_total_size_bytes: Some(bundle.confirm_spec.blob_total_size_bytes),
-        cas_layout: bundle.cas_layout.clone(),
-        manifest_format_version: Some(1),
-        total_size_bytes: bundle.total_size_bytes,
-        uncompressed_size: None,
-        compressed_size: None,
-        file_count: Some(bundle.confirm_spec.file_count),
-        expected_manifest_digest: Some(bundle.confirm_spec.manifest_digest.clone()),
-        expected_manifest_size: Some(bundle.confirm_spec.manifest_size),
-        force: None,
-        use_multipart: None,
-        ci_provider: Some(ci_provider),
-        encrypted: None,
-        encryption_algorithm: None,
-        encryption_recipient_hint: None,
-    };
+    let request = cas_publish::build_save_request(
+        resolved_tag.to_string(),
+        bundle.manifest_root_digest.clone(),
+        bundle.total_size_bytes,
+        bundle.cas_layout.clone(),
+        &bundle.confirm_spec,
+        false,
+    );
 
     if verbose {
         ui::info("  Requesting CAS upload plan...");
@@ -1203,12 +1201,15 @@ async fn sync_to_remote_cas(
         ui::info("  Confirming CAS upload...");
     }
 
-    let confirm_request =
-        cas_publish::build_confirm_request(&bundle.confirm_spec, publish_result.manifest_etag);
-    api_client
-        .confirm(workspace, &save_response.cache_entry_id, &confirm_request)
-        .await
-        .with_context(|| format!("Failed to confirm CAS upload for {}", resolved_tag))?;
+    cas_publish::confirm_upload(
+        api_client,
+        workspace,
+        &save_response.cache_entry_id,
+        &bundle.confirm_spec,
+        publish_result.manifest_etag,
+    )
+    .await
+    .with_context(|| format!("Failed to confirm CAS upload for {}", resolved_tag))?;
 
     if verbose {
         ui::info(&format!(

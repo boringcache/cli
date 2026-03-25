@@ -91,7 +91,9 @@ fn set_config_value(key: String, value: String) -> Result<()> {
         match key.as_str() {
             "default_workspace" | "default-workspace" => {
                 ui::info("Warning: You are using environment variables for authentication.");
-                ui::info(&format!("   To set default_workspace, use: export BORINGCACHE_DEFAULT_WORKSPACE=\"{value}\""));
+                ui::info(&format!(
+                    "   To set default_workspace, use: export BORINGCACHE_DEFAULT_WORKSPACE=\"{value}\""
+                ));
                 ui::info("   Or remove BORINGCACHE_API_TOKEN to use config file mode.");
                 return Ok(());
             }
@@ -119,7 +121,9 @@ fn set_config_value(key: String, value: String) -> Result<()> {
             }
         }
         "token" => {
-            anyhow::bail!("Token cannot be set via config command. Use 'boringcache auth --token <token>' instead.");
+            anyhow::bail!(
+                "Token cannot be set via config command. Use 'boringcache auth --token <token>' instead."
+            );
         }
         _ => anyhow::bail!(
             "Unknown config key: {}. Valid keys: api_url, default_workspace",

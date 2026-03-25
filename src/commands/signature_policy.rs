@@ -101,23 +101,6 @@ pub(crate) fn verify_restore_signature(
     }
 }
 
-pub(crate) fn enforce_server_signature(
-    hit: &CacheResolutionEntry,
-    root_digest: &str,
-    manifest_tag: Option<&str>,
-    verbose: bool,
-    require_server_signature: bool,
-) -> Result<()> {
-    verify_restore_signature(
-        hit,
-        root_digest,
-        manifest_tag,
-        verbose,
-        None,
-        require_server_signature,
-    )
-}
-
 fn signature_policy_failure(message: String, require_server_signature: bool) -> Result<()> {
     if require_server_signature {
         anyhow::bail!(message);

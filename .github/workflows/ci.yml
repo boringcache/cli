@@ -6,8 +6,12 @@ on:
   pull_request:
     branches: ["main"]
 
+concurrency:
+  group: cli-ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
-  RUST_VERSION: "1.89"
+  RUST_VERSION: "1.94"
   BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
   SCCACHE_VERSION: "v0.13.0"
   CARGO_INCREMENTAL: "0"
@@ -16,9 +20,6 @@ jobs:
   test-boringcache:
     name: Test CLI (BoringCache)
     runs-on: ubuntu-latest
-    concurrency:
-      group: cli-ci-native-bench-${{ github.ref_name }}
-      cancel-in-progress: false
 
     steps:
       - name: Checkout code
@@ -140,7 +141,7 @@ jobs:
           # Linux musl build (static, for Alpine/minimal containers)
           - runner: ubuntu-latest
             name: linux-musl-amd64
-            container: rust:1.89-alpine
+            container: rust:1.94-alpine
             target: x86_64-unknown-linux-musl
             binary_name: boringcache-linux-musl-amd64
             use_docker: true

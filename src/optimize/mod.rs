@@ -57,6 +57,7 @@ impl CiType {
         }
     }
 
+    #[allow(dead_code)]
     pub fn deterministic_supported(self) -> bool {
         matches!(
             self,

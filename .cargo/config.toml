@@ -1,0 +1,4 @@
+[alias]
+xfmt = "fmt --all --check"
+xclippy = "clippy --locked --all-targets -- -D warnings"
+xtest = "test --locked"

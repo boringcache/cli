@@ -208,6 +208,7 @@ pub fn preserve_trailing_newline(original: &str, optimized: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub fn no_changes_result(path: String, ci_type: CiType, reason: String) -> OptimizeFileResult {
     OptimizeFileResult {
         path,
@@ -220,6 +221,7 @@ pub fn no_changes_result(path: String, ci_type: CiType, reason: String) -> Optim
     }
 }
 
+#[allow(dead_code)]
 pub fn error_result(path: String, ci_type: CiType, error: String) -> OptimizeFileResult {
     OptimizeFileResult {
         path,
@@ -250,8 +252,7 @@ mod tests {
 
     #[test]
     fn validate_output_with_token() {
-        let optimized =
-            "- uses: boringcache/one@v1\n  env:\n    BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}";
+        let optimized = "- uses: boringcache/one@v1\n  env:\n    BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}";
         assert!(validate_output("original content here", optimized).is_ok());
     }
 

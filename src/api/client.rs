@@ -3030,7 +3030,9 @@ mod tests {
         };
 
         if !networking_available() {
-            eprintln!("skipping test_blob_upload_urls_batches_large_requests: networking disabled in sandbox");
+            eprintln!(
+                "skipping test_blob_upload_urls_batches_large_requests: networking disabled in sandbox"
+            );
             return;
         }
 
@@ -3089,7 +3091,9 @@ mod tests {
         };
 
         if !networking_available() {
-            eprintln!("skipping test_blob_upload_urls_sends_cache_entry_id: networking disabled in sandbox");
+            eprintln!(
+                "skipping test_blob_upload_urls_sends_cache_entry_id: networking disabled in sandbox"
+            );
             return;
         }
 
@@ -3149,7 +3153,9 @@ mod tests {
         };
 
         if !networking_available() {
-            eprintln!("skipping test_blob_download_urls_batches_large_requests: networking disabled in sandbox");
+            eprintln!(
+                "skipping test_blob_download_urls_batches_large_requests: networking disabled in sandbox"
+            );
             return;
         }
 

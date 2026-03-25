@@ -1,7 +1,5 @@
 use std::future::Future;
 
-use anyhow::Result;
-
 pub const CONTENT_ADDRESSED_ENCRYPTION_FALLBACK_WARNING: &str =
     "Detected content-addressed layout but encryption is enabled; using archive transport";
 
@@ -101,21 +99,20 @@ impl AdapterDispatchKind {
 
 pub fn select_transport_adapter(
     kind: crate::cache_adapter::CacheAdapterKind,
-) -> Result<AdapterDispatchKind> {
-    let adapter = match kind {
+) -> AdapterDispatchKind {
+    match kind {
         crate::cache_adapter::CacheAdapterKind::Archive => AdapterDispatchKind::Archive,
         crate::cache_adapter::CacheAdapterKind::CasOci => AdapterDispatchKind::Oci,
         crate::cache_adapter::CacheAdapterKind::Cas
         | crate::cache_adapter::CacheAdapterKind::CasBazel => AdapterDispatchKind::File,
-    };
-    Ok(adapter)
+    }
 }
 
 pub fn select_layout_adapter(
     kind: crate::cache_adapter::CacheAdapterKind,
     encrypt: bool,
-) -> Result<LayoutAdapterSelection> {
-    let selection = match kind {
+) -> LayoutAdapterSelection {
+    match kind {
         crate::cache_adapter::CacheAdapterKind::Archive => LayoutAdapterSelection {
             adapter: AdapterDispatchKind::Archive,
             used_encryption_fallback: false,
@@ -147,8 +144,7 @@ pub fn select_layout_adapter(
                 }
             }
         }
-    };
-    Ok(selection)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,8 +181,7 @@ mod tests {
 
     #[test]
     fn encrypted_content_addressed_layouts_fall_back_to_archive() {
-        let selection =
-            select_layout_adapter(crate::cache_adapter::CacheAdapterKind::CasOci, true).unwrap();
+        let selection = select_layout_adapter(crate::cache_adapter::CacheAdapterKind::CasOci, true);
         assert_eq!(selection.adapter, AdapterDispatchKind::Archive);
         assert!(selection.used_encryption_fallback);
     }

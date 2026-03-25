@@ -1,7 +1,8 @@
 use crate::api::models::cache::{
-    BlobDescriptor, BlobReceipt, BlobUploadUrlsResponse, ConfirmRequest, SaveResponse,
+    BlobDescriptor, BlobReceipt, BlobUploadUrlsResponse, ConfirmRequest, SaveRequest, SaveResponse,
 };
 use crate::api::ApiClient;
+use crate::ci_detection::detect_ci_environment;
 use crate::progress::TransferProgress;
 use crate::telemetry::StorageMetrics;
 use crate::upload_receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
@@ -195,6 +196,53 @@ pub(crate) fn build_confirm_request(
         tag: Some(spec.tag.clone()),
         write_scope_tag: None,
     }
+}
+
+pub(crate) fn build_save_request(
+    tag: String,
+    manifest_root_digest: String,
+    total_size_bytes: u64,
+    cas_layout: Option<String>,
+    confirm_spec: &CasConfirmSpec,
+    force: bool,
+) -> SaveRequest {
+    SaveRequest {
+        tag,
+        write_scope_tag: None,
+        manifest_root_digest,
+        compression_algorithm: "zstd".to_string(),
+        storage_mode: Some("cas".to_string()),
+        blob_count: Some(confirm_spec.blob_count),
+        blob_total_size_bytes: Some(confirm_spec.blob_total_size_bytes),
+        cas_layout,
+        manifest_format_version: Some(1),
+        total_size_bytes,
+        uncompressed_size: None,
+        compressed_size: None,
+        file_count: Some(confirm_spec.file_count),
+        expected_manifest_digest: Some(confirm_spec.manifest_digest.clone()),
+        expected_manifest_size: Some(confirm_spec.manifest_size),
+        force: force.then_some(true),
+        use_multipart: None,
+        ci_provider: Some(detect_ci_environment()),
+        encrypted: None,
+        encryption_algorithm: None,
+        encryption_recipient_hint: None,
+    }
+}
+
+pub(crate) async fn confirm_upload(
+    api_client: &ApiClient,
+    workspace: &str,
+    cache_entry_id: &str,
+    confirm_spec: &CasConfirmSpec,
+    manifest_etag: Option<String>,
+) -> Result<()> {
+    let confirm_request = build_confirm_request(confirm_spec, manifest_etag);
+    api_client
+        .confirm(workspace, cache_entry_id, &confirm_request)
+        .await?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

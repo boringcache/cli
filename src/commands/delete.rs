@@ -168,7 +168,7 @@ mod tests {
     fn proxy_root_tag_matches_serve_internal_root_tag() {
         let tags = [
             "grpc-bazel-remote-cache",
-            "sccache-rust1.89",
+            "sccache-rust1.94",
             "nx-main-ubuntu-24-x86_64",
         ];
         for tag in tags {
