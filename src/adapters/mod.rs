@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use anyhow::Result;
 
 pub const CONTENT_ADDRESSED_ENCRYPTION_FALLBACK_WARNING: &str =
@@ -73,6 +75,27 @@ impl AdapterDispatchKind {
     ) -> Option<&'static str> {
         self.cas()
             .map(|cas_adapter| cas_adapter.cas_layout(detected_kind))
+    }
+
+    pub async fn dispatch<T, ArchiveFn, OciFn, FileFn, ArchiveFuture, OciFuture, FileFuture>(
+        self,
+        archive: ArchiveFn,
+        oci: OciFn,
+        file: FileFn,
+    ) -> T
+    where
+        ArchiveFn: FnOnce() -> ArchiveFuture,
+        OciFn: FnOnce() -> OciFuture,
+        FileFn: FnOnce() -> FileFuture,
+        ArchiveFuture: Future<Output = T>,
+        OciFuture: Future<Output = T>,
+        FileFuture: Future<Output = T>,
+    {
+        match self {
+            AdapterDispatchKind::Archive => archive().await,
+            AdapterDispatchKind::Oci => oci().await,
+            AdapterDispatchKind::File => file().await,
+        }
     }
 }
 

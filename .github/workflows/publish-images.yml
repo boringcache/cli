@@ -12,8 +12,6 @@ on:
   push:
     branches: [main]
     paths: ["images/**"]
-  pull_request:
-    paths: ["images/**"]
 
 permissions:
   contents: read
@@ -51,7 +49,6 @@ jobs:
           echo "Resolved CLI version: ${VERSION}"
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
@@ -59,7 +56,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check if images already exist
-        if: github.event_name != 'pull_request'
         id: exists
         env:
           GH_TOKEN: ${{ github.token }}
@@ -72,11 +68,8 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # ---------------------------------------------------------------
-      # Release / push / dispatch — boringcache/one with multi-arch push
-      # ---------------------------------------------------------------
       - name: Build & push bookworm
-        if: github.event_name != 'pull_request' && steps.exists.outputs.skip != 'true'
+        if: steps.exists.outputs.skip != 'true'
         uses: boringcache/one@v1
         with:
           mode: docker
@@ -96,7 +89,7 @@ jobs:
           BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
 
       - name: Build & push bookworm-build
-        if: github.event_name != 'pull_request' && steps.exists.outputs.skip != 'true'
+        if: steps.exists.outputs.skip != 'true'
         uses: boringcache/one@v1
         with:
           mode: docker
@@ -115,49 +108,14 @@ jobs:
         env:
           BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
 
-      # ---------------------------------------------------------------
-      # PR — plain docker build, single-arch, validate + smoke test
-      # ---------------------------------------------------------------
-      - name: Validate bookworm (PR)
-        if: github.event_name == 'pull_request'
-        run: |
-          docker build \
-            --build-arg BORINGCACHE_VERSION="${{ steps.version.outputs.cli_version }}" \
-            -t ${{ env.IMAGE }}:bookworm \
-            images/bookworm
-
-      - name: Validate bookworm-build (PR)
-        if: github.event_name == 'pull_request'
-        run: |
-          docker build \
-            --build-arg BORINGCACHE_TAG=bookworm \
-            -t ${{ env.IMAGE }}:bookworm-build \
-            images/bookworm-build
-
-      - name: Smoke test (PR)
-        if: github.event_name == 'pull_request'
-        run: |
-          docker run --rm ${{ env.IMAGE }}:bookworm sh -c '
-            set -e
-            mise --version
-            boringcache --version
-            boringcache run test-org/test tag:path -- echo "boringcache run fallback OK"
-          '
-          docker run --rm ${{ env.IMAGE }}:bookworm-build sh -c '
-            set -e
-            gcc --version | head -1
-            mise --version
-            boringcache --version
-          '
-
       - name: Summary (skipped)
-        if: github.event_name != 'pull_request' && steps.exists.outputs.skip == 'true'
+        if: steps.exists.outputs.skip == 'true'
         run: |
           VERSION="${{ steps.version.outputs.cli_version }}"
           echo "## Base images already exist for ${VERSION} — skipped" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summary
-        if: github.event_name != 'pull_request' && steps.exists.outputs.skip != 'true'
+        if: steps.exists.outputs.skip != 'true'
         run: |
           VERSION="${{ steps.version.outputs.cli_version }}"
           echo "## Base images published" >> "$GITHUB_STEP_SUMMARY"
@@ -180,7 +138,6 @@ jobs:
     name: Smoke test
     needs: [publish]
     runs-on: ubuntu-24.04
-    if: github.event_name != 'pull_request'
 
     steps:
       - name: Log in to GHCR

@@ -16,9 +16,8 @@ use crate::archive::create_tar_archive;
 use crate::ci_detection::detect_ci_environment;
 use crate::commands::cas_publish::{self, BlobUploadSource};
 use crate::commands::cas_restore::{self, BlobDownloadTarget, FetchCasPointerOutcome};
-use crate::commands::file_materialize::{create_symlink, remove_path_if_exists};
+use crate::commands::file_materialize::materialize_file_cas_entries;
 use crate::commands::signature_policy::verify_restore_signature;
-use crate::commands::upload_receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
 use crate::manifest::{EntryType, ManifestBuilder};
 use crate::transfer::send_transfer_request_with_retry;
 use crate::ui;
@@ -285,34 +284,59 @@ async fn initial_restore(
         hit.tag,
         adapter.transport_kind().as_str()
     );
-    match adapter {
-        crate::adapters::AdapterDispatchKind::Oci => {
-            return initial_restore_oci(
-                api_client,
-                workspace,
-                hit,
-                local_path,
-                verbose,
-                force,
-                require_server_signature,
-            )
-            .await;
-        }
-        crate::adapters::AdapterDispatchKind::File => {
-            return initial_restore_file(
-                api_client,
-                workspace,
-                hit,
-                local_path,
-                verbose,
-                force,
-                require_server_signature,
-            )
-            .await;
-        }
-        crate::adapters::AdapterDispatchKind::Archive => {}
-    }
+    let archive_identity = identity.clone();
+    let archive_passphrase_cache = passphrase_cache.clone();
+    adapter
+        .dispatch(
+            || {
+                initial_restore_archive(
+                    api_client,
+                    hit,
+                    local_path,
+                    verbose,
+                    force,
+                    archive_identity,
+                    archive_passphrase_cache,
+                    require_server_signature,
+                )
+            },
+            || {
+                initial_restore_oci(
+                    api_client,
+                    workspace,
+                    hit,
+                    local_path,
+                    verbose,
+                    force,
+                    require_server_signature,
+                )
+            },
+            || {
+                initial_restore_file(
+                    api_client,
+                    workspace,
+                    hit,
+                    local_path,
+                    verbose,
+                    force,
+                    require_server_signature,
+                )
+            },
+        )
+        .await
+}
 
+#[allow(clippy::too_many_arguments)]
+async fn initial_restore_archive(
+    api_client: &ApiClient,
+    hit: &crate::api::models::cache::CacheResolutionEntry,
+    local_path: &Path,
+    verbose: bool,
+    force: bool,
+    identity: Option<String>,
+    passphrase_cache: Arc<Mutex<crate::encryption::PassphraseCache>>,
+    require_server_signature: bool,
+) -> Result<RestoreAction> {
     let remote_manifest_digest = hit
         .manifest_root_digest
         .as_ref()
@@ -883,179 +907,7 @@ async fn initial_restore_file(
         .await?;
     }
 
-    for entry in &pointer.entries {
-        if entry.entry_type != crate::manifest::EntryType::Dir {
-            continue;
-        }
-        let destination = crate::cas_file::safe_join(local_path, &entry.path)?;
-        remove_path_if_exists(&destination).await?;
-        tokio::fs::create_dir_all(&destination)
-            .await
-            .with_context(|| format!("Failed to create {}", destination.display()))?;
-    }
-
-    #[derive(Clone)]
-    struct FileMaterializeJob {
-        destination: std::path::PathBuf,
-        source_blob: std::path::PathBuf,
-        executable: bool,
-    }
-
-    #[derive(Clone)]
-    struct FileLinkJob {
-        destination: std::path::PathBuf,
-        primary_destination: std::path::PathBuf,
-        source_blob: std::path::PathBuf,
-        executable: bool,
-    }
-
-    let mut primary_jobs: Vec<FileMaterializeJob> = Vec::new();
-    let mut link_jobs: Vec<FileLinkJob> = Vec::new();
-    let mut symlink_jobs: Vec<(std::path::PathBuf, String)> = Vec::new();
-    let mut primary_by_key: HashMap<(String, bool), std::path::PathBuf> = HashMap::new();
-
-    for entry in &pointer.entries {
-        match entry.entry_type {
-            crate::manifest::EntryType::Dir => {}
-            crate::manifest::EntryType::File => {
-                let destination = crate::cas_file::safe_join(local_path, &entry.path)?;
-                let digest = entry
-                    .digest
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Missing file digest for {}", entry.path))?;
-                let source_blob = destination_by_digest
-                    .get(digest)
-                    .ok_or_else(|| anyhow::anyhow!("Missing blob for digest {}", digest))?
-                    .clone();
-                let executable = entry.executable == Some(true);
-                let key = (digest.clone(), executable);
-                if let Some(primary_destination) = primary_by_key.get(&key) {
-                    link_jobs.push(FileLinkJob {
-                        destination,
-                        primary_destination: primary_destination.clone(),
-                        source_blob,
-                        executable,
-                    });
-                } else {
-                    primary_by_key.insert(key, destination.clone());
-                    primary_jobs.push(FileMaterializeJob {
-                        destination,
-                        source_blob,
-                        executable,
-                    });
-                }
-            }
-            crate::manifest::EntryType::Symlink => {
-                let destination = crate::cas_file::safe_join(local_path, &entry.path)?;
-                let link_target = entry
-                    .target
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Missing symlink target for {}", entry.path))?
-                    .clone();
-                crate::cas_file::validate_symlink_target(
-                    local_path,
-                    &destination,
-                    Path::new(&link_target),
-                )?;
-                symlink_jobs.push((destination, link_target));
-            }
-        }
-    }
-
-    let file_job_count = primary_jobs.len().max(link_jobs.len()).max(1);
-    let max_concurrent = crate::commands::utils::get_optimal_concurrency(file_job_count, "restore");
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent.max(1)));
-
-    let mut tasks = Vec::with_capacity(primary_jobs.len());
-    for job in primary_jobs {
-        let semaphore = semaphore.clone();
-        let task = tokio::spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .map_err(|e| anyhow::anyhow!("Restore materialize semaphore closed: {e}"))?;
-            if let Some(parent) = job.destination.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .with_context(|| format!("Failed to create {}", parent.display()))?;
-            }
-            remove_path_if_exists(&job.destination).await?;
-            tokio::fs::copy(&job.source_blob, &job.destination)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to materialize {} from {}",
-                        job.destination.display(),
-                        job.source_blob.display()
-                    )
-                })?;
-            #[cfg(unix)]
-            if job.executable {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = tokio::fs::metadata(&job.destination).await?.permissions();
-                perms.set_mode(perms.mode() | 0o111);
-                tokio::fs::set_permissions(&job.destination, perms).await?;
-            }
-            Ok::<(), anyhow::Error>(())
-        });
-        tasks.push(task);
-    }
-    for task in tasks {
-        task.await.context("Primary materialize task panicked")??;
-    }
-
-    let mut link_tasks = Vec::with_capacity(link_jobs.len());
-    for job in link_jobs {
-        let semaphore = semaphore.clone();
-        let task = tokio::spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .map_err(|e| anyhow::anyhow!("Restore materialize semaphore closed: {e}"))?;
-            if let Some(parent) = job.destination.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .with_context(|| format!("Failed to create {}", parent.display()))?;
-            }
-            remove_path_if_exists(&job.destination).await?;
-            match tokio::fs::hard_link(&job.primary_destination, &job.destination).await {
-                Ok(_) => Ok::<(), anyhow::Error>(()),
-                Err(_) => {
-                    tokio::fs::copy(&job.source_blob, &job.destination)
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "Failed to materialize {} from {}",
-                                job.destination.display(),
-                                job.source_blob.display()
-                            )
-                        })?;
-                    #[cfg(unix)]
-                    if job.executable {
-                        use std::os::unix::fs::PermissionsExt;
-                        let mut perms = tokio::fs::metadata(&job.destination).await?.permissions();
-                        perms.set_mode(perms.mode() | 0o111);
-                        tokio::fs::set_permissions(&job.destination, perms).await?;
-                    }
-                    Ok(())
-                }
-            }
-        });
-        link_tasks.push(task);
-    }
-    for task in link_tasks {
-        task.await.context("Link materialize task panicked")??;
-    }
-
-    for (destination, link_target) in symlink_jobs {
-        if let Some(parent) = destination.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
-        }
-        remove_path_if_exists(&destination).await?;
-        create_symlink(&destination, link_target).await?;
-    }
+    materialize_file_cas_entries(local_path, &pointer.entries, &destination_by_digest).await?;
 
     Ok(RestoreAction::Downloaded)
 }
@@ -1209,44 +1061,181 @@ async fn sync_to_remote(
         resolved_tag,
         adapter.transport_kind().as_str()
     );
-    match adapter {
-        crate::adapters::AdapterDispatchKind::Archive => {
-            sync_to_remote_archive(
-                api_client,
-                workspace,
-                base_tag,
-                resolved_tag,
-                local_path,
-                verbose,
-                encrypt,
-                recipient,
-            )
-            .await
-        }
-        crate::adapters::AdapterDispatchKind::Oci => {
-            sync_to_remote_oci(
-                api_client,
-                workspace,
-                base_tag,
-                resolved_tag,
-                local_path,
-                verbose,
-            )
-            .await
-        }
-        crate::adapters::AdapterDispatchKind::File => {
-            sync_to_remote_file(
-                api_client,
-                workspace,
-                base_tag,
-                resolved_tag,
-                local_path,
-                verbose,
-                adapter_detection.kind,
-            )
-            .await
+    adapter
+        .dispatch(
+            || {
+                sync_to_remote_archive(
+                    api_client,
+                    workspace,
+                    base_tag,
+                    resolved_tag,
+                    local_path,
+                    verbose,
+                    encrypt,
+                    recipient,
+                )
+            },
+            || {
+                sync_to_remote_oci(
+                    api_client,
+                    workspace,
+                    base_tag,
+                    resolved_tag,
+                    local_path,
+                    verbose,
+                )
+            },
+            || {
+                sync_to_remote_file(
+                    api_client,
+                    workspace,
+                    base_tag,
+                    resolved_tag,
+                    local_path,
+                    verbose,
+                    adapter_detection.kind,
+                )
+            },
+        )
+        .await
+}
+
+struct MountCasSyncBundle {
+    expected_adapter: crate::adapters::CasAdapterKind,
+    cas_layout: Option<String>,
+    pointer_bytes: Vec<u8>,
+    manifest_root_digest: String,
+    total_size_bytes: u64,
+    blobs: Vec<BlobDescriptor>,
+    blob_sources: HashMap<String, BlobUploadSource>,
+    confirm_spec: cas_publish::CasConfirmSpec,
+    success_unit: &'static str,
+    success_size_bytes: u64,
+    empty_payload_error: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn sync_to_remote_cas(
+    api_client: &ApiClient,
+    workspace: &str,
+    base_tag: &str,
+    resolved_tag: &str,
+    verbose: bool,
+    bundle: MountCasSyncBundle,
+) -> Result<()> {
+    if let Some(message) = bundle.empty_payload_error.as_ref() {
+        anyhow::bail!(message.clone());
+    }
+
+    let check_response = api_client
+        .check_manifests(
+            workspace,
+            &[ManifestCheckRequest {
+                tag: resolved_tag.to_string(),
+                manifest_root_digest: bundle.manifest_root_digest.clone(),
+                lookup: None,
+            }],
+        )
+        .await;
+
+    if let Ok(response) = check_response {
+        if let Some(result) = response.results.first() {
+            if result.exists {
+                if verbose {
+                    ui::info("  Cache already up to date");
+                }
+                return Ok(());
+            }
         }
     }
+
+    let ci_provider = detect_ci_environment();
+    let request = SaveRequest {
+        tag: resolved_tag.to_string(),
+        write_scope_tag: None,
+        manifest_root_digest: bundle.manifest_root_digest.clone(),
+        compression_algorithm: "zstd".to_string(),
+        storage_mode: Some("cas".to_string()),
+        blob_count: Some(bundle.confirm_spec.blob_count),
+        blob_total_size_bytes: Some(bundle.confirm_spec.blob_total_size_bytes),
+        cas_layout: bundle.cas_layout.clone(),
+        manifest_format_version: Some(1),
+        total_size_bytes: bundle.total_size_bytes,
+        uncompressed_size: None,
+        compressed_size: None,
+        file_count: Some(bundle.confirm_spec.file_count),
+        expected_manifest_digest: Some(bundle.confirm_spec.manifest_digest.clone()),
+        expected_manifest_size: Some(bundle.confirm_spec.manifest_size),
+        force: None,
+        use_multipart: None,
+        ci_provider: Some(ci_provider),
+        encrypted: None,
+        encryption_algorithm: None,
+        encryption_recipient_hint: None,
+    };
+
+    if verbose {
+        ui::info("  Requesting CAS upload plan...");
+    }
+
+    let save_response = api_client
+        .save_entry(workspace, &request)
+        .await
+        .with_context(|| format!("Failed to create CAS entry for {}", resolved_tag))?;
+    cas_publish::ensure_server_adapter(resolved_tag, bundle.expected_adapter, &save_response)?;
+
+    if save_response.exists {
+        if verbose {
+            ui::info("  Cache already exists on server");
+        }
+        return Ok(());
+    }
+
+    let missing_blobs =
+        cas_publish::check_missing_blobs(api_client, workspace, &bundle.blobs).await?;
+    if verbose {
+        ui::info(&format!(
+            "  Uploading {} missing blob(s)...",
+            missing_blobs.len()
+        ));
+        ui::info("  Uploading CAS index...");
+    }
+
+    let publish_result = cas_publish::upload_missing_blobs_and_manifest(
+        api_client,
+        workspace,
+        &save_response,
+        &missing_blobs,
+        &bundle.blob_sources,
+        &bundle.pointer_bytes,
+        bundle.confirm_spec.manifest_digest.clone(),
+        bundle.confirm_spec.manifest_size,
+        crate::progress::TransferProgress::new_noop(),
+    )
+    .await?;
+
+    if verbose {
+        ui::info("  Confirming CAS upload...");
+    }
+
+    let confirm_request =
+        cas_publish::build_confirm_request(&bundle.confirm_spec, publish_result.manifest_etag);
+    api_client
+        .confirm(workspace, &save_response.cache_entry_id, &confirm_request)
+        .await
+        .with_context(|| format!("Failed to confirm CAS upload for {}", resolved_tag))?;
+
+    if verbose {
+        ui::info(&format!(
+            "  Synced {} ({} {}, {})",
+            base_tag,
+            bundle.confirm_spec.file_count,
+            bundle.success_unit,
+            crate::progress::format_bytes(bundle.success_size_bytes)
+        ));
+    }
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1595,35 +1584,12 @@ async fn sync_to_remote_oci(
 
     let pointer_bytes = crate::cas_oci::build_pointer(&scan)?;
     let manifest_root_digest = crate::cas_oci::prefixed_sha256_digest(&pointer_bytes);
-    let expected_manifest_digest = manifest_root_digest.clone();
-    let expected_manifest_size = pointer_bytes.len() as u64;
+    let manifest_size = pointer_bytes.len() as u64;
     let blob_count = scan.blobs.len() as u64;
     let file_count = blob_count.min(u32::MAX as u64) as u32;
     let blob_total_size_bytes = scan.total_blob_bytes;
     let total_size_bytes =
         blob_total_size_bytes + scan.index_json.len() as u64 + scan.oci_layout.len() as u64;
-
-    let check_response = api_client
-        .check_manifests(
-            workspace,
-            &[ManifestCheckRequest {
-                tag: resolved_tag.to_string(),
-                manifest_root_digest: manifest_root_digest.clone(),
-                lookup: None,
-            }],
-        )
-        .await;
-
-    if let Ok(response) = check_response {
-        if let Some(result) = response.results.first() {
-            if result.exists {
-                if verbose {
-                    ui::info("  Cache already up to date");
-                }
-                return Ok(());
-            }
-        }
-    }
 
     let blobs: Vec<BlobDescriptor> = scan
         .blobs
@@ -1647,148 +1613,34 @@ async fn sync_to_remote_oci(
         })
         .collect();
 
-    let ci_provider = detect_ci_environment();
-    let request = SaveRequest {
-        tag: resolved_tag.to_string(),
-        write_scope_tag: None,
-        manifest_root_digest: manifest_root_digest.clone(),
-        compression_algorithm: "zstd".to_string(),
-        storage_mode: Some("cas".to_string()),
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        cas_layout: Some("oci-v1".to_string()),
-        manifest_format_version: Some(1),
-        total_size_bytes,
-        uncompressed_size: None,
-        compressed_size: None,
-        file_count: Some(file_count),
-        expected_manifest_digest: Some(expected_manifest_digest.clone()),
-        expected_manifest_size: Some(expected_manifest_size),
-        force: None,
-        use_multipart: None,
-        ci_provider: Some(ci_provider),
-        encrypted: None,
-        encryption_algorithm: None,
-        encryption_recipient_hint: None,
-    };
-
-    if verbose {
-        ui::info("  Requesting CAS upload plan...");
-    }
-
-    let save_response = api_client
-        .save_entry(workspace, &request)
-        .await
-        .with_context(|| format!("Failed to create CAS entry for {}", resolved_tag))?;
-
-    let server_adapter = crate::cache_adapter::detect_restore_transport(
-        save_response.storage_mode.as_deref(),
-        save_response.cas_layout.as_deref(),
-    );
-    if !crate::adapters::AdapterDispatchKind::Oci.accepts_server_kind(server_adapter) {
-        anyhow::bail!(
-            "Server did not negotiate OCI CAS mode for {} (adapter '{}')",
-            resolved_tag,
-            server_adapter.as_str()
-        );
-    }
-
-    if save_response.exists {
-        if verbose {
-            ui::info("  Cache already exists on server");
-        }
-        return Ok(());
-    }
-
-    let missing_blobs = cas_publish::check_missing_blobs(api_client, workspace, &blobs).await?;
-
-    if verbose {
-        ui::info(&format!(
-            "  Uploading {} missing blob(s)...",
-            missing_blobs.len()
-        ));
-    }
-
-    if !missing_blobs.is_empty() {
-        let upload_outcome = cas_publish::upload_missing_blobs(
-            api_client,
-            workspace,
-            &save_response.cache_entry_id,
-            &missing_blobs,
-            &blob_sources,
-            crate::progress::TransferProgress::new_noop(),
-        )
-        .await?;
-        maybe_commit_blob_receipts(
-            api_client,
-            workspace,
-            save_response.upload_session_id.as_deref(),
-            upload_outcome.receipts,
-        )
-        .await;
-    }
-
-    if verbose {
-        ui::info("  Uploading CAS index...");
-    }
-
-    let manifest_url = save_response
-        .manifest_upload_url
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Missing manifest_upload_url in response"))?;
-    let manifest_etag = cas_publish::upload_manifest(
-        api_client,
-        manifest_url,
-        &pointer_bytes,
-        &save_response.upload_headers,
-    )
-    .await?;
-
-    maybe_commit_manifest_receipt(
+    sync_to_remote_cas(
         api_client,
         workspace,
-        save_response.upload_session_id.as_deref(),
-        expected_manifest_digest.clone(),
-        expected_manifest_size,
-        manifest_etag.clone(),
+        base_tag,
+        resolved_tag,
+        verbose,
+        MountCasSyncBundle {
+            expected_adapter: crate::adapters::CasAdapterKind::Oci,
+            cas_layout: Some("oci-v1".to_string()),
+            pointer_bytes,
+            manifest_root_digest: manifest_root_digest.clone(),
+            total_size_bytes,
+            blobs,
+            blob_sources,
+            confirm_spec: cas_publish::CasConfirmSpec {
+                manifest_digest: manifest_root_digest,
+                manifest_size,
+                blob_count,
+                blob_total_size_bytes,
+                file_count,
+                tag: resolved_tag.to_string(),
+            },
+            success_unit: "blobs",
+            success_size_bytes: blob_total_size_bytes,
+            empty_payload_error: None,
+        },
     )
-    .await;
-
-    if verbose {
-        ui::info("  Confirming CAS upload...");
-    }
-
-    let confirm_request = ConfirmRequest {
-        manifest_digest: expected_manifest_digest,
-        manifest_size: expected_manifest_size,
-        manifest_etag,
-        archive_size: None,
-        archive_etag: None,
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        file_count: Some(file_count),
-        uncompressed_size: None,
-        compressed_size: None,
-        storage_mode: Some("cas".to_string()),
-        tag: Some(resolved_tag.to_string()),
-        write_scope_tag: None,
-    };
-
-    api_client
-        .confirm(workspace, &save_response.cache_entry_id, &confirm_request)
-        .await
-        .with_context(|| format!("Failed to confirm CAS upload for {}", resolved_tag))?;
-
-    if verbose {
-        ui::info(&format!(
-            "  Synced {} ({} blobs, {})",
-            base_tag,
-            file_count,
-            crate::progress::format_bytes(blob_total_size_bytes)
-        ));
-    }
-
-    Ok(())
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1808,8 +1660,7 @@ async fn sync_to_remote_file(
 
     let pointer_bytes = crate::cas_file::build_pointer(&scan)?;
     let manifest_root_digest = crate::cas_file::prefixed_sha256_digest(&pointer_bytes);
-    let expected_manifest_digest = manifest_root_digest.clone();
-    let expected_manifest_size = pointer_bytes.len() as u64;
+    let manifest_size = pointer_bytes.len() as u64;
     let blob_count = scan.blobs.len() as u64;
     let file_count = scan
         .entries
@@ -1819,39 +1670,9 @@ async fn sync_to_remote_file(
         .min(u32::MAX as usize) as u32;
     let blob_total_size_bytes = scan.total_blob_bytes;
     let total_size_bytes = blob_total_size_bytes;
-    if total_size_bytes == 0 {
-        anyhow::bail!(
-            "Cannot sync {} -> {}: no file content to upload (0 bytes)",
-            resolved_tag,
-            local_path.display()
-        );
-    }
-
     let cas_layout = crate::adapters::AdapterDispatchKind::File
         .cas_layout(detected_kind)
         .map(str::to_string);
-
-    let check_response = api_client
-        .check_manifests(
-            workspace,
-            &[ManifestCheckRequest {
-                tag: resolved_tag.to_string(),
-                manifest_root_digest: manifest_root_digest.clone(),
-                lookup: None,
-            }],
-        )
-        .await;
-
-    if let Ok(response) = check_response {
-        if let Some(result) = response.results.first() {
-            if result.exists {
-                if verbose {
-                    ui::info("  Cache already up to date");
-                }
-                return Ok(());
-            }
-        }
-    }
 
     let blobs: Vec<BlobDescriptor> = scan
         .blobs
@@ -1875,148 +1696,40 @@ async fn sync_to_remote_file(
         })
         .collect();
 
-    let ci_provider = detect_ci_environment();
-    let request = SaveRequest {
-        tag: resolved_tag.to_string(),
-        write_scope_tag: None,
-        manifest_root_digest: manifest_root_digest.clone(),
-        compression_algorithm: "zstd".to_string(),
-        storage_mode: Some("cas".to_string()),
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        cas_layout,
-        manifest_format_version: Some(1),
-        total_size_bytes,
-        uncompressed_size: None,
-        compressed_size: None,
-        file_count: Some(file_count),
-        expected_manifest_digest: Some(expected_manifest_digest.clone()),
-        expected_manifest_size: Some(expected_manifest_size),
-        force: None,
-        use_multipart: None,
-        ci_provider: Some(ci_provider),
-        encrypted: None,
-        encryption_algorithm: None,
-        encryption_recipient_hint: None,
-    };
-
-    if verbose {
-        ui::info("  Requesting CAS upload plan...");
-    }
-
-    let save_response = api_client
-        .save_entry(workspace, &request)
-        .await
-        .with_context(|| format!("Failed to create CAS entry for {}", resolved_tag))?;
-
-    let server_adapter = crate::cache_adapter::detect_restore_transport(
-        save_response.storage_mode.as_deref(),
-        save_response.cas_layout.as_deref(),
-    );
-    if !crate::adapters::AdapterDispatchKind::File.accepts_server_kind(server_adapter) {
-        anyhow::bail!(
-            "Server did not negotiate file CAS mode for {} (adapter '{}')",
-            resolved_tag,
-            server_adapter.as_str()
-        );
-    }
-
-    if save_response.exists {
-        if verbose {
-            ui::info("  Cache already exists on server");
-        }
-        return Ok(());
-    }
-
-    let missing_blobs = cas_publish::check_missing_blobs(api_client, workspace, &blobs).await?;
-
-    if verbose {
-        ui::info(&format!(
-            "  Uploading {} missing blob(s)...",
-            missing_blobs.len()
-        ));
-    }
-
-    if !missing_blobs.is_empty() {
-        let upload_outcome = cas_publish::upload_missing_blobs(
-            api_client,
-            workspace,
-            &save_response.cache_entry_id,
-            &missing_blobs,
-            &blob_sources,
-            crate::progress::TransferProgress::new_noop(),
-        )
-        .await?;
-        maybe_commit_blob_receipts(
-            api_client,
-            workspace,
-            save_response.upload_session_id.as_deref(),
-            upload_outcome.receipts,
-        )
-        .await;
-    }
-
-    if verbose {
-        ui::info("  Uploading CAS index...");
-    }
-
-    let manifest_url = save_response
-        .manifest_upload_url
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Missing manifest_upload_url in response"))?;
-    let manifest_etag = cas_publish::upload_manifest(
-        api_client,
-        manifest_url,
-        &pointer_bytes,
-        &save_response.upload_headers,
-    )
-    .await?;
-
-    maybe_commit_manifest_receipt(
+    sync_to_remote_cas(
         api_client,
         workspace,
-        save_response.upload_session_id.as_deref(),
-        expected_manifest_digest.clone(),
-        expected_manifest_size,
-        manifest_etag.clone(),
+        base_tag,
+        resolved_tag,
+        verbose,
+        MountCasSyncBundle {
+            expected_adapter: crate::adapters::CasAdapterKind::File,
+            cas_layout,
+            pointer_bytes,
+            manifest_root_digest: manifest_root_digest.clone(),
+            total_size_bytes,
+            blobs,
+            blob_sources,
+            confirm_spec: cas_publish::CasConfirmSpec {
+                manifest_digest: manifest_root_digest,
+                manifest_size,
+                blob_count,
+                blob_total_size_bytes,
+                file_count,
+                tag: resolved_tag.to_string(),
+            },
+            success_unit: "files",
+            success_size_bytes: blob_total_size_bytes,
+            empty_payload_error: (total_size_bytes == 0).then(|| {
+                format!(
+                    "Cannot sync {} -> {}: no file content to upload (0 bytes)",
+                    resolved_tag,
+                    local_path.display()
+                )
+            }),
+        },
     )
-    .await;
-
-    if verbose {
-        ui::info("  Confirming CAS upload...");
-    }
-
-    let confirm_request = ConfirmRequest {
-        manifest_digest: expected_manifest_digest,
-        manifest_size: expected_manifest_size,
-        manifest_etag,
-        archive_size: None,
-        archive_etag: None,
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        file_count: Some(file_count),
-        uncompressed_size: None,
-        compressed_size: None,
-        storage_mode: Some("cas".to_string()),
-        tag: Some(resolved_tag.to_string()),
-        write_scope_tag: None,
-    };
-
-    api_client
-        .confirm(workspace, &save_response.cache_entry_id, &confirm_request)
-        .await
-        .with_context(|| format!("Failed to confirm CAS upload for {}", resolved_tag))?;
-
-    if verbose {
-        ui::info(&format!(
-            "  Synced {} ({} files, {})",
-            base_tag,
-            file_count,
-            crate::progress::format_bytes(blob_total_size_bytes)
-        ));
-    }
-
-    Ok(())
+    .await
 }
 
 fn local_file_manifest_digest(path: &Path) -> Result<Option<String>> {

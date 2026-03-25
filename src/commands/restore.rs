@@ -2,7 +2,7 @@
 
 use crate::api::{ApiClient, CacheResolutionEntry};
 use crate::commands::cas_restore::{self, BlobDownloadTarget, FetchCasPointerOutcome};
-use crate::commands::file_materialize::{create_symlink, remove_path_if_exists};
+use crate::commands::file_materialize::materialize_file_cas_entries;
 use crate::commands::signature_policy::verify_restore_signature;
 use crate::commands::utils::RestoreSpec;
 use crate::progress::{ProgressSession, Summary, System as ProgressSystem, TransferProgress};
@@ -1029,52 +1029,67 @@ async fn process_restore(
         adapter.transport_kind().as_str()
     );
 
-    match adapter {
-        crate::adapters::AdapterDispatchKind::Archive => {
-            process_restore_archive(
-                api_client,
-                reporter,
-                session_id,
-                title,
-                workspace,
-                hit,
-                target_path,
-                verbose,
-                identity,
-                passphrase_cache,
-                require_server_signature,
-            )
-            .await
-        }
-        crate::adapters::AdapterDispatchKind::Oci => {
-            process_restore_oci(
-                &api_client,
-                reporter,
-                session_id,
-                title,
-                workspace,
-                hit,
-                target_path,
-                verbose,
-                require_server_signature,
-            )
-            .await
-        }
-        crate::adapters::AdapterDispatchKind::File => {
-            process_restore_file(
-                &api_client,
-                reporter,
-                session_id,
-                title,
-                workspace,
-                hit,
-                target_path,
-                verbose,
-                require_server_signature,
-            )
-            .await
-        }
-    }
+    let archive_api_client = api_client.clone();
+    let archive_reporter = reporter.clone();
+    let archive_session_id = session_id.clone();
+    let archive_title = title.clone();
+    let archive_workspace = workspace.clone();
+    let archive_hit = hit.clone();
+    let archive_target_path = target_path.clone();
+    let archive_identity = identity.clone();
+    let archive_passphrase_cache = passphrase_cache.clone();
+    let oci_reporter = reporter.clone();
+    let oci_session_id = session_id.clone();
+    let oci_title = title.clone();
+    let oci_workspace = workspace.clone();
+    let oci_hit = hit.clone();
+    let oci_target_path = target_path.clone();
+
+    adapter
+        .dispatch(
+            || {
+                process_restore_archive(
+                    archive_api_client,
+                    archive_reporter,
+                    archive_session_id,
+                    archive_title,
+                    archive_workspace,
+                    archive_hit,
+                    archive_target_path,
+                    verbose,
+                    archive_identity,
+                    archive_passphrase_cache,
+                    require_server_signature,
+                )
+            },
+            || {
+                process_restore_oci(
+                    &api_client,
+                    oci_reporter,
+                    oci_session_id,
+                    oci_title,
+                    oci_workspace,
+                    oci_hit,
+                    oci_target_path,
+                    verbose,
+                    require_server_signature,
+                )
+            },
+            || {
+                process_restore_file(
+                    &api_client,
+                    reporter,
+                    session_id,
+                    title,
+                    workspace,
+                    hit,
+                    target_path,
+                    verbose,
+                    require_server_signature,
+                )
+            },
+        )
+        .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1792,183 +1807,7 @@ async fn process_restore_file(
     let materialize_step = session.start_step("Materialize files".to_string(), None)?;
     let materialize_started = Instant::now();
     let target_root = Path::new(&target_path);
-    fs::create_dir_all(target_root)
-        .await
-        .with_context(|| format!("Failed to create {}", target_root.display()))?;
-
-    for entry in &pointer.entries {
-        if entry.entry_type != crate::manifest::EntryType::Dir {
-            continue;
-        }
-        let destination = crate::cas_file::safe_join(target_root, &entry.path)?;
-        remove_path_if_exists(&destination).await?;
-        fs::create_dir_all(&destination)
-            .await
-            .with_context(|| format!("Failed to create {}", destination.display()))?;
-    }
-
-    #[derive(Clone)]
-    struct FileMaterializeJob {
-        destination: std::path::PathBuf,
-        source_blob: std::path::PathBuf,
-        executable: bool,
-    }
-
-    #[derive(Clone)]
-    struct FileLinkJob {
-        destination: std::path::PathBuf,
-        primary_destination: std::path::PathBuf,
-        source_blob: std::path::PathBuf,
-        executable: bool,
-    }
-
-    let mut primary_jobs: Vec<FileMaterializeJob> = Vec::new();
-    let mut link_jobs: Vec<FileLinkJob> = Vec::new();
-    let mut symlink_jobs: Vec<(std::path::PathBuf, String)> = Vec::new();
-    let mut primary_by_key: HashMap<(String, bool), std::path::PathBuf> = HashMap::new();
-
-    for entry in &pointer.entries {
-        match entry.entry_type {
-            crate::manifest::EntryType::Dir => {}
-            crate::manifest::EntryType::File => {
-                let destination = crate::cas_file::safe_join(target_root, &entry.path)?;
-                let digest = entry
-                    .digest
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("File entry missing digest for {}", entry.path))?;
-                let source_blob = blob_path_by_digest
-                    .get(digest)
-                    .ok_or_else(|| anyhow!("Missing downloaded blob for digest {}", digest))?
-                    .clone();
-                let executable = entry.executable == Some(true);
-                let key = (digest.clone(), executable);
-                if let Some(primary_destination) = primary_by_key.get(&key) {
-                    link_jobs.push(FileLinkJob {
-                        destination,
-                        primary_destination: primary_destination.clone(),
-                        source_blob,
-                        executable,
-                    });
-                } else {
-                    primary_by_key.insert(key, destination.clone());
-                    primary_jobs.push(FileMaterializeJob {
-                        destination,
-                        source_blob,
-                        executable,
-                    });
-                }
-            }
-            crate::manifest::EntryType::Symlink => {
-                let destination = crate::cas_file::safe_join(target_root, &entry.path)?;
-                let link_target = entry
-                    .target
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Symlink entry missing target for {}", entry.path))?
-                    .clone();
-                crate::cas_file::validate_symlink_target(
-                    target_root,
-                    &destination,
-                    Path::new(&link_target),
-                )?;
-                symlink_jobs.push((destination, link_target));
-            }
-        }
-    }
-
-    let file_job_count = primary_jobs.len().max(link_jobs.len()).max(1);
-    let max_concurrent = crate::commands::utils::get_optimal_concurrency(file_job_count, "restore");
-    let semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
-
-    let mut tasks = Vec::with_capacity(primary_jobs.len());
-    for job in primary_jobs {
-        let semaphore = semaphore.clone();
-        let task = tokio::spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .map_err(|e| anyhow!("Restore materialize semaphore closed: {e}"))?;
-            if let Some(parent) = job.destination.parent() {
-                fs::create_dir_all(parent)
-                    .await
-                    .with_context(|| format!("Failed to create {}", parent.display()))?;
-            }
-            remove_path_if_exists(&job.destination).await?;
-            fs::copy(&job.source_blob, &job.destination)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to materialize {} from {}",
-                        job.destination.display(),
-                        job.source_blob.display()
-                    )
-                })?;
-            #[cfg(unix)]
-            if job.executable {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(&job.destination).await?.permissions();
-                perms.set_mode(perms.mode() | 0o111);
-                fs::set_permissions(&job.destination, perms).await?;
-            }
-            Ok::<(), anyhow::Error>(())
-        });
-        tasks.push(task);
-    }
-    for task in tasks {
-        task.await.context("Primary materialize task panicked")??;
-    }
-
-    let mut link_tasks = Vec::with_capacity(link_jobs.len());
-    for job in link_jobs {
-        let semaphore = semaphore.clone();
-        let task = tokio::spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .map_err(|e| anyhow!("Restore materialize semaphore closed: {e}"))?;
-            if let Some(parent) = job.destination.parent() {
-                fs::create_dir_all(parent)
-                    .await
-                    .with_context(|| format!("Failed to create {}", parent.display()))?;
-            }
-            remove_path_if_exists(&job.destination).await?;
-            match fs::hard_link(&job.primary_destination, &job.destination).await {
-                Ok(_) => Ok::<(), anyhow::Error>(()),
-                Err(_) => {
-                    fs::copy(&job.source_blob, &job.destination)
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "Failed to materialize {} from {}",
-                                job.destination.display(),
-                                job.source_blob.display()
-                            )
-                        })?;
-                    #[cfg(unix)]
-                    if job.executable {
-                        use std::os::unix::fs::PermissionsExt;
-                        let mut perms = fs::metadata(&job.destination).await?.permissions();
-                        perms.set_mode(perms.mode() | 0o111);
-                        fs::set_permissions(&job.destination, perms).await?;
-                    }
-                    Ok(())
-                }
-            }
-        });
-        link_tasks.push(task);
-    }
-    for task in link_tasks {
-        task.await.context("Link materialize task panicked")??;
-    }
-
-    for (destination, link_target) in symlink_jobs {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
-        }
-        remove_path_if_exists(&destination).await?;
-        create_symlink(&destination, link_target).await?;
-    }
+    materialize_file_cas_entries(target_root, &pointer.entries, &blob_path_by_digest).await?;
 
     materialize_step.complete()?;
     let materialize_elapsed = materialize_started.elapsed();

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::api::CacheResolutionEntry;
 
-fn signature_subject_tag<'a>(
+pub(crate) fn signature_subject_tag<'a>(
     hit: &'a CacheResolutionEntry,
     manifest_tag: Option<&'a str>,
 ) -> &'a str {
@@ -13,20 +13,14 @@ fn signature_subject_tag<'a>(
         .unwrap_or(hit.tag.as_str())
 }
 
-fn signature_display_tag<'a>(hit: &'a CacheResolutionEntry, fallback: &'a str) -> &'a str {
+pub(crate) fn signature_display_tag<'a>(
+    hit: &'a CacheResolutionEntry,
+    fallback: &'a str,
+) -> &'a str {
     hit.signature_tag
         .as_deref()
         .or(hit.primary_tag.as_deref())
         .unwrap_or(fallback)
-}
-
-fn signature_policy_failure(message: String, require_server_signature: bool) -> Result<()> {
-    if require_server_signature {
-        anyhow::bail!(message);
-    }
-
-    crate::ui::warn(&message);
-    Ok(())
 }
 
 pub(crate) fn verify_server_signature(
@@ -37,15 +31,12 @@ pub(crate) fn verify_server_signature(
 ) -> Result<()> {
     let public_key = crate::signing::parse_public_key(workspace_signing_public_key)
         .context("Failed to parse workspace signing public key")?;
-
     let signature = crate::signing::signature_from_base64(server_signature)
         .context("Failed to parse server signature")?;
-
     let data_to_verify = format!("{}:{}", tag, root_digest);
 
     crate::signing::verify_signature(data_to_verify.as_bytes(), &signature, &public_key)
         .context("Server signature verification failed")?;
-
     Ok(())
 }
 
@@ -107,5 +98,53 @@ pub(crate) fn verify_restore_signature(
             ),
             require_server_signature,
         ),
+    }
+}
+
+fn signature_policy_failure(message: String, require_server_signature: bool) -> Result<()> {
+    if require_server_signature {
+        anyhow::bail!(message);
+    }
+
+    crate::ui::warn(&message);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_subject_prefers_explicit_signature_tag() {
+        let hit = CacheResolutionEntry {
+            tag: "fallback".to_string(),
+            primary_tag: Some("primary".to_string()),
+            signature_tag: Some("signature".to_string()),
+            status: "hit".to_string(),
+            cache_entry_id: None,
+            manifest_url: None,
+            manifest_root_digest: None,
+            manifest_digest: None,
+            compression_algorithm: None,
+            storage_mode: None,
+            blob_count: None,
+            blob_total_size_bytes: None,
+            cas_layout: None,
+            archive_urls: Vec::new(),
+            size: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            uploaded_at: None,
+            content_hash: None,
+            pending: false,
+            error: None,
+            workspace_signing_public_key: None,
+            server_signature: None,
+            server_signed_at: None,
+            encrypted: false,
+        };
+
+        assert_eq!(signature_subject_tag(&hit, Some("manifest")), "signature");
+        assert_eq!(signature_display_tag(&hit, "fallback"), "signature");
     }
 }

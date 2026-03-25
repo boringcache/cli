@@ -1,7 +1,10 @@
-use crate::api::models::cache::{BlobDescriptor, BlobReceipt, BlobUploadUrlsResponse};
+use crate::api::models::cache::{
+    BlobDescriptor, BlobReceipt, BlobUploadUrlsResponse, ConfirmRequest, SaveResponse,
+};
 use crate::api::ApiClient;
 use crate::progress::TransferProgress;
 use crate::telemetry::StorageMetrics;
+use crate::upload_receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
 use anyhow::{anyhow, Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -16,6 +19,22 @@ pub(crate) struct BlobUploadSource {
 #[derive(Debug, Default)]
 pub(crate) struct BlobUploadOutcome {
     pub receipts: Vec<BlobReceipt>,
+    pub storage_metrics: StorageMetrics,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CasConfirmSpec {
+    pub manifest_digest: String,
+    pub manifest_size: u64,
+    pub blob_count: u64,
+    pub blob_total_size_bytes: u64,
+    pub file_count: u32,
+    pub tag: String,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CasPublishResult {
+    pub manifest_etag: Option<String>,
     pub storage_metrics: StorageMetrics,
 }
 
@@ -130,6 +149,110 @@ pub(crate) async fn upload_manifest(
         upload_headers,
     )
     .await
+}
+
+pub(crate) fn ensure_server_adapter(
+    tag: &str,
+    expected_adapter: crate::adapters::CasAdapterKind,
+    save_response: &SaveResponse,
+) -> Result<()> {
+    let server_adapter = crate::cache_adapter::detect_restore_transport(
+        save_response.storage_mode.as_deref(),
+        save_response.cas_layout.as_deref(),
+    );
+    if expected_adapter.accepts_server_kind(server_adapter) {
+        return Ok(());
+    }
+
+    let expected_name = match expected_adapter {
+        crate::adapters::CasAdapterKind::Oci => "OCI",
+        crate::adapters::CasAdapterKind::File => "file",
+    };
+    anyhow::bail!(
+        "Server did not negotiate {} CAS mode for {} (adapter '{}')",
+        expected_name,
+        tag,
+        server_adapter.as_str()
+    );
+}
+
+pub(crate) fn build_confirm_request(
+    spec: &CasConfirmSpec,
+    manifest_etag: Option<String>,
+) -> ConfirmRequest {
+    ConfirmRequest {
+        manifest_digest: spec.manifest_digest.clone(),
+        manifest_size: spec.manifest_size,
+        manifest_etag,
+        archive_size: None,
+        archive_etag: None,
+        blob_count: Some(spec.blob_count),
+        blob_total_size_bytes: Some(spec.blob_total_size_bytes),
+        file_count: Some(spec.file_count),
+        uncompressed_size: None,
+        compressed_size: None,
+        storage_mode: Some("cas".to_string()),
+        tag: Some(spec.tag.clone()),
+        write_scope_tag: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upload_missing_blobs_and_manifest(
+    api_client: &ApiClient,
+    workspace: &str,
+    save_response: &SaveResponse,
+    missing_blobs: &[BlobDescriptor],
+    blob_sources: &HashMap<String, BlobUploadSource>,
+    pointer_bytes: &[u8],
+    manifest_digest: String,
+    manifest_size: u64,
+    progress: TransferProgress,
+) -> Result<CasPublishResult> {
+    let mut result = CasPublishResult::default();
+    if !missing_blobs.is_empty() {
+        let upload_outcome = upload_missing_blobs(
+            api_client,
+            workspace,
+            &save_response.cache_entry_id,
+            missing_blobs,
+            blob_sources,
+            progress,
+        )
+        .await?;
+        maybe_commit_blob_receipts(
+            api_client,
+            workspace,
+            save_response.upload_session_id.as_deref(),
+            upload_outcome.receipts,
+        )
+        .await;
+        result.storage_metrics = upload_outcome.storage_metrics;
+    }
+
+    let manifest_upload_url = save_response
+        .manifest_upload_url
+        .as_ref()
+        .ok_or_else(|| anyhow!("Missing manifest_upload_url in response"))?;
+    let manifest_etag = upload_manifest(
+        api_client,
+        manifest_upload_url,
+        pointer_bytes,
+        &save_response.upload_headers,
+    )
+    .await?;
+    maybe_commit_manifest_receipt(
+        api_client,
+        workspace,
+        save_response.upload_session_id.as_deref(),
+        manifest_digest,
+        manifest_size,
+        manifest_etag.clone(),
+    )
+    .await;
+    result.manifest_etag = manifest_etag;
+
+    Ok(result)
 }
 
 fn build_upload_items(

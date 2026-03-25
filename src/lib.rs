@@ -28,3 +28,4 @@ pub(crate) mod telemetry;
 pub(crate) mod transfer;
 pub mod types;
 pub mod ui;
+pub mod upload_receipts;

@@ -1,0 +1,70 @@
+name: Validate Base Images
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "images/**"
+      - ".github/workflows/validate-images.yml"
+      - ".github/workflows/publish-images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/boringcache/base
+
+jobs:
+  validate:
+    name: Build & validate base images
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve CLI version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(gh release view --json tagName -q .tagName)
+          echo "cli_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved CLI version: ${VERSION}"
+
+      - name: Validate bookworm
+        run: |
+          docker build \
+            --build-arg BORINGCACHE_VERSION="${{ steps.version.outputs.cli_version }}" \
+            -t ${{ env.IMAGE }}:bookworm \
+            images/bookworm
+
+      - name: Validate bookworm-build
+        run: |
+          docker build \
+            --build-arg BORINGCACHE_TAG=bookworm \
+            -t ${{ env.IMAGE }}:bookworm-build \
+            images/bookworm-build
+
+      - name: Smoke test
+        run: |
+          docker run --rm ${{ env.IMAGE }}:bookworm sh -c '
+            set -e
+            mise --version
+            boringcache --version
+            boringcache run test-org/test tag:path -- echo "boringcache run fallback OK"
+          '
+          docker run --rm ${{ env.IMAGE }}:bookworm-build sh -c '
+            set -e
+            gcc --version | head -1
+            mise --version
+            boringcache --version
+          '
+
+      - name: Summary
+        run: |
+          echo "## Base image validation passed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- bookworm builds with the current released CLI" >> "$GITHUB_STEP_SUMMARY"
+          echo "- bookworm-build builds against the local bookworm image" >> "$GITHUB_STEP_SUMMARY"
+          echo "- smoke tests passed for both images" >> "$GITHUB_STEP_SUMMARY"
