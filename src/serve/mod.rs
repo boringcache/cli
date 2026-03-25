@@ -1,4 +1,5 @@
 pub mod cache_registry;
+pub mod cas_publish;
 pub mod error;
 pub mod handlers;
 pub mod routes;

@@ -295,7 +295,7 @@ fn verify_check_signature(entry: &crate::api::CacheResolutionEntry) -> Result<()
         )
     })?;
 
-    crate::commands::restore::verify_server_signature(
+    crate::commands::signature_policy::verify_server_signature(
         signature_tag,
         root_digest,
         public_key,

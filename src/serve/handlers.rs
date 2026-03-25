@@ -10,9 +10,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio_util::io::ReaderStream;
 
-use crate::api::models::cache::{
-    BlobDescriptor, BlobReceipt, ConfirmRequest, ManifestReceiptCommitRequest, SaveRequest,
-};
+use crate::api::models::cache::{BlobDescriptor, BlobReceipt, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
 use crate::cas_transport::upload_payload;
 use crate::multipart_upload::upload_via_single_url;
@@ -39,53 +37,6 @@ const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 fn oci_request_log_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(diagnostics_enabled)
-}
-
-async fn maybe_commit_blob_receipts(
-    state: &AppState,
-    upload_session_id: Option<&str>,
-    receipts: Vec<BlobReceipt>,
-) {
-    if let Some(upload_session_id) = upload_session_id.filter(|_| !receipts.is_empty()) {
-        if let Err(e) = state
-            .api_client
-            .commit_blob_receipts(&state.workspace, upload_session_id, &receipts)
-            .await
-        {
-            log::warn!(
-                "blob receipt commit failed for upload session {}: {}",
-                upload_session_id,
-                e
-            );
-        }
-    }
-}
-
-async fn maybe_commit_manifest_receipt(
-    state: &AppState,
-    upload_session_id: Option<&str>,
-    manifest_digest: String,
-    manifest_size: u64,
-    manifest_etag: Option<String>,
-) {
-    if let Some(upload_session_id) = upload_session_id {
-        let request = ManifestReceiptCommitRequest {
-            manifest_digest,
-            manifest_size,
-            manifest_etag,
-        };
-        if let Err(e) = state
-            .api_client
-            .commit_manifest_receipt(&state.workspace, upload_session_id, &request)
-            .await
-        {
-            log::warn!(
-                "manifest receipt commit failed for upload session {}: {}",
-                upload_session_id,
-                e
-            );
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2248,173 +2199,201 @@ async fn put_manifest(
         })?
         .map_err(|e| OciError::internal(format!("save_entry failed: {e}")))?;
 
-        if !save_response.exists {
-            let mut blob_receipts = Vec::new();
-            if !blob_descriptors.is_empty() {
-                let upload_plan = tokio::time::timeout(
-                    OCI_API_CALL_TIMEOUT,
-                    state.api_client.blob_upload_urls(
-                        &state.workspace,
-                        &save_response.cache_entry_id,
-                        &blob_descriptors,
-                    ),
-                )
-                .await
-                .map_err(|_| {
-                    OciError::internal(format!(
-                        "blob_upload_urls timed out after {}s",
-                        OCI_API_CALL_TIMEOUT.as_secs()
-                    ))
-                })?
-                .map_err(|e| OciError::internal(format!("blob_upload_urls failed: {e}")))?;
+        let blob_state = state.clone();
+        let manifest_state = state.clone();
+        let confirm_state = state.clone();
+        let publish_blob_descriptors = blob_descriptors.clone();
+        let publish_pointer_bytes = pointer_bytes.clone();
+        let confirm_tag = tag.clone();
+        let confirm_write_scope_tag = write_scope_tag.clone();
+        let confirm_cache_entry_id = save_response.cache_entry_id.clone();
+        let confirm_manifest_digest = manifest_root_digest.clone();
+        let confirm_manifest_size = pointer_bytes.len() as u64;
+        let confirm_file_count = blob_count.min(u32::MAX as u64) as u32;
+        crate::serve::cas_publish::publish_after_save(
+            &state.api_client,
+            &state.workspace,
+            &save_response,
+            manifest_root_digest.clone(),
+            pointer_bytes.len() as u64,
+            move |save_response| {
+                let state = blob_state.clone();
+                let blob_descriptors = publish_blob_descriptors.clone();
+                let cache_entry_id = save_response.cache_entry_id.clone();
+                async move {
+                    let mut blob_receipts = Vec::new();
+                    if !blob_descriptors.is_empty() {
+                        let upload_plan = tokio::time::timeout(
+                            OCI_API_CALL_TIMEOUT,
+                            state.api_client.blob_upload_urls(
+                                &state.workspace,
+                                &cache_entry_id,
+                                &blob_descriptors,
+                            ),
+                        )
+                        .await
+                        .map_err(|_| {
+                            OciError::internal(format!(
+                                "blob_upload_urls timed out after {}s",
+                                OCI_API_CALL_TIMEOUT.as_secs()
+                            ))
+                        })?
+                        .map_err(|e| OciError::internal(format!("blob_upload_urls failed: {e}")))?;
 
-                let upload_jobs = {
-                    let sessions = state.upload_sessions.read().await;
-                    let mut jobs = Vec::with_capacity(upload_plan.upload_urls.len());
-                    for upload_url_info in &upload_plan.upload_urls {
-                        let session = sessions
-                            .find_by_digest(&upload_url_info.digest)
-                            .ok_or_else(|| {
-                                OciError::internal(format!(
-                                    "No upload session for blob {}",
-                                    upload_url_info.digest
-                                ))
-                            })?;
-                        jobs.push((
-                            upload_url_info.digest.clone(),
-                            session.temp_path.clone(),
-                            upload_url_info.url.clone(),
-                            upload_url_info.headers.clone(),
-                        ));
+                        let upload_jobs = {
+                            let sessions = state.upload_sessions.read().await;
+                            let mut jobs = Vec::with_capacity(upload_plan.upload_urls.len());
+                            for upload_url_info in &upload_plan.upload_urls {
+                                let session = sessions
+                                    .find_by_digest(&upload_url_info.digest)
+                                    .ok_or_else(|| {
+                                        OciError::internal(format!(
+                                            "No upload session for blob {}",
+                                            upload_url_info.digest
+                                        ))
+                                    })?;
+                                jobs.push((
+                                    upload_url_info.digest.clone(),
+                                    session.temp_path.clone(),
+                                    upload_url_info.url.clone(),
+                                    upload_url_info.headers.clone(),
+                                ));
+                            }
+                            jobs
+                        };
+
+                        if !upload_jobs.is_empty() {
+                            let max_concurrent =
+                                adaptive_blob_upload_concurrency(upload_jobs.len());
+                            let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+                            let transfer_client = state.api_client.transfer_client().clone();
+                            let mut tasks = Vec::with_capacity(upload_jobs.len());
+
+                            for (digest, temp_path, upload_url, upload_headers) in upload_jobs {
+                                let semaphore = semaphore.clone();
+                                let transfer_client = transfer_client.clone();
+                                let task = tokio::spawn(async move {
+                                    let _permit = semaphore.acquire().await.map_err(|e| {
+                                        OciError::internal(format!(
+                                            "Blob upload semaphore closed: {e}"
+                                        ))
+                                    })?;
+                                    let progress = crate::progress::TransferProgress::new_noop();
+                                    tokio::time::timeout(
+                                        OCI_TRANSFER_CALL_TIMEOUT,
+                                        upload_via_single_url(
+                                            temp_path.as_path(),
+                                            &upload_url,
+                                            &progress,
+                                            &transfer_client,
+                                            &upload_headers,
+                                        ),
+                                    )
+                                    .await
+                                    .map_err(|_| {
+                                        OciError::internal(format!(
+                                            "Blob upload timed out for {} after {}s",
+                                            digest,
+                                            OCI_TRANSFER_CALL_TIMEOUT.as_secs()
+                                        ))
+                                    })?
+                                    .map_err(|e| {
+                                        OciError::internal(format!(
+                                            "Blob upload failed for {}: {}",
+                                            digest, e
+                                        ))
+                                    })?;
+                                    Ok::<String, OciError>(digest)
+                                });
+                                tasks.push(task);
+                            }
+
+                            for task in tasks {
+                                let digest = task.await.map_err(|e| {
+                                    OciError::internal(format!("Blob upload task failed: {e}"))
+                                })??;
+                                blob_receipts.push(BlobReceipt { digest, etag: None });
+                            }
+                        }
                     }
-                    jobs
-                };
 
-                if !upload_jobs.is_empty() {
-                    let max_concurrent = adaptive_blob_upload_concurrency(upload_jobs.len());
-                    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-                    let transfer_client = state.api_client.transfer_client().clone();
-                    let mut tasks = Vec::with_capacity(upload_jobs.len());
-
-                    for (digest, temp_path, upload_url, upload_headers) in upload_jobs {
-                        let semaphore = semaphore.clone();
-                        let transfer_client = transfer_client.clone();
-                        let task = tokio::spawn(async move {
-                            let _permit = semaphore.acquire().await.map_err(|e| {
-                                OciError::internal(format!("Blob upload semaphore closed: {e}"))
-                            })?;
-                            let progress = crate::progress::TransferProgress::new_noop();
-                            tokio::time::timeout(
-                                OCI_TRANSFER_CALL_TIMEOUT,
-                                upload_via_single_url(
-                                    temp_path.as_path(),
-                                    &upload_url,
-                                    &progress,
-                                    &transfer_client,
-                                    &upload_headers,
-                                ),
-                            )
-                            .await
-                            .map_err(|_| {
-                                OciError::internal(format!(
-                                    "Blob upload timed out for {} after {}s",
-                                    digest,
-                                    OCI_TRANSFER_CALL_TIMEOUT.as_secs()
-                                ))
-                            })?
-                            .map_err(|e| {
-                                OciError::internal(format!(
-                                    "Blob upload failed for {}: {}",
-                                    digest, e
-                                ))
-                            })?;
-                            Ok::<String, OciError>(digest)
-                        });
-                        tasks.push(task);
-                    }
-
-                    for task in tasks {
-                        let digest = task.await.map_err(|e| {
-                            OciError::internal(format!("Blob upload task failed: {e}"))
-                        })??;
-                        blob_receipts.push(BlobReceipt { digest, etag: None });
-                    }
+                    Ok(blob_receipts)
                 }
-            }
+            },
+            move |save_response| {
+                let state = manifest_state.clone();
+                let pointer_bytes = publish_pointer_bytes.clone();
+                let manifest_upload_url = save_response.manifest_upload_url.clone();
+                let upload_headers = save_response.upload_headers.clone();
+                async move {
+                    let manifest_upload_url = manifest_upload_url
+                        .as_ref()
+                        .ok_or_else(|| OciError::internal("Missing manifest_upload_url"))?;
 
-            maybe_commit_blob_receipts(
-                &state,
-                save_response.upload_session_id.as_deref(),
-                blob_receipts,
-            )
-            .await;
+                    tokio::time::timeout(
+                        OCI_TRANSFER_CALL_TIMEOUT,
+                        upload_payload(
+                            state.api_client.transfer_client(),
+                            manifest_upload_url,
+                            &pointer_bytes,
+                            "application/cbor",
+                            &upload_headers,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| {
+                        OciError::internal(format!(
+                            "Pointer upload timed out after {}s",
+                            OCI_TRANSFER_CALL_TIMEOUT.as_secs()
+                        ))
+                    })?
+                    .map_err(|e| OciError::internal(format!("Pointer upload failed: {e}")))
+                }
+            },
+            move |_manifest_etag| {
+                let state = confirm_state.clone();
+                let tag = confirm_tag.clone();
+                let write_scope_tag = confirm_write_scope_tag.clone();
+                let cache_entry_id = confirm_cache_entry_id.clone();
+                let manifest_digest = confirm_manifest_digest.clone();
+                async move {
+                    let confirm_request = ConfirmRequest {
+                        manifest_digest,
+                        manifest_size: confirm_manifest_size,
+                        manifest_etag: None,
+                        archive_size: None,
+                        archive_etag: None,
+                        blob_count: Some(blob_count),
+                        blob_total_size_bytes: Some(blob_total_size_bytes),
+                        file_count: Some(confirm_file_count),
+                        uncompressed_size: None,
+                        compressed_size: None,
+                        storage_mode: Some("cas".to_string()),
+                        tag: Some(tag),
+                        write_scope_tag: Some(write_scope_tag),
+                    };
 
-            let manifest_upload_url = save_response
-                .manifest_upload_url
-                .as_ref()
-                .ok_or_else(|| OciError::internal("Missing manifest_upload_url"))?;
-
-            let manifest_etag = tokio::time::timeout(
-                OCI_TRANSFER_CALL_TIMEOUT,
-                upload_payload(
-                    state.api_client.transfer_client(),
-                    manifest_upload_url,
-                    &pointer_bytes,
-                    "application/cbor",
-                    &save_response.upload_headers,
-                ),
-            )
-            .await
-            .map_err(|_| {
-                OciError::internal(format!(
-                    "Pointer upload timed out after {}s",
-                    OCI_TRANSFER_CALL_TIMEOUT.as_secs()
-                ))
-            })?
-            .map_err(|e| OciError::internal(format!("Pointer upload failed: {e}")))?;
-
-            maybe_commit_manifest_receipt(
-                &state,
-                save_response.upload_session_id.as_deref(),
-                manifest_root_digest.clone(),
-                pointer_bytes.len() as u64,
-                manifest_etag.clone(),
-            )
-            .await;
-        }
-
-        let confirm_request = ConfirmRequest {
-            manifest_digest: manifest_root_digest.clone(),
-            manifest_size: pointer_bytes.len() as u64,
-            manifest_etag: None,
-            archive_size: None,
-            archive_etag: None,
-            blob_count: Some(blob_count),
-            blob_total_size_bytes: Some(blob_total_size_bytes),
-            file_count: Some(blob_count.min(u32::MAX as u64) as u32),
-            uncompressed_size: None,
-            compressed_size: None,
-            storage_mode: Some("cas".to_string()),
-            tag: Some(tag.clone()),
-            write_scope_tag: Some(write_scope_tag.clone()),
-        };
-
-        tokio::time::timeout(
-            OCI_API_CALL_TIMEOUT,
-            state.api_client.confirm(
-                &state.workspace,
-                &save_response.cache_entry_id,
-                &confirm_request,
-            ),
+                    tokio::time::timeout(
+                        OCI_API_CALL_TIMEOUT,
+                        state.api_client.confirm(
+                            &state.workspace,
+                            &cache_entry_id,
+                            &confirm_request,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| {
+                        OciError::internal(format!(
+                            "confirm timed out after {}s",
+                            OCI_API_CALL_TIMEOUT.as_secs()
+                        ))
+                    })?
+                    .map_err(|e| OciError::internal(format!("confirm failed: {e}")))?;
+                    Ok(())
+                }
+            },
         )
-        .await
-        .map_err(|_| {
-            OciError::internal(format!(
-                "confirm timed out after {}s",
-                OCI_API_CALL_TIMEOUT.as_secs()
-            ))
-        })?
-        .map_err(|e| OciError::internal(format!("confirm failed: {e}")))?;
+        .await?;
 
         {
             let cached = OciManifestCacheEntry {

@@ -16,8 +16,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::io::ReaderStream;
 
 use crate::api::models::cache::{
-    BlobDescriptor, BlobReceipt, CacheResolutionEntry, ConfirmRequest,
-    ManifestReceiptCommitRequest, SaveRequest,
+    BlobDescriptor, BlobReceipt, CacheResolutionEntry, ConfirmRequest, SaveRequest,
 };
 use crate::cas_transport::upload_payload;
 use crate::error::{BoringCacheError, PendingMetadata};
@@ -28,6 +27,7 @@ use crate::serve::state::{
     diagnostics_enabled, AppState, BlobReadHandle, KvFlushingSnapshot, KvReplicationWork,
     KV_BACKLOG_POLICY,
 };
+use crate::upload_receipts::try_commit_blob_receipts;
 
 use super::error::RegistryError;
 
@@ -3441,17 +3441,17 @@ async fn do_flush(
             .await
             {
                 Ok(heal_stats) => {
-                    if let Some(upload_session_id) = save_response.upload_session_id.as_deref() {
-                        if !heal_stats.uploaded_receipts.is_empty() {
-                            let _ = state
-                                .api_client
-                                .commit_blob_receipts(
-                                    &state.workspace,
-                                    upload_session_id,
-                                    &heal_stats.uploaded_receipts,
-                                )
-                                .await;
-                        }
+                    if let Err(error) = try_commit_blob_receipts(
+                        &state.api_client,
+                        &state.workspace,
+                        save_response.upload_session_id.as_deref(),
+                        heal_stats.uploaded_receipts.clone(),
+                    )
+                    .await
+                    {
+                        log::warn!(
+                            "KV flush: exists=true blob reconcile receipt commit failed: {error:#}"
+                        );
                     }
                     if heal_stats.uploaded_count > 0 || heal_stats.missing_local_count > 0 {
                         eprintln!(
@@ -3484,81 +3484,74 @@ async fn do_flush(
     }
     eprintln!("KV flush: uploading {total_count} entries, {blob_count} blobs, pointer={expected_manifest_size} bytes");
 
-    let upload_stats = if !blobs.is_empty() {
-        upload_blobs(
-            state,
-            &save_response.cache_entry_id,
-            &blobs,
-            &filtered_pending_blob_paths,
-        )
-        .await
-        .map_err(|e| classify_flush_error(&e, "blob upload failed"))?
-    } else {
-        BlobUploadStats::default()
-    };
+    let upload_stats_holder = Arc::new(std::sync::Mutex::new(BlobUploadStats::default()));
+    let publish_upload_stats = upload_stats_holder.clone();
+    let confirm_cache_entry_id = save_response.cache_entry_id.clone();
+    let confirm_manifest_digest = manifest_root_digest.clone();
+    let confirm_tag = tag.clone();
+    let confirm_write_scope_tag = kv_primary_write_scope_tag(state);
+    let confirm_outcome = crate::serve::cas_publish::publish_after_save(
+        &state.api_client,
+        &state.workspace,
+        &save_response,
+        manifest_root_digest.clone(),
+        expected_manifest_size,
+        |save_response| {
+            let cache_entry_id = save_response.cache_entry_id.clone();
+            async move {
+                let upload_stats = if !blobs.is_empty() {
+                    upload_blobs(state, &cache_entry_id, &blobs, &filtered_pending_blob_paths)
+                        .await
+                        .map_err(|e| classify_flush_error(&e, "blob upload failed"))?
+                } else {
+                    BlobUploadStats::default()
+                };
 
-    let manifest_upload_url = save_response
-        .manifest_upload_url
-        .as_ref()
-        .ok_or(FlushError::Permanent("missing manifest upload URL".into()))?;
+                *publish_upload_stats.lock().unwrap() = upload_stats.clone();
+                Ok(upload_stats.uploaded_receipts)
+            }
+        },
+        |save_response| {
+            let manifest_upload_url = save_response.manifest_upload_url.clone();
+            let upload_headers = save_response.upload_headers.clone();
+            async move {
+                let manifest_upload_url = manifest_upload_url
+                    .as_ref()
+                    .ok_or(FlushError::Permanent("missing manifest upload URL".into()))?;
 
-    let manifest_etag = upload_payload(
-        state.api_client.transfer_client(),
-        manifest_upload_url,
-        &pointer_bytes,
-        "application/cbor",
-        &save_response.upload_headers,
-    )
-    .await
-    .map_err(|e| classify_flush_error(&e, "manifest upload failed"))?;
-
-    if let Some(upload_session_id) = save_response.upload_session_id.as_deref() {
-        if !upload_stats.uploaded_receipts.is_empty() {
-            if let Err(e) = state
-                .api_client
-                .commit_blob_receipts(
-                    &state.workspace,
-                    upload_session_id,
-                    &upload_stats.uploaded_receipts,
+                upload_payload(
+                    state.api_client.transfer_client(),
+                    manifest_upload_url,
+                    &pointer_bytes,
+                    "application/cbor",
+                    &upload_headers,
                 )
                 .await
-            {
-                eprintln!("KV flush: blob receipt commit failed (non-fatal): {e:#}");
+                .map_err(|e| classify_flush_error(&e, "manifest upload failed"))
             }
-        }
+        },
+        |manifest_etag| async move {
+            let confirm_request = ConfirmRequest {
+                manifest_digest: confirm_manifest_digest.clone(),
+                manifest_size: expected_manifest_size,
+                manifest_etag,
+                archive_size: None,
+                archive_etag: None,
+                blob_count: Some(blob_count),
+                blob_total_size_bytes: Some(blob_total_size_bytes),
+                file_count: Some(file_count),
+                uncompressed_size: None,
+                compressed_size: None,
+                storage_mode: Some("cas".to_string()),
+                tag: Some(confirm_tag.clone()),
+                write_scope_tag: confirm_write_scope_tag.clone(),
+            };
 
-        let request = ManifestReceiptCommitRequest {
-            manifest_digest: manifest_root_digest.clone(),
-            manifest_size: expected_manifest_size,
-            manifest_etag: manifest_etag.clone(),
-        };
-        if let Err(e) = state
-            .api_client
-            .commit_manifest_receipt(&state.workspace, upload_session_id, &request)
-            .await
-        {
-            eprintln!("KV flush: manifest receipt commit failed (non-fatal): {e:#}");
-        }
-    }
-
-    let confirm_request = ConfirmRequest {
-        manifest_digest: manifest_root_digest.clone(),
-        manifest_size: expected_manifest_size,
-        manifest_etag,
-        archive_size: None,
-        archive_etag: None,
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        file_count: Some(file_count),
-        uncompressed_size: None,
-        compressed_size: None,
-        storage_mode: Some("cas".to_string()),
-        tag: Some(tag.clone()),
-        write_scope_tag: kv_primary_write_scope_tag(state),
-    };
-
-    let confirm_outcome =
-        confirm_kv_flush(state, &save_response.cache_entry_id, &confirm_request).await?;
+            confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request).await
+        },
+    )
+    .await?;
+    let upload_stats = upload_stats_holder.lock().unwrap().clone();
 
     let pending_alias_count = bind_kv_alias_tags(
         state,
@@ -3876,7 +3869,7 @@ fn select_flush_base_entries(
     )
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct BlobUploadStats {
     uploaded_count: u64,
     already_present_count: u64,
