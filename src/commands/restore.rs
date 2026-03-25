@@ -65,13 +65,21 @@ struct RestorePreflightCheck {
     valid_specs: Vec<RestoreSpec>,
 }
 
-fn run_restore_preflight_checks(parsed_pairs: &[RestoreSpec]) -> Result<RestorePreflightCheck> {
+fn run_restore_preflight_checks(
+    parsed_pairs: &[RestoreSpec],
+    validate_targets: bool,
+) -> Result<RestorePreflightCheck> {
     let mut valid_specs = Vec::new();
     let mut warnings = Vec::new();
 
     for spec in parsed_pairs {
         if let Err(error) = crate::tag_utils::validate_tag(&spec.tag) {
             warnings.push(format!("Skipping invalid tag '{}': {}", spec.tag, error));
+            continue;
+        }
+
+        if !validate_targets {
+            valid_specs.push(spec.clone());
             continue;
         }
 
@@ -175,7 +183,7 @@ mod tests {
             path: Some(file_path.to_string_lossy().to_string()),
         };
 
-        let result = run_restore_preflight_checks(&[parsed]).unwrap();
+        let result = run_restore_preflight_checks(&[parsed], true).unwrap();
         assert_eq!(result.valid_specs.len(), 0);
     }
 
@@ -188,7 +196,7 @@ mod tests {
             path: Some(target.to_string_lossy().to_string()),
         };
 
-        let result = run_restore_preflight_checks(&[parsed]).unwrap();
+        let result = run_restore_preflight_checks(&[parsed], true).unwrap();
         assert_eq!(result.valid_specs.len(), 1);
     }
 
@@ -201,7 +209,7 @@ mod tests {
             path: Some(target.to_string_lossy().to_string()),
         };
 
-        let result = run_restore_preflight_checks(&[parsed]).unwrap();
+        let result = run_restore_preflight_checks(&[parsed], true).unwrap();
         assert_eq!(result.valid_specs.len(), 0);
     }
 
@@ -215,7 +223,7 @@ mod tests {
             path: Some(target.to_string_lossy().to_string()),
         };
 
-        let result = run_restore_preflight_checks(&[parsed]).unwrap();
+        let result = run_restore_preflight_checks(&[parsed], true).unwrap();
         assert_eq!(result.valid_specs.len(), 1);
         // Verify parent directories were created
         assert!(temp.path().join("vendor").exists());
@@ -245,9 +253,23 @@ mod tests {
             },
         ];
 
-        let result = run_restore_preflight_checks(&parsed_entries).unwrap();
+        let result = run_restore_preflight_checks(&parsed_entries, true).unwrap();
         assert_eq!(result.valid_specs.len(), 1);
         assert_eq!(result.valid_specs[0].tag, "tag2");
+    }
+
+    #[test]
+    fn preflight_lookup_only_does_not_create_missing_parent_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("vendor").join("bundle");
+        let parsed = RestoreSpec {
+            tag: "valid-tag".to_string(),
+            path: Some(target.to_string_lossy().to_string()),
+        };
+
+        let result = run_restore_preflight_checks(&[parsed], false).unwrap();
+        assert_eq!(result.valid_specs.len(), 1);
+        assert!(!temp.path().join("vendor").exists());
     }
 
     #[test]
@@ -404,7 +426,7 @@ async fn execute_batch_restore_inner(
         .map(|tag_path| crate::commands::utils::parse_restore_format(tag_path).map_err(Error::from))
         .collect::<Result<_, _>>()?;
 
-    let preflight_result = run_restore_preflight_checks(&parsed_specs)?;
+    let preflight_result = run_restore_preflight_checks(&parsed_specs, !lookup_only)?;
 
     let platform = if !no_platform {
         Some(crate::platform::Platform::detect()?)

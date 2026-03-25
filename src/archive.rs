@@ -188,12 +188,20 @@ fn write_archive(
         for manifest_file in manifest_files.iter() {
             let full_path = base_path_buf.join(&manifest_file.path);
 
-            if full_path.exists() {
-                tar_builder
-                    .append_path_with_name(&full_path, &manifest_file.path)
-                    .with_context(|| {
-                        format!("Failed to add path to tar: {}", manifest_file.path)
-                    })?;
+            match fs::symlink_metadata(&full_path) {
+                Ok(_) => {
+                    tar_builder
+                        .append_path_with_name(&full_path, &manifest_file.path)
+                        .with_context(|| {
+                            format!("Failed to add path to tar: {}", manifest_file.path)
+                        })?;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("Failed to inspect path for tar: {}", manifest_file.path)
+                    })
+                }
             }
 
             let processed = files_processed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -792,4 +800,43 @@ fn create_symlink(path: &Path, target: &Path) -> Result<()> {
             .with_context(|| format!("Failed to create symlink {}", path.display()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::ManifestBuilder;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_and_extract_archive_preserves_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let source_dir = tempfile::tempdir().unwrap();
+        std::fs::write(source_dir.path().join("hello.txt"), "hello\n").unwrap();
+        symlink("missing-target", source_dir.path().join("dangling")).unwrap();
+
+        let draft = ManifestBuilder::new(source_dir.path()).build().unwrap();
+        let archive = create_tar_archive(&draft, source_dir.path().to_str().unwrap(), false, None)
+            .await
+            .unwrap();
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let restore_root = target_dir.path().join("restored");
+        extract_tar_archive(&archive.archive_path, &restore_root, false, None)
+            .await
+            .unwrap();
+
+        let dangling_path = restore_root.join("dangling");
+        let metadata = std::fs::symlink_metadata(&dangling_path).unwrap();
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_link(&dangling_path).unwrap(),
+            PathBuf::from("missing-target")
+        );
+        assert_eq!(
+            std::fs::read_to_string(restore_root.join("hello.txt")).unwrap(),
+            "hello\n"
+        );
+    }
 }

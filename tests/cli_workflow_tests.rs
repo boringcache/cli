@@ -2112,6 +2112,105 @@ async fn test_restore_lookup_only_all_found() {
 }
 
 #[tokio::test]
+async fn test_restore_lookup_only_does_not_create_target_directories() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!("skipping test_restore_lookup_only_does_not_create_target_directories: networking disabled in sandbox");
+        return;
+    }
+    let mut server = Server::new_async().await;
+
+    let _auth_mock = server
+        .mock("GET", "/v2/session")
+        .with_status(200)
+        .with_body(
+            json!({
+                "user": {"name": "Test User", "email": "test@example.com"},
+                "organization": {"name": "Test Org"},
+                "token": {"expires_in_days": 90}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let platform_suffix = platform_tag_suffix();
+    let hit_tag = format!("lookup-no-touch-{}", platform_suffix);
+
+    let _cache_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([
+                {
+                    "tag": hit_tag.clone(),
+                    "cache_entry_id": "123",
+                    "manifest_url": "https://example.com/manifest",
+                    "chunks": [],
+                    "metadata": null,
+                    "status": "hit"
+                }
+            ])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config_dir = temp_dir.path().join(".boringcache");
+    fs::create_dir(&config_dir).expect("Failed to create config dir");
+    fs::write(
+        config_dir.join("config.json"),
+        json!({
+            "token": "test-token-123",
+            "api_url": server.url()
+        })
+        .to_string(),
+    )
+    .expect("Failed to write config");
+    env::set_var("HOME", temp_dir.path());
+
+    let target_dir = temp_dir
+        .path()
+        .join("nested")
+        .join("restore")
+        .join("target");
+    let tag_path = format!("lookup-no-touch:{}", target_dir.display());
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "restore",
+            "test/workspace",
+            tag_path.as_str(),
+            "--lookup-only",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.code() != Some(0) {
+        eprintln!("STDOUT: {}", stdout);
+        eprintln!("STDERR: {}", stderr);
+        eprintln!("Exit code: {:?}", output.status.code());
+    }
+
+    assert_eq!(output.status.code(), Some(0));
+    let output_text = format!("{stdout}{stderr}");
+    assert!(output_text.contains(&format!("Available cache entries: {}", hit_tag)));
+    assert!(!temp_dir.path().join("nested").exists());
+
+    env::remove_var("BORINGCACHE_API_URL");
+    env::remove_var("HOME");
+}
+
+#[tokio::test]
 async fn test_save_workflow_with_force_flag() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {

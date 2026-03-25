@@ -87,7 +87,8 @@ impl<'a> ManifestBuilder<'a> {
         }
 
         let root = self.root;
-        let exclude_patterns = self.exclude_patterns.clone();
+        let exclude_patterns = trim_exclude_patterns(&self.exclude_patterns);
+        let exclude_patterns_for_filter = exclude_patterns.clone();
         let root_for_filter = root.to_path_buf();
         let paths: Vec<PathBuf> = WalkDir::new(root)
             .follow_links(false)
@@ -99,7 +100,10 @@ impl<'a> ManifestBuilder<'a> {
                         if let Ok(rel) = path.strip_prefix(&root_for_filter) {
                             let rel_str = normalize_manifest_path(rel);
                             return !should_skip_for_manifest(&rel_str)
-                                && !matches_exclude_pattern(&rel_str, &exclude_patterns);
+                                && !matches_exclude_pattern(
+                                    &rel_str,
+                                    &exclude_patterns_for_filter,
+                                );
                         }
                     }
                     true
@@ -123,7 +127,7 @@ impl<'a> ManifestBuilder<'a> {
                 if should_skip_for_manifest(&relative_path) {
                     return None;
                 }
-                if matches_exclude_pattern(&relative_path, &self.exclude_patterns) {
+                if matches_exclude_pattern(&relative_path, &exclude_patterns) {
                     return None;
                 }
 
@@ -247,9 +251,37 @@ fn should_skip_for_manifest(path: &str) -> bool {
     matches_any_pattern(path, BUILTIN_SKIP_PATTERNS)
 }
 
+fn trim_exclude_patterns(patterns: &[String]) -> Vec<String> {
+    patterns
+        .iter()
+        .map(|pattern| pattern.trim().to_string())
+        .filter(|pattern| !pattern.is_empty())
+        .collect()
+}
+
 fn matches_exclude_pattern(path: &str, patterns: &[String]) -> bool {
-    let pattern_refs: Vec<&str> = patterns.iter().map(|s| s.trim()).collect();
-    matches_any_pattern(path, &pattern_refs)
+    let filename = path.rsplit('/').next().unwrap_or(path);
+
+    for pattern in patterns {
+        if pattern.ends_with('/') {
+            if path.starts_with(pattern) || path.contains(&format!("/{pattern}")) {
+                return true;
+            }
+            continue;
+        }
+
+        let target = if pattern.contains('/') {
+            path
+        } else {
+            filename
+        };
+
+        if matches_glob(target, pattern) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn matches_any_pattern(path: &str, patterns: &[&str]) -> bool {
@@ -403,22 +435,41 @@ mod tests {
     #[test]
     fn test_matches_exclude_pattern_filename() {
         let patterns = vec!["*.out".to_string(), "*.log".to_string()];
-        assert!(matches_exclude_pattern("ruby/gems/gem_make.out", &patterns));
-        assert!(matches_exclude_pattern("debug.log", &patterns));
-        assert!(!matches_exclude_pattern("main.rs", &patterns));
+        let trimmed_patterns = trim_exclude_patterns(&patterns);
+        assert!(matches_exclude_pattern(
+            "ruby/gems/gem_make.out",
+            &trimmed_patterns
+        ));
+        assert!(matches_exclude_pattern("debug.log", &trimmed_patterns));
+        assert!(!matches_exclude_pattern("main.rs", &trimmed_patterns));
     }
 
     #[test]
     fn test_matches_exclude_pattern_with_path() {
         let patterns = vec!["ruby/*.out".to_string()];
-        assert!(matches_exclude_pattern("ruby/gem_make.out", &patterns));
-        assert!(!matches_exclude_pattern("python/gem_make.out", &patterns));
+        let trimmed_patterns = trim_exclude_patterns(&patterns);
+        assert!(matches_exclude_pattern(
+            "ruby/gem_make.out",
+            &trimmed_patterns
+        ));
+        assert!(!matches_exclude_pattern(
+            "python/gem_make.out",
+            &trimmed_patterns
+        ));
     }
 
     #[test]
     fn test_matches_exclude_pattern_empty() {
         let patterns: Vec<String> = vec![];
-        assert!(!matches_exclude_pattern("any_file.txt", &patterns));
+        let trimmed_patterns = trim_exclude_patterns(&patterns);
+        assert!(!matches_exclude_pattern("any_file.txt", &trimmed_patterns));
+    }
+
+    #[test]
+    fn test_trim_exclude_patterns_drops_empty_entries() {
+        let patterns = vec!["  *.out  ".to_string(), "   ".to_string()];
+        let trimmed_patterns = trim_exclude_patterns(&patterns);
+        assert_eq!(trimmed_patterns, vec!["*.out"]);
     }
 
     #[test]
