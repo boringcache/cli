@@ -10,18 +10,24 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio_util::io::ReaderStream;
 
-use crate::api::models::cache::{
-    BlobDescriptor, BlobReceipt, ConfirmRequest, ManifestReceiptCommitRequest, SaveRequest,
-};
+use crate::api::models::cache::{BlobDescriptor, BlobReceipt, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
 use crate::cas_transport::upload_payload;
 use crate::multipart_upload::upload_via_single_url;
 use crate::serve::error::OciError;
+use crate::serve::oci_receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
+use crate::serve::oci_route::{
+    insert_header, oci_cache_op_for_route_method, oci_miss_key, oci_success_rollup_result,
+    parse_oci_path, record_oci_cache_op, OciRoute,
+};
+use crate::serve::oci_tags::{
+    alias_tags_for_manifest, bind_alias_tag, scoped_restore_tags, scoped_save_tag,
+    scoped_write_scope_tag, AliasBinding, AliasTagManifest,
+};
 use crate::serve::state::{
-    diagnostics_enabled, digest_tag, ref_tag_for_input, AppState, BlobLocatorEntry, BlobReadHandle,
+    diagnostics_enabled, digest_tag, AppState, BlobLocatorEntry, BlobReadHandle,
     OciManifestCacheEntry, UploadSession, OCI_MANIFEST_CACHE_TTL,
 };
-use crate::tag_utils::TagResolver;
 
 const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
 const OCI_PREFETCH_BLOB_URL_LIMIT: usize = 128;
@@ -41,213 +47,11 @@ fn oci_request_log_enabled() -> bool {
     *ENABLED.get_or_init(diagnostics_enabled)
 }
 
-async fn maybe_commit_blob_receipts(
-    state: &AppState,
-    upload_session_id: Option<&str>,
-    receipts: Vec<BlobReceipt>,
-) {
-    if let Some(upload_session_id) = upload_session_id.filter(|_| !receipts.is_empty()) {
-        if let Err(e) = state
-            .api_client
-            .commit_blob_receipts(&state.workspace, upload_session_id, &receipts)
-            .await
-        {
-            log::warn!(
-                "blob receipt commit failed for upload session {}: {}",
-                upload_session_id,
-                e
-            );
-        }
-    }
-}
-
-async fn maybe_commit_manifest_receipt(
-    state: &AppState,
-    upload_session_id: Option<&str>,
-    manifest_digest: String,
-    manifest_size: u64,
-    manifest_etag: Option<String>,
-) {
-    if let Some(upload_session_id) = upload_session_id {
-        let request = ManifestReceiptCommitRequest {
-            manifest_digest,
-            manifest_size,
-            manifest_etag,
-        };
-        if let Err(e) = state
-            .api_client
-            .commit_manifest_receipt(&state.workspace, upload_session_id, &request)
-            .await
-        {
-            log::warn!(
-                "manifest receipt commit failed for upload session {}: {}",
-                upload_session_id,
-                e
-            );
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EmptyFinalizeReuse {
     Local,
     Remote,
     Missing,
-}
-
-fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) -> Result<(), OciError> {
-    let header_name = axum::http::header::HeaderName::from_bytes(name.as_bytes())
-        .map_err(|e| OciError::internal(format!("Invalid header name {name}: {e}")))?;
-    let header_value = axum::http::header::HeaderValue::from_str(value)
-        .map_err(|e| OciError::internal(format!("Invalid header value for {name}: {e}")))?;
-    headers.insert(header_name, header_value);
-    Ok(())
-}
-
-#[derive(Clone)]
-enum OciRoute {
-    Manifest { name: String, reference: String },
-    Blob { name: String, digest: String },
-    BlobUploadStart { name: String },
-    BlobUpload { name: String, uuid: String },
-}
-
-fn parse_oci_path(path: &str) -> Option<OciRoute> {
-    let path = path.strip_prefix('/').unwrap_or(path);
-
-    if let Some(idx) = path.rfind("/blobs/uploads/") {
-        let name = &path[..idx];
-        let uuid = &path[idx + "/blobs/uploads/".len()..];
-        if !name.is_empty() && !uuid.is_empty() {
-            return Some(OciRoute::BlobUpload {
-                name: name.to_string(),
-                uuid: uuid.to_string(),
-            });
-        }
-    }
-
-    if let Some(name) = path.strip_suffix("/blobs/uploads") {
-        if !name.is_empty() {
-            return Some(OciRoute::BlobUploadStart {
-                name: name.to_string(),
-            });
-        }
-    }
-
-    if let Some(name) = path.strip_suffix("/blobs/uploads/") {
-        if !name.is_empty() {
-            return Some(OciRoute::BlobUploadStart {
-                name: name.to_string(),
-            });
-        }
-    }
-
-    if let Some(idx) = path.rfind("/blobs/") {
-        let name = &path[..idx];
-        let digest = &path[idx + "/blobs/".len()..];
-        if !name.is_empty() && !digest.is_empty() {
-            return Some(OciRoute::Blob {
-                name: name.to_string(),
-                digest: digest.to_string(),
-            });
-        }
-    }
-
-    if let Some(idx) = path.rfind("/manifests/") {
-        let name = &path[..idx];
-        let reference = &path[idx + "/manifests/".len()..];
-        if !name.is_empty() && !reference.is_empty() {
-            return Some(OciRoute::Manifest {
-                name: name.to_string(),
-                reference: reference.to_string(),
-            });
-        }
-    }
-
-    None
-}
-
-fn oci_cache_op_for_route_method(
-    route: &OciRoute,
-    method: &Method,
-) -> Option<crate::serve::cache_registry::cache_ops::Op> {
-    match route {
-        OciRoute::Manifest { .. } => {
-            if *method == Method::GET || *method == Method::HEAD {
-                Some(crate::serve::cache_registry::cache_ops::Op::Get)
-            } else if *method == Method::PUT {
-                Some(crate::serve::cache_registry::cache_ops::Op::Put)
-            } else {
-                None
-            }
-        }
-        OciRoute::Blob { .. } => {
-            if *method == Method::GET || *method == Method::HEAD {
-                Some(crate::serve::cache_registry::cache_ops::Op::Get)
-            } else {
-                None
-            }
-        }
-        OciRoute::BlobUpload { .. } => {
-            if *method == Method::PUT {
-                Some(crate::serve::cache_registry::cache_ops::Op::Put)
-            } else {
-                None
-            }
-        }
-        OciRoute::BlobUploadStart { .. } => None,
-    }
-}
-
-fn oci_miss_key(route: &OciRoute) -> Option<String> {
-    match route {
-        OciRoute::Manifest { name, reference } => Some(format!("manifest:{name}:{reference}")),
-        OciRoute::Blob { name, digest } => Some(format!("blob:{name}@{digest}")),
-        OciRoute::BlobUploadStart { .. } | OciRoute::BlobUpload { .. } => None,
-    }
-}
-
-fn record_oci_cache_op(
-    state: &AppState,
-    op: crate::serve::cache_registry::cache_ops::Op,
-    result: crate::serve::cache_registry::cache_ops::OpResult,
-    degraded: bool,
-    bytes: u64,
-    latency_ms: u64,
-    miss_key: Option<&str>,
-) {
-    state.cache_ops.record(
-        crate::serve::cache_registry::cache_ops::Tool::Oci,
-        op,
-        result,
-        degraded,
-        bytes,
-        latency_ms,
-    );
-
-    if result == crate::serve::cache_registry::cache_ops::OpResult::Miss {
-        if let Some(key) = miss_key {
-            state
-                .cache_ops
-                .record_miss(crate::serve::cache_registry::cache_ops::Tool::Oci, key);
-        }
-    }
-}
-
-fn oci_success_rollup_result(
-    response: &Response,
-) -> (crate::serve::cache_registry::cache_ops::OpResult, bool) {
-    if response.headers().get(OCI_DEGRADED_HEADER).is_some() {
-        (
-            crate::serve::cache_registry::cache_ops::OpResult::Error,
-            true,
-        )
-    } else {
-        (
-            crate::serve::cache_registry::cache_ops::OpResult::Hit,
-            false,
-        )
-    }
 }
 
 pub async fn v2_base(State(state): State<AppState>) -> impl IntoResponse {
@@ -331,7 +135,7 @@ pub async fn oci_dispatch(
                 );
             }
             if let Some(op) = maybe_cache_op {
-                let (result, degraded) = oci_success_rollup_result(&response);
+                let (result, degraded) = oci_success_rollup_result(&response, OCI_DEGRADED_HEADER);
                 let bytes = response
                     .headers()
                     .get(reqwest::header::CONTENT_LENGTH)
@@ -1039,167 +843,6 @@ fn evict_cached_manifest(state: &AppState, tags: &[String], manifest_digest: &st
     state
         .oci_manifest_cache
         .remove(&digest_tag(manifest_digest));
-}
-
-fn scoped_restore_tags(tag_resolver: &TagResolver, name: &str, reference: &str) -> Vec<String> {
-    let scoped_input = format!("{name}:{reference}");
-    let scoped = tag_resolver
-        .effective_save_tag(&scoped_input)
-        .unwrap_or(scoped_input);
-    vec![ref_tag_for_input(&scoped)]
-}
-
-fn scoped_save_tag(
-    tag_resolver: &TagResolver,
-    name: &str,
-    reference: &str,
-) -> Result<String, OciError> {
-    let scoped_input = format!("{name}:{reference}");
-    let scoped = tag_resolver
-        .effective_save_tag(&scoped_input)
-        .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))?;
-    Ok(ref_tag_for_input(&scoped))
-}
-
-fn scoped_write_scope_tag(
-    tag_resolver: &TagResolver,
-    name: &str,
-    reference: &str,
-) -> Result<String, OciError> {
-    let scoped_input = format!("{name}:{reference}");
-    tag_resolver
-        .effective_save_tag(&scoped_input)
-        .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct AliasBinding {
-    tag: String,
-    write_scope_tag: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct AliasTagManifest {
-    manifest_root_digest: String,
-    manifest_size: u64,
-    blob_count: u64,
-    blob_total_size_bytes: u64,
-    total_size_bytes: u64,
-}
-
-fn alias_tags_for_manifest(
-    primary_tag: &str,
-    manifest_digest: &str,
-    primary_write_scope_tag: Option<&str>,
-    configured_human_tags: &[String],
-    additional_aliases: &[AliasBinding],
-) -> Vec<AliasBinding> {
-    let mut seen = HashSet::new();
-    let mut aliases = Vec::new();
-
-    let digest_alias = digest_tag(manifest_digest);
-    if digest_alias != primary_tag && seen.insert(digest_alias.clone()) {
-        aliases.push(AliasBinding {
-            tag: digest_alias,
-            write_scope_tag: primary_write_scope_tag.map(ToOwned::to_owned),
-        });
-    }
-
-    for human_tag in configured_human_tags {
-        if human_tag != primary_tag && seen.insert(human_tag.clone()) {
-            aliases.push(AliasBinding {
-                tag: human_tag.clone(),
-                write_scope_tag: None,
-            });
-        }
-    }
-
-    for alias in additional_aliases {
-        if alias.tag != primary_tag && seen.insert(alias.tag.clone()) {
-            aliases.push(alias.clone());
-        }
-    }
-
-    aliases
-}
-
-async fn bind_alias_tag(
-    state: &AppState,
-    alias_tag: &str,
-    write_scope_tag: Option<&str>,
-    manifest: &AliasTagManifest,
-) -> Result<(), String> {
-    let alias_request = SaveRequest {
-        tag: alias_tag.to_string(),
-        write_scope_tag: write_scope_tag.map(ToOwned::to_owned),
-        manifest_root_digest: manifest.manifest_root_digest.clone(),
-        compression_algorithm: "zstd".to_string(),
-        storage_mode: Some("cas".to_string()),
-        blob_count: Some(manifest.blob_count),
-        blob_total_size_bytes: Some(manifest.blob_total_size_bytes),
-        cas_layout: Some("oci-v1".to_string()),
-        manifest_format_version: Some(1),
-        total_size_bytes: manifest.total_size_bytes,
-        uncompressed_size: None,
-        compressed_size: None,
-        file_count: Some(manifest.blob_count.min(u32::MAX as u64) as u32),
-        expected_manifest_digest: Some(manifest.manifest_root_digest.clone()),
-        expected_manifest_size: Some(manifest.manifest_size),
-        force: None,
-        use_multipart: None,
-        ci_provider: None,
-        encrypted: None,
-        encryption_algorithm: None,
-        encryption_recipient_hint: None,
-    };
-
-    let alias_save = tokio::time::timeout(
-        OCI_API_CALL_TIMEOUT,
-        state
-            .api_client
-            .save_entry(&state.workspace, &alias_request),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "save_entry timed out after {}s",
-            OCI_API_CALL_TIMEOUT.as_secs()
-        )
-    })?
-    .map_err(|e| format!("save_entry failed: {e}"))?;
-
-    let alias_confirm = ConfirmRequest {
-        manifest_digest: manifest.manifest_root_digest.clone(),
-        manifest_size: manifest.manifest_size,
-        manifest_etag: None,
-        archive_size: None,
-        archive_etag: None,
-        blob_count: Some(manifest.blob_count),
-        blob_total_size_bytes: Some(manifest.blob_total_size_bytes),
-        file_count: Some(manifest.blob_count.min(u32::MAX as u64) as u32),
-        uncompressed_size: None,
-        compressed_size: None,
-        storage_mode: Some("cas".to_string()),
-        tag: Some(alias_tag.to_string()),
-        write_scope_tag: write_scope_tag.map(ToOwned::to_owned),
-    };
-
-    tokio::time::timeout(
-        OCI_API_CALL_TIMEOUT,
-        state
-            .api_client
-            .confirm(&state.workspace, &alias_save.cache_entry_id, &alias_confirm),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "confirm timed out after {}s",
-            OCI_API_CALL_TIMEOUT.as_secs()
-        )
-    })?
-    .map_err(|e| format!("confirm failed: {e}"))?;
-
-    Ok(())
 }
 
 fn lookup_oci_manifest_cache(
@@ -2703,7 +2346,8 @@ mod tests {
     use crate::git::GitContext;
     use crate::platform::Platform;
     use crate::serve::state::{
-        BlobLocatorCache, BlobReadCache, KvPendingStore, KvPublishedIndex, UploadSessionStore,
+        ref_tag_for_input, BlobLocatorCache, BlobReadCache, KvPendingStore, KvPublishedIndex,
+        UploadSessionStore,
     };
     use crate::tag_utils::TagResolver;
     use axum::body::Bytes;
@@ -2810,7 +2454,7 @@ mod tests {
     #[test]
     fn oci_success_rollup_without_degraded_header_is_hit() {
         let response = (StatusCode::CREATED, Body::empty()).into_response();
-        let (result, degraded) = oci_success_rollup_result(&response);
+        let (result, degraded) = oci_success_rollup_result(&response, OCI_DEGRADED_HEADER);
         assert_eq!(
             result,
             crate::serve::cache_registry::cache_ops::OpResult::Hit
@@ -2826,7 +2470,7 @@ mod tests {
             Body::empty(),
         )
             .into_response();
-        let (result, degraded) = oci_success_rollup_result(&response);
+        let (result, degraded) = oci_success_rollup_result(&response, OCI_DEGRADED_HEADER);
         assert_eq!(
             result,
             crate::serve::cache_registry::cache_ops::OpResult::Error

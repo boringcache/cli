@@ -16,6 +16,8 @@ use crate::archive::create_tar_archive;
 use crate::ci_detection::detect_ci_environment;
 use crate::commands::cas_publish::{self, BlobUploadSource};
 use crate::commands::cas_restore::{self, BlobDownloadTarget, FetchCasPointerOutcome};
+use crate::commands::file_materialize::{create_symlink, remove_path_if_exists};
+use crate::commands::signature_policy::verify_restore_signature;
 use crate::commands::upload_receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
 use crate::manifest::{EntryType, ManifestBuilder};
 use crate::transfer::send_transfer_request_with_retry;
@@ -31,105 +33,6 @@ enum RestoreAction {
     AlreadyInSync,
     LocalDiffers,
     NoRemoteCache,
-}
-
-fn signature_subject_tag<'a>(
-    hit: &'a crate::api::models::cache::CacheResolutionEntry,
-    manifest_tag: Option<&'a str>,
-) -> &'a str {
-    hit.signature_tag
-        .as_deref()
-        .or(manifest_tag)
-        .or(hit.primary_tag.as_deref())
-        .unwrap_or(hit.tag.as_str())
-}
-
-fn signature_display_tag<'a>(
-    hit: &'a crate::api::models::cache::CacheResolutionEntry,
-    fallback: &'a str,
-) -> &'a str {
-    hit.signature_tag
-        .as_deref()
-        .or(hit.primary_tag.as_deref())
-        .unwrap_or(fallback)
-}
-
-fn enforce_server_signature(
-    hit: &crate::api::models::cache::CacheResolutionEntry,
-    root_digest: &str,
-    manifest_tag: Option<&str>,
-    verbose: bool,
-    require_server_signature: bool,
-) -> Result<()> {
-    let signature_tag = signature_subject_tag(hit, manifest_tag);
-    let display_tag = signature_display_tag(hit, manifest_tag.unwrap_or(hit.tag.as_str()));
-
-    match (&hit.workspace_signing_public_key, &hit.server_signature) {
-        (Some(workspace_key), Some(server_sig)) => {
-            match crate::commands::restore::verify_server_signature(
-                signature_tag,
-                root_digest,
-                workspace_key,
-                server_sig,
-            ) {
-                Ok(()) => {
-                    if verbose {
-                        ui::info("  Server signature verified");
-                    }
-                    Ok(())
-                }
-                Err(error) => {
-                    if require_server_signature {
-                        anyhow::bail!(
-                            "Server signature verification failed for {}: {}",
-                            display_tag,
-                            error
-                        );
-                    }
-                    ui::warn(&format!(
-                        "Server signature verification failed for {}: {}",
-                        display_tag, error
-                    ));
-                    Ok(())
-                }
-            }
-        }
-        (Some(_), None) => {
-            if require_server_signature {
-                anyhow::bail!(
-                    "Server signature missing for {}; strict signature mode is enabled",
-                    display_tag
-                );
-            }
-            ui::warn(&format!(
-                "Server signature missing for {}; authenticity not verified",
-                display_tag
-            ));
-            Ok(())
-        }
-        (None, Some(_)) => {
-            if require_server_signature {
-                anyhow::bail!(
-                    "Workspace signing key missing for {}; strict signature mode is enabled",
-                    display_tag
-                );
-            }
-            ui::warn(&format!(
-                "Workspace signing key missing for {}; cannot verify server signature",
-                display_tag
-            ));
-            Ok(())
-        }
-        (None, None) => {
-            if require_server_signature {
-                anyhow::bail!(
-                    "Server signature missing for {}; strict signature mode is enabled",
-                    display_tag
-                );
-            }
-            Ok(())
-        }
-    }
 }
 
 pub async fn execute(
@@ -553,11 +456,12 @@ async fn initial_restore(
         return Ok(RestoreAction::NoRemoteCache);
     }
 
-    enforce_server_signature(
+    verify_restore_signature(
         hit,
         &manifest.root.digest,
         Some(manifest.tag.as_str()),
         verbose,
+        None,
         require_server_signature,
     )?;
 
@@ -757,7 +661,14 @@ async fn initial_restore_oci(
         hit,
         crate::adapters::CasAdapterKind::Oci,
         |hit, root_digest| {
-            enforce_server_signature(hit, root_digest, None, verbose, require_server_signature)
+            verify_restore_signature(
+                hit,
+                root_digest,
+                None,
+                verbose,
+                None,
+                require_server_signature,
+            )
         },
     )
     .await?
@@ -893,7 +804,14 @@ async fn initial_restore_file(
         hit,
         crate::adapters::CasAdapterKind::File,
         |hit, root_digest| {
-            enforce_server_signature(hit, root_digest, None, verbose, require_server_signature)
+            verify_restore_signature(
+                hit,
+                root_digest,
+                None,
+                verbose,
+                None,
+                require_server_signature,
+            )
         },
     )
     .await?
@@ -2123,51 +2041,6 @@ fn local_oci_manifest_digest(path: &Path) -> Result<Option<String>> {
     let scan = crate::cas_oci::scan_layout(path)?;
     let pointer_bytes = crate::cas_oci::build_pointer(&scan)?;
     Ok(Some(crate::cas_oci::prefixed_sha256_digest(&pointer_bytes)))
-}
-
-async fn remove_path_if_exists(path: &Path) -> Result<()> {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) => {
-            let file_type = metadata.file_type();
-            if file_type.is_dir() {
-                tokio::fs::remove_dir_all(path)
-                    .await
-                    .with_context(|| format!("Failed to remove {}", path.display()))?;
-            } else {
-                tokio::fs::remove_file(path)
-                    .await
-                    .with_context(|| format!("Failed to remove {}", path.display()))?;
-            }
-            Ok(())
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("Failed to inspect {}", path.display())),
-    }
-}
-
-async fn create_symlink(path: &Path, target: String) -> Result<()> {
-    let destination = path.to_path_buf();
-    tokio::task::spawn_blocking(move || create_symlink_blocking(&destination, &target))
-        .await
-        .context("Symlink task panicked")?
-}
-
-#[cfg(unix)]
-fn create_symlink_blocking(path: &Path, target: &str) -> Result<()> {
-    std::os::unix::fs::symlink(target, path)
-        .with_context(|| format!("Failed to create symlink {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn create_symlink_blocking(path: &Path, target: &str) -> Result<()> {
-    use std::os::windows::fs::{symlink_dir, symlink_file};
-
-    if symlink_file(target, path).is_err() {
-        symlink_dir(target, path)
-            .with_context(|| format!("Failed to create symlink {}", path.display()))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

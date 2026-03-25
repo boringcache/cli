@@ -2,6 +2,8 @@
 
 use crate::api::{ApiClient, CacheResolutionEntry};
 use crate::commands::cas_restore::{self, BlobDownloadTarget, FetchCasPointerOutcome};
+use crate::commands::file_materialize::{create_symlink, remove_path_if_exists};
+use crate::commands::signature_policy::verify_restore_signature;
 use crate::commands::utils::RestoreSpec;
 use crate::progress::{ProgressSession, Summary, System as ProgressSystem, TransferProgress};
 use crate::telemetry::StorageMetrics;
@@ -41,24 +43,6 @@ fn is_entry_retryable(entry: &CacheResolutionEntry) -> bool {
     }
 
     false
-}
-
-fn signature_subject_tag<'a>(
-    hit: &'a CacheResolutionEntry,
-    manifest_tag: Option<&'a str>,
-) -> &'a str {
-    hit.signature_tag
-        .as_deref()
-        .or(manifest_tag)
-        .or(hit.primary_tag.as_deref())
-        .unwrap_or(hit.tag.as_str())
-}
-
-fn signature_display_tag<'a>(hit: &'a CacheResolutionEntry, fallback: &'a str) -> &'a str {
-    hit.signature_tag
-        .as_deref()
-        .or(hit.primary_tag.as_deref())
-        .unwrap_or(fallback)
 }
 
 #[derive(Debug)]
@@ -2026,51 +2010,6 @@ async fn process_restore_file(
     })
 }
 
-async fn remove_path_if_exists(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path).await {
-        Ok(metadata) => {
-            let file_type = metadata.file_type();
-            if file_type.is_dir() {
-                fs::remove_dir_all(path)
-                    .await
-                    .with_context(|| format!("Failed to remove {}", path.display()))?;
-            } else {
-                fs::remove_file(path)
-                    .await
-                    .with_context(|| format!("Failed to remove {}", path.display()))?;
-            }
-            Ok(())
-        }
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("Failed to inspect {}", path.display())),
-    }
-}
-
-async fn create_symlink(path: &Path, target: String) -> Result<()> {
-    let destination = path.to_path_buf();
-    tokio::task::spawn_blocking(move || create_symlink_blocking(&destination, &target))
-        .await
-        .context("Symlink task panicked")?
-}
-
-#[cfg(unix)]
-fn create_symlink_blocking(path: &Path, target: &str) -> Result<()> {
-    std::os::unix::fs::symlink(target, path)
-        .with_context(|| format!("Failed to create symlink {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn create_symlink_blocking(path: &Path, target: &str) -> Result<()> {
-    use std::os::windows::fs::{symlink_dir, symlink_file};
-
-    if symlink_file(target, path).is_err() {
-        symlink_dir(target, path)
-            .with_context(|| format!("Failed to create symlink {}", path.display()))?;
-    }
-    Ok(())
-}
-
 enum EnsureTargetStatus {
     Ready,
     Occupied { existing_path: String },
@@ -2107,96 +2046,6 @@ async fn ensure_empty_target(path: &str) -> Result<EnsureTargetStatus> {
     }
 
     Ok(EnsureTargetStatus::Ready)
-}
-
-fn signature_policy_failure(message: String, require_server_signature: bool) -> Result<()> {
-    if require_server_signature {
-        anyhow::bail!(message);
-    }
-
-    ui::warn(&message);
-    Ok(())
-}
-
-fn verify_restore_signature(
-    hit: &CacheResolutionEntry,
-    root_digest: &str,
-    manifest_tag: Option<&str>,
-    verbose: bool,
-    reporter: Option<&crate::progress::Reporter>,
-    require_server_signature: bool,
-) -> Result<()> {
-    let signature_tag = signature_subject_tag(hit, manifest_tag);
-    let display_tag = signature_display_tag(hit, manifest_tag.unwrap_or(hit.tag.as_str()));
-
-    match (&hit.workspace_signing_public_key, &hit.server_signature) {
-        (Some(workspace_key), Some(server_sig)) => {
-            match verify_server_signature(signature_tag, root_digest, workspace_key, server_sig) {
-                Ok(()) => {
-                    if verbose {
-                        let public_key = crate::signing::parse_public_key(workspace_key).ok();
-                        let fingerprint = public_key
-                            .as_ref()
-                            .map(crate::signing::public_key_fingerprint)
-                            .unwrap_or_else(|| "unknown".to_string());
-                        if let Some(reporter) = reporter {
-                            let _ = reporter
-                                .info(format!("  Server signature verified ({})", fingerprint));
-                        }
-                    }
-                    Ok(())
-                }
-                Err(error) => signature_policy_failure(
-                    format!(
-                        "Server signature verification failed for {}: {}",
-                        display_tag, error
-                    ),
-                    require_server_signature,
-                ),
-            }
-        }
-        (Some(_), None) => signature_policy_failure(
-            format!(
-                "Server signature missing for {}; authenticity not verified",
-                display_tag
-            ),
-            require_server_signature,
-        ),
-        (None, Some(_)) => signature_policy_failure(
-            format!(
-                "Workspace signing key missing for {}; cannot verify server signature",
-                display_tag
-            ),
-            require_server_signature,
-        ),
-        (None, None) => signature_policy_failure(
-            format!(
-                "Server signature missing for {}; authenticity not verified",
-                display_tag
-            ),
-            require_server_signature,
-        ),
-    }
-}
-
-pub(crate) fn verify_server_signature(
-    tag: &str,
-    root_digest: &str,
-    workspace_signing_public_key: &str,
-    server_signature: &str,
-) -> Result<()> {
-    let public_key = crate::signing::parse_public_key(workspace_signing_public_key)
-        .context("Failed to parse workspace signing public key")?;
-
-    let signature = crate::signing::signature_from_base64(server_signature)
-        .context("Failed to parse server signature")?;
-
-    let data_to_verify = format!("{}:{}", tag, root_digest);
-
-    crate::signing::verify_signature(data_to_verify.as_bytes(), &signature, &public_key)
-        .context("Server signature verification failed")?;
-
-    Ok(())
 }
 
 const PARALLEL_DOWNLOAD_THRESHOLD: u64 = 50 * 1024 * 1024;
