@@ -10,10 +10,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio_util::io::ReaderStream;
 
-use crate::api::models::cache::{BlobDescriptor, BlobReceipt, ConfirmRequest, SaveRequest};
+use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
 use crate::cas_transport::upload_payload;
-use crate::multipart_upload::upload_via_single_url;
 use crate::serve::error::OciError;
 use crate::serve::oci_route::{
     insert_header, oci_cache_op_for_route_method, oci_miss_key, oci_success_rollup_result,
@@ -1908,103 +1907,25 @@ async fn put_manifest(
                 let blob_descriptors = publish_blob_descriptors.clone();
                 let cache_entry_id = save_response.cache_entry_id.clone();
                 async move {
-                    let mut blob_receipts = Vec::new();
-                    if !blob_descriptors.is_empty() {
-                        let upload_plan = tokio::time::timeout(
-                            OCI_API_CALL_TIMEOUT,
-                            state.api_client.blob_upload_urls(
-                                &state.workspace,
-                                &cache_entry_id,
-                                &blob_descriptors,
-                            ),
-                        )
-                        .await
-                        .map_err(|_| {
-                            OciError::internal(format!(
-                                "blob_upload_urls timed out after {}s",
-                                OCI_API_CALL_TIMEOUT.as_secs()
-                            ))
-                        })?
-                        .map_err(|e| OciError::internal(format!("blob_upload_urls failed: {e}")))?;
-
-                        let upload_jobs = {
-                            let sessions = state.upload_sessions.read().await;
-                            let mut jobs = Vec::with_capacity(upload_plan.upload_urls.len());
-                            for upload_url_info in &upload_plan.upload_urls {
-                                let session = sessions
-                                    .find_by_digest(&upload_url_info.digest)
-                                    .ok_or_else(|| {
-                                        OciError::internal(format!(
-                                            "No upload session for blob {}",
-                                            upload_url_info.digest
-                                        ))
-                                    })?;
-                                jobs.push((
-                                    upload_url_info.digest.clone(),
-                                    session.temp_path.clone(),
-                                    upload_url_info.url.clone(),
-                                    upload_url_info.headers.clone(),
-                                ));
-                            }
-                            jobs
-                        };
-
-                        if !upload_jobs.is_empty() {
-                            let max_concurrent =
-                                adaptive_blob_upload_concurrency(upload_jobs.len());
-                            let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-                            let transfer_client = state.api_client.transfer_client().clone();
-                            let mut tasks = Vec::with_capacity(upload_jobs.len());
-
-                            for (digest, temp_path, upload_url, upload_headers) in upload_jobs {
-                                let semaphore = semaphore.clone();
-                                let transfer_client = transfer_client.clone();
-                                let task = tokio::spawn(async move {
-                                    let _permit = semaphore.acquire().await.map_err(|e| {
-                                        OciError::internal(format!(
-                                            "Blob upload semaphore closed: {e}"
-                                        ))
-                                    })?;
-                                    let progress = crate::progress::TransferProgress::new_noop();
-                                    tokio::time::timeout(
-                                        OCI_TRANSFER_CALL_TIMEOUT,
-                                        upload_via_single_url(
-                                            temp_path.as_path(),
-                                            &upload_url,
-                                            &progress,
-                                            &transfer_client,
-                                            &upload_headers,
-                                        ),
-                                    )
-                                    .await
-                                    .map_err(|_| {
-                                        OciError::internal(format!(
-                                            "Blob upload timed out for {} after {}s",
-                                            digest,
-                                            OCI_TRANSFER_CALL_TIMEOUT.as_secs()
-                                        ))
-                                    })?
-                                    .map_err(|e| {
-                                        OciError::internal(format!(
-                                            "Blob upload failed for {}: {}",
-                                            digest, e
-                                        ))
-                                    })?;
-                                    Ok::<String, OciError>(digest)
-                                });
-                                tasks.push(task);
-                            }
-
-                            for task in tasks {
-                                let digest = task.await.map_err(|e| {
-                                    OciError::internal(format!("Blob upload task failed: {e}"))
-                                })??;
-                                blob_receipts.push(BlobReceipt { digest, etag: None });
-                            }
-                        }
-                    }
-
-                    Ok(blob_receipts)
+                    tokio::time::timeout(
+                        OCI_API_CALL_TIMEOUT,
+                        crate::serve::cas_publish::upload_tracked_blobs(
+                            &state.api_client,
+                            &state.workspace,
+                            &cache_entry_id,
+                            &blob_descriptors,
+                            &state.upload_sessions,
+                            adaptive_blob_upload_concurrency(blob_descriptors.len()),
+                            OCI_TRANSFER_CALL_TIMEOUT,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| {
+                        OciError::internal(format!(
+                            "blob_upload_urls timed out after {}s",
+                            OCI_API_CALL_TIMEOUT.as_secs()
+                        ))
+                    })?
                 }
             },
             move |save_response| {

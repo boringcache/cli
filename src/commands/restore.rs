@@ -1022,7 +1022,7 @@ async fn process_restore(
         hit.cas_layout.as_deref()
     );
 
-    let adapter = crate::adapters::select_transport_adapter(restore_adapter)?;
+    let adapter = crate::adapters::select_transport_adapter(restore_adapter);
     log::debug!(
         "Restore adapter dispatch tag={} adapter={}",
         hit.tag,

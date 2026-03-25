@@ -4,6 +4,7 @@ on:
   workflow_run:
     workflows: ["Build and Release CLI"]
     types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       cli_version:
@@ -31,7 +32,11 @@ jobs:
     runs-on: ubuntu-24.04
     if: >-
       github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main'
+      )
 
     steps:
       - uses: actions/checkout@v4

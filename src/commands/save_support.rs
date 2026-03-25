@@ -5,7 +5,7 @@ use crate::api::models::cache::CompleteMultipartRequest;
 use crate::api::ApiClient;
 use crate::manifest::ManifestFile;
 use crate::multipart_upload::{upload_via_part_urls, upload_via_single_url};
-use crate::progress::{ProgressSession, TransferProgress};
+use crate::progress::{ProgressSession, Summary, TransferProgress};
 use crate::telemetry::StorageMetrics;
 use crate::ui;
 
@@ -17,6 +17,20 @@ pub(crate) fn complete_skipped_step(
     let step = session.start_step(title.to_string(), Some(detail.to_string()))?;
     step.complete()?;
     Ok(())
+}
+
+pub(crate) fn save_summary(
+    size_bytes: u64,
+    file_count: u32,
+    digest: String,
+    path: String,
+) -> Summary {
+    Summary {
+        size_bytes,
+        file_count,
+        digest: Some(digest),
+        path: Some(path),
+    }
 }
 
 pub(crate) fn progress_info(reporter: &crate::progress::Reporter, message: impl Into<String>) {

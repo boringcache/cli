@@ -15,7 +15,7 @@ use crate::commands::cas_publish::{self, BlobUploadSource};
 use crate::commands::save_support::{
     build_manifest_bytes, complete_skipped_step, conflict_message_from_error,
     format_phase_duration, format_phase_duration_ms, is_cache_pending_error,
-    manifest_files_from_draft, progress_info, progress_warning, upload_archive_file,
+    manifest_files_from_draft, progress_info, progress_warning, save_summary, upload_archive_file,
     upload_archive_multipart, upload_manifest,
 };
 use crate::commands::upload_receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
@@ -291,8 +291,7 @@ async fn save_single_entry(
         adapter_detection.reason
     );
 
-    let adapter_selection =
-        crate::adapters::select_layout_adapter(adapter_detection.kind, encrypt)?;
+    let adapter_selection = crate::adapters::select_layout_adapter(adapter_detection.kind, encrypt);
     if adapter_selection.used_encryption_fallback {
         ui::warn(crate::adapters::CONTENT_ADDRESSED_ENCRYPTION_FALLBACK_WARNING);
     }
@@ -1210,30 +1209,14 @@ where
     }
 
     let create_step = session.start_step("Creating cache entry".to_string(), None)?;
-    let ci_provider = detect_ci_environment();
-    let request = SaveRequest {
-        tag: tag.clone(),
-        write_scope_tag: None,
-        manifest_root_digest: bundle.manifest_root_digest.clone(),
-        compression_algorithm: "zstd".to_string(),
-        storage_mode: Some("cas".to_string()),
-        blob_count: Some(bundle.confirm_spec.blob_count),
-        blob_total_size_bytes: Some(bundle.confirm_spec.blob_total_size_bytes),
-        cas_layout: bundle.cas_layout.clone(),
-        manifest_format_version: Some(1),
-        total_size_bytes: bundle.total_size_bytes,
-        uncompressed_size: None,
-        compressed_size: None,
-        file_count: Some(bundle.confirm_spec.file_count),
-        expected_manifest_digest: Some(bundle.confirm_spec.manifest_digest.clone()),
-        expected_manifest_size: Some(bundle.confirm_spec.manifest_size),
-        force: if force { Some(true) } else { None },
-        use_multipart: None,
-        ci_provider: Some(ci_provider),
-        encrypted: None,
-        encryption_algorithm: None,
-        encryption_recipient_hint: None,
-    };
+    let request = cas_publish::build_save_request(
+        tag.clone(),
+        bundle.manifest_root_digest.clone(),
+        bundle.total_size_bytes,
+        bundle.cas_layout.clone(),
+        &bundle.confirm_spec,
+        force,
+    );
 
     let save_response = match api_client.save_entry(&workspace, &request).await {
         Ok(response) => response,
@@ -1259,12 +1242,12 @@ where
                 )?;
                 complete_skipped_step(&mut session, "Confirming upload", "skipped — tag conflict")?;
 
-                let summary = Summary {
-                    size_bytes: bundle.total_size_bytes,
-                    file_count: bundle.confirm_spec.file_count,
-                    digest: Some(bundle.manifest_root_digest.clone()),
-                    path: Some(path.clone()),
-                };
+                let summary = save_summary(
+                    bundle.total_size_bytes,
+                    bundle.confirm_spec.file_count,
+                    bundle.manifest_root_digest.clone(),
+                    path.clone(),
+                );
                 session.complete(summary)?;
                 drop(reporter);
                 progress_system.shutdown()?;
@@ -1297,12 +1280,12 @@ where
                     "skipped — another job is uploading",
                 )?;
 
-                let summary = Summary {
-                    size_bytes: bundle.total_size_bytes,
-                    file_count: bundle.confirm_spec.file_count,
-                    digest: Some(bundle.manifest_root_digest.clone()),
-                    path: Some(path.clone()),
-                };
+                let summary = save_summary(
+                    bundle.total_size_bytes,
+                    bundle.confirm_spec.file_count,
+                    bundle.manifest_root_digest.clone(),
+                    path.clone(),
+                );
                 session.complete(summary)?;
                 drop(reporter);
                 progress_system.shutdown()?;
@@ -1355,20 +1338,24 @@ where
             )?;
         } else {
             let confirm_step = session.start_step("Confirming upload".to_string(), None)?;
-            let confirm_request = cas_publish::build_confirm_request(&bundle.confirm_spec, None);
-            api_client
-                .confirm(&workspace, &save_response.cache_entry_id, &confirm_request)
-                .await
-                .with_context(|| format!("Failed to confirm existing CAS entry for {}", tag))?;
+            cas_publish::confirm_upload(
+                &api_client,
+                &workspace,
+                &save_response.cache_entry_id,
+                &bundle.confirm_spec,
+                None,
+            )
+            .await
+            .with_context(|| format!("Failed to confirm existing CAS entry for {}", tag))?;
             confirm_step.complete()?;
         }
 
-        let summary = Summary {
-            size_bytes: bundle.total_size_bytes,
-            file_count: bundle.confirm_spec.file_count,
-            digest: Some(bundle.manifest_root_digest.clone()),
-            path: Some(path),
-        };
+        let summary = save_summary(
+            bundle.total_size_bytes,
+            bundle.confirm_spec.file_count,
+            bundle.manifest_root_digest.clone(),
+            path,
+        );
         session.complete(summary)?;
         drop(reporter);
         progress_system.shutdown()?;
@@ -1445,10 +1432,14 @@ where
     .await;
 
     let confirm_step = session.start_step("Confirming upload".to_string(), None)?;
-    let confirm_request = cas_publish::build_confirm_request(&bundle.confirm_spec, manifest_etag);
-    if let Err(err) = api_client
-        .confirm(&workspace, &save_response.cache_entry_id, &confirm_request)
-        .await
+    if let Err(err) = cas_publish::confirm_upload(
+        &api_client,
+        &workspace,
+        &save_response.cache_entry_id,
+        &bundle.confirm_spec,
+        manifest_etag,
+    )
+    .await
     {
         confirm_step.complete()?;
 
@@ -1458,12 +1449,12 @@ where
                 &reporter,
                 "  Another job finalized this tag first; skipping save",
             );
-            let summary = Summary {
-                size_bytes: bundle.total_size_bytes,
-                file_count: bundle.confirm_spec.file_count,
-                digest: Some(bundle.manifest_root_digest.clone()),
-                path: Some(path.clone()),
-            };
+            let summary = save_summary(
+                bundle.total_size_bytes,
+                bundle.confirm_spec.file_count,
+                bundle.manifest_root_digest.clone(),
+                path.clone(),
+            );
             session.complete(summary)?;
             drop(reporter);
             progress_system.shutdown()?;
@@ -1475,12 +1466,12 @@ where
                 &reporter,
                 "  Another job is uploading this cache; skipping wait",
             );
-            let summary = Summary {
-                size_bytes: bundle.total_size_bytes,
-                file_count: bundle.confirm_spec.file_count,
-                digest: Some(bundle.manifest_root_digest.clone()),
-                path: Some(path.clone()),
-            };
+            let summary = save_summary(
+                bundle.total_size_bytes,
+                bundle.confirm_spec.file_count,
+                bundle.manifest_root_digest.clone(),
+                path.clone(),
+            );
             session.complete(summary)?;
             drop(reporter);
             progress_system.shutdown()?;
@@ -1494,12 +1485,12 @@ where
     }
     confirm_step.complete()?;
 
-    let summary = Summary {
-        size_bytes: bundle.total_size_bytes,
-        file_count: bundle.confirm_spec.file_count,
-        digest: Some(bundle.manifest_root_digest.clone()),
-        path: Some(path.clone()),
-    };
+    let summary = save_summary(
+        bundle.total_size_bytes,
+        bundle.confirm_spec.file_count,
+        bundle.manifest_root_digest.clone(),
+        path.clone(),
+    );
     session.complete(summary)?;
     drop(reporter);
     progress_system.shutdown()?;
