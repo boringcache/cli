@@ -26,30 +26,29 @@
 FROM ghcr.io/boringcache/base:bookworm-build AS build
 WORKDIR /rails
 
-# 1. Install tools (changes rarely — boringcache run layer)
-#    --mount=type=cache keeps mise's download cache between builds.
+# 1. Install tools — cached across builds via boringcache
 COPY mise.toml .ruby-version ./
-RUN --mount=type=cache,target=/mise/cache \
+RUN --mount=type=secret,id=bc_token \
+    --mount=type=cache,target=/mise/cache \
+    boringcache run my-org/my-app mise-installs:/mise/installs --no-platform --no-git -- \
     mise install
 
-# 2. Install gems (changes when Gemfile.lock changes)
-#    `boringcache run` restores from boringcache, runs bundle install, saves back.
-#    Without a token, boringcache skips caching and runs bundle install directly.
+# 2. Install gems — cached across builds via boringcache
 ENV BUNDLE_DEPLOYMENT="1" \
     BUNDLE_PATH="/usr/local/bundle" \
     BUNDLE_WITHOUT="development"
 
 COPY Gemfile Gemfile.lock ./
 RUN --mount=type=secret,id=bc_token \
-    boringcache run my-org/my-app gems:/usr/local/bundle -- \
+    boringcache run my-org/my-app bundler:/usr/local/bundle --no-platform --no-git -- \
     bundle install && \
     rm -rf ~/.bundle/ "${BUNDLE_PATH}"/ruby/*/cache "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git && \
     bundle exec bootsnap precompile -j 1 --gemfile
 
-# 3. Install node modules (changes when yarn.lock changes)
+# 3. Install node modules — cached across builds via boringcache
 COPY package.json yarn.lock ./
 RUN --mount=type=secret,id=bc_token \
-    boringcache run my-org/my-app node_modules:node_modules -- \
+    boringcache run my-org/my-app node_modules:node_modules --no-platform --no-git -- \
     yarn install --frozen-lockfile
 
 # 4. Copy source and compile (changes every commit — last for cache efficiency)

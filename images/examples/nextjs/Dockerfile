@@ -17,12 +17,14 @@ FROM ghcr.io/boringcache/base:bookworm-build AS build
 WORKDIR /app
 
 COPY mise.toml ./
-RUN --mount=type=cache,target=/mise/cache \
+RUN --mount=type=secret,id=bc_token \
+    --mount=type=cache,target=/mise/cache \
+    boringcache run my-org/my-app mise-installs:/mise/installs --no-platform --no-git -- \
     mise install
 
 COPY package.json yarn.lock ./
 RUN --mount=type=secret,id=bc_token \
-    boringcache run my-org/my-app node_modules:node_modules -- \
+    boringcache run my-org/my-app node_modules:node_modules --no-platform --no-git -- \
     yarn install --frozen-lockfile
 
 COPY . .
