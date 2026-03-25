@@ -13,6 +13,10 @@ on:
     branches: [main]
     paths: ["images/**"]
 
+concurrency:
+  group: publish-images-${{ github.workflow }}-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || inputs.cli_version || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
 permissions:
   contents: read
   packages: write

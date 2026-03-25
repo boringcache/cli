@@ -24,7 +24,7 @@ on:
     - cron: "30 5 * * *"
 
 concurrency:
-  group: e2e-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  group: e2e-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
