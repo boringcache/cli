@@ -242,7 +242,7 @@ jobs:
           if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "Skipping e2e leg: BORINGCACHE_API_TOKEN is not configured."
-          elif [[ "${{ matrix.tier }}" == "extended" && "${GITHUB_EVENT_NAME}" != "schedule" && "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
+          elif [[ "${{ matrix.tier }}" == "extended" && "${GITHUB_EVENT_NAME}" != "schedule" && "${GITHUB_EVENT_NAME}" != "workflow_dispatch" && "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "Skipping extended e2e leg on ${GITHUB_EVENT_NAME}."
           else
