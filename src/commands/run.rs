@@ -321,6 +321,8 @@ async fn handle_signal(child: &mut tokio::process::Child, signal: i32) -> Result
     }
 
     if let Some(pid) = child.id() {
+        // SAFETY: `pid` comes from the live child process handle and `signal` is forwarded verbatim
+        // to the OS. Failing `kill` here is non-fatal because we still wait on the child below.
         unsafe {
             libc::kill(pid as i32, signal);
         }

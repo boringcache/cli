@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::ui;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
