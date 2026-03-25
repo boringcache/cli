@@ -42,6 +42,20 @@ Key paths:
 - `tests/` CLI tests
 - `install.sh` install script
 - `install-web/` installation website assets
+- `.github/workflows/` CI, E2E, release, and image workflows
+
+## Structure Rules
+
+- Keep command entrypoints thin. Shared transport logic should live in focused helpers, not be duplicated across `save`, `restore`, and `mount`.
+- Use `src/commands/cas_publish.rs` for shared CAS publish flow.
+- Use `src/commands/cas_restore.rs` for shared CAS restore fetch/verify/download flow.
+- Use `src/commands/upload_receipts.rs` for upload-session receipt helpers.
+- Keep adapter capability and layout decisions in `src/adapters/mod.rs`; do not re-encode transport/layout rules in command modules.
+- Prefer extracting a shared helper or module before introducing a third copy of similar logic.
+- Keep archive-specific behavior separate from CAS-specific behavior.
+- Keep workflow intent split cleanly:
+  - PR validation belongs in validation workflows.
+  - publish or deployment behavior belongs in main/tag/release workflows only.
 
 ## Conventions
 
@@ -66,6 +80,7 @@ Key paths:
 - No backwards compatibility hacks.
 - Delete unused code completely.
 - Performance-first: avoid extra allocations, unnecessary I/O, and blocking calls in async paths.
+- When a file grows large because of orchestration-only code, extract shared helpers instead of adding more branches inline.
 
 ## Inputs and Configuration
 
@@ -101,7 +116,5 @@ Recent reminder:
 
 ## Skills
 
-Local skills:
-- `cli-sccache-release-ops`: BoringCache CLI performance and release playbook for sccache proxy behavior, workflow tag conventions, benchmark regression checks, and release execution. (file: `skills/cli-sccache-release-ops/SKILL.md`)
-
-Use global skills when they are a better match than this local playbook.
+- Prefer global skills for general CLI, API, or repo work.
+- Use local `cli-sccache-release-ops` for sccache proxy behavior, workflow tag conventions, benchmark regression checks, and CLI release execution.
