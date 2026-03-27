@@ -795,8 +795,6 @@ jobs:
       - name: Verify CAS on fresh runner via proxy
         run: |
           set -euo pipefail
-          source ./scripts/e2e-auth.sh
-          export_resolved_cli_tokens
           unset BORINGCACHE_API_TOKEN
           CLI="${RUNNER_TEMP}/bin/boringcache"
           chmod +x "$CLI"
