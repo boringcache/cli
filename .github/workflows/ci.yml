@@ -260,7 +260,7 @@ jobs:
 
               # Install build dependencies based on container type
               if [ -f /etc/alpine-release ]; then
-                apk add --no-cache build-base musl-dev curl
+                apk add --no-cache bash build-base musl-dev curl
               elif [ -f /etc/debian_version ]; then
                 apt-get update
                 apt-get install -y build-essential pkg-config libssl-dev curl

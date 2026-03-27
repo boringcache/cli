@@ -10,6 +10,26 @@ use crate::ui;
 const EXIT_CONFIG: i32 = 78;
 const EXIT_COMMAND_NOT_FOUND: i32 = 127;
 const PROXY_AUTH_TOKEN: &str = "boringcache";
+const SCCACHE_BACKEND_ENV_VARS: &[&str] = &[
+    "SCCACHE_ENDPOINT",
+    "SCCACHE_BUCKET",
+    "SCCACHE_REGION",
+    "SCCACHE_S3_KEY_PREFIX",
+    "SCCACHE_S3_USE_SSL",
+    "SCCACHE_S3_NO_CREDENTIALS",
+    "SCCACHE_S3_SERVER_SIDE_ENCRYPTION",
+    "SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE",
+    "SCCACHE_GCS_BUCKET",
+    "SCCACHE_GCS_KEY_PATH",
+    "SCCACHE_GCS_CREDENTIALS_URL",
+    "SCCACHE_AZURE_CONNECTION_STRING",
+    "SCCACHE_AZURE_BLOB_CONTAINER",
+    "SCCACHE_REDIS",
+    "SCCACHE_MEMCACHED",
+    "SCCACHE_WEBDAV_ENDPOINT",
+    "SCCACHE_WEBDAV_USERNAME",
+    "SCCACHE_WEBDAV_PASSWORD",
+];
 
 #[derive(Debug)]
 enum ChildOutcome {
@@ -264,6 +284,9 @@ async fn spawn_command(
 
 fn inject_proxy_env(command: &mut tokio::process::Command, context: &ProxyContext) {
     let endpoint = format!("http://{}:{}", context.endpoint_host, context.port);
+    for key in SCCACHE_BACKEND_ENV_VARS {
+        command.env_remove(key);
+    }
     command.env("NX_SELF_HOSTED_REMOTE_CACHE_SERVER", &endpoint);
     command.env("NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN", PROXY_AUTH_TOKEN);
     command.env("TURBO_API", &endpoint);
