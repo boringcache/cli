@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/e2e-remote-tag.sh"
+source "${SCRIPT_DIR}/e2e-helpers.sh"
 
 PROXY_PORT="${PROXY_PORT:-5050}"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
