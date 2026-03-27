@@ -684,8 +684,9 @@ jobs:
       - name: Gate
         id: gate
         run: |
-          if [[ -z "${BORINGCACHE_SAVE_TOKEN:-}" ]]; then
+          if [[ -z "${BORINGCACHE_ADMIN_TOKEN:-}" ]]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping cross-runner seed: BORINGCACHE_ADMIN_TOKEN is not configured."
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
@@ -707,6 +708,8 @@ jobs:
         run: |
           set -euo pipefail
           source ./scripts/e2e-remote-tag.sh
+          export_resolved_cli_tokens admin
+          unset BORINGCACHE_API_TOKEN
           CLI="${RUNNER_TEMP}/bin/boringcache"
           chmod +x "$CLI"
           TAG="gha-cross-runner-cas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -792,6 +795,9 @@ jobs:
       - name: Verify CAS on fresh runner via proxy
         run: |
           set -euo pipefail
+          source ./scripts/e2e-auth.sh
+          export_resolved_cli_tokens
+          unset BORINGCACHE_API_TOKEN
           CLI="${RUNNER_TEMP}/bin/boringcache"
           chmod +x "$CLI"
           TAG="${{ needs.cross-runner-seed.outputs.tag }}"
