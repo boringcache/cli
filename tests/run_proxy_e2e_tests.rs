@@ -33,8 +33,11 @@ expected_sccache_endpoint="${expected_endpoint}/"
 [ -z "${SCCACHE_BUCKET:-}" ] || exit 6
 [ -z "${SCCACHE_WEBDAV_USERNAME:-}" ] || exit 7
 [ -z "${SCCACHE_WEBDAV_PASSWORD:-}" ] || exit 8
-[ "${2:-}" = "$expected_ref" ] || exit 9
-curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 10
+[ -z "${SCCACHE_CONF:-}" ] || exit 9
+[ -z "${SCCACHE_CACHED_CONF:-}" ] || exit 10
+[ -z "${SCCACHE_WEBDAV_TOKEN:-}" ] || exit 11
+[ "${2:-}" = "$expected_ref" ] || exit 12
+curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 13
 "#;
 
     let output = Command::new(cli_binary())
@@ -64,6 +67,9 @@ curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 10
         .env("SCCACHE_BUCKET", "wrong-bucket")
         .env("SCCACHE_WEBDAV_USERNAME", "wrong-user")
         .env("SCCACHE_WEBDAV_PASSWORD", "wrong-password")
+        .env("SCCACHE_CONF", "/tmp/wrong-sccache.conf")
+        .env("SCCACHE_CACHED_CONF", "stale-config")
+        .env("SCCACHE_WEBDAV_TOKEN", "wrong-token")
         .env_remove("BORINGCACHE_API_TOKEN")
         .env_remove("BORINGCACHE_TOKEN_FILE")
         .output()
