@@ -43,6 +43,75 @@ require_numeric() {
   fi
 }
 
+resolve_restore_capable_token() {
+  local token
+  for token in \
+    "${BORINGCACHE_E2E_RESTORE_TOKEN:-}" \
+    "${BORINGCACHE_RESTORE_TOKEN:-}" \
+    "${BORINGCACHE_E2E_SAVE_TOKEN:-}" \
+    "${BORINGCACHE_SAVE_TOKEN:-}" \
+    "${BORINGCACHE_API_TOKEN:-}"; do
+    if [[ -n "${token}" ]]; then
+      printf '%s\n' "${token}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_save_capable_token() {
+  local token
+  for token in \
+    "${BORINGCACHE_E2E_SAVE_TOKEN:-}" \
+    "${BORINGCACHE_SAVE_TOKEN:-}" \
+    "${BORINGCACHE_API_TOKEN:-}"; do
+    if [[ -n "${token}" ]]; then
+      printf '%s\n' "${token}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+export_resolved_cli_tokens() {
+  local restore_token save_token
+  restore_token="$(resolve_restore_capable_token || true)"
+  save_token="$(resolve_save_capable_token || true)"
+
+  if [[ -n "${restore_token}" ]]; then
+    export BORINGCACHE_RESTORE_TOKEN="${restore_token}"
+  else
+    unset BORINGCACHE_RESTORE_TOKEN
+  fi
+
+  if [[ -n "${save_token}" ]]; then
+    export BORINGCACHE_SAVE_TOKEN="${save_token}"
+  else
+    unset BORINGCACHE_SAVE_TOKEN
+  fi
+}
+
+bootstrap_cli_session() {
+  local binary="$1"
+  local workspace="$2"
+  local api_url="$3"
+  local auth_log="$4"
+  local auth_token
+
+  auth_token="$(resolve_save_capable_token || true)"
+  if [[ -z "${auth_token}" ]]; then
+    echo "ERROR: configure BORINGCACHE_SAVE_TOKEN, BORINGCACHE_E2E_SAVE_TOKEN, or BORINGCACHE_API_TOKEN"
+    exit 1
+  fi
+
+  export BORINGCACHE_DEFAULT_WORKSPACE="${workspace}"
+  export BORINGCACHE_API_URL="${api_url}"
+  export_resolved_cli_tokens
+
+  "${binary}" auth --token "${auth_token}" > "${auth_log}"
+  unset BORINGCACHE_API_TOKEN
+}
+
 children_of_pid() {
   pgrep -P "$1" 2>/dev/null || true
 }

@@ -65,6 +65,15 @@ rust_host() {
   rust_field host
 }
 
+proxy_port() {
+  local port="${BORINGCACHE_CARGO_PROXY_PORT:-0}"
+  if ! [[ "${port}" =~ ^[0-9]+$ ]] || (( port > 65535 )); then
+    echo "ERROR: BORINGCACHE_CARGO_PROXY_PORT must be an integer between 0 and 65535" >&2
+    exit 1
+  fi
+  printf '%s\n' "${port}"
+}
+
 detect_profile() {
   local profile="debug"
   local expect_profile="0"
@@ -233,6 +242,7 @@ rust_host=${RUST_HOST}
 cargo_target_dir=${CARGO_TARGET_DIR}
 sccache_dir=${SCCACHE_DIR:-none}
 sccache_server_port=${SCCACHE_SERVER_PORT:-none}
+proxy_port=$(proxy_port)
 cargo_incremental=${CARGO_INCREMENTAL:-unset}
 target_archive_mode=$(target_archive_mode)
 target_archive_action=$(target_archive_action "${profile}")
@@ -293,7 +303,7 @@ run_flow() {
   proxy_tag="$(build_proxy_tag "${profile}")"
   restore_target_archive_if_needed "${profile}"
 
-  run_args=(run "${WORKSPACE}" --proxy "${proxy_tag}" --no-platform --no-git)
+  run_args=(run "${WORKSPACE}" --proxy "${proxy_tag}" --no-platform --no-git --host 127.0.0.1 --port "$(proxy_port)")
   case "$(target_archive_action "${profile}")" in
     restore-and-save)
       run_args+=("$(build_target_tag "${profile}"):${CARGO_TARGET_DIR}")

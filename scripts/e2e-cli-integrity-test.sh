@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-helpers.sh"
+
 BINARY="${BINARY:-./target/debug/boringcache}"
 WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
 BORINGCACHE_API_URL="${BORINGCACHE_API_URL:-https://api.boringcache.com}"
@@ -8,8 +11,8 @@ LOG_DIR="${LOG_DIR:-.}"
 RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 
-if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
-  echo "ERROR: BORINGCACHE_API_TOKEN is required"
+if ! resolve_save_capable_token >/dev/null; then
+  echo "ERROR: configure BORINGCACHE_SAVE_TOKEN, BORINGCACHE_E2E_SAVE_TOKEN, or BORINGCACHE_API_TOKEN"
   exit 1
 fi
 
@@ -108,10 +111,7 @@ expect_restore_failure() {
 }
 
 export HOME="${CLI_HOME}"
-"${CLI}" auth --token "${BORINGCACHE_API_TOKEN}" > "${E2E_LOG_DIR}/auth.log"
-unset BORINGCACHE_API_TOKEN BORINGCACHE_DEFAULT_WORKSPACE
-"${CLI}" config set default_workspace "${WORKSPACE}" > "${E2E_LOG_DIR}/config-set-workspace.log"
-"${CLI}" config set api_url "${BORINGCACHE_API_URL}" > "${E2E_LOG_DIR}/config-set-api-url.log"
+bootstrap_cli_session "${CLI}" "${WORKSPACE}" "${BORINGCACHE_API_URL}" "${E2E_LOG_DIR}/auth.log"
 
 TAG_ROOT="bc-e2e-cli-integrity-${RUN_ID}-${RUN_ATTEMPT}"
 

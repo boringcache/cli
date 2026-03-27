@@ -71,7 +71,7 @@ make check
 ./scripts/cargo-flow.sh cargo build --release --locked
 ```
 
-The flow uses tags derived from the active Rust version and host triple, disables git/platform suffixing for those explicit tags, prefers remote `sccache`, and restores the archived debug `target` directory only when the local target directory is empty. `make compat` runs the Rust 2024 compatibility lint, and `make check` now includes formatting, clippy, that compatibility pass, and tests. Local runs do not save `target` back to BoringCache; the debug `target` archive is seeded from GitHub Actions on macOS so Apple Silicon laptops can reuse that remote baseline without stomping active local builds.
+The flow uses tags derived from the active Rust version and host triple, disables git/platform suffixing for those explicit tags, prefers remote `sccache`, and restores the archived debug `target` directory only when the local target directory is empty. The local proxy port defaults to `0`, so Cargo picks an open loopback port unless you pin `BORINGCACHE_CARGO_PROXY_PORT`. `make compat` runs the Rust 2024 compatibility lint, and `make check` now includes formatting, clippy, that compatibility pass, and tests. Local runs do not save `target` back to BoringCache; the debug `target` archive is seeded from GitHub Actions on macOS so Apple Silicon laptops can reuse that remote baseline without stomping active local builds.
 
 ## Trust model
 

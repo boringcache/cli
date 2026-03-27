@@ -32,6 +32,9 @@ permissions:
 
 env:
   RUST_VERSION: "1.94"
+  BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+  BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN || secrets.BORINGCACHE_API_TOKEN }}
+  BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN || secrets.BORINGCACHE_API_TOKEN }}
   BAZELISK_VERSION: "v1.20.0"
   SCCACHE_VERSION: "v0.13.0"
 
@@ -41,7 +44,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
     steps:
       - name: Checkout code
@@ -218,7 +220,6 @@ jobs:
             needs_rust: false
             needs_sccache: false
     env:
-      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_E2E_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
       BORINGCACHE_E2E_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
@@ -663,7 +664,7 @@ jobs:
       cas_digest: ${{ steps.seed.outputs.cas_digest }}
       ac_digest: ${{ steps.seed.outputs.ac_digest }}
     env:
-      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+      BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
     steps:
       - name: Gate
         id: gate

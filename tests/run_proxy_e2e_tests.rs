@@ -23,7 +23,6 @@ fn free_port() -> u16 {
 #[test]
 fn test_run_proxy_injects_env_and_substitutes_placeholders() {
     let temp_dir = TempDir::new().expect("temp dir");
-    let port = free_port().to_string();
     let script = r#"expected_endpoint="http://127.0.0.1:$1"
 expected_ref="127.0.0.1:$1/cache:main"
 expected_sccache_endpoint="${expected_endpoint}/"
@@ -49,7 +48,7 @@ curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 10
             "--host",
             "127.0.0.1",
             "--port",
-            &port,
+            "0",
             "--",
             "sh",
             "-ec",
