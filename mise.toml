@@ -22,6 +22,12 @@ run = "./scripts/cargo-flow.sh compat"
 [tasks.check]
 run = "./scripts/cargo-flow.sh check"
 
+[tasks.pre-commit]
+run = "BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh check"
+
+[tasks.install-hooks]
+run = "git config core.hooksPath .githooks && chmod +x .githooks/pre-commit"
+
 [tasks.fmt]
 run = "cargo fmt"
 

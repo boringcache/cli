@@ -2,7 +2,7 @@
 #
 # Common development tasks
 
-.PHONY: all env build dev test clippy lint compat check fmt fmt-check clean release-patch release-minor release-major install
+.PHONY: all env build dev test clippy lint compat check fmt fmt-check clean release-patch release-minor release-major install pre-commit install-hooks
 
 # Default target
 all: check
@@ -84,8 +84,14 @@ version:
 	@grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'
 
 # Pre-commit hook: run before committing
-pre-commit: check
+pre-commit:
+	BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh check
 	@echo "Pre-commit checks passed!"
+
+install-hooks:
+	git config core.hooksPath .githooks
+	chmod +x .githooks/pre-commit
+	@echo "Git hooks installed from .githooks"
 
 # Help
 help:
@@ -114,3 +120,4 @@ help:
 	@echo ""
 	@echo "Git Hooks:"
 	@echo "  make pre-commit   - Run pre-commit checks"
+	@echo "  make install-hooks - Install repo-local git hooks"
