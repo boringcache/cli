@@ -23,7 +23,7 @@ run = "./scripts/cargo-flow.sh compat"
 run = "./scripts/cargo-flow.sh check"
 
 [tasks.pre-commit]
-run = "BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh check"
+run = "cargo fmt -- --check && cargo clippy --locked --all-targets --all-features -- -D warnings"
 
 [tasks.install-hooks]
 run = "git config core.hooksPath .githooks && chmod +x .githooks/pre-commit"

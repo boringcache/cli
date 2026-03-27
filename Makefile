@@ -85,7 +85,8 @@ version:
 
 # Pre-commit hook: run before committing
 pre-commit:
-	BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh check
+	cargo fmt -- --check
+	cargo clippy --locked --all-targets --all-features -- -D warnings
 	@echo "Pre-commit checks passed!"
 
 install-hooks:

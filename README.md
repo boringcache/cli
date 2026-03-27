@@ -74,7 +74,7 @@ make check
 ./scripts/cargo-flow.sh cargo build --release --locked
 ```
 
-`make install-hooks` configures `git` to use the repo-local [.githooks/pre-commit](/Users/gaurav/boringcache/cli/.githooks/pre-commit), which runs the same plain-mode `cargo-flow check` gate before each commit so local commits do not depend on proxy startup or cache credentials.
+`make install-hooks` configures `git` to use the repo-local [.githooks/pre-commit](/Users/gaurav/boringcache/cli/.githooks/pre-commit), which runs `cargo fmt -- --check` plus `cargo clippy --locked --all-targets --all-features -- -D warnings` before each commit. The heavier test pass stays on `make check`.
 
 The flow uses tags derived from the active Rust version and host triple, disables git/platform suffixing for those explicit tags, prefers remote `sccache`, and restores the archived debug `target` directory only when the local target directory is empty. The local proxy port defaults to `0`, so Cargo picks an open loopback port unless you pin `BORINGCACHE_CARGO_PROXY_PORT`. Interrupting `make` or `cargo-flow` now waits for the active proxy-backed run to flush and shut down before the wrapper exits. `make compat` runs the Rust 2024 compatibility lint, and `make check` now includes formatting, clippy, that compatibility pass, the Rust-version sync check, and tests. Local runs do not save `target` back to BoringCache; the debug `target` archive is seeded from GitHub Actions on macOS so Apple Silicon laptops can reuse that remote baseline without stomping active local builds.
 
