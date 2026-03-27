@@ -167,12 +167,11 @@ fn detect_available_memory_gb() -> f64 {
                     {
                         mem_available = Some(kb as f64 / (1024.0 * 1024.0));
                     }
-                } else if line.starts_with("MemTotal:") {
-                    if let Some(kb_str) = line.split_whitespace().nth(1)
-                        && let Ok(kb) = kb_str.parse::<u64>()
-                    {
-                        mem_total = Some(kb as f64 / (1024.0 * 1024.0));
-                    }
+                } else if line.starts_with("MemTotal:")
+                    && let Some(kb_str) = line.split_whitespace().nth(1)
+                    && let Ok(kb) = kb_str.parse::<u64>()
+                {
+                    mem_total = Some(kb as f64 / (1024.0 * 1024.0));
                 }
             }
 
@@ -252,25 +251,22 @@ fn detect_disk_type() -> (DiskType, f64) {
     #[cfg(target_os = "linux")]
     {
         if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
-            for line in mounts.lines() {
-                if line.contains(" / ") {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if let Some(device) = parts.first() {
-                        let device_name = device.trim_start_matches("/dev/");
+            if let Some(line) = mounts.lines().find(|line| line.contains(" / ")) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(device) = parts.first() {
+                    let device_name = device.trim_start_matches("/dev/");
 
-                        if device_name.starts_with("nvme") {
-                            return (DiskType::NvmeSsd, 2000.0);
-                        }
+                    if device_name.starts_with("nvme") {
+                        return (DiskType::NvmeSsd, 2000.0);
+                    }
 
-                        let sys_path = format!("/sys/block/{}/queue/rotational", device_name);
-                        if let Ok(rotational) = std::fs::read_to_string(&sys_path)
-                            && rotational.trim() == "0"
-                        {
-                            return (DiskType::SataSsd, 500.0);
-                        }
+                    let sys_path = format!("/sys/block/{}/queue/rotational", device_name);
+                    if let Ok(rotational) = std::fs::read_to_string(&sys_path)
+                        && rotational.trim() == "0"
+                    {
+                        return (DiskType::SataSsd, 500.0);
                     }
                 }
-                break;
             }
         }
     }
