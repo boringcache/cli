@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+resolved_rust_version() {
+  if [[ -n "${RUST_VERSION:-}" ]]; then
+    printf '%s\n' "${RUST_VERSION}"
+    return 0
+  fi
+  "${SCRIPT_DIR}/rust-version.sh"
+}
+
 run_leg() {
   local leg="$1"
   local binary="$2"
@@ -174,7 +184,7 @@ run_benchmark() {
         WORKSPACE="$workspace" \
         LOG_DIR="$log_dir" \
         SCCACHE_DIR="$sccache_dir" \
-        TAG="gha-cache-registry-${backend}-${phase}-rust-${RUST_VERSION:-unknown}-${branch_slug}" \
+        TAG="gha-cache-registry-${backend}-${phase}-rust-$(resolved_rust_version)-${branch_slug}" \
         bash ./scripts/e2e-sccache-test.sh
       )
       ;;
@@ -195,7 +205,7 @@ run_benchmark() {
         WORKSPACE="$workspace" \
         LOG_DIR="$log_dir" \
         SCCACHE_DIR="$sccache_dir" \
-        TAG="gha-cache-registry-${backend}-${phase}-rust-${RUST_VERSION:-unknown}-${branch_slug}" \
+        TAG="gha-cache-registry-${backend}-${phase}-rust-$(resolved_rust_version)-${branch_slug}" \
         bash ./scripts/e2e-sccache-test.sh
       )
       ;;

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-auth.sh"
 source "${SCRIPT_DIR}/e2e-remote-tag.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
@@ -10,6 +11,26 @@ PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
 PROXY_READY_WARN_SECS="${PROXY_READY_WARN_SECS:-15}"
 PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-30}"
 PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
+SCCACHE_CONFLICT_ENV_VARS=(
+  SCCACHE_ENDPOINT
+  SCCACHE_BUCKET
+  SCCACHE_REGION
+  SCCACHE_S3_KEY_PREFIX
+  SCCACHE_S3_USE_SSL
+  SCCACHE_S3_NO_CREDENTIALS
+  SCCACHE_S3_SERVER_SIDE_ENCRYPTION
+  SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE
+  SCCACHE_GCS_BUCKET
+  SCCACHE_GCS_KEY_PATH
+  SCCACHE_GCS_CREDENTIALS_URL
+  SCCACHE_AZURE_CONNECTION_STRING
+  SCCACHE_AZURE_BLOB_CONTAINER
+  SCCACHE_REDIS
+  SCCACHE_MEMCACHED
+  SCCACHE_WEBDAV_ENDPOINT
+  SCCACHE_WEBDAV_USERNAME
+  SCCACHE_WEBDAV_PASSWORD
+)
 
 _HELPER_PROXY_PID=""
 _HELPER_PROXY_LOG=""
@@ -41,6 +62,15 @@ require_numeric() {
     echo "ERROR: ${name} must be a non-negative integer"
     exit 1
   fi
+}
+
+run_with_clean_sccache_env() {
+  local -a env_cmd=(env)
+  local name
+  for name in "${SCCACHE_CONFLICT_ENV_VARS[@]}"; do
+    env_cmd+=("-u" "$name")
+  done
+  "${env_cmd[@]}" "$@"
 }
 
 children_of_pid() {
@@ -128,13 +158,6 @@ reclaim_stale_proxy_port() {
     port_listener_details "$port"
     exit 1
   fi
-}
-
-e2e_tag() {
-  local name="$1"
-  local run_id="${GITHUB_RUN_ID:-local}"
-  local run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
-  printf 'gha-%s-%s-%s' "$name" "$run_id" "$run_attempt"
 }
 
 start_proxy() {

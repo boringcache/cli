@@ -1,5 +1,6 @@
 use base64::Engine as _;
 use boring_cache_cli::manifest::EntryType;
+use boring_cache_cli::test_env;
 use boring_cache_cli::{cas_file, cas_oci};
 use mockito::{Matcher, Server};
 use serde_json::json;
@@ -8,9 +9,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tempfile::TempDir;
-use tokio::sync::Mutex;
-
-static CLI_TEST_MUTEX: Mutex<()> = Mutex::const_new(());
 
 fn cli_binary() -> PathBuf {
     option_env!("CARGO_BIN_EXE_boringcache")
@@ -36,17 +34,17 @@ fn networking_available() -> bool {
     std::net::TcpListener::bind("127.0.0.1:0").is_ok()
 }
 
-async fn acquire_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
-    let guard = CLI_TEST_MUTEX.lock().await;
+async fn acquire_test_lock() -> test_env::Guard {
+    let guard = test_env::lock();
     clear_test_env_overrides();
-    std::env::set_var("BORINGCACHE_TEST_MODE", "1");
+    test_env::set_var("BORINGCACHE_TEST_MODE", "1");
     guard
 }
 
 fn clear_test_env_overrides() {
-    env::remove_var("BORINGCACHE_REQUIRE_SERVER_SIGNATURE");
-    env::remove_var("BORINGCACHE_RESTORE_TOKEN");
-    env::remove_var("BORINGCACHE_SAVE_TOKEN");
+    test_env::remove_var("BORINGCACHE_REQUIRE_SERVER_SIGNATURE");
+    test_env::remove_var("BORINGCACHE_RESTORE_TOKEN");
+    test_env::remove_var("BORINGCACHE_SAVE_TOKEN");
 }
 
 fn setup_test_config(temp_dir: &TempDir, server_url: &str) {
@@ -65,18 +63,18 @@ fn setup_test_config(temp_dir: &TempDir, server_url: &str) {
 
 fn restore_env(temp_home: &Path, server_url: &str) {
     clear_test_env_overrides();
-    env::set_var("BORINGCACHE_API_TOKEN", "test-token-123");
-    env::set_var("BORINGCACHE_API_URL", server_url);
-    env::set_var("HOME", temp_home);
-    env::set_var("BORINGCACHE_TELEMETRY_DISABLED", "1");
+    test_env::set_var("BORINGCACHE_API_TOKEN", "test-token-123");
+    test_env::set_var("BORINGCACHE_API_URL", server_url);
+    test_env::set_var("HOME", temp_home);
+    test_env::set_var("BORINGCACHE_TELEMETRY_DISABLED", "1");
 }
 
 fn clear_env() {
     clear_test_env_overrides();
-    env::remove_var("BORINGCACHE_API_TOKEN");
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
-    env::remove_var("BORINGCACHE_TELEMETRY_DISABLED");
+    test_env::remove_var("BORINGCACHE_API_TOKEN");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_TELEMETRY_DISABLED");
 }
 
 fn create_bazel_cache_dir(base: &Path, dir_name: &str) -> PathBuf {

@@ -62,12 +62,12 @@ pub async fn execute(token: String) -> Result<()> {
 
     crate::commands::onboard::ensure_default_workspace_after_onboarding(&token).await?;
 
-    if let Ok(config) = Config::load() {
-        if config.default_workspace.is_some() {
-            ui::blank_line();
-            ui::info("Ready. Try:");
-            ui::info("  boringcache onboard");
-        }
+    if let Ok(config) = Config::load()
+        && config.default_workspace.is_some()
+    {
+        ui::blank_line();
+        ui::info("Ready. Try:");
+        ui::info("  boringcache onboard");
     }
 
     Ok(())

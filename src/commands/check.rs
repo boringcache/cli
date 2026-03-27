@@ -1,6 +1,6 @@
 use crate::api::ApiClient;
 use crate::ui;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,7 +82,8 @@ async fn execute_inner(
 
     let mut valid_tags: Vec<String> = Vec::new();
     for tag in tags {
-        match crate::tag_utils::validate_tag(&tag) {
+        let validation_result = crate::tag_utils::validate_tag(&tag);
+        match validation_result {
             Ok(()) => valid_tags.push(tag),
             Err(err) => {
                 ui::warn(&format!("Skipping invalid tag '{}': {}", tag, err));
@@ -171,11 +172,11 @@ async fn execute_inner(
     for (requested_tag, candidates) in &tag_to_candidates {
         let mut found: Option<(String, &crate::api::CacheResolutionEntry)> = None;
         for candidate in candidates {
-            if let Some(entry) = results_by_tag.get(candidate) {
-                if entry.status == "hit" {
-                    found = Some((candidate.clone(), entry));
-                    break;
-                }
+            if let Some(entry) = results_by_tag.get(candidate)
+                && entry.status == "hit"
+            {
+                found = Some((candidate.clone(), entry));
+                break;
             }
         }
 

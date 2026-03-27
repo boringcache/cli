@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-helpers.sh"
+
 BINARY="${BINARY:-./target/debug/boringcache}"
 WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
 BORINGCACHE_API_URL="${BORINGCACHE_API_URL:-https://api.boringcache.com}"
@@ -21,8 +24,8 @@ require_positive() {
 
 require_positive "MOUNT_SHUTDOWN_WAIT_SECS" "$MOUNT_SHUTDOWN_WAIT_SECS"
 
-if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
-  echo "ERROR: BORINGCACHE_API_TOKEN is required"
+if ! resolve_save_capable_token >/dev/null; then
+  echo "ERROR: configure BORINGCACHE_SAVE_TOKEN"
   exit 1
 fi
 
@@ -102,17 +105,14 @@ dump_cli_debug_logs() {
 }
 trap dump_cli_debug_logs ERR
 
-"${CLI}" auth --token "${BORINGCACHE_API_TOKEN}" > "${CLI_LOG_DIR}/auth.log"
-unset BORINGCACHE_API_TOKEN BORINGCACHE_DEFAULT_WORKSPACE
-"${CLI}" config set default_workspace "${WORKSPACE}" > "${CLI_LOG_DIR}/config-set-workspace.log"
-"${CLI}" config set api_url "${BORINGCACHE_API_URL}" > "${CLI_LOG_DIR}/config-set-api-url.log"
+bootstrap_cli_session "${CLI}" "${WORKSPACE}" "${BORINGCACHE_API_URL}" "${CLI_LOG_DIR}/auth.log" admin
 "${CLI}" config get default_workspace > "${CLI_LOG_DIR}/config-get-default-workspace.log"
 grep -q "${WORKSPACE}" "${CLI_LOG_DIR}/config-get-default-workspace.log"
 "${CLI}" config list --json > "${CLI_LOG_DIR}/config-list.json"
 "${CLI}" workspaces --json > "${CLI_LOG_DIR}/workspaces.json"
 "${CLI}" ls --limit 1 --json > "${CLI_LOG_DIR}/ls.json"
 
-TAG_ROOT="bc-e2e-cli-core-${RUN_ID}-${RUN_ATTEMPT}"
+TAG_ROOT="$(e2e_tag "cli-core")"
 TAG_DIR="${TAG_ROOT}-dir"
 TAG_FILE="${TAG_ROOT}-file"
 TAG_MOUNT="${TAG_ROOT}-mount"

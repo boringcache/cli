@@ -7,7 +7,7 @@ pub mod model;
 pub use apply::ManifestApplier;
 pub use builder::{FileDescriptor, ManifestBuilder, ManifestDraft};
 pub use diff::{DiffOutcome, ManifestDiffer};
-pub use io::{load_manifest, save_manifest, ManifestIoError};
+pub use io::{ManifestIoError, load_manifest, save_manifest};
 pub use model::{
     EncryptionMetadata, EntryState, EntryType, Manifest, ManifestArchive, ManifestEntry,
     ManifestEntryMetadata, ManifestFile, ManifestRoot, ManifestSummary, SignatureMetadata,

@@ -12,10 +12,7 @@ RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
-if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
-  echo "ERROR: BORINGCACHE_API_TOKEN is required"
-  exit 1
-fi
+require_save_capable_token
 
 for dep in bazel curl; do
   if ! command -v "$dep" >/dev/null 2>&1; then
@@ -36,6 +33,8 @@ if [[ ! -x "${BINARY}" ]]; then
   echo "ERROR: BINARY is not executable: ${BINARY}"
   exit 1
 fi
+
+export_resolved_cli_tokens admin
 
 mkdir -p "${LOG_DIR}"
 BAZEL_LOG_DIR="${LOG_DIR}/tool-bazel-e2e"

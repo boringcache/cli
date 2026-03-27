@@ -1,4 +1,4 @@
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use std::collections::BTreeMap;
 
 use crate::api::client::ApiClient;
@@ -285,10 +285,8 @@ fn normalize_proxy_metadata_hint_value(raw_value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env;
     use std::collections::BTreeMap;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn root_tag_without_aliases() {
@@ -327,16 +325,12 @@ mod tests {
 
     #[test]
     fn proxy_metadata_hints_merge_env_and_flags() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var(PROXY_METADATA_HINTS_ENV, "project=zed,phase=seed");
-        }
+        let _guard = test_env::lock();
+        test_env::set_var(PROXY_METADATA_HINTS_ENV, "project=zed,phase=seed");
         let hints =
             resolve_proxy_metadata_hints(&["phase=warm".to_string(), "tooling=main".to_string()])
                 .unwrap();
-        unsafe {
-            std::env::remove_var(PROXY_METADATA_HINTS_ENV);
-        }
+        test_env::remove_var(PROXY_METADATA_HINTS_ENV);
 
         assert_eq!(
             hints,
@@ -363,8 +357,10 @@ mod tests {
     #[test]
     fn proxy_metadata_hints_reject_invalid_keys() {
         let error = resolve_proxy_metadata_hints(&["bad key=value".to_string()]).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("Invalid proxy metadata hint key"));
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid proxy metadata hint key")
+        );
     }
 }

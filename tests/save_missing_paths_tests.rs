@@ -1,3 +1,4 @@
+use boring_cache_cli::test_env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -17,8 +18,9 @@ fn cli_binary() -> PathBuf {
 
 #[test]
 fn test_save_with_missing_paths_continues_processing() {
-    std::env::remove_var("BORINGCACHE_API_TOKEN");
-    std::env::remove_var("BORINGCACHE_API_URL");
+    let _guard = test_env::lock();
+    test_env::remove_var("BORINGCACHE_API_TOKEN");
+    test_env::remove_var("BORINGCACHE_API_URL");
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let test_file1 = temp_dir.path().join("existing1.txt");
@@ -79,8 +81,9 @@ fn test_save_with_missing_paths_continues_processing() {
 
 #[test]
 fn test_save_with_all_missing_paths_exits_gracefully() {
-    std::env::remove_var("BORINGCACHE_API_TOKEN");
-    std::env::remove_var("BORINGCACHE_API_URL");
+    let _guard = test_env::lock();
+    test_env::remove_var("BORINGCACHE_API_TOKEN");
+    test_env::remove_var("BORINGCACHE_API_URL");
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let nonexistent1 = temp_dir.path().join("missing1");
     let nonexistent2 = temp_dir.path().join("missing2");
@@ -127,9 +130,10 @@ fn test_save_with_all_missing_paths_exits_gracefully() {
 
 #[test]
 fn test_save_with_only_existing_paths_works_normally() {
-    std::env::remove_var("BORINGCACHE_API_TOKEN");
-    std::env::remove_var("BORINGCACHE_API_URL");
-    std::env::remove_var("BORINGCACHE_WORKSPACE");
+    let _guard = test_env::lock();
+    test_env::remove_var("BORINGCACHE_API_TOKEN");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("BORINGCACHE_WORKSPACE");
 
     if let Ok(home_dir) = std::env::var("HOME") {
         let config_path = format!("{}/.boringcache/config.json", home_dir);
@@ -179,8 +183,9 @@ fn test_save_with_only_existing_paths_works_normally() {
 
 #[test]
 fn test_save_path_expansion_with_missing_tilde_path() {
-    std::env::remove_var("BORINGCACHE_API_TOKEN");
-    std::env::remove_var("BORINGCACHE_API_URL");
+    let _guard = test_env::lock();
+    test_env::remove_var("BORINGCACHE_API_TOKEN");
+    test_env::remove_var("BORINGCACHE_API_URL");
 
     let fake_home_path = "~/this/path/definitely/does/not/exist";
 
@@ -215,8 +220,9 @@ fn test_save_path_expansion_with_missing_tilde_path() {
 
 #[test]
 fn test_save_rejects_empty_directory_before_upload() {
-    std::env::remove_var("BORINGCACHE_API_TOKEN");
-    std::env::remove_var("BORINGCACHE_API_URL");
+    let _guard = test_env::lock();
+    test_env::remove_var("BORINGCACHE_API_TOKEN");
+    test_env::remove_var("BORINGCACHE_API_URL");
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 

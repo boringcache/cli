@@ -186,16 +186,22 @@ mod tests {
 
     #[test]
     fn test_error_display_messages() {
-        assert!(BoringCacheError::ConfigNotFound
-            .to_string()
-            .contains("Config file not found"));
-        assert!(BoringCacheError::TokenNotFound
-            .to_string()
-            .contains("API token not found"));
+        assert!(
+            BoringCacheError::ConfigNotFound
+                .to_string()
+                .contains("Config file not found")
+        );
+        assert!(
+            BoringCacheError::TokenNotFound
+                .to_string()
+                .contains("API token not found")
+        );
         assert!(BoringCacheError::CacheMiss.to_string().contains("miss"));
-        assert!(BoringCacheError::cache_pending()
-            .to_string()
-            .contains("in progress"));
+        assert!(
+            BoringCacheError::cache_pending()
+                .to_string()
+                .contains("in progress")
+        );
     }
 
     #[test]

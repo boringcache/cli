@@ -12,13 +12,14 @@
 #   1. Validates the working directory is clean
 #   2. Runs cargo fmt --check
 #   3. Runs cargo clippy
-#   4. Runs cargo test
-#   5. Bumps version in Cargo.toml
-#   6. Updates install fallback versions
-#   7. Updates Cargo.lock
-#   8. Commits the version bump (signed)
-#   8. Creates an annotated git tag
-#   9. Pushes the commit and tag
+#   4. Runs the Rust 2024 compatibility check
+#   5. Runs cargo test
+#   6. Bumps version in Cargo.toml
+#   7. Updates install fallback versions
+#   8. Updates Cargo.lock
+#   9. Commits the version bump (signed)
+#   10. Creates an annotated git tag
+#   11. Pushes the commit and tag
 
 set -euo pipefail
 
@@ -203,7 +204,15 @@ main() {
     fi
     log_success "Clippy check passed"
 
-    # Step 4: Run cargo test
+    # Step 4: Run Rust 2024 compatibility check
+    log_info "Running Rust 2024 compatibility check..."
+    if ! RUSTFLAGS='-Wrust-2024-compatibility' cargo check --all-targets; then
+        log_error "Rust 2024 compatibility check found issues. Please fix them first."
+        exit 1
+    fi
+    log_success "Rust 2024 compatibility check passed"
+
+    # Step 5: Run cargo test
     log_info "Running cargo test..."
     if ! cargo test; then
         log_error "Tests failed. Please fix them first."
@@ -211,7 +220,7 @@ main() {
     fi
     log_success "All tests passed"
 
-    # Step 5-8: Update version and commit (skip if version unchanged)
+    # Step 6-9: Update version and commit (skip if version unchanged)
     if [[ "$current_version" == "$new_version" ]]; then
         log_info "Version already set to $new_version, skipping version bump..."
     else

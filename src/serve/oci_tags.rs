@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::api::models::cache::SaveRequest;
 use crate::serve::error::OciError;
-use crate::serve::state::{digest_tag, ref_tag_for_input, AppState};
+use crate::serve::state::{AppState, digest_tag, ref_tag_for_input};
 use crate::tag_utils::TagResolver;
 
 pub(crate) fn scoped_restore_tags(

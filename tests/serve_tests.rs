@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use boring_cache_cli::api::client::ApiClient;
 use boring_cache_cli::cas_file;
 use boring_cache_cli::cas_oci;
@@ -8,10 +8,11 @@ use boring_cache_cli::git::GitContext;
 use boring_cache_cli::manifest::EntryType;
 use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
-    digest_tag, ref_tag, AppState, BlobLocatorCache, BlobLocatorEntry, BlobReadCache,
-    KvPendingStore, KvPublishedIndex, OciManifestCacheEntry, UploadSession, UploadSessionStore,
+    AppState, BlobLocatorCache, BlobLocatorEntry, BlobReadCache, KvPendingStore, KvPublishedIndex,
+    OciManifestCacheEntry, UploadSession, UploadSessionStore, digest_tag, ref_tag,
 };
 use boring_cache_cli::tag_utils::TagResolver;
+use boring_cache_cli::test_env;
 use http_body_util::BodyExt;
 use mockito::{Matcher, Server};
 use serde_json::json;
@@ -20,7 +21,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 
-static ENV_MUTEX: Mutex<()> = Mutex::const_new(());
 static ORIGINAL_TMPDIR: std::sync::LazyLock<Option<String>> =
     std::sync::LazyLock::new(|| std::env::var("TMPDIR").ok());
 
@@ -28,42 +28,28 @@ struct ScopedEnvVar(&'static str);
 
 impl Drop for ScopedEnvVar {
     fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var(self.0);
-        }
+        test_env::remove_var(self.0);
     }
 }
 
 fn set_scoped_env_var(key: &'static str, value: &str) -> ScopedEnvVar {
-    unsafe {
-        std::env::set_var(key, value);
-    }
+    test_env::set_var(key, value);
     ScopedEnvVar(key)
 }
 
-async fn setup(
-    server: &Server,
-) -> (
-    AppState,
-    tempfile::TempDir,
-    tokio::sync::MutexGuard<'static, ()>,
-) {
-    let guard = ENV_MUTEX.lock().await;
+async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard) {
+    let guard = test_env::lock();
     let _ = *ORIGINAL_TMPDIR;
-    unsafe {
-        match ORIGINAL_TMPDIR.as_deref() {
-            Some(orig) => std::env::set_var("TMPDIR", orig),
-            None => std::env::remove_var("TMPDIR"),
-        }
+    match ORIGINAL_TMPDIR.as_deref() {
+        Some(orig) => test_env::set_var("TMPDIR", orig),
+        None => test_env::remove_var("TMPDIR"),
     }
     let temp_home = tempfile::tempdir().expect("temp dir");
-    unsafe {
-        std::env::set_var("HOME", temp_home.path());
-        std::env::set_var("TMPDIR", temp_home.path());
-        std::env::set_var("BORINGCACHE_API_URL", server.url());
-        std::env::set_var("BORINGCACHE_AUTH_TOKEN", "test-token");
-        std::env::set_var("BORINGCACHE_TEST_MODE", "1");
-    }
+    test_env::set_var("HOME", temp_home.path());
+    test_env::set_var("TMPDIR", temp_home.path());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_AUTH_TOKEN", "test-token");
+    test_env::set_var("BORINGCACHE_TEST_MODE", "1");
 
     let api_client =
         ApiClient::new_with_token_override(Some("test-token".to_string())).expect("API client");
@@ -560,13 +546,15 @@ async fn test_manifest_hit_returns_decoded_index_json() {
         response.headers().get("Content-Type").unwrap(),
         "application/vnd.oci.image.manifest.v1+json"
     );
-    assert!(response
-        .headers()
-        .get("Docker-Content-Digest")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .starts_with("sha256:"));
+    assert!(
+        response
+            .headers()
+            .get("Docker-Content-Digest")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -839,10 +827,12 @@ async fn test_cached_manifest_hit_revalidates_blob_retrievability_in_best_effort
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(state.oci_manifest_cache.get(&tag).is_none());
-    assert!(state
-        .oci_manifest_cache
-        .get(&digest_tag(&manifest_digest))
-        .is_none());
+    assert!(
+        state
+            .oci_manifest_cache
+            .get(&digest_tag(&manifest_digest))
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -2575,10 +2565,12 @@ async fn test_put_upload_body_stream_error_returns_internal_error() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(parsed["errors"][0]["code"], "INTERNAL_ERROR");
-    assert!(parsed["errors"][0]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("body stream error"));
+    assert!(
+        parsed["errors"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("body stream error")
+    );
 }
 
 #[tokio::test]

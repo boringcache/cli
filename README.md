@@ -44,24 +44,68 @@ boringcache run my-org/app --proxy build-cache -- nx run-many --target=build
 
 The `tag:path` pair is the basic unit. In `deps:node_modules`, `deps` is the cache tag and `node_modules` is where the files live locally.
 
+## Cargo flow locally
+
+For this repo, the fastest local Cargo path is:
+- use `sccache` through `boringcache run --proxy`
+- optionally restore a CI-seeded debug `target` tree when local `target/` is empty
+- load tokens from a repo-local `.boringcache.env`
+
+Setup:
+
+```bash
+cp .boringcache.env.example .boringcache.env
+$EDITOR .boringcache.env
+make install-hooks
+make env
+```
+
+Rust toolchain versioning is sourced from [mise.toml](/Users/gaurav/boringcache/cli/mise.toml); [rust-toolchain.toml](/Users/gaurav/boringcache/cli/rust-toolchain.toml) is kept in sync and checked by `make check`.
+
+Run cached Cargo commands:
+
+```bash
+make dev
+make build
+make test
+make clippy
+make compat
+make check
+./scripts/cargo-flow.sh cargo build --release --locked
+```
+
+`make install-hooks` configures `git` to use the repo-local [.githooks/pre-commit](/Users/gaurav/boringcache/cli/.githooks/pre-commit), which runs `cargo fmt -- --check` plus `cargo clippy --locked --all-targets --all-features -- -D warnings` before each commit. The heavier test pass stays on `make check`.
+
+The flow uses tags derived from the active Rust version and host triple, disables git/platform suffixing for those explicit tags, prefers remote `sccache`, and restores the archived debug `target` directory only when the local target directory is empty. The local proxy port defaults to `0`, so Cargo picks an open loopback port unless you pin `BORINGCACHE_CARGO_PROXY_PORT`. Interrupting `make` or `cargo-flow` now waits for the active proxy-backed run to flush and shut down before the wrapper exits. `make compat` runs the Rust 2024 compatibility lint, and `make check` now includes formatting, clippy, that compatibility pass, the Rust-version sync check, and tests. Local runs do not save `target` back to BoringCache; the debug `target` archive is seeded from GitHub Actions on macOS so Apple Silicon laptops can reuse that remote baseline without stomping active local builds.
+
 ## Trust model
 
 Local CLI use is simplest with `boringcache auth --token ...`.
 
-In CI, prefer split tokens:
+In CI, use split tokens only:
 - `BORINGCACHE_RESTORE_TOKEN` for restore and other read-only paths
 - `BORINGCACHE_SAVE_TOKEN` for trusted jobs that should also publish updates
-- `BORINGCACHE_API_TOKEN` only as a compatibility fallback for older setups that have not moved to split tokens yet
+- `BORINGCACHE_ADMIN_TOKEN` only for admin-only paths such as delete coverage in E2E
+
+Local compatibility still accepts `BORINGCACHE_API_TOKEN`, but the repo workflows do not rely on it.
 
 Restore resolution order:
 - `BORINGCACHE_RESTORE_TOKEN`
 - `BORINGCACHE_SAVE_TOKEN`
+- `BORINGCACHE_ADMIN_TOKEN`
 - `BORINGCACHE_API_TOKEN`
 - `BORINGCACHE_TOKEN_FILE`
 - local config
 
 Save resolution order:
 - `BORINGCACHE_SAVE_TOKEN`
+- `BORINGCACHE_ADMIN_TOKEN`
+- `BORINGCACHE_API_TOKEN`
+- `BORINGCACHE_TOKEN_FILE`
+- local config
+
+Admin resolution order:
+- `BORINGCACHE_ADMIN_TOKEN`
 - `BORINGCACHE_API_TOKEN`
 - `BORINGCACHE_TOKEN_FILE`
 - local config

@@ -63,6 +63,10 @@ Key paths:
 - No inline comments; code must be self-documenting through clear naming.
 - Comments only for non-obvious business logic or external constraints.
 - Follow Rust conventions strictly.
+- Prefer Rust 2024 idioms supported by the pinned toolchain instead of preserving older 2021-style patterns.
+- Use `let ... else`, let-chains, inline format args, and helpers like `is_some_and` or `is_ok_and` when they make control flow clearer.
+- New examples, fixtures, and generated Cargo manifests should default to `edition = "2024"`.
+- In tests, mutate process environment only through `crate::test_env`; do not call `std::env::set_var` or `std::env::remove_var` directly.
 - Use `snake_case` for functions and variables.
 - Use `CamelCase` for types and traits.
 - Keep functions focused and under 50 lines when possible.
@@ -99,7 +103,8 @@ Config locations:
 Run before committing:
 ```
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
+RUSTFLAGS='-Wrust-2024-compatibility' cargo check --all-targets
 cargo test
 ```
 
@@ -107,7 +112,7 @@ Run before pushing too. Do not rely on CI to catch a missed local formatting or 
 
 Recent reminder:
 - GitHub Actions run `23025952437` (`Test CLI (BoringCache)`, March 12, 2026) passed build and tests, then failed at `cargo fmt -- --check`.
-- Treat `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` as the required local pre-push gate for CLI changes.
+- Treat `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `RUSTFLAGS='-Wrust-2024-compatibility' cargo check --all-targets`, and `cargo test` as the required local pre-push gate for CLI changes.
 
 ## Operational Notes
 

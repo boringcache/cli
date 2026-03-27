@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
 
-use crate::serve::state::{diagnostics_enabled, AppState};
+use crate::serve::state::{AppState, diagnostics_enabled};
 
 static INFLIGHT_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_REQUESTS: AtomicU64 = AtomicU64::new(0);
@@ -113,20 +113,20 @@ impl PutProbeGuard {
 
 impl Drop for PutProbeGuard {
     fn drop(&mut self) {
-        if let Some(seq) = self.seq {
-            if let Some((_, progress)) = put_progress_map().remove(&seq) {
-                let age_ms = unix_time_ms_now().saturating_sub(progress.started_ms);
-                if age_ms >= PUT_SLOW_WARN_MS {
-                    log::warn!(
-                        "slow_kv_put seq={} age_ms={} stage={} bytes_read={} bytes_written={} key={}",
-                        seq,
-                        age_ms,
-                        progress.stage,
-                        progress.bytes_read,
-                        progress.bytes_written,
-                        progress.scoped_key,
-                    );
-                }
+        if let Some(seq) = self.seq
+            && let Some((_, progress)) = put_progress_map().remove(&seq)
+        {
+            let age_ms = unix_time_ms_now().saturating_sub(progress.started_ms);
+            if age_ms >= PUT_SLOW_WARN_MS {
+                log::warn!(
+                    "slow_kv_put seq={} age_ms={} stage={} bytes_read={} bytes_written={} key={}",
+                    seq,
+                    age_ms,
+                    progress.stage,
+                    progress.bytes_read,
+                    progress.bytes_written,
+                    progress.scoped_key,
+                );
             }
         }
     }
@@ -189,6 +189,7 @@ mod sccache;
 mod turborepo;
 
 pub use error::RegistryError;
+pub(crate) use kv::FlushResult;
 pub(crate) use kv::cleanup_expired_kv_misses;
 pub(crate) use kv::enqueue_replication_flush_hint;
 pub(crate) use kv::flush_kv_index;
@@ -197,7 +198,6 @@ pub(crate) use kv::poll_tag_version_loop;
 pub(crate) use kv::prefetch_manifest_blobs;
 pub(crate) use kv::refresh_kv_index;
 pub(crate) use kv::try_schedule_flush;
-pub(crate) use kv::FlushResult;
 
 pub async fn dispatch_root(
     method: Method,

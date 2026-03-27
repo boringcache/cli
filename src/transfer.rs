@@ -42,7 +42,8 @@ where
     loop {
         attempt += 1;
 
-        match send_request().await {
+        let response_result = send_request().await;
+        match response_result {
             Ok(response) => {
                 let status = response.status();
                 if is_retryable_transfer_status(status) && attempt < TRANSFER_RETRY_ATTEMPTS {

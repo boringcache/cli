@@ -1,15 +1,15 @@
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{Context, Error, Result, anyhow};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task;
 
+use crate::api::ApiClient;
 use crate::api::models::cache::{
     BlobDescriptor, ConfirmRequest, ManifestCheckRequest, SaveRequest,
 };
-use crate::api::ApiClient;
-use crate::archive::{create_tar_archive, TarArchiveInfo};
+use crate::archive::{TarArchiveInfo, create_tar_archive};
 use crate::ci_detection::detect_ci_environment;
 use crate::commands::cas_publish::{self, BlobUploadSource};
 use crate::commands::save_support::{
@@ -22,7 +22,7 @@ use crate::commands::upload_receipts::{maybe_commit_blob_receipts, maybe_commit_
 use crate::manifest::diff::compute_digest_from_draft;
 use crate::manifest::{EntryType, ManifestBuilder};
 use crate::progress::{
-    format_bytes, ProgressSession, Summary, System as ProgressSystem, TransferProgress,
+    ProgressSession, Summary, System as ProgressSystem, TransferProgress, format_bytes,
 };
 use crate::telemetry::{SaveMetrics, StorageMetrics};
 use crate::ui;
@@ -449,19 +449,19 @@ async fn save_single_archive_entry(
     let mut cache_pending = false;
     match check_response {
         Ok(response) => {
-            if let Some(result) = response.results.first() {
-                if result.exists {
-                    cache_exists = true;
-                    cache_pending = result.pending
-                        || result.status.as_deref() == Some("pending")
-                        || result.status.as_deref() == Some("uploading");
-                    let status_msg = if cache_pending {
-                        "cache pending"
-                    } else {
-                        "cache hit"
-                    };
-                    check_step.update_progress(100.0, Some(status_msg.to_string()))?;
-                }
+            if let Some(result) = response.results.first()
+                && result.exists
+            {
+                cache_exists = true;
+                cache_pending = result.pending
+                    || result.status.as_deref() == Some("pending")
+                    || result.status.as_deref() == Some("uploading");
+                let status_msg = if cache_pending {
+                    "cache pending"
+                } else {
+                    "cache hit"
+                };
+                check_step.update_progress(100.0, Some(status_msg.to_string()))?;
             }
         }
         Err(err) => {
@@ -528,10 +528,9 @@ async fn save_single_archive_entry(
                             .map(|status| status != "pending" && status != "uploading")
                             .unwrap_or(true);
 
-                    if digest_exists {
-                        if let Some(cache_entry_id) = result.cache_entry_id.as_deref() {
-                            digest_existing_cache_entry_id = Some(cache_entry_id.to_string());
-                        }
+                    if digest_exists && let Some(cache_entry_id) = result.cache_entry_id.as_deref()
+                    {
+                        digest_existing_cache_entry_id = Some(cache_entry_id.to_string());
                     }
                 }
             }
@@ -980,14 +979,15 @@ async fn save_single_archive_entry(
 
         let upload_started = Instant::now();
 
-        if verbose && !save_response.upload_headers.is_empty() {
-            if let Some(regions) = save_response.upload_headers.get("x-tigris-regions") {
-                let count = regions.split(',').count();
-                progress_info(
-                    &reporter,
-                    format!("  Replication: {} regions ({})", count, regions),
-                );
-            }
+        if verbose
+            && !save_response.upload_headers.is_empty()
+            && let Some(regions) = save_response.upload_headers.get("x-tigris-regions")
+        {
+            let count = regions.split(',').count();
+            progress_info(
+                &reporter,
+                format!("  Replication: {} regions ({})", count, regions),
+            );
         }
 
         if let Some(upload_id) = save_response.get_upload_id() {

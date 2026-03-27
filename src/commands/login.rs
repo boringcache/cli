@@ -17,16 +17,16 @@ pub async fn execute() -> Result<()> {
     crate::commands::auth::execute(token.clone()).await?;
     ensure_default_workspace_after_onboarding(&token).await?;
 
-    if let Ok(config) = Config::load() {
-        if let Some(ref ws) = config.default_workspace {
-            ui::blank_line();
-            ui::info("Ready. Try:");
-            ui::info("  boringcache onboard");
-            ui::info(&format!(
-                "  boringcache run {} \"deps:node_modules\" -- npm ci",
-                ws
-            ));
-        }
+    if let Ok(config) = Config::load()
+        && let Some(ref ws) = config.default_workspace
+    {
+        ui::blank_line();
+        ui::info("Ready. Try:");
+        ui::info("  boringcache onboard");
+        ui::info(&format!(
+            "  boringcache run {} \"deps:node_modules\" -- npm ci",
+            ws
+        ));
     }
 
     Ok(())

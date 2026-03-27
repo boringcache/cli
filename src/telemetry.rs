@@ -134,12 +134,12 @@ impl StorageMetrics {
                     let end = desc_value.find(';').unwrap_or(desc_value.len());
                     cache_status = Some(desc_value[..end].to_string());
                 }
-            } else if part.starts_with("block;") {
-                if let Some(desc_start) = part.find("desc=") {
-                    let desc_value = &part[desc_start + 5..];
-                    let end = desc_value.find(';').unwrap_or(desc_value.len());
-                    block_location = Some(desc_value[..end].to_string());
-                }
+            } else if part.starts_with("block;")
+                && let Some(desc_start) = part.find("desc=")
+            {
+                let desc_value = &part[desc_start + 5..];
+                let end = desc_value.find(';').unwrap_or(desc_value.len());
+                block_location = Some(desc_value[..end].to_string());
             }
         }
 

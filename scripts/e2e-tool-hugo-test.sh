@@ -16,10 +16,7 @@ BUILD_CLEANUP_WAIT_SECS="${BUILD_CLEANUP_WAIT_SECS:-20}"
 PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-30}"
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
-if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
-  echo "ERROR: BORINGCACHE_API_TOKEN is required"
-  exit 1
-fi
+require_save_capable_token
 
 for dep in docker curl; do
   if ! command -v "$dep" >/dev/null 2>&1; then
@@ -32,6 +29,8 @@ if [[ ! -x "${BINARY}" ]]; then
   echo "ERROR: BINARY is not executable: ${BINARY}"
   exit 1
 fi
+
+export_resolved_cli_tokens admin
 
 mkdir -p "${LOG_DIR}"
 HUGO_LOG_DIR="${LOG_DIR}/tool-hugo-e2e"

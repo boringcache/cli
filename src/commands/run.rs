@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::collections::BTreeMap;
 use std::process::Stdio;
 
@@ -10,6 +10,50 @@ use crate::ui;
 const EXIT_CONFIG: i32 = 78;
 const EXIT_COMMAND_NOT_FOUND: i32 = 127;
 const PROXY_AUTH_TOKEN: &str = "boringcache";
+const SCCACHE_BACKEND_ENV_VARS: &[&str] = &[
+    "SCCACHE_CONF",
+    "SCCACHE_CACHED_CONF",
+    "SCCACHE_ENDPOINT",
+    "SCCACHE_BUCKET",
+    "SCCACHE_REGION",
+    "SCCACHE_S3_KEY_PREFIX",
+    "SCCACHE_S3_USE_SSL",
+    "SCCACHE_S3_NO_CREDENTIALS",
+    "SCCACHE_S3_SERVER_SIDE_ENCRYPTION",
+    "SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE",
+    "SCCACHE_GCS_BUCKET",
+    "SCCACHE_GCS_KEY_PATH",
+    "SCCACHE_GCS_CREDENTIALS_URL",
+    "SCCACHE_AZURE_CONNECTION_STRING",
+    "SCCACHE_AZURE_BLOB_CONTAINER",
+    "SCCACHE_AZURE_KEY_PREFIX",
+    "SCCACHE_REDIS_ENDPOINT",
+    "SCCACHE_REDIS_CLUSTER_ENDPOINTS",
+    "SCCACHE_REDIS_USERNAME",
+    "SCCACHE_REDIS_PASSWORD",
+    "SCCACHE_REDIS_DB",
+    "SCCACHE_REDIS_EXPIRATION",
+    "SCCACHE_REDIS_TTL",
+    "SCCACHE_REDIS_KEY_PREFIX",
+    "SCCACHE_REDIS",
+    "SCCACHE_MEMCACHED_ENDPOINT",
+    "SCCACHE_MEMCACHED_USERNAME",
+    "SCCACHE_MEMCACHED_PASSWORD",
+    "SCCACHE_MEMCACHED_EXPIRATION",
+    "SCCACHE_MEMCACHED_KEY_PREFIX",
+    "SCCACHE_MEMCACHED",
+    "SCCACHE_GHA_CACHE_URL",
+    "SCCACHE_GHA_RUNTIME_TOKEN",
+    "SCCACHE_GHA_CACHE_TO",
+    "SCCACHE_GHA_CACHE_FROM",
+    "SCCACHE_WEBDAV_ENDPOINT",
+    "SCCACHE_WEBDAV_KEY_PREFIX",
+    "SCCACHE_WEBDAV_USERNAME",
+    "SCCACHE_WEBDAV_PASSWORD",
+    "SCCACHE_WEBDAV_TOKEN",
+    "ACTIONS_RESULTS_URL",
+    "ACTIONS_RUNTIME_TOKEN",
+];
 
 #[derive(Debug)]
 enum ChildOutcome {
@@ -181,16 +225,14 @@ pub async fn execute(
                 )
                 .await;
 
-                if let Err(error) = save_result {
-                    if fail_on_cache_error && command_succeeded {
-                        shutdown_proxy_handle(proxy_handle.take(), fail_on_cache_error, false)
-                            .await?;
-                        return Err(ExitCodeError::with_message(
-                            EXIT_CONFIG,
-                            format!("{:#}", error),
-                        )
-                        .into());
-                    }
+                if let Err(error) = save_result
+                    && fail_on_cache_error
+                    && command_succeeded
+                {
+                    shutdown_proxy_handle(proxy_handle.take(), fail_on_cache_error, false).await?;
+                    return Err(
+                        ExitCodeError::with_message(EXIT_CONFIG, format!("{:#}", error)).into(),
+                    );
                 }
             }
 
@@ -260,11 +302,15 @@ async fn spawn_command(
         .spawn()
         .map_err(|error| map_spawn_error(error, &prepared_command[0]))?;
 
-    wait_for_child(&mut child).await
+    let exit_code = wait_for_child(&mut child).await?;
+    Ok(exit_code)
 }
 
 fn inject_proxy_env(command: &mut tokio::process::Command, context: &ProxyContext) {
     let endpoint = format!("http://{}:{}", context.endpoint_host, context.port);
+    for key in SCCACHE_BACKEND_ENV_VARS {
+        command.env_remove(key);
+    }
     command.env("NX_SELF_HOSTED_REMOTE_CACHE_SERVER", &endpoint);
     command.env("NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN", PROXY_AUTH_TOKEN);
     command.env("TURBO_API", &endpoint);
@@ -275,10 +321,7 @@ fn inject_proxy_env(command: &mut tokio::process::Command, context: &ProxyContex
         format!("boringcache go-cacheprog --endpoint {}", endpoint),
     );
     command.env("RUSTC_WRAPPER", "sccache");
-    command.env("SCCACHE_ENDPOINT", &endpoint);
-    command.env("SCCACHE_BUCKET", "cache");
-    command.env("SCCACHE_S3_USE_SSL", "false");
-    command.env("SCCACHE_REGION", "local");
+    command.env("SCCACHE_WEBDAV_ENDPOINT", format!("{endpoint}/"));
     command.env("BORINGCACHE_PROXY_PORT", context.port.to_string());
     command.env("BORINGCACHE_CACHE_REF", &context.cache_ref);
 }
@@ -296,7 +339,7 @@ fn substitute_proxy_placeholders(command: &[String], port: u16, cache_ref: &str)
 
 #[cfg(unix)]
 async fn wait_for_child(child: &mut tokio::process::Child) -> Result<ChildOutcome> {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
 
     let mut sigint = signal(SignalKind::interrupt()).context("Failed to install SIGINT handler")?;
     let mut sigterm =

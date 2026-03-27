@@ -1,7 +1,7 @@
 [package]
 name = "boring_cache_cli"
 version = "1.12.10"
-edition = "2021"
+edition = "2024"
 rust-version = "1.94"
 authors = ["BoringCache Team"]
 description = "High-performance cache management CLI for CI/CD workflows"

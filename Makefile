@@ -2,25 +2,34 @@
 #
 # Common development tasks
 
-.PHONY: all build check test lint fmt clean release-patch release-minor release-major install
+.PHONY: all env build dev test clippy lint compat check fmt fmt-check clean release-patch release-minor release-major install pre-commit install-hooks
 
 # Default target
 all: check
 
 # Build in release mode
 build:
-	cargo build --release
+	./scripts/cargo-flow.sh build --release
 
 # Run all checks (fmt, clippy, test)
-check: fmt-check lint test
+check:
+	./scripts/cargo-flow.sh check
+
+env:
+	./scripts/cargo-flow.sh env
 
 # Run tests
 test:
-	cargo test
+	./scripts/cargo-flow.sh test
 
 # Run clippy linter
-lint:
-	cargo clippy --all-targets --all-features -- -D warnings
+clippy:
+	./scripts/cargo-flow.sh clippy
+
+lint: clippy
+
+compat:
+	./scripts/cargo-flow.sh compat
 
 # Check code formatting
 fmt-check:
@@ -64,7 +73,7 @@ release-major:
 
 # Development build (faster compilation)
 dev:
-	cargo build
+	./scripts/cargo-flow.sh build
 
 # Run with verbose logging
 run-verbose:
@@ -75,19 +84,29 @@ version:
 	@grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'
 
 # Pre-commit hook: run before committing
-pre-commit: fmt lint test
+pre-commit:
+	cargo fmt -- --check
+	cargo clippy --locked --all-targets --all-features -- -D warnings
 	@echo "Pre-commit checks passed!"
+
+install-hooks:
+	git config core.hooksPath .githooks
+	chmod +x .githooks/pre-commit
+	@echo "Git hooks installed from .githooks"
 
 # Help
 help:
 	@echo "BoringCache CLI Development Commands"
 	@echo ""
 	@echo "Development:"
+	@echo "  make env          - Show resolved cargo-flow settings"
 	@echo "  make dev          - Build debug binary"
 	@echo "  make build        - Build release binary"
 	@echo "  make check        - Run all checks (fmt, lint, test)"
 	@echo "  make test         - Run tests"
-	@echo "  make lint         - Run clippy"
+	@echo "  make clippy       - Run clippy"
+	@echo "  make compat       - Run Rust 2024 compatibility check"
+	@echo "  make lint         - Alias for clippy"
 	@echo "  make fmt          - Format code"
 	@echo "  make fmt-check    - Check formatting"
 	@echo "  make clean        - Clean build artifacts"
@@ -102,3 +121,4 @@ help:
 	@echo ""
 	@echo "Git Hooks:"
 	@echo "  make pre-commit   - Run pre-commit checks"
+	@echo "  make install-hooks - Install repo-local git hooks"

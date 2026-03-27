@@ -48,7 +48,8 @@ impl RetryConfig {
         loop {
             attempts += 1;
 
-            match operation().await {
+            let operation_result = operation().await;
+            match operation_result {
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     if crate::error::is_connection_error(&e)
@@ -332,10 +333,12 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 3);
         assert!(start_time.elapsed() >= Duration::from_secs(1));
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("failed after 3 attempts"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed after 3 attempts")
+        );
     }
 
     #[test]
@@ -347,10 +350,12 @@ mod tests {
         assert_eq!(resume_info.total_size, 1000);
         assert_eq!(resume_info.downloaded_size, 0);
         assert_eq!(resume_info.chunks_completed.len(), 5);
-        assert!(resume_info
-            .chunks_completed
-            .iter()
-            .all(|&completed| !completed));
+        assert!(
+            resume_info
+                .chunks_completed
+                .iter()
+                .all(|&completed| !completed)
+        );
     }
 
     #[test]

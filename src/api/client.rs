@@ -3,13 +3,13 @@ use crate::error::{BoringCacheError, ConflictMetadata, PendingMetadata};
 use crate::observability;
 use crate::retry_resume::RetryConfig;
 use crate::types::Result;
-use anyhow::{ensure, Context};
+use anyhow::{Context, ensure};
 use log::debug;
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
@@ -828,7 +828,8 @@ impl ApiClient {
         let mut last_error = None;
 
         for attempt in 0..=max_retries {
-            match operation().await {
+            let operation_result = operation().await;
+            match operation_result {
                 Ok(result) => return Ok(result),
                 Err(error) => {
                     last_error = Some(error);
@@ -1048,7 +1049,7 @@ impl ApiClient {
                     .await
                     .map_err(|e| anyhow::anyhow!("Blob check semaphore closed: {e}"))?;
                 let body = super::models::cache::BlobCheckRequest { blobs: chunk };
-                client
+                let response = client
                     .post_v2_with_request_metrics::<_, super::models::cache::BlobCheckResponse>(
                         &endpoint,
                         &body,
@@ -1057,7 +1058,9 @@ impl ApiClient {
                         Some(batch_count),
                         Some(batch_size),
                     )
-                    .await
+                    .await;
+                drop(_permit);
+                response
             }));
         }
 
@@ -1124,7 +1127,7 @@ impl ApiClient {
                     cache_entry_id: entry_id,
                     blobs: chunk,
                 };
-                client
+                let response = client
                     .post_v2_with_request_metrics::<
                         _,
                         super::models::cache::BlobUploadUrlsResponse,
@@ -1136,7 +1139,9 @@ impl ApiClient {
                         Some(batch_count),
                         Some(batch_size),
                     )
-                    .await
+                    .await;
+                drop(_permit);
+                response
             }));
         }
 
@@ -1266,7 +1271,7 @@ impl ApiClient {
                     cache_entry_id,
                     blobs: chunk,
                 };
-                client
+                let response = client
                     .post_v2_with_request_metrics::<
                         _,
                         super::models::cache::BlobDownloadUrlsResponse,
@@ -1278,7 +1283,9 @@ impl ApiClient {
                         Some(batch_count),
                         Some(batch_size),
                     )
-                    .await
+                    .await;
+                drop(_permit);
+                response
             }));
         }
 
@@ -1503,15 +1510,15 @@ impl ApiClient {
         let started_at = Instant::now();
 
         let response: TagPointer = loop {
-            match self
+            let publish_result = self
                 .put_v2_with_if_match(
                     &endpoint,
                     &publish_payload,
                     if_match.as_deref(),
                     CACHE_METRIC_ENDPOINT_OPERATION_CONFIRM_PUBLISH,
                 )
-                .await
-            {
+                .await;
+            match publish_result {
                 Ok(response) => break response,
                 Err(error) => {
                     let Some(metadata) = pending_metadata_from_error(&error).cloned() else {
@@ -1527,7 +1534,7 @@ impl ApiClient {
                     }
 
                     if metadata.poll_path.is_some() || metadata.upload_session_id.is_some() {
-                        match self
+                        let poll_result = self
                             .poll_pending_publish(
                                 workspace,
                                 tag,
@@ -1535,8 +1542,8 @@ impl ApiClient {
                                 started_at,
                                 shutdown_requested,
                             )
-                            .await?
-                        {
+                            .await?;
+                        match poll_result {
                             PendingPublishPollOutcome::Published(pointer) => break pointer,
                             PendingPublishPollOutcome::Pending(metadata) => {
                                 return Ok(ConfirmPublishResult::Pending(metadata));
@@ -1977,10 +1984,10 @@ fn parse_restore_not_found_body(
         return Ok(Some(restore_response));
     }
 
-    if let Ok(pending_response) = serde_json::from_str::<RestorePendingResponse>(trimmed) {
-        if pending_response.pending || pending_response.status.as_deref() == Some("pending") {
-            return Err(BoringCacheError::cache_pending().into());
-        }
+    if let Ok(pending_response) = serde_json::from_str::<RestorePendingResponse>(trimmed)
+        && (pending_response.pending || pending_response.status.as_deref() == Some("pending"))
+    {
+        return Err(BoringCacheError::cache_pending().into());
     }
 
     Ok(None)
@@ -2365,12 +2372,10 @@ fn transfer_http2_enabled() -> bool {
 mod tests {
     use super::*;
     use crate::api::cache;
+    use crate::test_env;
     use mockito::Matcher;
     use serde_json::json;
     use std::net::TcpListener;
-    use std::sync::{Mutex, OnceLock};
-
-    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn networking_available() -> bool {
         match TcpListener::bind("127.0.0.1:0") {
@@ -2423,77 +2428,70 @@ mod tests {
 
     #[test]
     fn test_blob_check_batch_max_env_override() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
 
-        std::env::set_var(BLOB_CHECK_BATCH_MAX_ENV, "7");
+        test_env::set_var(BLOB_CHECK_BATCH_MAX_ENV, "7");
         assert_eq!(blob_check_batch_max(), 7);
-        std::env::remove_var(BLOB_CHECK_BATCH_MAX_ENV);
+        test_env::remove_var(BLOB_CHECK_BATCH_MAX_ENV);
         assert_eq!(blob_check_batch_max(), BLOB_CHECK_BATCH_MAX);
     }
 
     #[test]
     fn test_blob_url_batch_max_env_override() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
 
-        std::env::set_var(BLOB_URL_BATCH_MAX_ENV, "9");
+        test_env::set_var(BLOB_URL_BATCH_MAX_ENV, "9");
         assert_eq!(blob_url_batch_max(), 9);
-        std::env::remove_var(BLOB_URL_BATCH_MAX_ENV);
+        test_env::remove_var(BLOB_URL_BATCH_MAX_ENV);
         assert_eq!(blob_url_batch_max(), BLOB_URL_BATCH_MAX);
     }
 
     #[test]
     fn test_blob_check_batch_concurrency_env_override() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
 
-        std::env::set_var(BLOB_CHECK_BATCH_CONCURRENCY_ENV, "16");
+        test_env::set_var(BLOB_CHECK_BATCH_CONCURRENCY_ENV, "16");
         assert_eq!(blob_check_batch_concurrency(4), 4);
-        std::env::remove_var(BLOB_CHECK_BATCH_CONCURRENCY_ENV);
+        test_env::remove_var(BLOB_CHECK_BATCH_CONCURRENCY_ENV);
     }
 
     #[test]
     fn test_blob_url_batch_concurrency_env_override() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
 
-        std::env::set_var(BLOB_URL_BATCH_CONCURRENCY_ENV, "3");
+        test_env::set_var(BLOB_URL_BATCH_CONCURRENCY_ENV, "3");
         assert_eq!(blob_url_batch_concurrency(10), 3);
-        std::env::remove_var(BLOB_URL_BATCH_CONCURRENCY_ENV);
+        test_env::remove_var(BLOB_URL_BATCH_CONCURRENCY_ENV);
     }
 
     #[test]
     fn test_transfer_http2_enabled_defaults_true() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
 
-        std::env::remove_var("BORINGCACHE_TRANSFER_HTTP2");
+        test_env::remove_var("BORINGCACHE_TRANSFER_HTTP2");
         assert!(transfer_http2_enabled());
     }
 
     #[test]
     fn test_transfer_http2_enabled_respects_false_values() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
 
         for value in ["0", "false", "FALSE", "no", "off"] {
-            std::env::set_var("BORINGCACHE_TRANSFER_HTTP2", value);
+            test_env::set_var("BORINGCACHE_TRANSFER_HTTP2", value);
             assert!(!transfer_http2_enabled(), "value {value} should disable h2");
         }
-        std::env::remove_var("BORINGCACHE_TRANSFER_HTTP2");
+        test_env::remove_var("BORINGCACHE_TRANSFER_HTTP2");
     }
 
     #[test]
     fn test_transfer_http2_enabled_respects_true_and_unknown_values() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
 
         for value in ["1", "true", "TRUE", "yes", "on", "unexpected"] {
-            std::env::set_var("BORINGCACHE_TRANSFER_HTTP2", value);
+            test_env::set_var("BORINGCACHE_TRANSFER_HTTP2", value);
             assert!(transfer_http2_enabled(), "value {value} should enable h2");
         }
-        std::env::remove_var("BORINGCACHE_TRANSFER_HTTP2");
+        test_env::remove_var("BORINGCACHE_TRANSFER_HTTP2");
     }
 
     #[test]
@@ -2533,21 +2531,20 @@ mod tests {
 
     #[test]
     fn test_default_base_url_matches_config() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
 
         // Isolate from user config by using a temp HOME directory
         let temp_home = tempfile::tempdir().expect("failed to create temp dir");
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
-        std::env::remove_var("BORINGCACHE_API_URL");
+        test_env::set_var("HOME", temp_home.path());
+        test_env::remove_var("BORINGCACHE_API_URL");
 
         let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
             .expect("client should initialize without BORINGCACHE_API_URL or config file");
 
         // Restore original HOME
         if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
+            test_env::set_var("HOME", home);
         }
 
         let (_v1, expected_v2) =
@@ -2571,20 +2568,19 @@ mod tests {
 
     #[test]
     fn test_new_with_token_override_trims_whitespace() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
 
         let temp_home = tempfile::tempdir().expect("failed to create temp dir");
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
-        std::env::remove_var("BORINGCACHE_API_TOKEN");
+        test_env::set_var("HOME", temp_home.path());
+        test_env::remove_var("BORINGCACHE_API_TOKEN");
 
         let client = ApiClient::new_with_token_override(Some("  test-token\n".to_string()))
             .expect("client should initialize");
         assert_eq!(client.get_token().unwrap(), "test-token");
 
         if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
+            test_env::set_var("HOME", home);
         }
     }
 
@@ -2780,22 +2776,17 @@ mod tests {
 
     #[test]
     fn test_confirm_publish_request_timeout_uses_default_and_env_override() {
-        unsafe {
-            std::env::remove_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV);
-        }
+        let _guard = test_env::lock();
+        test_env::remove_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV);
         assert_eq!(
             confirm_publish_request_timeout(),
             Duration::from_secs(DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS)
         );
 
-        unsafe {
-            std::env::set_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV, "7");
-        }
+        test_env::set_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV, "7");
         assert_eq!(confirm_publish_request_timeout(), Duration::from_secs(7));
 
-        unsafe {
-            std::env::remove_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV);
-        }
+        test_env::remove_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV);
     }
 
     #[test]
@@ -2822,14 +2813,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_manifest_check_request_body() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-
-        // Use lock() with ok() to handle poisoned mutex gracefully
-        let guard_result = mutex.lock();
-        let _guard = match guard_result {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let _guard = test_env::lock();
 
         if !networking_available() {
             eprintln!("skipping test_manifest_check_request_body: networking disabled in sandbox");
@@ -2839,7 +2823,7 @@ mod tests {
         // Isolate from user config
         let temp_home = tempfile::tempdir().expect("failed to create temp dir");
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        test_env::set_var("HOME", temp_home.path());
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -2860,7 +2844,7 @@ mod tests {
             .create_async()
             .await;
 
-        std::env::set_var("BORINGCACHE_API_URL", server.url());
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
 
         let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
             .expect("client should initialize");
@@ -2886,20 +2870,15 @@ mod tests {
 
         // Cleanup: restore HOME and remove API URL override
         if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
+            test_env::set_var("HOME", home);
         }
-        std::env::remove_var("BORINGCACHE_API_URL");
+        test_env::remove_var("BORINGCACHE_API_URL");
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_blob_check_request_body() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let guard_result = mutex.lock();
-        let _guard = match guard_result {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let _guard = test_env::lock();
 
         if !networking_available() {
             eprintln!("skipping test_blob_check_request_body: networking disabled in sandbox");
@@ -2908,7 +2887,7 @@ mod tests {
 
         let temp_home = tempfile::tempdir().expect("failed to create temp dir");
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        test_env::set_var("HOME", temp_home.path());
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -2929,7 +2908,7 @@ mod tests {
             .create_async()
             .await;
 
-        std::env::set_var("BORINGCACHE_API_URL", server.url());
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
 
         let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
             .expect("client should initialize");
@@ -2953,20 +2932,15 @@ mod tests {
         mock.assert_async().await;
 
         if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
+            test_env::set_var("HOME", home);
         }
-        std::env::remove_var("BORINGCACHE_API_URL");
+        test_env::remove_var("BORINGCACHE_API_URL");
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_blob_check_batches_large_requests() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let guard_result = mutex.lock();
-        let _guard = match guard_result {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let _guard = test_env::lock();
 
         if !networking_available() {
             eprintln!(
@@ -2977,7 +2951,7 @@ mod tests {
 
         let temp_home = tempfile::tempdir().expect("failed to create temp dir");
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        test_env::set_var("HOME", temp_home.path());
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -2993,7 +2967,7 @@ mod tests {
             .create_async()
             .await;
 
-        std::env::set_var("BORINGCACHE_API_URL", server.url());
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
 
         let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
             .expect("client should initialize");
@@ -3014,20 +2988,15 @@ mod tests {
         mock.assert_async().await;
 
         if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
+            test_env::set_var("HOME", home);
         }
-        std::env::remove_var("BORINGCACHE_API_URL");
+        test_env::remove_var("BORINGCACHE_API_URL");
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_blob_upload_urls_batches_large_requests() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let guard_result = mutex.lock();
-        let _guard = match guard_result {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let _guard = test_env::lock();
 
         if !networking_available() {
             eprintln!(
@@ -3038,7 +3007,7 @@ mod tests {
 
         let temp_home = tempfile::tempdir().expect("failed to create temp dir");
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        test_env::set_var("HOME", temp_home.path());
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -3054,7 +3023,7 @@ mod tests {
             .create_async()
             .await;
 
-        std::env::set_var("BORINGCACHE_API_URL", server.url());
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
 
         let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
             .expect("client should initialize");
@@ -3075,20 +3044,15 @@ mod tests {
         mock.assert_async().await;
 
         if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
+            test_env::set_var("HOME", home);
         }
-        std::env::remove_var("BORINGCACHE_API_URL");
+        test_env::remove_var("BORINGCACHE_API_URL");
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_blob_upload_urls_sends_cache_entry_id() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let guard_result = mutex.lock();
-        let _guard = match guard_result {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let _guard = test_env::lock();
 
         if !networking_available() {
             eprintln!(
@@ -3099,7 +3063,7 @@ mod tests {
 
         let temp_home = tempfile::tempdir().expect("failed to create temp dir");
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        test_env::set_var("HOME", temp_home.path());
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -3117,7 +3081,7 @@ mod tests {
             .create_async()
             .await;
 
-        std::env::set_var("BORINGCACHE_API_URL", server.url());
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
 
         let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
             .expect("client should initialize");
@@ -3137,20 +3101,15 @@ mod tests {
         mock.assert_async().await;
 
         if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
+            test_env::set_var("HOME", home);
         }
-        std::env::remove_var("BORINGCACHE_API_URL");
+        test_env::remove_var("BORINGCACHE_API_URL");
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_blob_download_urls_batches_large_requests() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let guard_result = mutex.lock();
-        let _guard = match guard_result {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let _guard = test_env::lock();
 
         if !networking_available() {
             eprintln!(
@@ -3161,7 +3120,7 @@ mod tests {
 
         let temp_home = tempfile::tempdir().expect("failed to create temp dir");
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
+        test_env::set_var("HOME", temp_home.path());
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -3177,7 +3136,7 @@ mod tests {
             .create_async()
             .await;
 
-        std::env::set_var("BORINGCACHE_API_URL", server.url());
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
 
         let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
             .expect("client should initialize");
@@ -3198,20 +3157,15 @@ mod tests {
         mock.assert_async().await;
 
         if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
+            test_env::set_var("HOME", home);
         }
-        std::env::remove_var("BORINGCACHE_API_URL");
+        test_env::remove_var("BORINGCACHE_API_URL");
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_create_cli_connect_session_without_auth_token() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let guard_result = mutex.lock();
-        let _guard = match guard_result {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let _guard = test_env::lock();
 
         if !networking_available() {
             eprintln!(
@@ -3222,8 +3176,8 @@ mod tests {
 
         let temp_home = tempfile::tempdir().expect("failed to create temp dir");
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
-        std::env::remove_var("BORINGCACHE_API_TOKEN");
+        test_env::set_var("HOME", temp_home.path());
+        test_env::remove_var("BORINGCACHE_API_TOKEN");
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -3237,7 +3191,7 @@ mod tests {
             .create_async()
             .await;
 
-        std::env::set_var("BORINGCACHE_API_URL", server.url());
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
 
         let client = ApiClient::new().expect("client should initialize without auth token");
         let response = client
@@ -3251,20 +3205,15 @@ mod tests {
         mock.assert_async().await;
 
         if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
+            test_env::set_var("HOME", home);
         }
-        std::env::remove_var("BORINGCACHE_API_URL");
+        test_env::remove_var("BORINGCACHE_API_URL");
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_poll_cli_connect_session_rejects_invalid_poll_token() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let guard_result = mutex.lock();
-        let _guard = match guard_result {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let _guard = test_env::lock();
 
         if !networking_available() {
             eprintln!(
@@ -3275,8 +3224,8 @@ mod tests {
 
         let temp_home = tempfile::tempdir().expect("failed to create temp dir");
         let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", temp_home.path());
-        std::env::remove_var("BORINGCACHE_API_TOKEN");
+        test_env::set_var("HOME", temp_home.path());
+        test_env::remove_var("BORINGCACHE_API_TOKEN");
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -3288,7 +3237,7 @@ mod tests {
             .create_async()
             .await;
 
-        std::env::set_var("BORINGCACHE_API_URL", server.url());
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
 
         let client = ApiClient::new().expect("client should initialize without auth token");
         let error = client
@@ -3303,9 +3252,9 @@ mod tests {
         mock.assert_async().await;
 
         if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
+            test_env::set_var("HOME", home);
         }
-        std::env::remove_var("BORINGCACHE_API_URL");
+        test_env::remove_var("BORINGCACHE_API_URL");
     }
 
     #[test]

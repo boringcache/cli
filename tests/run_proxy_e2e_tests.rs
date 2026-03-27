@@ -23,13 +23,21 @@ fn free_port() -> u16 {
 #[test]
 fn test_run_proxy_injects_env_and_substitutes_placeholders() {
     let temp_dir = TempDir::new().expect("temp dir");
-    let port = free_port().to_string();
     let script = r#"expected_endpoint="http://127.0.0.1:$1"
 expected_ref="127.0.0.1:$1/cache:main"
+expected_sccache_endpoint="${expected_endpoint}/"
 [ "${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}" = "$expected_endpoint" ] || exit 2
 [ "${TURBO_API:-}" = "$expected_endpoint" ] || exit 3
-[ "${2:-}" = "$expected_ref" ] || exit 4
-curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 5
+[ "${SCCACHE_WEBDAV_ENDPOINT:-}" = "$expected_sccache_endpoint" ] || exit 4
+[ -z "${SCCACHE_ENDPOINT:-}" ] || exit 5
+[ -z "${SCCACHE_BUCKET:-}" ] || exit 6
+[ -z "${SCCACHE_WEBDAV_USERNAME:-}" ] || exit 7
+[ -z "${SCCACHE_WEBDAV_PASSWORD:-}" ] || exit 8
+[ -z "${SCCACHE_CONF:-}" ] || exit 9
+[ -z "${SCCACHE_CACHED_CONF:-}" ] || exit 10
+[ -z "${SCCACHE_WEBDAV_TOKEN:-}" ] || exit 11
+[ "${2:-}" = "$expected_ref" ] || exit 12
+curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 13
 "#;
 
     let output = Command::new(cli_binary())
@@ -43,7 +51,7 @@ curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 5
             "--host",
             "127.0.0.1",
             "--port",
-            &port,
+            "0",
             "--",
             "sh",
             "-ec",
@@ -55,6 +63,13 @@ curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 5
         .env("HOME", temp_dir.path())
         .env("BORINGCACHE_API_URL", DUMMY_API_URL)
         .env("BORINGCACHE_SAVE_TOKEN", "test-save-token")
+        .env("SCCACHE_ENDPOINT", "https://wrong.example.invalid")
+        .env("SCCACHE_BUCKET", "wrong-bucket")
+        .env("SCCACHE_WEBDAV_USERNAME", "wrong-user")
+        .env("SCCACHE_WEBDAV_PASSWORD", "wrong-password")
+        .env("SCCACHE_CONF", "/tmp/wrong-sccache.conf")
+        .env("SCCACHE_CACHED_CONF", "stale-config")
+        .env("SCCACHE_WEBDAV_TOKEN", "wrong-token")
         .env_remove("BORINGCACHE_API_TOKEN")
         .env_remove("BORINGCACHE_TOKEN_FILE")
         .output()
@@ -111,7 +126,6 @@ fn test_run_combined_archive_and_proxy_mode_executes_child() {
     let temp_dir = TempDir::new().expect("temp dir");
     let cache_dir = temp_dir.path().join("cache");
     std::fs::create_dir_all(&cache_dir).expect("create cache dir");
-    let port = free_port().to_string();
     let script = r#"expected_endpoint="http://127.0.0.1:$1"
 [ "${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}" = "$expected_endpoint" ] || exit 2
 curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 3
@@ -132,7 +146,7 @@ curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 3
             "--host",
             "127.0.0.1",
             "--port",
-            &port,
+            "0",
             "--",
             "sh",
             "-ec",

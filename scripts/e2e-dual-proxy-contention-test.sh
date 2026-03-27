@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/e2e-remote-tag.sh"
+source "${SCRIPT_DIR}/e2e-helpers.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT_A="${PROXY_PORT_A:-5050}"
@@ -97,10 +97,7 @@ require_port() {
   fi
 }
 
-if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
-  echo "ERROR: BORINGCACHE_API_TOKEN not set"
-  exit 1
-fi
+require_save_capable_token
 
 require_port "PROXY_PORT_A" "$PROXY_PORT_A"
 require_port "PROXY_PORT_B" "$PROXY_PORT_B"
@@ -137,6 +134,8 @@ for dep in sccache curl pgrep ps python3; do
     exit 1
   fi
 done
+
+export_resolved_cli_tokens admin
 
 PORT_TOOL=""
 if command -v lsof >/dev/null 2>&1; then
@@ -288,9 +287,9 @@ cleanup() {
   done
   ACTIVE_BUILD_PIDS=()
   stop_all
-  SCCACHE_SERVER_PORT="$SCCACHE_PORT_A" SCCACHE_DIR="$PREWARM_SCCACHE_DIR" sccache --stop-server >/dev/null 2>&1 || true
-  SCCACHE_SERVER_PORT="$SCCACHE_PORT_A" SCCACHE_DIR="$SCCACHE_DIR_A" sccache --stop-server >/dev/null 2>&1 || true
-  SCCACHE_SERVER_PORT="$SCCACHE_PORT_B" SCCACHE_DIR="$SCCACHE_DIR_B" sccache --stop-server >/dev/null 2>&1 || true
+run_with_clean_sccache_env "SCCACHE_SERVER_PORT=$SCCACHE_PORT_A" "SCCACHE_DIR=$PREWARM_SCCACHE_DIR" sccache --stop-server >/dev/null 2>&1 || true
+run_with_clean_sccache_env "SCCACHE_SERVER_PORT=$SCCACHE_PORT_A" "SCCACHE_DIR=$SCCACHE_DIR_A" sccache --stop-server >/dev/null 2>&1 || true
+run_with_clean_sccache_env "SCCACHE_SERVER_PORT=$SCCACHE_PORT_B" "SCCACHE_DIR=$SCCACHE_DIR_B" sccache --stop-server >/dev/null 2>&1 || true
   rm -f "$TMP_BINARY" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -511,8 +510,7 @@ start_proxy() {
     echo ""
     echo "=== Proxy ${label} start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${TAG} port=${port} hints=${metadata_hints:-none} ==="
   } >>"$log_file"
-  BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
-    BORINGCACHE_METRICS_FORMAT="${BORINGCACHE_METRICS_FORMAT:-json}" \
+  BORINGCACHE_METRICS_FORMAT="${BORINGCACHE_METRICS_FORMAT:-json}" \
     BORINGCACHE_PROXY_METADATA_HINTS="$metadata_hints" \
     BORINGCACHE_REQUEST_METRICS_PATH="$metrics_file" \
     BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS="${BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS:-1}" \
@@ -568,16 +566,19 @@ reset_sccache_for() {
   local sccache_dir="$2"
   local proxy_port="$3"
   local proxy_url="http://${PROXY_HOST}:${proxy_port}"
-  SCCACHE_SERVER_PORT="$port" \
-    SCCACHE_DIR="$sccache_dir" \
+  run_with_clean_sccache_env \
+    "SCCACHE_SERVER_PORT=$port" \
+    "SCCACHE_DIR=$sccache_dir" \
     sccache --stop-server >/dev/null 2>&1 || true
   sleep 1
-  SCCACHE_SERVER_PORT="$port" \
-    SCCACHE_DIR="$sccache_dir" \
-    SCCACHE_WEBDAV_ENDPOINT="$proxy_url" \
+  run_with_clean_sccache_env \
+    "SCCACHE_SERVER_PORT=$port" \
+    "SCCACHE_DIR=$sccache_dir" \
+    "SCCACHE_WEBDAV_ENDPOINT=$proxy_url" \
     sccache --start-server >/dev/null 2>&1
-  SCCACHE_SERVER_PORT="$port" \
-    SCCACHE_DIR="$sccache_dir" \
+  run_with_clean_sccache_env \
+    "SCCACHE_SERVER_PORT=$port" \
+    "SCCACHE_DIR=$sccache_dir" \
     sccache --zero-stats >/dev/null 2>&1
 }
 
@@ -595,12 +596,13 @@ run_build_for() {
   mkdir -p "$target_dir"
   echo "${label} starting..."
   start_ts="$(date +%s)"
-  SCCACHE_SERVER_PORT="$sccache_port" \
-    SCCACHE_DIR="$sccache_dir" \
-    SCCACHE_WEBDAV_ENDPOINT="$proxy_url" \
+  run_with_clean_sccache_env \
+    "SCCACHE_SERVER_PORT=$sccache_port" \
+    "SCCACHE_DIR=$sccache_dir" \
+    "SCCACHE_WEBDAV_ENDPOINT=$proxy_url" \
     RUSTC_WRAPPER=sccache \
     CARGO_INCREMENTAL=0 \
-    CARGO_TARGET_DIR="$target_dir" \
+    "CARGO_TARGET_DIR=$target_dir" \
     bash -lc "$CARGO_CMD" >"$log_file" 2>&1 &
   build_pid=$!
   ACTIVE_BUILD_PIDS+=("$build_pid")
@@ -659,10 +661,10 @@ echo "Prewarm proxy running (pid=${PROXY_PID_A})"
 
 reset_sccache_for "$SCCACHE_PORT_A" "$PREWARM_SCCACHE_DIR" "$PROXY_PORT_A"
 run_build_for "prewarm-cold" "${TARGET_ROOT}/prewarm" "${PREWARM_DIR}/cold.log" "$SCCACHE_PORT_A" "$PROXY_PORT_A" "$PREWARM_SCCACHE_DIR"
-SCCACHE_SERVER_PORT="$SCCACHE_PORT_A" SCCACHE_DIR="$PREWARM_SCCACHE_DIR" sccache --show-stats >"${PREWARM_DIR}/cold-sccache-stats.txt" 2>&1
+run_with_clean_sccache_env "SCCACHE_SERVER_PORT=$SCCACHE_PORT_A" "SCCACHE_DIR=$PREWARM_SCCACHE_DIR" sccache --show-stats >"${PREWARM_DIR}/cold-sccache-stats.txt" 2>&1
 print_stats_summary "Prewarm cold stats" "${PREWARM_DIR}/cold-sccache-stats.txt"
 
-SCCACHE_SERVER_PORT="$SCCACHE_PORT_A" SCCACHE_DIR="$PREWARM_SCCACHE_DIR" sccache --stop-server >/dev/null 2>&1 || true
+run_with_clean_sccache_env "SCCACHE_SERVER_PORT=$SCCACHE_PORT_A" "SCCACHE_DIR=$PREWARM_SCCACHE_DIR" sccache --stop-server >/dev/null 2>&1 || true
 echo "Waiting for writes to settle (${SETTLE_SECS}s)..."
 sleep "$SETTLE_SECS"
 
@@ -737,13 +739,13 @@ if [[ "$BUILD_FAILED" -ne 0 ]]; then
   echo "WARNING: one or more contention builds failed (continuing to collect metrics)"
 fi
 
-SCCACHE_SERVER_PORT="$SCCACHE_PORT_A" SCCACHE_DIR="$SCCACHE_DIR_A" sccache --show-stats >"${CONTENTION_DIR}/sccache-a-stats.txt" 2>&1
-SCCACHE_SERVER_PORT="$SCCACHE_PORT_B" SCCACHE_DIR="$SCCACHE_DIR_B" sccache --show-stats >"${CONTENTION_DIR}/sccache-b-stats.txt" 2>&1
+run_with_clean_sccache_env "SCCACHE_SERVER_PORT=$SCCACHE_PORT_A" "SCCACHE_DIR=$SCCACHE_DIR_A" sccache --show-stats >"${CONTENTION_DIR}/sccache-a-stats.txt" 2>&1
+run_with_clean_sccache_env "SCCACHE_SERVER_PORT=$SCCACHE_PORT_B" "SCCACHE_DIR=$SCCACHE_DIR_B" sccache --show-stats >"${CONTENTION_DIR}/sccache-b-stats.txt" 2>&1
 print_stats_summary "sccache A stats" "${CONTENTION_DIR}/sccache-a-stats.txt"
 print_stats_summary "sccache B stats" "${CONTENTION_DIR}/sccache-b-stats.txt"
 
-SCCACHE_SERVER_PORT="$SCCACHE_PORT_A" SCCACHE_DIR="$SCCACHE_DIR_A" sccache --stop-server >/dev/null 2>&1 || true
-SCCACHE_SERVER_PORT="$SCCACHE_PORT_B" SCCACHE_DIR="$SCCACHE_DIR_B" sccache --stop-server >/dev/null 2>&1 || true
+run_with_clean_sccache_env "SCCACHE_SERVER_PORT=$SCCACHE_PORT_A" "SCCACHE_DIR=$SCCACHE_DIR_A" sccache --stop-server >/dev/null 2>&1 || true
+run_with_clean_sccache_env "SCCACHE_SERVER_PORT=$SCCACHE_PORT_B" "SCCACHE_DIR=$SCCACHE_DIR_B" sccache --stop-server >/dev/null 2>&1 || true
 
 echo ""
 echo "Stopping both proxies (triggering shutdown flush)..."

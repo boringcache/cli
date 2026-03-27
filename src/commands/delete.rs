@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::time::Instant;
 
 use crate::api::ApiClient;
@@ -109,10 +109,8 @@ pub async fn execute(
                         ui::info("Proxy data deleted");
                     } else {
                         ui::warn(&format!("No cache entry found for tag: {}", platform_tag));
-                        if verbose {
-                            if let Some(error) = &response.error {
-                                ui::info(error);
-                            }
+                        if verbose && let Some(error) = &response.error {
+                            ui::info(error);
                         }
                     }
                     Ok(())

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{Semaphore, mpsc};
 
 use crate::progress::TransferProgress;
 use crate::telemetry::StorageMetrics;
@@ -170,7 +170,11 @@ async fn download_sequential(
     let mut stream = response.bytes_stream();
     let mut hasher = expected_digest.map(|_| Sha256::new());
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let next_chunk = stream.next().await;
+        let Some(chunk_result) = next_chunk else {
+            break;
+        };
         let chunk = chunk_result?;
         let len = chunk.len() as u64;
         if let Some(ref mut h) = hasher {
@@ -299,7 +303,7 @@ async fn download_parallel(
                 .acquire_owned()
                 .await
                 .map_err(|e| anyhow::anyhow!("Parallel download semaphore closed: {e}"))?;
-            download_range(
+            let result = download_range(
                 &client,
                 &url,
                 &file_path,
@@ -315,7 +319,9 @@ async fn download_parallel(
                     "Part {}/{} (bytes {}-{}) failed",
                     part_num, num_parts, start, end
                 )
-            })
+            });
+            drop(_permit);
+            result
         });
 
         tasks.push(task);
@@ -327,7 +333,8 @@ async fn download_parallel(
     let mut first_storage_metrics: Option<StorageMetrics> = None;
 
     for (idx, task) in tasks.into_iter().enumerate() {
-        match task.await {
+        let task_result = task.await;
+        match task_result {
             Ok(Ok((bytes, metrics))) => {
                 total_downloaded += bytes;
                 if first_storage_metrics.is_none() {
@@ -375,9 +382,17 @@ async fn hash_parallel_download_stream(
     let mut next_offset = 0u64;
     let mut pending: BTreeMap<u64, axum::body::Bytes> = BTreeMap::new();
 
-    while let Some((offset, chunk)) = receiver.recv().await {
+    loop {
+        let next_chunk = receiver.recv().await;
+        let Some((offset, chunk)) = next_chunk else {
+            break;
+        };
         pending.insert(offset, chunk);
-        while let Some(chunk) = pending.remove(&next_offset) {
+        loop {
+            let next_pending = pending.remove(&next_offset);
+            let Some(chunk) = next_pending else {
+                break;
+            };
             hasher.update(&chunk);
             next_offset = next_offset.saturating_add(chunk.len() as u64);
         }
@@ -449,7 +464,11 @@ pub(crate) async fn download_range(
     let mut bytes_written = 0u64;
     let mut stream = response.bytes_stream();
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let next_chunk = stream.next().await;
+        let Some(chunk_result) = next_chunk else {
+            break;
+        };
         let chunk = chunk_result?;
         let len = chunk.len();
         let write_offset = start + bytes_written;
@@ -543,10 +562,12 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("integrity check failed"),);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("integrity check failed"),
+        );
     }
 
     #[tokio::test]

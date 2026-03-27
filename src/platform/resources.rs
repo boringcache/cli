@@ -146,12 +146,11 @@ impl SystemResources {
 fn detect_available_memory_gb() -> f64 {
     #[cfg(target_os = "macos")]
     {
-        if let Ok(output) = Command::new("sysctl").args(["-n", "hw.memsize"]).output() {
-            if let Ok(mem_str) = String::from_utf8(output.stdout) {
-                if let Ok(mem_bytes) = mem_str.trim().parse::<u64>() {
-                    return mem_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                }
-            }
+        if let Ok(output) = Command::new("sysctl").args(["-n", "hw.memsize"]).output()
+            && let Ok(mem_str) = String::from_utf8(output.stdout)
+            && let Ok(mem_bytes) = mem_str.trim().parse::<u64>()
+        {
+            return mem_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         }
     }
 
@@ -163,17 +162,16 @@ fn detect_available_memory_gb() -> f64 {
 
             for line in meminfo.lines() {
                 if line.starts_with("MemAvailable:") {
-                    if let Some(kb_str) = line.split_whitespace().nth(1) {
-                        if let Ok(kb) = kb_str.parse::<u64>() {
-                            mem_available = Some(kb as f64 / (1024.0 * 1024.0));
-                        }
+                    if let Some(kb_str) = line.split_whitespace().nth(1)
+                        && let Ok(kb) = kb_str.parse::<u64>()
+                    {
+                        mem_available = Some(kb as f64 / (1024.0 * 1024.0));
                     }
-                } else if line.starts_with("MemTotal:") {
-                    if let Some(kb_str) = line.split_whitespace().nth(1) {
-                        if let Ok(kb) = kb_str.parse::<u64>() {
-                            mem_total = Some(kb as f64 / (1024.0 * 1024.0));
-                        }
-                    }
+                } else if line.starts_with("MemTotal:")
+                    && let Some(kb_str) = line.split_whitespace().nth(1)
+                    && let Ok(kb) = kb_str.parse::<u64>()
+                {
+                    mem_total = Some(kb as f64 / (1024.0 * 1024.0));
                 }
             }
 
@@ -195,22 +193,20 @@ fn detect_cpu_load() -> f32 {
             .output()
             .map_err(|_| ())
             .and_then(|o| if o.status.success() { Ok(o) } else { Err(()) })
+            && let Ok(uptime_str) = String::from_utf8(output.stdout)
         {
-            if let Ok(uptime_str) = String::from_utf8(output.stdout) {
-                let load_part = uptime_str
-                    .split("load averages:")
-                    .nth(1)
-                    .or_else(|| uptime_str.split("load average:").nth(1));
+            let load_part = uptime_str
+                .split("load averages:")
+                .nth(1)
+                .or_else(|| uptime_str.split("load average:").nth(1));
 
-                if let Some(load_part) = load_part {
-                    if let Some(first_load) = load_part.split_whitespace().next() {
-                        if let Ok(load) = first_load.trim().parse::<f32>() {
-                            let cpu_cores = num_cpus::get() as f32;
-                            let cpu_load = (load / cpu_cores) * 100.0;
-                            return cpu_load.min(100.0);
-                        }
-                    }
-                }
+            if let Some(load_part) = load_part
+                && let Some(first_load) = load_part.split_whitespace().next()
+                && let Ok(load) = first_load.trim().parse::<f32>()
+            {
+                let cpu_cores = num_cpus::get() as f32;
+                let cpu_load = (load / cpu_cores) * 100.0;
+                return cpu_load.min(100.0);
             }
         }
     }
@@ -220,14 +216,13 @@ fn detect_cpu_load() -> f32 {
         if let Ok(output) = Command::new("wmic")
             .args(["cpu", "get", "loadpercentage", "/value"])
             .output()
+            && let Ok(output_str) = String::from_utf8(output.stdout)
         {
-            if let Ok(output_str) = String::from_utf8(output.stdout) {
-                for line in output_str.lines() {
-                    if let Some(value) = line.strip_prefix("LoadPercentage=") {
-                        if let Ok(load) = value.trim().parse::<f32>() {
-                            return load;
-                        }
-                    }
+            for line in output_str.lines() {
+                if let Some(value) = line.strip_prefix("LoadPercentage=")
+                    && let Ok(load) = value.trim().parse::<f32>()
+                {
+                    return load;
                 }
             }
         }
@@ -242,40 +237,35 @@ fn detect_disk_type() -> (DiskType, f64) {
         if let Ok(output) = Command::new("system_profiler")
             .args(["SPStorageDataType", "-json"])
             .output()
+            && let Ok(json_str) = String::from_utf8(output.stdout)
+            && (json_str.contains("SSD") || json_str.contains("Flash"))
         {
-            if let Ok(json_str) = String::from_utf8(output.stdout) {
-                if json_str.contains("SSD") || json_str.contains("Flash") {
-                    if json_str.contains("NVMe") || json_str.contains("PCIe") {
-                        return (DiskType::NvmeSsd, 2000.0);
-                    } else {
-                        return (DiskType::SataSsd, 500.0);
-                    }
-                }
+            if json_str.contains("NVMe") || json_str.contains("PCIe") {
+                return (DiskType::NvmeSsd, 2000.0);
+            } else {
+                return (DiskType::SataSsd, 500.0);
             }
         }
     }
 
     #[cfg(target_os = "linux")]
     {
-        if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
-            for line in mounts.lines() {
-                if line.contains(" / ") {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if let Some(device) = parts.first() {
-                        let device_name = device.trim_start_matches("/dev/");
+        if let Ok(mounts) = std::fs::read_to_string("/proc/mounts")
+            && let Some(line) = mounts.lines().find(|line| line.contains(" / "))
+        {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(device) = parts.first() {
+                let device_name = device.trim_start_matches("/dev/");
 
-                        if device_name.starts_with("nvme") {
-                            return (DiskType::NvmeSsd, 2000.0);
-                        }
+                if device_name.starts_with("nvme") {
+                    return (DiskType::NvmeSsd, 2000.0);
+                }
 
-                        let sys_path = format!("/sys/block/{}/queue/rotational", device_name);
-                        if let Ok(rotational) = std::fs::read_to_string(&sys_path) {
-                            if rotational.trim() == "0" {
-                                return (DiskType::SataSsd, 500.0);
-                            }
-                        }
-                    }
-                    break;
+                let sys_path = format!("/sys/block/{}/queue/rotational", device_name);
+                if let Ok(rotational) = std::fs::read_to_string(&sys_path)
+                    && rotational.trim() == "0"
+                {
+                    return (DiskType::SataSsd, 500.0);
                 }
             }
         }
@@ -289,13 +279,12 @@ fn detect_disk_type() -> (DiskType, f64) {
                 "Get-PhysicalDisk | Select-Object MediaType, BusType",
             ])
             .output()
+            && let Ok(output_str) = String::from_utf8(output.stdout)
         {
-            if let Ok(output_str) = String::from_utf8(output.stdout) {
-                if output_str.contains("NVMe") || output_str.contains("PCIe") {
-                    return (DiskType::NvmeSsd, 2000.0);
-                } else if output_str.contains("SSD") {
-                    return (DiskType::SataSsd, 500.0);
-                }
+            if output_str.contains("NVMe") || output_str.contains("PCIe") {
+                return (DiskType::NvmeSsd, 2000.0);
+            } else if output_str.contains("SSD") {
+                return (DiskType::SataSsd, 500.0);
             }
         }
     }

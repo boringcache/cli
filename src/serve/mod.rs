@@ -13,18 +13,18 @@ use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as HttpConnectionBuilder;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::net::{lookup_host, TcpListener, TcpSocket};
-use tokio::sync::{mpsc, oneshot, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::net::{TcpListener, TcpSocket, lookup_host};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tower::ServiceExt;
 
 use crate::api::client::ApiClient;
 use crate::observability;
 use crate::serve::state::{
-    diagnostics_enabled, unix_time_ms_now, AppState, BlobLocatorCache, BlobReadCache,
-    KvPendingStore, KvPublishedIndex, KvReplicationWork, UploadSessionStore,
-    DEFAULT_BLOB_READ_CACHE_MAX_BYTES, KV_BACKLOG_POLICY, KV_REPLICATION_WORK_QUEUE_CAPACITY,
+    AppState, BlobLocatorCache, BlobReadCache, DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
+    KV_BACKLOG_POLICY, KV_REPLICATION_WORK_QUEUE_CAPACITY, KvPendingStore, KvPublishedIndex,
+    KvReplicationWork, UploadSessionStore, diagnostics_enabled, unix_time_ms_now,
 };
 use crate::tag_utils::TagResolver;
 
@@ -574,7 +574,11 @@ fn spawn_maintenance_tasks(
     let replication_state = state.clone();
     tokio::spawn(async move {
         let mut consecutive_failures: u32 = 0;
-        while let Some(work) = replication_rx.recv().await {
+        loop {
+            let next_work = replication_rx.recv().await;
+            let Some(work) = next_work else {
+                break;
+            };
             decrement_replication_queue_depth(&replication_state);
             let mut urgent = matches!(work, KvReplicationWork::FlushHint { urgent: true });
             while let Ok(extra) = replication_rx.try_recv() {
@@ -655,10 +659,10 @@ async fn should_flush_pending(state: &AppState, urgent: bool) -> bool {
 async fn process_replication_work(state: &AppState, urgent: bool, consecutive_failures: &mut u32) {
     {
         let gate = state.kv_next_flush_at.read().await;
-        if let Some(next) = *gate {
-            if std::time::Instant::now() < next {
-                return;
-            }
+        if let Some(next) = *gate
+            && std::time::Instant::now() < next
+        {
+            return;
         }
     }
 
@@ -894,25 +898,33 @@ async fn flush_pending_on_shutdown(state: &AppState) {
             continue;
         }
 
-        if let Some(_flush_guard) = cache_registry::try_schedule_flush(state) {
-            match cache_registry::flush_kv_index_on_shutdown(state).await {
-                cache_registry::FlushResult::Ok => {
-                    expected_root_cache_entry_id = {
-                        let published = state.kv_published_index.read().await;
-                        published.cache_entry_id().map(|value| value.to_string())
-                    };
-                    let mut gate = state.kv_next_flush_at.write().await;
-                    *gate = None;
+        let flush_guard = cache_registry::try_schedule_flush(state);
+        match flush_guard {
+            Some(_flush_guard) => {
+                let flush_result = cache_registry::flush_kv_index_on_shutdown(state).await;
+                match flush_result {
+                    cache_registry::FlushResult::Ok => {
+                        let published_entry = {
+                            let published = state.kv_published_index.read().await;
+                            published.cache_entry_id().map(|value| value.to_string())
+                        };
+                        expected_root_cache_entry_id = published_entry;
+                        {
+                            let mut gate = state.kv_next_flush_at.write().await;
+                            *gate = None;
+                        }
+                    }
+                    cache_registry::FlushResult::Permanent => {
+                        let mut gate = state.kv_next_flush_at.write().await;
+                        *gate = None;
+                    }
+                    cache_registry::FlushResult::Conflict | cache_registry::FlushResult::Error => {}
                 }
-                cache_registry::FlushResult::Permanent => {
-                    let mut gate = state.kv_next_flush_at.write().await;
-                    *gate = None;
-                }
-                cache_registry::FlushResult::Conflict | cache_registry::FlushResult::Error => {}
             }
-        } else {
-            let _running_flush = state.kv_flush_lock.lock().await;
-            drop(_running_flush);
+            None => {
+                let _running_flush = state.kv_flush_lock.lock().await;
+                drop(_running_flush);
+            }
         }
 
         if std::time::Instant::now() >= deadline {
@@ -1131,9 +1143,7 @@ async fn serve_with_h2c(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+    use crate::test_env;
 
     #[test]
     fn update_consecutive_failures_resets_on_conflict() {
@@ -1174,36 +1184,24 @@ mod tests {
 
     #[test]
     fn tcp_listen_backlog_defaults_when_unset_or_invalid() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        unsafe {
-            std::env::remove_var(TCP_LISTEN_BACKLOG_ENV);
-        }
+        let _guard = test_env::lock();
+        test_env::remove_var(TCP_LISTEN_BACKLOG_ENV);
         assert_eq!(tcp_listen_backlog(), DEFAULT_TCP_LISTEN_BACKLOG);
 
-        unsafe {
-            std::env::set_var(TCP_LISTEN_BACKLOG_ENV, "0");
-        }
+        test_env::set_var(TCP_LISTEN_BACKLOG_ENV, "0");
         assert_eq!(tcp_listen_backlog(), DEFAULT_TCP_LISTEN_BACKLOG);
 
-        unsafe {
-            std::env::set_var(TCP_LISTEN_BACKLOG_ENV, "not-a-number");
-        }
+        test_env::set_var(TCP_LISTEN_BACKLOG_ENV, "not-a-number");
         assert_eq!(tcp_listen_backlog(), DEFAULT_TCP_LISTEN_BACKLOG);
 
-        unsafe {
-            std::env::remove_var(TCP_LISTEN_BACKLOG_ENV);
-        }
+        test_env::remove_var(TCP_LISTEN_BACKLOG_ENV);
     }
 
     #[test]
     fn tcp_listen_backlog_honors_positive_env_override() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        unsafe {
-            std::env::set_var(TCP_LISTEN_BACKLOG_ENV, "4096");
-        }
+        let _guard = test_env::lock();
+        test_env::set_var(TCP_LISTEN_BACKLOG_ENV, "4096");
         assert_eq!(tcp_listen_backlog(), 4096);
-        unsafe {
-            std::env::remove_var(TCP_LISTEN_BACKLOG_ENV);
-        }
+        test_env::remove_var(TCP_LISTEN_BACKLOG_ENV);
     }
 }

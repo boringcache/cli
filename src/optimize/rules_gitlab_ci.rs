@@ -292,12 +292,16 @@ mod tests {
 
         let result = apply(input).expect("expected rewrite");
         assert!(!result.optimized_content.contains("cache:"));
-        assert!(result
-            .optimized_content
-            .contains("boringcache restore $CI_PROJECT_PATH \"deps:node_modules\""));
-        assert!(result
-            .optimized_content
-            .contains("boringcache save $CI_PROJECT_PATH \"deps:node_modules\""));
+        assert!(
+            result
+                .optimized_content
+                .contains("boringcache restore $CI_PROJECT_PATH \"deps:node_modules\"")
+        );
+        assert!(
+            result
+                .optimized_content
+                .contains("boringcache save $CI_PROJECT_PATH \"deps:node_modules\"")
+        );
     }
 
     #[test]

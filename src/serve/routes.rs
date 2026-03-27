@@ -1,6 +1,6 @@
+use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{any, get};
-use axum::Router;
 
 use crate::serve::cache_registry;
 use crate::serve::handlers;

@@ -71,15 +71,14 @@ if [[ -z "${WORKSPACE}" ]]; then
   exit 1
 fi
 
-if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
-  echo "missing BORINGCACHE_API_TOKEN"
-  exit 1
-fi
+require_save_capable_token
 
 if [[ -z "${BORINGCACHE_API_URL:-}" ]]; then
   echo "missing BORINGCACHE_API_URL"
   exit 1
 fi
+
+export_resolved_cli_tokens admin
 
 echo "==> Tool versions"
 (
@@ -317,28 +316,28 @@ if [[ "${RUN_SCCACHE}" == "1" ]]; then
   SCCACHE_DIR_A="${LOG_DIR}/sccache-a"
   SCCACHE_DIR_B="${LOG_DIR}/sccache-b"
 
-  SCCACHE_SERVER_PORT="${SCCACHE_PORT_A}" sccache --stop-server >/dev/null 2>&1 || true
-  SCCACHE_SERVER_PORT="${SCCACHE_PORT_B}" sccache --stop-server >/dev/null 2>&1 || true
+  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_A}" sccache --stop-server >/dev/null 2>&1 || true
+  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_B}" sccache --stop-server >/dev/null 2>&1 || true
 
-  SCCACHE_SERVER_PORT="${SCCACHE_PORT_A}" SCCACHE_DIR="${SCCACHE_DIR_A}" SCCACHE_WEBDAV_ENDPOINT="http://${HOST}:${PORT}/" sccache --start-server >/dev/null
-  SCCACHE_SERVER_PORT="${SCCACHE_PORT_A}" sccache --zero-stats >/dev/null
+  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_A}" "SCCACHE_DIR=${SCCACHE_DIR_A}" "SCCACHE_WEBDAV_ENDPOINT=http://${HOST}:${PORT}/" sccache --start-server >/dev/null
+  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_A}" sccache --zero-stats >/dev/null
   (
     cd "$(pwd)"
-    SCCACHE_SERVER_PORT="${SCCACHE_PORT_A}" SCCACHE_DIR="${SCCACHE_DIR_A}" SCCACHE_WEBDAV_ENDPOINT="http://${HOST}:${PORT}/" RUSTC_WRAPPER=sccache CARGO_TARGET_DIR="${SCCACHE_TARGET_DIR}" cargo build --release --locked >"${LOG_DIR}/sccache-build-1.log" 2>&1
+    run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_A}" "SCCACHE_DIR=${SCCACHE_DIR_A}" "SCCACHE_WEBDAV_ENDPOINT=http://${HOST}:${PORT}/" RUSTC_WRAPPER=sccache "CARGO_TARGET_DIR=${SCCACHE_TARGET_DIR}" cargo build --release --locked >"${LOG_DIR}/sccache-build-1.log" 2>&1
   )
-  SCCACHE_SERVER_PORT="${SCCACHE_PORT_A}" sccache --show-stats >"${LOG_DIR}/sccache-stats-1.txt" 2>&1
-  SCCACHE_SERVER_PORT="${SCCACHE_PORT_A}" sccache --stop-server >/dev/null 2>&1 || true
+  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_A}" sccache --show-stats >"${LOG_DIR}/sccache-stats-1.txt" 2>&1
+  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_A}" sccache --stop-server >/dev/null 2>&1 || true
 
   rm -rf "${SCCACHE_TARGET_DIR}"
 
-  SCCACHE_SERVER_PORT="${SCCACHE_PORT_B}" SCCACHE_DIR="${SCCACHE_DIR_B}" SCCACHE_WEBDAV_ENDPOINT="http://${HOST}:${PORT}/" sccache --start-server >/dev/null
-  SCCACHE_SERVER_PORT="${SCCACHE_PORT_B}" sccache --zero-stats >/dev/null
+  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_B}" "SCCACHE_DIR=${SCCACHE_DIR_B}" "SCCACHE_WEBDAV_ENDPOINT=http://${HOST}:${PORT}/" sccache --start-server >/dev/null
+  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_B}" sccache --zero-stats >/dev/null
   (
     cd "$(pwd)"
-    SCCACHE_SERVER_PORT="${SCCACHE_PORT_B}" SCCACHE_DIR="${SCCACHE_DIR_B}" SCCACHE_WEBDAV_ENDPOINT="http://${HOST}:${PORT}/" RUSTC_WRAPPER=sccache CARGO_TARGET_DIR="${SCCACHE_TARGET_DIR}" cargo build --release --locked >"${LOG_DIR}/sccache-build-2.log" 2>&1
+    run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_B}" "SCCACHE_DIR=${SCCACHE_DIR_B}" "SCCACHE_WEBDAV_ENDPOINT=http://${HOST}:${PORT}/" RUSTC_WRAPPER=sccache "CARGO_TARGET_DIR=${SCCACHE_TARGET_DIR}" cargo build --release --locked >"${LOG_DIR}/sccache-build-2.log" 2>&1
   )
-  SCCACHE_SERVER_PORT="${SCCACHE_PORT_B}" sccache --show-stats >"${LOG_DIR}/sccache-stats-2.txt" 2>&1
-  SCCACHE_SERVER_PORT="${SCCACHE_PORT_B}" sccache --stop-server >/dev/null 2>&1 || true
+  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_B}" sccache --show-stats >"${LOG_DIR}/sccache-stats-2.txt" 2>&1
+  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_B}" sccache --stop-server >/dev/null 2>&1 || true
 
   SCCACHE_HITS="$(
     awk '/^Cache hits/ {

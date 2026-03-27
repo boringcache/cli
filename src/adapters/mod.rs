@@ -171,12 +171,18 @@ mod tests {
 
     #[test]
     fn oci_adapter_accepts_generic_cas_server_mode() {
-        assert!(AdapterDispatchKind::Oci
-            .accepts_server_kind(crate::cache_adapter::CacheAdapterKind::Cas));
-        assert!(AdapterDispatchKind::Oci
-            .accepts_server_kind(crate::cache_adapter::CacheAdapterKind::CasOci));
-        assert!(!AdapterDispatchKind::Oci
-            .accepts_server_kind(crate::cache_adapter::CacheAdapterKind::CasBazel));
+        assert!(
+            AdapterDispatchKind::Oci
+                .accepts_server_kind(crate::cache_adapter::CacheAdapterKind::Cas)
+        );
+        assert!(
+            AdapterDispatchKind::Oci
+                .accepts_server_kind(crate::cache_adapter::CacheAdapterKind::CasOci)
+        );
+        assert!(
+            !AdapterDispatchKind::Oci
+                .accepts_server_kind(crate::cache_adapter::CacheAdapterKind::CasBazel)
+        );
     }
 
     #[test]

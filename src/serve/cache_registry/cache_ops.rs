@@ -344,11 +344,12 @@ impl Aggregator {
             let (tx, rx) = mpsc::sync_channel(cache_ops_queue_capacity());
             let worker_state = state.clone();
             let worker_queued_events = queued_events.clone();
-            match std::thread::Builder::new()
+            let spawn_result = std::thread::Builder::new()
                 .name("cache-ops-worker".to_string())
                 .spawn(move || {
                     Self::run_worker(rx, worker_state, worker_queued_events);
-                }) {
+                });
+            match spawn_result {
                 Ok(_) => Some(Arc::new(tx)),
                 Err(error) => {
                     log::warn!("Cache ops worker spawn failed ({error}); using direct mode");
@@ -382,7 +383,11 @@ impl Aggregator {
         state: Arc<Mutex<AggregateState>>,
         queued_events: Arc<AtomicU64>,
     ) {
-        while let Ok(event) = rx.recv() {
+        loop {
+            let next_event = rx.recv();
+            let Ok(event) = next_event else {
+                break;
+            };
             match event {
                 CacheOpEvent::Record(record) => {
                     let mut guard = Self::lock_state_arc(&state);
@@ -449,7 +454,8 @@ impl Aggregator {
         let deadline = std::time::Instant::now() + CACHE_OPS_BARRIER_TIMEOUT;
         loop {
             let (ack_tx, ack_rx) = mpsc::channel();
-            match queue_tx.try_send(CacheOpEvent::Barrier { ack: ack_tx }) {
+            let send_result = queue_tx.try_send(CacheOpEvent::Barrier { ack: ack_tx });
+            match send_result {
                 Ok(()) => {
                     let _ = ack_rx.recv_timeout(CACHE_OPS_BARRIER_TIMEOUT);
                     return;

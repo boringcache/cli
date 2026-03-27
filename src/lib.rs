@@ -25,6 +25,8 @@ pub mod serve;
 pub mod signing;
 pub mod tag_utils;
 pub(crate) mod telemetry;
+#[doc(hidden)]
+pub mod test_env;
 pub(crate) mod transfer;
 pub mod types;
 pub mod ui;

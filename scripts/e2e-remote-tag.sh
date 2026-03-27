@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-auth.sh"
+
 REMOTE_TAG_VERIFY_ATTEMPTS="${REMOTE_TAG_VERIFY_ATTEMPTS:-30}"
 REMOTE_TAG_VERIFY_SLEEP_SECS="${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}"
 BORINGCACHE_API_URL="${BORINGCACHE_API_URL:-https://api.boringcache.com}"
@@ -62,13 +65,14 @@ tag_pointer_check_once() {
   local workspace="$1"
   local tag="$2"
   local output_dir="$3"
-  local pointer_file stderr_file namespace_slug workspace_slug encoded_tag
+  local pointer_file stderr_file namespace_slug workspace_slug encoded_tag auth_token
 
   mkdir -p "$output_dir"
   pointer_file="${output_dir}/tag-pointer.json"
   stderr_file="${output_dir}/tag-pointer.stderr.txt"
 
-  if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+  auth_token="$(resolve_restore_capable_token || true)"
+  if [[ -z "${auth_token}" ]]; then
     return 1
   fi
 
@@ -81,7 +85,7 @@ tag_pointer_check_once() {
   encoded_tag="$(urlencode "$tag")"
 
   if ! curl -fsS \
-      -H "Authorization: Bearer ${BORINGCACHE_API_TOKEN}" \
+      -H "Authorization: Bearer ${auth_token}" \
       -H "Accept: application/json" \
       "${BORINGCACHE_API_URL}/v2/workspaces/${namespace_slug}/${workspace_slug}/caches/tags/${encoded_tag}/pointer" \
       >"$pointer_file" 2>"$stderr_file"; then

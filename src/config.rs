@@ -54,22 +54,21 @@ fn token_from_file() -> Option<String> {
     let token = fs::read_to_string(token_file).ok()?;
     let token = token.trim().to_string();
 
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
-    }
+    if token.is_empty() { None } else { Some(token) }
 }
 
 fn env_api_token_for(purpose: AuthPurpose) -> Option<String> {
     match purpose {
-        AuthPurpose::Default | AuthPurpose::Admin => env_var("BORINGCACHE_API_TOKEN"),
+        AuthPurpose::Default | AuthPurpose::Admin => {
+            env_var("BORINGCACHE_ADMIN_TOKEN").or_else(|| env_var("BORINGCACHE_API_TOKEN"))
+        }
         AuthPurpose::Restore => env_var("BORINGCACHE_RESTORE_TOKEN")
             .or_else(|| env_var("BORINGCACHE_SAVE_TOKEN"))
+            .or_else(|| env_var("BORINGCACHE_ADMIN_TOKEN"))
             .or_else(|| env_var("BORINGCACHE_API_TOKEN")),
-        AuthPurpose::Save => {
-            env_var("BORINGCACHE_SAVE_TOKEN").or_else(|| env_var("BORINGCACHE_API_TOKEN"))
-        }
+        AuthPurpose::Save => env_var("BORINGCACHE_SAVE_TOKEN")
+            .or_else(|| env_var("BORINGCACHE_ADMIN_TOKEN"))
+            .or_else(|| env_var("BORINGCACHE_API_TOKEN")),
     }
 }
 
@@ -77,19 +76,21 @@ fn purpose_missing_token_message(purpose: AuthPurpose) -> String {
     match purpose {
         AuthPurpose::Default | AuthPurpose::Restore => {
             "No authentication token configured. Set BORINGCACHE_RESTORE_TOKEN, \
-             BORINGCACHE_SAVE_TOKEN, BORINGCACHE_API_TOKEN, BORINGCACHE_TOKEN_FILE, \
+             BORINGCACHE_SAVE_TOKEN, BORINGCACHE_ADMIN_TOKEN, BORINGCACHE_API_TOKEN, \
+             BORINGCACHE_TOKEN_FILE, \
              or run 'boringcache auth --token <token>'."
                 .to_string()
         }
         AuthPurpose::Save => {
             if env_var("BORINGCACHE_RESTORE_TOKEN").is_some() {
                 "This command needs a save-capable token. BORINGCACHE_RESTORE_TOKEN is configured, \
-                 but save requires BORINGCACHE_SAVE_TOKEN, BORINGCACHE_API_TOKEN, \
-                 BORINGCACHE_TOKEN_FILE, or a token saved with 'boringcache auth --token <token>'."
+                 but save requires BORINGCACHE_SAVE_TOKEN, BORINGCACHE_ADMIN_TOKEN, \
+                 BORINGCACHE_API_TOKEN, BORINGCACHE_TOKEN_FILE, or a token saved with \
+                 'boringcache auth --token <token>'."
                     .to_string()
             } else {
                 "No save-capable token configured. Set BORINGCACHE_SAVE_TOKEN, \
-                 BORINGCACHE_API_TOKEN, BORINGCACHE_TOKEN_FILE, or run \
+                 BORINGCACHE_ADMIN_TOKEN, BORINGCACHE_API_TOKEN, BORINGCACHE_TOKEN_FILE, or run \
                  'boringcache auth --token <token>'."
                     .to_string()
             }
@@ -100,12 +101,13 @@ fn purpose_missing_token_message(purpose: AuthPurpose) -> String {
             {
                 "This command needs an admin-capable token. BORINGCACHE_RESTORE_TOKEN and \
                  BORINGCACHE_SAVE_TOKEN are not enough for admin operations. Use \
-                 BORINGCACHE_API_TOKEN, BORINGCACHE_TOKEN_FILE, or a token saved with \
-                 'boringcache auth --token <token>'."
+                 BORINGCACHE_ADMIN_TOKEN, BORINGCACHE_API_TOKEN, BORINGCACHE_TOKEN_FILE, or \
+                 a token saved with 'boringcache auth --token <token>'."
                     .to_string()
             } else {
-                "No admin-capable token configured. Use BORINGCACHE_API_TOKEN, \
-                 BORINGCACHE_TOKEN_FILE, or run 'boringcache auth --token <token>'."
+                "No admin-capable token configured. Use BORINGCACHE_ADMIN_TOKEN, \
+                 BORINGCACHE_API_TOKEN, BORINGCACHE_TOKEN_FILE, or run \
+                 'boringcache auth --token <token>'."
                     .to_string()
             }
         }
@@ -371,10 +373,8 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use crate::test_env;
     use tempfile::TempDir;
-
-    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
     struct EnvVarGuard {
         key: &'static str,
@@ -391,9 +391,9 @@ mod tests {
 
         fn set(&self, value: Option<&str>) {
             if let Some(value) = value {
-                std::env::set_var(self.key, value);
+                test_env::set_var(self.key, value);
             } else {
-                std::env::remove_var(self.key);
+                test_env::remove_var(self.key);
             }
         }
     }
@@ -401,9 +401,9 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             if let Some(ref value) = self.original {
-                std::env::set_var(self.key, value);
+                test_env::set_var(self.key, value);
             } else {
-                std::env::remove_var(self.key);
+                test_env::remove_var(self.key);
             }
         }
     }
@@ -492,7 +492,8 @@ mod tests {
 
     #[test]
     fn test_env_api_token_uses_token_file_when_api_token_missing() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
+        let admin_token_guard = EnvVarGuard::new("BORINGCACHE_ADMIN_TOKEN");
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
@@ -501,6 +502,7 @@ mod tests {
         let token_path = temp_dir.path().join("token.txt");
         fs::write(&token_path, "token-from-file\n").unwrap();
 
+        admin_token_guard.set(None);
         api_token_guard.set(None);
         restore_token_guard.set(None);
         save_token_guard.set(None);
@@ -516,7 +518,8 @@ mod tests {
 
     #[test]
     fn test_env_api_token_prefers_api_token_env() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
+        let admin_token_guard = EnvVarGuard::new("BORINGCACHE_ADMIN_TOKEN");
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
@@ -525,6 +528,7 @@ mod tests {
         let token_path = temp_dir.path().join("token.txt");
         fs::write(&token_path, "token-from-file").unwrap();
 
+        admin_token_guard.set(None);
         api_token_guard.set(Some("token-from-env"));
         restore_token_guard.set(None);
         save_token_guard.set(None);
@@ -538,10 +542,12 @@ mod tests {
 
     #[test]
     fn test_env_var_trims_whitespace_and_drops_empty_values() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
+        let admin_token_guard = EnvVarGuard::new("BORINGCACHE_ADMIN_TOKEN");
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let workspace_guard = EnvVarGuard::new("BORINGCACHE_DEFAULT_WORKSPACE");
 
+        admin_token_guard.set(None);
         api_token_guard.set(Some("  token-from-env\n"));
         workspace_guard.set(Some("   \n\t"));
 
@@ -554,13 +560,15 @@ mod tests {
 
     #[test]
     fn test_load_for_auth_purpose_trims_env_token() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
+        let admin_token_guard = EnvVarGuard::new("BORINGCACHE_ADMIN_TOKEN");
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
         let token_file_guard = EnvVarGuard::new("BORINGCACHE_TOKEN_FILE");
         let api_url_guard = EnvVarGuard::new("BORINGCACHE_API_URL");
 
+        admin_token_guard.set(None);
         api_token_guard.set(None);
         restore_token_guard.set(Some("  restore-token\n"));
         save_token_guard.set(None);
@@ -574,11 +582,13 @@ mod tests {
 
     #[test]
     fn test_restore_prefers_restore_token_over_save_and_api() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
+        let admin_token_guard = EnvVarGuard::new("BORINGCACHE_ADMIN_TOKEN");
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
 
+        admin_token_guard.set(Some("admin-token"));
         api_token_guard.set(Some("api-token"));
         restore_token_guard.set(Some("restore-token"));
         save_token_guard.set(Some("save-token"));
@@ -591,11 +601,13 @@ mod tests {
 
     #[test]
     fn test_restore_falls_back_to_save_token() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
+        let admin_token_guard = EnvVarGuard::new("BORINGCACHE_ADMIN_TOKEN");
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
 
+        admin_token_guard.set(Some("admin-token"));
         api_token_guard.set(Some("api-token"));
         restore_token_guard.set(None);
         save_token_guard.set(Some("save-token"));
@@ -608,10 +620,12 @@ mod tests {
 
     #[test]
     fn test_save_prefers_save_token_over_api_token() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
+        let admin_token_guard = EnvVarGuard::new("BORINGCACHE_ADMIN_TOKEN");
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
 
+        admin_token_guard.set(Some("admin-token"));
         api_token_guard.set(Some("api-token"));
         save_token_guard.set(Some("save-token"));
 
@@ -623,12 +637,14 @@ mod tests {
 
     #[test]
     fn test_missing_save_token_message_mentions_restore_only_token() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
+        let admin_token_guard = EnvVarGuard::new("BORINGCACHE_ADMIN_TOKEN");
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
         let token_file_guard = EnvVarGuard::new("BORINGCACHE_TOKEN_FILE");
 
+        admin_token_guard.set(None);
         api_token_guard.set(None);
         restore_token_guard.set(Some("restore-token"));
         save_token_guard.set(None);
@@ -640,8 +656,23 @@ mod tests {
     }
 
     #[test]
+    fn test_admin_prefers_admin_token_over_api_token() {
+        let _guard = test_env::lock();
+        let admin_token_guard = EnvVarGuard::new("BORINGCACHE_ADMIN_TOKEN");
+        let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
+
+        admin_token_guard.set(Some("admin-token"));
+        api_token_guard.set(Some("api-token"));
+
+        assert_eq!(
+            env_api_token_for(AuthPurpose::Admin).as_deref(),
+            Some("admin-token")
+        );
+    }
+
+    #[test]
     fn test_token_from_file_reads_docker_secret_when_env_unset() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
         let token_file_guard = EnvVarGuard::new("BORINGCACHE_TOKEN_FILE");
         token_file_guard.set(None);
 
@@ -655,7 +686,7 @@ mod tests {
 
     #[test]
     fn test_token_from_file_prefers_env_over_docker_secret() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
         let token_file_guard = EnvVarGuard::new("BORINGCACHE_TOKEN_FILE");
         let temp_dir = TempDir::new().unwrap();
         let token_path = temp_dir.path().join("explicit-token.txt");

@@ -1,16 +1,16 @@
 use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use futures_util::future::join_all;
 use futures_util::StreamExt;
+use futures_util::future::join_all;
 use rand::Rng;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::io::ReaderStream;
@@ -24,8 +24,8 @@ use crate::manifest::EntryType;
 use crate::observability;
 use crate::progress::TransferProgress;
 use crate::serve::state::{
-    diagnostics_enabled, AppState, BlobReadHandle, KvFlushingSnapshot, KvReplicationWork,
-    KV_BACKLOG_POLICY,
+    AppState, BlobReadHandle, KV_BACKLOG_POLICY, KvFlushingSnapshot, KvReplicationWork,
+    diagnostics_enabled,
 };
 use crate::upload_receipts::try_commit_blob_receipts;
 
@@ -425,14 +425,14 @@ pub(crate) async fn put_kv_object(
     put_probe.stage("read_body");
     let (path, blob_size, blob_digest) = write_body_to_temp_file(body, &put_probe).await?;
 
-    if let Some(expected_digest) = expected_bazel_cas_blob_digest(namespace, key) {
-        if !blob_digest.eq_ignore_ascii_case(&expected_digest) {
-            cleanup_temp_file(&path).await;
-            return Err(RegistryError::new(
-                StatusCode::BAD_REQUEST,
-                format!("Bazel CAS digest mismatch: expected {expected_digest}, got {blob_digest}"),
-            ));
-        }
+    if let Some(expected_digest) = expected_bazel_cas_blob_digest(namespace, key)
+        && !blob_digest.eq_ignore_ascii_case(&expected_digest)
+    {
+        cleanup_temp_file(&path).await;
+        return Err(RegistryError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Bazel CAS digest mismatch: expected {expected_digest}, got {blob_digest}"),
+        ));
     }
 
     let miss_key = kv_miss_cache_key(state, &state.registry_root_tag, &scoped_key);
@@ -1418,7 +1418,11 @@ async fn stream_blob_to_file(
             .map_err(|e| RegistryError::internal(format!("Failed to create temp file: {e}")))?;
         let mut written = 0u64;
         let mut hasher = Sha256::new();
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let next_chunk = stream.next().await;
+            let Some(chunk) = next_chunk else {
+                break;
+            };
             let chunk = chunk
                 .map_err(|e| RegistryError::internal(format!("Failed to read blob stream: {e}")))?;
             file.write_all(&chunk).await.map_err(|e| {
@@ -1485,8 +1489,8 @@ async fn download_blob_to_cache(
             if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
                 return Ok(cache_handle);
             }
-            let result = do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await;
-            result
+
+            do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await
         }
         LookupFlight::Follower(notified) => {
             if !await_flight("dl", &flight_key, notified).await {
@@ -2039,17 +2043,17 @@ async fn confirm_kv_flush(
             Err(error) => {
                 let message = format!("confirm failed: {error}");
                 let classified = classify_flush_error(&error, "confirm failed");
-                if started_at.elapsed() < KV_CONFIRM_VERIFICATION_RETRY_TIMEOUT {
-                    if let Some(reason) = confirm_retry_reason(&message, &classified) {
-                        attempt = attempt.saturating_add(1);
-                        let delay = kv_confirm_verification_retry_delay(attempt);
-                        eprintln!(
-                            "KV confirm: {reason} for cache entry {cache_entry_id}; retrying in {:.1}s (attempt {attempt})",
-                            delay.as_secs_f32()
-                        );
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
+                if started_at.elapsed() < KV_CONFIRM_VERIFICATION_RETRY_TIMEOUT
+                    && let Some(reason) = confirm_retry_reason(&message, &classified)
+                {
+                    attempt = attempt.saturating_add(1);
+                    let delay = kv_confirm_verification_retry_delay(attempt);
+                    eprintln!(
+                        "KV confirm: {reason} for cache entry {cache_entry_id}; retrying in {:.1}s (attempt {attempt})",
+                        delay.as_secs_f32()
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
                 }
 
                 return Err(classified);
@@ -2742,14 +2746,13 @@ async fn refresh_fence_allows_update(
             .manifest_root_digest
             .as_deref()
             .or(live_hit.manifest_digest.as_deref()),
-    ) {
-        if expected_digest != live_digest {
-            eprintln!(
-                "KV index refresh fence: skipping stale update (expected digest {}, live digest {})",
-                expected_digest, live_digest
-            );
-            return false;
-        }
+    ) && expected_digest != live_digest
+    {
+        eprintln!(
+            "KV index refresh fence: skipping stale update (expected digest {}, live digest {})",
+            expected_digest, live_digest
+        );
+        return false;
     }
 
     true
@@ -3022,13 +3025,19 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
                 .acquire_owned()
                 .await
                 .map_err(|error| anyhow::anyhow!("prefetch semaphore closed: {error}"))?;
-            preload_single_blob(state, cache_entry_id, blob, url).await
+            let result = preload_single_blob(state, cache_entry_id, blob, url).await;
+            drop(_permit);
+            result
         });
     }
 
     let mut inserted = 0usize;
     let mut failures = 0usize;
-    while let Some(result) = tasks.join_next().await {
+    loop {
+        let next_result = tasks.join_next().await;
+        let Some(result) = next_result else {
+            break;
+        };
         match result {
             Ok(Ok(true)) => inserted = inserted.saturating_add(1),
             Ok(Ok(false)) => {}
@@ -3233,7 +3242,9 @@ async fn prefetch_all_blobs(state: &AppState, cache_entry_id: &str) {
                 .acquire_owned()
                 .await
                 .map_err(|error| anyhow::anyhow!("prefetch semaphore closed: {error}"))?;
-            preload_single_blob(state, cache_entry_id, blob, url).await
+            let result = preload_single_blob(state, cache_entry_id, blob, url).await;
+            drop(_permit);
+            result
         });
     }
 
@@ -3241,7 +3252,11 @@ async fn prefetch_all_blobs(state: &AppState, cache_entry_id: &str) {
     let mut failures = 0usize;
     let log_interval = (scheduled / 10).max(1);
     let mut completed = 0usize;
-    while let Some(result) = tasks.join_next().await {
+    loop {
+        let next_result = tasks.join_next().await;
+        let Some(result) = next_result else {
+            break;
+        };
         match result {
             Ok(Ok(true)) => inserted = inserted.saturating_add(1),
             Ok(Ok(false)) => {}
@@ -3771,7 +3786,7 @@ async fn bind_kv_alias_tags(
 ) -> Result<usize, FlushError> {
     let mut pending_count = 0usize;
     for alias_tag in kv_alias_tags(state) {
-        match bind_kv_alias_tag(
+        let bind_result = bind_kv_alias_tag(
             state,
             &alias_tag,
             manifest_root_digest,
@@ -3781,8 +3796,8 @@ async fn bind_kv_alias_tags(
             file_count,
             flush_mode,
         )
-        .await
-        {
+        .await;
+        match bind_result {
             Ok(pending) => {
                 if pending {
                     pending_count = pending_count.saturating_add(1);
@@ -3946,13 +3961,12 @@ fn kv_blob_upload_concurrency(operation_count: usize) -> (usize, usize) {
         return (1, 1);
     }
 
-    if let Ok(val) = std::env::var(KV_BLOB_UPLOAD_CONCURRENCY_ENV) {
-        if let Ok(v) = val.trim().parse::<usize>() {
-            if v > 0 {
-                let fixed = v.min(operation_count).max(1);
-                return (fixed, fixed);
-            }
-        }
+    if let Ok(val) = std::env::var(KV_BLOB_UPLOAD_CONCURRENCY_ENV)
+        && let Ok(v) = val.trim().parse::<usize>()
+        && v > 0
+    {
+        let fixed = v.min(operation_count).max(1);
+        return (fixed, fixed);
     }
 
     let max = KV_BLOB_UPLOAD_MAX_CONCURRENCY.min(operation_count).max(1);
@@ -3976,15 +3990,15 @@ async fn upload_single_blob_with_retry(
 
     for attempt in 1..=KV_BLOB_UPLOAD_MAX_ATTEMPTS {
         let progress = TransferProgress::new_noop();
-        match crate::multipart_upload::upload_via_single_url(
+        let upload_result = crate::multipart_upload::upload_via_single_url(
             blob_path.as_path(),
             &upload_url,
             &progress,
             state.api_client.transfer_client(),
             &upload_headers,
         )
-        .await
-        {
+        .await;
+        match upload_result {
             Ok(_) => {
                 let outcome = if attempt > 1 {
                     BlobUploadOutcome::UploadedAfterRetry
@@ -4013,15 +4027,15 @@ async fn upload_single_blob_with_retry(
                 }
 
                 if let Some(blob) = &blob {
-                    match state
+                    let retry_plan_result = state
                         .api_client
                         .blob_upload_urls(
                             &state.workspace,
                             &cache_entry_id,
                             std::slice::from_ref(blob),
                         )
-                        .await
-                    {
+                        .await;
+                    match retry_plan_result {
                         Ok(retry_plan) => {
                             if retry_plan
                                 .already_present
@@ -4119,7 +4133,7 @@ async fn upload_blobs(
                 .acquire_owned()
                 .await
                 .map_err(|e| anyhow::anyhow!("KV upload semaphore closed: {e}"))?;
-            upload_single_blob_with_retry(
+            let result = upload_single_blob_with_retry(
                 state,
                 cache_entry_id,
                 blob,
@@ -4128,21 +4142,35 @@ async fn upload_blobs(
                 upload.headers,
                 blob_path,
             )
-            .await
+            .await;
+            drop(_permit);
+            result
         });
     }
 
-    while let Some(task_result) = tasks.join_next().await {
+    loop {
+        let next_task_result = tasks.join_next().await;
+        let Some(task_result) = next_task_result else {
+            break;
+        };
         let (digest, outcome) = match task_result {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => {
                 tasks.abort_all();
-                while tasks.join_next().await.is_some() {}
+                loop {
+                    if tasks.join_next().await.is_none() {
+                        break;
+                    }
+                }
                 return Err(error);
             }
             Err(error) => {
                 tasks.abort_all();
-                while tasks.join_next().await.is_some() {}
+                loop {
+                    if tasks.join_next().await.is_none() {
+                        break;
+                    }
+                }
                 return Err(anyhow::anyhow!("Blob upload task failed: {error}"));
             }
         };
@@ -4417,13 +4445,11 @@ mod tests {
         KvPublishedIndex, UploadSessionStore,
     };
     use crate::tag_utils::TagResolver;
+    use crate::test_env;
     use mockito::{Matcher, Server};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Mutex, OnceLock};
     use tokio::sync::{Mutex as TokioMutex, RwLock};
-
-    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
     struct TestEnvGuard(Vec<(&'static str, Option<String>)>);
 
@@ -4440,11 +4466,9 @@ mod tests {
     impl Drop for TestEnvGuard {
         fn drop(&mut self) {
             for (key, value) in self.0.drain(..) {
-                unsafe {
-                    match value {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
-                    }
+                match value {
+                    Some(value) => test_env::set_var(key, value),
+                    None => test_env::remove_var(key),
                 }
             }
         }
@@ -4462,9 +4486,7 @@ mod tests {
 
     async fn setup_state(server: &Server) -> (AppState, tempfile::TempDir) {
         let temp_home = tempfile::tempdir().expect("temp dir");
-        unsafe {
-            std::env::set_var("BORINGCACHE_API_URL", server.url());
-        }
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
 
         let api_client =
             ApiClient::new_with_token_override(Some("test-token".to_string())).expect("client");
@@ -4720,8 +4742,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn confirm_polls_pending_publish_until_published() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
         let _env_guard = TestEnvGuard::capture(&["BORINGCACHE_API_URL"]);
         if !networking_available() {
             eprintln!(
@@ -4809,8 +4830,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn normal_confirm_waits_for_pending_publish_terminal_state() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
         let _env_guard = TestEnvGuard::capture(&["BORINGCACHE_API_URL"]);
         if !networking_available() {
             eprintln!(
@@ -4882,8 +4902,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn normal_confirm_accepts_pending_publish_once_shutdown_requested() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
         let _env_guard = TestEnvGuard::capture(&["BORINGCACHE_API_URL"]);
         if !networking_available() {
             eprintln!(
@@ -5327,31 +5346,29 @@ mod tests {
 
     #[test]
     fn kv_blob_preload_limits_allow_env_overrides() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
 
-        std::env::set_var(KV_BLOB_PRELOAD_MAX_BLOBS_ENV, "32");
-        std::env::set_var(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV, "1048576");
+        test_env::set_var(KV_BLOB_PRELOAD_MAX_BLOBS_ENV, "32");
+        test_env::set_var(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV, "1048576");
         assert_eq!(kv_blob_preload_max_blobs(), 32);
         assert_eq!(kv_blob_preload_max_blob_bytes(), 1_048_576);
-        std::env::remove_var(KV_BLOB_PRELOAD_MAX_BLOBS_ENV);
-        std::env::remove_var(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV);
+        test_env::remove_var(KV_BLOB_PRELOAD_MAX_BLOBS_ENV);
+        test_env::remove_var(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV);
     }
 
     #[test]
     fn kv_startup_prefetch_limits_allow_env_overrides() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
 
-        std::env::set_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV, "48");
-        std::env::set_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV, "2097152");
+        test_env::set_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV, "48");
+        test_env::set_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV, "2097152");
         assert_eq!(kv_startup_prefetch_max_blobs(), 48);
         assert_eq!(
             kv_startup_prefetch_max_total_bytes(1024 * 1024 * 1024),
             2_097_152
         );
-        std::env::remove_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV);
-        std::env::remove_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV);
+        test_env::remove_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV);
+        test_env::remove_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV);
     }
 
     #[test]
@@ -5379,12 +5396,11 @@ mod tests {
 
     #[test]
     fn kv_blob_prefetch_max_inflight_bytes_uses_env_override() {
-        let mutex = ENV_MUTEX.get_or_init(|| Mutex::new(()));
-        let _guard = mutex.lock().unwrap();
+        let _guard = test_env::lock();
 
-        std::env::set_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV, "12345");
+        test_env::set_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV, "12345");
         assert_eq!(kv_blob_prefetch_max_inflight_bytes(1024 * 1024), 12_345);
-        std::env::remove_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV);
+        test_env::remove_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV);
     }
 
     #[test]

@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  RUST_VERSION: "1.94"
-  BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+  BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
+  BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
   SCCACHE_VERSION: "v0.13.0"
   CARGO_INCREMENTAL: "0"
 
@@ -25,6 +25,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Resolve Rust version
+        id: rust-version
+        run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         continue-on-error: true
@@ -33,8 +37,8 @@ jobs:
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-ci-test"
+          rust-version: ${{ steps.rust-version.outputs.version }}
+          cache-tag: "rust-${{ steps.rust-version.outputs.version }}-ci-test"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "false"
@@ -43,58 +47,22 @@ jobs:
         if: steps.boringcache-rust.outcome == 'failure'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-version.outputs.version }}
 
       - name: Install Rust components
         run: rustup component add clippy rustfmt
 
       - name: Build and test with timing
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          BORINGCACHE_CARGO_FLOW_MODE: plain
         run: |
           set -euo pipefail
-          PROXY_PID=""
-
-          cleanup() {
-            sccache --stop-server >/dev/null 2>&1 || true
-            if [[ -n "${PROXY_PID}" ]]; then
-              kill "${PROXY_PID}" >/dev/null 2>&1 || true
-              wait "${PROXY_PID}" >/dev/null 2>&1 || true
-            fi
-          }
-          trap cleanup EXIT
-
-          if command -v boringcache >/dev/null 2>&1 && command -v sccache >/dev/null 2>&1; then
-            SCCACHE_PORT=4228
-            boringcache cache-registry ${{ github.repository }} "rust-${{ env.RUST_VERSION }}-sccache-native-test" \
-              --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
-            PROXY_PID=$!
-            PROXY_READY=0
-            for _ in $(seq 1 30); do
-              if curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1; then
-                PROXY_READY=1
-                break
-              fi
-              sleep 0.5
-            done
-            if [[ "${PROXY_READY}" == "1" ]]; then
-              export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
-              export RUSTC_WRAPPER=sccache
-              echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
-              sccache --stop-server >/dev/null 2>&1 || true
-              sccache --start-server || true
-              sccache --zero-stats >/dev/null 2>&1 || true
-            else
-              echo "sccache proxy not ready; continuing without remote cache backend"
-              kill "${PROXY_PID}" >/dev/null 2>&1 || true
-              wait "${PROXY_PID}" >/dev/null 2>&1 || true
-              PROXY_PID=""
-            fi
-          fi
-
-          export CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target"
           START_TIME=$(date +%s%N)
-          cargo build --locked
-          cargo test --locked
-          cargo clippy --locked -- -D warnings
+          ./scripts/cargo-flow.sh build
+          ./scripts/cargo-flow.sh test
+          ./scripts/cargo-flow.sh clippy
+          ./scripts/cargo-flow.sh compat
           END_TIME=$(date +%s%N)
           DURATION=$(( (END_TIME - START_TIME) / 1000000 ))
           echo "BoringCache build+test: ${DURATION}ms"
@@ -125,6 +93,45 @@ jobs:
           name: boringcache-results
           path: benchmark-results/
 
+  warm-macos-debug-cache:
+    name: Warm CLI debug cache (macOS)
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Resolve Rust version
+        id: rust-version
+        run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust (BoringCache)
+        id: boringcache-rust
+        continue-on-error: true
+        uses: boringcache/one@v1
+        with:
+          setup: none
+          mode: rust-sccache
+          workspace: ${{ github.repository }}
+          rust-version: ${{ steps.rust-version.outputs.version }}
+          cache-tag: "rust-${{ steps.rust-version.outputs.version }}-ci-build-aarch64-apple-darwin"
+          sccache: "true"
+          sccache-mode: "proxy"
+          cache-target: "true"
+          target-tag: "cargo-target-debug-rust-${{ steps.rust-version.outputs.version }}-aarch64-apple-darwin"
+          sccache-tag: "rust-${{ steps.rust-version.outputs.version }}-sccache-debug-aarch64-apple-darwin"
+
+      - name: Setup Rust (Fallback)
+        if: steps.boringcache-rust.outcome == 'failure'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust-version.outputs.version }}
+
+      - name: Warm debug cache via cargo-flow
+        env:
+          BORINGCACHE_CARGO_FLOW_MODE: plain
+        run: ./scripts/cargo-flow.sh build
+
   build:
     name: Build CLI - ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
@@ -141,7 +148,7 @@ jobs:
           # Linux musl build (static, for Alpine/minimal containers)
           - runner: ubuntu-latest
             name: linux-musl-amd64
-            container: rust:1.94-alpine
+            container: alpine:3.21
             target: x86_64-unknown-linux-musl
             binary_name: boringcache-linux-musl-amd64
             use_docker: true
@@ -164,6 +171,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Resolve Rust version
+        id: rust-version
+        run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Setup BoringCache Docker cache
         id: boringcache-docker-build
@@ -200,23 +211,25 @@ jobs:
       - name: Build in Docker container
         if: matrix.use_docker == true
         run: |
-          BC_MOUNT=""
           DOCKER_IMAGE="${{ matrix.container }}"
+          docker_args=(
+            --rm
+            -v "$PWD:/workspace"
+            -w /workspace
+            -e CARGO_TARGET_DIR=/workspace/target
+            -e CARGO_INCREMENTAL=${{ env.CARGO_INCREMENTAL }}
+            -e BORINGCACHE_RESTORE_TOKEN=${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
+            -e BORINGCACHE_SAVE_TOKEN=${{ secrets.BORINGCACHE_SAVE_TOKEN }}
+          )
           if docker image inspect "boringcache-cli-ci-build-${{ matrix.name }}:latest" >/dev/null 2>&1; then
             DOCKER_IMAGE="boringcache-cli-ci-build-${{ matrix.name }}:latest"
           fi
           if [ -n "${BORINGCACHE_BIN_PATH:-}" ] && [ -f "${BORINGCACHE_BIN_PATH}" ]; then
-            BC_MOUNT="-v ${BORINGCACHE_BIN_PATH}:/usr/local/bin/boringcache:ro"
+            docker_args+=(-v "${BORINGCACHE_BIN_PATH}:/usr/local/bin/boringcache:ro")
           elif command -v boringcache >/dev/null 2>&1; then
-            BC_MOUNT="-v $(command -v boringcache):/usr/local/bin/boringcache:ro"
+            docker_args+=(-v "$(command -v boringcache):/usr/local/bin/boringcache:ro")
           fi
-          docker run --rm \
-            -v "$PWD:/workspace" \
-            $BC_MOUNT \
-            -w /workspace \
-            -e CARGO_TARGET_DIR=/workspace/target \
-            -e CARGO_INCREMENTAL=${{ env.CARGO_INCREMENTAL }} \
-            -e BORINGCACHE_API_TOKEN=${{ secrets.BORINGCACHE_API_TOKEN }} \
+          docker run "${docker_args[@]}" \
             "$DOCKER_IMAGE" \
             sh -c '
               set -eu
@@ -224,14 +237,18 @@ jobs:
 
               # Install build dependencies based on container type
               if [ -f /etc/alpine-release ]; then
-                apk add --no-cache build-base musl-dev curl
+                apk add --no-cache bash build-base musl-dev curl perl make
+                if ! command -v cargo >/dev/null 2>&1; then
+                  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ steps.rust-version.outputs.version }}
+                fi
+                export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
               elif [ -f /etc/debian_version ]; then
                 apt-get update
                 apt-get install -y build-essential pkg-config libssl-dev curl
-                if ! command -v rustup >/dev/null 2>&1; then
-                  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ env.RUST_VERSION }}
-                  export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
+                if ! command -v cargo >/dev/null 2>&1; then
+                  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ steps.rust-version.outputs.version }}
                 fi
+                export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
               fi
 
               # Install sccache + start proxy for compilation caching
@@ -243,7 +260,10 @@ jobs:
                   sccache --version
 
                   SCCACHE_PORT=4227
-                  boringcache cache-registry ${{ github.repository }} "rust-${{ env.RUST_VERSION }}-sccache-${{ matrix.name }}" \
+                  for var in SCCACHE_ENDPOINT SCCACHE_BUCKET SCCACHE_REGION SCCACHE_S3_KEY_PREFIX SCCACHE_S3_USE_SSL SCCACHE_S3_NO_CREDENTIALS SCCACHE_S3_SERVER_SIDE_ENCRYPTION SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE SCCACHE_GCS_BUCKET SCCACHE_GCS_KEY_PATH SCCACHE_GCS_CREDENTIALS_URL SCCACHE_AZURE_CONNECTION_STRING SCCACHE_AZURE_BLOB_CONTAINER SCCACHE_REDIS SCCACHE_MEMCACHED SCCACHE_WEBDAV_ENDPOINT SCCACHE_WEBDAV_USERNAME SCCACHE_WEBDAV_PASSWORD; do
+                    unset "$var"
+                  done
+                  boringcache cache-registry ${{ github.repository }} "rust-${{ steps.rust-version.outputs.version }}-sccache-${{ matrix.name }}" \
                     --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
                   PROXY_PID=$!
                   PROXY_READY=0
@@ -274,9 +294,9 @@ jobs:
               # Build with appropriate flags.
               # Docker layer caching is handled by boringcache/one above.
               if [ "${{ matrix.musl }}" = "true" ]; then
-                RUSTFLAGS="-C target-feature=+crt-static" cargo build --locked --release --target ${{ matrix.target }}
+                RUSTFLAGS="-C target-feature=+crt-static" BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
               else
-                cargo build --locked --release --target ${{ matrix.target }}
+                BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
               fi
 
               # Copy binary
@@ -302,8 +322,8 @@ jobs:
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-ci-build-${{ matrix.name }}"
+          rust-version: ${{ steps.rust-version.outputs.version }}
+          cache-tag: "rust-${{ steps.rust-version.outputs.version }}-ci-build-${{ matrix.name }}"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "false"
@@ -312,7 +332,7 @@ jobs:
         if: matrix.use_docker != true && steps.boringcache-rust-native.outcome == 'failure'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-version.outputs.version }}
           targets: ${{ matrix.target }}
 
       - name: Normalize Windows compiler env
@@ -328,8 +348,12 @@ jobs:
 
       - name: Build CLI (Native builds)
         if: matrix.use_docker != true
+        shell: bash
+        env:
+          BORINGCACHE_CARGO_FLOW_MODE: plain
         run: |
-          cargo build --locked --release --target ${{ matrix.target }}
+          set -euo pipefail
+          ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
 
       - name: Prepare binary (Native builds)
         if: matrix.use_docker != true

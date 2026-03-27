@@ -149,18 +149,17 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
         if candidate.is_dir() {
             return Some(candidate);
         }
-        if candidate.is_file() {
-            if let Ok(contents) = fs::read_to_string(&candidate) {
-                if let Some(rest) = contents.strip_prefix("gitdir:") {
-                    let gitdir = rest.trim();
-                    let resolved = if Path::new(gitdir).is_absolute() {
-                        PathBuf::from(gitdir)
-                    } else {
-                        current.join(gitdir)
-                    };
-                    return Some(resolved);
-                }
-            }
+        if candidate.is_file()
+            && let Ok(contents) = fs::read_to_string(&candidate)
+            && let Some(rest) = contents.strip_prefix("gitdir:")
+        {
+            let gitdir = rest.trim();
+            let resolved = if Path::new(gitdir).is_absolute() {
+                PathBuf::from(gitdir)
+            } else {
+                current.join(gitdir)
+            };
+            return Some(resolved);
         }
 
         if !current.pop() {
@@ -187,12 +186,12 @@ fn detect_branch_from_head(git_dir: &Path) -> Option<String> {
 
 fn detect_default_branch(git_dir: &Path) -> Option<String> {
     let origin_head = git_dir.join("refs/remotes/origin/HEAD");
-    if let Ok(contents) = fs::read_to_string(&origin_head) {
-        if let Some(rest) = contents.trim().strip_prefix("ref:") {
-            let reference = rest.trim();
-            if let Some(branch_name) = reference.rsplit('/').next() {
-                return Some(normalize_ref(branch_name));
-            }
+    if let Ok(contents) = fs::read_to_string(&origin_head)
+        && let Some(rest) = contents.trim().strip_prefix("ref:")
+    {
+        let reference = rest.trim();
+        if let Some(branch_name) = reference.rsplit('/').next() {
+            return Some(normalize_ref(branch_name));
         }
     }
 
@@ -228,10 +227,10 @@ fn detect_ci_sha() -> Option<String> {
         "CIRCLE_SHA1",
         "BITBUCKET_COMMIT",
     ] {
-        if let Ok(value) = env::var(var) {
-            if !value.trim().is_empty() {
-                return Some(value.trim().to_string());
-            }
+        if let Ok(value) = env::var(var)
+            && !value.trim().is_empty()
+        {
+            return Some(value.trim().to_string());
         }
     }
     None
@@ -252,10 +251,8 @@ fn shorten_sha(sha: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::test_env;
     use tempfile;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn normalize_ref_sanitizes_characters() {
@@ -277,7 +274,7 @@ mod tests {
 
     #[test]
     fn detect_local_git_from_gitdir_file() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = test_env::lock();
 
         let temp = tempfile::tempdir().unwrap();
         let dot_git = temp.path().join(".git");
@@ -293,11 +290,11 @@ mod tests {
         std::fs::write(&dot_git, format!("gitdir: {}", actual_git.display())).unwrap();
 
         let original_default = std::env::var("BORINGCACHE_DEFAULT_BRANCH").ok();
-        std::env::remove_var("BORINGCACHE_DEFAULT_BRANCH");
+        test_env::remove_var("BORINGCACHE_DEFAULT_BRANCH");
 
         let ctx = GitContext::detect_with_path(Some(temp.path().to_str().unwrap()));
         if let Some(value) = original_default {
-            std::env::set_var("BORINGCACHE_DEFAULT_BRANCH", value);
+            test_env::set_var("BORINGCACHE_DEFAULT_BRANCH", value);
         }
         assert_eq!(ctx.branch.as_deref(), Some("main"));
         assert_eq!(ctx.default_branch.as_deref(), Some("main"));
@@ -322,7 +319,7 @@ mod tests {
 
     #[test]
     fn missing_origin_head_returns_none() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = test_env::lock();
 
         let temp = tempfile::tempdir().unwrap();
         let git_dir = temp.path().join(".git");
@@ -330,17 +327,17 @@ mod tests {
         std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/x").unwrap();
 
         let original_default = std::env::var("BORINGCACHE_DEFAULT_BRANCH").ok();
-        std::env::remove_var("BORINGCACHE_DEFAULT_BRANCH");
+        test_env::remove_var("BORINGCACHE_DEFAULT_BRANCH");
         let ctx = GitContext::detect_with_path(Some(temp.path().to_str().unwrap()));
         if let Some(value) = original_default {
-            std::env::set_var("BORINGCACHE_DEFAULT_BRANCH", value);
+            test_env::set_var("BORINGCACHE_DEFAULT_BRANCH", value);
         }
         assert!(ctx.default_branch.is_none());
     }
 
     #[test]
     fn env_override_wins_for_default_branch() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = test_env::lock();
 
         let temp = tempfile::tempdir().unwrap();
         let git_dir = temp.path().join(".git");
@@ -352,36 +349,36 @@ mod tests {
         .unwrap();
         std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main").unwrap();
 
-        std::env::set_var("BORINGCACHE_DEFAULT_BRANCH", "develop");
+        test_env::set_var("BORINGCACHE_DEFAULT_BRANCH", "develop");
         let ctx = GitContext::detect_with_path(Some(temp.path().to_str().unwrap()));
-        std::env::remove_var("BORINGCACHE_DEFAULT_BRANCH");
+        test_env::remove_var("BORINGCACHE_DEFAULT_BRANCH");
 
         assert_eq!(ctx.default_branch.as_deref(), Some("develop"));
     }
 
     #[test]
     fn ci_env_branch_used_when_branch_missing() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = test_env::lock();
 
         let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("GITHUB_HEAD_REF", "feature/ci-branch");
+        test_env::set_var("GITHUB_HEAD_REF", "feature/ci-branch");
         let ctx = GitContext::detect_with_path(Some(temp.path().to_str().unwrap()));
-        std::env::remove_var("GITHUB_HEAD_REF");
+        test_env::remove_var("GITHUB_HEAD_REF");
 
         assert_eq!(ctx.branch.as_deref(), Some("feature-ci-branch"));
     }
 
     #[test]
     fn ci_sha_used_when_no_branch() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = test_env::lock();
 
         let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("CI", "true");
-        std::env::set_var("GITHUB_SHA", "1234567890abcdef");
-        std::env::remove_var("GITHUB_HEAD_REF");
+        test_env::set_var("CI", "true");
+        test_env::set_var("GITHUB_SHA", "1234567890abcdef");
+        test_env::remove_var("GITHUB_HEAD_REF");
         let ctx = GitContext::detect_with_path(Some(temp.path().to_str().unwrap()));
-        std::env::remove_var("GITHUB_SHA");
-        std::env::remove_var("CI");
+        test_env::remove_var("GITHUB_SHA");
+        test_env::remove_var("CI");
         assert_eq!(ctx.commit_slug().as_deref(), Some("1234567890ab"));
     }
 }

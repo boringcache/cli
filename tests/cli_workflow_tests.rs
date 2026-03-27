@@ -1,4 +1,5 @@
 use age::secrecy::SecretString;
+use boring_cache_cli::test_env;
 use boring_cache_cli::{archive, encryption, manifest, platform, signing};
 use chrono::Utc;
 use mockito::{Matcher, Server};
@@ -8,9 +9,6 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-use tokio::sync::Mutex;
-
-static CLI_TEST_MUTEX: Mutex<()> = Mutex::const_new(());
 
 fn cli_binary() -> PathBuf {
     option_env!("CARGO_BIN_EXE_boringcache")
@@ -36,17 +34,17 @@ fn networking_available() -> bool {
     std::net::TcpListener::bind("127.0.0.1:0").is_ok()
 }
 
-async fn acquire_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
-    let guard = CLI_TEST_MUTEX.lock().await;
+async fn acquire_test_lock() -> test_env::Guard {
+    let guard = test_env::lock();
     clear_test_env_overrides();
-    std::env::set_var("BORINGCACHE_TEST_MODE", "1");
+    test_env::set_var("BORINGCACHE_TEST_MODE", "1");
     guard
 }
 
 fn clear_test_env_overrides() {
-    env::remove_var("BORINGCACHE_REQUIRE_SERVER_SIGNATURE");
-    env::remove_var("BORINGCACHE_RESTORE_TOKEN");
-    env::remove_var("BORINGCACHE_SAVE_TOKEN");
+    test_env::remove_var("BORINGCACHE_REQUIRE_SERVER_SIGNATURE");
+    test_env::remove_var("BORINGCACHE_RESTORE_TOKEN");
+    test_env::remove_var("BORINGCACHE_SAVE_TOKEN");
 }
 
 fn platform_tag_suffix() -> String {
@@ -155,8 +153,7 @@ async fn test_auth_workflow_success() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output = std::process::Command::new(cli_binary())
@@ -168,8 +165,7 @@ async fn test_auth_workflow_success() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("success") || stdout.contains("authenticated"));
-
-    env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("BORINGCACHE_API_URL");
 }
 
 #[tokio::test]
@@ -189,8 +185,7 @@ async fn test_auth_workflow_invalid_token() {
         .await;
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let output = std::process::Command::new(cli_binary())
         .args(["auth", "--token", "invalid-token"])
@@ -210,8 +205,7 @@ async fn test_auth_workflow_invalid_token() {
                 || stderr.contains("API Error")
         );
     }
-
-    env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("BORINGCACHE_API_URL");
 }
 
 #[tokio::test]
@@ -266,8 +260,7 @@ async fn test_workspaces_workflow_success() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config_dir = temp_dir.path().join(".boringcache");
@@ -281,8 +274,7 @@ async fn test_workspaces_workflow_success() {
         .to_string(),
     )
     .expect("Failed to write config");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let output = std::process::Command::new(cli_binary())
         .args(["workspaces"])
@@ -295,9 +287,8 @@ async fn test_workspaces_workflow_success() {
         assert!(stdout.contains("Test Workspace") || stdout.contains("test/workspace"));
         assert!(stdout.contains("Another Workspace") || stdout.contains("another/workspace"));
     }
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -324,8 +315,7 @@ async fn test_restore_warns_on_invalid_signature_with_encrypted_manifest() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config_dir = temp_dir.path().join(".boringcache");
@@ -339,7 +329,7 @@ async fn test_restore_warns_on_invalid_signature_with_encrypted_manifest() {
         .to_string(),
     )
     .expect("Failed to write config");
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let data_dir = temp_dir.path().join("data");
     fs::create_dir(&data_dir).expect("Failed to create data dir");
@@ -469,9 +459,8 @@ async fn test_restore_warns_on_invalid_signature_with_encrypted_manifest() {
     let restored =
         fs::read_to_string(target_dir.join("hello.txt")).expect("Failed to read restored file");
     assert_eq!(restored, "hello");
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -498,8 +487,7 @@ async fn test_restore_fails_on_invalid_signature_in_strict_mode() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config_dir = temp_dir.path().join(".boringcache");
@@ -513,7 +501,7 @@ async fn test_restore_fails_on_invalid_signature_in_strict_mode() {
         .to_string(),
     )
     .expect("Failed to write config");
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let data_dir = temp_dir.path().join("data");
     fs::create_dir(&data_dir).expect("Failed to create data dir");
@@ -630,9 +618,8 @@ async fn test_restore_fails_on_invalid_signature_in_strict_mode() {
     assert_ne!(output.status.code(), Some(0));
     assert!(stderr.contains("Server signature verification failed for cache-tag"));
     assert!(!target_dir.join("hello.txt").exists());
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -659,8 +646,7 @@ async fn test_restore_passphrase_manifest_requires_passphrase() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config_dir = temp_dir.path().join(".boringcache");
@@ -674,7 +660,7 @@ async fn test_restore_passphrase_manifest_requires_passphrase() {
         .to_string(),
     )
     .expect("Failed to write config");
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let data_dir = temp_dir.path().join("data");
     fs::create_dir(&data_dir).expect("Failed to create data dir");
@@ -743,9 +729,8 @@ async fn test_restore_passphrase_manifest_requires_passphrase() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success());
     assert!(stderr.contains("passphrase"));
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -804,8 +789,7 @@ async fn test_save_workflow_success() {
         .with_body(json!({"status": "success", "metric_id": "metric-456"}).to_string())
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
@@ -825,8 +809,7 @@ async fn test_save_workflow_success() {
     fs::create_dir(&cache_dir).expect("Failed to create cache dir");
     fs::write(cache_dir.join("test1.txt"), "test content 1").expect("Failed to write test1");
     fs::write(cache_dir.join("test2.txt"), "test content 2").expect("Failed to write test2");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let tag_path = format!("test-save-tag:{}", cache_dir.to_str().unwrap());
     let output = std::process::Command::new(cli_binary())
@@ -848,9 +831,8 @@ async fn test_save_workflow_success() {
                 || combined_lower.contains("success")
         );
     }
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -877,8 +859,7 @@ async fn test_restore_ignores_archive_with_digest_mismatch() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config_dir = temp_dir.path().join(".boringcache");
@@ -892,7 +873,7 @@ async fn test_restore_ignores_archive_with_digest_mismatch() {
         .to_string(),
     )
     .expect("Failed to write config");
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let data_dir = temp_dir.path().join("data");
     fs::create_dir(&data_dir).expect("Failed to create data dir");
@@ -1001,9 +982,8 @@ async fn test_restore_ignores_archive_with_digest_mismatch() {
     assert_eq!(output.status.code(), Some(0));
     assert!(stderr.contains("Archive bytes digest mismatch"));
     assert!(!target_dir.join("hello.txt").exists());
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -1030,8 +1010,7 @@ async fn test_run_workflow_restore_then_save_lifecycle_success() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config_dir = temp_dir.path().join(".boringcache");
@@ -1045,7 +1024,7 @@ async fn test_run_workflow_restore_then_save_lifecycle_success() {
         .to_string(),
     )
     .expect("Failed to write config");
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let seed_dir = temp_dir.path().join("seed-cache");
     fs::create_dir(&seed_dir).expect("Failed to create seed dir");
@@ -1262,9 +1241,8 @@ printf 'created-by-run\n' > "$1/generated.txt"
     archive_upload_mock.assert_async().await;
     manifest_upload_mock.assert_async().await;
     publish_mock.assert_async().await;
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -1312,8 +1290,7 @@ async fn test_restore_workflow_cache_not_found() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
@@ -1328,8 +1305,7 @@ async fn test_restore_workflow_cache_not_found() {
         .to_string(),
     )
     .expect("Failed to write config");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let output = std::process::Command::new(cli_binary())
         .args(["restore", "test/workspace", "non-existent-key"])
@@ -1343,9 +1319,8 @@ async fn test_restore_workflow_cache_not_found() {
 
     let exit_code = output.status.code();
     assert_eq!(exit_code, Some(0));
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -1397,8 +1372,7 @@ async fn test_metrics_workflow() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
@@ -1413,8 +1387,7 @@ async fn test_metrics_workflow() {
         .to_string(),
     )
     .expect("Failed to write config");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let output = std::process::Command::new(cli_binary())
         .args(["metrics"])
@@ -1430,9 +1403,8 @@ async fn test_metrics_workflow() {
                 || stdout.contains("success")
         );
     }
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 #[tokio::test]
 async fn test_restore_exit_codes() {
@@ -1478,8 +1450,7 @@ async fn test_restore_exit_codes() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config_dir = temp_dir.path().join(".boringcache");
@@ -1493,8 +1464,7 @@ async fn test_restore_exit_codes() {
         .to_string(),
     )
     .expect("Failed to write config");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let output = std::process::Command::new(cli_binary())
         .args(["restore", "test/workspace", "missing-key"])
@@ -1503,9 +1473,8 @@ async fn test_restore_exit_codes() {
 
     let exit_code = output.status.code();
     assert_eq!(exit_code, Some(0));
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -1555,8 +1524,7 @@ async fn test_restore_fail_on_cache_miss_flag() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
@@ -1571,8 +1539,7 @@ async fn test_restore_fail_on_cache_miss_flag() {
         .to_string(),
     )
     .expect("Failed to write config");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let output = std::process::Command::new(cli_binary())
         .args([
@@ -1600,8 +1567,8 @@ async fn test_restore_fail_on_cache_miss_flag() {
     }
 
     assert!(stderr.contains("Cache miss for tags: missing-cache"));
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -1664,8 +1631,7 @@ async fn test_restore_fail_on_cache_miss_with_partial_hits() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
@@ -1680,8 +1646,7 @@ async fn test_restore_fail_on_cache_miss_with_partial_hits() {
         .to_string(),
     )
     .expect("Failed to write config");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let output = std::process::Command::new(cli_binary())
         .args([
@@ -1709,9 +1674,8 @@ async fn test_restore_fail_on_cache_miss_with_partial_hits() {
     }
 
     assert!(stderr.contains("Cache miss for tags: missing-cache"));
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -1768,8 +1732,7 @@ async fn test_restore_fail_on_cache_error_flag() {
         .with_body("storage unavailable")
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config_dir = temp_dir.path().join(".boringcache");
@@ -1783,8 +1746,7 @@ async fn test_restore_fail_on_cache_error_flag() {
         .to_string(),
     )
     .expect("Failed to write config");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let restore_target = temp_dir.path().join("restore-target");
     let output = std::process::Command::new(cli_binary())
@@ -1811,9 +1773,8 @@ async fn test_restore_fail_on_cache_error_flag() {
         "Unexpected stderr: {}",
         stderr
     );
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -1851,8 +1812,7 @@ async fn test_restore_require_server_signature_fails_on_resolution_error() {
         .with_body("builder error")
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config_dir = temp_dir.path().join(".boringcache");
@@ -1866,9 +1826,8 @@ async fn test_restore_require_server_signature_fails_on_resolution_error() {
         .to_string(),
     )
     .expect("Failed to write config");
-
-    env::set_var("HOME", temp_dir.path());
-    env::set_var("BORINGCACHE_REQUIRE_SERVER_SIGNATURE", "1");
+    test_env::set_var("HOME", temp_dir.path());
+    test_env::set_var("BORINGCACHE_REQUIRE_SERVER_SIGNATURE", "1");
 
     let restore_target = temp_dir.path().join("restore-target");
     let output = std::process::Command::new(cli_binary())
@@ -1894,10 +1853,9 @@ async fn test_restore_require_server_signature_fails_on_resolution_error() {
         "Unexpected stderr: {}",
         stderr
     );
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("BORINGCACHE_REQUIRE_SERVER_SIGNATURE");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("BORINGCACHE_REQUIRE_SERVER_SIGNATURE");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -1958,8 +1916,7 @@ async fn test_restore_lookup_only_flag() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
@@ -1974,8 +1931,7 @@ async fn test_restore_lookup_only_flag() {
         .to_string(),
     )
     .expect("Failed to write config");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let output = std::process::Command::new(cli_binary())
         .args([
@@ -2006,9 +1962,8 @@ async fn test_restore_lookup_only_flag() {
 
     assert!(!output_text.contains("Downloading"));
     assert!(!output_text.contains("Restoring"));
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -2068,8 +2023,7 @@ async fn test_restore_lookup_only_all_found() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
@@ -2084,8 +2038,7 @@ async fn test_restore_lookup_only_all_found() {
         .to_string(),
     )
     .expect("Failed to write config");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let output = std::process::Command::new(cli_binary())
         .args([
@@ -2116,9 +2069,8 @@ async fn test_restore_lookup_only_all_found() {
     assert!(output_text.contains(&hit_tag2));
 
     assert!(!output_text.contains("Not found"));
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -2171,8 +2123,7 @@ async fn test_restore_lookup_only_does_not_create_target_directories() {
         )
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config_dir = temp_dir.path().join(".boringcache");
@@ -2186,7 +2137,7 @@ async fn test_restore_lookup_only_does_not_create_target_directories() {
         .to_string(),
     )
     .expect("Failed to write config");
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let target_dir = temp_dir
         .path()
@@ -2217,9 +2168,8 @@ async fn test_restore_lookup_only_does_not_create_target_directories() {
     let output_text = format!("{stdout}{stderr}");
     assert!(output_text.contains(&format!("Available cache entries: {}", hit_tag)));
     assert!(!temp_dir.path().join("nested").exists());
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -2312,8 +2262,7 @@ async fn test_save_workflow_with_force_flag() {
         .with_body(json!({"status": "success", "metric_id": "metric-789"}).to_string())
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
@@ -2333,8 +2282,7 @@ async fn test_save_workflow_with_force_flag() {
     fs::create_dir(&cache_dir).expect("Failed to create cache dir");
     fs::write(cache_dir.join("file1.txt"), "content 1").expect("Failed to write file1");
     fs::write(cache_dir.join("file2.txt"), "content 2").expect("Failed to write file2");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let tag_path = format!("test-force-tag:{}", cache_dir.to_str().unwrap());
     let output = std::process::Command::new(cli_binary())
@@ -2353,9 +2301,8 @@ async fn test_save_workflow_with_force_flag() {
     }
 
     _save_mock.assert_async().await;
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -2413,8 +2360,7 @@ async fn test_save_workflow_without_force_flag_skips_existing() {
         .with_body(json!({"status": "success"}).to_string())
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
@@ -2433,8 +2379,7 @@ async fn test_save_workflow_without_force_flag_skips_existing() {
     let cache_dir = temp_dir.path().join("cache_existing_test");
     fs::create_dir(&cache_dir).expect("Failed to create cache dir");
     fs::write(cache_dir.join("file1.txt"), "existing content").expect("Failed to write file");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let tag_path = format!("test-existing-tag:{}", cache_dir.to_str().unwrap());
     let output = std::process::Command::new(cli_binary())
@@ -2454,9 +2399,8 @@ async fn test_save_workflow_without_force_flag_skips_existing() {
     );
 
     save_mock.assert_async().await;
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
 
 #[tokio::test]
@@ -2555,8 +2499,7 @@ async fn test_save_workflow_digest_lookup_binds_tag() {
         .with_status(201)
         .create_async()
         .await;
-
-    env::set_var("BORINGCACHE_API_URL", server.url());
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
@@ -2576,8 +2519,7 @@ async fn test_save_workflow_digest_lookup_binds_tag() {
     fs::create_dir(&cache_dir).expect("Failed to create cache dir");
     fs::write(cache_dir.join("test1.txt"), "test content 1").expect("Failed to write test1");
     fs::write(cache_dir.join("test2.txt"), "test content 2").expect("Failed to write test2");
-
-    env::set_var("HOME", temp_dir.path());
+    test_env::set_var("HOME", temp_dir.path());
 
     let tag_path = format!("test-digest-tag:{}", cache_dir.to_str().unwrap());
     let output = std::process::Command::new(cli_binary())
@@ -2601,7 +2543,6 @@ async fn test_save_workflow_digest_lookup_binds_tag() {
     }
 
     assert_eq!(output.status.code(), Some(0));
-
-    env::remove_var("BORINGCACHE_API_URL");
-    env::remove_var("HOME");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
 }
