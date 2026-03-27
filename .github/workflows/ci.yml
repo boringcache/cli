@@ -39,7 +39,8 @@ jobs:
           workspace: ${{ github.repository }}
           rust-version: ${{ steps.rust-version.outputs.version }}
           cache-tag: "rust-${{ steps.rust-version.outputs.version }}-ci-test"
-          sccache: "false"
+          sccache: "true"
+          sccache-mode: "proxy"
           cache-target: "false"
 
       - name: Setup Rust (Fallback)
@@ -51,56 +52,12 @@ jobs:
       - name: Install Rust components
         run: rustup component add clippy rustfmt
 
-      - name: Install sccache
-        run: ./scripts/install-sccache.sh
-
       - name: Build and test with timing
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          BORINGCACHE_CARGO_FLOW_MODE: plain
         run: |
           set -euo pipefail
-          PROXY_PID=""
-
-          cleanup() {
-            sccache --stop-server >/dev/null 2>&1 || true
-            if [[ -n "${PROXY_PID}" ]]; then
-              kill "${PROXY_PID}" >/dev/null 2>&1 || true
-              wait "${PROXY_PID}" >/dev/null 2>&1 || true
-            fi
-          }
-          trap cleanup EXIT
-
-          if command -v boringcache >/dev/null 2>&1 && command -v sccache >/dev/null 2>&1; then
-            SCCACHE_PORT=4228
-            for var in SCCACHE_ENDPOINT SCCACHE_BUCKET SCCACHE_REGION SCCACHE_S3_KEY_PREFIX SCCACHE_S3_USE_SSL SCCACHE_S3_NO_CREDENTIALS SCCACHE_S3_SERVER_SIDE_ENCRYPTION SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE SCCACHE_GCS_BUCKET SCCACHE_GCS_KEY_PATH SCCACHE_GCS_CREDENTIALS_URL SCCACHE_AZURE_CONNECTION_STRING SCCACHE_AZURE_BLOB_CONTAINER SCCACHE_REDIS SCCACHE_MEMCACHED SCCACHE_WEBDAV_ENDPOINT SCCACHE_WEBDAV_USERNAME SCCACHE_WEBDAV_PASSWORD; do
-              unset "$var"
-            done
-            boringcache cache-registry ${{ github.repository }} "rust-${{ steps.rust-version.outputs.version }}-sccache-native-test" \
-              --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
-            PROXY_PID=$!
-            PROXY_READY=0
-            for _ in $(seq 1 30); do
-              if curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1; then
-                PROXY_READY=1
-                break
-              fi
-              sleep 0.5
-            done
-            if [[ "${PROXY_READY}" == "1" ]]; then
-              export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
-              export RUSTC_WRAPPER=sccache
-              echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
-              sccache --stop-server >/dev/null 2>&1 || true
-              sccache --start-server || true
-              sccache --zero-stats >/dev/null 2>&1 || true
-            else
-              echo "sccache proxy not ready; continuing without remote cache backend"
-              kill "${PROXY_PID}" >/dev/null 2>&1 || true
-              wait "${PROXY_PID}" >/dev/null 2>&1 || true
-              PROXY_PID=""
-            fi
-          fi
-
-          export CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target"
-          export BORINGCACHE_CARGO_FLOW_MODE=plain
           START_TIME=$(date +%s%N)
           ./scripts/cargo-flow.sh build
           ./scripts/cargo-flow.sh test
@@ -158,8 +115,11 @@ jobs:
           workspace: ${{ github.repository }}
           rust-version: ${{ steps.rust-version.outputs.version }}
           cache-tag: "rust-${{ steps.rust-version.outputs.version }}-ci-build-aarch64-apple-darwin"
-          sccache: "false"
-          cache-target: "false"
+          sccache: "true"
+          sccache-mode: "proxy"
+          cache-target: "true"
+          target-tag: "cargo-target-debug-rust-${{ steps.rust-version.outputs.version }}-aarch64-apple-darwin"
+          sccache-tag: "rust-${{ steps.rust-version.outputs.version }}-sccache-debug-aarch64-apple-darwin"
 
       - name: Setup Rust (Fallback)
         if: steps.boringcache-rust.outcome == 'failure'
@@ -167,13 +127,9 @@ jobs:
         with:
           toolchain: ${{ steps.rust-version.outputs.version }}
 
-      - name: Install sccache
-        run: ./scripts/install-sccache.sh
-
       - name: Warm debug cache via cargo-flow
         env:
-          BORINGCACHE_CARGO_FLOW_MODE: boringcache
-          BORINGCACHE_CARGO_TARGET_ARCHIVE_MODE: seed
+          BORINGCACHE_CARGO_FLOW_MODE: plain
         run: ./scripts/cargo-flow.sh build
 
   build:
@@ -392,8 +348,10 @@ jobs:
 
       - name: Build CLI (Native builds)
         if: matrix.use_docker != true
+        env:
+          BORINGCACHE_CARGO_FLOW_MODE: plain
         run: |
-          BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
+          ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
 
       - name: Prepare binary (Native builds)
         if: matrix.use_docker != true
