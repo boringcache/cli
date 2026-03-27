@@ -348,9 +348,11 @@ jobs:
 
       - name: Build CLI (Native builds)
         if: matrix.use_docker != true
+        shell: bash
         env:
           BORINGCACHE_CARGO_FLOW_MODE: plain
         run: |
+          set -euo pipefail
           ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
 
       - name: Prepare binary (Native builds)
