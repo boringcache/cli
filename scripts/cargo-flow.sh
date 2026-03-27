@@ -4,6 +4,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${BORINGCACHE_ENV_FILE:-${REPO_ROOT}/.boringcache.env}"
+SCCACHE_CONFLICT_ENV_VARS=(
+  SCCACHE_ENDPOINT
+  SCCACHE_BUCKET
+  SCCACHE_REGION
+  SCCACHE_S3_KEY_PREFIX
+  SCCACHE_S3_USE_SSL
+  SCCACHE_S3_NO_CREDENTIALS
+  SCCACHE_S3_SERVER_SIDE_ENCRYPTION
+  SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE
+  SCCACHE_GCS_BUCKET
+  SCCACHE_GCS_KEY_PATH
+  SCCACHE_GCS_CREDENTIALS_URL
+  SCCACHE_AZURE_CONNECTION_STRING
+  SCCACHE_AZURE_BLOB_CONTAINER
+  SCCACHE_REDIS
+  SCCACHE_MEMCACHED
+  SCCACHE_WEBDAV_ENDPOINT
+  SCCACHE_WEBDAV_USERNAME
+  SCCACHE_WEBDAV_PASSWORD
+)
+RUN_FLOW_CHILD_PID=""
+RUN_FLOW_SIGNAL_STATUS=0
 
 if [[ -f "${ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
@@ -20,6 +42,13 @@ require_cmd() {
     echo "ERROR: required command not found: ${name}" >&2
     exit 1
   fi
+}
+
+clear_conflicting_sccache_env() {
+  local name
+  for name in "${SCCACHE_CONFLICT_ENV_VARS[@]}"; do
+    unset "${name}"
+  done
 }
 
 resolve_boringcache_binary() {
@@ -174,6 +203,7 @@ prepare_environment() {
   MODE="$(effective_mode)"
   if [[ "${MODE}" == "boringcache" ]]; then
     require_cmd sccache
+    clear_conflicting_sccache_env
     BORINGCACHE_BINARY="$(resolve_boringcache_binary)" || {
       echo "ERROR: boringcache binary not found. Build ./target/debug/boringcache once or set BORINGCACHE_CARGO_FLOW_BINARY." >&2
       exit 1
@@ -280,6 +310,36 @@ stop_sccache_server_if_needed() {
   SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT}" sccache --stop-server >/dev/null 2>&1 || true
 }
 
+run_command_with_forwarded_signals() {
+  local status=0
+  RUN_FLOW_CHILD_PID=""
+  RUN_FLOW_SIGNAL_STATUS=0
+
+  "$@" &
+  RUN_FLOW_CHILD_PID=$!
+  trap 'forward_run_flow_signal INT 130' INT
+  trap 'forward_run_flow_signal TERM 143' TERM
+  wait "${RUN_FLOW_CHILD_PID}" || status=$?
+  trap - INT TERM
+  RUN_FLOW_CHILD_PID=""
+  if [[ "${RUN_FLOW_SIGNAL_STATUS}" -ne 0 ]]; then
+    return "${RUN_FLOW_SIGNAL_STATUS}"
+  fi
+  return "${status}"
+}
+
+forward_run_flow_signal() {
+  local signal_name="$1"
+  local exit_status="$2"
+  RUN_FLOW_SIGNAL_STATUS="${exit_status}"
+  if [[ -z "${RUN_FLOW_CHILD_PID}" ]]; then
+    return 0
+  fi
+  kill -s "${signal_name}" "-${RUN_FLOW_CHILD_PID}" >/dev/null 2>&1 || \
+    kill -s "${signal_name}" "${RUN_FLOW_CHILD_PID}" >/dev/null 2>&1 || true
+  wait "${RUN_FLOW_CHILD_PID}" >/dev/null 2>&1 || true
+}
+
 run_flow() {
   local cargo_args=("$@")
   local profile
@@ -315,7 +375,7 @@ run_flow() {
 
   stop_sccache_server_if_needed
   status=0
-  "${BORINGCACHE_BINARY}" "${run_args[@]}" -- cargo "${cargo_args[@]}" || status=$?
+  run_command_with_forwarded_signals "${BORINGCACHE_BINARY}" "${run_args[@]}" -- cargo "${cargo_args[@]}" || status=$?
   print_sccache_stats
   stop_sccache_server_if_needed
   return "${status}"
@@ -381,6 +441,7 @@ main() {
       run_rust_2024_compat "$@"
       ;;
     check)
+      ./scripts/verify-rust-version-sync.sh
       cargo fmt -- --check
       run_flow clippy --locked --all-targets --all-features -- -D warnings
       run_rust_2024_compat

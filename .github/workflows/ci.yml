@@ -11,10 +11,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  RUST_VERSION: "1.94.1"
-  BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
-  BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN || secrets.BORINGCACHE_API_TOKEN }}
-  BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN || secrets.BORINGCACHE_API_TOKEN }}
+  BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
+  BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
   SCCACHE_VERSION: "v0.13.0"
   CARGO_INCREMENTAL: "0"
 
@@ -27,6 +25,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Resolve Rust version
+        id: rust-version
+        run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         continue-on-error: true
@@ -35,8 +37,8 @@ jobs:
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-ci-test"
+          rust-version: ${{ steps.rust-version.outputs.version }}
+          cache-tag: "rust-${{ steps.rust-version.outputs.version }}-ci-test"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "false"
@@ -45,7 +47,7 @@ jobs:
         if: steps.boringcache-rust.outcome == 'failure'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-version.outputs.version }}
 
       - name: Install Rust components
         run: rustup component add clippy rustfmt
@@ -66,7 +68,10 @@ jobs:
 
           if command -v boringcache >/dev/null 2>&1 && command -v sccache >/dev/null 2>&1; then
             SCCACHE_PORT=4228
-            boringcache cache-registry ${{ github.repository }} "rust-${{ env.RUST_VERSION }}-sccache-native-test" \
+            for var in SCCACHE_ENDPOINT SCCACHE_BUCKET SCCACHE_REGION SCCACHE_S3_KEY_PREFIX SCCACHE_S3_USE_SSL SCCACHE_S3_NO_CREDENTIALS SCCACHE_S3_SERVER_SIDE_ENCRYPTION SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE SCCACHE_GCS_BUCKET SCCACHE_GCS_KEY_PATH SCCACHE_GCS_CREDENTIALS_URL SCCACHE_AZURE_CONNECTION_STRING SCCACHE_AZURE_BLOB_CONTAINER SCCACHE_REDIS SCCACHE_MEMCACHED SCCACHE_WEBDAV_ENDPOINT SCCACHE_WEBDAV_USERNAME SCCACHE_WEBDAV_PASSWORD; do
+              unset "$var"
+            done
+            boringcache cache-registry ${{ github.repository }} "rust-${{ steps.rust-version.outputs.version }}-sccache-native-test" \
               --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
             PROXY_PID=$!
             PROXY_READY=0
@@ -137,6 +142,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Resolve Rust version
+        id: rust-version
+        run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         continue-on-error: true
@@ -145,8 +154,8 @@ jobs:
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-ci-build-aarch64-apple-darwin"
+          rust-version: ${{ steps.rust-version.outputs.version }}
+          cache-tag: "rust-${{ steps.rust-version.outputs.version }}-ci-build-aarch64-apple-darwin"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "false"
@@ -155,7 +164,7 @@ jobs:
         if: steps.boringcache-rust.outcome == 'failure'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-version.outputs.version }}
 
       - name: Warm debug cache via cargo-flow
         env:
@@ -179,7 +188,7 @@ jobs:
           # Linux musl build (static, for Alpine/minimal containers)
           - runner: ubuntu-latest
             name: linux-musl-amd64
-            container: rust:1.94.1-alpine
+            container: alpine:3.21
             target: x86_64-unknown-linux-musl
             binary_name: boringcache-linux-musl-amd64
             use_docker: true
@@ -202,6 +211,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Resolve Rust version
+        id: rust-version
+        run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Setup BoringCache Docker cache
         id: boringcache-docker-build
@@ -254,9 +267,8 @@ jobs:
             -w /workspace \
             -e CARGO_TARGET_DIR=/workspace/target \
             -e CARGO_INCREMENTAL=${{ env.CARGO_INCREMENTAL }} \
-            -e BORINGCACHE_API_TOKEN=${{ secrets.BORINGCACHE_API_TOKEN }} \
-            -e BORINGCACHE_RESTORE_TOKEN=${{ secrets.BORINGCACHE_RESTORE_TOKEN || secrets.BORINGCACHE_API_TOKEN }} \
-            -e BORINGCACHE_SAVE_TOKEN=${{ secrets.BORINGCACHE_SAVE_TOKEN || secrets.BORINGCACHE_API_TOKEN }} \
+            -e BORINGCACHE_RESTORE_TOKEN=${{ secrets.BORINGCACHE_RESTORE_TOKEN }} \
+            -e BORINGCACHE_SAVE_TOKEN=${{ secrets.BORINGCACHE_SAVE_TOKEN }} \
             "$DOCKER_IMAGE" \
             sh -c '
               set -eu
@@ -264,14 +276,18 @@ jobs:
 
               # Install build dependencies based on container type
               if [ -f /etc/alpine-release ]; then
-                apk add --no-cache bash build-base musl-dev curl
+                apk add --no-cache bash build-base musl-dev curl perl make
+                if ! command -v cargo >/dev/null 2>&1; then
+                  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ steps.rust-version.outputs.version }}
+                fi
+                export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
               elif [ -f /etc/debian_version ]; then
                 apt-get update
                 apt-get install -y build-essential pkg-config libssl-dev curl
-                if ! command -v rustup >/dev/null 2>&1; then
-                  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ env.RUST_VERSION }}
-                  export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
+                if ! command -v cargo >/dev/null 2>&1; then
+                  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ steps.rust-version.outputs.version }}
                 fi
+                export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
               fi
 
               # Install sccache + start proxy for compilation caching
@@ -283,7 +299,10 @@ jobs:
                   sccache --version
 
                   SCCACHE_PORT=4227
-                  boringcache cache-registry ${{ github.repository }} "rust-${{ env.RUST_VERSION }}-sccache-${{ matrix.name }}" \
+                  for var in SCCACHE_ENDPOINT SCCACHE_BUCKET SCCACHE_REGION SCCACHE_S3_KEY_PREFIX SCCACHE_S3_USE_SSL SCCACHE_S3_NO_CREDENTIALS SCCACHE_S3_SERVER_SIDE_ENCRYPTION SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE SCCACHE_GCS_BUCKET SCCACHE_GCS_KEY_PATH SCCACHE_GCS_CREDENTIALS_URL SCCACHE_AZURE_CONNECTION_STRING SCCACHE_AZURE_BLOB_CONTAINER SCCACHE_REDIS SCCACHE_MEMCACHED SCCACHE_WEBDAV_ENDPOINT SCCACHE_WEBDAV_USERNAME SCCACHE_WEBDAV_PASSWORD; do
+                    unset "$var"
+                  done
+                  boringcache cache-registry ${{ github.repository }} "rust-${{ steps.rust-version.outputs.version }}-sccache-${{ matrix.name }}" \
                     --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
                   PROXY_PID=$!
                   PROXY_READY=0
@@ -342,8 +361,8 @@ jobs:
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-ci-build-${{ matrix.name }}"
+          rust-version: ${{ steps.rust-version.outputs.version }}
+          cache-tag: "rust-${{ steps.rust-version.outputs.version }}-ci-build-${{ matrix.name }}"
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "false"
@@ -352,7 +371,7 @@ jobs:
         if: matrix.use_docker != true && steps.boringcache-rust-native.outcome == 'failure'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-version.outputs.version }}
           targets: ${{ matrix.target }}
 
       - name: Normalize Windows compiler env

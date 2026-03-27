@@ -49,10 +49,7 @@ require_positive() {
   fi
 }
 
-if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
-  echo "ERROR: BORINGCACHE_API_TOKEN not set"
-  exit 1
-fi
+require_save_capable_token
 
 require_positive "PROXY_PORT" "$PROXY_PORT"
 require_positive "SETTLE_SECS" "$SETTLE_SECS"
@@ -202,6 +199,8 @@ if [[ ! -x "$BINARY" ]]; then
   cargo build --release --locked 2>&1 | tail -n 5
 fi
 
+export_resolved_cli_tokens
+
 mkdir -p "$BINARY_DIR" "$LOG_DIR"
 cp "$BINARY" "$TMP_BINARY"
 chmod +x "$TMP_BINARY"
@@ -228,8 +227,7 @@ start_proxy() {
     echo ""
     echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} hints=${metadata_hints:-none} ==="
   } >>"$PROXY_LOG"
-  BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
-    BORINGCACHE_PROXY_METADATA_HINTS="$metadata_hints" \
+  BORINGCACHE_PROXY_METADATA_HINTS="$metadata_hints" \
     RUST_LOG="${RUST_LOG:-warn}" \
     "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
     --host "$PROXY_HOST" \

@@ -120,7 +120,6 @@ fn test_run_combined_archive_and_proxy_mode_executes_child() {
     let temp_dir = TempDir::new().expect("temp dir");
     let cache_dir = temp_dir.path().join("cache");
     std::fs::create_dir_all(&cache_dir).expect("create cache dir");
-    let port = free_port().to_string();
     let script = r#"expected_endpoint="http://127.0.0.1:$1"
 [ "${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}" = "$expected_endpoint" ] || exit 2
 curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 3
@@ -141,7 +140,7 @@ curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 3
             "--host",
             "127.0.0.1",
             "--port",
-            &port,
+            "0",
             "--",
             "sh",
             "-ec",

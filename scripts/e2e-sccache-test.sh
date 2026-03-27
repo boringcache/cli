@@ -221,9 +221,9 @@ INTERRUPTED="0"
 declare -a ACTIVE_BUILD_PIDS=()
 declare -a SCCACHE_INSTANCES=()
 
-if [[ "$USE_PROXY" == "1" && -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
-  echo "ERROR: BORINGCACHE_API_TOKEN not set"
-  exit 1
+if [[ "$USE_PROXY" == "1" ]]; then
+  require_save_capable_token
+  export_resolved_cli_tokens
 fi
 
 deps=(sccache pgrep ps)
@@ -265,8 +265,9 @@ stop_registered_sccache_servers() {
   for entry in "${SCCACHE_INSTANCES[@]-}"; do
     port="${entry%%|*}"
     dir="${entry#*|}"
-    SCCACHE_SERVER_PORT="$port" \
-      SCCACHE_DIR="$dir" \
+    run_with_clean_sccache_env \
+      "SCCACHE_SERVER_PORT=$port" \
+      "SCCACHE_DIR=$dir" \
       sccache --stop-server >/dev/null 2>&1 || true
   done
 }
@@ -508,8 +509,7 @@ start_proxy() {
     echo ""
     echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} metrics=${metrics_file} hints=${metadata_hints:-none} ==="
   } >>"$log_file"
-  BORINGCACHE_API_TOKEN="$BORINGCACHE_API_TOKEN" \
-    BORINGCACHE_METRICS_FORMAT="${BORINGCACHE_METRICS_FORMAT:-json}" \
+  BORINGCACHE_METRICS_FORMAT="${BORINGCACHE_METRICS_FORMAT:-json}" \
     BORINGCACHE_PROXY_METADATA_HINTS="$metadata_hints" \
     BORINGCACHE_REQUEST_METRICS_PATH="$metrics_file" \
     BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS="${BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS:-1}" \
@@ -577,17 +577,17 @@ reset_sccache() {
     sccache_env+=("SCCACHE_LOG=$SCCACHE_LOG_LEVEL")
   fi
   register_sccache_instance "$sccache_port" "$sccache_dir"
-  env "${sccache_env[@]}" sccache --stop-server >/dev/null 2>&1 || true
+  run_with_clean_sccache_env "${sccache_env[@]}" sccache --stop-server >/dev/null 2>&1 || true
   sleep 1
   if [[ "$USE_PROXY" == "1" ]]; then
-    env "${sccache_env[@]}" \
+    run_with_clean_sccache_env "${sccache_env[@]}" \
       "SCCACHE_WEBDAV_ENDPOINT=${PROXY_URL}" \
       sccache --start-server >>"$sccache_ctl_log" 2>&1
   else
-    env "${sccache_env[@]}" \
+    run_with_clean_sccache_env "${sccache_env[@]}" \
       sccache --start-server >>"$sccache_ctl_log" 2>&1
   fi
-  env "${sccache_env[@]}" sccache --zero-stats >>"$sccache_ctl_log" 2>&1
+  run_with_clean_sccache_env "${sccache_env[@]}" sccache --zero-stats >>"$sccache_ctl_log" 2>&1
 }
 
 run_build() {
@@ -610,23 +610,25 @@ run_build() {
   start_ts="$(date +%s)"
   if [[ "$USE_PROXY" == "1" ]]; then
     if [[ -n "$SCCACHE_LOG_LEVEL" ]]; then
-      SCCACHE_SERVER_PORT="$sccache_port" \
-        SCCACHE_DIR="$sccache_dir" \
-        SCCACHE_ERROR_LOG="$sccache_error_log" \
-        SCCACHE_LOG="$SCCACHE_LOG_LEVEL" \
-        SCCACHE_WEBDAV_ENDPOINT="${PROXY_URL}" \
+      run_with_clean_sccache_env \
+        "SCCACHE_SERVER_PORT=$sccache_port" \
+        "SCCACHE_DIR=$sccache_dir" \
+        "SCCACHE_ERROR_LOG=$sccache_error_log" \
+        "SCCACHE_LOG=$SCCACHE_LOG_LEVEL" \
+        "SCCACHE_WEBDAV_ENDPOINT=${PROXY_URL}" \
         RUSTC_WRAPPER=sccache \
         CARGO_INCREMENTAL=0 \
-        CARGO_TARGET_DIR="$target_dir" \
+        "CARGO_TARGET_DIR=$target_dir" \
         bash -lc "$CARGO_CMD" >"$log_file" 2>&1 &
     else
-      SCCACHE_SERVER_PORT="$sccache_port" \
-        SCCACHE_DIR="$sccache_dir" \
-        SCCACHE_ERROR_LOG="$sccache_error_log" \
-        SCCACHE_WEBDAV_ENDPOINT="${PROXY_URL}" \
+      run_with_clean_sccache_env \
+        "SCCACHE_SERVER_PORT=$sccache_port" \
+        "SCCACHE_DIR=$sccache_dir" \
+        "SCCACHE_ERROR_LOG=$sccache_error_log" \
+        "SCCACHE_WEBDAV_ENDPOINT=${PROXY_URL}" \
         RUSTC_WRAPPER=sccache \
         CARGO_INCREMENTAL=0 \
-        CARGO_TARGET_DIR="$target_dir" \
+        "CARGO_TARGET_DIR=$target_dir" \
         bash -lc "$CARGO_CMD" >"$log_file" 2>&1 &
     fi
   else
@@ -1026,8 +1028,9 @@ phase_efficacy() {
   echo "Running efficacy cold pass..."
   reset_sccache
   run_build "efficacy-cold" "${TARGET_ROOT}/efficacy-stable" "${phase_dir}/cold.log"
-  SCCACHE_SERVER_PORT="$SCCACHE_SERVER_PORT" \
-    SCCACHE_DIR="$SCCACHE_DIR" \
+  run_with_clean_sccache_env \
+    "SCCACHE_SERVER_PORT=$SCCACHE_SERVER_PORT" \
+    "SCCACHE_DIR=$SCCACHE_DIR" \
     sccache --show-stats >"${phase_dir}/cold-sccache-stats.txt" 2>&1
   print_stats_summary "Efficacy cold stats" "${phase_dir}/cold-sccache-stats.txt"
   EFFICACY_COLD_REQUESTS="$(stat_value 'Compile requests' "${phase_dir}/cold-sccache-stats.txt")"
@@ -1065,8 +1068,9 @@ phase_efficacy() {
   fi
   reset_sccache "$SCCACHE_SERVER_PORT" "$warm_sccache_dir"
   run_build "efficacy-warm" "${TARGET_ROOT}/efficacy-stable" "${phase_dir}/warm.log" "$SCCACHE_SERVER_PORT" "$warm_sccache_dir"
-  SCCACHE_SERVER_PORT="$SCCACHE_SERVER_PORT" \
-    SCCACHE_DIR="$warm_sccache_dir" \
+  run_with_clean_sccache_env \
+    "SCCACHE_SERVER_PORT=$SCCACHE_SERVER_PORT" \
+    "SCCACHE_DIR=$warm_sccache_dir" \
     sccache --show-stats >"${phase_dir}/warm-sccache-stats.txt" 2>&1
   print_stats_summary "Efficacy warm stats" "${phase_dir}/warm-sccache-stats.txt"
   if [[ "$USE_PROXY" == "1" ]]; then
@@ -1189,8 +1193,9 @@ phase_stress() {
     health_check_fails="$((health_check_fails + $(count_pattern "${phase_dir}/prewarm-${i}.log" 'proxy health check failed')))"
     prewarm_sum="$((prewarm_sum + $(cat "${phase_dir}/prewarm-${i}.log.seconds")))"
     prewarm_stats_file="${phase_dir}/prewarm-${i}-sccache-stats.txt"
-    SCCACHE_SERVER_PORT="$SCCACHE_SERVER_PORT" \
-      SCCACHE_DIR="$SCCACHE_DIR" \
+    run_with_clean_sccache_env \
+      "SCCACHE_SERVER_PORT=$SCCACHE_SERVER_PORT" \
+      "SCCACHE_DIR=$SCCACHE_DIR" \
       sccache --show-stats >"${prewarm_stats_file}" 2>&1
     print_stats_summary "Stress prewarm stats pass ${i}" "${prewarm_stats_file}"
     if [[ "$USE_PROXY" == "1" && "$i" -lt "$PARALLEL_JOBS" ]]; then
@@ -1201,8 +1206,9 @@ phase_stress() {
       ensure_proxy_ready "$proxy_log"
     fi
   done
-  SCCACHE_SERVER_PORT="$SCCACHE_SERVER_PORT" \
-    SCCACHE_DIR="$SCCACHE_DIR" \
+  run_with_clean_sccache_env \
+    "SCCACHE_SERVER_PORT=$SCCACHE_SERVER_PORT" \
+    "SCCACHE_DIR=$SCCACHE_DIR" \
     sccache --show-stats >"${phase_dir}/prewarm-sccache-stats.txt" 2>&1
   print_stats_summary "Stress prewarm stats" "${phase_dir}/prewarm-sccache-stats.txt"
 
@@ -1289,7 +1295,7 @@ phase_stress() {
     for i in $(seq 1 "$PARALLEL_JOBS"); do
       SCCACHE_SERVER_PORT="${stress_sccache_ports[$((i - 1))]}" \
         SCCACHE_DIR="${stress_sccache_dirs[$((i - 1))]}" \
-        sccache --show-stats >"${phase_dir}/parallel-${i}-sccache-stats.txt" 2>&1
+        run_with_clean_sccache_env sccache --show-stats >"${phase_dir}/parallel-${i}-sccache-stats.txt" 2>&1
       print_stats_summary "Stress parallel stats job ${i}" "${phase_dir}/parallel-${i}-sccache-stats.txt"
       req_i="$(stat_value 'Compile requests' "${phase_dir}/parallel-${i}-sccache-stats.txt")"
       hits_i="$(stat_value 'Cache hits' "${phase_dir}/parallel-${i}-sccache-stats.txt")"
@@ -1310,8 +1316,9 @@ Cache hits rate $parallel_hit_rate %
 Cache hits rate (Rust) $parallel_hit_rate %
 EOF
   else
-    SCCACHE_SERVER_PORT="$SCCACHE_SERVER_PORT" \
-      SCCACHE_DIR="$SCCACHE_DIR" \
+    run_with_clean_sccache_env \
+      "SCCACHE_SERVER_PORT=$SCCACHE_SERVER_PORT" \
+      "SCCACHE_DIR=$SCCACHE_DIR" \
       sccache --show-stats >"${phase_dir}/parallel-sccache-stats.txt" 2>&1
   fi
   print_stats_summary "Stress parallel stats" "${phase_dir}/parallel-sccache-stats.txt"

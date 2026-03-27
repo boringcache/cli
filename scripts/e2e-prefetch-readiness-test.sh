@@ -32,15 +32,14 @@ BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 PROXY_PID=""
 TAG=""
 
-if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
-  echo "ERROR: BORINGCACHE_API_TOKEN not set"
-  exit 1
-fi
+require_save_capable_token
 
 if [[ ! -x "${BINARY}" ]]; then
   echo "ERROR: BINARY not executable at ${BINARY}"
   exit 1
 fi
+
+export_resolved_cli_tokens
 
 mkdir -p "$LOG_DIR"
 : >"$PROXY_LOG"
@@ -198,8 +197,7 @@ start_proxy() {
     echo
     echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${proxy_tag} hints=${metadata_hints:-none} ==="
   } >>"$PROXY_LOG"
-  BORINGCACHE_API_TOKEN="${BORINGCACHE_API_TOKEN}" \
-    BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY="${SEED_CONCURRENCY}" \
+  BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY="${SEED_CONCURRENCY}" \
     BORINGCACHE_PROXY_METADATA_HINTS="$metadata_hints" \
     RUST_LOG="${RUST_LOG_LEVEL:-info}" \
     "$BINARY" cache-registry "$WORKSPACE" "$proxy_tag" \

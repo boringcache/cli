@@ -25,7 +25,7 @@ require_positive() {
 require_positive "MOUNT_SHUTDOWN_WAIT_SECS" "$MOUNT_SHUTDOWN_WAIT_SECS"
 
 if ! resolve_save_capable_token >/dev/null; then
-  echo "ERROR: configure BORINGCACHE_SAVE_TOKEN, BORINGCACHE_E2E_SAVE_TOKEN, or BORINGCACHE_API_TOKEN"
+  echo "ERROR: configure BORINGCACHE_SAVE_TOKEN"
   exit 1
 fi
 

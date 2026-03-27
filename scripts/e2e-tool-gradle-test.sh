@@ -13,10 +13,7 @@ RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 GRADLE_VERSION="${GRADLE_VERSION:-8.12}"
 
-if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
-  echo "ERROR: BORINGCACHE_API_TOKEN is required"
-  exit 1
-fi
+require_save_capable_token
 
 for dep in java curl; do
   if ! command -v "$dep" >/dev/null 2>&1; then
@@ -29,6 +26,8 @@ if [[ ! -x "${BINARY}" ]]; then
   echo "ERROR: BINARY is not executable: ${BINARY}"
   exit 1
 fi
+
+export_resolved_cli_tokens
 
 mkdir -p "${LOG_DIR}"
 GRADLE_LOG_DIR="${LOG_DIR}/tool-gradle-e2e"

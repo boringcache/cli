@@ -12,7 +12,7 @@ RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 
 if ! resolve_save_capable_token >/dev/null; then
-  echo "ERROR: configure BORINGCACHE_SAVE_TOKEN, BORINGCACHE_E2E_SAVE_TOKEN, or BORINGCACHE_API_TOKEN"
+  echo "ERROR: configure BORINGCACHE_SAVE_TOKEN"
   exit 1
 fi
 

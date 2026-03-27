@@ -13,10 +13,7 @@ RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT:-$((4200 + (RANDOM % 2000)))}"
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
-if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
-  echo "ERROR: BORINGCACHE_API_TOKEN is required"
-  exit 1
-fi
+require_save_capable_token
 
 for dep in cargo sccache; do
   if ! command -v "$dep" >/dev/null 2>&1; then
@@ -29,6 +26,8 @@ if [[ ! -x "${BINARY}" ]]; then
   echo "ERROR: BINARY is not executable: ${BINARY}"
   exit 1
 fi
+
+export_resolved_cli_tokens
 
 mkdir -p "${LOG_DIR}"
 SCCACHE_LOG_DIR="${LOG_DIR}/tool-sccache-e2e"
@@ -82,7 +81,7 @@ pub fn fibonacci(n: u64) -> u64 {
 EOF
 
 stop_sccache_server() {
-  SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT}" sccache --stop-server >/dev/null 2>&1 || true
+  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_SERVER_PORT}" sccache --stop-server >/dev/null 2>&1 || true
 }
 register_cleanup_callback stop_sccache_server
 
@@ -102,19 +101,20 @@ mkdir -p "${COLD_SCCACHE_DIR}"
 COLD_START="$(date +%s)"
 (
   cd "${PROJECT_DIR}"
-  SCCACHE_DIR="${COLD_SCCACHE_DIR}" \
-  SCCACHE_WEBDAV_ENDPOINT="${PROXY_URL}/" \
-  SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT}" \
-  SCCACHE_LOG=info \
-  RUSTC_WRAPPER=sccache \
-  CARGO_INCREMENTAL=0 \
-  CARGO_TARGET_DIR="${TARGET_DIR}" \
+  run_with_clean_sccache_env \
+    "SCCACHE_DIR=${COLD_SCCACHE_DIR}" \
+    "SCCACHE_WEBDAV_ENDPOINT=${PROXY_URL}/" \
+    "SCCACHE_SERVER_PORT=${SCCACHE_SERVER_PORT}" \
+    SCCACHE_LOG=info \
+    RUSTC_WRAPPER=sccache \
+    CARGO_INCREMENTAL=0 \
+    "CARGO_TARGET_DIR=${TARGET_DIR}" \
     cargo build --release 2>&1 | tee "${COLD_LOG}"
 )
 COLD_END="$(date +%s)"
 COLD_SECS="$((COLD_END - COLD_START))"
 
-SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT}" sccache --show-stats > "${SCCACHE_LOG_DIR}/cold-stats.txt" 2>&1
+run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_SERVER_PORT}" sccache --show-stats > "${SCCACHE_LOG_DIR}/cold-stats.txt" 2>&1
 echo "Cold build completed in ${COLD_SECS}s"
 cat "${SCCACHE_LOG_DIR}/cold-stats.txt"
 
@@ -134,19 +134,20 @@ mkdir -p "${WARM_SCCACHE_DIR}"
 WARM_START="$(date +%s)"
 (
   cd "${PROJECT_DIR}"
-  SCCACHE_DIR="${WARM_SCCACHE_DIR}" \
-  SCCACHE_WEBDAV_ENDPOINT="${PROXY_URL}/" \
-  SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT}" \
-  SCCACHE_LOG=info \
-  RUSTC_WRAPPER=sccache \
-  CARGO_INCREMENTAL=0 \
-  CARGO_TARGET_DIR="${TARGET_DIR}" \
+  run_with_clean_sccache_env \
+    "SCCACHE_DIR=${WARM_SCCACHE_DIR}" \
+    "SCCACHE_WEBDAV_ENDPOINT=${PROXY_URL}/" \
+    "SCCACHE_SERVER_PORT=${SCCACHE_SERVER_PORT}" \
+    SCCACHE_LOG=info \
+    RUSTC_WRAPPER=sccache \
+    CARGO_INCREMENTAL=0 \
+    "CARGO_TARGET_DIR=${TARGET_DIR}" \
     cargo build --release 2>&1 | tee "${WARM_LOG}"
 )
 WARM_END="$(date +%s)"
 WARM_SECS="$((WARM_END - WARM_START))"
 
-SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT}" sccache --show-stats > "${SCCACHE_LOG_DIR}/warm-stats.txt" 2>&1
+run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_SERVER_PORT}" sccache --show-stats > "${SCCACHE_LOG_DIR}/warm-stats.txt" 2>&1
 echo "Warm build completed in ${WARM_SECS}s"
 cat "${SCCACHE_LOG_DIR}/warm-stats.txt"
 

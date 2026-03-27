@@ -31,10 +31,9 @@ permissions:
   contents: read
 
 env:
-  RUST_VERSION: "1.94"
-  BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
-  BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN || secrets.BORINGCACHE_API_TOKEN }}
-  BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN || secrets.BORINGCACHE_API_TOKEN }}
+  BORINGCACHE_ADMIN_TOKEN: ${{ secrets.BORINGCACHE_ADMIN_TOKEN }}
+  BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
+  BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
   BAZELISK_VERSION: "v1.20.0"
   SCCACHE_VERSION: "v0.13.0"
 
@@ -49,6 +48,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Resolve Rust version
+        id: rust-version
+        run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         continue-on-error: true
@@ -57,8 +60,8 @@ jobs:
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-e2e-linux-x86_64"
+          rust-version: ${{ steps.rust-version.outputs.version }}
+          cache-tag: "rust-${{ steps.rust-version.outputs.version }}-e2e-linux-x86_64"
           sccache: "true"
           sccache-mode: "local"
           cache-target: "false"
@@ -67,7 +70,7 @@ jobs:
         if: steps.boringcache-rust.outcome == 'failure'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-version.outputs.version }}
 
       - name: Build CLI binary
         run: cargo build --release --locked
@@ -240,15 +243,23 @@ jobs:
         id: gate
         run: |
           set -euo pipefail
-          if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+          if [[ -z "${BORINGCACHE_SAVE_TOKEN:-}" ]]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping e2e leg: BORINGCACHE_API_TOKEN is not configured."
+            echo "Skipping e2e leg: BORINGCACHE_SAVE_TOKEN is not configured."
+          elif [[ "${{ matrix.leg }}" == "cli-core" && -z "${BORINGCACHE_ADMIN_TOKEN:-}" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping cli-core e2e leg: BORINGCACHE_ADMIN_TOKEN is not configured."
           elif [[ "${{ matrix.tier }}" == "extended" && "${GITHUB_EVENT_NAME}" != "schedule" && "${GITHUB_EVENT_NAME}" != "workflow_dispatch" && "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "Skipping extended e2e leg on ${GITHUB_EVENT_NAME}."
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Resolve Rust version
+        id: rust-version
+        if: steps.gate.outputs.run == 'true'
+        run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Java
         if: steps.gate.outputs.run == 'true' && matrix.needs_java == true
@@ -261,7 +272,7 @@ jobs:
         if: steps.gate.outputs.run == 'true' && matrix.needs_rust == true
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-version.outputs.version }}
 
       - name: Ensure bazel present
         if: steps.gate.outputs.run == 'true' && matrix.needs_bazel == true
@@ -388,7 +399,6 @@ jobs:
             phase_label: Stress
             artifact: cache-registry-proxy-stress
     env:
-      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
       BORINGCACHE_DEFAULT_WORKSPACE: boringcache/cli
       RUN_SCOPED_TAGS: "1"
       PARALLEL_JOBS: "2"
@@ -406,12 +416,17 @@ jobs:
         id: gate
         run: |
           set -euo pipefail
-          if [[ "${{ matrix.backend }}" == "proxy" && -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+          if [[ "${{ matrix.backend }}" == "proxy" && -z "${BORINGCACHE_SAVE_TOKEN:-}" ]]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping proxy benchmark: BORINGCACHE_API_TOKEN is not configured."
+            echo "Skipping proxy benchmark: BORINGCACHE_SAVE_TOKEN is not configured."
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Resolve Rust version
+        id: rust-version
+        if: steps.gate.outputs.run == 'true'
+        run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
@@ -422,8 +437,8 @@ jobs:
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
-          rust-version: ${{ env.RUST_VERSION }}
-          cache-tag: "rust-${{ env.RUST_VERSION }}-cache-registry-bench-linux-x86_64"
+          rust-version: ${{ steps.rust-version.outputs.version }}
+          cache-tag: "rust-${{ steps.rust-version.outputs.version }}-cache-registry-bench-linux-x86_64"
           sccache: "true"
           sccache-mode: ${{ matrix.backend }}
           cache-target: "false"
@@ -432,7 +447,7 @@ jobs:
         if: steps.gate.outputs.run == 'true' && steps.boringcache-rust.outcome == 'failure'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-version.outputs.version }}
 
       - name: Ensure sccache present
         if: steps.gate.outputs.run == 'true'
@@ -669,7 +684,7 @@ jobs:
       - name: Gate
         id: gate
         run: |
-          if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
+          if [[ -z "${BORINGCACHE_SAVE_TOKEN:-}" ]]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -767,8 +782,6 @@ jobs:
     needs: [build-cli-binary, cross-runner-seed]
     if: needs.cross-runner-seed.outputs.tag != ''
     timeout-minutes: 10
-    env:
-      BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
     steps:
       - name: Download CLI binary
         uses: actions/download-artifact@v8
@@ -790,6 +803,7 @@ jobs:
           PROXY_LOG="${WORK_DIR}/proxy.log"
 
           RUST_LOG=info "$CLI" cache-registry "${{ github.repository }}" "$TAG" \
+            --read-only \
             --host 127.0.0.1 --port "$PROXY_PORT" --no-platform --no-git \
             >>"$PROXY_LOG" 2>&1 &
           PROXY_PID=$!

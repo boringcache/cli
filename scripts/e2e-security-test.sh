@@ -12,10 +12,7 @@ RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 PROXY_PORT="${PROXY_PORT:-5057}"
 
-if [[ -z "${BORINGCACHE_API_TOKEN:-}" ]]; then
-  echo "ERROR: BORINGCACHE_API_TOKEN is required"
-  exit 1
-fi
+require_save_capable_token
 
 for dep in jq curl cmp mktemp; do
   if ! command -v "$dep" >/dev/null 2>&1; then
@@ -36,11 +33,8 @@ mkdir -p "${SEC_LOG_DIR}"
 CLI_HOME="$(mktemp -d)"
 export HOME="${CLI_HOME}"
 
-FULL_TOKEN="${BORINGCACHE_API_TOKEN}"
-
-"${BINARY}" auth --token "${BORINGCACHE_API_TOKEN}" > "${SEC_LOG_DIR}/auth.log"
-"${BINARY}" config set default_workspace "${WORKSPACE}" > "${SEC_LOG_DIR}/config-set-workspace.log"
-"${BINARY}" config set api_url "${BORINGCACHE_API_URL}" > "${SEC_LOG_DIR}/config-set-api-url.log"
+FULL_TOKEN="$(resolve_admin_capable_token || resolve_save_capable_token)"
+bootstrap_cli_session "${BINARY}" "${WORKSPACE}" "${BORINGCACHE_API_URL}" "${SEC_LOG_DIR}/auth.log"
 
 setup_e2e_traps "${BINARY}" "${WORKSPACE}"
 
@@ -248,6 +242,7 @@ set +e
 HOME="${TOKEN_HOME}" \
   BORINGCACHE_RESTORE_TOKEN="${RESTORE_ONLY_TOKEN}" \
   BORINGCACHE_SAVE_TOKEN="" \
+  BORINGCACHE_ADMIN_TOKEN="" \
   BORINGCACHE_API_TOKEN="" \
   BORINGCACHE_API_URL="${BORINGCACHE_API_URL}" \
   "${BINARY}" save --no-platform --no-git "${WORKSPACE}" "${TOKEN_TAG}:${TOKEN_SRC}" \
@@ -279,6 +274,7 @@ set +e
 HOME="${TOKEN_HOME}" \
   BORINGCACHE_RESTORE_TOKEN="${RESTORE_ONLY_TOKEN}" \
   BORINGCACHE_SAVE_TOKEN="" \
+  BORINGCACHE_ADMIN_TOKEN="" \
   BORINGCACHE_API_TOKEN="" \
   BORINGCACHE_API_URL="${BORINGCACHE_API_URL}" \
   "${BINARY}" restore --no-platform --no-git "${WORKSPACE}" "${TOKEN_TAG}:${TOKEN_RESTORE_DIR}" \
@@ -305,6 +301,7 @@ set +e
 HOME="${TOKEN_HOME}" \
   BORINGCACHE_RESTORE_TOKEN="" \
   BORINGCACHE_SAVE_TOKEN="${SAVE_ONLY_TOKEN}" \
+  BORINGCACHE_ADMIN_TOKEN="" \
   BORINGCACHE_API_TOKEN="" \
   BORINGCACHE_API_URL="${BORINGCACHE_API_URL}" \
   "${BINARY}" delete --no-platform --no-git "${WORKSPACE}" "${TOKEN_TAG}" \
@@ -333,6 +330,7 @@ set +e
 HOME="${TOKEN_HOME}" \
   BORINGCACHE_RESTORE_TOKEN="" \
   BORINGCACHE_SAVE_TOKEN="${SAVE_ONLY_TOKEN}" \
+  BORINGCACHE_ADMIN_TOKEN="" \
   BORINGCACHE_API_TOKEN="" \
   BORINGCACHE_API_URL="${BORINGCACHE_API_URL}" \
   "${BINARY}" save --no-platform --no-git "${WORKSPACE}" "${TOKEN_SAVE_TAG}:${TOKEN_SRC}" \

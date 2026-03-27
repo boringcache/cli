@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-auth.sh"
 source "${SCRIPT_DIR}/e2e-remote-tag.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
@@ -10,6 +11,26 @@ PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
 PROXY_READY_WARN_SECS="${PROXY_READY_WARN_SECS:-15}"
 PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-30}"
 PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
+SCCACHE_CONFLICT_ENV_VARS=(
+  SCCACHE_ENDPOINT
+  SCCACHE_BUCKET
+  SCCACHE_REGION
+  SCCACHE_S3_KEY_PREFIX
+  SCCACHE_S3_USE_SSL
+  SCCACHE_S3_NO_CREDENTIALS
+  SCCACHE_S3_SERVER_SIDE_ENCRYPTION
+  SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE
+  SCCACHE_GCS_BUCKET
+  SCCACHE_GCS_KEY_PATH
+  SCCACHE_GCS_CREDENTIALS_URL
+  SCCACHE_AZURE_CONNECTION_STRING
+  SCCACHE_AZURE_BLOB_CONTAINER
+  SCCACHE_REDIS
+  SCCACHE_MEMCACHED
+  SCCACHE_WEBDAV_ENDPOINT
+  SCCACHE_WEBDAV_USERNAME
+  SCCACHE_WEBDAV_PASSWORD
+)
 
 _HELPER_PROXY_PID=""
 _HELPER_PROXY_LOG=""
@@ -43,73 +64,13 @@ require_numeric() {
   fi
 }
 
-resolve_restore_capable_token() {
-  local token
-  for token in \
-    "${BORINGCACHE_E2E_RESTORE_TOKEN:-}" \
-    "${BORINGCACHE_RESTORE_TOKEN:-}" \
-    "${BORINGCACHE_E2E_SAVE_TOKEN:-}" \
-    "${BORINGCACHE_SAVE_TOKEN:-}" \
-    "${BORINGCACHE_API_TOKEN:-}"; do
-    if [[ -n "${token}" ]]; then
-      printf '%s\n' "${token}"
-      return 0
-    fi
+run_with_clean_sccache_env() {
+  local -a env_cmd=(env)
+  local name
+  for name in "${SCCACHE_CONFLICT_ENV_VARS[@]}"; do
+    env_cmd+=("-u" "$name")
   done
-  return 1
-}
-
-resolve_save_capable_token() {
-  local token
-  for token in \
-    "${BORINGCACHE_E2E_SAVE_TOKEN:-}" \
-    "${BORINGCACHE_SAVE_TOKEN:-}" \
-    "${BORINGCACHE_API_TOKEN:-}"; do
-    if [[ -n "${token}" ]]; then
-      printf '%s\n' "${token}"
-      return 0
-    fi
-  done
-  return 1
-}
-
-export_resolved_cli_tokens() {
-  local restore_token save_token
-  restore_token="$(resolve_restore_capable_token || true)"
-  save_token="$(resolve_save_capable_token || true)"
-
-  if [[ -n "${restore_token}" ]]; then
-    export BORINGCACHE_RESTORE_TOKEN="${restore_token}"
-  else
-    unset BORINGCACHE_RESTORE_TOKEN
-  fi
-
-  if [[ -n "${save_token}" ]]; then
-    export BORINGCACHE_SAVE_TOKEN="${save_token}"
-  else
-    unset BORINGCACHE_SAVE_TOKEN
-  fi
-}
-
-bootstrap_cli_session() {
-  local binary="$1"
-  local workspace="$2"
-  local api_url="$3"
-  local auth_log="$4"
-  local auth_token
-
-  auth_token="$(resolve_save_capable_token || true)"
-  if [[ -z "${auth_token}" ]]; then
-    echo "ERROR: configure BORINGCACHE_SAVE_TOKEN, BORINGCACHE_E2E_SAVE_TOKEN, or BORINGCACHE_API_TOKEN"
-    exit 1
-  fi
-
-  export BORINGCACHE_DEFAULT_WORKSPACE="${workspace}"
-  export BORINGCACHE_API_URL="${api_url}"
-  export_resolved_cli_tokens
-
-  "${binary}" auth --token "${auth_token}" > "${auth_log}"
-  unset BORINGCACHE_API_TOKEN
+  "${env_cmd[@]}" "$@"
 }
 
 children_of_pid() {
