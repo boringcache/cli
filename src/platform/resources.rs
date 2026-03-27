@@ -250,22 +250,22 @@ fn detect_disk_type() -> (DiskType, f64) {
 
     #[cfg(target_os = "linux")]
     {
-        if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
-            if let Some(line) = mounts.lines().find(|line| line.contains(" / ")) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if let Some(device) = parts.first() {
-                    let device_name = device.trim_start_matches("/dev/");
+        if let Ok(mounts) = std::fs::read_to_string("/proc/mounts")
+            && let Some(line) = mounts.lines().find(|line| line.contains(" / "))
+        {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(device) = parts.first() {
+                let device_name = device.trim_start_matches("/dev/");
 
-                    if device_name.starts_with("nvme") {
-                        return (DiskType::NvmeSsd, 2000.0);
-                    }
+                if device_name.starts_with("nvme") {
+                    return (DiskType::NvmeSsd, 2000.0);
+                }
 
-                    let sys_path = format!("/sys/block/{}/queue/rotational", device_name);
-                    if let Ok(rotational) = std::fs::read_to_string(&sys_path)
-                        && rotational.trim() == "0"
-                    {
-                        return (DiskType::SataSsd, 500.0);
-                    }
+                let sys_path = format!("/sys/block/{}/queue/rotational", device_name);
+                if let Ok(rotational) = std::fs::read_to_string(&sys_path)
+                    && rotational.trim() == "0"
+                {
+                    return (DiskType::SataSsd, 500.0);
                 }
             }
         }
