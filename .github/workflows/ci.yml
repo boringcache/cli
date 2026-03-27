@@ -96,6 +96,7 @@ jobs:
           ./scripts/cargo-flow.sh build
           ./scripts/cargo-flow.sh test
           ./scripts/cargo-flow.sh clippy
+          ./scripts/cargo-flow.sh compat
           END_TIME=$(date +%s%N)
           DURATION=$(( (END_TIME - START_TIME) / 1000000 ))
           echo "BoringCache build+test: ${DURATION}ms"

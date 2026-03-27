@@ -311,6 +311,28 @@ run_flow() {
   return "${status}"
 }
 
+run_rust_2024_compat() {
+  local saved_rustflags="${RUSTFLAGS-}"
+  local compat_flag="-Wrust-2024-compatibility"
+  local status=0
+
+  if [[ -n "${saved_rustflags}" ]]; then
+    export RUSTFLAGS="${saved_rustflags} ${compat_flag}"
+  else
+    export RUSTFLAGS="${compat_flag}"
+  fi
+
+  run_flow check --locked --all-targets "$@" || status=$?
+
+  if [[ -n "${saved_rustflags}" ]]; then
+    export RUSTFLAGS="${saved_rustflags}"
+  else
+    unset RUSTFLAGS
+  fi
+
+  return "${status}"
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -318,6 +340,7 @@ Usage:
   scripts/cargo-flow.sh build [cargo build args...]
   scripts/cargo-flow.sh test [cargo test args...]
   scripts/cargo-flow.sh clippy
+  scripts/cargo-flow.sh compat [cargo check args...]
   scripts/cargo-flow.sh check
   scripts/cargo-flow.sh cargo <cargo args...>
 EOF
@@ -344,9 +367,13 @@ main() {
     clippy)
       run_flow clippy --locked --all-targets --all-features "$@" -- -D warnings
       ;;
+    compat)
+      run_rust_2024_compat "$@"
+      ;;
     check)
       cargo fmt -- --check
       run_flow clippy --locked --all-targets --all-features -- -D warnings
+      run_rust_2024_compat
       run_flow test --locked
       ;;
     cargo)

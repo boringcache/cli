@@ -16,6 +16,9 @@ run = "./scripts/cargo-flow.sh test"
 [tasks.clippy]
 run = "./scripts/cargo-flow.sh clippy"
 
+[tasks.compat]
+run = "./scripts/cargo-flow.sh compat"
+
 [tasks.check]
 run = "./scripts/cargo-flow.sh check"
 

@@ -48,7 +48,7 @@ cat > "${PROJECT_DIR}/Cargo.toml" <<EOF
 [package]
 name = "sccache-e2e-project"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 EOF
 
 cat > "${PROJECT_DIR}/src/main.rs" <<'EOF'

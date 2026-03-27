@@ -2,7 +2,7 @@
 #
 # Common development tasks
 
-.PHONY: all env build dev test clippy lint check fmt fmt-check clean release-patch release-minor release-major install
+.PHONY: all env build dev test clippy lint compat check fmt fmt-check clean release-patch release-minor release-major install
 
 # Default target
 all: check
@@ -12,7 +12,8 @@ build:
 	./scripts/cargo-flow.sh build --release
 
 # Run all checks (fmt, clippy, test)
-check: fmt-check clippy test
+check:
+	./scripts/cargo-flow.sh check
 
 env:
 	./scripts/cargo-flow.sh env
@@ -26,6 +27,9 @@ clippy:
 	./scripts/cargo-flow.sh clippy
 
 lint: clippy
+
+compat:
+	./scripts/cargo-flow.sh compat
 
 # Check code formatting
 fmt-check:
@@ -80,7 +84,7 @@ version:
 	@grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'
 
 # Pre-commit hook: run before committing
-pre-commit: fmt-check clippy test
+pre-commit: check
 	@echo "Pre-commit checks passed!"
 
 # Help
@@ -94,6 +98,7 @@ help:
 	@echo "  make check        - Run all checks (fmt, lint, test)"
 	@echo "  make test         - Run tests"
 	@echo "  make clippy       - Run clippy"
+	@echo "  make compat       - Run Rust 2024 compatibility check"
 	@echo "  make lint         - Alias for clippy"
 	@echo "  make fmt          - Format code"
 	@echo "  make fmt-check    - Check formatting"
