@@ -51,6 +51,9 @@ jobs:
       - name: Install Rust components
         run: rustup component add clippy rustfmt
 
+      - name: Install sccache
+        run: ./scripts/install-sccache.sh
+
       - name: Build and test with timing
         run: |
           set -euo pipefail
@@ -163,6 +166,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ steps.rust-version.outputs.version }}
+
+      - name: Install sccache
+        run: ./scripts/install-sccache.sh
 
       - name: Warm debug cache via cargo-flow
         env:
