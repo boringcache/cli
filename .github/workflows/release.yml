@@ -252,23 +252,24 @@ jobs:
       - name: Build in Docker container
         if: matrix.use_docker == true
         run: |
-          BC_MOUNT=""
           DOCKER_IMAGE="${{ matrix.container }}"
+          docker_args=(
+            --rm
+            -v "$PWD:/workspace"
+            -w /workspace
+            -e CARGO_TARGET_DIR=/workspace/target
+            -e BORINGCACHE_RESTORE_TOKEN=${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
+            -e BORINGCACHE_SAVE_TOKEN=${{ secrets.BORINGCACHE_SAVE_TOKEN }}
+          )
           if docker image inspect "boringcache-cli-release-build-${{ matrix.name }}:latest" >/dev/null 2>&1; then
             DOCKER_IMAGE="boringcache-cli-release-build-${{ matrix.name }}:latest"
           fi
           if [ -n "${BORINGCACHE_BIN_PATH:-}" ] && [ -f "${BORINGCACHE_BIN_PATH}" ]; then
-            BC_MOUNT="-v ${BORINGCACHE_BIN_PATH}:/usr/local/bin/boringcache:ro"
+            docker_args+=(-v "${BORINGCACHE_BIN_PATH}:/usr/local/bin/boringcache:ro")
           elif command -v boringcache >/dev/null 2>&1; then
-            BC_MOUNT="-v $(command -v boringcache):/usr/local/bin/boringcache:ro"
+            docker_args+=(-v "$(command -v boringcache):/usr/local/bin/boringcache:ro")
           fi
-          docker run --rm \
-            -v "$PWD:/workspace" \
-            $BC_MOUNT \
-            -w /workspace \
-            -e CARGO_TARGET_DIR=/workspace/target \
-            -e BORINGCACHE_RESTORE_TOKEN=${{ secrets.BORINGCACHE_RESTORE_TOKEN }} \
-            -e BORINGCACHE_SAVE_TOKEN=${{ secrets.BORINGCACHE_SAVE_TOKEN }} \
+          docker run "${docker_args[@]}" \
             "$DOCKER_IMAGE" \
             sh -c '
               set -e

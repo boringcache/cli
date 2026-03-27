@@ -23,6 +23,10 @@ SCCACHE_CONFLICT_ENV_VARS=(
   SCCACHE_WEBDAV_ENDPOINT
   SCCACHE_WEBDAV_USERNAME
   SCCACHE_WEBDAV_PASSWORD
+  RUSTC_WRAPPER
+  CC
+  CXX
+  SCCACHE_IDLE_TIMEOUT
 )
 RUN_FLOW_CHILD_PID=""
 RUN_FLOW_SIGNAL_STATUS=0
@@ -307,6 +311,7 @@ stop_sccache_server_if_needed() {
   if [[ "${MODE}" != "boringcache" ]] || ! has_cmd sccache; then
     return 0
   fi
+  sccache --stop-server >/dev/null 2>&1 || true
   SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT}" sccache --stop-server >/dev/null 2>&1 || true
 }
 
