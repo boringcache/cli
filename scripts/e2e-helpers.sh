@@ -160,13 +160,6 @@ reclaim_stale_proxy_port() {
   fi
 }
 
-e2e_tag() {
-  local name="$1"
-  local run_id="${GITHUB_RUN_ID:-local}"
-  local run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
-  printf 'gha-%s-%s-%s' "$name" "$run_id" "$run_attempt"
-}
-
 start_proxy() {
   local binary="$1"
   local workspace="$2"

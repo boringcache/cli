@@ -34,7 +34,7 @@ CLI_HOME="$(mktemp -d)"
 export HOME="${CLI_HOME}"
 
 FULL_TOKEN="$(resolve_admin_capable_token || resolve_save_capable_token)"
-bootstrap_cli_session "${BINARY}" "${WORKSPACE}" "${BORINGCACHE_API_URL}" "${SEC_LOG_DIR}/auth.log"
+bootstrap_cli_session "${BINARY}" "${WORKSPACE}" "${BORINGCACHE_API_URL}" "${SEC_LOG_DIR}/auth.log" admin
 
 setup_e2e_traps "${BINARY}" "${WORKSPACE}"
 

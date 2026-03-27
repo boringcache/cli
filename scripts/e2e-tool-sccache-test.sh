@@ -27,7 +27,7 @@ if [[ ! -x "${BINARY}" ]]; then
   exit 1
 fi
 
-export_resolved_cli_tokens
+export_resolved_cli_tokens admin
 
 mkdir -p "${LOG_DIR}"
 SCCACHE_LOG_DIR="${LOG_DIR}/tool-sccache-e2e"

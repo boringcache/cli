@@ -7,7 +7,7 @@ source "${SCRIPT_DIR}/e2e-remote-tag.sh"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-5050}"
 WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-boringcache/testing2}}"
-TAG_BASE="${TAG:-bc-e2e-cli-all-adapters}"
+TAG_BASE="${TAG:-$(e2e_tag "adapters-http")}"
 BINARY="${BINARY:-./target/release/boringcache}"
 TMP_ROOT="${TMPDIR:-/tmp}/boringcache-all-adapters-e2e"
 BINARY_DIR="${TMP_ROOT}/bin"
@@ -199,7 +199,7 @@ if [[ ! -x "$BINARY" ]]; then
   cargo build --release --locked 2>&1 | tail -n 5
 fi
 
-export_resolved_cli_tokens
+export_resolved_cli_tokens admin
 
 mkdir -p "$BINARY_DIR" "$LOG_DIR"
 cp "$BINARY" "$TMP_BINARY"

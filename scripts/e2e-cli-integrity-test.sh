@@ -111,9 +111,9 @@ expect_restore_failure() {
 }
 
 export HOME="${CLI_HOME}"
-bootstrap_cli_session "${CLI}" "${WORKSPACE}" "${BORINGCACHE_API_URL}" "${E2E_LOG_DIR}/auth.log"
+bootstrap_cli_session "${CLI}" "${WORKSPACE}" "${BORINGCACHE_API_URL}" "${E2E_LOG_DIR}/auth.log" admin
 
-TAG_ROOT="bc-e2e-cli-integrity-${RUN_ID}-${RUN_ATTEMPT}"
+TAG_ROOT="$(e2e_tag "cli-integrity")"
 
 SAFE_TAG="${TAG_ROOT}-safe-relative"
 SAFE_SRC="${E2E_LOG_DIR}/safe-src"

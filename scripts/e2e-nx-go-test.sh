@@ -78,7 +78,7 @@ if [[ -z "${BORINGCACHE_API_URL:-}" ]]; then
   exit 1
 fi
 
-export_resolved_cli_tokens
+export_resolved_cli_tokens admin
 
 echo "==> Tool versions"
 (

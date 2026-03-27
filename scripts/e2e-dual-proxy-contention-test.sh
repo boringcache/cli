@@ -135,7 +135,7 @@ for dep in sccache curl pgrep ps python3; do
   fi
 done
 
-export_resolved_cli_tokens
+export_resolved_cli_tokens admin
 
 PORT_TOOL=""
 if command -v lsof >/dev/null 2>&1; then

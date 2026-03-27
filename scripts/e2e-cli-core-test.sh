@@ -105,14 +105,14 @@ dump_cli_debug_logs() {
 }
 trap dump_cli_debug_logs ERR
 
-bootstrap_cli_session "${CLI}" "${WORKSPACE}" "${BORINGCACHE_API_URL}" "${CLI_LOG_DIR}/auth.log"
+bootstrap_cli_session "${CLI}" "${WORKSPACE}" "${BORINGCACHE_API_URL}" "${CLI_LOG_DIR}/auth.log" admin
 "${CLI}" config get default_workspace > "${CLI_LOG_DIR}/config-get-default-workspace.log"
 grep -q "${WORKSPACE}" "${CLI_LOG_DIR}/config-get-default-workspace.log"
 "${CLI}" config list --json > "${CLI_LOG_DIR}/config-list.json"
 "${CLI}" workspaces --json > "${CLI_LOG_DIR}/workspaces.json"
 "${CLI}" ls --limit 1 --json > "${CLI_LOG_DIR}/ls.json"
 
-TAG_ROOT="bc-e2e-cli-core-${RUN_ID}-${RUN_ATTEMPT}"
+TAG_ROOT="$(e2e_tag "cli-core")"
 TAG_DIR="${TAG_ROOT}-dir"
 TAG_FILE="${TAG_ROOT}-file"
 TAG_MOUNT="${TAG_ROOT}-mount"

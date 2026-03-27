@@ -1,14 +1,38 @@
 #!/usr/bin/env bash
 
+e2e_tag() {
+  local name="$1"
+  local run_id="${GITHUB_RUN_ID:-local}"
+  local run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
+  printf 'gha-%s-%s-%s' "$name" "$run_id" "$run_attempt"
+}
+
 resolve_restore_capable_token() {
+  local mode="${1:-default}"
   local token
-  for token in \
-    "${BORINGCACHE_E2E_RESTORE_TOKEN:-}" \
-    "${BORINGCACHE_RESTORE_TOKEN:-}" \
-    "${BORINGCACHE_E2E_SAVE_TOKEN:-}" \
-    "${BORINGCACHE_SAVE_TOKEN:-}" \
-    "${BORINGCACHE_E2E_ADMIN_TOKEN:-}" \
-    "${BORINGCACHE_ADMIN_TOKEN:-}"; do
+  local -a candidates=()
+
+  if [[ "$mode" == "admin" ]]; then
+    candidates=(
+      "${BORINGCACHE_E2E_ADMIN_TOKEN:-}"
+      "${BORINGCACHE_ADMIN_TOKEN:-}"
+      "${BORINGCACHE_E2E_RESTORE_TOKEN:-}"
+      "${BORINGCACHE_RESTORE_TOKEN:-}"
+      "${BORINGCACHE_E2E_SAVE_TOKEN:-}"
+      "${BORINGCACHE_SAVE_TOKEN:-}"
+    )
+  else
+    candidates=(
+      "${BORINGCACHE_E2E_RESTORE_TOKEN:-}"
+      "${BORINGCACHE_RESTORE_TOKEN:-}"
+      "${BORINGCACHE_E2E_SAVE_TOKEN:-}"
+      "${BORINGCACHE_SAVE_TOKEN:-}"
+      "${BORINGCACHE_E2E_ADMIN_TOKEN:-}"
+      "${BORINGCACHE_ADMIN_TOKEN:-}"
+    )
+  fi
+
+  for token in "${candidates[@]}"; do
     if [[ -n "${token}" ]]; then
       printf '%s\n' "${token}"
       return 0
@@ -18,12 +42,27 @@ resolve_restore_capable_token() {
 }
 
 resolve_save_capable_token() {
+  local mode="${1:-default}"
   local token
-  for token in \
-    "${BORINGCACHE_E2E_SAVE_TOKEN:-}" \
-    "${BORINGCACHE_SAVE_TOKEN:-}" \
-    "${BORINGCACHE_E2E_ADMIN_TOKEN:-}" \
-    "${BORINGCACHE_ADMIN_TOKEN:-}"; do
+  local -a candidates=()
+
+  if [[ "$mode" == "admin" ]]; then
+    candidates=(
+      "${BORINGCACHE_E2E_ADMIN_TOKEN:-}"
+      "${BORINGCACHE_ADMIN_TOKEN:-}"
+      "${BORINGCACHE_E2E_SAVE_TOKEN:-}"
+      "${BORINGCACHE_SAVE_TOKEN:-}"
+    )
+  else
+    candidates=(
+      "${BORINGCACHE_E2E_SAVE_TOKEN:-}"
+      "${BORINGCACHE_SAVE_TOKEN:-}"
+      "${BORINGCACHE_E2E_ADMIN_TOKEN:-}"
+      "${BORINGCACHE_ADMIN_TOKEN:-}"
+    )
+  fi
+
+  for token in "${candidates[@]}"; do
     if [[ -n "${token}" ]]; then
       printf '%s\n' "${token}"
       return 0
@@ -67,9 +106,10 @@ require_admin_capable_token() {
 }
 
 export_resolved_cli_tokens() {
+  local mode="${1:-default}"
   local restore_token save_token admin_token
-  restore_token="$(resolve_restore_capable_token || true)"
-  save_token="$(resolve_save_capable_token || true)"
+  restore_token="$(resolve_restore_capable_token "$mode" || true)"
+  save_token="$(resolve_save_capable_token "$mode" || true)"
   admin_token="$(resolve_admin_capable_token || true)"
 
   if [[ -n "${restore_token}" ]]; then
@@ -96,13 +136,15 @@ bootstrap_cli_session() {
   local workspace="$2"
   local api_url="$3"
   local auth_log="$4"
+  local token_mode="${5:-default}"
 
   export BORINGCACHE_DEFAULT_WORKSPACE="${workspace}"
   export BORINGCACHE_API_URL="${api_url}"
-  export_resolved_cli_tokens
+  export_resolved_cli_tokens "$token_mode"
   unset BORINGCACHE_API_TOKEN
 
   {
+    printf 'token_mode=%s\n' "${token_mode}"
     printf 'mode=env\n'
     printf 'binary=%s\n' "${binary}"
     printf 'workspace=%s\n' "${workspace}"

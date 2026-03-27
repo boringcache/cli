@@ -223,7 +223,7 @@ declare -a SCCACHE_INSTANCES=()
 
 if [[ "$USE_PROXY" == "1" ]]; then
   require_save_capable_token
-  export_resolved_cli_tokens
+  export_resolved_cli_tokens admin
 fi
 
 deps=(sccache pgrep ps)

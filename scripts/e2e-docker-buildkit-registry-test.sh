@@ -6,7 +6,7 @@ source "${SCRIPT_DIR}/e2e-remote-tag.sh"
 
 BINARY="${BINARY:-./target/debug/boringcache}"
 WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
-E2E_TAG_PREFIX="${E2E_TAG_PREFIX:-bc-e2e-cli}"
+E2E_TAG_PREFIX="${E2E_TAG_PREFIX:-gha-cache-registry}"
 PORT="${PORT:-5000}"
 LOG_DIR="${LOG_DIR:-.}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-0}"
@@ -65,7 +65,7 @@ for dep in docker curl pgrep; do
   fi
 done
 
-export_resolved_cli_tokens
+export_resolved_cli_tokens admin
 
 remove_active_build_pid() {
   local target_pid="$1"
