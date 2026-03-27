@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::serve::state::AppState;
 
 use super::error::RegistryError;
-use super::kv::{get_or_head_kv_object, put_kv_object, KvNamespace};
+use super::kv::{KvNamespace, get_or_head_kv_object, put_kv_object};
 
 const SCCACHE_GET_HEAD_TIMEOUT_MIN_SECS: u64 = 15;
 const SCCACHE_GET_HEAD_TIMEOUT_MAX_SECS: u64 = 180;

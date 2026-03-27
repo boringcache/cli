@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use super::model::{EntryState, EntryType, Manifest};
 
@@ -34,22 +34,20 @@ impl ManifestApplier {
 async fn remove_entry(path: &Path, entry_type: EntryType) -> Result<()> {
     match entry_type {
         EntryType::Dir => {
-            if tokio::fs::remove_dir_all(path).await.is_err() {
-                if let Err(err) = tokio::fs::remove_dir(path).await {
-                    if err.kind() != std::io::ErrorKind::NotFound {
-                        return Err(err).with_context(|| {
-                            format!("Failed to remove directory {}", path.display())
-                        });
-                    }
-                }
+            if tokio::fs::remove_dir_all(path).await.is_err()
+                && let Err(err) = tokio::fs::remove_dir(path).await
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(err)
+                    .with_context(|| format!("Failed to remove directory {}", path.display()));
             }
         }
         _ => {
-            if let Err(err) = tokio::fs::remove_file(path).await {
-                if err.kind() != std::io::ErrorKind::NotFound {
-                    return Err(err)
-                        .with_context(|| format!("Failed to remove entry {}", path.display()));
-                }
+            if let Err(err) = tokio::fs::remove_file(path).await
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(err)
+                    .with_context(|| format!("Failed to remove entry {}", path.display()));
             }
         }
     }
@@ -81,11 +79,11 @@ async fn set_executable(path: &Path, executable: bool) -> Result<()> {
     let mode = if executable { 0o755 } else { 0o644 };
     let permissions = std::fs::Permissions::from_mode(mode);
 
-    if let Err(err) = tokio::fs::set_permissions(path, permissions).await {
-        if err.kind() != std::io::ErrorKind::NotFound {
-            return Err(err)
-                .with_context(|| format!("Failed to set permissions for {}", path.display()));
-        }
+    if let Err(err) = tokio::fs::set_permissions(path, permissions).await
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(err)
+            .with_context(|| format!("Failed to set permissions for {}", path.display()));
     }
 
     Ok(())

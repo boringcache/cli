@@ -1,12 +1,12 @@
+use crate::api::ApiClient;
 use crate::api::models::cache::{
     BlobDescriptor, BlobReceipt, BlobUploadUrlsResponse, ConfirmRequest, SaveRequest, SaveResponse,
 };
-use crate::api::ApiClient;
 use crate::ci_detection::detect_ci_environment;
 use crate::progress::TransferProgress;
 use crate::telemetry::StorageMetrics;
 use crate::upload_receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -421,8 +421,10 @@ mod tests {
 
         let error = build_upload_items(&missing_blobs, &upload_plan, &blob_sources).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("Server did not provide upload URL"));
+        assert!(
+            error
+                .to_string()
+                .contains("Server did not provide upload URL")
+        );
     }
 }

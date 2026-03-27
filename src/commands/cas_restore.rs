@@ -3,7 +3,7 @@ use crate::api::{ApiClient, CacheResolutionEntry};
 use crate::progress::TransferProgress;
 use crate::telemetry::StorageMetrics;
 use crate::transfer::send_transfer_request_with_retry;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,15 +63,15 @@ where
     let pointer_bytes = response.bytes().await?.to_vec();
     let actual_manifest_hex = sha256_hex(cas_adapter, &pointer_bytes);
 
-    if let Some(expected_digest) = hit.manifest_digest.as_ref() {
-        if !digest_matches(cas_adapter, expected_digest, &actual_manifest_hex) {
-            return Ok(FetchCasPointerOutcome::Ignored {
-                reason: format!(
-                    "CAS index digest mismatch for {} (expected {}, got sha256:{})",
-                    hit.tag, expected_digest, actual_manifest_hex
-                ),
-            });
-        }
+    if let Some(expected_digest) = hit.manifest_digest.as_ref()
+        && !digest_matches(cas_adapter, expected_digest, &actual_manifest_hex)
+    {
+        return Ok(FetchCasPointerOutcome::Ignored {
+            reason: format!(
+                "CAS index digest mismatch for {} (expected {}, got sha256:{})",
+                hit.tag, expected_digest, actual_manifest_hex
+            ),
+        });
     }
 
     let resolved_manifest_root_digest = hit
@@ -159,7 +159,7 @@ pub(crate) async fn download_blob_targets(
                 .acquire_owned()
                 .await
                 .map_err(|error| anyhow!("Restore blob download semaphore closed: {error}"))?;
-            crate::cas_transport::download_blob_file(
+            let result = crate::cas_transport::download_blob_file(
                 &transfer_client,
                 &download_target.url,
                 &download_target.path,
@@ -168,7 +168,9 @@ pub(crate) async fn download_blob_targets(
                 writer_capacity,
                 Some(&download_target.digest),
             )
-            .await
+            .await;
+            drop(_permit);
+            result
         });
         tasks.push(task);
     }
@@ -266,9 +268,11 @@ mod tests {
 
         let error = build_download_items(&targets, &plan).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("Server did not provide download URL"));
+        assert!(
+            error
+                .to_string()
+                .contains("Server did not provide download URL")
+        );
     }
 
     #[test]

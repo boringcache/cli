@@ -54,11 +54,7 @@ fn token_from_file() -> Option<String> {
     let token = fs::read_to_string(token_file).ok()?;
     let token = token.trim().to_string();
 
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
-    }
+    if token.is_empty() { None } else { Some(token) }
 }
 
 fn env_api_token_for(purpose: AuthPurpose) -> Option<String> {
@@ -371,10 +367,8 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use crate::test_env;
     use tempfile::TempDir;
-
-    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
     struct EnvVarGuard {
         key: &'static str,
@@ -391,9 +385,9 @@ mod tests {
 
         fn set(&self, value: Option<&str>) {
             if let Some(value) = value {
-                std::env::set_var(self.key, value);
+                test_env::set_var(self.key, value);
             } else {
-                std::env::remove_var(self.key);
+                test_env::remove_var(self.key);
             }
         }
     }
@@ -401,9 +395,9 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             if let Some(ref value) = self.original {
-                std::env::set_var(self.key, value);
+                test_env::set_var(self.key, value);
             } else {
-                std::env::remove_var(self.key);
+                test_env::remove_var(self.key);
             }
         }
     }
@@ -492,7 +486,7 @@ mod tests {
 
     #[test]
     fn test_env_api_token_uses_token_file_when_api_token_missing() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
@@ -516,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_env_api_token_prefers_api_token_env() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
@@ -538,7 +532,7 @@ mod tests {
 
     #[test]
     fn test_env_var_trims_whitespace_and_drops_empty_values() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let workspace_guard = EnvVarGuard::new("BORINGCACHE_DEFAULT_WORKSPACE");
 
@@ -554,7 +548,7 @@ mod tests {
 
     #[test]
     fn test_load_for_auth_purpose_trims_env_token() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
@@ -574,7 +568,7 @@ mod tests {
 
     #[test]
     fn test_restore_prefers_restore_token_over_save_and_api() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
@@ -591,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_restore_falls_back_to_save_token() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
@@ -608,7 +602,7 @@ mod tests {
 
     #[test]
     fn test_save_prefers_save_token_over_api_token() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
 
@@ -623,7 +617,7 @@ mod tests {
 
     #[test]
     fn test_missing_save_token_message_mentions_restore_only_token() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
         let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
         let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
@@ -641,7 +635,7 @@ mod tests {
 
     #[test]
     fn test_token_from_file_reads_docker_secret_when_env_unset() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
         let token_file_guard = EnvVarGuard::new("BORINGCACHE_TOKEN_FILE");
         token_file_guard.set(None);
 
@@ -655,7 +649,7 @@ mod tests {
 
     #[test]
     fn test_token_from_file_prefers_env_over_docker_secret() {
-        let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = test_env::lock();
         let token_file_guard = EnvVarGuard::new("BORINGCACHE_TOKEN_FILE");
         let temp_dir = TempDir::new().unwrap();
         let token_path = temp_dir.path().join("explicit-token.txt");

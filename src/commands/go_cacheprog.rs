@@ -1,6 +1,6 @@
-use anyhow::{anyhow, bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -337,9 +337,11 @@ mod tests {
     #[test]
     fn normalize_endpoint_rejects_invalid_scheme() {
         let error = normalize_endpoint("localhost:5000").unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("must start with http:// or https://"));
+        assert!(
+            error
+                .to_string()
+                .contains("must start with http:// or https://")
+        );
     }
 
     #[test]

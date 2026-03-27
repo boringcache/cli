@@ -39,20 +39,20 @@ pub(crate) fn parse_oci_path(path: &str) -> Option<OciRoute> {
         }
     }
 
-    if let Some(name) = path.strip_suffix("/blobs/uploads") {
-        if !name.is_empty() {
-            return Some(OciRoute::BlobUploadStart {
-                name: name.to_string(),
-            });
-        }
+    if let Some(name) = path.strip_suffix("/blobs/uploads")
+        && !name.is_empty()
+    {
+        return Some(OciRoute::BlobUploadStart {
+            name: name.to_string(),
+        });
     }
 
-    if let Some(name) = path.strip_suffix("/blobs/uploads/") {
-        if !name.is_empty() {
-            return Some(OciRoute::BlobUploadStart {
-                name: name.to_string(),
-            });
-        }
+    if let Some(name) = path.strip_suffix("/blobs/uploads/")
+        && !name.is_empty()
+    {
+        return Some(OciRoute::BlobUploadStart {
+            name: name.to_string(),
+        });
     }
 
     if let Some(idx) = path.rfind("/blobs/") {
@@ -138,12 +138,12 @@ pub(crate) fn record_oci_cache_op(
         latency_ms,
     );
 
-    if result == crate::serve::cache_registry::cache_ops::OpResult::Miss {
-        if let Some(key) = miss_key {
-            state
-                .cache_ops
-                .record_miss(crate::serve::cache_registry::cache_ops::Tool::Oci, key);
-        }
+    if result == crate::serve::cache_registry::cache_ops::OpResult::Miss
+        && let Some(key) = miss_key
+    {
+        state
+            .cache_ops
+            .record_miss(crate::serve::cache_registry::cache_ops::Tool::Oci, key);
     }
 }
 

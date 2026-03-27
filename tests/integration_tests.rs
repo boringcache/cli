@@ -292,15 +292,15 @@ fn test_workspaces_command_without_auth() {
 
 #[test]
 fn test_api_url_env_var() {
-    use std::env;
+    let _guard = test_env::lock();
 
-    env::set_var("BORINGCACHE_API_URL", "https://custom.api.com");
+    test_env::set_var("BORINGCACHE_API_URL", "https://custom.api.com");
 
     let output = run_cli_command(&["workspaces"]);
 
     assert!(!output.status.success());
 
-    env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("BORINGCACHE_API_URL");
 }
 
 #[test]
@@ -578,3 +578,4 @@ fn test_mount_command_validates_workspace_format() {
         combined
     );
 }
+use boring_cache_cli::test_env;

@@ -105,6 +105,7 @@ pub fn build_tags_string() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env;
     use std::env;
 
     fn clear_ci_env_vars() {
@@ -132,15 +133,16 @@ mod tests {
         ];
 
         for var in &ci_vars {
-            env::remove_var(var);
+            test_env::remove_var(var);
         }
     }
 
     #[test]
     #[ignore]
     fn test_github_actions_detection() {
+        let _guard = test_env::lock();
         clear_ci_env_vars();
-        env::set_var("GITHUB_ACTIONS", "true");
+        test_env::set_var("GITHUB_ACTIONS", "true");
         let result = detect_ci_environment();
         clear_ci_env_vars();
         assert_eq!(result, "github-actions");
@@ -149,6 +151,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_local_detection() {
+        let _guard = test_env::lock();
         let original_env: Vec<_> = env::vars().collect();
 
         clear_ci_env_vars();
@@ -156,12 +159,12 @@ mod tests {
 
         for (key, _) in env::vars() {
             if key.starts_with("CI") || key.contains("ACTIONS") || key.contains("GITLAB") {
-                env::remove_var(key);
+                test_env::remove_var(key);
             }
         }
         for (key, value) in original_env {
             if key.starts_with("CI") || key.contains("ACTIONS") || key.contains("GITLAB") {
-                env::set_var(key, value);
+                test_env::set_var(key, value);
             }
         }
 
@@ -174,9 +177,10 @@ mod tests {
     #[test]
     #[ignore]
     fn test_multiple_ci_detection() {
+        let _guard = test_env::lock();
         clear_ci_env_vars();
-        env::set_var("GITHUB_ACTIONS", "true");
-        env::set_var("CI", "true");
+        test_env::set_var("GITHUB_ACTIONS", "true");
+        test_env::set_var("CI", "true");
         let result = detect_ci_environment();
         clear_ci_env_vars();
         assert!(result.contains("github-actions"));

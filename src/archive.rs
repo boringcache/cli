@@ -1,10 +1,10 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tempfile::NamedTempFile;
 use zstd::stream::read::Decoder as ZstdDecoder;
@@ -434,10 +434,10 @@ fn extract_parallel(
                             }
 
                             let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                            if let Some(ref cb) = callback {
-                                if count.is_multiple_of(1000) {
-                                    cb(count as u64);
-                                }
+                            if let Some(ref cb) = callback
+                                && count.is_multiple_of(1000)
+                            {
+                                cb(count as u64);
                             }
                         }
                         Ok(ExtractJob::File {
@@ -454,10 +454,10 @@ fn extract_parallel(
                             write_file(&full_path, &data, mode, mtime)?;
 
                             let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                            if let Some(ref cb) = callback {
-                                if count.is_multiple_of(1000) {
-                                    cb(count as u64);
-                                }
+                            if let Some(ref cb) = callback
+                                && count.is_multiple_of(1000)
+                            {
+                                cb(count as u64);
                             }
                         }
                         Ok(ExtractJob::Symlink {
@@ -485,10 +485,10 @@ fn extract_parallel(
                             apply_file_metadata(&full_path, mode, mtime);
 
                             let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                            if let Some(ref cb) = callback {
-                                if count.is_multiple_of(1000) {
-                                    cb(count as u64);
-                                }
+                            if let Some(ref cb) = callback
+                                && count.is_multiple_of(1000)
+                            {
+                                cb(count as u64);
                             }
                         }
                         Err(_) => break,

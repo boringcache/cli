@@ -1,8 +1,8 @@
 use crate::api::models::optimize::{OptimizeChange, OptimizeFileResult};
 
 use super::{
-    rules_buildkite, rules_circleci, rules_dockerfile, rules_github_actions, rules_gitlab_ci,
-    CiType,
+    CiType, rules_buildkite, rules_circleci, rules_dockerfile, rules_github_actions,
+    rules_gitlab_ci,
 };
 
 #[derive(Debug, Clone)]

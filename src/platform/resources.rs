@@ -146,12 +146,11 @@ impl SystemResources {
 fn detect_available_memory_gb() -> f64 {
     #[cfg(target_os = "macos")]
     {
-        if let Ok(output) = Command::new("sysctl").args(["-n", "hw.memsize"]).output() {
-            if let Ok(mem_str) = String::from_utf8(output.stdout) {
-                if let Ok(mem_bytes) = mem_str.trim().parse::<u64>() {
-                    return mem_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                }
-            }
+        if let Ok(output) = Command::new("sysctl").args(["-n", "hw.memsize"]).output()
+            && let Ok(mem_str) = String::from_utf8(output.stdout)
+            && let Ok(mem_bytes) = mem_str.trim().parse::<u64>()
+        {
+            return mem_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         }
     }
 
@@ -195,22 +194,20 @@ fn detect_cpu_load() -> f32 {
             .output()
             .map_err(|_| ())
             .and_then(|o| if o.status.success() { Ok(o) } else { Err(()) })
+            && let Ok(uptime_str) = String::from_utf8(output.stdout)
         {
-            if let Ok(uptime_str) = String::from_utf8(output.stdout) {
-                let load_part = uptime_str
-                    .split("load averages:")
-                    .nth(1)
-                    .or_else(|| uptime_str.split("load average:").nth(1));
+            let load_part = uptime_str
+                .split("load averages:")
+                .nth(1)
+                .or_else(|| uptime_str.split("load average:").nth(1));
 
-                if let Some(load_part) = load_part {
-                    if let Some(first_load) = load_part.split_whitespace().next() {
-                        if let Ok(load) = first_load.trim().parse::<f32>() {
-                            let cpu_cores = num_cpus::get() as f32;
-                            let cpu_load = (load / cpu_cores) * 100.0;
-                            return cpu_load.min(100.0);
-                        }
-                    }
-                }
+            if let Some(load_part) = load_part
+                && let Some(first_load) = load_part.split_whitespace().next()
+                && let Ok(load) = first_load.trim().parse::<f32>()
+            {
+                let cpu_cores = num_cpus::get() as f32;
+                let cpu_load = (load / cpu_cores) * 100.0;
+                return cpu_load.min(100.0);
             }
         }
     }
@@ -242,15 +239,13 @@ fn detect_disk_type() -> (DiskType, f64) {
         if let Ok(output) = Command::new("system_profiler")
             .args(["SPStorageDataType", "-json"])
             .output()
+            && let Ok(json_str) = String::from_utf8(output.stdout)
+            && (json_str.contains("SSD") || json_str.contains("Flash"))
         {
-            if let Ok(json_str) = String::from_utf8(output.stdout) {
-                if json_str.contains("SSD") || json_str.contains("Flash") {
-                    if json_str.contains("NVMe") || json_str.contains("PCIe") {
-                        return (DiskType::NvmeSsd, 2000.0);
-                    } else {
-                        return (DiskType::SataSsd, 500.0);
-                    }
-                }
+            if json_str.contains("NVMe") || json_str.contains("PCIe") {
+                return (DiskType::NvmeSsd, 2000.0);
+            } else {
+                return (DiskType::SataSsd, 500.0);
             }
         }
     }

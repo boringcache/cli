@@ -5,7 +5,7 @@ use crate::api::models::optimize::{
 use crate::config::{self, Config};
 use crate::optimize::detect::{detect_ci_type, score_relevance};
 use crate::optimize::transform::{
-    deterministic_optimize, preserve_trailing_newline, validate_output, TransformResult,
+    TransformResult, deterministic_optimize, preserve_trailing_newline, validate_output,
 };
 use crate::optimize::{CiType, FileRelevance, MAX_FILES_PER_REQUEST};
 use crate::types::Result;
@@ -83,7 +83,8 @@ pub async fn execute(
     if !json_output && std::io::stdin().is_terminal() {
         let needs_auth = if optimize_auth_configured() {
             let client = ApiClient::new()?;
-            client.get_session_info().await.is_err()
+            let session_result = client.get_session_info().await;
+            session_result.is_err()
         } else {
             true
         };
@@ -300,11 +301,11 @@ pub async fn execute(
             }
         }
 
-        if let Some(explanation) = &result.explanation {
-            if !explanation.is_empty() {
-                println!();
-                ui::info(explanation);
-            }
+        if let Some(explanation) = &result.explanation
+            && !explanation.is_empty()
+        {
+            println!();
+            ui::info(explanation);
         }
 
         println!();
@@ -376,11 +377,11 @@ pub async fn execute(
             ui::info("  1. Review: git diff");
             ui::info("  2. Commit and push to trigger your first cached CI run");
 
-            if let Ok(config) = Config::load() {
-                if let Some(ref ws) = config.default_workspace {
-                    ui::blank_line();
-                    ui::info(&format!("Your workspace: {}", ws));
-                }
+            if let Ok(config) = Config::load()
+                && let Some(ref ws) = config.default_workspace
+            {
+                ui::blank_line();
+                ui::info(&format!("Your workspace: {}", ws));
             }
         }
     }

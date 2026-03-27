@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use std::time::Duration;
 
-use crate::api::models::cache::CompleteMultipartRequest;
 use crate::api::ApiClient;
+use crate::api::models::cache::CompleteMultipartRequest;
 use crate::manifest::ManifestFile;
 use crate::multipart_upload::{upload_via_part_urls, upload_via_single_url};
 use crate::progress::{ProgressSession, Summary, TransferProgress};

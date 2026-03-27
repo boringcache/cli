@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -108,7 +108,9 @@ pub(crate) async fn materialize_file_cas_entries(
                 .acquire_owned()
                 .await
                 .map_err(|error| anyhow!("Restore materialize semaphore closed: {error}"))?;
-            materialize_primary_file(job).await
+            let result = materialize_primary_file(job).await;
+            drop(_permit);
+            result
         }));
     }
     for task in primary_tasks {
@@ -123,7 +125,9 @@ pub(crate) async fn materialize_file_cas_entries(
                 .acquire_owned()
                 .await
                 .map_err(|error| anyhow!("Restore materialize semaphore closed: {error}"))?;
-            materialize_link_file(job).await
+            let result = materialize_link_file(job).await;
+            drop(_permit);
+            result
         }));
     }
     for task in link_tasks {

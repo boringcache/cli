@@ -4,11 +4,11 @@ pub use common::{ProgressFormat, ProgressSession, StepHandle, TransferProgress};
 
 use anyhow::{self, Result};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
-use humansize::{format_size, DECIMAL};
+use humansize::{DECIMAL, format_size};
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -433,12 +433,12 @@ impl Renderer {
     }
 
     fn extract_prefix(title: &str) -> Option<String> {
-        if let Some(start) = title.find('[') {
-            if let Some(end) = title[start + 1..].find(']') {
-                let inner = title[start + 1..start + 1 + end].trim();
-                if !inner.is_empty() {
-                    return Some(inner.to_string());
-                }
+        if let Some(start) = title.find('[')
+            && let Some(end) = title[start + 1..].find(']')
+        {
+            let inner = title[start + 1..start + 1 + end].trim();
+            if !inner.is_empty() {
+                return Some(inner.to_string());
             }
         }
 

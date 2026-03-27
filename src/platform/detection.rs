@@ -73,10 +73,10 @@ impl Platform {
 
     #[inline]
     pub fn has_platform_suffix(tag: &str) -> bool {
-        if let Some(last_part) = tag.rsplit('-').next() {
-            if matches!(last_part, "x86_64" | "arm64" | "arm32" | "x86") {
-                return true;
-            }
+        if let Some(last_part) = tag.rsplit('-').next()
+            && matches!(last_part, "x86_64" | "arm64" | "arm32" | "x86")
+        {
+            return true;
         }
 
         let tag_bytes = tag.as_bytes();
@@ -279,12 +279,11 @@ impl Platform {
         if let Ok(output) = std::process::Command::new("sw_vers")
             .arg("-productVersion")
             .output()
+            && let Ok(version_str) = String::from_utf8(output.stdout)
         {
-            if let Ok(version_str) = String::from_utf8(output.stdout) {
-                let version = version_str.trim();
-                let major_version = version.split('.').next().unwrap_or(version);
-                return (Some("darwin".to_string()), Some(major_version.to_string()));
-            }
+            let version = version_str.trim();
+            let major_version = version.split('.').next().unwrap_or(version);
+            return (Some("darwin".to_string()), Some(major_version.to_string()));
         }
         (Some("darwin".to_string()), None)
     }

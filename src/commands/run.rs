@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::collections::BTreeMap;
 use std::process::Stdio;
 
@@ -181,16 +181,14 @@ pub async fn execute(
                 )
                 .await;
 
-                if let Err(error) = save_result {
-                    if fail_on_cache_error && command_succeeded {
-                        shutdown_proxy_handle(proxy_handle.take(), fail_on_cache_error, false)
-                            .await?;
-                        return Err(ExitCodeError::with_message(
-                            EXIT_CONFIG,
-                            format!("{:#}", error),
-                        )
-                        .into());
-                    }
+                if let Err(error) = save_result
+                    && fail_on_cache_error
+                    && command_succeeded
+                {
+                    shutdown_proxy_handle(proxy_handle.take(), fail_on_cache_error, false).await?;
+                    return Err(
+                        ExitCodeError::with_message(EXIT_CONFIG, format!("{:#}", error)).into(),
+                    );
                 }
             }
 
@@ -260,7 +258,8 @@ async fn spawn_command(
         .spawn()
         .map_err(|error| map_spawn_error(error, &prepared_command[0]))?;
 
-    wait_for_child(&mut child).await
+    let exit_code = wait_for_child(&mut child).await?;
+    Ok(exit_code)
 }
 
 fn inject_proxy_env(command: &mut tokio::process::Command, context: &ProxyContext) {
@@ -293,7 +292,7 @@ fn substitute_proxy_placeholders(command: &[String], port: u16, cache_ref: &str)
 
 #[cfg(unix)]
 async fn wait_for_child(child: &mut tokio::process::Child) -> Result<ChildOutcome> {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
 
     let mut sigint = signal(SignalKind::interrupt()).context("Failed to install SIGINT handler")?;
     let mut sigterm =

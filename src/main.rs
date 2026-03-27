@@ -17,10 +17,10 @@ fn resolve_effective_workspace(workspace: &str) -> Option<String> {
 }
 
 fn resolve_default_workspace() -> Option<String> {
-    if let Some(workspace) = config::env_var("BORINGCACHE_DEFAULT_WORKSPACE") {
-        if let Some(workspace) = resolve_effective_workspace(&workspace) {
-            return Some(workspace);
-        }
+    if let Some(workspace) = config::env_var("BORINGCACHE_DEFAULT_WORKSPACE")
+        && let Some(workspace) = resolve_effective_workspace(&workspace)
+    {
+        return Some(workspace);
     }
 
     let config = Config::load().ok()?;
@@ -177,31 +177,31 @@ async fn main() -> Result<()> {
                 _ => false,
             };
 
-            if needs_workspace_injection {
-                if let Some(default_workspace) = resolve_default_workspace() {
-                    if command == "run" || command == "exec" {
-                        let separator_idx = args[2..].iter().position(|arg| arg == "--");
-                        let pre_separator: Vec<_> = positional_args
-                            .iter()
-                            .filter(|(idx, _)| separator_idx.is_none_or(|sep| *idx < sep))
-                            .collect();
+            if needs_workspace_injection
+                && let Some(default_workspace) = resolve_default_workspace()
+            {
+                if command == "run" || command == "exec" {
+                    let separator_idx = args[2..].iter().position(|arg| arg == "--");
+                    let pre_separator: Vec<_> = positional_args
+                        .iter()
+                        .filter(|(idx, _)| separator_idx.is_none_or(|sep| *idx < sep))
+                        .collect();
 
-                        if let Some((index, _)) = pre_separator.first() {
-                            args.insert(index + 2, default_workspace);
-                        } else if let Some(separator_idx) = separator_idx {
-                            args.insert(separator_idx + 2, default_workspace);
-                        } else if positional_args.is_empty() {
-                            args.push(default_workspace);
-                        } else {
-                            let first_pos_idx = positional_args[0].0 + 2;
-                            args.insert(first_pos_idx, default_workspace);
-                        }
-                    } else if command == "ls" || positional_args.is_empty() {
+                    if let Some((index, _)) = pre_separator.first() {
+                        args.insert(index + 2, default_workspace);
+                    } else if let Some(separator_idx) = separator_idx {
+                        args.insert(separator_idx + 2, default_workspace);
+                    } else if positional_args.is_empty() {
                         args.push(default_workspace);
                     } else {
                         let first_pos_idx = positional_args[0].0 + 2;
                         args.insert(first_pos_idx, default_workspace);
                     }
+                } else if command == "ls" || positional_args.is_empty() {
+                    args.push(default_workspace);
+                } else {
+                    let first_pos_idx = positional_args[0].0 + 2;
+                    args.insert(first_pos_idx, default_workspace);
                 }
             }
         }

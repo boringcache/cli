@@ -1,7 +1,7 @@
 use crate::progress::{Reporter, Summary};
 use crate::types::{ByteSize, Result};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 #[derive(Clone)]

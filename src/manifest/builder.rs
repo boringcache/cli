@@ -321,10 +321,10 @@ fn matches_glob(text: &str, pattern: &str) -> bool {
         return text == pattern;
     }
 
-    if let Some(middle) = pattern.strip_prefix('*').and_then(|p| p.strip_suffix('*')) {
-        if !middle.is_empty() {
-            return text.contains(middle);
-        }
+    if let Some(middle) = pattern.strip_prefix('*').and_then(|p| p.strip_suffix('*'))
+        && !middle.is_empty()
+    {
+        return text.contains(middle);
     }
 
     if let Some(suffix) = pattern.strip_prefix('*') {

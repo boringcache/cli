@@ -1,7 +1,7 @@
 use crate::observability::ObservabilityEvent;
 use serde_json::to_string;
 use std::env;
-use std::fs::{create_dir_all, OpenOptions};
+use std::fs::{OpenOptions, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -42,28 +42,28 @@ pub(crate) fn sink_event(event: &ObservabilityEvent) {
 fn primary_output_path() -> Option<&'static PathBuf> {
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
     PATH.get_or_init(|| {
-        if let Ok(path) = env::var(OBSERVABILITY_JSONL_PATH_ENV) {
-            if let Some(trimmed) = trim_optional_env(path) {
-                return Some(PathBuf::from(trimmed));
-            }
+        if let Ok(path) = env::var(OBSERVABILITY_JSONL_PATH_ENV)
+            && let Some(trimmed) = trim_optional_env(path)
+        {
+            return Some(PathBuf::from(trimmed));
         }
 
-        if let Ok(path) = env::var("BORINGCACHE_REQUEST_METRICS_PATH") {
-            if let Some(trimmed) = trim_optional_env(path) {
-                return Some(PathBuf::from(trimmed));
-            }
+        if let Ok(path) = env::var("BORINGCACHE_REQUEST_METRICS_PATH")
+            && let Some(trimmed) = trim_optional_env(path)
+        {
+            return Some(PathBuf::from(trimmed));
         }
 
-        if let Ok(path) = env::var("BORINGCACHE_CACHE_METRICS_PATH") {
-            if let Some(trimmed) = trim_optional_env(path) {
-                return Some(PathBuf::from(trimmed));
-            }
+        if let Ok(path) = env::var("BORINGCACHE_CACHE_METRICS_PATH")
+            && let Some(trimmed) = trim_optional_env(path)
+        {
+            return Some(PathBuf::from(trimmed));
         }
 
-        if let Ok(log_dir) = env::var("LOG_DIR") {
-            if let Some(trimmed) = trim_optional_env(log_dir) {
-                return Some(PathBuf::from(trimmed).join("cache-registry-request-metrics.jsonl"));
-            }
+        if let Ok(log_dir) = env::var("LOG_DIR")
+            && let Some(trimmed) = trim_optional_env(log_dir)
+        {
+            return Some(PathBuf::from(trimmed).join("cache-registry-request-metrics.jsonl"));
         }
 
         if let Some(default_logs_dir) = default_internal_logs_dir() {
@@ -101,10 +101,10 @@ fn archive_output_path(event: &ObservabilityEvent) -> Option<PathBuf> {
 }
 
 fn archive_workspace(event: &ObservabilityEvent) -> Option<String> {
-    if let Ok(value) = env::var(OBSERVABILITY_ARCHIVE_WORKSPACE_ENV) {
-        if let Some(trimmed) = trim_optional_env(value) {
-            return Some(trimmed);
-        }
+    if let Ok(value) = env::var(OBSERVABILITY_ARCHIVE_WORKSPACE_ENV)
+        && let Some(trimmed) = trim_optional_env(value)
+    {
+        return Some(trimmed);
     }
 
     event.workspace.clone().and_then(trim_optional_env)

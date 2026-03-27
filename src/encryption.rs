@@ -276,14 +276,14 @@ pub fn load_identity_for_decryption(
         })?));
     }
 
-    if let Ok(config) = crate::config::Config::load() {
-        if let Some(ref identity_path) = config.default_age_identity {
-            let path = PathBuf::from(identity_path);
-            if path.exists() {
-                return Ok(Some(load_identity(&path).with_context(|| {
-                    format!("Failed to load identity from {}", path.display())
-                })?));
-            }
+    if let Ok(config) = crate::config::Config::load()
+        && let Some(ref identity_path) = config.default_age_identity
+    {
+        let path = PathBuf::from(identity_path);
+        if path.exists() {
+            return Ok(Some(load_identity(&path).with_context(|| {
+                format!("Failed to load identity from {}", path.display())
+            })?));
         }
     }
 

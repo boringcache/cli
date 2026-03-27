@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use crate::serve::state::AppState;
 
 use super::error::RegistryError;
-use super::kv::{get_or_head_kv_object, put_kv_object, resolve_kv_entries, KvNamespace};
+use super::kv::{KvNamespace, get_or_head_kv_object, put_kv_object, resolve_kv_entries};
 
 pub(crate) fn handle_status(
     method: Method,

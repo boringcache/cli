@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Response};
 use crate::serve::state::AppState;
 
 use super::error::RegistryError;
-use super::kv::{get_or_head_kv_object, put_kv_object, resolve_kv_entries, KvNamespace};
+use super::kv::{KvNamespace, get_or_head_kv_object, put_kv_object, resolve_kv_entries};
 use super::turborepo;
 
 pub(crate) async fn handle_artifact(

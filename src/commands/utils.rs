@@ -4,10 +4,10 @@ use anyhow::Result;
 use thiserror::Error;
 
 pub fn expand_tilde_path(path: &str) -> String {
-    if path.starts_with('~') {
-        if let Some(home) = dirs::home_dir() {
-            return path.replacen('~', &home.to_string_lossy(), 1);
-        }
+    if path.starts_with('~')
+        && let Some(home) = dirs::home_dir()
+    {
+        return path.replacen('~', &home.to_string_lossy(), 1);
     }
     path.to_string()
 }
@@ -45,12 +45,12 @@ pub fn resolve_encryption_config(
         return Ok((true, Some(recipient)));
     }
 
-    if let Ok(config) = Config::load() {
-        if let Some(ws_encryption) = config.get_workspace_encryption(workspace) {
-            if ws_encryption.enabled && !ws_encryption.recipient.is_empty() {
-                return Ok((true, Some(ws_encryption.recipient.clone())));
-            }
-        }
+    if let Ok(config) = Config::load()
+        && let Some(ws_encryption) = config.get_workspace_encryption(workspace)
+        && ws_encryption.enabled
+        && !ws_encryption.recipient.is_empty()
+    {
+        return Ok((true, Some(ws_encryption.recipient.clone())));
     }
 
     Ok((false, None))

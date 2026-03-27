@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-use crate::api::models::cache::{BlobReceipt, ManifestReceiptCommitRequest};
 use crate::api::ApiClient;
+use crate::api::models::cache::{BlobReceipt, ManifestReceiptCommitRequest};
 
 pub async fn try_commit_blob_receipts(
     api_client: &ApiClient,

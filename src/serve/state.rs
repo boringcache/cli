@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
-use tokio::sync::{mpsc, Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 
 pub fn diagnostics_enabled() -> bool {
     log::log_enabled!(log::Level::Debug)
@@ -671,17 +671,17 @@ impl BlobReadCache {
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if let Some(key) = Self::legacy_digest_key_from_name(file_name) {
-                if metadata.len() > 0 {
-                    total_bytes = total_bytes.saturating_add(metadata.len());
-                    entries.insert(
-                        key,
-                        BlobReadStorageEntry::LegacyFile {
-                            path,
-                            size_bytes: metadata.len(),
-                        },
-                    );
-                }
+            if let Some(key) = Self::legacy_digest_key_from_name(file_name)
+                && metadata.len() > 0
+            {
+                total_bytes = total_bytes.saturating_add(metadata.len());
+                entries.insert(
+                    key,
+                    BlobReadStorageEntry::LegacyFile {
+                        path,
+                        size_bytes: metadata.len(),
+                    },
+                );
             }
         }
 
@@ -1092,11 +1092,9 @@ impl KvPendingStore {
             }
             None => false,
         };
-        if remove {
-            if let Some(bref) = self.blob_refs.remove(digest) {
-                self.total_spool_bytes = self.total_spool_bytes.saturating_sub(bref.size_bytes);
-                return Some(bref.path);
-            }
+        if remove && let Some(bref) = self.blob_refs.remove(digest) {
+            self.total_spool_bytes = self.total_spool_bytes.saturating_sub(bref.size_bytes);
+            return Some(bref.path);
         }
         None
     }

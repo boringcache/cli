@@ -243,12 +243,16 @@ jobs:
 "#;
 
         let result = apply(input).expect("expected deterministic rewrite");
-        assert!(result
-            .optimized_content
-            .contains("uses: boringcache/one@v1"));
-        assert!(result
-            .optimized_content
-            .contains("BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}"));
+        assert!(
+            result
+                .optimized_content
+                .contains("uses: boringcache/one@v1")
+        );
+        assert!(
+            result
+                .optimized_content
+                .contains("BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}")
+        );
         assert!(!result.optimized_content.contains("uses: actions/cache"));
         assert!(!result.changes.is_empty());
     }

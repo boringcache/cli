@@ -9,13 +9,13 @@ use crate::progress::{ProgressSession, Summary, System as ProgressSystem, Transf
 use crate::telemetry::StorageMetrics;
 use crate::transfer::send_transfer_request_with_retry;
 use crate::ui;
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{Context, Error, Result, anyhow};
 use std::collections::HashMap;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tempfile::{tempdir, TempPath};
+use tempfile::{TempPath, tempdir};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
@@ -497,10 +497,10 @@ async fn execute_batch_restore_inner(
     let max_pending_retries = 5u32;
     let mut pending_attempt = 0u32;
     let resolution_result = loop {
-        match api_client
+        let restore_result = api_client
             .restore(&workspace, &all_candidates, require_server_signature)
-            .await
-        {
+            .await;
+        match restore_result {
             Ok(result) => {
                 let has_hit = result.iter().any(|entry| entry.status == "hit");
                 let has_retryable = result.iter().any(is_entry_retryable);
@@ -610,11 +610,11 @@ async fn execute_batch_restore_inner(
     for plan in &plans {
         let mut chosen: Option<CacheResolutionEntry> = None;
         for candidate in &plan.candidates {
-            if let Some(entry) = results_by_tag.get(candidate) {
-                if entry.status == "hit" {
-                    chosen = Some(entry.clone());
-                    break;
-                }
+            if let Some(entry) = results_by_tag.get(candidate)
+                && entry.status == "hit"
+            {
+                chosen = Some(entry.clone());
+                break;
             }
         }
 
@@ -724,7 +724,7 @@ async fn execute_batch_restore_inner(
                 .acquire_owned()
                 .await
                 .map_err(|e| anyhow!("Restore semaphore closed: {e}"))?;
-            process_restore(
+            let result = process_restore(
                 api_client,
                 reporter,
                 session_id,
@@ -737,7 +737,9 @@ async fn execute_batch_restore_inner(
                 passphrase_cache,
                 require_server_signature,
             )
-            .await
+            .await;
+            drop(_permit);
+            result
         });
 
         tasks.push(task);
@@ -749,7 +751,8 @@ async fn execute_batch_restore_inner(
     let mut restore_errors: Vec<Error> = Vec::new();
 
     for task in tasks {
-        match task.await {
+        let task_result = task.await;
+        match task_result {
             Ok(Ok(RestoreOutcome::Restored {
                 tag,
                 manifest_root_digest,
@@ -1203,11 +1206,12 @@ async fn process_restore_archive(
 
     let manifest_payload = if manifest_encrypted {
         let cached_passphrase = crate::encryption::cached_passphrase(&passphrase_cache)?;
-        match crate::encryption::decrypt_bytes(
+        let decrypt_result = crate::encryption::decrypt_bytes(
             &manifest_bytes_raw,
             age_identity.as_ref(),
             cached_passphrase.as_deref(),
-        ) {
+        );
+        match decrypt_result {
             Ok(bytes) => bytes,
             Err(err) if crate::encryption::is_passphrase_required(&err) => {
                 let passphrase = crate::encryption::get_or_prompt_passphrase(
@@ -1236,20 +1240,20 @@ async fn process_restore_archive(
         ciborium::from_reader(&manifest_bytes[..]).context("Failed to parse manifest")?;
     manifest_step.complete()?;
 
-    if let Some(expected_digest) = hit.manifest_root_digest.as_ref() {
-        if expected_digest != &manifest.root.digest {
-            let reason = format!(
-                "Manifest digest mismatch for {} (expected {}, got {})",
-                hit.tag, expected_digest, manifest.root.digest
-            );
-            let _ = reporter.warning(reason.clone());
-            ui::warn(&reason);
-            session.error(reason.clone())?;
-            return Ok(RestoreOutcome::Ignored {
-                tag: hit.tag.clone(),
-                reason,
-            });
-        }
+    if let Some(expected_digest) = hit.manifest_root_digest.as_ref()
+        && expected_digest != &manifest.root.digest
+    {
+        let reason = format!(
+            "Manifest digest mismatch for {} (expected {}, got {})",
+            hit.tag, expected_digest, manifest.root.digest
+        );
+        let _ = reporter.warning(reason.clone());
+        ui::warn(&reason);
+        session.error(reason.clone())?;
+        return Ok(RestoreOutcome::Ignored {
+            tag: hit.tag.clone(),
+            reason,
+        });
     }
 
     verify_restore_signature(
@@ -1386,7 +1390,7 @@ async fn process_restore_archive(
                 if passphrase_ref.is_none() {
                     return Err(err);
                 }
-                tokio::task::spawn_blocking({
+                let decrypt_retry = tokio::task::spawn_blocking({
                     let archive_path = archive_file_path.clone();
                     let passphrase = passphrase.clone();
                     let age_identity = age_identity.clone();
@@ -1399,7 +1403,8 @@ async fn process_restore_archive(
                     }
                 })
                 .await
-                .context("Decryption task failed")??
+                .context("Decryption task failed")?;
+                decrypt_retry?
             }
             Err(err) => return Err(err),
         };
@@ -1993,7 +1998,7 @@ pub(crate) async fn download_archive(
                 .acquire_owned()
                 .await
                 .map_err(|e| anyhow!("Archive download semaphore closed: {e}"))?;
-            crate::cas_transport::download_range(
+            let result = crate::cas_transport::download_range(
                 &client,
                 &url,
                 &file_path,
@@ -2009,7 +2014,9 @@ pub(crate) async fn download_archive(
                     "Part {}/{} (bytes {}-{}) failed",
                     part_num, num_parts, start, end
                 )
-            })
+            });
+            drop(_permit);
+            result
         });
 
         tasks.push(task);
@@ -2020,7 +2027,8 @@ pub(crate) async fn download_archive(
     let mut first_storage_metrics: Option<StorageMetrics> = None;
 
     for (idx, task) in tasks.into_iter().enumerate() {
-        match task.await {
+        let task_result = task.await;
+        match task_result {
             Ok(Ok((bytes, metrics))) => {
                 total_downloaded += bytes;
 
@@ -2068,7 +2076,11 @@ async fn download_sequential(
     let mut bytes_downloaded = 0u64;
     let mut stream = response.bytes_stream();
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let next_chunk = stream.next().await;
+        let Some(chunk_result) = next_chunk else {
+            break;
+        };
         let chunk = chunk_result?;
         let len = chunk.len();
         writer.write_all(&chunk).await?;

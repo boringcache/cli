@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
+use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,10 +8,10 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task;
 
+use crate::api::ApiClient;
 use crate::api::models::cache::{
     BlobDescriptor, ConfirmRequest, ManifestCheckRequest, SaveRequest,
 };
-use crate::api::ApiClient;
 use crate::archive::create_tar_archive;
 use crate::ci_detection::detect_ci_environment;
 use crate::commands::cas_publish::{self, BlobUploadSource};
@@ -155,7 +155,8 @@ pub async fn execute(
         encrypt,
         recipient,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 fn parse_tag_path(tag_path: &str) -> Result<(String, String)> {
@@ -286,7 +287,7 @@ async fn initial_restore(
     );
     let archive_identity = identity.clone();
     let archive_passphrase_cache = passphrase_cache.clone();
-    adapter
+    let restore_action = adapter
         .dispatch(
             || {
                 initial_restore_archive(
@@ -323,7 +324,8 @@ async fn initial_restore(
                 )
             },
         )
-        .await
+        .await?;
+    Ok(restore_action)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -439,11 +441,12 @@ async fn initial_restore_archive(
 
     let manifest_payload = if manifest_encrypted {
         let cached_passphrase = crate::encryption::cached_passphrase(&passphrase_cache)?;
-        match crate::encryption::decrypt_bytes(
+        let decrypt_result = crate::encryption::decrypt_bytes(
             &manifest_bytes_raw,
             age_identity.as_ref(),
             cached_passphrase.as_deref(),
-        ) {
+        );
+        match decrypt_result {
             Ok(bytes) => bytes,
             Err(err) if crate::encryption::is_passphrase_required(&err) => {
                 let passphrase = crate::encryption::get_or_prompt_passphrase(
@@ -570,7 +573,7 @@ async fn initial_restore_archive(
                 if passphrase_ref.is_none() {
                     return Err(err);
                 }
-                tokio::task::spawn_blocking({
+                let decrypt_retry = tokio::task::spawn_blocking({
                     let archive_path = archive_path.clone();
                     let passphrase = passphrase.clone();
                     let age_identity = age_identity.clone();
@@ -583,7 +586,8 @@ async fn initial_restore_archive(
                     }
                 })
                 .await
-                .context("Decryption task failed")??
+                .context("Decryption task failed")?;
+                decrypt_retry?
             }
             Err(err) => return Err(err),
         };
@@ -1137,15 +1141,14 @@ async fn sync_to_remote_cas(
         )
         .await;
 
-    if let Ok(response) = check_response {
-        if let Some(result) = response.results.first() {
-            if result.exists {
-                if verbose {
-                    ui::info("  Cache already up to date");
-                }
-                return Ok(());
-            }
+    if let Ok(response) = check_response
+        && let Some(result) = response.results.first()
+        && result.exists
+    {
+        if verbose {
+            ui::info("  Cache already up to date");
         }
+        return Ok(());
     }
 
     let request = cas_publish::build_save_request(
@@ -1270,15 +1273,14 @@ async fn sync_to_remote_archive(
         )
         .await;
 
-    if let Ok(response) = check_response {
-        if let Some(result) = response.results.first() {
-            if result.exists {
-                if verbose {
-                    ui::info("  Cache already up to date");
-                }
-                return Ok(());
-            }
+    if let Ok(response) = check_response
+        && let Some(result) = response.results.first()
+        && result.exists
+    {
+        if verbose {
+            ui::info("  Cache already up to date");
         }
+        return Ok(());
     }
 
     if verbose {
@@ -1438,11 +1440,11 @@ async fn sync_to_remote_archive(
             "  Uploading archive ({})...",
             crate::types::ByteSize::new(final_compressed_size)
         ));
-        if !save_response.upload_headers.is_empty() {
-            if let Some(regions) = save_response.upload_headers.get("x-tigris-regions") {
-                let count = regions.split(',').count();
-                ui::info(&format!("  Replication: {} regions ({})", count, regions));
-            }
+        if !save_response.upload_headers.is_empty()
+            && let Some(regions) = save_response.upload_headers.get("x-tigris-regions")
+        {
+            let count = regions.split(',').count();
+            ui::info(&format!("  Replication: {} regions ({})", count, regions));
         }
     }
 

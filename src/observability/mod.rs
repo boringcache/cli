@@ -234,10 +234,10 @@ impl Hub {
             let (tx, rx) = mpsc::sync_channel(observability_queue_capacity());
             let worker_queued = queued.clone();
             let worker_human = human_log_enabled;
-            match std::thread::Builder::new()
+            let spawn_result = std::thread::Builder::new()
                 .name("observability-worker".to_string())
-                .spawn(move || run_worker(rx, worker_queued, worker_human))
-            {
+                .spawn(move || run_worker(rx, worker_queued, worker_human));
+            match spawn_result {
                 Ok(_) => Some(Arc::new(tx)),
                 Err(error) => {
                     log::warn!("Observability worker spawn failed ({error}); using direct mode");

@@ -2,7 +2,7 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -15,16 +15,16 @@ use crate::cas_oci;
 use crate::cas_transport::upload_payload;
 use crate::serve::error::OciError;
 use crate::serve::oci_route::{
-    insert_header, oci_cache_op_for_route_method, oci_miss_key, oci_success_rollup_result,
-    parse_oci_path, record_oci_cache_op, OciRoute,
+    OciRoute, insert_header, oci_cache_op_for_route_method, oci_miss_key,
+    oci_success_rollup_result, parse_oci_path, record_oci_cache_op,
 };
 use crate::serve::oci_tags::{
-    alias_tags_for_manifest, bind_alias_tag, scoped_restore_tags, scoped_save_tag,
-    scoped_write_scope_tag, AliasBinding, AliasTagManifest,
+    AliasBinding, AliasTagManifest, alias_tags_for_manifest, bind_alias_tag, scoped_restore_tags,
+    scoped_save_tag, scoped_write_scope_tag,
 };
 use crate::serve::state::{
-    diagnostics_enabled, digest_tag, AppState, BlobLocatorEntry, BlobReadHandle,
-    OciManifestCacheEntry, UploadSession, OCI_MANIFEST_CACHE_TTL,
+    AppState, BlobLocatorEntry, BlobReadHandle, OCI_MANIFEST_CACHE_TTL, OciManifestCacheEntry,
+    UploadSession, diagnostics_enabled, digest_tag,
 };
 
 const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
@@ -322,11 +322,11 @@ async fn resolve_manifest(
         .collect();
     let mut selected = None;
     for tag in &tags {
-        if let Some(entry) = entries_by_tag.remove(tag) {
-            if entry.status == "hit" {
-                selected = Some(entry);
-                break;
-            }
+        if let Some(entry) = entries_by_tag.remove(tag)
+            && entry.status == "hit"
+        {
+            selected = Some(entry);
+            break;
         }
     }
     if selected.is_none() {
@@ -403,8 +403,9 @@ async fn resolve_manifest(
         let should_prefetch_blob_urls =
             prefetch_blob_urls && pointer.blobs.len() <= OCI_PREFETCH_BLOB_URL_LIMIT;
         let mut prefetched_urls: HashMap<String, String> = HashMap::new();
-        if should_prefetch_blob_urls && !blob_descriptors.is_empty() {
-            if let Ok(Ok(response)) = tokio::time::timeout(
+        if should_prefetch_blob_urls
+            && !blob_descriptors.is_empty()
+            && let Ok(Ok(response)) = tokio::time::timeout(
                 OCI_API_CALL_TIMEOUT,
                 state.api_client.blob_download_urls(
                     &state.workspace,
@@ -413,10 +414,9 @@ async fn resolve_manifest(
                 ),
             )
             .await
-            {
-                for entry in response.download_urls {
-                    prefetched_urls.insert(entry.digest, entry.url);
-                }
+        {
+            for entry in response.download_urls {
+                prefetched_urls.insert(entry.digest, entry.url);
             }
         }
         prefetched_urls
@@ -525,15 +525,15 @@ async fn ensure_cached_manifest_blob_retrievability(
         return Ok(HashMap::new());
     }
 
-    match validate_manifest_blob_retrievability(
+    let validation_result = validate_manifest_blob_retrievability(
         state,
         &cached.cache_entry_id,
         &cached.name,
         reference,
         &cached.blobs,
     )
-    .await
-    {
+    .await;
+    match validation_result {
         Ok(prefetched_urls) => {
             mark_manifest_blob_retrievability_validated_at(cached);
             Ok(prefetched_urls)
@@ -848,7 +848,8 @@ fn lookup_oci_manifest_cache(
     tags: &[String],
 ) -> Option<Arc<OciManifestCacheEntry>> {
     for tag in tags {
-        if let Some(entry) = state.oci_manifest_cache.get(tag) {
+        let cached_entry = state.oci_manifest_cache.get(tag);
+        if let Some(entry) = cached_entry {
             if entry.inserted_at.elapsed() < OCI_MANIFEST_CACHE_TTL {
                 return Some(Arc::clone(entry.value()));
             }
@@ -860,10 +861,10 @@ fn lookup_oci_manifest_cache(
 }
 
 fn detect_manifest_content_type(json_bytes: &[u8]) -> String {
-    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(json_bytes) {
-        if val.get("manifests").is_some() {
-            return "application/vnd.oci.image.index.v1+json".to_string();
-        }
+    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(json_bytes)
+        && val.get("manifests").is_some()
+    {
+        return "application/vnd.oci.image.index.v1+json".to_string();
     }
     "application/vnd.oci.image.manifest.v1+json".to_string()
 }
@@ -1100,7 +1101,11 @@ async fn download_oci_blob_to_cache(
         .map_err(|e| OciError::internal(format!("Failed to create temp blob file: {e}")))?;
     let mut stream = response.bytes_stream();
     let mut written = 0u64;
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next_chunk = stream.next().await;
+        let Some(chunk) = next_chunk else {
+            break;
+        };
         let chunk =
             chunk.map_err(|e| OciError::internal(format!("Failed to read blob stream: {e}")))?;
         file.write_all(&chunk)
@@ -1213,7 +1218,11 @@ async fn write_body_to_file(body: Body, file: &mut tokio::fs::File) -> Result<u6
     let mut stream = body.into_data_stream();
     let mut bytes_written: u64 = 0;
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let next_chunk = stream.next().await;
+        let Some(chunk_result) = next_chunk else {
+            break;
+        };
         let chunk = chunk_result
             .map_err(|e| OciError::internal(format!("Failed to read request body chunk: {e}")))?;
         if chunk.is_empty() {
@@ -1392,36 +1401,36 @@ async fn start_upload(
     let body_size = write_body_to_file(body, &mut file).await?;
     drop(file);
 
-    if let Some(digest_param) = params.get("digest") {
-        if body_size > 0 {
-            let (_, actual_digest) = read_file_digest_and_size(&temp_path).await?;
-            if actual_digest != *digest_param {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(OciError::digest_invalid(format!(
-                    "expected {digest_param}, got {actual_digest}"
-                )));
-            }
-
-            let mut sessions = state.upload_sessions.write().await;
-            sessions.create(UploadSession {
-                id: session_id.clone(),
-                name: name.clone(),
-                temp_path,
-                write_lock: Arc::new(tokio::sync::Mutex::new(())),
-                bytes_received: body_size,
-                finalized_digest: Some(digest_param.clone()),
-                finalized_size: Some(body_size),
-                created_at: std::time::Instant::now(),
-            });
-
-            let location = format!("/v2/{name}/blobs/{digest_param}");
-            let mut headers = HeaderMap::new();
-            insert_header(&mut headers, "Location", &location)?;
-            insert_header(&mut headers, "Docker-Upload-UUID", &session_id)?;
-            insert_header(&mut headers, "Docker-Content-Digest", digest_param)?;
-            insert_header(&mut headers, "Content-Length", "0")?;
-            return Ok((StatusCode::CREATED, headers, Body::empty()).into_response());
+    if let Some(digest_param) = params.get("digest")
+        && body_size > 0
+    {
+        let (_, actual_digest) = read_file_digest_and_size(&temp_path).await?;
+        if actual_digest != *digest_param {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(OciError::digest_invalid(format!(
+                "expected {digest_param}, got {actual_digest}"
+            )));
         }
+
+        let mut sessions = state.upload_sessions.write().await;
+        sessions.create(UploadSession {
+            id: session_id.clone(),
+            name: name.clone(),
+            temp_path,
+            write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            bytes_received: body_size,
+            finalized_digest: Some(digest_param.clone()),
+            finalized_size: Some(body_size),
+            created_at: std::time::Instant::now(),
+        });
+
+        let location = format!("/v2/{name}/blobs/{digest_param}");
+        let mut headers = HeaderMap::new();
+        insert_header(&mut headers, "Location", &location)?;
+        insert_header(&mut headers, "Docker-Upload-UUID", &session_id)?;
+        insert_header(&mut headers, "Docker-Content-Digest", digest_param)?;
+        insert_header(&mut headers, "Content-Length", "0")?;
+        return Ok((StatusCode::CREATED, headers, Body::empty()).into_response());
     }
 
     let mut sessions = state.upload_sessions.write().await;
@@ -2114,21 +2123,21 @@ fn extract_blob_descriptors(manifest: &serde_json::Value) -> Result<Vec<BlobDesc
         }
     }
 
-    if let Some(config) = manifest.get("config") {
-        if let (Some(digest), Some(size)) = (
+    if let Some(config) = manifest.get("config")
+        && let (Some(digest), Some(size)) = (
             config.get("digest").and_then(|d| d.as_str()),
             config.get("size").and_then(|s| s.as_u64()),
-        ) {
-            if !cas_oci::is_valid_sha256_digest(digest) {
-                return Err(OciError::digest_invalid(format!(
-                    "unsupported config digest format: {digest}"
-                )));
-            }
-            blobs.push(BlobDescriptor {
-                digest: digest.to_string(),
-                size_bytes: size,
-            });
+        )
+    {
+        if !cas_oci::is_valid_sha256_digest(digest) {
+            return Err(OciError::digest_invalid(format!(
+                "unsupported config digest format: {digest}"
+            )));
         }
+        blobs.push(BlobDescriptor {
+            digest: digest.to_string(),
+            size_bytes: size,
+        });
     }
 
     if let Some(layers) = manifest.get("layers").and_then(|l| l.as_array()) {
@@ -2206,18 +2215,19 @@ async fn stage_manifest_reference_upload(
     }
 
     let digest_tag = digest_tag(&descriptor.digest);
-    let manifest_bytes = if let Some(cached) = lookup_oci_manifest_cache(state, &[digest_tag]) {
-        cached.index_json.clone()
-    } else {
-        let (manifest_bytes, _content_type, resolved_digest) =
-            resolve_manifest(state, name, &descriptor.digest, false).await?;
-        if resolved_digest != descriptor.digest {
-            return Err(OciError::internal(format!(
-                "resolved child manifest digest mismatch for {}: got {}",
-                descriptor.digest, resolved_digest
-            )));
+    let manifest_bytes = match lookup_oci_manifest_cache(state, &[digest_tag]) {
+        Some(cached) => cached.index_json.clone(),
+        _ => {
+            let (manifest_bytes, _content_type, resolved_digest) =
+                resolve_manifest(state, name, &descriptor.digest, false).await?;
+            if resolved_digest != descriptor.digest {
+                return Err(OciError::internal(format!(
+                    "resolved child manifest digest mismatch for {}: got {}",
+                    descriptor.digest, resolved_digest
+                )));
+            }
+            manifest_bytes
         }
-        manifest_bytes
     };
 
     let actual_digest = cas_oci::prefixed_sha256_digest(&manifest_bytes);
@@ -2275,10 +2285,10 @@ async fn stage_manifest_reference_upload(
 async fn cleanup_blob_sessions(state: &AppState, blob_descriptors: &[BlobDescriptor]) {
     let mut sessions = state.upload_sessions.write().await;
     for blob in blob_descriptors {
-        if let Some(session) = sessions.find_by_digest(&blob.digest).map(|s| s.id.clone()) {
-            if let Some(removed) = sessions.remove(&session) {
-                let _ = tokio::fs::remove_file(&removed.temp_path).await;
-            }
+        if let Some(session) = sessions.find_by_digest(&blob.digest).map(|s| s.id.clone())
+            && let Some(removed) = sessions.remove(&session)
+        {
+            let _ = tokio::fs::remove_file(&removed.temp_path).await;
         }
     }
 }
@@ -2290,8 +2300,8 @@ mod tests {
     use crate::git::GitContext;
     use crate::platform::Platform;
     use crate::serve::state::{
-        ref_tag_for_input, BlobLocatorCache, BlobReadCache, KvPendingStore, KvPublishedIndex,
-        UploadSessionStore,
+        BlobLocatorCache, BlobReadCache, KvPendingStore, KvPublishedIndex, UploadSessionStore,
+        ref_tag_for_input,
     };
     use crate::tag_utils::TagResolver;
     use axum::body::Bytes;
