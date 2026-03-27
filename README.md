@@ -44,6 +44,34 @@ boringcache run my-org/app --proxy build-cache -- nx run-many --target=build
 
 The `tag:path` pair is the basic unit. In `deps:node_modules`, `deps` is the cache tag and `node_modules` is where the files live locally.
 
+## Cargo flow locally
+
+For this repo, the fastest local Cargo path is:
+- use `sccache` through `boringcache run --proxy`
+- optionally restore a CI-seeded debug `target` tree when local `target/` is empty
+- load tokens from a repo-local `.boringcache.env`
+
+Setup:
+
+```bash
+cp .boringcache.env.example .boringcache.env
+$EDITOR .boringcache.env
+make env
+```
+
+Run cached Cargo commands:
+
+```bash
+make dev
+make build
+make test
+make clippy
+make check
+./scripts/cargo-flow.sh cargo build --release --locked
+```
+
+The flow uses tags derived from the active Rust version and host triple, disables git/platform suffixing for those explicit tags, prefers remote `sccache`, and restores the archived debug `target` directory only when the local target directory is empty. Local runs do not save `target` back to BoringCache; the debug `target` archive is seeded from GitHub Actions on macOS so Apple Silicon laptops can reuse that remote baseline without stomping active local builds.
+
 ## Trust model
 
 Local CLI use is simplest with `boringcache auth --token ...`.

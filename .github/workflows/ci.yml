@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  RUST_VERSION: "1.94"
+  RUST_VERSION: "1.94.1"
   BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
   SCCACHE_VERSION: "v0.13.0"
   CARGO_INCREMENTAL: "0"
@@ -91,10 +91,11 @@ jobs:
           fi
 
           export CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target"
+          export BORINGCACHE_CARGO_FLOW_MODE=plain
           START_TIME=$(date +%s%N)
-          cargo build --locked
-          cargo test --locked
-          cargo clippy --locked -- -D warnings
+          ./scripts/cargo-flow.sh build
+          ./scripts/cargo-flow.sh test
+          ./scripts/cargo-flow.sh clippy
           END_TIME=$(date +%s%N)
           DURATION=$(( (END_TIME - START_TIME) / 1000000 ))
           echo "BoringCache build+test: ${DURATION}ms"
@@ -125,6 +126,40 @@ jobs:
           name: boringcache-results
           path: benchmark-results/
 
+  warm-macos-debug-cache:
+    name: Warm CLI debug cache (macOS)
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Rust (BoringCache)
+        id: boringcache-rust
+        continue-on-error: true
+        uses: boringcache/one@v1
+        with:
+          setup: none
+          mode: rust-sccache
+          workspace: ${{ github.repository }}
+          rust-version: ${{ env.RUST_VERSION }}
+          cache-tag: "rust-${{ env.RUST_VERSION }}-ci-build-aarch64-apple-darwin"
+          sccache: "true"
+          sccache-mode: "proxy"
+          cache-target: "false"
+
+      - name: Setup Rust (Fallback)
+        if: steps.boringcache-rust.outcome == 'failure'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Warm debug cache via cargo-flow
+        env:
+          BORINGCACHE_CARGO_FLOW_MODE: boringcache
+          BORINGCACHE_CARGO_TARGET_ARCHIVE_MODE: seed
+        run: ./scripts/cargo-flow.sh build
+
   build:
     name: Build CLI - ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
@@ -141,7 +176,7 @@ jobs:
           # Linux musl build (static, for Alpine/minimal containers)
           - runner: ubuntu-latest
             name: linux-musl-amd64
-            container: rust:1.94-alpine
+            container: rust:1.94.1-alpine
             target: x86_64-unknown-linux-musl
             binary_name: boringcache-linux-musl-amd64
             use_docker: true
@@ -274,9 +309,9 @@ jobs:
               # Build with appropriate flags.
               # Docker layer caching is handled by boringcache/one above.
               if [ "${{ matrix.musl }}" = "true" ]; then
-                RUSTFLAGS="-C target-feature=+crt-static" cargo build --locked --release --target ${{ matrix.target }}
+                RUSTFLAGS="-C target-feature=+crt-static" BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
               else
-                cargo build --locked --release --target ${{ matrix.target }}
+                BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
               fi
 
               # Copy binary
@@ -329,7 +364,7 @@ jobs:
       - name: Build CLI (Native builds)
         if: matrix.use_docker != true
         run: |
-          cargo build --locked --release --target ${{ matrix.target }}
+          BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
 
       - name: Prepare binary (Native builds)
         if: matrix.use_docker != true

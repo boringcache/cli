@@ -275,10 +275,7 @@ fn inject_proxy_env(command: &mut tokio::process::Command, context: &ProxyContex
         format!("boringcache go-cacheprog --endpoint {}", endpoint),
     );
     command.env("RUSTC_WRAPPER", "sccache");
-    command.env("SCCACHE_ENDPOINT", &endpoint);
-    command.env("SCCACHE_BUCKET", "cache");
-    command.env("SCCACHE_S3_USE_SSL", "false");
-    command.env("SCCACHE_REGION", "local");
+    command.env("SCCACHE_WEBDAV_ENDPOINT", format!("{endpoint}/"));
     command.env("BORINGCACHE_PROXY_PORT", context.port.to_string());
     command.env("BORINGCACHE_CACHE_REF", &context.cache_ref);
 }

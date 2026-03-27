@@ -1,2 +1,26 @@
 [tools]
-rust = "1.94"
+rust = "1.94.1"
+
+[tasks.env]
+run = "./scripts/cargo-flow.sh env"
+
+[tasks.dev]
+run = "./scripts/cargo-flow.sh build"
+
+[tasks.build]
+run = "./scripts/cargo-flow.sh build --release"
+
+[tasks.test]
+run = "./scripts/cargo-flow.sh test"
+
+[tasks.clippy]
+run = "./scripts/cargo-flow.sh clippy"
+
+[tasks.check]
+run = "./scripts/cargo-flow.sh check"
+
+[tasks.fmt]
+run = "cargo fmt"
+
+[tasks.fmt-check]
+run = "cargo fmt -- --check"

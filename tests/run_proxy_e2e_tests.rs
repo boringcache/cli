@@ -26,10 +26,13 @@ fn test_run_proxy_injects_env_and_substitutes_placeholders() {
     let port = free_port().to_string();
     let script = r#"expected_endpoint="http://127.0.0.1:$1"
 expected_ref="127.0.0.1:$1/cache:main"
+expected_sccache_endpoint="${expected_endpoint}/"
 [ "${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}" = "$expected_endpoint" ] || exit 2
 [ "${TURBO_API:-}" = "$expected_endpoint" ] || exit 3
-[ "${2:-}" = "$expected_ref" ] || exit 4
-curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 5
+[ "${SCCACHE_WEBDAV_ENDPOINT:-}" = "$expected_sccache_endpoint" ] || exit 4
+[ -z "${SCCACHE_ENDPOINT:-}" ] || exit 5
+[ "${2:-}" = "$expected_ref" ] || exit 6
+curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 7
 "#;
 
     let output = Command::new(cli_binary())
