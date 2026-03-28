@@ -197,7 +197,7 @@ jobs:
           load: "true"
           save-always: "true"
 
-      - name: Copy BoringCache CLI for Docker mount
+      - name: Copy Docker build tools for mount
         if: matrix.use_docker == true
         run: |
           set -eu
@@ -205,6 +205,11 @@ jobs:
             cp "$(command -v boringcache)" "${RUNNER_TEMP}/boringcache-bin"
             chmod +x "${RUNNER_TEMP}/boringcache-bin"
             echo "BORINGCACHE_BIN_PATH=${RUNNER_TEMP}/boringcache-bin" >> "${GITHUB_ENV}"
+          fi
+          if command -v sccache >/dev/null 2>&1; then
+            cp "$(command -v sccache)" "${RUNNER_TEMP}/sccache-bin"
+            chmod +x "${RUNNER_TEMP}/sccache-bin"
+            echo "SCCACHE_BIN_PATH=${RUNNER_TEMP}/sccache-bin" >> "${GITHUB_ENV}"
           fi
 
       # Docker builds for Debian/Alpine
@@ -228,6 +233,11 @@ jobs:
             docker_args+=(-v "${BORINGCACHE_BIN_PATH}:/usr/local/bin/boringcache:ro")
           elif command -v boringcache >/dev/null 2>&1; then
             docker_args+=(-v "$(command -v boringcache):/usr/local/bin/boringcache:ro")
+          fi
+          if [ -n "${SCCACHE_BIN_PATH:-}" ] && [ -f "${SCCACHE_BIN_PATH}" ]; then
+            docker_args+=(-v "${SCCACHE_BIN_PATH}:/usr/local/bin/sccache:ro")
+          elif command -v sccache >/dev/null 2>&1; then
+            docker_args+=(-v "$(command -v sccache):/usr/local/bin/sccache:ro")
           fi
           docker run "${docker_args[@]}" \
             "$DOCKER_IMAGE" \
@@ -253,10 +263,14 @@ jobs:
 
               # Install sccache + start proxy for compilation caching
               if boringcache --version >/dev/null 2>&1; then
-                SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/${{ env.SCCACHE_VERSION }}/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl.tar.gz"
-                if curl -fsSL "$SCCACHE_URL" | tar xz -C /tmp; then
-                  mv "/tmp/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
-                  chmod +x /usr/local/bin/sccache
+                if ! command -v sccache >/dev/null 2>&1; then
+                  SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/${{ env.SCCACHE_VERSION }}/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl.tar.gz"
+                  if curl -fsSL "$SCCACHE_URL" | tar xz -C /tmp; then
+                    mv "/tmp/sccache-${{ env.SCCACHE_VERSION }}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
+                    chmod +x /usr/local/bin/sccache
+                  fi
+                fi
+                if command -v sccache >/dev/null 2>&1; then
                   sccache --version
 
                   SCCACHE_PORT=4227
@@ -303,9 +317,11 @@ jobs:
               cp target/${{ matrix.target }}/release/boringcache /workspace/${{ matrix.binary_name }}
               chmod +x /workspace/${{ matrix.binary_name }}
 
-              echo "=== sccache stats ==="
-              sccache --show-stats || true
-              sccache --stop-server >/dev/null 2>&1 || true
+              if command -v sccache >/dev/null 2>&1; then
+                echo "=== sccache stats ==="
+                sccache --show-stats || true
+                sccache --stop-server >/dev/null 2>&1 || true
+              fi
               if [ -n "${PROXY_PID}" ]; then
                 kill "${PROXY_PID}" >/dev/null 2>&1 || true
                 wait "${PROXY_PID}" >/dev/null 2>&1 || true
