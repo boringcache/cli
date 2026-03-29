@@ -23,7 +23,16 @@ run_contract_test() {
   local log_name
   log_name="$(printf '%s' "${label}" | tr ' /' '__')"
   echo "--- ${label} ---"
-  "$@" 2>&1 | tee "${CONTRACT_LOG_DIR}/${log_name}.log"
+  env \
+    -u BORINGCACHE_ADMIN_TOKEN \
+    -u BORINGCACHE_RESTORE_TOKEN \
+    -u BORINGCACHE_SAVE_TOKEN \
+    -u BORINGCACHE_API_TOKEN \
+    -u BORINGCACHE_API_URL \
+    -u BORINGCACHE_DEFAULT_WORKSPACE \
+    -u BORINGCACHE_E2E_RESTORE_TOKEN \
+    -u BORINGCACHE_E2E_SAVE_TOKEN \
+    "$@" 2>&1 | tee "${CONTRACT_LOG_DIR}/${log_name}.log"
 }
 
 echo "=== Phase 1: Pending restore and manifest-check handling ==="

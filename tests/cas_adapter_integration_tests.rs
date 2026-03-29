@@ -45,6 +45,10 @@ fn clear_test_env_overrides() {
     test_env::remove_var("BORINGCACHE_REQUIRE_SERVER_SIGNATURE");
     test_env::remove_var("BORINGCACHE_RESTORE_TOKEN");
     test_env::remove_var("BORINGCACHE_SAVE_TOKEN");
+    test_env::remove_var("BORINGCACHE_ADMIN_TOKEN");
+    test_env::remove_var("BORINGCACHE_API_TOKEN");
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("BORINGCACHE_DEFAULT_WORKSPACE");
 }
 
 fn setup_test_config(temp_dir: &TempDir, server_url: &str) {
