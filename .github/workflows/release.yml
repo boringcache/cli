@@ -189,24 +189,32 @@ jobs:
             use_docker: true
             musl: true
 
-          # macOS builds (GitHub-hosted native)
-          - runner: macos-14
-            name: macos-14-arm64
-            target: aarch64-apple-darwin
-            binary_name: boringcache-macos-14-arm64
-            use_docker: false
-          
+          # macOS universal2 build inputs
           - runner: macos-15
-            name: macos-15-arm64
+            name: macos-arm64
             target: aarch64-apple-darwin
-            binary_name: boringcache-macos-15-arm64
+            binary_name: boringcache-macos-arm64
             use_docker: false
-          
+            macos_deployment_target: "13.0"
+
+          - runner: macos-15-intel
+            name: macos-amd64
+            target: x86_64-apple-darwin
+            binary_name: boringcache-macos-amd64
+            use_docker: false
+            macos_deployment_target: "13.0"
+
           # Windows builds (GitHub-hosted native)
           - runner: windows-2022
-            name: windows-2022-amd64
+            name: windows-amd64
             target: x86_64-pc-windows-msvc
-            binary_name: boringcache-windows-2022-amd64.exe
+            binary_name: boringcache-windows-amd64.exe
+            use_docker: false
+
+          - runner: windows-11-arm
+            name: windows-arm64
+            target: aarch64-pc-windows-msvc
+            binary_name: boringcache-windows-arm64.exe
             use_docker: false
 
     steps:
@@ -400,6 +408,8 @@ jobs:
 
       - name: Build CLI (Native builds)
         if: matrix.use_docker != true
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target || '' }}
         run: |
           cargo build --release --target ${{ matrix.target }}
 
@@ -430,11 +440,51 @@ jobs:
           path: ${{ matrix.binary_name }}
           overwrite: true
 
+  build-macos-universal:
+    name: Build macOS Universal Binary
+    needs: [build-cli]
+    runs-on: macos-15
+
+    steps:
+      - name: Download macOS ARM64 artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: boringcache-macos-arm64
+          path: ./
+
+      - name: Download macOS AMD64 artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: boringcache-macos-amd64
+          path: ./
+
+      - name: Create universal binary
+        run: |
+          lipo -create boringcache-macos-arm64 boringcache-macos-amd64 -output boringcache-macos-universal
+          chmod +x boringcache-macos-universal
+          file boringcache-macos-universal
+
+      - name: Upload universal macOS artifact (attempt 1)
+        id: upload_macos_universal_attempt_1
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: boringcache-macos-universal
+          path: boringcache-macos-universal
+
+      - name: Upload universal macOS artifact (retry)
+        if: steps.upload_macos_universal_attempt_1.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: boringcache-macos-universal
+          path: boringcache-macos-universal
+          overwrite: true
+
   # Create GitHub Release
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [require-cli-ci, build-cli]
+    needs: [require-cli-ci, build-cli, build-macos-universal]
     outputs:
       tag: ${{ steps.get_tag.outputs.tag }}
 
@@ -487,7 +537,7 @@ jobs:
           - \`BORINGCACHE_TOKEN_FILE\` env var: read API token from a file path (useful in Docker builds with secret mounts)
           - \`delete\` now also purges proxy/cache-registry internal data for the deleted tag
           - Unified \`cache-registry\` command with native OCI + Bazel + Gradle + Maven + Nx + Turborepo + sccache + Go support
-          - Cross-platform support: Linux (AMD64/ARM64), macOS (Apple Silicon), Windows (AMD64)
+          - Cross-platform support: Linux (glibc/musl AMD64/ARM64), macOS (Universal, macOS 13+), Windows (AMD64/ARM64)
           - Zstd-compressed tar archives with optional age encryption
           - Streaming I/O for large caches
           - Server-signed manifests with warn-only verification
@@ -518,9 +568,9 @@ jobs:
           - boringcache-linux-arm64
           - boringcache-linux-musl-amd64
           - boringcache-linux-musl-arm64
-          - boringcache-macos-14-arm64
-          - boringcache-macos-15-arm64
-          - boringcache-windows-2022-amd64.exe
+          - boringcache-macos-universal
+          - boringcache-windows-amd64.exe
+          - boringcache-windows-arm64.exe
 
     steps:
       - name: Download artifact
@@ -553,7 +603,8 @@ jobs:
           gh release download "${TAG}" --repo "${{ github.repository }}" \
             -p "boringcache-linux-amd64" \
             -p "boringcache-linux-arm64" \
-            -p "boringcache-linux-musl-amd64"
+            -p "boringcache-linux-musl-amd64" \
+            -p "boringcache-linux-musl-arm64"
 
       - name: Create and upload aliases
         env:
@@ -578,6 +629,9 @@ jobs:
           cp boringcache-linux-musl-amd64 boringcache-alpine-amd64
           gh release upload "${TAG}" boringcache-alpine-amd64 --repo "${REPO}" --clobber
 
+          cp boringcache-linux-musl-arm64 boringcache-alpine-arm64
+          gh release upload "${TAG}" boringcache-alpine-arm64 --repo "${REPO}" --clobber
+
   # Generate and upload SHA256 checksums
   generate-checksums:
     name: Generate Checksums
@@ -585,37 +639,25 @@ jobs:
     needs: [create-release, upload-cli-assets, upload-compat-aliases]
 
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: ./artifacts
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+        run: |
+          mkdir -p artifacts
+          gh release download "${TAG}" --repo "${{ github.repository }}" --dir artifacts
+          rm -f artifacts/SHA256SUMS
 
       - name: Generate SHA256SUMS
         run: |
           cd artifacts
-          for dir in */; do
-            binary_name="${dir%/}"
-            if [ -f "$dir/$binary_name" ]; then
-              sha256sum "$dir/$binary_name" | sed "s|$dir/||" >> ../SHA256SUMS
-            elif [ -f "$dir/${binary_name}.exe" ]; then
-              sha256sum "$dir/${binary_name}.exe" | sed "s|$dir/||" >> ../SHA256SUMS
-            fi
+          : > ../SHA256SUMS
+          find . -maxdepth 1 -type f -name 'boringcache*' | sort | while read -r path; do
+            hash="$(sha256sum "$path" | awk '{print $1}')"
+            name="$(basename "$path")"
+            printf '%s  %s\n' "${hash}" "${name}" >> ../SHA256SUMS
           done
           cd ..
-
-          # Add compat alias entries (same hash as the generic binary)
-          GLIBC_AMD64=$(grep 'boringcache-linux-amd64$' SHA256SUMS | awk '{print $1}')
-          GLIBC_ARM64=$(grep 'boringcache-linux-arm64$' SHA256SUMS | awk '{print $1}')
-          MUSL_AMD64=$(grep 'boringcache-linux-musl-amd64$' SHA256SUMS | awk '{print $1}')
-          for name in ubuntu-22.04-amd64 ubuntu-24.04-amd64 ubuntu-25.04-amd64 \
-                      debian-bookworm-amd64 debian-bullseye-amd64 arch-amd64; do
-            echo "${GLIBC_AMD64}  boringcache-${name}" >> SHA256SUMS
-          done
-          for name in ubuntu-22.04-arm64 ubuntu-24.04-arm64 ubuntu-25.04-arm64 \
-                      debian-bookworm-arm64 debian-bullseye-arm64 arch-arm64; do
-            echo "${GLIBC_ARM64}  boringcache-${name}" >> SHA256SUMS
-          done
-          echo "${MUSL_AMD64}  boringcache-alpine-amd64" >> SHA256SUMS
 
           sort -k2 SHA256SUMS -o SHA256SUMS
           echo "Generated SHA256SUMS:"
@@ -643,7 +685,7 @@ jobs:
           echo "## 🎉 BoringCache CLI Release Complete!"
           echo ""
           echo "### ✅ Components Built and Released:"
-          echo "- **CLI Binaries**: Linux glibc (AMD64/ARM64), Linux musl (AMD64/ARM64), macOS 14/15 (ARM64), Windows 2022 (AMD64)"
+          echo "- **CLI Binaries**: Linux glibc (AMD64/ARM64), Linux musl (AMD64/ARM64), macOS universal (Intel + ARM64, macOS 13+), Windows (AMD64/ARM64)"
           echo "- **SHA256SUMS**: Integrity verification checksums for all binaries"
           echo "- **GitHub-hosted runners**: Free unlimited builds for public repository"
           echo ""

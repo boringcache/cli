@@ -87,18 +87,8 @@ install_binary() {
     local binary_name=""
     
     case "${os}-${arch}" in
-        "darwin-amd64")
-            print_error "macOS Intel builds are no longer published. Please build from source or run under Rosetta."
-            exit 1
-            ;;
-        "darwin-arm64")
-            # Prefer binaries that match the host OS generation
-            macos_major=$(sw_vers -productVersion 2>/dev/null | cut -d'.' -f1)
-            if [ -n "$macos_major" ] && [ "$macos_major" -lt 15 ]; then
-                binary_name="boringcache-macos-14-arm64"
-            else
-                binary_name="boringcache-macos-15-arm64"
-            fi
+        "darwin-amd64"|"darwin-arm64")
+            binary_name="boringcache-macos-universal"
             ;;
         "linux-amd64")
             if [ -f /etc/alpine-release ]; then
@@ -115,7 +105,10 @@ install_binary() {
             fi
             ;;
         "windows-amd64")
-            binary_name="boringcache-windows-2022-amd64.exe"
+            binary_name="boringcache-windows-amd64.exe"
+            ;;
+        "windows-arm64")
+            binary_name="boringcache-windows-arm64.exe"
             ;;
         *)
             print_error "Unsupported platform: ${os}-${arch}"
