@@ -33,6 +33,10 @@ run_leg() {
       LOG_DIR="$log_dir" \
       bash ./scripts/e2e-cli-core-test.sh
       ;;
+    cli-contract)
+      LOG_DIR="$log_dir" \
+      bash ./scripts/e2e-cli-contract-test.sh
+      ;;
     security)
       BINARY="$binary" \
       WORKSPACE="$workspace" \
@@ -234,6 +238,14 @@ EOF
 === Phase 2: run command cache integration ===
 === Phase 3: encryption + mount sync ===
 CLI core e2e passed
+EOF
+      ;;
+    cli-contract)
+      cat <<'EOF'
+=== Phase 1: Pending restore and manifest-check handling ===
+=== Phase 2: Concurrent writer conflict wording ===
+=== Phase 3: Pending publish completion ===
+CLI contract e2e passed
 EOF
       ;;
     security)

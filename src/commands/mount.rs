@@ -10,7 +10,7 @@ use tokio::task;
 
 use crate::api::ApiClient;
 use crate::api::models::cache::{
-    BlobDescriptor, ConfirmRequest, ManifestCheckRequest, SaveRequest,
+    BlobDescriptor, ConfirmRequest, ManifestCheckRequest, ManifestCheckResult, SaveRequest,
 };
 use crate::archive::create_tar_archive;
 use crate::ci_detection::detect_ci_environment;
@@ -32,6 +32,14 @@ enum RestoreAction {
     AlreadyInSync,
     LocalDiffers,
     NoRemoteCache,
+}
+
+fn manifest_check_is_pending(result: &ManifestCheckResult) -> bool {
+    result.pending || matches!(result.status.as_deref(), Some("pending" | "uploading"))
+}
+
+fn manifest_check_is_ready(result: &ManifestCheckResult) -> bool {
+    result.exists && !manifest_check_is_pending(result)
 }
 
 pub async fn execute(
@@ -1143,12 +1151,20 @@ async fn sync_to_remote_cas(
 
     if let Ok(response) = check_response
         && let Some(result) = response.results.first()
-        && result.exists
     {
-        if verbose {
-            ui::info("  Cache already up to date");
+        if manifest_check_is_ready(result) {
+            if verbose {
+                ui::info("  Cache already up to date");
+            }
+            return Ok(());
         }
-        return Ok(());
+
+        if manifest_check_is_pending(result) {
+            if verbose {
+                ui::info("  Remote cache publish pending; skipping duplicate publish");
+            }
+            return Ok(());
+        }
     }
 
     let request = cas_publish::build_save_request(
@@ -1275,12 +1291,20 @@ async fn sync_to_remote_archive(
 
     if let Ok(response) = check_response
         && let Some(result) = response.results.first()
-        && result.exists
     {
-        if verbose {
-            ui::info("  Cache already up to date");
+        if manifest_check_is_ready(result) {
+            if verbose {
+                ui::info("  Cache already up to date");
+            }
+            return Ok(());
         }
-        return Ok(());
+
+        if manifest_check_is_pending(result) {
+            if verbose {
+                ui::info("  Remote cache publish pending; skipping duplicate publish");
+            }
+            return Ok(());
+        }
     }
 
     if verbose {
@@ -1747,6 +1771,82 @@ fn local_oci_manifest_digest(path: &Path) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::models::cache::ManifestCheckResult;
+
+    #[test]
+    fn manifest_check_ready_requires_non_pending_status() {
+        let result = ManifestCheckResult {
+            tag: "test-tag".to_string(),
+            exists: true,
+            pending: false,
+            manifest_root_digest: None,
+            cache_entry_id: None,
+            content_hash: None,
+            manifest_digest: None,
+            manifest_url: None,
+            compression_algorithm: None,
+            archive_urls: Vec::new(),
+            size: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            uploaded_at: None,
+            status: Some("pending".to_string()),
+            error: None,
+        };
+
+        assert!(!manifest_check_is_ready(&result));
+        assert!(manifest_check_is_pending(&result));
+    }
+
+    #[test]
+    fn manifest_check_pending_flag_blocks_ready_classification() {
+        let result = ManifestCheckResult {
+            tag: "test-tag".to_string(),
+            exists: true,
+            pending: true,
+            manifest_root_digest: None,
+            cache_entry_id: None,
+            content_hash: None,
+            manifest_digest: None,
+            manifest_url: None,
+            compression_algorithm: None,
+            archive_urls: Vec::new(),
+            size: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            uploaded_at: None,
+            status: Some("hit".to_string()),
+            error: None,
+        };
+
+        assert!(!manifest_check_is_ready(&result));
+        assert!(manifest_check_is_pending(&result));
+    }
+
+    #[test]
+    fn manifest_check_ready_accepts_ready_hit() {
+        let result = ManifestCheckResult {
+            tag: "test-tag".to_string(),
+            exists: true,
+            pending: false,
+            manifest_root_digest: None,
+            cache_entry_id: None,
+            content_hash: None,
+            manifest_digest: None,
+            manifest_url: None,
+            compression_algorithm: None,
+            archive_urls: Vec::new(),
+            size: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            uploaded_at: None,
+            status: Some("hit".to_string()),
+            error: None,
+        };
+
+        assert!(manifest_check_is_ready(&result));
+        assert!(!manifest_check_is_pending(&result));
+    }
 
     #[test]
     fn local_oci_manifest_digest_returns_none_for_non_oci_layout() {

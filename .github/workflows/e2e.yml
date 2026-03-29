@@ -112,6 +112,16 @@ jobs:
             needs_node: false
             needs_rust: false
             needs_sccache: false
+          - leg: cli-contract
+            label: CLI / Pending and Conflict Contracts
+            artifact: cli-contract-pending-conflicts
+            tier: quick
+            needs_bazel: false
+            needs_docker: false
+            needs_java: false
+            needs_node: false
+            needs_rust: true
+            needs_sccache: false
           - leg: security
             label: Security / Tokens and Poisoning
             artifact: security-tokens-poisoning
@@ -243,7 +253,9 @@ jobs:
         id: gate
         run: |
           set -euo pipefail
-          if [[ -z "${BORINGCACHE_SAVE_TOKEN:-}" ]]; then
+          if [[ "${{ matrix.leg }}" == "cli-contract" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [[ -z "${BORINGCACHE_SAVE_TOKEN:-}" ]]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "Skipping e2e leg: BORINGCACHE_SAVE_TOKEN is not configured."
           elif [[ "${{ matrix.leg }}" == "cli-core" && -z "${BORINGCACHE_ADMIN_TOKEN:-}" ]]; then
