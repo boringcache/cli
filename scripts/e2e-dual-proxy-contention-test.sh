@@ -8,6 +8,14 @@ PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT_A="${PROXY_PORT_A:-5050}"
 PROXY_PORT_B="${PROXY_PORT_B:-5052}"
 PROXY_PORT_VERIFY="${PROXY_PORT_VERIFY:-5054}"
+SCCACHE_PORT_A_EXPLICIT=0
+if [[ -n "${SCCACHE_PORT_A:-}" ]]; then
+  SCCACHE_PORT_A_EXPLICIT=1
+fi
+SCCACHE_PORT_B_EXPLICIT=0
+if [[ -n "${SCCACHE_PORT_B:-}" ]]; then
+  SCCACHE_PORT_B_EXPLICIT=1
+fi
 SCCACHE_PORT_A="${SCCACHE_PORT_A:-$((4200 + (RANDOM % 1000)))}"
 SCCACHE_PORT_B="${SCCACHE_PORT_B:-$((SCCACHE_PORT_A + 1))}"
 TAG="${TAG:-bc-e2e-cli-dual-proxy-contention}"
@@ -30,6 +38,7 @@ BUILD_FAILURE_TAIL_LINES="${BUILD_FAILURE_TAIL_LINES:-60}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
 PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
+VALIDATE_PORT_SELECTION_ONLY="${VALIDATE_PORT_SELECTION_ONLY:-0}"
 PREWARM_SCCACHE_DIR="${TMP_ROOT}/sccache-prewarm-${RUN_ID}"
 SCCACHE_DIR_A="${TMP_ROOT}/sccache-a-${RUN_ID}"
 SCCACHE_DIR_B="${TMP_ROOT}/sccache-b-${RUN_ID}"
@@ -97,7 +106,9 @@ require_port() {
   fi
 }
 
-require_save_capable_token
+if [[ "$VALIDATE_PORT_SELECTION_ONLY" != "1" ]]; then
+  require_save_capable_token
+fi
 
 require_port "PROXY_PORT_A" "$PROXY_PORT_A"
 require_port "PROXY_PORT_B" "$PROXY_PORT_B"
@@ -128,14 +139,16 @@ if [[ "$SCCACHE_PORT_A" == "$SCCACHE_PORT_B" ]]; then
   exit 1
 fi
 
-for dep in sccache curl pgrep ps python3; do
-  if ! command -v "$dep" >/dev/null 2>&1; then
-    echo "ERROR: ${dep} not found in PATH"
-    exit 1
-  fi
-done
+if [[ "$VALIDATE_PORT_SELECTION_ONLY" != "1" ]]; then
+  for dep in sccache curl pgrep ps python3; do
+    if ! command -v "$dep" >/dev/null 2>&1; then
+      echo "ERROR: ${dep} not found in PATH"
+      exit 1
+    fi
+  done
 
-export_resolved_cli_tokens admin
+  export_resolved_cli_tokens admin
+fi
 
 PORT_TOOL=""
 if command -v lsof >/dev/null 2>&1; then
@@ -227,6 +240,79 @@ port_listener_details() {
   fi
 }
 
+port_in_set() {
+  local port="$1"
+  shift
+  local candidate
+  for candidate in "$@"; do
+    if [[ -n "${candidate:-}" && "$port" == "$candidate" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+choose_available_sccache_port() {
+  local start_port="$1"
+  shift
+  local reserved_ports=("$@")
+  local candidate="$start_port"
+  while (( candidate <= 65535 )); do
+    if ! port_in_set "$candidate" "${reserved_ports[@]}" && [[ -z "$(port_listener_pids "$candidate")" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    candidate=$((candidate + 1))
+  done
+  echo "ERROR: unable to find available sccache port starting from ${start_port}" >&2
+  exit 1
+}
+
+resolve_sccache_port() {
+  local name="$1"
+  local current_port="$2"
+  local explicit="$3"
+  shift 3
+  local reserved_ports=("$@")
+  local adjusted_port
+  local listeners
+
+  if port_in_set "$current_port" "${reserved_ports[@]}"; then
+    if [[ "$explicit" == "1" ]]; then
+      echo "ERROR: ${name}=${current_port} collides with proxy/verify ports" >&2
+      exit 1
+    fi
+    adjusted_port="$(choose_available_sccache_port "$((current_port + 1))" "${reserved_ports[@]}")"
+    echo "INFO: adjusted ${name} from ${current_port} to ${adjusted_port} to avoid proxy port collision" >&2
+    current_port="$adjusted_port"
+  fi
+
+  listeners="$(port_listener_pids "$current_port")"
+  if [[ -n "$listeners" ]]; then
+    if [[ "$explicit" == "1" ]]; then
+      echo "ERROR: ${name}=${current_port} is already in use" >&2
+      port_listener_details "$current_port" >&2
+      exit 1
+    fi
+    adjusted_port="$(choose_available_sccache_port "$((current_port + 1))" "${reserved_ports[@]}")"
+    echo "INFO: adjusted ${name} from ${current_port} to ${adjusted_port} to avoid in-use port" >&2
+    current_port="$adjusted_port"
+  fi
+
+  printf '%s\n' "$current_port"
+}
+
+resolve_sccache_ports() {
+  local reserved_for_a=("$PROXY_PORT_A" "$PROXY_PORT_B" "$PROXY_PORT_VERIFY")
+  if [[ "$SCCACHE_PORT_B_EXPLICIT" == "1" ]]; then
+    reserved_for_a+=("$SCCACHE_PORT_B")
+  fi
+  SCCACHE_PORT_A="$(resolve_sccache_port "SCCACHE_PORT_A" "$SCCACHE_PORT_A" "$SCCACHE_PORT_A_EXPLICIT" "${reserved_for_a[@]}")"
+
+  local reserved_for_b=("$PROXY_PORT_A" "$PROXY_PORT_B" "$PROXY_PORT_VERIFY" "$SCCACHE_PORT_A")
+  SCCACHE_PORT_B="$(resolve_sccache_port "SCCACHE_PORT_B" "$SCCACHE_PORT_B" "$SCCACHE_PORT_B_EXPLICIT" "${reserved_for_b[@]}")"
+}
+
 reclaim_stale_proxy_port() {
   local port="$1"
   local log_file="$2"
@@ -282,7 +368,7 @@ handle_interrupt() {
 cleanup() {
   stop_background_jobs
   local pid
-  for pid in "${ACTIVE_BUILD_PIDS[@]}"; do
+  for pid in "${ACTIVE_BUILD_PIDS[@]-}"; do
     stop_pid_tree "$pid" "build" "$BUILD_CLEANUP_WAIT_SECS"
   done
   ACTIVE_BUILD_PIDS=()
@@ -294,6 +380,18 @@ run_with_clean_sccache_env "SCCACHE_SERVER_PORT=$SCCACHE_PORT_B" "SCCACHE_DIR=$S
 }
 trap cleanup EXIT
 trap handle_interrupt INT TERM
+
+resolve_sccache_ports
+
+if [[ "$VALIDATE_PORT_SELECTION_ONLY" == "1" ]]; then
+  echo "Validated dual-proxy port selection"
+  echo "Proxy A:      ${PROXY_HOST}:${PROXY_PORT_A}"
+  echo "Proxy B:      ${PROXY_HOST}:${PROXY_PORT_B}"
+  echo "Verify proxy: ${PROXY_HOST}:${PROXY_PORT_VERIFY}"
+  echo "sccache A:    port ${SCCACHE_PORT_A}"
+  echo "sccache B:    port ${SCCACHE_PORT_B}"
+  exit 0
+fi
 
 if [[ ! -x "$BINARY" ]]; then
   echo "Building boringcache..."

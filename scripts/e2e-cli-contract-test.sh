@@ -68,4 +68,34 @@ run_contract_test \
   "pending-publish-conflict-terminal-state" \
   cargo test normal_confirm_waits_for_pending_publish_terminal_state
 
+echo "=== Phase 4: E2E harness guards ==="
+run_contract_test \
+  "dual-proxy-port-validation" \
+  env VALIDATE_PORT_SELECTION_ONLY=1 bash ./scripts/e2e-dual-proxy-contention-test.sh
+
+echo "--- dual-proxy-port-collision-rejected ---"
+collision_log="${CONTRACT_LOG_DIR}/dual-proxy-port-collision-rejected.log"
+set +e
+env \
+  VALIDATE_PORT_SELECTION_ONLY=1 \
+  PROXY_PORT_A=5050 \
+  PROXY_PORT_B=5052 \
+  PROXY_PORT_VERIFY=5054 \
+  SCCACHE_PORT_A=5052 \
+  SCCACHE_PORT_B=5053 \
+  bash ./scripts/e2e-dual-proxy-contention-test.sh \
+  2>&1 | tee "${collision_log}"
+collision_status=${PIPESTATUS[0]}
+set -e
+if [[ "$collision_status" -eq 0 ]]; then
+  echo "Expected dual-proxy port collision validation to fail"
+  cat "${collision_log}"
+  exit 1
+fi
+if ! grep -q "SCCACHE_PORT_A=5052 collides with proxy/verify ports" "${collision_log}"; then
+  echo "Expected collision validation log to explain the reserved-port failure"
+  cat "${collision_log}"
+  exit 1
+fi
+
 echo "CLI contract e2e passed. Logs: ${CONTRACT_LOG_DIR}"
