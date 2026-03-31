@@ -681,17 +681,26 @@ async fn ensure_ai_assist_ready(json_output: bool) -> Result<()> {
 pub async fn run_cli_connect_onboarding(manual: bool) -> Result<String> {
     let client = ApiClient::new()?;
     let connect = client.create_cli_connect_session().await?;
+    let verification_url_with_code = format!(
+        "{}?code={}",
+        connect.verification_url,
+        urlencoding::encode(&connect.user_code)
+    );
 
     ui::blank_line();
-    ui::info("Open this URL in any browser to sign in/sign up and approve CLI access:");
-    ui::info(&format!("  {}", connect.authorize_url));
+    ui::info("Approve CLI access:");
+    ui::info(&format!("  1. Open {}", connect.verification_url));
+    ui::info(&format!("  2. Enter code {}", connect.user_code));
+    ui::info(&format!("  Direct link: {}", connect.authorize_url));
 
-    if !manual && try_open_browser(&connect.authorize_url) {
-        ui::info("Opened browser automatically.");
+    if !manual && try_open_browser(&verification_url_with_code) {
+        ui::info("Opened verification page automatically.");
     } else if manual {
-        ui::info("Manual mode: open the URL yourself. The CLI will keep waiting for approval.");
+        ui::info(
+            "Manual mode: open the verification URL on this machine or another device. The CLI will keep waiting for approval.",
+        );
     } else {
-        ui::info("Could not open browser automatically. Open the URL manually.");
+        ui::info("Could not open browser automatically. Open the verification URL manually.");
     }
 
     ui::info("Waiting for browser approval...");

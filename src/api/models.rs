@@ -1349,6 +1349,8 @@ pub mod cli_connect {
     pub struct CliConnectSessionCreateResponse {
         pub session_id: String,
         pub poll_token: String,
+        pub user_code: String,
+        pub verification_url: String,
         pub authorize_url: String,
         pub expires_at: String,
         pub poll_interval_seconds: u64,

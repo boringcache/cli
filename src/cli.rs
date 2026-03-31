@@ -20,6 +20,18 @@ pub enum TokenCommands {
         json: bool,
     },
 
+    #[command(about = "Show one workspace token")]
+    Show {
+        #[arg(help = "Workspace name or token id")]
+        workspace_or_token_id: String,
+
+        #[arg(help = "Token id (omit when a default workspace is configured)")]
+        token_id: Option<String>,
+
+        #[arg(long, help = "Print machine-readable output for CI and scripts")]
+        json: bool,
+    },
+
     #[command(about = "Create a workspace token")]
     Create {
         #[arg(help = "Workspace name (org/project or user/project)")]
@@ -53,6 +65,13 @@ pub enum TokenCommands {
         #[arg(long, value_name = "YYYY-MM-DD", help = "Custom expiration date")]
         expires_on: Option<String>,
 
+        #[arg(
+            long,
+            help = "Print shell export lines for the new secret",
+            conflicts_with = "json"
+        )]
+        shell: bool,
+
         #[arg(long, help = "Print machine-readable output for CI and scripts")]
         json: bool,
     },
@@ -85,6 +104,13 @@ pub enum TokenCommands {
 
         #[arg(long, value_name = "YYYY-MM-DD", help = "Custom expiration date")]
         expires_on: Option<String>,
+
+        #[arg(
+            long,
+            help = "Print shell export lines for the new secrets",
+            conflicts_with = "json"
+        )]
+        shell: bool,
 
         #[arg(long, help = "Print machine-readable output for CI and scripts")]
         json: bool,
@@ -122,6 +148,13 @@ pub enum TokenCommands {
 
         #[arg(long, value_name = "YYYY-MM-DD", help = "Custom expiration date")]
         expires_on: Option<String>,
+
+        #[arg(
+            long,
+            help = "Print shell export lines for the replacement secret",
+            conflicts_with = "json"
+        )]
+        shell: bool,
 
         #[arg(long, help = "Print machine-readable output for CI and scripts")]
         json: bool,

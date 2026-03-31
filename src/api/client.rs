@@ -1924,6 +1924,18 @@ impl ApiClient {
         self.get_v2(&url).await
     }
 
+    pub async fn workspace_token(
+        &self,
+        workspace: &str,
+        token_id: &str,
+    ) -> Result<super::models::workspace::WorkspaceTokenResponse> {
+        let endpoint = self.workspace_endpoint(
+            workspace,
+            &format!("tokens/{}", urlencoding::encode(token_id)),
+        )?;
+        self.get_v2(&endpoint).await
+    }
+
     pub async fn create_workspace_token(
         &self,
         workspace: &str,
@@ -3379,7 +3391,7 @@ mod tests {
             .with_status(201)
             .with_header("content-type", "application/json")
             .with_body(
-                r#"{"session_id":"abc123","poll_token":"poll-secret","authorize_url":"https://boringcache.com/cli/connect/abc123","expires_at":"2026-03-02T12:00:00Z","poll_interval_seconds":3}"#,
+                r#"{"session_id":"abc123","poll_token":"poll-secret","user_code":"ABCD-EF12","verification_url":"https://boringcache.com/cli/connect","authorize_url":"https://boringcache.com/cli/connect/abc123","expires_at":"2026-03-02T12:00:00Z","poll_interval_seconds":3}"#,
             )
             .create_async()
             .await;
@@ -3394,6 +3406,11 @@ mod tests {
 
         assert_eq!(response.session_id, "abc123");
         assert_eq!(response.poll_token, "poll-secret");
+        assert_eq!(response.user_code, "ABCD-EF12");
+        assert_eq!(
+            response.verification_url,
+            "https://boringcache.com/cli/connect"
+        );
         assert_eq!(response.poll_interval_seconds, 3);
         mock.assert_async().await;
 

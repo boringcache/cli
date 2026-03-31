@@ -9,6 +9,17 @@ use crate::api::{
 };
 use anyhow::{Result, anyhow};
 
+pub struct CreateTokenOptions {
+    pub workspace_option: Option<String>,
+    pub name: String,
+    pub access_level: String,
+    pub write_tag_prefixes: Vec<String>,
+    pub expires_in: Option<String>,
+    pub expires_on: Option<String>,
+    pub shell_output: bool,
+    pub json_output: bool,
+}
+
 pub async fn list(
     workspace_option: Option<String>,
     include_inactive: bool,
@@ -37,32 +48,51 @@ pub async fn list(
     Ok(())
 }
 
-pub async fn create(
-    workspace_option: Option<String>,
-    name: String,
-    access_level: String,
-    write_tag_prefixes: Vec<String>,
-    expires_in: Option<String>,
-    expires_on: Option<String>,
+pub async fn show(
+    workspace_or_token_id: String,
+    token_id: Option<String>,
     json_output: bool,
 ) -> Result<()> {
+    let (workspace_option, token_id) =
+        parse_token_target_args("show", workspace_or_token_id, token_id)?;
     let api_client = ApiClient::for_admin()?;
     let workspace = crate::commands::utils::resolve_workspace(
         &api_client,
         workspace_option,
+        "boringcache token show <workspace> <token-id>",
+    )
+    .await?;
+
+    let response = api_client.workspace_token(&workspace, &token_id).await?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+
+    render_token_detail(&response);
+    Ok(())
+}
+
+pub async fn create(options: CreateTokenOptions) -> Result<()> {
+    let api_client = ApiClient::for_admin()?;
+    let workspace = crate::commands::utils::resolve_workspace(
+        &api_client,
+        options.workspace_option,
         "boringcache token create <workspace> --name <name>",
     )
     .await?;
-    let (expiration_preset, custom_expires_on) = resolve_expiration_args(expires_in, expires_on)?;
+    let (expiration_preset, custom_expires_on) =
+        resolve_expiration_args(options.expires_in, options.expires_on)?;
 
     let response = api_client
         .create_workspace_token(
             &workspace,
             &WorkspaceTokenCreateRequest {
                 token: WorkspaceTokenCreateParams {
-                    name,
-                    access_level,
-                    write_tag_prefixes,
+                    name: options.name,
+                    access_level: options.access_level,
+                    write_tag_prefixes: options.write_tag_prefixes,
                     expiration_preset,
                     custom_expires_on,
                 },
@@ -70,8 +100,13 @@ pub async fn create(
         )
         .await?;
 
-    if json_output {
+    if options.json_output {
         println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+
+    if options.shell_output {
+        render_issued_token_shell(&response)?;
         return Ok(());
     }
 
@@ -85,6 +120,7 @@ pub async fn create_ci(
     save_tag_prefixes: Vec<String>,
     expires_in: Option<String>,
     expires_on: Option<String>,
+    shell_output: bool,
     json_output: bool,
 ) -> Result<()> {
     let api_client = ApiClient::for_admin()?;
@@ -112,6 +148,11 @@ pub async fn create_ci(
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+
+    if shell_output {
+        render_token_pair_shell(&response);
         return Ok(());
     }
 
@@ -153,6 +194,7 @@ pub async fn rotate(
     name: Option<String>,
     expires_in: Option<String>,
     expires_on: Option<String>,
+    shell_output: bool,
     json_output: bool,
 ) -> Result<()> {
     let (workspace_option, token_id) =
@@ -182,6 +224,11 @@ pub async fn rotate(
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+
+    if shell_output {
+        render_issued_token_shell(&response)?;
         return Ok(());
     }
 
@@ -237,10 +284,33 @@ fn render_token_list(response: &WorkspaceTokensResponse) {
     crate::ui::blank_line();
     println!("Create: boringcache token create --name <name>");
     println!("CI pair: boringcache token create-ci");
+    println!("Inspect: boringcache token show <token-id>");
 
     if response.pagination.has_more {
         println!("Next page: {}", next_page_command(response));
     }
+}
+
+fn render_token_detail(response: &WorkspaceTokenResponse) {
+    crate::ui::blank_line();
+    println!("Token");
+    print_token_summary(response);
+    crate::commands::status::print_field("Created", &response.token.created_at);
+    crate::commands::status::print_field("Last used", &format_last_used(&response.token));
+    if let Some(expires_at) = response.token.expires_at.as_deref() {
+        crate::commands::status::print_field("Expires at", expires_at);
+    }
+
+    crate::ui::blank_line();
+    println!("Actions");
+    println!(
+        "  boringcache token rotate {} {}",
+        response.workspace.slug, response.token.id
+    );
+    println!(
+        "  boringcache token revoke {} {}",
+        response.workspace.slug, response.token.id
+    );
 }
 
 fn render_issued_token(title: &str, response: &WorkspaceTokenResponse) {
@@ -261,6 +331,20 @@ fn render_issued_token(title: &str, response: &WorkspaceTokenResponse) {
             shell_quote(value)
         );
     }
+}
+
+fn render_issued_token_shell(response: &WorkspaceTokenResponse) -> Result<()> {
+    let value = response
+        .value
+        .as_deref()
+        .ok_or_else(|| anyhow!("This response does not include a token value."))?;
+
+    println!(
+        "export {}={}",
+        token_env_var(&response.token.access_level),
+        shell_quote(value)
+    );
+    Ok(())
 }
 
 fn render_token_pair(title: &str, response: &WorkspaceTokenPairResponse) {
@@ -284,6 +368,17 @@ fn render_token_pair(title: &str, response: &WorkspaceTokenPairResponse) {
     );
     println!(
         "  export BORINGCACHE_SAVE_TOKEN={}",
+        shell_quote(&response.save.value)
+    );
+}
+
+fn render_token_pair_shell(response: &WorkspaceTokenPairResponse) {
+    println!(
+        "export BORINGCACHE_RESTORE_TOKEN={}",
+        shell_quote(&response.restore.value)
+    );
+    println!(
+        "export BORINGCACHE_SAVE_TOKEN={}",
         shell_quote(&response.save.value)
     );
 }

@@ -241,6 +241,11 @@ async fn main() -> Result<()> {
                 page,
                 json,
             } => commands::token::list(workspace, all, limit, page, json).await,
+            cli::TokenCommands::Show {
+                workspace_or_token_id,
+                token_id,
+                json,
+            } => commands::token::show(workspace_or_token_id, token_id, json).await,
             cli::TokenCommands::Create {
                 workspace,
                 name,
@@ -248,17 +253,19 @@ async fn main() -> Result<()> {
                 write_tag_prefixes,
                 expires_in,
                 expires_on,
+                shell,
                 json,
             } => {
-                commands::token::create(
-                    workspace,
+                commands::token::create(commands::token::CreateTokenOptions {
+                    workspace_option: workspace,
                     name,
-                    access,
+                    access_level: access,
                     write_tag_prefixes,
                     expires_in,
                     expires_on,
-                    json,
-                )
+                    shell_output: shell,
+                    json_output: json,
+                })
                 .await
             }
             cli::TokenCommands::CreateCi {
@@ -267,6 +274,7 @@ async fn main() -> Result<()> {
                 save_tag_prefixes,
                 expires_in,
                 expires_on,
+                shell,
                 json,
             } => {
                 commands::token::create_ci(
@@ -275,6 +283,7 @@ async fn main() -> Result<()> {
                     save_tag_prefixes,
                     expires_in,
                     expires_on,
+                    shell,
                     json,
                 )
                 .await
@@ -290,6 +299,7 @@ async fn main() -> Result<()> {
                 name,
                 expires_in,
                 expires_on,
+                shell,
                 json,
             } => {
                 commands::token::rotate(
@@ -298,6 +308,7 @@ async fn main() -> Result<()> {
                     name,
                     expires_in,
                     expires_on,
+                    shell,
                     json,
                 )
                 .await
