@@ -1888,6 +1888,26 @@ impl ApiClient {
         self.get_v2(&url).await
     }
 
+    pub async fn workspace_tags(
+        &self,
+        workspace: &str,
+        filter: Option<&str>,
+        include_system: bool,
+        limit: u32,
+        offset: u32,
+    ) -> Result<super::models::workspace::WorkspaceTagsResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "tags")?;
+        let mut params = vec![format!("limit={limit}"), format!("offset={offset}")];
+        if let Some(filter) = filter.filter(|value| !value.trim().is_empty()) {
+            params.push(format!("filter={}", urlencoding::encode(filter.trim())));
+        }
+        if include_system {
+            params.push("include_system=true".to_string());
+        }
+        let url = format!("{endpoint}?{}", params.join("&"));
+        self.get_v2(&url).await
+    }
+
     pub async fn workspace_sessions(
         &self,
         workspace: &str,

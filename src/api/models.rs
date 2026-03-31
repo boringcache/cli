@@ -758,6 +758,44 @@ pub mod workspace {
     }
 
     #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceSummaryContext {
+        pub name: String,
+        pub slug: String,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceTagsFilter {
+        #[serde(default)]
+        pub query: Option<String>,
+        pub include_system: bool,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceTagFeedItem {
+        pub name: String,
+        pub primary: bool,
+        pub system: bool,
+        pub primary_tag: String,
+        pub cache_entry_id: String,
+        pub manifest_root_digest: String,
+        pub storage_mode: String,
+        pub stored_size_bytes: u64,
+        pub hit_count: u64,
+        #[serde(default)]
+        pub uploaded_at: Option<String>,
+        #[serde(default)]
+        pub last_accessed_at: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceTagsResponse {
+        pub workspace: WorkspaceSummaryContext,
+        pub filter: WorkspaceTagsFilter,
+        pub pagination: WorkspacePagination,
+        pub tags: Vec<WorkspaceTagFeedItem>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
     pub struct WorkspaceStatusWorkspace {
         pub id: Value,
         pub name: String,

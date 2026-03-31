@@ -397,6 +397,33 @@ pub enum Commands {
         json: bool,
     },
 
+    #[command(about = "List active cache tags for a workspace")]
+    Tags {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(long, help = "Filter tags by substring")]
+        filter: Option<String>,
+
+        #[arg(long, help = "Include system and internal tags")]
+        all: bool,
+
+        #[arg(
+            short,
+            long,
+            default_value = "20",
+            value_parser = clap::value_parser!(u32).range(1..=100),
+            help = "Maximum number of tags to show"
+        )]
+        limit: u32,
+
+        #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..))]
+        page: u32,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
     #[command(name = "use", about = "Choose or set the default workspace")]
     Use {
         #[arg(help = "Workspace name (org/project or user/project)")]

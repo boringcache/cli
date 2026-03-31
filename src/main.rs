@@ -449,6 +449,14 @@ async fn main() -> Result<()> {
             page,
             json,
         } => commands::misses::execute(workspace, period, limit, page, json).await,
+        cli::Commands::Tags {
+            workspace,
+            filter,
+            all,
+            limit,
+            page,
+            json,
+        } => commands::tags::execute(workspace, filter, all, limit, page, json).await,
         cli::Commands::Use { workspace, json } => {
             commands::use_workspace::execute(workspace, json).await
         }

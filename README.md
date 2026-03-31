@@ -58,6 +58,9 @@ boringcache status
 # Inspect one cache tag or entry in detail
 boringcache inspect deps
 
+# List active cache tags
+boringcache tags
+
 # Verify API URL, token scope, and workspace resolution
 boringcache doctor
 

@@ -438,6 +438,53 @@
         }
       }
     },
+    "/workspaces/{namespace_slug}/{workspace_slug}/tags": {
+      "get": {
+        "operationId": "listWorkspaceTags",
+        "summary": "List active cache tags for a workspace",
+        "tags": [
+          "Cache Entries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/FilterQuery"
+          },
+          {
+            "$ref": "#/components/parameters/IncludeSystemQuery"
+          },
+          {
+            "$ref": "#/components/parameters/LimitQuery"
+          },
+          {
+            "$ref": "#/components/parameters/OffsetQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace tags feed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceTagsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/workspaces/{namespace_slug}/{workspace_slug}/sessions": {
       "get": {
         "operationId": "listWorkspaceSessions",
@@ -1407,6 +1454,22 @@
           ]
         }
       },
+      "FilterQuery": {
+        "name": "filter",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "IncludeSystemQuery": {
+        "name": "include_system",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean"
+        }
+      },
       "LimitQuery": {
         "name": "limit",
         "in": "query",
@@ -1940,6 +2003,36 @@
           }
         }
       },
+      "WorkspaceSummaryContext": {
+        "type": "object",
+        "required": [
+          "name",
+          "slug"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkspaceTagsFilter": {
+        "type": "object",
+        "required": [
+          "include_system"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "nullable": true
+          },
+          "include_system": {
+            "type": "boolean"
+          }
+        }
+      },
       "WorkspaceStatusPeriod": {
         "type": "object",
         "required": [
@@ -2222,6 +2315,85 @@
               "new",
               "recurring"
             ]
+          }
+        }
+      },
+      "WorkspaceTagFeedItem": {
+        "type": "object",
+        "required": [
+          "name",
+          "primary",
+          "system",
+          "primary_tag",
+          "cache_entry_id",
+          "manifest_root_digest",
+          "storage_mode",
+          "stored_size_bytes",
+          "hit_count"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "primary": {
+            "type": "boolean"
+          },
+          "system": {
+            "type": "boolean"
+          },
+          "primary_tag": {
+            "type": "string"
+          },
+          "cache_entry_id": {
+            "type": "string"
+          },
+          "manifest_root_digest": {
+            "type": "string"
+          },
+          "storage_mode": {
+            "type": "string"
+          },
+          "stored_size_bytes": {
+            "type": "integer"
+          },
+          "hit_count": {
+            "type": "integer"
+          },
+          "uploaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "last_accessed_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "WorkspaceTagsResponse": {
+        "type": "object",
+        "required": [
+          "workspace",
+          "filter",
+          "pagination",
+          "tags"
+        ],
+        "properties": {
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceSummaryContext"
+          },
+          "filter": {
+            "$ref": "#/components/schemas/WorkspaceTagsFilter"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/WorkspacePagination"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceTagFeedItem"
+            }
           }
         }
       },
