@@ -63,6 +63,9 @@ boringcache doctor
 
 # Remove a bad or stale cache tag
 boringcache rm deps
+
+# Stay on a live operator view during an incident or rollout
+boringcache status --watch
 ```
 
 If you need to save or restore data, use `run`, `save`, `restore`, or `cache-registry` as usual. If you need a deeper view of where the terminal UX is heading, see `docs/terminal-ux-roadmap.md`.
@@ -240,6 +243,12 @@ boringcache inspect deps
 
 # Check API URL, token scope, and resolved workspace
 boringcache doctor --json
+
+# Drill into recent sessions
+boringcache sessions
+
+# Drill into recurring and cold misses
+boringcache misses
 
 # Check whether tags exist without downloading
 boringcache check my-org/app "deps,build" --json

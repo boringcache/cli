@@ -319,6 +319,74 @@ pub enum Commands {
         )]
         limit: u32,
 
+        #[arg(
+            long,
+            help = "Refresh the status view until interrupted",
+            conflicts_with = "json"
+        )]
+        watch: bool,
+
+        #[arg(
+            long,
+            default_value = "5",
+            requires = "watch",
+            value_parser = clap::value_parser!(u64).range(1..=3600),
+            help = "Seconds between refreshes when --watch is enabled"
+        )]
+        interval: u64,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
+    #[command(about = "Show recent cache sessions and execution context")]
+    Sessions {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(
+            long,
+            default_value = "24h",
+            value_parser = ["1h", "6h", "24h", "7d", "30d"],
+            help = "Time window for recent sessions"
+        )]
+        period: String,
+
+        #[arg(
+            short,
+            long,
+            default_value = "10",
+            value_parser = clap::value_parser!(u32).range(1..=10),
+            help = "Maximum number of sessions to show"
+        )]
+        limit: u32,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
+    #[command(about = "Show hot cache misses and recurring miss patterns")]
+    Misses {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(
+            long,
+            default_value = "24h",
+            value_parser = ["1h", "6h", "24h", "7d", "30d"],
+            help = "Time window for recent misses"
+        )]
+        period: String,
+
+        #[arg(
+            short,
+            long,
+            default_value = "10",
+            value_parser = clap::value_parser!(u32).range(1..=10),
+            help = "Maximum number of misses to show"
+        )]
+        limit: u32,
+
         #[arg(short, long, help = "Output in JSON format")]
         json: bool,
     },

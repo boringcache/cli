@@ -92,6 +92,12 @@ These stay important, but they solve a different job than operator insight:
   - supports `--json` for CI and scripts
 - `boringcache rm`
   - short primary alias for cache deletion, with `delete` kept as an alias
+- `boringcache status --watch`
+  - keeps operators on a live terminal view without a full-screen TUI
+- `boringcache sessions`
+  - dedicated drill-down for recent session context, traffic, misses, and errors
+- `boringcache misses`
+  - dedicated drill-down for recurring and cold miss patterns
 - `boringcache workspaces`
   - now shows the saved default workspace more clearly
 - local config persistence
@@ -105,8 +111,8 @@ These stay important, but they solve a different job than operator insight:
 
 ### Still missing
 
-- live watch mode for operators
-- first-class session and miss drill-down in the terminal
+- richer pagination and longer history for operator drill-down
+- first-class tag move/retag flows in the terminal
 
 ## Phase plan
 
@@ -136,7 +142,7 @@ This phase covers the most common follow-up after `status`: "show me the thing" 
 
 ### Phase 3
 
-Operator drill-down:
+Status: shipped
 
 - `boringcache status --watch`
 - `boringcache sessions`

@@ -3,24 +3,27 @@ use crate::progress::format_bytes;
 use crate::ui;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use std::io::{IsTerminal, Write};
+use std::time::Duration;
 
 pub async fn execute(
     workspace_option: Option<String>,
     period: String,
     limit: u32,
+    watch: bool,
+    interval_seconds: u64,
     json_output: bool,
 ) -> Result<()> {
-    let api_client = ApiClient::for_restore()?;
-    let workspace = crate::commands::utils::resolve_workspace(
-        &api_client,
-        workspace_option,
-        "boringcache status <workspace>",
-    )
-    .await?;
+    let (api_client, workspace) =
+        resolve_status_target(workspace_option, "boringcache status <workspace>").await?;
+
+    if watch {
+        return watch_status(&api_client, &workspace, &period, limit, interval_seconds).await;
+    }
+
     let status = api_client
         .workspace_status(&workspace, &period, limit)
         .await?;
-
     if json_output {
         println!("{}", serde_json::to_string_pretty(&status)?);
         return Ok(());
@@ -30,15 +33,155 @@ pub async fn execute(
     Ok(())
 }
 
-fn render_status(status: &WorkspaceStatusResponse) {
+pub(crate) async fn load_status(
+    workspace_option: Option<String>,
+    period: &str,
+    limit: u32,
+    explicit_example: &str,
+) -> Result<WorkspaceStatusResponse> {
+    let (api_client, workspace) = resolve_status_target(workspace_option, explicit_example).await?;
+    api_client.workspace_status(&workspace, period, limit).await
+}
+
+pub(crate) fn render_status(status: &WorkspaceStatusResponse) {
     ui::blank_line();
     print_header(status);
     print_inventory(status);
     print_operations(status);
     print_savings(status);
     print_tools(status);
-    print_sessions(status);
-    print_missed_keys(status);
+    print_sessions_section(status);
+    print_missed_keys_section(status);
+}
+
+pub(crate) fn render_sessions_report(status: &WorkspaceStatusResponse) {
+    ui::blank_line();
+    println!("Sessions");
+    print_field("Workspace", &status.workspace.slug);
+    print_field("Period", &format!("last {}", status.period.key));
+    print_field("Generated", &format_relative_time(&status.generated_at));
+    print_field(
+        "Summary",
+        &format!(
+            "{} total, {} healthy, {} errors",
+            status.operations.session_health.total_sessions,
+            status.operations.session_health.healthy_sessions,
+            status.operations.session_health.error_sessions
+        ),
+    );
+    print_field(
+        "Avg session",
+        &format!(
+            "{} at {} hit rate",
+            format_duration_seconds(Some(
+                status.operations.session_health.avg_duration_ms / 1000.0
+            )),
+            format_percent(status.operations.session_health.avg_hit_rate)
+        ),
+    );
+    ui::blank_line();
+    print_sessions_section(status);
+}
+
+pub(crate) fn render_misses_report(status: &WorkspaceStatusResponse) {
+    ui::blank_line();
+    println!("Misses");
+    print_field("Workspace", &status.workspace.slug);
+    print_field("Period", &format!("last {}", status.period.key));
+    print_field("Generated", &format_relative_time(&status.generated_at));
+    print_field(
+        "Total",
+        &status.operations.cache_health.total_misses.to_string(),
+    );
+    print_field(
+        "Recurring",
+        &format!(
+            "{} ({})",
+            status.operations.cache_health.recurring_misses,
+            format_percent(status.operations.cache_health.recurring_pct)
+        ),
+    );
+    print_field(
+        "Cold",
+        &format!(
+            "{} ({})",
+            status.operations.cache_health.cold_misses,
+            format_percent(status.operations.cache_health.cold_pct)
+        ),
+    );
+    print_field(
+        "Degraded",
+        &format!(
+            "{} ({})",
+            status.operations.cache_health.degraded_misses,
+            format_percent(status.operations.cache_health.degraded_pct)
+        ),
+    );
+    ui::blank_line();
+    print_missed_keys_section(status);
+}
+
+async fn resolve_status_target(
+    workspace_option: Option<String>,
+    explicit_example: &str,
+) -> Result<(ApiClient, String)> {
+    let api_client = ApiClient::for_restore()?;
+    let workspace =
+        crate::commands::utils::resolve_workspace(&api_client, workspace_option, explicit_example)
+            .await?;
+    Ok((api_client, workspace))
+}
+
+async fn watch_status(
+    api_client: &ApiClient,
+    workspace: &str,
+    period: &str,
+    limit: u32,
+    interval_seconds: u64,
+) -> Result<()> {
+    let interactive = std::io::stdout().is_terminal() && std::env::var_os("CI").is_none();
+    let mut first_snapshot = true;
+
+    loop {
+        let status = api_client
+            .workspace_status(workspace, period, limit)
+            .await?;
+        render_watch_snapshot(&status, interval_seconds, interactive, first_snapshot)?;
+        first_snapshot = false;
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                if interactive {
+                    ui::blank_line();
+                }
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(interval_seconds)) => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn render_watch_snapshot(
+    status: &WorkspaceStatusResponse,
+    interval_seconds: u64,
+    interactive: bool,
+    first_snapshot: bool,
+) -> Result<()> {
+    if interactive {
+        print!("\x1b[2J\x1b[H");
+        std::io::stdout().flush()?;
+    } else if !first_snapshot {
+        println!("\n---");
+    }
+
+    println!(
+        "Watching workspace status every {}s. Press Ctrl-C to stop.",
+        interval_seconds
+    );
+    render_status(status);
+    Ok(())
 }
 
 fn print_header(status: &WorkspaceStatusResponse) {
@@ -201,7 +344,7 @@ fn print_tools(status: &WorkspaceStatusResponse) {
     ui::blank_line();
 }
 
-fn print_sessions(status: &WorkspaceStatusResponse) {
+fn print_sessions_section(status: &WorkspaceStatusResponse) {
     println!("Recent sessions");
 
     if status.sessions.is_empty() {
@@ -217,6 +360,15 @@ fn print_sessions(status: &WorkspaceStatusResponse) {
             format_percent(session.hit_rate),
             format_duration_seconds(session.duration_seconds),
             format_relative_time(&session.created_at)
+        );
+        println!(
+            "    counts: {} hits, {} misses, {} errors",
+            session.hit_count, session.miss_count, session.error_count
+        );
+        println!(
+            "    traffic: {} read, {} written",
+            format_bytes(session.bytes_read),
+            format_bytes(session.bytes_written)
         );
 
         let mut context = Vec::new();
@@ -236,6 +388,22 @@ fn print_sessions(status: &WorkspaceStatusResponse) {
             println!("    context: {}", truncate(&context.join(" "), 80));
         }
 
+        if !session.missed_keys.is_empty() {
+            let misses = session
+                .missed_keys
+                .iter()
+                .map(|entry| {
+                    entry
+                        .sampled_key_prefix
+                        .as_deref()
+                        .map(|value| truncate(value, 36))
+                        .unwrap_or_else(|| truncate(&entry.key_hash, 18))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("    missed: {misses}");
+        }
+
         if session.error_count > 0 && !session.error_details.is_empty() {
             let detail = session
                 .error_details
@@ -250,7 +418,7 @@ fn print_sessions(status: &WorkspaceStatusResponse) {
     ui::blank_line();
 }
 
-fn print_missed_keys(status: &WorkspaceStatusResponse) {
+fn print_missed_keys_section(status: &WorkspaceStatusResponse) {
     println!("Hot misses");
 
     if status.missed_keys.is_empty() {
@@ -281,23 +449,23 @@ fn print_missed_keys(status: &WorkspaceStatusResponse) {
     }
 }
 
-fn print_field(label: &str, value: &str) {
+pub(crate) fn print_field(label: &str, value: &str) {
     println!("  {label:<12} {value}");
 }
 
-fn format_percent(value: f64) -> String {
+pub(crate) fn format_percent(value: f64) -> String {
     format!("{value:.1}%")
 }
 
-fn format_millis(value: f64) -> String {
+pub(crate) fn format_millis(value: f64) -> String {
     if value >= 1000.0 {
         format_duration_seconds(Some(value / 1000.0))
     } else {
-        format!("{:.0}ms", value)
+        format!("{value:.0}ms")
     }
 }
 
-fn format_duration_seconds(value: Option<f64>) -> String {
+pub(crate) fn format_duration_seconds(value: Option<f64>) -> String {
     let Some(seconds) = value else {
         return "-".to_string();
     };
@@ -313,7 +481,7 @@ fn format_duration_seconds(value: Option<f64>) -> String {
     }
 }
 
-fn format_relative_time(timestamp: &str) -> String {
+pub(crate) fn format_relative_time(timestamp: &str) -> String {
     let Ok(parsed) = DateTime::parse_from_rfc3339(timestamp) else {
         return timestamp.to_string();
     };
@@ -332,7 +500,7 @@ fn format_relative_time(timestamp: &str) -> String {
     }
 }
 
-fn truncate(value: &str, max_len: usize) -> String {
+pub(crate) fn truncate(value: &str, max_len: usize) -> String {
     if value.chars().count() <= max_len {
         return value.to_string();
     }
