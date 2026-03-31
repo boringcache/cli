@@ -21,6 +21,54 @@ pub enum AuthPurpose {
     Admin,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ValueSource {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl ValueSource {
+    fn env(key: &str) -> Self {
+        Self {
+            kind: "env".to_string(),
+            detail: Some(key.to_string()),
+        }
+    }
+
+    fn token_file(path: impl Into<String>) -> Self {
+        Self {
+            kind: "token_file".to_string(),
+            detail: Some(path.into()),
+        }
+    }
+
+    fn config_file(path: impl Into<String>) -> Self {
+        Self {
+            kind: "config_file".to_string(),
+            detail: Some(path.into()),
+        }
+    }
+
+    fn default() -> Self {
+        Self {
+            kind: "default".to_string(),
+            detail: None,
+        }
+    }
+
+    fn missing() -> Self {
+        Self {
+            kind: "missing".to_string(),
+            detail: None,
+        }
+    }
+
+    pub fn is_missing(&self) -> bool {
+        self.kind == "missing"
+    }
+}
+
 pub fn env_var(key: &str) -> Option<String> {
     std::env::var(key).ok().and_then(|value| {
         let trimmed = value.trim();
@@ -55,6 +103,15 @@ fn token_from_file() -> Option<String> {
     let token = token.trim().to_string();
 
     if token.is_empty() { None } else { Some(token) }
+}
+
+fn token_file_source_path() -> Option<String> {
+    let token_file = env_var("BORINGCACHE_TOKEN_FILE").or_else(|| {
+        let path = std::path::Path::new(DOCKER_SECRET_PATH);
+        path.exists().then(|| DOCKER_SECRET_PATH.to_string())
+    })?;
+    let token = fs::read_to_string(&token_file).ok()?;
+    (!token.trim().is_empty()).then_some(token_file)
 }
 
 fn env_api_token_for(purpose: AuthPurpose) -> Option<String> {
@@ -112,6 +169,29 @@ fn purpose_missing_token_message(purpose: AuthPurpose) -> String {
             }
         }
     }
+}
+
+fn env_token_source_for(purpose: AuthPurpose) -> Option<ValueSource> {
+    let keys = match purpose {
+        AuthPurpose::Default | AuthPurpose::Admin => {
+            &["BORINGCACHE_ADMIN_TOKEN", "BORINGCACHE_API_TOKEN"][..]
+        }
+        AuthPurpose::Restore => &[
+            "BORINGCACHE_RESTORE_TOKEN",
+            "BORINGCACHE_SAVE_TOKEN",
+            "BORINGCACHE_ADMIN_TOKEN",
+            "BORINGCACHE_API_TOKEN",
+        ][..],
+        AuthPurpose::Save => &[
+            "BORINGCACHE_SAVE_TOKEN",
+            "BORINGCACHE_ADMIN_TOKEN",
+            "BORINGCACHE_API_TOKEN",
+        ][..],
+    };
+
+    keys.iter()
+        .find(|key| env_var(key).is_some())
+        .map(|key| ValueSource::env(key))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -395,6 +475,55 @@ impl Config {
             .clone()
             .ok_or(BoringCacheError::ConfigNotFound)
     }
+}
+
+pub fn token_source_for(purpose: AuthPurpose) -> ValueSource {
+    if let Some(source) = env_token_source_for(purpose) {
+        return source;
+    }
+
+    if let Some(path) = token_file_source_path() {
+        return ValueSource::token_file(path);
+    }
+
+    if let (Ok(config), Ok(path)) = (Config::load_from_file(), Config::config_path())
+        && !config.token.trim().is_empty()
+    {
+        return ValueSource::config_file(path.display().to_string());
+    }
+
+    ValueSource::missing()
+}
+
+pub fn api_url_source() -> ValueSource {
+    if env_var("BORINGCACHE_API_URL").is_some() {
+        return ValueSource::env("BORINGCACHE_API_URL");
+    }
+
+    if let Ok(path) = Config::config_path()
+        && path.exists()
+    {
+        return ValueSource::config_file(path.display().to_string());
+    }
+
+    ValueSource::default()
+}
+
+pub fn default_workspace_source() -> ValueSource {
+    if env_var("BORINGCACHE_DEFAULT_WORKSPACE").is_some() {
+        return ValueSource::env("BORINGCACHE_DEFAULT_WORKSPACE");
+    }
+
+    if let (Ok(config), Ok(path)) = (Config::load_from_file(), Config::config_path())
+        && config
+            .default_workspace
+            .as_deref()
+            .is_some_and(|workspace| !workspace.trim().is_empty())
+    {
+        return ValueSource::config_file(path.display().to_string());
+    }
+
+    ValueSource::missing()
 }
 
 #[cfg(test)]

@@ -55,14 +55,19 @@ boringcache use
 # See current cache health and recent activity
 boringcache status
 
-# See which workspaces you can access
-boringcache workspaces
+# Inspect one cache tag or entry in detail
+boringcache inspect deps
 
-# List current cache entries in the active workspace
-boringcache ls
+# Verify API URL, token scope, and workspace resolution
+boringcache doctor
+
+# Remove a bad or stale cache tag
+boringcache rm deps
 ```
 
 If you need to save or restore data, use `run`, `save`, `restore`, or `cache-registry` as usual. If you need a deeper view of where the terminal UX is heading, see `docs/terminal-ux-roadmap.md`.
+
+For CI and scripts, prefer `--json` on terminal health commands such as `status`, `inspect`, and `doctor`.
 
 ## Cargo flow locally
 
@@ -230,6 +235,12 @@ boringcache use
 # Show workspace status, cache health, and recent operator signals
 boringcache status
 
+# Inspect one cache tag or cache entry
+boringcache inspect deps
+
+# Check API URL, token scope, and resolved workspace
+boringcache doctor --json
+
 # Check whether tags exist without downloading
 boringcache check my-org/app "deps,build" --json
 
@@ -237,7 +248,7 @@ boringcache check my-org/app "deps,build" --json
 boringcache ls my-org/app --json
 
 # Delete cache entries by tag
-boringcache delete my-org/app "deps"
+boringcache rm my-org/app "deps"
 
 # Inspect or set local config
 boringcache config list

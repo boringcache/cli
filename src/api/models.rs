@@ -895,7 +895,7 @@ pub mod workspace {
         pub miss_state: String,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Serialize)]
     pub struct SessionInfo {
         #[allow(dead_code)]
         pub valid: bool,
@@ -909,7 +909,7 @@ pub mod workspace {
         pub token: TokenInfo,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Serialize)]
     pub struct UserInfo {
         #[allow(dead_code)]
         pub id: String,
@@ -919,7 +919,7 @@ pub mod workspace {
         pub name: String,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Serialize)]
     pub struct OrganizationInfo {
         #[allow(dead_code)]
         pub id: String,
@@ -930,7 +930,7 @@ pub mod workspace {
         pub slug: Option<String>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Serialize)]
     pub struct WorkspaceInfo {
         #[allow(dead_code)]
         pub id: String,
@@ -941,13 +941,17 @@ pub mod workspace {
         pub slug: Option<String>,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Serialize)]
     pub struct TokenInfo {
         pub id: String,
         pub name: String,
         pub scope_type: String,
         #[serde(default)]
+        pub access_level: String,
+        #[serde(default)]
         pub scopes: Vec<String>,
+        #[serde(default)]
+        pub write_tag_prefixes: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub expires_at: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]

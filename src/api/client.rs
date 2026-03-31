@@ -2262,7 +2262,7 @@ fn map_request_send_error(err: reqwest::Error) -> anyhow::Error {
     boringcache_error.into()
 }
 
-fn derive_api_base_urls(configured_base_url: &str) -> (String, String) {
+pub(crate) fn derive_api_base_urls(configured_base_url: &str) -> (String, String) {
     let configured = configured_base_url.trim().trim_end_matches('/');
     let default = crate::config::Config::default_api_url_value()
         .trim()

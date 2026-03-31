@@ -32,6 +32,15 @@ pub enum Commands {
     #[command(about = "Sign in via browser (opens browser for OAuth)")]
     Login,
 
+    #[command(about = "Check terminal cache setup, token scope, and workspace resolution")]
+    Doctor {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(long, help = "Print machine-readable output for CI and scripts")]
+        json: bool,
+    },
+
     Mount {
         #[arg(help = "Workspace name (org/project or user/project)")]
         workspace: String,

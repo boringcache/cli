@@ -84,20 +84,29 @@ These stay important, but they solve a different job than operator insight:
   - works safely even when auth comes from `BORINGCACHE_API_TOKEN`
 - `boringcache status`
   - shows workspace summary, inventory, cache health, savings, recent sessions, and hot misses
+- `boringcache inspect <tag|id>`
+  - resolves a tag or cache entry id to a detailed terminal view
+  - supports `--json` for CI and scripts
+- `boringcache doctor`
+  - checks API URL, token source, access level, workspace resolution, and command readiness
+  - supports `--json` for CI and scripts
+- `boringcache rm`
+  - short primary alias for cache deletion, with `delete` kept as an alias
 - `boringcache workspaces`
   - now shows the saved default workspace more clearly
 - local config persistence
   - saves `default_workspace` without copying an environment token into config
 - workspace status API
   - `GET /api/v2/workspaces/:namespace_slug/:workspace_slug/status`
+- cache inspect API
+  - `GET /api/v2/workspaces/:namespace_slug/:workspace_slug/caches/inspect/:identifier`
+- session info contract
+  - includes token `access_level` and `write_tag_prefixes` for terminal diagnosis
 
 ### Still missing
 
-- inspect a specific tag or cache entry in detail
-- one-command environment and auth diagnosis
 - live watch mode for operators
 - first-class session and miss drill-down in the terminal
-- a short, obvious alias for deletion
 
 ## Phase plan
 
@@ -114,7 +123,7 @@ This gives users one landing command and one workspace-selection command, which 
 
 ### Phase 2
 
-Highest value next:
+Status: shipped
 
 - `boringcache inspect <tag|id>`
   - show tag, digest, storage mode, size, timestamps, hit count, versions, and related tags

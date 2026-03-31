@@ -4,6 +4,7 @@ pub mod cas_restore;
 pub mod check;
 pub mod config;
 pub mod delete;
+pub mod doctor;
 pub mod file_materialize;
 pub mod go_cacheprog;
 pub mod inspect;

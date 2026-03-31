@@ -230,6 +230,9 @@ async fn main() -> Result<()> {
     let result = match cli.command {
         cli::Commands::Auth { token } => commands::auth::execute(token).await,
         cli::Commands::Login => commands::login::execute().await,
+        cli::Commands::Doctor { workspace, json } => {
+            commands::doctor::execute(workspace, json).await
+        }
         cli::Commands::Mount {
             workspace,
             tag_path,
