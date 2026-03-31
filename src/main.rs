@@ -229,7 +229,91 @@ async fn main() -> Result<()> {
 
     let result = match cli.command {
         cli::Commands::Auth { token } => commands::auth::execute(token).await,
-        cli::Commands::Login => commands::login::execute().await,
+        cli::Commands::Login { manual } => commands::login::execute(manual).await,
+        cli::Commands::Doctor { workspace, json } => {
+            commands::doctor::execute(workspace, json).await
+        }
+        cli::Commands::Token(token_command) => match token_command {
+            cli::TokenCommands::List {
+                workspace,
+                all,
+                limit,
+                page,
+                json,
+            } => commands::token::list(workspace, all, limit, page, json).await,
+            cli::TokenCommands::Show {
+                workspace_or_token_id,
+                token_id,
+                json,
+            } => commands::token::show(workspace_or_token_id, token_id, json).await,
+            cli::TokenCommands::Create {
+                workspace,
+                name,
+                access,
+                write_tag_prefixes,
+                expires_in,
+                expires_on,
+                shell,
+                json,
+            } => {
+                commands::token::create(commands::token::CreateTokenOptions {
+                    workspace_option: workspace,
+                    name,
+                    access_level: access,
+                    write_tag_prefixes,
+                    expires_in,
+                    expires_on,
+                    shell_output: shell,
+                    json_output: json,
+                })
+                .await
+            }
+            cli::TokenCommands::CreateCi {
+                workspace,
+                name,
+                save_tag_prefixes,
+                expires_in,
+                expires_on,
+                shell,
+                json,
+            } => {
+                commands::token::create_ci(
+                    workspace,
+                    name,
+                    save_tag_prefixes,
+                    expires_in,
+                    expires_on,
+                    shell,
+                    json,
+                )
+                .await
+            }
+            cli::TokenCommands::Revoke {
+                workspace_or_token_id,
+                token_id,
+                json,
+            } => commands::token::revoke(workspace_or_token_id, token_id, json).await,
+            cli::TokenCommands::Rotate {
+                workspace_or_token_id,
+                token_id,
+                name,
+                expires_in,
+                expires_on,
+                shell,
+                json,
+            } => {
+                commands::token::rotate(
+                    workspace_or_token_id,
+                    token_id,
+                    name,
+                    expires_in,
+                    expires_on,
+                    shell,
+                    json,
+                )
+                .await
+            }
+        },
         cli::Commands::Mount {
             workspace,
             tag_path,
@@ -393,24 +477,19 @@ async fn main() -> Result<()> {
             .await
         }
         cli::Commands::Delete {
-            workspace,
+            workspace_or_tag,
             tags,
             no_platform,
             no_git,
         } => {
-            let effective_workspace = resolve_effective_workspace(&workspace);
-            for tag in tags.split(',') {
-                commands::delete::execute(
-                    effective_workspace.clone(),
-                    tag.trim().to_string(),
-                    cli.verbose,
-                    no_platform,
-                    no_git,
-                )
-                .await?;
-            }
-            Ok(())
+            commands::delete::execute(workspace_or_tag, tags, cli.verbose, no_platform, no_git)
+                .await
         }
+        cli::Commands::Inspect {
+            workspace_or_identifier,
+            identifier,
+            json,
+        } => commands::inspect::execute(workspace_or_identifier, identifier, json).await,
         cli::Commands::Config { action } => {
             use cli::ConfigSubcommand;
             use commands::config::ConfigAction;
@@ -429,6 +508,39 @@ async fn main() -> Result<()> {
             page,
             json,
         } => commands::ls::execute(workspace, Some(limit), Some(page), cli.verbose, json).await,
+        cli::Commands::Status {
+            workspace,
+            period,
+            limit,
+            watch,
+            interval,
+            json,
+        } => commands::status::execute(workspace, period, limit, watch, interval, json).await,
+        cli::Commands::Sessions {
+            workspace,
+            period,
+            limit,
+            page,
+            json,
+        } => commands::sessions::execute(workspace, period, limit, page, json).await,
+        cli::Commands::Misses {
+            workspace,
+            period,
+            limit,
+            page,
+            json,
+        } => commands::misses::execute(workspace, period, limit, page, json).await,
+        cli::Commands::Tags {
+            workspace,
+            filter,
+            all,
+            limit,
+            page,
+            json,
+        } => commands::tags::execute(workspace, filter, all, limit, page, json).await,
+        cli::Commands::Use { workspace, json } => {
+            commands::use_workspace::execute(workspace, json).await
+        }
         cli::Commands::SetupEncryption {
             workspace,
             identity_output,
@@ -438,14 +550,16 @@ async fn main() -> Result<()> {
             path,
             apply,
             dry_run,
+            manual,
             json,
         }
         | cli::Commands::Optimize {
             path,
             apply,
             dry_run,
+            manual,
             json,
-        } => commands::onboard::execute(path, apply, dry_run, json).await,
+        } => commands::onboard::execute(path, apply, dry_run, manual, json).await,
         cli::Commands::Serve {
             workspace,
             tag,

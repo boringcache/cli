@@ -44,6 +44,39 @@ boringcache run my-org/app --proxy build-cache -- nx run-many --target=build
 
 The `tag:path` pair is the basic unit. In `deps:node_modules`, `deps` is the cache tag and `node_modules` is where the files live locally.
 
+## Daily terminal use
+
+For day-to-day terminal use, keep it to the small set of commands most users need:
+
+```bash
+# Pick a default workspace once
+boringcache use
+
+# See current cache health and recent activity
+boringcache status
+
+# Inspect one cache tag or entry in detail
+boringcache inspect deps
+
+# List active cache tags
+boringcache tags
+
+# Verify API URL, token scope, and workspace resolution
+boringcache doctor
+
+# Remove a bad or stale cache tag
+boringcache rm deps
+
+# Stay on a live operator view during an incident or rollout
+boringcache status --watch
+```
+
+For operator drill-down, use `boringcache sessions` and `boringcache misses`.
+For token lifecycle in terminal, use `boringcache token ls`, `boringcache token show`, `boringcache token create`, `boringcache token create-ci`, `boringcache token revoke`, and `boringcache token rotate`.
+Use `--shell` on `token create`, `token create-ci`, and `token rotate` when you want export lines you can paste straight into CI secrets or a local shell.
+If you want browser approval without the CLI trying to open a local browser, use `boringcache login --manual` or `boringcache onboard --manual`.
+For CI and scripts, prefer `--json` on `status`, `inspect`, `doctor`, `sessions`, and `misses`. `sessions` and `misses` also support `--limit` and `--page`.
+
 ## Cargo flow locally
 
 For this repo, the fastest local Cargo path is:
@@ -204,6 +237,24 @@ You do not need to choose a mode manually for normal use.
 ## Smaller commands
 
 ```bash
+# Choose or change the default workspace
+boringcache use
+
+# Show workspace status, cache health, and recent operator signals
+boringcache status
+
+# Inspect one cache tag or cache entry
+boringcache inspect deps
+
+# Check API URL, token scope, and resolved workspace
+boringcache doctor --json
+
+# Drill into recent sessions
+boringcache sessions
+
+# Drill into recurring and cold misses
+boringcache misses
+
 # Check whether tags exist without downloading
 boringcache check my-org/app "deps,build" --json
 
@@ -211,7 +262,7 @@ boringcache check my-org/app "deps,build" --json
 boringcache ls my-org/app --json
 
 # Delete cache entries by tag
-boringcache delete my-org/app "deps"
+boringcache rm my-org/app "deps"
 
 # Inspect or set local config
 boringcache config list

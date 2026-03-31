@@ -1,6 +1,7 @@
+use crate::api::ApiClient;
 use crate::config::Config;
 use crate::ui;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use thiserror::Error;
 
 pub fn expand_tilde_path(path: &str) -> String {
@@ -17,23 +18,65 @@ pub fn get_workspace_name(workspace_option: Option<String>) -> Result<String> {
         return Ok(workspace);
     }
 
+    configured_workspace().ok_or_else(|| {
+        anyhow!(
+            "No workspace specified. Set BORINGCACHE_DEFAULT_WORKSPACE or run `boringcache use`."
+        )
+    })
+}
+
+pub fn configured_workspace() -> Option<String> {
     if let Some(workspace) = crate::config::env_var("BORINGCACHE_DEFAULT_WORKSPACE") {
+        let normalized = workspace.trim().to_string();
+        if !normalized.is_empty() {
+            return Some(normalized);
+        }
+    }
+
+    Config::load()
+        .ok()
+        .and_then(|config| config.default_workspace)
+        .map(|workspace| workspace.trim().to_string())
+        .filter(|workspace| !workspace.is_empty())
+}
+
+pub async fn resolve_workspace(
+    api_client: &ApiClient,
+    workspace_option: Option<String>,
+    explicit_example: &str,
+) -> Result<String> {
+    if let Some(workspace) = workspace_option
+        .map(|workspace| workspace.trim().to_string())
+        .filter(|workspace| !workspace.is_empty())
+    {
         return Ok(workspace);
     }
 
-    match Config::load() {
-        Ok(config) => {
-            if let Some(default_workspace) = config.default_workspace {
-                Ok(default_workspace)
-            } else {
-                Err(anyhow::anyhow!(
-                    "No workspace specified. Set BORINGCACHE_DEFAULT_WORKSPACE env var or use 'boringcache config set default_workspace <name>'"
-                ))
-            }
-        }
-        Err(_) => Err(anyhow::anyhow!(
-            "No workspace specified and config not found. Set BORINGCACHE_DEFAULT_WORKSPACE env var or run 'boringcache auth' first"
+    if let Some(workspace) = configured_workspace() {
+        return Ok(workspace);
+    }
+
+    let mut workspaces = api_client.list_workspaces().await?;
+    workspaces.sort_by(|a, b| a.name.cmp(&b.name));
+
+    match workspaces.as_slice() {
+        [] => Err(anyhow!(
+            "No accessible workspaces found for this token. Pass a workspace explicitly or authenticate with a workspace-scoped token."
         )),
+        [workspace] => Ok(workspace.slug.clone()),
+        _ => {
+            let names = workspaces
+                .iter()
+                .take(5)
+                .map(|workspace| workspace.slug.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let suffix = if workspaces.len() > 5 { ", ..." } else { "" };
+
+            Err(anyhow!(
+                "No workspace specified. Use `boringcache use` to choose a default workspace or run `{explicit_example}`.\nAvailable workspaces: {names}{suffix}"
+            ))
+        }
     }
 }
 

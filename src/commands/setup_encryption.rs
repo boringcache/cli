@@ -46,7 +46,7 @@ pub async fn execute(workspace: Option<String>, identity_output: Option<String>)
 
     let recipient_str = recipient.to_string();
 
-    let mut config = Config::load().context("Failed to load config")?;
+    let mut config = Config::load_for_write().context("Failed to load config")?;
     config.default_age_identity = Some(identity_path.to_string_lossy().to_string());
     config.set_workspace_encryption(&workspace, &recipient_str);
     config.save_config()?;

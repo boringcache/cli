@@ -1,5 +1,166 @@
 use clap::{Parser, Subcommand};
 
+#[derive(Subcommand)]
+pub enum TokenCommands {
+    #[command(name = "ls", visible_alias = "list", about = "List workspace tokens")]
+    List {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(long, help = "Include revoked and expired tokens")]
+        all: bool,
+
+        #[arg(long, default_value_t = 20, help = "Number of tokens per page")]
+        limit: u32,
+
+        #[arg(long, default_value_t = 1, help = "Page number (1-based)")]
+        page: u32,
+
+        #[arg(long, help = "Print machine-readable output for CI and scripts")]
+        json: bool,
+    },
+
+    #[command(about = "Show one workspace token")]
+    Show {
+        #[arg(help = "Workspace name or token id")]
+        workspace_or_token_id: String,
+
+        #[arg(help = "Token id (omit when a default workspace is configured)")]
+        token_id: Option<String>,
+
+        #[arg(long, help = "Print machine-readable output for CI and scripts")]
+        json: bool,
+    },
+
+    #[command(about = "Create a workspace token")]
+    Create {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(long, help = "Token name")]
+        name: String,
+
+        #[arg(
+            long,
+            default_value = "save",
+            value_parser = ["restore", "save", "admin"],
+            help = "Token access level"
+        )]
+        access: String,
+
+        #[arg(
+            long = "write-tag-prefix",
+            value_name = "PREFIX",
+            help = "Allowed write tag prefix for save tokens (repeatable)"
+        )]
+        write_tag_prefixes: Vec<String>,
+
+        #[arg(
+            long,
+            value_parser = ["30d", "90d", "1y"],
+            help = "Expiration shortcut"
+        )]
+        expires_in: Option<String>,
+
+        #[arg(long, value_name = "YYYY-MM-DD", help = "Custom expiration date")]
+        expires_on: Option<String>,
+
+        #[arg(
+            long,
+            help = "Print shell export lines for the new secret",
+            conflicts_with = "json"
+        )]
+        shell: bool,
+
+        #[arg(long, help = "Print machine-readable output for CI and scripts")]
+        json: bool,
+    },
+
+    #[command(
+        name = "create-ci",
+        visible_alias = "ci",
+        about = "Create restore/save CI token pair"
+    )]
+    CreateCi {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(long, help = "Optional token name prefix")]
+        name: Option<String>,
+
+        #[arg(
+            long = "save-tag-prefix",
+            value_name = "PREFIX",
+            help = "Allowed save tag prefix for the save token (repeatable)"
+        )]
+        save_tag_prefixes: Vec<String>,
+
+        #[arg(
+            long,
+            value_parser = ["30d", "90d", "1y"],
+            help = "Expiration shortcut"
+        )]
+        expires_in: Option<String>,
+
+        #[arg(long, value_name = "YYYY-MM-DD", help = "Custom expiration date")]
+        expires_on: Option<String>,
+
+        #[arg(
+            long,
+            help = "Print shell export lines for the new secrets",
+            conflicts_with = "json"
+        )]
+        shell: bool,
+
+        #[arg(long, help = "Print machine-readable output for CI and scripts")]
+        json: bool,
+    },
+
+    #[command(about = "Revoke a workspace token")]
+    Revoke {
+        #[arg(help = "Workspace name or token id")]
+        workspace_or_token_id: String,
+
+        #[arg(help = "Token id (omit when a default workspace is configured)")]
+        token_id: Option<String>,
+
+        #[arg(long, help = "Print machine-readable output for CI and scripts")]
+        json: bool,
+    },
+
+    #[command(about = "Rotate a workspace token")]
+    Rotate {
+        #[arg(help = "Workspace name or token id")]
+        workspace_or_token_id: String,
+
+        #[arg(help = "Token id (omit when a default workspace is configured)")]
+        token_id: Option<String>,
+
+        #[arg(long, help = "Optional replacement token name")]
+        name: Option<String>,
+
+        #[arg(
+            long,
+            value_parser = ["30d", "90d", "1y"],
+            help = "Expiration shortcut"
+        )]
+        expires_in: Option<String>,
+
+        #[arg(long, value_name = "YYYY-MM-DD", help = "Custom expiration date")]
+        expires_on: Option<String>,
+
+        #[arg(
+            long,
+            help = "Print shell export lines for the replacement secret",
+            conflicts_with = "json"
+        )]
+        shell: bool,
+
+        #[arg(long, help = "Print machine-readable output for CI and scripts")]
+        json: bool,
+    },
+}
+
 #[derive(Parser)]
 #[command(
     name = "boringcache",
@@ -29,8 +190,26 @@ pub enum Commands {
         token: String,
     },
 
-    #[command(about = "Sign in via browser (opens browser for OAuth)")]
-    Login,
+    #[command(about = "Sign in by approving CLI access in a browser (local or another device)")]
+    Login {
+        #[arg(
+            long,
+            help = "Print the approval URL and wait without trying to open a local browser"
+        )]
+        manual: bool,
+    },
+
+    #[command(about = "Check terminal cache setup, token scope, and workspace resolution")]
+    Doctor {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(long, help = "Print machine-readable output for CI and scripts")]
+        json: bool,
+    },
+
+    #[command(subcommand, about = "Manage workspace tokens")]
+    Token(TokenCommands),
 
     Mount {
         #[arg(help = "Workspace name (org/project or user/project)")]
@@ -238,12 +417,13 @@ pub enum Commands {
         json: bool,
     },
 
+    #[command(name = "rm", visible_alias = "delete", about = "Delete cache tags")]
     Delete {
-        #[arg(help = "Workspace name (org/project or user/project)")]
-        workspace: String,
+        #[arg(help = "Cache tag to delete, or workspace when passing two positionals")]
+        workspace_or_tag: String,
 
-        #[arg(help = "Comma-separated tags to delete")]
-        tags: String,
+        #[arg(help = "Comma-separated tags to delete when passing an explicit workspace")]
+        tags: Option<String>,
 
         #[arg(long, help = "Disable automatic platform suffix appending to tags")]
         no_platform: bool,
@@ -255,6 +435,21 @@ pub enum Commands {
         no_git: bool,
     },
 
+    #[command(
+        about = "Inspect a cache entry by tag or cache entry id",
+        visible_alias = "show"
+    )]
+    Inspect {
+        #[arg(help = "Cache tag or workspace when passing two positionals")]
+        workspace_or_identifier: String,
+
+        #[arg(help = "Cache tag or cache entry id when passing an explicit workspace")]
+        identifier: Option<String>,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
     Ls {
         #[arg(help = "Workspace name (org/project or user/project)")]
         workspace: Option<String>,
@@ -264,6 +459,145 @@ pub enum Commands {
 
         #[arg(long, default_value = "1")]
         page: u32,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
+    #[command(
+        about = "Show workspace status, cache health, and operator insights",
+        visible_alias = "overview"
+    )]
+    Status {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(
+            long,
+            default_value = "24h",
+            value_parser = ["1h", "6h", "24h", "7d", "30d"],
+            help = "Time window for operator insights"
+        )]
+        period: String,
+
+        #[arg(
+            short,
+            long,
+            default_value = "5",
+            value_parser = clap::value_parser!(u32).range(1..=10),
+            help = "Maximum number of tools, sessions, and missed keys to show"
+        )]
+        limit: u32,
+
+        #[arg(
+            long,
+            help = "Refresh the status view until interrupted",
+            conflicts_with = "json"
+        )]
+        watch: bool,
+
+        #[arg(
+            long,
+            default_value = "5",
+            requires = "watch",
+            value_parser = clap::value_parser!(u64).range(1..=3600),
+            help = "Seconds between refreshes when --watch is enabled"
+        )]
+        interval: u64,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
+    #[command(about = "Show recent cache sessions and execution context")]
+    Sessions {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(
+            long,
+            default_value = "24h",
+            value_parser = ["1h", "6h", "24h", "7d", "30d"],
+            help = "Time window for recent sessions"
+        )]
+        period: String,
+
+        #[arg(
+            short,
+            long,
+            default_value = "20",
+            value_parser = clap::value_parser!(u32).range(1..=100),
+            help = "Maximum number of sessions to show"
+        )]
+        limit: u32,
+
+        #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..))]
+        page: u32,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
+    #[command(about = "Show hot cache misses and recurring miss patterns")]
+    Misses {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(
+            long,
+            default_value = "24h",
+            value_parser = ["1h", "6h", "24h", "7d", "30d"],
+            help = "Time window for recent misses"
+        )]
+        period: String,
+
+        #[arg(
+            short,
+            long,
+            default_value = "20",
+            value_parser = clap::value_parser!(u32).range(1..=100),
+            help = "Maximum number of misses to show"
+        )]
+        limit: u32,
+
+        #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..))]
+        page: u32,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
+    #[command(about = "List active cache tags for a workspace")]
+    Tags {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(long, help = "Filter tags by substring")]
+        filter: Option<String>,
+
+        #[arg(long, help = "Include system and internal tags")]
+        all: bool,
+
+        #[arg(
+            short,
+            long,
+            default_value = "20",
+            value_parser = clap::value_parser!(u32).range(1..=100),
+            help = "Maximum number of tags to show"
+        )]
+        limit: u32,
+
+        #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..))]
+        page: u32,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
+    #[command(name = "use", about = "Choose or set the default workspace")]
+    Use {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
 
         #[arg(short, long, help = "Output in JSON format")]
         json: bool,
@@ -302,6 +636,12 @@ pub enum Commands {
         #[arg(long, help = "Show changes without applying")]
         dry_run: bool,
 
+        #[arg(
+            long,
+            help = "Print the approval URL and wait without trying to open a local browser"
+        )]
+        manual: bool,
+
         #[arg(short, long, help = "Output in JSON format")]
         json: bool,
     },
@@ -316,6 +656,12 @@ pub enum Commands {
 
         #[arg(long, help = "Show changes without applying")]
         dry_run: bool,
+
+        #[arg(
+            long,
+            help = "Print the approval URL and wait without trying to open a local browser"
+        )]
+        manual: bool,
 
         #[arg(short, long, help = "Output in JSON format")]
         json: bool,

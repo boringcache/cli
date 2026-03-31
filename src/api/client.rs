@@ -1877,6 +1877,161 @@ impl ApiClient {
         self.get_v2(&url).await
     }
 
+    pub async fn workspace_status(
+        &self,
+        workspace: &str,
+        period: &str,
+        limit: u32,
+    ) -> Result<super::models::workspace::WorkspaceStatusResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "status")?;
+        let url = format!("{endpoint}?period={period}&limit={limit}");
+        self.get_v2(&url).await
+    }
+
+    pub async fn workspace_tags(
+        &self,
+        workspace: &str,
+        filter: Option<&str>,
+        include_system: bool,
+        limit: u32,
+        offset: u32,
+    ) -> Result<super::models::workspace::WorkspaceTagsResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "tags")?;
+        let mut params = vec![format!("limit={limit}"), format!("offset={offset}")];
+        if let Some(filter) = filter.filter(|value| !value.trim().is_empty()) {
+            params.push(format!("filter={}", urlencoding::encode(filter.trim())));
+        }
+        if include_system {
+            params.push("include_system=true".to_string());
+        }
+        let url = format!("{endpoint}?{}", params.join("&"));
+        self.get_v2(&url).await
+    }
+
+    pub async fn workspace_tokens(
+        &self,
+        workspace: &str,
+        include_inactive: bool,
+        limit: u32,
+        offset: u32,
+    ) -> Result<super::models::workspace::WorkspaceTokensResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "tokens")?;
+        let mut params = vec![format!("limit={limit}"), format!("offset={offset}")];
+        if include_inactive {
+            params.push("include_inactive=true".to_string());
+        }
+        let url = format!("{endpoint}?{}", params.join("&"));
+        self.get_v2(&url).await
+    }
+
+    pub async fn workspace_token(
+        &self,
+        workspace: &str,
+        token_id: &str,
+    ) -> Result<super::models::workspace::WorkspaceTokenResponse> {
+        let endpoint = self.workspace_endpoint(
+            workspace,
+            &format!("tokens/{}", urlencoding::encode(token_id)),
+        )?;
+        self.get_v2(&endpoint).await
+    }
+
+    pub async fn create_workspace_token(
+        &self,
+        workspace: &str,
+        body: &super::models::workspace::WorkspaceTokenCreateRequest,
+    ) -> Result<super::models::workspace::WorkspaceTokenResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "tokens")?;
+        self.post_v2(&endpoint, body).await
+    }
+
+    pub async fn create_workspace_token_pair(
+        &self,
+        workspace: &str,
+        body: &super::models::workspace::WorkspaceTokenPairCreateRequest,
+    ) -> Result<super::models::workspace::WorkspaceTokenPairResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "tokens/ci-pair")?;
+        self.post_v2(&endpoint, body).await
+    }
+
+    pub async fn revoke_workspace_token(
+        &self,
+        workspace: &str,
+        token_id: &str,
+    ) -> Result<super::models::workspace::WorkspaceTokenResponse> {
+        let endpoint = self.workspace_endpoint(
+            workspace,
+            &format!("tokens/{}/revoke", urlencoding::encode(token_id)),
+        )?;
+        self.post_v2(&endpoint, &serde_json::json!({})).await
+    }
+
+    pub async fn rotate_workspace_token(
+        &self,
+        workspace: &str,
+        token_id: &str,
+        body: &super::models::workspace::WorkspaceTokenRotateRequest,
+    ) -> Result<super::models::workspace::WorkspaceTokenResponse> {
+        let endpoint = self.workspace_endpoint(
+            workspace,
+            &format!("tokens/{}/rotate", urlencoding::encode(token_id)),
+        )?;
+        self.post_v2(&endpoint, body).await
+    }
+
+    pub async fn workspace_sessions(
+        &self,
+        workspace: &str,
+        period: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<super::models::workspace::WorkspaceSessionsResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "sessions")?;
+        let url = format!("{endpoint}?period={period}&limit={limit}&offset={offset}");
+        self.get_v2(&url).await
+    }
+
+    pub async fn workspace_misses(
+        &self,
+        workspace: &str,
+        period: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<super::models::workspace::WorkspaceMissesResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "misses")?;
+        let url = format!("{endpoint}?period={period}&limit={limit}&offset={offset}");
+        self.get_v2(&url).await
+    }
+
+    pub async fn inspect_cache(
+        &self,
+        workspace: &str,
+        identifier: &str,
+    ) -> Result<Option<super::models::cache::CacheInspectResponse>> {
+        let encoded_identifier = urlencoding::encode(identifier);
+        let endpoint =
+            self.workspace_endpoint(workspace, &format!("caches/inspect/{encoded_identifier}"))?;
+        let url = self.build_v2_url(&endpoint);
+        let response = self
+            .send_authenticated_request(self.client.get(&url))
+            .await?;
+        let status = response.status();
+
+        if status == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        if !status.is_success() {
+            return Err(self.create_error_from_response(response).await);
+        }
+
+        let inspection = response
+            .json()
+            .await
+            .context("Failed to parse cache inspect response")?;
+        Ok(Some(inspection))
+    }
+
     pub async fn get_session_info(&self) -> Result<super::models::SessionInfo> {
         self.get_v2("session").await
     }
@@ -2222,7 +2377,7 @@ fn map_request_send_error(err: reqwest::Error) -> anyhow::Error {
     boringcache_error.into()
 }
 
-fn derive_api_base_urls(configured_base_url: &str) -> (String, String) {
+pub(crate) fn derive_api_base_urls(configured_base_url: &str) -> (String, String) {
     let configured = configured_base_url.trim().trim_end_matches('/');
     let default = crate::config::Config::default_api_url_value()
         .trim()
@@ -3164,6 +3319,56 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
+    async fn test_cache_inspect_request() {
+        let _guard = test_env::lock();
+
+        if !networking_available() {
+            eprintln!("skipping test_cache_inspect_request: networking disabled in sandbox");
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        test_env::set_var("HOME", temp_home.path());
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v2/workspaces/ns/ws/caches/inspect/ruby-deps")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"workspace":{"name":"Rails","slug":"ns/ws"},"identifier":{"query":"ruby-deps","matched_by":"tag"},"entry":{"id":"entry-1","primary_tag":"ruby-deps","status":"ready","manifest_root_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","manifest_format_version":1,"storage_mode":"archive","stored_size_bytes":1024,"uncompressed_size":4096,"compressed_size":1024,"archive_size":1024,"file_count":32,"compression_algorithm":"zstd","blob_count":null,"blob_total_size_bytes":null,"cas_layout":null,"storage_verified":false,"hit_count":7,"created_at":"2026-03-31T12:00:00Z","uploaded_at":"2026-03-31T12:01:00Z","last_accessed_at":"2026-03-31T12:02:00Z","expires_at":null,"encrypted":false,"encryption_algorithm":null,"encryption_recipient_hint":null,"server_signed":false,"server_signed_at":null},"tags":[{"name":"ruby-deps","primary":true,"system":false,"created_at":"2026-03-31T12:00:00Z","updated_at":"2026-03-31T12:00:00Z"}],"versions":{"tag":"ruby-deps","version_count":1,"max_versions":10,"current":true,"total_storage_bytes":1024},"performance":{"total_operations":1,"saves":0,"restores":1,"avg_restore_ms":120.0,"avg_save_ms":0.0,"errors":0,"avg_download_speed":0.0,"avg_upload_speed":0.0,"last_operation":"2026-03-31T12:02:00Z","error_rate":0.0}}"#,
+            )
+            .create_async()
+            .await;
+
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize");
+
+        let response = client
+            .inspect_cache("ns/ws", "ruby-deps")
+            .await
+            .expect("cache inspect should succeed")
+            .expect("cache inspect should return a payload");
+
+        assert_eq!(response.workspace.slug, "ns/ws");
+        assert_eq!(response.identifier.matched_by, "tag");
+        assert_eq!(response.entry.id, "entry-1");
+        assert_eq!(response.tags.len(), 1);
+
+        mock.assert_async().await;
+
+        if let Some(home) = original_home {
+            test_env::set_var("HOME", home);
+        }
+        test_env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_create_cli_connect_session_without_auth_token() {
         let _guard = test_env::lock();
 
@@ -3186,7 +3391,7 @@ mod tests {
             .with_status(201)
             .with_header("content-type", "application/json")
             .with_body(
-                r#"{"session_id":"abc123","poll_token":"poll-secret","authorize_url":"https://boringcache.com/cli/connect/abc123","expires_at":"2026-03-02T12:00:00Z","poll_interval_seconds":3}"#,
+                r#"{"session_id":"abc123","poll_token":"poll-secret","user_code":"ABCD-EF12","verification_url":"https://boringcache.com/cli/connect","authorize_url":"https://boringcache.com/cli/connect/abc123","expires_at":"2026-03-02T12:00:00Z","poll_interval_seconds":3}"#,
             )
             .create_async()
             .await;
@@ -3201,6 +3406,11 @@ mod tests {
 
         assert_eq!(response.session_id, "abc123");
         assert_eq!(response.poll_token, "poll-secret");
+        assert_eq!(response.user_code, "ABCD-EF12");
+        assert_eq!(
+            response.verification_url,
+            "https://boringcache.com/cli/connect"
+        );
         assert_eq!(response.poll_interval_seconds, 3);
         mock.assert_async().await;
 

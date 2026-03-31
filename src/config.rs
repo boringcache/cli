@@ -21,6 +21,54 @@ pub enum AuthPurpose {
     Admin,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ValueSource {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl ValueSource {
+    fn env(key: &str) -> Self {
+        Self {
+            kind: "env".to_string(),
+            detail: Some(key.to_string()),
+        }
+    }
+
+    fn token_file(path: impl Into<String>) -> Self {
+        Self {
+            kind: "token_file".to_string(),
+            detail: Some(path.into()),
+        }
+    }
+
+    fn config_file(path: impl Into<String>) -> Self {
+        Self {
+            kind: "config_file".to_string(),
+            detail: Some(path.into()),
+        }
+    }
+
+    fn default() -> Self {
+        Self {
+            kind: "default".to_string(),
+            detail: None,
+        }
+    }
+
+    fn missing() -> Self {
+        Self {
+            kind: "missing".to_string(),
+            detail: None,
+        }
+    }
+
+    pub fn is_missing(&self) -> bool {
+        self.kind == "missing"
+    }
+}
+
 pub fn env_var(key: &str) -> Option<String> {
     std::env::var(key).ok().and_then(|value| {
         let trimmed = value.trim();
@@ -55,6 +103,15 @@ fn token_from_file() -> Option<String> {
     let token = token.trim().to_string();
 
     if token.is_empty() { None } else { Some(token) }
+}
+
+fn token_file_source_path() -> Option<String> {
+    let token_file = env_var("BORINGCACHE_TOKEN_FILE").or_else(|| {
+        let path = std::path::Path::new(DOCKER_SECRET_PATH);
+        path.exists().then(|| DOCKER_SECRET_PATH.to_string())
+    })?;
+    let token = fs::read_to_string(&token_file).ok()?;
+    (!token.trim().is_empty()).then_some(token_file)
 }
 
 fn env_api_token_for(purpose: AuthPurpose) -> Option<String> {
@@ -114,6 +171,29 @@ fn purpose_missing_token_message(purpose: AuthPurpose) -> String {
     }
 }
 
+fn env_token_source_for(purpose: AuthPurpose) -> Option<ValueSource> {
+    let keys = match purpose {
+        AuthPurpose::Default | AuthPurpose::Admin => {
+            &["BORINGCACHE_ADMIN_TOKEN", "BORINGCACHE_API_TOKEN"][..]
+        }
+        AuthPurpose::Restore => &[
+            "BORINGCACHE_RESTORE_TOKEN",
+            "BORINGCACHE_SAVE_TOKEN",
+            "BORINGCACHE_ADMIN_TOKEN",
+            "BORINGCACHE_API_TOKEN",
+        ][..],
+        AuthPurpose::Save => &[
+            "BORINGCACHE_SAVE_TOKEN",
+            "BORINGCACHE_ADMIN_TOKEN",
+            "BORINGCACHE_API_TOKEN",
+        ][..],
+    };
+
+    keys.iter()
+        .find(|key| env_var(key).is_some())
+        .map(|key| ValueSource::env(key))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspaceEncryption {
     pub enabled: bool,
@@ -124,6 +204,7 @@ pub struct WorkspaceEncryption {
 pub struct Config {
     #[serde(default = "default_api_url")]
     pub api_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_workspace: Option<String>,
@@ -158,6 +239,9 @@ impl Config {
                 workspace_encryption: None,
             };
             if let Ok(file_config) = Self::load_from_file() {
+                if config.default_workspace.is_none() {
+                    config.default_workspace = file_config.default_workspace;
+                }
                 config.default_age_identity = file_config.default_age_identity;
                 config.workspace_encryption = file_config.workspace_encryption;
             }
@@ -300,6 +384,29 @@ impl Config {
         Ok(())
     }
 
+    pub fn load_for_write() -> Result<Self> {
+        match Self::load_from_file() {
+            Ok(config) => Ok(config),
+            Err(err) => {
+                if err
+                    .downcast_ref::<BoringCacheError>()
+                    .is_some_and(|error| matches!(error, BoringCacheError::ConfigNotFound))
+                {
+                    Ok(Self {
+                        api_url: env_var("BORINGCACHE_API_URL")
+                            .unwrap_or_else(|| DEFAULT_API_URL.to_string()),
+                        token: String::new(),
+                        default_workspace: None,
+                        default_age_identity: None,
+                        workspace_encryption: None,
+                    })
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
     pub fn update<F>(&mut self, updater: F) -> Result<()>
     where
         F: FnOnce(&mut Self),
@@ -368,6 +475,55 @@ impl Config {
             .clone()
             .ok_or(BoringCacheError::ConfigNotFound)
     }
+}
+
+pub fn token_source_for(purpose: AuthPurpose) -> ValueSource {
+    if let Some(source) = env_token_source_for(purpose) {
+        return source;
+    }
+
+    if let Some(path) = token_file_source_path() {
+        return ValueSource::token_file(path);
+    }
+
+    if let (Ok(config), Ok(path)) = (Config::load_from_file(), Config::config_path())
+        && !config.token.trim().is_empty()
+    {
+        return ValueSource::config_file(path.display().to_string());
+    }
+
+    ValueSource::missing()
+}
+
+pub fn api_url_source() -> ValueSource {
+    if env_var("BORINGCACHE_API_URL").is_some() {
+        return ValueSource::env("BORINGCACHE_API_URL");
+    }
+
+    if let Ok(path) = Config::config_path()
+        && path.exists()
+    {
+        return ValueSource::config_file(path.display().to_string());
+    }
+
+    ValueSource::default()
+}
+
+pub fn default_workspace_source() -> ValueSource {
+    if env_var("BORINGCACHE_DEFAULT_WORKSPACE").is_some() {
+        return ValueSource::env("BORINGCACHE_DEFAULT_WORKSPACE");
+    }
+
+    if let (Ok(config), Ok(path)) = (Config::load_from_file(), Config::config_path())
+        && config
+            .default_workspace
+            .as_deref()
+            .is_some_and(|workspace| !workspace.trim().is_empty())
+    {
+        return ValueSource::config_file(path.display().to_string());
+    }
+
+    ValueSource::missing()
 }
 
 #[cfg(test)]
@@ -440,6 +596,15 @@ mod tests {
         assert_eq!(config.api_url, DEFAULT_API_URL);
         assert_eq!(config.token, "test_token");
         assert!(config.default_workspace.is_none());
+    }
+
+    #[test]
+    fn test_config_deserialization_without_token() {
+        let json = r#"{"default_workspace":"org/ws"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.token, "");
+        assert_eq!(config.default_workspace.as_deref(), Some("org/ws"));
     }
 
     #[test]
@@ -578,6 +743,41 @@ mod tests {
         let config = Config::load_for_auth_purpose(AuthPurpose::Restore).unwrap();
         assert_eq!(config.token, "restore-token");
         assert_eq!(config.api_url, "https://api.example.test/v2");
+    }
+
+    #[test]
+    fn test_load_for_auth_purpose_merges_file_default_workspace_with_env_token() {
+        let _guard = test_env::lock();
+        let home_guard = EnvVarGuard::new("HOME");
+        let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
+        let workspace_guard = EnvVarGuard::new("BORINGCACHE_DEFAULT_WORKSPACE");
+        let temp_dir = TempDir::new().unwrap();
+
+        home_guard.set(Some(temp_dir.path().to_str().unwrap()));
+        api_token_guard.set(Some("env-token"));
+        workspace_guard.set(None);
+
+        let mut file_config = Config::load_for_write().unwrap();
+        file_config.default_workspace = Some("org/from-file".to_string());
+        file_config.save_config().unwrap();
+
+        let config = Config::load_for_auth_purpose(AuthPurpose::Restore).unwrap();
+        assert_eq!(config.token, "env-token");
+        assert_eq!(config.default_workspace.as_deref(), Some("org/from-file"));
+    }
+
+    #[test]
+    fn test_load_for_write_does_not_copy_env_token() {
+        let _guard = test_env::lock();
+        let home_guard = EnvVarGuard::new("HOME");
+        let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
+        let temp_dir = TempDir::new().unwrap();
+
+        home_guard.set(Some(temp_dir.path().to_str().unwrap()));
+        api_token_guard.set(Some("env-token"));
+
+        let config = Config::load_for_write().unwrap();
+        assert!(config.token.is_empty());
     }
 
     #[test]

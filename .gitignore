@@ -54,6 +54,7 @@ vendor
 target
 .act
 .boringcache
+.planning/
 build/
 dist/
 .examples/

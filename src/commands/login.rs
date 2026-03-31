@@ -6,14 +6,14 @@ use crate::types::Result;
 use crate::ui;
 use std::io::IsTerminal;
 
-pub async fn execute() -> Result<()> {
+pub async fn execute(manual: bool) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!(
             "'boringcache login' requires an interactive terminal. Use 'boringcache auth --token <token>' for non-interactive auth."
         );
     }
 
-    let token = run_cli_connect_onboarding().await?;
+    let token = run_cli_connect_onboarding(manual).await?;
     crate::commands::auth::execute(token.clone()).await?;
     ensure_default_workspace_after_onboarding(&token).await?;
 
