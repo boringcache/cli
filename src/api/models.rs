@@ -729,6 +729,35 @@ pub mod workspace {
     }
 
     #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspacePagination {
+        pub limit: u32,
+        pub offset: u32,
+        pub total: u32,
+        pub returned: u32,
+        pub has_more: bool,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceSessionsResponse {
+        pub workspace: WorkspaceStatusWorkspace,
+        pub period: WorkspaceStatusPeriod,
+        pub generated_at: String,
+        pub session_health: WorkspaceStatusSessionHealth,
+        pub pagination: WorkspacePagination,
+        pub sessions: Vec<WorkspaceStatusSession>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceMissesResponse {
+        pub workspace: WorkspaceStatusWorkspace,
+        pub period: WorkspaceStatusPeriod,
+        pub generated_at: String,
+        pub cache_health: WorkspaceStatusCacheHealth,
+        pub pagination: WorkspacePagination,
+        pub missed_keys: Vec<WorkspaceStatusMissedKey>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
     pub struct WorkspaceStatusWorkspace {
         pub id: Value,
         pub name: String,

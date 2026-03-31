@@ -33,16 +33,6 @@ pub async fn execute(
     Ok(())
 }
 
-pub(crate) async fn load_status(
-    workspace_option: Option<String>,
-    period: &str,
-    limit: u32,
-    explicit_example: &str,
-) -> Result<WorkspaceStatusResponse> {
-    let (api_client, workspace) = resolve_status_target(workspace_option, explicit_example).await?;
-    api_client.workspace_status(&workspace, period, limit).await
-}
-
 pub(crate) fn render_status(status: &WorkspaceStatusResponse) {
     ui::blank_line();
     print_header(status);
@@ -51,73 +41,6 @@ pub(crate) fn render_status(status: &WorkspaceStatusResponse) {
     print_savings(status);
     print_tools(status);
     print_sessions_section(status);
-    print_missed_keys_section(status);
-}
-
-pub(crate) fn render_sessions_report(status: &WorkspaceStatusResponse) {
-    ui::blank_line();
-    println!("Sessions");
-    print_field("Workspace", &status.workspace.slug);
-    print_field("Period", &format!("last {}", status.period.key));
-    print_field("Generated", &format_relative_time(&status.generated_at));
-    print_field(
-        "Summary",
-        &format!(
-            "{} total, {} healthy, {} errors",
-            status.operations.session_health.total_sessions,
-            status.operations.session_health.healthy_sessions,
-            status.operations.session_health.error_sessions
-        ),
-    );
-    print_field(
-        "Avg session",
-        &format!(
-            "{} at {} hit rate",
-            format_duration_seconds(Some(
-                status.operations.session_health.avg_duration_ms / 1000.0
-            )),
-            format_percent(status.operations.session_health.avg_hit_rate)
-        ),
-    );
-    ui::blank_line();
-    print_sessions_section(status);
-}
-
-pub(crate) fn render_misses_report(status: &WorkspaceStatusResponse) {
-    ui::blank_line();
-    println!("Misses");
-    print_field("Workspace", &status.workspace.slug);
-    print_field("Period", &format!("last {}", status.period.key));
-    print_field("Generated", &format_relative_time(&status.generated_at));
-    print_field(
-        "Total",
-        &status.operations.cache_health.total_misses.to_string(),
-    );
-    print_field(
-        "Recurring",
-        &format!(
-            "{} ({})",
-            status.operations.cache_health.recurring_misses,
-            format_percent(status.operations.cache_health.recurring_pct)
-        ),
-    );
-    print_field(
-        "Cold",
-        &format!(
-            "{} ({})",
-            status.operations.cache_health.cold_misses,
-            format_percent(status.operations.cache_health.cold_pct)
-        ),
-    );
-    print_field(
-        "Degraded",
-        &format!(
-            "{} ({})",
-            status.operations.cache_health.degraded_misses,
-            format_percent(status.operations.cache_health.degraded_pct)
-        ),
-    );
-    ui::blank_line();
     print_missed_keys_section(status);
 }
 

@@ -1888,6 +1888,30 @@ impl ApiClient {
         self.get_v2(&url).await
     }
 
+    pub async fn workspace_sessions(
+        &self,
+        workspace: &str,
+        period: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<super::models::workspace::WorkspaceSessionsResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "sessions")?;
+        let url = format!("{endpoint}?period={period}&limit={limit}&offset={offset}");
+        self.get_v2(&url).await
+    }
+
+    pub async fn workspace_misses(
+        &self,
+        workspace: &str,
+        period: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<super::models::workspace::WorkspaceMissesResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "misses")?;
+        let url = format!("{endpoint}?period={period}&limit={limit}&offset={offset}");
+        self.get_v2(&url).await
+    }
+
     pub async fn inspect_cache(
         &self,
         workspace: &str,

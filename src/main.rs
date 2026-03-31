@@ -439,14 +439,16 @@ async fn main() -> Result<()> {
             workspace,
             period,
             limit,
+            page,
             json,
-        } => commands::sessions::execute(workspace, period, limit, json).await,
+        } => commands::sessions::execute(workspace, period, limit, page, json).await,
         cli::Commands::Misses {
             workspace,
             period,
             limit,
+            page,
             json,
-        } => commands::misses::execute(workspace, period, limit, json).await,
+        } => commands::misses::execute(workspace, period, limit, page, json).await,
         cli::Commands::Use { workspace, json } => {
             commands::use_workspace::execute(workspace, json).await
         }

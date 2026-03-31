@@ -96,8 +96,10 @@ These stay important, but they solve a different job than operator insight:
   - keeps operators on a live terminal view without a full-screen TUI
 - `boringcache sessions`
   - dedicated drill-down for recent session context, traffic, misses, and errors
+  - supports `--limit` and `--page` for longer history
 - `boringcache misses`
   - dedicated drill-down for recurring and cold miss patterns
+  - supports `--limit` and `--page` for longer history
 - `boringcache workspaces`
   - now shows the saved default workspace more clearly
 - local config persistence
@@ -111,8 +113,7 @@ These stay important, but they solve a different job than operator insight:
 
 ### Still missing
 
-- richer pagination and longer history for operator drill-down
-- first-class tag move/retag flows in the terminal
+- first-class tag listing and move/retag flows in the terminal
 
 ## Phase plan
 
@@ -168,20 +169,18 @@ The terminal path should stay backed by explicit JSON endpoints, not HTML-only v
 - workspace status
 - workspace list
 - cache list
+- cache/tag inspect
 - session info
+- operator drill-down endpoints
+  - sessions list with pagination
+  - misses list with pagination
 
 ### Needed next
 
-- cache/tag inspect endpoint
-  - resolve by tag or cache entry id
-  - include tags, digest, storage mode, counts, size, timestamps, hit count, and version context
-- operator drill-down endpoints
-  - sessions list
-  - misses list
-  - optionally watch-friendly summaries
 - tag operations under v2
   - pointer details
   - move/retag flows when appropriate
+- optionally watch-friendly summaries optimized for polling
 
 ## UX rules
 

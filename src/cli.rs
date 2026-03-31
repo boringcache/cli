@@ -355,11 +355,14 @@ pub enum Commands {
         #[arg(
             short,
             long,
-            default_value = "10",
-            value_parser = clap::value_parser!(u32).range(1..=10),
+            default_value = "20",
+            value_parser = clap::value_parser!(u32).range(1..=100),
             help = "Maximum number of sessions to show"
         )]
         limit: u32,
+
+        #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..))]
+        page: u32,
 
         #[arg(short, long, help = "Output in JSON format")]
         json: bool,
@@ -381,11 +384,14 @@ pub enum Commands {
         #[arg(
             short,
             long,
-            default_value = "10",
-            value_parser = clap::value_parser!(u32).range(1..=10),
+            default_value = "20",
+            value_parser = clap::value_parser!(u32).range(1..=100),
             help = "Maximum number of misses to show"
         )]
         limit: u32,
+
+        #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..))]
+        page: u32,
 
         #[arg(short, long, help = "Output in JSON format")]
         json: bool,

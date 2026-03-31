@@ -7,7 +7,7 @@
   },
   "servers": [
     {
-      "url": "https://api.boringcache.com/api/v2",
+      "url": "https://api.boringcache.com/v2",
       "description": "Production API"
     },
     {
@@ -21,6 +21,9 @@
     }
   ],
   "tags": [
+    {
+      "name": "Health"
+    },
     {
       "name": "Capabilities"
     },
@@ -53,6 +56,134 @@
     }
   ],
   "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Get overall API health",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "API is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "API is degraded or unhealthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/database": {
+      "get": {
+        "operationId": "getDatabaseHealth",
+        "summary": "Check database connectivity",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Database is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResult"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Database is unhealthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/cache": {
+      "get": {
+        "operationId": "getCacheHealth",
+        "summary": "Check cache connectivity",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Cache is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResult"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Cache is unhealthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/storage": {
+      "get": {
+        "operationId": "getStorageHealth",
+        "summary": "Check storage connectivity",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Storage is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResult"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Storage is unhealthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheckResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/openapi.json": {
       "get": {
         "operationId": "getOpenapiJson",
@@ -297,6 +428,94 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/sessions": {
+      "get": {
+        "operationId": "listWorkspaceSessions",
+        "summary": "List recent cache sessions for a workspace",
+        "tags": [
+          "Cache Operations"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/PeriodQuery"
+          },
+          {
+            "$ref": "#/components/parameters/LimitQuery"
+          },
+          {
+            "$ref": "#/components/parameters/OffsetQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace sessions feed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceSessionsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/misses": {
+      "get": {
+        "operationId": "listWorkspaceMisses",
+        "summary": "List recent cache misses for a workspace",
+        "tags": [
+          "Cache Operations"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/PeriodQuery"
+          },
+          {
+            "$ref": "#/components/parameters/LimitQuery"
+          },
+          {
+            "$ref": "#/components/parameters/OffsetQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace misses feed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceMissesResponse"
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1173,6 +1392,21 @@
           "minimum": 1
         }
       },
+      "PeriodQuery": {
+        "name": "period",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "1h",
+            "6h",
+            "24h",
+            "7d",
+            "30d"
+          ]
+        }
+      },
       "LimitQuery": {
         "name": "limit",
         "in": "query",
@@ -1181,6 +1415,15 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 100
+        }
+      },
+      "OffsetQuery": {
+        "name": "offset",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -1247,6 +1490,75 @@
       }
     },
     "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "timestamp",
+          "version",
+          "checks"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "unhealthy"
+            ]
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "string"
+          },
+          "checks": {
+            "type": "object",
+            "properties": {
+              "database": {
+                "$ref": "#/components/schemas/HealthCheckResult"
+              },
+              "cache": {
+                "$ref": "#/components/schemas/HealthCheckResult"
+              },
+              "storage": {
+                "$ref": "#/components/schemas/HealthCheckResult"
+              }
+            }
+          }
+        }
+      },
+      "HealthCheckResult": {
+        "type": "object",
+        "required": [
+          "status",
+          "response_time_ms",
+          "message"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "unhealthy"
+            ]
+          },
+          "response_time_ms": {
+            "type": "number",
+            "format": "float"
+          },
+          "message": {
+            "type": "string"
+          },
+          "workspace": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "ErrorResponse": {
         "type": "object",
         "required": [
@@ -1366,6 +1678,20 @@
           },
           "scope_type": {
             "type": "string"
+          },
+          "access_level": {
+            "type": "string",
+            "enum": [
+              "restore",
+              "save",
+              "admin"
+            ]
+          },
+          "write_tag_prefixes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "expires_at": {
             "type": "string",
@@ -1574,6 +1900,398 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "WorkspaceStatusWorkspace": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "provisioned",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "provisioned": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WorkspaceStatusPeriod": {
+        "type": "object",
+        "required": [
+          "key",
+          "started_at",
+          "ended_at"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "enum": [
+              "1h",
+              "6h",
+              "24h",
+              "7d",
+              "30d"
+            ]
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WorkspacePagination": {
+        "type": "object",
+        "required": [
+          "limit",
+          "offset",
+          "total",
+          "returned",
+          "has_more"
+        ],
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "returned": {
+            "type": "integer"
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "WorkspaceSessionHealth": {
+        "type": "object",
+        "required": [
+          "total_sessions",
+          "healthy_sessions",
+          "error_sessions",
+          "degraded_sessions",
+          "avg_hit_rate",
+          "avg_duration_ms"
+        ],
+        "properties": {
+          "total_sessions": {
+            "type": "integer"
+          },
+          "healthy_sessions": {
+            "type": "integer"
+          },
+          "error_sessions": {
+            "type": "integer"
+          },
+          "degraded_sessions": {
+            "type": "integer"
+          },
+          "avg_hit_rate": {
+            "type": "number"
+          },
+          "avg_duration_ms": {
+            "type": "number"
+          }
+        }
+      },
+      "WorkspaceCacheHealth": {
+        "type": "object",
+        "required": [
+          "warm_hit_rate",
+          "cold_misses",
+          "recurring_misses",
+          "cold_pct",
+          "recurring_pct",
+          "session_miss_total",
+          "normal_misses",
+          "degraded_misses",
+          "total_misses",
+          "degraded_pct",
+          "excluded_seed_misses",
+          "excluded_seed_sessions"
+        ],
+        "properties": {
+          "warm_hit_rate": {
+            "type": "number"
+          },
+          "cold_misses": {
+            "type": "integer"
+          },
+          "recurring_misses": {
+            "type": "integer"
+          },
+          "cold_pct": {
+            "type": "number"
+          },
+          "recurring_pct": {
+            "type": "number"
+          },
+          "session_miss_total": {
+            "type": "integer"
+          },
+          "normal_misses": {
+            "type": "integer"
+          },
+          "degraded_misses": {
+            "type": "integer"
+          },
+          "total_misses": {
+            "type": "integer"
+          },
+          "degraded_pct": {
+            "type": "number"
+          },
+          "excluded_seed_misses": {
+            "type": "integer"
+          },
+          "excluded_seed_sessions": {
+            "type": "integer"
+          }
+        }
+      },
+      "WorkspaceSessionErrorDetail": {
+        "type": "object",
+        "required": [
+          "operation",
+          "count"
+        ],
+        "properties": {
+          "operation": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          }
+        }
+      },
+      "WorkspaceSessionMissedKey": {
+        "type": "object",
+        "required": [
+          "key_hash",
+          "miss_count"
+        ],
+        "properties": {
+          "key_hash": {
+            "type": "string"
+          },
+          "miss_count": {
+            "type": "integer"
+          },
+          "sampled_key_prefix": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "WorkspaceSessionFeedItem": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "tool",
+          "metadata_hints",
+          "hit_rate",
+          "hit_count",
+          "miss_count",
+          "error_count",
+          "error_details",
+          "duration_seconds",
+          "bytes_read",
+          "bytes_written",
+          "created_at",
+          "missed_keys"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          },
+          "project_hint": {
+            "type": "string",
+            "nullable": true
+          },
+          "phase_hint": {
+            "type": "string",
+            "nullable": true
+          },
+          "metadata_hints": {
+            "$ref": "#/components/schemas/MetadataHints"
+          },
+          "hit_rate": {
+            "type": "number"
+          },
+          "hit_count": {
+            "type": "integer"
+          },
+          "miss_count": {
+            "type": "integer"
+          },
+          "error_count": {
+            "type": "integer"
+          },
+          "error_details": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceSessionErrorDetail"
+            }
+          },
+          "duration_seconds": {
+            "type": "number"
+          },
+          "bytes_read": {
+            "type": "integer"
+          },
+          "bytes_written": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "missed_keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceSessionMissedKey"
+            }
+          }
+        }
+      },
+      "WorkspaceMissedKeyFeedItem": {
+        "type": "object",
+        "required": [
+          "key_hash",
+          "tool",
+          "miss_count",
+          "miss_state"
+        ],
+        "properties": {
+          "key_hash": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          },
+          "miss_count": {
+            "type": "integer"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "sampled_key_prefix": {
+            "type": "string",
+            "nullable": true
+          },
+          "miss_state": {
+            "type": "string",
+            "enum": [
+              "new",
+              "recurring"
+            ]
+          }
+        }
+      },
+      "WorkspaceSessionsResponse": {
+        "type": "object",
+        "required": [
+          "workspace",
+          "period",
+          "generated_at",
+          "session_health",
+          "pagination",
+          "sessions"
+        ],
+        "properties": {
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceStatusWorkspace"
+          },
+          "period": {
+            "$ref": "#/components/schemas/WorkspaceStatusPeriod"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "session_health": {
+            "$ref": "#/components/schemas/WorkspaceSessionHealth"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/WorkspacePagination"
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceSessionFeedItem"
+            }
+          }
+        }
+      },
+      "WorkspaceMissesResponse": {
+        "type": "object",
+        "required": [
+          "workspace",
+          "period",
+          "generated_at",
+          "cache_health",
+          "pagination",
+          "missed_keys"
+        ],
+        "properties": {
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceStatusWorkspace"
+          },
+          "period": {
+            "$ref": "#/components/schemas/WorkspaceStatusPeriod"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "cache_health": {
+            "$ref": "#/components/schemas/WorkspaceCacheHealth"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/WorkspacePagination"
+          },
+          "missed_keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceMissedKeyFeedItem"
+            }
           }
         }
       },
@@ -2659,6 +3377,7 @@
           "receipts": {
             "type": "array",
             "minItems": 1,
+            "maxItems": 500,
             "items": {
               "$ref": "#/components/schemas/BlobReceipt"
             }

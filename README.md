@@ -70,7 +70,8 @@ boringcache status --watch
 
 If you need to save or restore data, use `run`, `save`, `restore`, or `cache-registry` as usual. If you need a deeper view of where the terminal UX is heading, see `docs/terminal-ux-roadmap.md`.
 
-For CI and scripts, prefer `--json` on terminal health commands such as `status`, `inspect`, and `doctor`.
+For CI and scripts, prefer `--json` on terminal health commands such as `status`, `inspect`, `doctor`, `sessions`, and `misses`.
+`boringcache sessions` and `boringcache misses` also support `--limit` and `--page` for longer operator history without leaving the terminal.
 
 ## Cargo flow locally
 
