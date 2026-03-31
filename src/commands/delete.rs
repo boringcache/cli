@@ -17,8 +17,8 @@ pub async fn execute(
     no_platform: bool,
     no_git: bool,
 ) -> Result<()> {
-    let api_client = ApiClient::for_admin()?;
     let (workspace_option, tag_list) = parse_delete_args(workspace_or_tag, tags)?;
+    let api_client = ApiClient::for_admin()?;
     let workspace = crate::commands::utils::resolve_workspace(
         &api_client,
         workspace_option,
@@ -158,11 +158,6 @@ fn parse_delete_args(
             ));
         }
         Some(tag_list) => (Some(first), tag_list),
-        None if first.contains('/') => {
-            return Err(anyhow!(
-                "Delete target is missing. Run `boringcache rm <tag>` or `boringcache rm <workspace> <tag>`."
-            ));
-        }
         None => (None, first),
     };
 
@@ -229,6 +224,14 @@ mod tests {
             parse_delete_args("ruby-deps".to_string(), None).expect("args should parse");
         assert_eq!(workspace, None);
         assert_eq!(tags, vec!["ruby-deps"]);
+    }
+
+    #[test]
+    fn parse_delete_args_accepts_single_tag_with_slash() {
+        let (workspace, tags) =
+            parse_delete_args("org/tag-name".to_string(), None).expect("args should parse");
+        assert_eq!(workspace, None);
+        assert_eq!(tags, vec!["org/tag-name"]);
     }
 
     #[test]

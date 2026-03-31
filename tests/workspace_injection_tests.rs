@@ -503,8 +503,13 @@ fn test_delete_with_workspace_format_tag() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("required arguments were not provided") || stderr.contains("<TAGS>"),
-        "Expected missing TAGS error since org/tag-name is treated as workspace, got: {}",
+        !stderr.contains("required arguments were not provided") && !stderr.contains("<TAGS>"),
+        "Expected single positional delete arg to be treated as a tag, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("No admin-capable token configured"),
+        "Expected auth error after argument parsing, got: {}",
         stderr
     );
 }
