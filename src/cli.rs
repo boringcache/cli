@@ -269,6 +269,44 @@ pub enum Commands {
         json: bool,
     },
 
+    #[command(
+        about = "Show workspace status, cache health, and operator insights",
+        visible_alias = "overview"
+    )]
+    Status {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(
+            long,
+            default_value = "24h",
+            value_parser = ["1h", "6h", "24h", "7d", "30d"],
+            help = "Time window for operator insights"
+        )]
+        period: String,
+
+        #[arg(
+            short,
+            long,
+            default_value = "5",
+            value_parser = clap::value_parser!(u32).range(1..=10),
+            help = "Maximum number of tools, sessions, and missed keys to show"
+        )]
+        limit: u32,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
+    #[command(name = "use", about = "Choose or set the default workspace")]
+    Use {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
+    },
+
     Config {
         #[command(subcommand)]
         action: ConfigSubcommand,

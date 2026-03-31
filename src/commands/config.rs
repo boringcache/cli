@@ -87,21 +87,7 @@ fn get_config_value(key: String, json_output: bool) -> Result<()> {
 }
 
 fn set_config_value(key: String, value: String) -> Result<()> {
-    if std::env::var("BORINGCACHE_API_TOKEN").is_ok() {
-        match key.as_str() {
-            "default_workspace" | "default-workspace" => {
-                ui::info("Warning: You are using environment variables for authentication.");
-                ui::info(&format!(
-                    "   To set default_workspace, use: export BORINGCACHE_DEFAULT_WORKSPACE=\"{value}\""
-                ));
-                ui::info("   Or remove BORINGCACHE_API_TOKEN to use config file mode.");
-                return Ok(());
-            }
-            _ => {}
-        }
-    }
-
-    let mut config = Config::load()?;
+    let mut config = Config::load_for_write()?;
 
     match key.as_str() {
         "api_url" | "api-url" => {
@@ -118,6 +104,11 @@ fn set_config_value(key: String, value: String) -> Result<()> {
                 config.default_workspace = Some(value.clone());
                 config.update(|_| {})?;
                 ui::info(&format!("Set default_workspace to: {value}"));
+            }
+            if let Some(env_workspace) = crate::config::env_var("BORINGCACHE_DEFAULT_WORKSPACE") {
+                ui::warn(&format!(
+                    "BORINGCACHE_DEFAULT_WORKSPACE is set to '{env_workspace}' and will override the saved default in this shell."
+                ));
             }
         }
         "token" => {

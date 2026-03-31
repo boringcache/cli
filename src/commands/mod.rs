@@ -17,6 +17,8 @@ pub mod save_support;
 pub mod serve;
 pub mod setup_encryption;
 pub mod signature_policy;
+pub mod status;
 pub mod upload_receipts;
+pub mod use_workspace;
 pub mod utils;
 pub mod workspaces;

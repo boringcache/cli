@@ -429,6 +429,15 @@ async fn main() -> Result<()> {
             page,
             json,
         } => commands::ls::execute(workspace, Some(limit), Some(page), cli.verbose, json).await,
+        cli::Commands::Status {
+            workspace,
+            period,
+            limit,
+            json,
+        } => commands::status::execute(workspace, period, limit, json).await,
+        cli::Commands::Use { workspace, json } => {
+            commands::use_workspace::execute(workspace, json).await
+        }
         cli::Commands::SetupEncryption {
             workspace,
             identity_output,

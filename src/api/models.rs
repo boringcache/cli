@@ -587,6 +587,8 @@ pub mod cache {
 
 pub mod workspace {
     use super::*;
+    use serde_json::Value;
+    use std::collections::BTreeMap;
 
     #[derive(Debug, Deserialize)]
     pub struct Workspace {
@@ -602,6 +604,186 @@ pub mod workspace {
         pub total_cache_size: u64,
         pub created_at: String,
         pub updated_at: String,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusResponse {
+        pub workspace: WorkspaceStatusWorkspace,
+        pub period: WorkspaceStatusPeriod,
+        pub generated_at: String,
+        pub inventory: WorkspaceStatusInventory,
+        pub operations: WorkspaceStatusOperations,
+        pub savings: WorkspaceStatusSavings,
+        pub tools: Vec<WorkspaceStatusTool>,
+        pub sessions: Vec<WorkspaceStatusSession>,
+        pub missed_keys: Vec<WorkspaceStatusMissedKey>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusWorkspace {
+        pub id: Value,
+        pub name: String,
+        pub slug: String,
+        #[serde(default)]
+        pub description: Option<String>,
+        pub provisioned: bool,
+        pub created_at: String,
+        pub updated_at: String,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusPeriod {
+        pub key: String,
+        pub started_at: String,
+        pub ended_at: String,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusInventory {
+        pub tagged_entries_count: u64,
+        pub tagged_storage_bytes: u64,
+        pub tagged_hits: u64,
+        pub version_count: u64,
+        pub orphaned_entries_count: u64,
+        pub orphaned_storage_bytes: u64,
+        pub dedup_unique_bytes: u64,
+        pub dedup_logical_bytes: u64,
+        pub dedup_savings_bytes: u64,
+        pub dedup_ratio: f64,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusOperations {
+        pub cache: WorkspaceStatusCacheSummary,
+        pub runtime: WorkspaceStatusRuntimeSummary,
+        pub cache_health: WorkspaceStatusCacheHealth,
+        pub session_health: WorkspaceStatusSessionHealth,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusCacheSummary {
+        pub total_requests: u64,
+        pub total_hits: u64,
+        pub lookup_requests: u64,
+        pub hit_rate: f64,
+        pub bytes_total: u64,
+        pub avg_latency_ms: f64,
+        pub degraded_count: u64,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusRuntimeSummary {
+        pub total_queries: u64,
+        pub error_count: u64,
+        pub error_rate: f64,
+        pub avg_latency_ms: f64,
+        pub degraded_count: u64,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusCacheHealth {
+        pub warm_hit_rate: f64,
+        pub cold_misses: u64,
+        pub recurring_misses: u64,
+        pub cold_pct: f64,
+        pub recurring_pct: f64,
+        pub session_miss_total: u64,
+        pub normal_misses: u64,
+        pub degraded_misses: u64,
+        pub total_misses: u64,
+        pub degraded_pct: f64,
+        pub excluded_seed_misses: u64,
+        pub excluded_seed_sessions: u64,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusSessionHealth {
+        pub total_sessions: u64,
+        pub healthy_sessions: u64,
+        pub error_sessions: u64,
+        pub degraded_sessions: u64,
+        pub avg_hit_rate: f64,
+        pub avg_duration_ms: f64,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusSavings {
+        pub cache_hits: u64,
+        pub bytes_served: u64,
+        pub bytes_written: u64,
+        pub cli_restores: u64,
+        pub cli_restore_bytes: u64,
+        pub cli_compression_saved: u64,
+        pub cli_avg_restore_ms: f64,
+        pub dedup_unique_bytes: u64,
+        pub dedup_logical_bytes: u64,
+        pub dedup_savings_bytes: u64,
+        pub dedup_ratio: f64,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusTool {
+        pub tool: String,
+        pub total: u64,
+        pub hits: u64,
+        pub misses: u64,
+        pub lookup_total: u64,
+        pub hit_rate: f64,
+        pub warm_hit_rate: f64,
+        pub recurring_misses: u64,
+        pub new_key_misses: u64,
+        pub bytes_total: u64,
+        pub avg_latency_ms: f64,
+        pub degraded: u64,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusSession {
+        pub session_id: String,
+        pub tool: String,
+        #[serde(default)]
+        pub project_hint: Option<String>,
+        #[serde(default)]
+        pub phase_hint: Option<String>,
+        #[serde(default)]
+        pub metadata_hints: BTreeMap<String, String>,
+        pub hit_rate: f64,
+        pub hit_count: u64,
+        pub miss_count: u64,
+        pub error_count: u64,
+        pub error_details: Vec<WorkspaceStatusSessionError>,
+        #[serde(default)]
+        pub duration_seconds: Option<f64>,
+        pub bytes_read: u64,
+        pub bytes_written: u64,
+        pub created_at: String,
+        pub missed_keys: Vec<WorkspaceStatusSessionMissedKey>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusSessionError {
+        pub operation: String,
+        pub count: u64,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusSessionMissedKey {
+        pub key_hash: String,
+        pub miss_count: u64,
+        #[serde(default)]
+        pub sampled_key_prefix: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceStatusMissedKey {
+        pub key_hash: String,
+        pub tool: String,
+        pub miss_count: u64,
+        #[serde(default)]
+        pub last_seen_at: Option<String>,
+        #[serde(default)]
+        pub sampled_key_prefix: Option<String>,
+        pub miss_state: String,
     }
 
     #[derive(Debug, Deserialize)]

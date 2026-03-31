@@ -124,6 +124,7 @@ pub struct WorkspaceEncryption {
 pub struct Config {
     #[serde(default = "default_api_url")]
     pub api_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_workspace: Option<String>,
@@ -158,6 +159,9 @@ impl Config {
                 workspace_encryption: None,
             };
             if let Ok(file_config) = Self::load_from_file() {
+                if config.default_workspace.is_none() {
+                    config.default_workspace = file_config.default_workspace;
+                }
                 config.default_age_identity = file_config.default_age_identity;
                 config.workspace_encryption = file_config.workspace_encryption;
             }
@@ -298,6 +302,29 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    pub fn load_for_write() -> Result<Self> {
+        match Self::load_from_file() {
+            Ok(config) => Ok(config),
+            Err(err) => {
+                if err
+                    .downcast_ref::<BoringCacheError>()
+                    .is_some_and(|error| matches!(error, BoringCacheError::ConfigNotFound))
+                {
+                    Ok(Self {
+                        api_url: env_var("BORINGCACHE_API_URL")
+                            .unwrap_or_else(|| DEFAULT_API_URL.to_string()),
+                        token: String::new(),
+                        default_workspace: None,
+                        default_age_identity: None,
+                        workspace_encryption: None,
+                    })
+                } else {
+                    Err(err)
+                }
+            }
+        }
     }
 
     pub fn update<F>(&mut self, updater: F) -> Result<()>
@@ -443,6 +470,15 @@ mod tests {
     }
 
     #[test]
+    fn test_config_deserialization_without_token() {
+        let json = r#"{"default_workspace":"org/ws"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.token, "");
+        assert_eq!(config.default_workspace.as_deref(), Some("org/ws"));
+    }
+
+    #[test]
     fn test_get_default_workspace() {
         let config_with_workspace = Config {
             api_url: DEFAULT_API_URL.to_string(),
@@ -578,6 +614,41 @@ mod tests {
         let config = Config::load_for_auth_purpose(AuthPurpose::Restore).unwrap();
         assert_eq!(config.token, "restore-token");
         assert_eq!(config.api_url, "https://api.example.test/v2");
+    }
+
+    #[test]
+    fn test_load_for_auth_purpose_merges_file_default_workspace_with_env_token() {
+        let _guard = test_env::lock();
+        let home_guard = EnvVarGuard::new("HOME");
+        let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
+        let workspace_guard = EnvVarGuard::new("BORINGCACHE_DEFAULT_WORKSPACE");
+        let temp_dir = TempDir::new().unwrap();
+
+        home_guard.set(Some(temp_dir.path().to_str().unwrap()));
+        api_token_guard.set(Some("env-token"));
+        workspace_guard.set(None);
+
+        let mut file_config = Config::load_for_write().unwrap();
+        file_config.default_workspace = Some("org/from-file".to_string());
+        file_config.save_config().unwrap();
+
+        let config = Config::load_for_auth_purpose(AuthPurpose::Restore).unwrap();
+        assert_eq!(config.token, "env-token");
+        assert_eq!(config.default_workspace.as_deref(), Some("org/from-file"));
+    }
+
+    #[test]
+    fn test_load_for_write_does_not_copy_env_token() {
+        let _guard = test_env::lock();
+        let home_guard = EnvVarGuard::new("HOME");
+        let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
+        let temp_dir = TempDir::new().unwrap();
+
+        home_guard.set(Some(temp_dir.path().to_str().unwrap()));
+        api_token_guard.set(Some("env-token"));
+
+        let config = Config::load_for_write().unwrap();
+        assert!(config.token.is_empty());
     }
 
     #[test]

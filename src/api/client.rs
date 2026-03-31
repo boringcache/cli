@@ -1877,6 +1877,17 @@ impl ApiClient {
         self.get_v2(&url).await
     }
 
+    pub async fn workspace_status(
+        &self,
+        workspace: &str,
+        period: &str,
+        limit: u32,
+    ) -> Result<super::models::workspace::WorkspaceStatusResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "status")?;
+        let url = format!("{endpoint}?period={period}&limit={limit}");
+        self.get_v2(&url).await
+    }
+
     pub async fn get_session_info(&self) -> Result<super::models::SessionInfo> {
         self.get_v2("session").await
     }

@@ -1,4 +1,5 @@
 use crate::api::ApiClient;
+use crate::config::Config;
 use crate::progress::format_bytes;
 use crate::ui;
 use anyhow::Result;
@@ -26,6 +27,10 @@ pub async fn execute(json_output: bool) -> Result<()> {
     let api_client = ApiClient::for_restore()?;
     let mut sorted_workspaces = api_client.list_workspaces().await?;
     sorted_workspaces.sort_by(|a, b| a.name.cmp(&b.name));
+    let current_workspace = Config::load()
+        .ok()
+        .and_then(|config| config.default_workspace)
+        .filter(|workspace| !workspace.trim().is_empty());
 
     if json_output {
         let summary = WorkspacesSummary {
@@ -55,18 +60,22 @@ pub async fn execute(json_output: bool) -> Result<()> {
 
     ui::blank_line();
     ui::info(&format!(
-        "{:<15} {:<20} {:<10} {:<15}",
-        "ID", "NAME", "ENTRIES", "SIZE"
+        "{:<7} {:<32} {:<18} {:<10} {:<15}",
+        "DEFAULT", "WORKSPACE", "NAME", "ENTRIES", "SIZE"
     ));
-    ui::info(&"-".repeat(60));
+    ui::info(&"-".repeat(90));
 
     for workspace in &sorted_workspaces {
-        let id = workspace.id.as_ref().unwrap_or(&workspace.slug);
-
-        let id_display = if id.len() > 15 {
-            format!("{}...", &id[..12.min(id.len())])
+        let marker = if current_workspace.as_deref() == Some(workspace.slug.as_str()) {
+            "*"
         } else {
-            id.clone()
+            ""
+        };
+
+        let slug = if workspace.slug.len() > 32 {
+            format!("{}...", &workspace.slug[..29.min(workspace.slug.len())])
+        } else {
+            workspace.slug.clone()
         };
 
         let name = if workspace.name.len() > 20 {
@@ -79,12 +88,13 @@ pub async fn execute(json_output: bool) -> Result<()> {
         let size = format_bytes(workspace.total_cache_size);
 
         ui::info(&format!(
-            "{id_display:<15} {name:<20} {entries:<10} {size:<15}"
+            "{marker:<7} {slug:<32} {name:<18} {entries:<10} {size:<15}"
         ));
     }
 
     ui::blank_line();
     ui::info(&format!("Total: {} workspaces", sorted_workspaces.len()));
+    ui::info("Use `boringcache use <workspace>` to save a default workspace.");
 
     Ok(())
 }
