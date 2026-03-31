@@ -1888,6 +1888,35 @@ impl ApiClient {
         self.get_v2(&url).await
     }
 
+    pub async fn inspect_cache(
+        &self,
+        workspace: &str,
+        identifier: &str,
+    ) -> Result<Option<super::models::cache::CacheInspectResponse>> {
+        let encoded_identifier = urlencoding::encode(identifier);
+        let endpoint =
+            self.workspace_endpoint(workspace, &format!("caches/inspect/{encoded_identifier}"))?;
+        let url = self.build_v2_url(&endpoint);
+        let response = self
+            .send_authenticated_request(self.client.get(&url))
+            .await?;
+        let status = response.status();
+
+        if status == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        if !status.is_success() {
+            return Err(self.create_error_from_response(response).await);
+        }
+
+        let inspection = response
+            .json()
+            .await
+            .context("Failed to parse cache inspect response")?;
+        Ok(Some(inspection))
+    }
+
     pub async fn get_session_info(&self) -> Result<super::models::SessionInfo> {
         self.get_v2("session").await
     }
@@ -3164,6 +3193,56 @@ mod tests {
             .await
             .expect("blob download urls should succeed");
         assert_eq!(response.download_urls.len(), 2);
+
+        mock.assert_async().await;
+
+        if let Some(home) = original_home {
+            test_env::set_var("HOME", home);
+        }
+        test_env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_cache_inspect_request() {
+        let _guard = test_env::lock();
+
+        if !networking_available() {
+            eprintln!("skipping test_cache_inspect_request: networking disabled in sandbox");
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        test_env::set_var("HOME", temp_home.path());
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v2/workspaces/ns/ws/caches/inspect/ruby-deps")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"workspace":{"name":"Rails","slug":"ns/ws"},"identifier":{"query":"ruby-deps","matched_by":"tag"},"entry":{"id":"entry-1","primary_tag":"ruby-deps","status":"ready","manifest_root_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","manifest_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","manifest_format_version":1,"storage_mode":"archive","stored_size_bytes":1024,"uncompressed_size":4096,"compressed_size":1024,"archive_size":1024,"file_count":32,"compression_algorithm":"zstd","blob_count":null,"blob_total_size_bytes":null,"cas_layout":null,"storage_verified":false,"hit_count":7,"created_at":"2026-03-31T12:00:00Z","uploaded_at":"2026-03-31T12:01:00Z","last_accessed_at":"2026-03-31T12:02:00Z","expires_at":null,"encrypted":false,"encryption_algorithm":null,"encryption_recipient_hint":null,"server_signed":false,"server_signed_at":null},"tags":[{"name":"ruby-deps","primary":true,"system":false,"created_at":"2026-03-31T12:00:00Z","updated_at":"2026-03-31T12:00:00Z"}],"versions":{"tag":"ruby-deps","version_count":1,"max_versions":10,"current":true,"total_storage_bytes":1024},"performance":{"total_operations":1,"saves":0,"restores":1,"avg_restore_ms":120.0,"avg_save_ms":0.0,"errors":0,"avg_download_speed":0.0,"avg_upload_speed":0.0,"last_operation":"2026-03-31T12:02:00Z","error_rate":0.0}}"#,
+            )
+            .create_async()
+            .await;
+
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize");
+
+        let response = client
+            .inspect_cache("ns/ws", "ruby-deps")
+            .await
+            .expect("cache inspect should succeed")
+            .expect("cache inspect should return a payload");
+
+        assert_eq!(response.workspace.slug, "ns/ws");
+        assert_eq!(response.identifier.matched_by, "tag");
+        assert_eq!(response.entry.id, "entry-1");
+        assert_eq!(response.tags.len(), 1);
 
         mock.assert_async().await;
 

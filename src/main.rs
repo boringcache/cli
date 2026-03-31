@@ -393,24 +393,19 @@ async fn main() -> Result<()> {
             .await
         }
         cli::Commands::Delete {
-            workspace,
+            workspace_or_tag,
             tags,
             no_platform,
             no_git,
         } => {
-            let effective_workspace = resolve_effective_workspace(&workspace);
-            for tag in tags.split(',') {
-                commands::delete::execute(
-                    effective_workspace.clone(),
-                    tag.trim().to_string(),
-                    cli.verbose,
-                    no_platform,
-                    no_git,
-                )
-                .await?;
-            }
-            Ok(())
+            commands::delete::execute(workspace_or_tag, tags, cli.verbose, no_platform, no_git)
+                .await
         }
+        cli::Commands::Inspect {
+            workspace_or_identifier,
+            identifier,
+            json,
+        } => commands::inspect::execute(workspace_or_identifier, identifier, json).await,
         cli::Commands::Config { action } => {
             use cli::ConfigSubcommand;
             use commands::config::ConfigAction;

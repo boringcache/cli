@@ -513,6 +513,115 @@ pub mod cache {
         pub version: Option<String>,
     }
 
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct CacheInspectResponse {
+        pub workspace: CacheInspectWorkspace,
+        pub identifier: CacheInspectIdentifier,
+        pub entry: CacheInspectEntry,
+        #[serde(default)]
+        pub tags: Vec<CacheInspectTag>,
+        #[serde(default)]
+        pub versions: Option<CacheInspectVersions>,
+        #[serde(default)]
+        pub performance: Option<CacheInspectPerformance>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct CacheInspectWorkspace {
+        pub name: String,
+        pub slug: String,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct CacheInspectIdentifier {
+        pub query: String,
+        pub matched_by: String,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct CacheInspectEntry {
+        pub id: String,
+        #[serde(default)]
+        pub primary_tag: Option<String>,
+        pub status: String,
+        pub manifest_root_digest: String,
+        #[serde(default)]
+        pub manifest_digest: Option<String>,
+        #[serde(default)]
+        pub manifest_format_version: Option<u32>,
+        pub storage_mode: String,
+        pub stored_size_bytes: u64,
+        #[serde(default)]
+        pub uncompressed_size: Option<u64>,
+        #[serde(default)]
+        pub compressed_size: Option<u64>,
+        #[serde(default)]
+        pub archive_size: Option<u64>,
+        #[serde(default)]
+        pub file_count: Option<u32>,
+        #[serde(default)]
+        pub compression_algorithm: Option<String>,
+        #[serde(default)]
+        pub blob_count: Option<u64>,
+        #[serde(default)]
+        pub blob_total_size_bytes: Option<u64>,
+        #[serde(default)]
+        pub cas_layout: Option<String>,
+        #[serde(default)]
+        pub storage_verified: bool,
+        pub hit_count: u64,
+        pub created_at: String,
+        #[serde(default)]
+        pub uploaded_at: Option<String>,
+        #[serde(default)]
+        pub last_accessed_at: Option<String>,
+        #[serde(default)]
+        pub expires_at: Option<String>,
+        #[serde(default)]
+        pub encrypted: bool,
+        #[serde(default)]
+        pub encryption_algorithm: Option<String>,
+        #[serde(default)]
+        pub encryption_recipient_hint: Option<String>,
+        #[serde(default)]
+        pub server_signed: bool,
+        #[serde(default)]
+        pub server_signed_at: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct CacheInspectTag {
+        pub name: String,
+        pub primary: bool,
+        pub system: bool,
+        pub created_at: String,
+        pub updated_at: String,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct CacheInspectVersions {
+        pub tag: String,
+        pub version_count: u64,
+        pub max_versions: u64,
+        pub current: bool,
+        pub total_storage_bytes: u64,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct CacheInspectPerformance {
+        pub total_operations: u64,
+        pub saves: u64,
+        pub restores: u64,
+        pub avg_restore_ms: f64,
+        pub avg_save_ms: f64,
+        pub errors: u64,
+        pub avg_download_speed: f64,
+        pub avg_upload_speed: f64,
+        #[serde(default)]
+        pub last_operation: Option<String>,
+        pub error_rate: f64,
+    }
+
     #[derive(Debug, Deserialize)]
     pub struct UploadSessionStatusResponse {
         pub upload_session_id: String,

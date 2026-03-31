@@ -6,6 +6,7 @@ pub mod config;
 pub mod delete;
 pub mod file_materialize;
 pub mod go_cacheprog;
+pub mod inspect;
 pub mod login;
 pub mod ls;
 pub mod mount;

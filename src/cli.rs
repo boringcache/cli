@@ -238,12 +238,13 @@ pub enum Commands {
         json: bool,
     },
 
+    #[command(name = "rm", visible_alias = "delete", about = "Delete cache tags")]
     Delete {
-        #[arg(help = "Workspace name (org/project or user/project)")]
-        workspace: String,
+        #[arg(help = "Cache tag to delete, or workspace when passing two positionals")]
+        workspace_or_tag: String,
 
-        #[arg(help = "Comma-separated tags to delete")]
-        tags: String,
+        #[arg(help = "Comma-separated tags to delete when passing an explicit workspace")]
+        tags: Option<String>,
 
         #[arg(long, help = "Disable automatic platform suffix appending to tags")]
         no_platform: bool,
@@ -253,6 +254,21 @@ pub enum Commands {
             help = "Disable automatic git-based tag suffixing and fallback resolution"
         )]
         no_git: bool,
+    },
+
+    #[command(
+        about = "Inspect a cache entry by tag or cache entry id",
+        visible_alias = "show"
+    )]
+    Inspect {
+        #[arg(help = "Cache tag or workspace when passing two positionals")]
+        workspace_or_identifier: String,
+
+        #[arg(help = "Cache tag or cache entry id when passing an explicit workspace")]
+        identifier: Option<String>,
+
+        #[arg(short, long, help = "Output in JSON format")]
+        json: bool,
     },
 
     Ls {

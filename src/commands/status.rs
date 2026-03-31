@@ -1,8 +1,7 @@
 use crate::api::{ApiClient, models::workspace::WorkspaceStatusResponse};
-use crate::config::{self, Config};
 use crate::progress::format_bytes;
 use crate::ui;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 
 pub async fn execute(
@@ -12,7 +11,12 @@ pub async fn execute(
     json_output: bool,
 ) -> Result<()> {
     let api_client = ApiClient::for_restore()?;
-    let workspace = resolve_workspace(&api_client, workspace_option).await?;
+    let workspace = crate::commands::utils::resolve_workspace(
+        &api_client,
+        workspace_option,
+        "boringcache status <workspace>",
+    )
+    .await?;
     let status = api_client
         .workspace_status(&workspace, &period, limit)
         .await?;
@@ -24,57 +28,6 @@ pub async fn execute(
 
     render_status(&status);
     Ok(())
-}
-
-async fn resolve_workspace(
-    api_client: &ApiClient,
-    workspace_option: Option<String>,
-) -> Result<String> {
-    if let Some(workspace) = workspace_option
-        .map(|workspace| workspace.trim().to_string())
-        .filter(|workspace| !workspace.is_empty())
-    {
-        return Ok(workspace);
-    }
-
-    if let Some(workspace) = configured_workspace() {
-        return Ok(workspace);
-    }
-
-    let mut workspaces = api_client.list_workspaces().await?;
-    workspaces.sort_by(|a, b| a.name.cmp(&b.name));
-
-    match workspaces.as_slice() {
-        [] => Err(anyhow!(
-            "No accessible workspaces found for this token. Pass a workspace explicitly or authenticate with a workspace-scoped token."
-        )),
-        [workspace] => Ok(workspace.slug.clone()),
-        _ => {
-            let names = workspaces
-                .iter()
-                .take(5)
-                .map(|workspace| workspace.slug.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let suffix = if workspaces.len() > 5 { ", ..." } else { "" };
-
-            Err(anyhow!(
-                "No workspace specified. Use `boringcache use` to choose a default workspace or run `boringcache status <workspace>`.\nAvailable workspaces: {names}{suffix}"
-            ))
-        }
-    }
-}
-
-fn configured_workspace() -> Option<String> {
-    if let Some(workspace) = config::env_var("BORINGCACHE_DEFAULT_WORKSPACE") {
-        return Some(workspace);
-    }
-
-    Config::load()
-        .ok()
-        .and_then(|config| config.default_workspace)
-        .map(|workspace| workspace.trim().to_string())
-        .filter(|workspace| !workspace.is_empty())
 }
 
 fn render_status(status: &WorkspaceStatusResponse) {
