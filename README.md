@@ -44,6 +44,26 @@ boringcache run my-org/app --proxy build-cache -- nx run-many --target=build
 
 The `tag:path` pair is the basic unit. In `deps:node_modules`, `deps` is the cache tag and `node_modules` is where the files live locally.
 
+## Daily terminal use
+
+For most day-to-day terminal use, the CLI should stay small:
+
+```bash
+# Pick a default workspace once
+boringcache use
+
+# See current cache health and recent activity
+boringcache status
+
+# See which workspaces you can access
+boringcache workspaces
+
+# List current cache entries in the active workspace
+boringcache ls
+```
+
+If you need to save or restore data, use `run`, `save`, `restore`, or `cache-registry` as usual. If you need a deeper view of where the terminal UX is heading, see `docs/terminal-ux-roadmap.md`.
+
 ## Cargo flow locally
 
 For this repo, the fastest local Cargo path is:
@@ -204,6 +224,12 @@ You do not need to choose a mode manually for normal use.
 ## Smaller commands
 
 ```bash
+# Choose or change the default workspace
+boringcache use
+
+# Show workspace status, cache health, and recent operator signals
+boringcache status
+
 # Check whether tags exist without downloading
 boringcache check my-org/app "deps,build" --json
 
