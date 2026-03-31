@@ -748,13 +748,21 @@ mod tests {
     #[test]
     fn test_load_for_auth_purpose_merges_file_default_workspace_with_env_token() {
         let _guard = test_env::lock();
+        let admin_token_guard = EnvVarGuard::new("BORINGCACHE_ADMIN_TOKEN");
         let home_guard = EnvVarGuard::new("HOME");
         let api_token_guard = EnvVarGuard::new("BORINGCACHE_API_TOKEN");
+        let restore_token_guard = EnvVarGuard::new("BORINGCACHE_RESTORE_TOKEN");
+        let save_token_guard = EnvVarGuard::new("BORINGCACHE_SAVE_TOKEN");
+        let token_file_guard = EnvVarGuard::new("BORINGCACHE_TOKEN_FILE");
         let workspace_guard = EnvVarGuard::new("BORINGCACHE_DEFAULT_WORKSPACE");
         let temp_dir = TempDir::new().unwrap();
 
+        admin_token_guard.set(None);
         home_guard.set(Some(temp_dir.path().to_str().unwrap()));
         api_token_guard.set(Some("env-token"));
+        restore_token_guard.set(None);
+        save_token_guard.set(None);
+        token_file_guard.set(None);
         workspace_guard.set(None);
 
         let mut file_config = Config::load_for_write().unwrap();
