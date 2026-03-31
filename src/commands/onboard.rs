@@ -78,6 +78,7 @@ pub async fn execute(
     path: Option<String>,
     auto_apply: bool,
     dry_run: bool,
+    manual: bool,
     json_output: bool,
 ) -> Result<()> {
     if !json_output && std::io::stdin().is_terminal() {
@@ -95,7 +96,7 @@ pub async fn execute(
             ui::info("Let's connect your account and set up caching for this project.");
             ui::blank_line();
 
-            let token = match run_cli_connect_onboarding().await {
+            let token = match run_cli_connect_onboarding(manual).await {
                 Ok(token) => token,
                 Err(err) => {
                     ui::warn(&format!("Browser sign-in failed: {err}"));
@@ -677,16 +678,18 @@ async fn ensure_ai_assist_ready(json_output: bool) -> Result<()> {
     );
 }
 
-pub async fn run_cli_connect_onboarding() -> Result<String> {
+pub async fn run_cli_connect_onboarding(manual: bool) -> Result<String> {
     let client = ApiClient::new()?;
     let connect = client.create_cli_connect_session().await?;
 
     ui::blank_line();
-    ui::info("Open this URL to sign in/sign up and approve CLI access:");
+    ui::info("Open this URL in any browser to sign in/sign up and approve CLI access:");
     ui::info(&format!("  {}", connect.authorize_url));
 
-    if try_open_browser(&connect.authorize_url) {
+    if !manual && try_open_browser(&connect.authorize_url) {
         ui::info("Opened browser automatically.");
+    } else if manual {
+        ui::info("Manual mode: open the URL yourself. The CLI will keep waiting for approval.");
     } else {
         ui::info("Could not open browser automatically. Open the URL manually.");
     }

@@ -229,10 +229,80 @@ async fn main() -> Result<()> {
 
     let result = match cli.command {
         cli::Commands::Auth { token } => commands::auth::execute(token).await,
-        cli::Commands::Login => commands::login::execute().await,
+        cli::Commands::Login { manual } => commands::login::execute(manual).await,
         cli::Commands::Doctor { workspace, json } => {
             commands::doctor::execute(workspace, json).await
         }
+        cli::Commands::Token(token_command) => match token_command {
+            cli::TokenCommands::List {
+                workspace,
+                all,
+                limit,
+                page,
+                json,
+            } => commands::token::list(workspace, all, limit, page, json).await,
+            cli::TokenCommands::Create {
+                workspace,
+                name,
+                access,
+                write_tag_prefixes,
+                expires_in,
+                expires_on,
+                json,
+            } => {
+                commands::token::create(
+                    workspace,
+                    name,
+                    access,
+                    write_tag_prefixes,
+                    expires_in,
+                    expires_on,
+                    json,
+                )
+                .await
+            }
+            cli::TokenCommands::CreateCi {
+                workspace,
+                name,
+                save_tag_prefixes,
+                expires_in,
+                expires_on,
+                json,
+            } => {
+                commands::token::create_ci(
+                    workspace,
+                    name,
+                    save_tag_prefixes,
+                    expires_in,
+                    expires_on,
+                    json,
+                )
+                .await
+            }
+            cli::TokenCommands::Revoke {
+                workspace_or_token_id,
+                token_id,
+                json,
+            } => commands::token::revoke(workspace_or_token_id, token_id, json).await,
+            cli::TokenCommands::Rotate {
+                workspace_or_token_id,
+                token_id,
+                name,
+                expires_in,
+                expires_on,
+                json,
+            } => {
+                commands::token::rotate(
+                    workspace_or_token_id,
+                    token_id,
+                    name,
+                    expires_in,
+                    expires_on,
+                    json,
+                )
+                .await
+            }
+        },
         cli::Commands::Mount {
             workspace,
             tag_path,
@@ -469,14 +539,16 @@ async fn main() -> Result<()> {
             path,
             apply,
             dry_run,
+            manual,
             json,
         }
         | cli::Commands::Optimize {
             path,
             apply,
             dry_run,
+            manual,
             json,
-        } => commands::onboard::execute(path, apply, dry_run, json).await,
+        } => commands::onboard::execute(path, apply, dry_run, manual, json).await,
         cli::Commands::Serve {
             workspace,
             tag,

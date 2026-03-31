@@ -23,6 +23,7 @@ pub mod setup_encryption;
 pub mod signature_policy;
 pub mod status;
 pub mod tags;
+pub mod token;
 pub mod upload_receipts;
 pub mod use_workspace;
 pub mod utils;

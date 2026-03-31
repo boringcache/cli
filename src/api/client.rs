@@ -1908,6 +1908,65 @@ impl ApiClient {
         self.get_v2(&url).await
     }
 
+    pub async fn workspace_tokens(
+        &self,
+        workspace: &str,
+        include_inactive: bool,
+        limit: u32,
+        offset: u32,
+    ) -> Result<super::models::workspace::WorkspaceTokensResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "tokens")?;
+        let mut params = vec![format!("limit={limit}"), format!("offset={offset}")];
+        if include_inactive {
+            params.push("include_inactive=true".to_string());
+        }
+        let url = format!("{endpoint}?{}", params.join("&"));
+        self.get_v2(&url).await
+    }
+
+    pub async fn create_workspace_token(
+        &self,
+        workspace: &str,
+        body: &super::models::workspace::WorkspaceTokenCreateRequest,
+    ) -> Result<super::models::workspace::WorkspaceTokenResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "tokens")?;
+        self.post_v2(&endpoint, body).await
+    }
+
+    pub async fn create_workspace_token_pair(
+        &self,
+        workspace: &str,
+        body: &super::models::workspace::WorkspaceTokenPairCreateRequest,
+    ) -> Result<super::models::workspace::WorkspaceTokenPairResponse> {
+        let endpoint = self.workspace_endpoint(workspace, "tokens/ci-pair")?;
+        self.post_v2(&endpoint, body).await
+    }
+
+    pub async fn revoke_workspace_token(
+        &self,
+        workspace: &str,
+        token_id: &str,
+    ) -> Result<super::models::workspace::WorkspaceTokenResponse> {
+        let endpoint = self.workspace_endpoint(
+            workspace,
+            &format!("tokens/{}/revoke", urlencoding::encode(token_id)),
+        )?;
+        self.post_v2(&endpoint, &serde_json::json!({})).await
+    }
+
+    pub async fn rotate_workspace_token(
+        &self,
+        workspace: &str,
+        token_id: &str,
+        body: &super::models::workspace::WorkspaceTokenRotateRequest,
+    ) -> Result<super::models::workspace::WorkspaceTokenResponse> {
+        let endpoint = self.workspace_endpoint(
+            workspace,
+            &format!("tokens/{}/rotate", urlencoding::encode(token_id)),
+        )?;
+        self.post_v2(&endpoint, body).await
+    }
+
     pub async fn workspace_sessions(
         &self,
         workspace: &str,

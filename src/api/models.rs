@@ -796,6 +796,110 @@ pub mod workspace {
     }
 
     #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceTokensFilter {
+        pub include_inactive: bool,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceApiToken {
+        pub id: String,
+        pub name: String,
+        pub access_level: String,
+        pub scope_type: String,
+        pub state: String,
+        pub active: bool,
+        pub created_at: String,
+        #[serde(default)]
+        pub expires_at: Option<String>,
+        #[serde(default)]
+        pub expires_in_days: Option<i32>,
+        #[serde(default)]
+        pub last_used_at: Option<String>,
+        #[serde(default)]
+        pub write_tag_prefixes: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceTokensResponse {
+        pub workspace: WorkspaceSummaryContext,
+        pub filter: WorkspaceTokensFilter,
+        pub pagination: WorkspacePagination,
+        pub tokens: Vec<WorkspaceApiToken>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceIssuedToken {
+        pub token: WorkspaceApiToken,
+        pub value: String,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceTokenResponse {
+        pub workspace: WorkspaceSummaryContext,
+        pub token: WorkspaceApiToken,
+        #[serde(default)]
+        pub value: Option<String>,
+        #[serde(default)]
+        pub rotated_from: Option<WorkspaceApiToken>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct WorkspaceTokenPairResponse {
+        pub workspace: WorkspaceSummaryContext,
+        pub restore: WorkspaceIssuedToken,
+        pub save: WorkspaceIssuedToken,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct WorkspaceTokenCreateRequest {
+        pub token: WorkspaceTokenCreateParams,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct WorkspaceTokenCreateParams {
+        pub name: String,
+        pub access_level: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub write_tag_prefixes: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub expiration_preset: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub custom_expires_on: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct WorkspaceTokenRotateRequest {
+        pub token: WorkspaceTokenRotateParams,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct WorkspaceTokenRotateParams {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub expiration_preset: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub custom_expires_on: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct WorkspaceTokenPairCreateRequest {
+        pub token_pair: WorkspaceTokenPairCreateParams,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct WorkspaceTokenPairCreateParams {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub name_prefix: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub save_tag_prefixes: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub expiration_preset: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub custom_expires_on: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
     pub struct WorkspaceStatusWorkspace {
         pub id: Value,
         pub name: String,
