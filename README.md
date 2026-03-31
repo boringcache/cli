@@ -72,7 +72,8 @@ boringcache status --watch
 ```
 
 For operator drill-down, use `boringcache sessions` and `boringcache misses`.
-For token lifecycle in terminal, use `boringcache token ls`, `boringcache token create`, `boringcache token create-ci`, `boringcache token revoke`, and `boringcache token rotate`.
+For token lifecycle in terminal, use `boringcache token ls`, `boringcache token show`, `boringcache token create`, `boringcache token create-ci`, `boringcache token revoke`, and `boringcache token rotate`.
+Use `--shell` on `token create`, `token create-ci`, and `token rotate` when you want export lines you can paste straight into CI secrets or a local shell.
 If you want browser approval without the CLI trying to open a local browser, use `boringcache login --manual` or `boringcache onboard --manual`.
 For CI and scripts, prefer `--json` on `status`, `inspect`, `doctor`, `sessions`, and `misses`. `sessions` and `misses` also support `--limit` and `--page`.
 
