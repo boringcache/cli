@@ -613,7 +613,7 @@ async fn test_save_skips_wait_on_pending() {
         .create_async()
         .await;
 
-    let _pending_mock = server
+    let pending_mock = server
         .mock("POST", "/v2/workspaces/test/workspace/caches")
         .with_status(423)
         .with_header("content-type", "application/json")
@@ -627,6 +627,14 @@ async fn test_save_skips_wait_on_pending() {
         .expect(1)
         .create_async()
         .await;
+    let upload_session_poll_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/upload-sessions/.*$".to_string()),
+        )
+        .expect(0)
+        .create_async()
+        .await;
     test_env::set_var("BORINGCACHE_API_URL", server.url());
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -637,21 +645,25 @@ async fn test_save_skips_wait_on_pending() {
     fs::create_dir(&save_dir).expect("Failed to create save dir");
     fs::write(save_dir.join("test.txt"), "test content").expect("Failed to write test file");
 
-    let start = Instant::now();
     let tag_path = format!("pending-tag:{}", save_dir.to_str().unwrap());
-    let _output = std::process::Command::new(cli_binary())
+    let output = std::process::Command::new(cli_binary())
         .args(["save", "test/workspace", &tag_path])
         .current_dir(temp_dir.path())
         .output()
         .expect("Failed to execute command");
 
-    let elapsed = start.elapsed();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
 
     assert!(
-        elapsed.as_millis() < 5000,
-        "Expected no retry delay on pending, but completed in {:?}",
-        elapsed
+        output.status.success()
+            || combined.to_lowercase().contains("uploading")
+            || combined.to_lowercase().contains("skip"),
+        "Expected pending save to exit cleanly without waiting, got: {combined}"
     );
+    pending_mock.assert_async().await;
+    upload_session_poll_mock.assert_async().await;
     test_env::remove_var("BORINGCACHE_API_URL");
     test_env::remove_var("HOME");
 }
