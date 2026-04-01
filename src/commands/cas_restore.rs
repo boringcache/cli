@@ -132,7 +132,7 @@ pub(crate) async fn download_blob_targets(
         })
         .collect();
     let download_plan = api_client
-        .blob_download_urls(workspace, cache_entry_id, &blobs)
+        .blob_download_urls_verified(workspace, cache_entry_id, &blobs)
         .await
         .context("Failed to request CAS blob download URLs")?;
 

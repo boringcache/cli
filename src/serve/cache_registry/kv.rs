@@ -557,7 +557,7 @@ async fn resolve_download_url(
 ) -> Result<String, RegistryError> {
     let download_urls = match state
         .api_client
-        .blob_download_urls(&state.workspace, cache_entry_id, std::slice::from_ref(blob))
+        .blob_download_urls_verified(&state.workspace, cache_entry_id, std::slice::from_ref(blob))
         .await
     {
         Ok(urls) => {
@@ -2798,7 +2798,7 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
 
     match state
         .api_client
-        .blob_download_urls(&state.workspace, cache_entry_id, &blobs)
+        .blob_download_urls_verified(&state.workspace, cache_entry_id, &blobs)
         .await
     {
         Ok(response) => {

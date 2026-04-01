@@ -419,6 +419,8 @@ pub mod cache {
     #[derive(Debug, Serialize)]
     pub struct BlobCheckRequest {
         pub blobs: Vec<BlobDescriptor>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub verify_storage: Option<bool>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -489,6 +491,8 @@ pub mod cache {
     pub struct BlobDownloadUrlsRequest {
         pub cache_entry_id: String,
         pub blobs: Vec<BlobDescriptor>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub verify_storage: Option<bool>,
     }
 
     #[derive(Debug, Deserialize)]

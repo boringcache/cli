@@ -695,7 +695,9 @@ async fn test_manifest_degrades_to_miss_when_storage_blob_is_unreadable_in_best_
 
     let _download_urls_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -789,7 +791,9 @@ async fn test_cached_manifest_hit_revalidates_blob_retrievability_in_best_effort
 
     let _download_urls_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -931,6 +935,7 @@ async fn test_manifest_refreshes_stale_blob_urls_before_returning_manifest() {
     let tag = ref_tag("img", "latest");
     let batch_request = json!({
         "cache_entry_id": "entry-refresh",
+        "verify_storage": true,
         "blobs": [
             {"digest": blob_a, "size_bytes": 1024},
             {"digest": blob_b, "size_bytes": 2048}
@@ -938,6 +943,7 @@ async fn test_manifest_refreshes_stale_blob_urls_before_returning_manifest() {
     });
     let single_request = json!({
         "cache_entry_id": "entry-refresh",
+        "verify_storage": true,
         "blobs": [
             {"digest": blob_a, "size_bytes": 1024}
         ]
@@ -1446,7 +1452,9 @@ async fn test_blob_get_after_manifest_resolution() {
 
     let _download_urls_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -2996,6 +3004,7 @@ async fn test_put_upload_accepts_empty_body_when_blob_already_exists_remote() {
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
         .match_header("authorization", "Bearer test-token")
         .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true,
             "blobs": [{
                 "digest": blob_digest,
                 "size_bytes": 0
@@ -3104,7 +3113,9 @@ async fn test_blob_proxy_returns_error_on_storage_failure() {
 
     let _download_urls_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -3215,7 +3226,9 @@ async fn test_blob_proxy_best_effort_returns_404_on_storage_failure() {
 
     let _download_urls_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -3509,7 +3522,9 @@ async fn test_bazel_cas_put_head_get_round_trip() {
 
     let _download_urls_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -3784,7 +3799,9 @@ async fn test_sccache_put_head_get_round_trip() {
 
     let _download_urls_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -4152,7 +4169,9 @@ async fn test_gradle_put_get_round_trip() {
 
     let _download_urls_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -4363,7 +4382,9 @@ async fn test_maven_put_get_round_trip() {
 
     let _download_urls_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -4437,7 +4458,9 @@ async fn test_maven_put_get_round_trip() {
 
     let _download_urls_mock_second = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -5034,7 +5057,9 @@ async fn test_turborepo_put_head_get_round_trip() {
 
     let _download_urls_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(

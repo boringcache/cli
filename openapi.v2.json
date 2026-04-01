@@ -53,6 +53,9 @@
     },
     {
       "name": "Cache Operations"
+    },
+    {
+      "name": "Token Management"
     }
   ],
   "paths": {
@@ -569,6 +572,289 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/tokens": {
+      "get": {
+        "operationId": "listWorkspaceTokens",
+        "summary": "List workspace tokens",
+        "tags": [
+          "Token Management"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/IncludeInactiveQuery"
+          },
+          {
+            "$ref": "#/components/parameters/LimitQuery"
+          },
+          {
+            "$ref": "#/components/parameters/OffsetQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace tokens feed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceTokensResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createWorkspaceToken",
+        "summary": "Create a workspace token",
+        "tags": [
+          "Token Management"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceTokenCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Workspace token created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceTokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/tokens/{id}": {
+      "get": {
+        "operationId": "getWorkspaceToken",
+        "summary": "Show one workspace token",
+        "tags": [
+          "Token Management"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/TokenId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace token details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceTokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/tokens/ci-pair": {
+      "post": {
+        "operationId": "createWorkspaceTokenPair",
+        "summary": "Create restore/save CI token pair for a workspace",
+        "tags": [
+          "Token Management"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceTokenPairCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Workspace CI token pair created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceTokenPairResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/tokens/{id}/revoke": {
+      "post": {
+        "operationId": "revokeWorkspaceToken",
+        "summary": "Revoke a workspace token",
+        "tags": [
+          "Token Management"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/TokenId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace token revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceTokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/workspaces/{namespace_slug}/{workspace_slug}/tokens/{id}/rotate": {
+      "post": {
+        "operationId": "rotateWorkspaceToken",
+        "summary": "Create a replacement token with the same workspace scope",
+        "tags": [
+          "Token Management"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/WorkspaceSlug"
+          },
+          {
+            "$ref": "#/components/parameters/TokenId"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceTokenRotateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Workspace token rotated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceTokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
           }
         }
       }
@@ -1488,6 +1774,22 @@
           "type": "integer",
           "minimum": 0
         }
+      },
+      "IncludeInactiveQuery": {
+        "name": "include_inactive",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      "TokenId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
       }
     },
     "responses": {
@@ -2394,6 +2696,295 @@
             "items": {
               "$ref": "#/components/schemas/WorkspaceTagFeedItem"
             }
+          }
+        }
+      },
+      "WorkspaceTokensFilter": {
+        "type": "object",
+        "required": [
+          "include_inactive"
+        ],
+        "properties": {
+          "include_inactive": {
+            "type": "boolean"
+          }
+        }
+      },
+      "WorkspaceApiToken": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "access_level",
+          "scope_type",
+          "state",
+          "active",
+          "created_at",
+          "write_tag_prefixes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "access_level": {
+            "type": "string",
+            "enum": [
+              "restore",
+              "save",
+              "admin"
+            ]
+          },
+          "scope_type": {
+            "type": "string",
+            "enum": [
+              "workspace"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "expired",
+              "revoked"
+            ]
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "expires_in_days": {
+            "type": "integer",
+            "nullable": true
+          },
+          "last_used_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "write_tag_prefixes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "WorkspaceTokensResponse": {
+        "type": "object",
+        "required": [
+          "workspace",
+          "filter",
+          "pagination",
+          "tokens"
+        ],
+        "properties": {
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceSummaryContext"
+          },
+          "filter": {
+            "$ref": "#/components/schemas/WorkspaceTokensFilter"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/WorkspacePagination"
+          },
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceApiToken"
+            }
+          }
+        }
+      },
+      "WorkspaceIssuedToken": {
+        "type": "object",
+        "required": [
+          "token",
+          "value"
+        ],
+        "properties": {
+          "token": {
+            "$ref": "#/components/schemas/WorkspaceApiToken"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkspaceTokenResponse": {
+        "type": "object",
+        "required": [
+          "workspace",
+          "token"
+        ],
+        "properties": {
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceSummaryContext"
+          },
+          "token": {
+            "$ref": "#/components/schemas/WorkspaceApiToken"
+          },
+          "value": {
+            "type": "string",
+            "nullable": true
+          },
+          "rotated_from": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceApiToken"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "WorkspaceTokenCreateRequest": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "object",
+            "required": [
+              "name",
+              "access_level"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "access_level": {
+                "type": "string",
+                "enum": [
+                  "restore",
+                  "save",
+                  "admin"
+                ]
+              },
+              "write_tag_prefixes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "expiration_preset": {
+                "type": "string",
+                "enum": [
+                  "30_days",
+                  "90_days",
+                  "1_year",
+                  "custom"
+                ],
+                "nullable": true
+              },
+              "custom_expires_on": {
+                "type": "string",
+                "format": "date",
+                "nullable": true
+              }
+            }
+          }
+        }
+      },
+      "WorkspaceTokenRotateRequest": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "nullable": true
+              },
+              "expiration_preset": {
+                "type": "string",
+                "enum": [
+                  "30_days",
+                  "90_days",
+                  "1_year",
+                  "custom"
+                ],
+                "nullable": true
+              },
+              "custom_expires_on": {
+                "type": "string",
+                "format": "date",
+                "nullable": true
+              }
+            }
+          }
+        }
+      },
+      "WorkspaceTokenPairCreateRequest": {
+        "type": "object",
+        "required": [
+          "token_pair"
+        ],
+        "properties": {
+          "token_pair": {
+            "type": "object",
+            "properties": {
+              "name_prefix": {
+                "type": "string",
+                "nullable": true
+              },
+              "save_tag_prefixes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "expiration_preset": {
+                "type": "string",
+                "enum": [
+                  "30_days",
+                  "90_days",
+                  "1_year",
+                  "custom"
+                ],
+                "nullable": true
+              },
+              "custom_expires_on": {
+                "type": "string",
+                "format": "date",
+                "nullable": true
+              }
+            }
+          }
+        }
+      },
+      "WorkspaceTokenPairResponse": {
+        "type": "object",
+        "required": [
+          "workspace",
+          "restore",
+          "save"
+        ],
+        "properties": {
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceSummaryContext"
+          },
+          "restore": {
+            "$ref": "#/components/schemas/WorkspaceIssuedToken"
+          },
+          "save": {
+            "$ref": "#/components/schemas/WorkspaceIssuedToken"
           }
         }
       },
@@ -3427,6 +4018,10 @@
             "items": {
               "$ref": "#/components/schemas/BlobDescriptor"
             }
+          },
+          "verify_storage": {
+            "type": "boolean",
+            "description": "Verify ready blobs against object storage before treating them as existing."
           }
         }
       },
@@ -3592,6 +4187,10 @@
             "items": {
               "$ref": "#/components/schemas/BlobDescriptor"
             }
+          },
+          "verify_storage": {
+            "type": "boolean",
+            "description": "Verify ready blobs against object storage before returning download URLs."
           }
         }
       },

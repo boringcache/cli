@@ -58,7 +58,7 @@ pub(crate) async fn check_missing_blobs(
     }
 
     let check_response = api_client
-        .check_blobs(workspace, blobs)
+        .check_blobs_verified(workspace, blobs)
         .await
         .context("Failed to check remote blob presence")?;
     let existing: HashSet<&str> = check_response

@@ -407,7 +407,7 @@ async fn resolve_manifest(
             && !blob_descriptors.is_empty()
             && let Ok(Ok(response)) = tokio::time::timeout(
                 OCI_API_CALL_TIMEOUT,
-                state.api_client.blob_download_urls(
+                state.api_client.blob_download_urls_verified(
                     &state.workspace,
                     cache_entry_id,
                     &blob_descriptors,
@@ -476,7 +476,7 @@ async fn missing_oci_blobs(
         OCI_API_CALL_TIMEOUT,
         state
             .api_client
-            .check_blobs(&state.workspace, blob_descriptors),
+            .check_blobs_verified(&state.workspace, blob_descriptors),
     )
     .await
     .map_err(|_| {
@@ -681,9 +681,11 @@ async fn resolve_manifest_blob_download_urls(
 ) -> Result<HashMap<String, String>, String> {
     let response = tokio::time::timeout(
         OCI_API_CALL_TIMEOUT,
-        state
-            .api_client
-            .blob_download_urls(&state.workspace, cache_entry_id, blob_descriptors),
+        state.api_client.blob_download_urls_verified(
+            &state.workspace,
+            cache_entry_id,
+            blob_descriptors,
+        ),
     )
     .await
     .map_err(|_| {
@@ -1160,7 +1162,7 @@ async fn resolve_oci_download_url(
 ) -> Result<String, OciError> {
     let download_response = tokio::time::timeout(
         OCI_API_CALL_TIMEOUT,
-        state.api_client.blob_download_urls(
+        state.api_client.blob_download_urls_verified(
             &state.workspace,
             cache_entry_id,
             std::slice::from_ref(blob_desc),
@@ -1312,7 +1314,7 @@ async fn has_non_empty_local_blob(state: &AppState, digest: &str) -> bool {
 async fn has_remote_blob(state: &AppState, digest: &str) -> Result<bool, OciError> {
     let check = tokio::time::timeout(
         OCI_API_CALL_TIMEOUT,
-        state.api_client.check_blobs(
+        state.api_client.check_blobs_verified(
             &state.workspace,
             &[BlobDescriptor {
                 digest: digest.to_string(),

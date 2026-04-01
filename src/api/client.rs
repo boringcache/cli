@@ -1010,6 +1010,7 @@ impl ApiClient {
         &self,
         workspace: &str,
         blobs: &[super::models::cache::BlobDescriptor],
+        verify_storage: bool,
     ) -> Result<super::models::cache::BlobCheckResponse> {
         ensure!(!blobs.is_empty(), "blobs cannot be empty");
         let endpoint = self.workspace_endpoint(workspace, "caches/blobs/check")?;
@@ -1019,6 +1020,7 @@ impl ApiClient {
         if chunk_count == 1 {
             let body = super::models::cache::BlobCheckRequest {
                 blobs: blobs.to_vec(),
+                verify_storage: verify_storage.then_some(true),
             };
             return self
                 .post_v2_with_request_metrics(
@@ -1048,7 +1050,10 @@ impl ApiClient {
                     .acquire_owned()
                     .await
                     .map_err(|e| anyhow::anyhow!("Blob check semaphore closed: {e}"))?;
-                let body = super::models::cache::BlobCheckRequest { blobs: chunk };
+                let body = super::models::cache::BlobCheckRequest {
+                    blobs: chunk,
+                    verify_storage: verify_storage.then_some(true),
+                };
                 let response = client
                     .post_v2_with_request_metrics::<_, super::models::cache::BlobCheckResponse>(
                         &endpoint,
@@ -1071,6 +1076,14 @@ impl ApiClient {
         }
 
         Ok(super::models::cache::BlobCheckResponse { results })
+    }
+
+    pub async fn check_blobs_verified(
+        &self,
+        workspace: &str,
+        blobs: &[super::models::cache::BlobDescriptor],
+    ) -> Result<super::models::cache::BlobCheckResponse> {
+        self.check_blobs(workspace, blobs, true).await
     }
 
     pub async fn blob_upload_urls(
@@ -1223,6 +1236,7 @@ impl ApiClient {
         workspace: &str,
         cache_entry_id: &str,
         blobs: &[super::models::cache::BlobDescriptor],
+        verify_storage: bool,
     ) -> Result<super::models::cache::BlobDownloadUrlsResponse> {
         ensure!(
             !cache_entry_id.trim().is_empty(),
@@ -1237,6 +1251,7 @@ impl ApiClient {
             let body = super::models::cache::BlobDownloadUrlsRequest {
                 cache_entry_id: cache_entry_id.to_string(),
                 blobs: blobs.to_vec(),
+                verify_storage: verify_storage.then_some(true),
             };
             return self
                 .post_v2_with_request_metrics(
@@ -1270,6 +1285,7 @@ impl ApiClient {
                 let body = super::models::cache::BlobDownloadUrlsRequest {
                     cache_entry_id,
                     blobs: chunk,
+                    verify_storage: verify_storage.then_some(true),
                 };
                 let response = client
                     .post_v2_with_request_metrics::<
@@ -1301,6 +1317,16 @@ impl ApiClient {
             download_urls,
             missing: dedupe_strings(missing),
         })
+    }
+
+    pub async fn blob_download_urls_verified(
+        &self,
+        workspace: &str,
+        cache_entry_id: &str,
+        blobs: &[super::models::cache::BlobDescriptor],
+    ) -> Result<super::models::cache::BlobDownloadUrlsResponse> {
+        self.blob_download_urls(workspace, cache_entry_id, blobs, true)
+            .await
     }
 
     pub async fn save_entry(
@@ -3050,6 +3076,7 @@ mod tests {
             .match_header("authorization", "Bearer test-token")
             .match_header("content-type", "application/json")
             .match_body(Matcher::PartialJson(json!({
+                "verify_storage": true,
                 "blobs": [
                     {
                         "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -3077,6 +3104,7 @@ mod tests {
                             .to_string(),
                     size_bytes: 1234,
                 }],
+                true,
             )
             .await
             .expect("blob check should succeed");
@@ -3135,7 +3163,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let response = client
-            .check_blobs("ns/ws", &blobs)
+            .check_blobs("ns/ws", &blobs, false)
             .await
             .expect("blob check should succeed");
         assert_eq!(response.results.len(), 2);
@@ -3304,10 +3332,72 @@ mod tests {
             .collect::<Vec<_>>();
 
         let response = client
-            .blob_download_urls("ns/ws", "entry-1", &blobs)
+            .blob_download_urls("ns/ws", "entry-1", &blobs, false)
             .await
             .expect("blob download urls should succeed");
         assert_eq!(response.download_urls.len(), 2);
+
+        mock.assert_async().await;
+
+        if let Some(home) = original_home {
+            test_env::set_var("HOME", home);
+        }
+        test_env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_blob_download_urls_can_verify_storage() {
+        let _guard = test_env::lock();
+
+        if !networking_available() {
+            eprintln!(
+                "skipping test_blob_download_urls_can_verify_storage: networking disabled in sandbox"
+            );
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        test_env::set_var("HOME", temp_home.path());
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v2/workspaces/ns/ws/caches/blobs/download-urls")
+            .match_header("authorization", "Bearer test-token")
+            .match_header("content-type", "application/json")
+            .match_body(Matcher::PartialJson(json!({
+                "cache_entry_id": "entry-verify",
+                "verify_storage": true,
+                "blobs": [{
+                    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "size_bytes": 42
+                }]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"download_urls":[{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","url":"https://example.com/download"}],"missing":[]}"#,
+            )
+            .create_async()
+            .await;
+
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+            .expect("client should initialize");
+
+        let blobs = vec![cache::BlobDescriptor {
+            digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_string(),
+            size_bytes: 42,
+        }];
+
+        let response = client
+            .blob_download_urls("ns/ws", "entry-verify", &blobs, true)
+            .await
+            .expect("blob download urls should succeed");
+        assert_eq!(response.download_urls.len(), 1);
 
         mock.assert_async().await;
 

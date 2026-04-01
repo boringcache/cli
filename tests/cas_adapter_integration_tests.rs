@@ -953,6 +953,7 @@ async fn test_restore_materializes_file_cas_layout() {
         )
         .match_body(Matcher::PartialJson(json!({
             "cache_entry_id": "restore-file-entry",
+            "verify_storage": true,
             "blobs": [{
                 "digest": blob_digest,
                 "size_bytes": blob_bytes.len() as u64
@@ -1094,7 +1095,8 @@ async fn test_restore_materializes_bazel_layout() {
             "/v2/workspaces/test/workspace/caches/blobs/download-urls",
         )
         .match_body(Matcher::PartialJson(json!({
-            "cache_entry_id": "restore-bazel-entry"
+            "cache_entry_id": "restore-bazel-entry",
+            "verify_storage": true
         })))
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -1226,6 +1228,7 @@ async fn test_restore_materializes_oci_layout() {
         )
         .match_body(Matcher::PartialJson(json!({
             "cache_entry_id": "restore-oci-entry",
+            "verify_storage": true,
             "blobs": [{
                 "digest": blob_digest,
                 "size_bytes": blob_bytes.len() as u64
