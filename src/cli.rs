@@ -208,6 +208,28 @@ pub enum Commands {
         json: bool,
     },
 
+    #[command(about = "Audit repo cache tag usage and suggest .boringcache.toml entries")]
+    Audit {
+        #[arg(help = "Repo root or a path inside the repo")]
+        root: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Limit the audit to specific relative or absolute paths (repeatable)"
+        )]
+        path: Vec<String>,
+
+        #[arg(
+            long,
+            help = "Write missing entries and profiles into .boringcache.toml"
+        )]
+        write: bool,
+
+        #[arg(long, help = "Print machine-readable output for CI and scripts")]
+        json: bool,
+    },
+
     #[command(
         about = "Open a full-screen workspace dashboard",
         visible_alias = "tui"
@@ -351,14 +373,34 @@ pub enum Commands {
     #[command(
         name = "run",
         visible_alias = "exec",
-        about = "Wrap restore -> command -> save in one invocation"
+        about = "Wrap restore -> command -> save in one invocation",
+        after_help = "Supported forms:\n  boringcache run [WORKSPACE] TAG_PATHS -- COMMAND...\n  boringcache run [WORKSPACE] --entry ENTRY[,ENTRY] -- COMMAND...\n  boringcache run [WORKSPACE] --profile PROFILE[,PROFILE] -- COMMAND...\n  boringcache run [WORKSPACE] -- COMMAND...\n\nManual TAG_PATHS are exclusive with --entry and --profile."
     )]
     Run {
-        #[arg(help = "Workspace name (org/project or user/project)")]
-        workspace: String,
+        #[arg(
+            value_name = "WORKSPACE_OR_TAG_PATHS",
+            help = "Workspace name, or manual tag:path pairs when omitting WORKSPACE"
+        )]
+        workspace_or_tag_path: Option<String>,
 
-        #[arg(help = "One or more tag:path pairs (comma-separated)")]
+        #[arg(help = "Manual tag:path pairs (comma-separated)")]
         tag_path_pairs: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "PROFILE",
+            value_delimiter = ',',
+            help = "Project cache profile(s) from .boringcache.toml (repeatable)"
+        )]
+        profile: Vec<String>,
+
+        #[arg(
+            long,
+            value_name = "ENTRY",
+            value_delimiter = ',',
+            help = "Project or built-in cache entry/entries to resolve (repeatable)"
+        )]
+        entry: Vec<String>,
 
         #[arg(
             long,

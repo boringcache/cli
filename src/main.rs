@@ -1,10 +1,5 @@
 use anyhow::Result;
-use boring_cache_cli::{
-    cli, commands,
-    config::{self, Config},
-    exit_code::ExitCodeError,
-    ui,
-};
+use boring_cache_cli::{cli, commands, config, exit_code::ExitCodeError, ui};
 use clap::{CommandFactory, Parser};
 use tracing_subscriber::EnvFilter;
 
@@ -14,18 +9,6 @@ fn resolve_effective_workspace(workspace: &str) -> Option<String> {
     } else {
         Some(workspace.to_string())
     }
-}
-
-fn resolve_default_workspace() -> Option<String> {
-    if let Some(workspace) = config::env_var("BORINGCACHE_DEFAULT_WORKSPACE")
-        && let Some(workspace) = resolve_effective_workspace(&workspace)
-    {
-        return Some(workspace);
-    }
-
-    let config = Config::load().ok()?;
-    let workspace = config.default_workspace?;
-    resolve_effective_workspace(&workspace)
 }
 
 fn long_option_requires_value(command: &str, option: &str) -> bool {
@@ -57,6 +40,33 @@ fn short_option_requires_value(command: &str, option: &str) -> bool {
             option == "-p" || (option.starts_with("-p") && option.len() > 2)
         }
         _ => false,
+    }
+}
+
+fn split_comma_values(value: String) -> Vec<String> {
+    value
+        .split(',')
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+fn split_run_positionals(
+    workspace_or_tag_path: Option<String>,
+    tag_path_pairs: Option<String>,
+) -> Result<(Option<String>, Vec<String>)> {
+    match (workspace_or_tag_path, tag_path_pairs) {
+        (Some(first), Some(_)) if first.contains(':') => Err(anyhow::anyhow!(
+            "When omitting WORKSPACE, pass manual TAG_PATHS as the first positional only."
+        )),
+        (Some(first), Some(second)) => Ok((
+            resolve_effective_workspace(&first),
+            split_comma_values(second),
+        )),
+        (Some(first), None) if first.contains(':') => Ok((None, split_comma_values(first))),
+        (Some(first), None) => Ok((resolve_effective_workspace(&first), Vec::new())),
+        (None, Some(second)) => Ok((None, split_comma_values(second))),
+        (None, None) => Ok((None, Vec::new())),
     }
 }
 
@@ -133,8 +143,6 @@ async fn main() -> Result<()> {
             command.as_str(),
             "save"
                 | "restore"
-                | "run"
-                | "exec"
                 | "delete"
                 | "check"
                 | "ls"
@@ -150,23 +158,6 @@ async fn main() -> Result<()> {
                 "save" | "restore" => {
                     positional_args.len() == 1 && positional_args[0].1.contains(':')
                 }
-                "run" | "exec" => {
-                    let separator_idx = args[2..].iter().position(|arg| arg == "--");
-                    let pre_separator: Vec<_> = positional_args
-                        .iter()
-                        .filter(|(idx, _)| separator_idx.is_none_or(|sep| *idx < sep))
-                        .collect();
-                    if pre_separator.len() == 1 && pre_separator[0].1.contains(':') {
-                        true
-                    } else {
-                        pre_separator.is_empty()
-                            && args[2..]
-                                .iter()
-                                .take_while(|arg| *arg != "--")
-                                .any(|arg| arg == "--proxy" || arg.starts_with("--proxy="))
-                    }
-                }
-
                 "delete" | "check" => {
                     positional_args.len() == 1 && !positional_args[0].1.contains('/')
                 }
@@ -178,26 +169,9 @@ async fn main() -> Result<()> {
             };
 
             if needs_workspace_injection
-                && let Some(default_workspace) = resolve_default_workspace()
+                && let Some(default_workspace) = commands::utils::configured_workspace()
             {
-                if command == "run" || command == "exec" {
-                    let separator_idx = args[2..].iter().position(|arg| arg == "--");
-                    let pre_separator: Vec<_> = positional_args
-                        .iter()
-                        .filter(|(idx, _)| separator_idx.is_none_or(|sep| *idx < sep))
-                        .collect();
-
-                    if let Some((index, _)) = pre_separator.first() {
-                        args.insert(index + 2, default_workspace);
-                    } else if let Some(separator_idx) = separator_idx {
-                        args.insert(separator_idx + 2, default_workspace);
-                    } else if positional_args.is_empty() {
-                        args.push(default_workspace);
-                    } else {
-                        let first_pos_idx = positional_args[0].0 + 2;
-                        args.insert(first_pos_idx, default_workspace);
-                    }
-                } else if command == "ls" || positional_args.is_empty() {
+                if command == "ls" || positional_args.is_empty() {
                     args.push(default_workspace);
                 } else {
                     let first_pos_idx = positional_args[0].0 + 2;
@@ -233,6 +207,12 @@ async fn main() -> Result<()> {
         cli::Commands::Doctor { workspace, json } => {
             commands::doctor::execute(workspace, json).await
         }
+        cli::Commands::Audit {
+            root,
+            path,
+            write,
+            json,
+        } => commands::audit::execute_with_paths(root, path, write, json).await,
         cli::Commands::Dashboard {
             workspace,
             period,
@@ -402,8 +382,10 @@ async fn main() -> Result<()> {
             .await
         }
         cli::Commands::Run {
-            workspace,
+            workspace_or_tag_path,
             tag_path_pairs,
+            profile,
+            entry,
             no_platform,
             no_git,
             force,
@@ -422,18 +404,14 @@ async fn main() -> Result<()> {
             dry_run,
             command,
         } => {
-            let tag_path_strings = tag_path_pairs
-                .unwrap_or_default()
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>();
-
-            let effective_workspace = resolve_effective_workspace(&workspace);
+            let (effective_workspace, tag_path_strings) =
+                split_run_positionals(workspace_or_tag_path, tag_path_pairs)?;
 
             commands::run::execute(
                 effective_workspace,
                 tag_path_strings,
+                profile,
+                entry,
                 cli.verbose,
                 require_server_signature,
                 no_platform,

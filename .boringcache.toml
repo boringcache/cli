@@ -1,0 +1,11 @@
+[entries.mise]
+default_path = "/mise/installs"
+
+[profiles.bundle-install]
+entries = ["bundler"]
+
+[profiles.mise-install]
+entries = ["mise"]
+
+[profiles.yarn-install]
+entries = ["node_modules"]

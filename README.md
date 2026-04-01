@@ -44,6 +44,37 @@ boringcache run my-org/app --proxy build-cache -- nx run-many --target=build
 
 The `tag:path` pair is the basic unit. In `deps:node_modules`, `deps` is the cache tag and `node_modules` is where the files live locally.
 
+If you want the same logical cache names across local runs, Dockerfiles, and CI, add a repo config in `.boringcache.toml`:
+
+```toml
+workspace = "my-org/app"
+
+[entries.bundler]
+tag = "bundler-gems"
+
+[profiles.bundle-install]
+entries = ["bundler"]
+```
+
+Then you can keep raw manual `tag:path` pairs when you need them, or let the CLI resolve entries for you:
+
+```bash
+boringcache run my-org/app "gems:vendor/bundle" -- bundle install
+boringcache run --profile bundle-install -- bundle install
+boringcache run -- bundle install
+```
+
+Manual `tag:path` pairs are exclusive with `--entry` and `--profile`.
+
+To seed or refresh repo config from literal manual tags in Dockerfiles, scripts, or selected workflow files, run:
+
+```bash
+boringcache audit --write
+boringcache audit --path images --path .github/workflows/publish-images.yml --write
+```
+
+`audit` skips dynamic tags such as `${TAG}:path` and placeholder pairs such as `tag:path`.
+
 ## Daily terminal use
 
 For day-to-day terminal use, keep it to the small set of commands most users need:

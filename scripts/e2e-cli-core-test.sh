@@ -223,6 +223,10 @@ RUN_SEED_DIR="${CLI_LOG_DIR}/run-seed"
 RUN_TARGET_DIR="${CLI_LOG_DIR}/run-target"
 RUN_VERIFY_DIR="${CLI_LOG_DIR}/run-verify"
 RUN_MISS_SENTINEL="${CLI_LOG_DIR}/run-miss-sentinel.txt"
+REPO_CONFIG_DIR="${CLI_LOG_DIR}/repo-config-run"
+REPO_CONFIG_BIN_DIR="${REPO_CONFIG_DIR}/bin"
+REPO_CONFIG_TAG="${TAG_ROOT}-repo-config-bundler"
+REPO_CONFIG_PROFILE="bundle-install"
 
 echo "=== Phase 2: run command cache integration ==="
 mkdir -p "${RUN_SEED_DIR}"
@@ -268,6 +272,72 @@ run_proxy_script=$'endpoint="${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}"\n[ -n "${e
 "${CLI}" run "${WORKSPACE}" --proxy "${RUN_PROXY_TAG}" --no-platform --no-git --host 127.0.0.1 --port 0 -- sh -ec "${run_proxy_script}" _ "{PORT}" "${RUN_PROXY_TAG}" "{CACHE_REF}" > "${CLI_LOG_DIR}/run-proxy.log"
 
 "${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-delete.log"
+
+echo "=== Phase 2b: repo config profiles ==="
+mkdir -p "${REPO_CONFIG_BIN_DIR}"
+cat > "${REPO_CONFIG_DIR}/.boringcache.toml" <<EOF
+workspace = "${WORKSPACE}"
+
+[entries.bundler]
+tag = "${REPO_CONFIG_TAG}"
+
+[profiles.${REPO_CONFIG_PROFILE}]
+entries = ["bundler"]
+EOF
+
+cat > "${REPO_CONFIG_BIN_DIR}/bundle" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" != "install" ]]; then
+  echo "expected bundle install" >&2
+  exit 41
+fi
+
+if [[ -z "${BUNDLE_PATH:-}" ]]; then
+  echo "BUNDLE_PATH missing" >&2
+  exit 42
+fi
+
+mkdir -p "${BUNDLE_PATH}"
+
+case "${REPO_CONFIG_MODE:?}" in
+  seed)
+    printf 'repo-config-seed-%s\n' "${RUN_ID_FOR_E2E:?}" > "${BUNDLE_PATH}/marker.txt"
+    ;;
+  verify)
+    grep -q "repo-config-seed-${RUN_ID_FOR_E2E:?}" "${BUNDLE_PATH}/marker.txt" || exit 43
+    printf 'repo-config-restored-%s\n' "${RUN_ID_FOR_E2E:?}" > "${BUNDLE_PATH}/restored.txt"
+    ;;
+  *)
+    echo "unknown REPO_CONFIG_MODE=${REPO_CONFIG_MODE}" >&2
+    exit 44
+    ;;
+esac
+EOF
+chmod +x "${REPO_CONFIG_BIN_DIR}/bundle"
+
+(
+  cd "${REPO_CONFIG_DIR}"
+  PATH="${REPO_CONFIG_BIN_DIR}:$PATH" \
+    REPO_CONFIG_MODE=seed \
+    RUN_ID_FOR_E2E="${RUN_ID}" \
+    "${CLI}" run --no-platform --no-git --skip-restore --profile "${REPO_CONFIG_PROFILE}" -- bundle install \
+      > "${CLI_LOG_DIR}/repo-config-seed.log"
+)
+
+rm -rf "${REPO_CONFIG_DIR}/vendor"
+
+(
+  cd "${REPO_CONFIG_DIR}"
+  PATH="${REPO_CONFIG_BIN_DIR}:$PATH" \
+    REPO_CONFIG_MODE=verify \
+    RUN_ID_FOR_E2E="${RUN_ID}" \
+    "${CLI}" run --no-platform --no-git --skip-save --profile "${REPO_CONFIG_PROFILE}" -- bundle install \
+      > "${CLI_LOG_DIR}/repo-config-restore.log"
+)
+
+grep -q "repo-config-restored-${RUN_ID}" "${REPO_CONFIG_DIR}/vendor/bundle/restored.txt"
 
 echo "=== Phase 3: encryption + mount sync ==="
 "${CLI}" setup-encryption "${WORKSPACE}" --identity-output "${IDENTITY_FILE}" > "${CLI_LOG_DIR}/setup-encryption.log"
