@@ -52,7 +52,10 @@ For day-to-day terminal use, keep it to the small set of commands most users nee
 # Pick a default workspace once
 boringcache use
 
-# See current cache health and recent activity
+# Open the full-screen workspace dashboard
+boringcache dashboard
+
+# See current cache health and recent activity in line output
 boringcache status
 
 # Inspect one cache tag or entry in detail

@@ -54,6 +54,8 @@ thiserror = "2.0"
 # Progress reporting
 crossbeam-channel = "0.5"
 humansize = "2"
+crossterm = "0.29"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 
 # Compression backend
 zstd = { version = "0.13", default-features = false, features = ["zstdmt"] }

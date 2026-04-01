@@ -235,6 +235,7 @@ EOF
     cli-core)
       cat <<'EOF'
 === Phase 1: Save/restore/delete (archive cache path) ===
+=== Phase 1b: dashboard compact TUI smoke ===
 === Phase 2: run command cache integration ===
 === Phase 3: encryption + mount sync ===
 CLI core e2e passed

@@ -233,6 +233,13 @@ async fn main() -> Result<()> {
         cli::Commands::Doctor { workspace, json } => {
             commands::doctor::execute(workspace, json).await
         }
+        cli::Commands::Dashboard {
+            workspace,
+            period,
+            limit,
+            tag_limit,
+            interval,
+        } => commands::dashboard::execute(workspace, period, limit, tag_limit, interval).await,
         cli::Commands::Token(token_command) => match token_command {
             cli::TokenCommands::List {
                 workspace,

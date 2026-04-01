@@ -158,14 +158,14 @@ jobs:
           - runner: macos-15
             name: macos-15-arm64
             target: aarch64-apple-darwin
-            binary_name: boringcache-macos-15-arm64
+            binary_name: boringcache-macos-universal
             use_docker: false
           
           # Windows builds (GitHub-hosted native)
           - runner: windows-2022
             name: windows-2022-amd64
             target: x86_64-pc-windows-msvc
-            binary_name: boringcache-windows-2022-amd64.exe
+            binary_name: boringcache-windows-amd64.exe
             use_docker: false
 
     steps:

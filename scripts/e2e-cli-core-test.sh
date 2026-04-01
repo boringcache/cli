@@ -29,7 +29,7 @@ if ! resolve_save_capable_token >/dev/null; then
   exit 1
 fi
 
-for dep in jq stat mktemp grep cmp curl pgrep sh; do
+for dep in jq stat mktemp grep cmp curl pgrep script sh; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     echo "ERROR: required dependency not found: ${dep}"
     exit 1
@@ -112,6 +112,35 @@ grep -q "${WORKSPACE}" "${CLI_LOG_DIR}/config-get-default-workspace.log"
 "${CLI}" workspaces --json > "${CLI_LOG_DIR}/workspaces.json"
 "${CLI}" ls --limit 1 --json > "${CLI_LOG_DIR}/ls.json"
 
+run_dashboard_smoke() {
+  local log_file="$1"
+  local dashboard_cmd
+  printf -v dashboard_cmd '%q ' env -u CI "${CLI}" dashboard "${WORKSPACE}" --interval 5
+  dashboard_cmd="${dashboard_cmd% }"
+
+  if script -qec "printf ready >/dev/null" /dev/null >/dev/null 2>&1; then
+    ({ sleep 2; printf 'q' || true; } 2>/dev/null) |
+      TERM=xterm-256color COLUMNS=80 LINES=24 \
+      script -qec "${dashboard_cmd}" "${log_file}" >/dev/null 2>&1
+
+    if [[ ! -s "${log_file}" ]]; then
+      echo "dashboard smoke did not capture any terminal output"
+      exit 1
+    fi
+    assert_file_not_contains "${log_file}" "interactive terminal"
+    assert_file_not_contains "${log_file}" "needs a larger terminal"
+  else
+    ({ sleep 2; printf 'q' || true; } 2>/dev/null) |
+      TERM=xterm-256color COLUMNS=80 LINES=24 \
+      script -q "${log_file}" "${CLI}" dashboard "${WORKSPACE}" --interval 5 >/dev/null 2>&1
+
+    if [[ ! -s "${log_file}" ]]; then
+      echo "dashboard smoke did not capture any terminal output"
+      exit 1
+    fi
+  fi
+}
+
 TAG_ROOT="$(e2e_tag "cli-core")"
 TAG_DIR="${TAG_ROOT}-dir"
 TAG_FILE="${TAG_ROOT}-file"
@@ -147,6 +176,10 @@ if [[ "${save_visible}" != "1" ]]; then
   cat "${CLI_LOG_DIR}/check-hit.log"
   exit 1
 fi
+
+echo "=== Phase 1b: dashboard compact TUI smoke ==="
+run_dashboard_smoke "${CLI_LOG_DIR}/dashboard.log"
+
 "${CLI}" restore --no-platform --no-git "${WORKSPACE}" "${TAG_DIR}:${RESTORE_DIR},${TAG_FILE}:${RESTORE_FILE_DIR}" > "${CLI_LOG_DIR}/restore.log"
 
 cmp -s "${SRC_DIR}/a.txt" "${RESTORE_DIR}/a.txt"
