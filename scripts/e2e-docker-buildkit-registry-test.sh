@@ -14,6 +14,9 @@ BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-0}"
 BUILD_HEARTBEAT_SECS="${BUILD_HEARTBEAT_SECS:-30}"
 BUILD_CLEANUP_WAIT_SECS="${BUILD_CLEANUP_WAIT_SECS:-20}"
 BUILD_FAILURE_TAIL_LINES="${BUILD_FAILURE_TAIL_LINES:-120}"
+PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
+PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
+PROXY_READY_WARN_SECS="${PROXY_READY_WARN_SECS:-10}"
 PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-30}"
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
@@ -55,6 +58,9 @@ require_numeric "BUILD_TIMEOUT_SECS" "$BUILD_TIMEOUT_SECS"
 require_positive "BUILD_HEARTBEAT_SECS" "$BUILD_HEARTBEAT_SECS"
 require_positive "BUILD_CLEANUP_WAIT_SECS" "$BUILD_CLEANUP_WAIT_SECS"
 require_positive "BUILD_FAILURE_TAIL_LINES" "$BUILD_FAILURE_TAIL_LINES"
+require_positive "PROXY_READY_TIMEOUT_SECS" "$PROXY_READY_TIMEOUT_SECS"
+require_positive "PROXY_READY_POLL_SECS" "$PROXY_READY_POLL_SECS"
+require_positive "PROXY_READY_WARN_SECS" "$PROXY_READY_WARN_SECS"
 require_positive "PROXY_SHUTDOWN_WAIT_SECS" "$PROXY_SHUTDOWN_WAIT_SECS"
 require_numeric "BUDGET_REMOTE_TAG_HITS_MIN" "$BUDGET_REMOTE_TAG_HITS_MIN"
 require_save_capable_token
@@ -165,6 +171,8 @@ trap handle_interrupt INT TERM
 start_proxy() {
   local log_file="$1"
   local metadata_hints="${2:-}"
+  local readiness_reference="${3:-}"
+  local attempts start_ts next_warn now waited latest_line
   stop_proxy
   LOG_FILES+=("${log_file}")
   BORINGCACHE_PROXY_METADATA_HINTS="${metadata_hints}" \
@@ -177,17 +185,39 @@ start_proxy() {
   SERVE_PID=$!
 
   local ready=0
-  for _ in $(seq 1 60); do
-    if curl -fsS --max-time 1 "http://127.0.0.1:${PORT}/v2/" >/dev/null 2>&1; then
+  attempts="$((PROXY_READY_TIMEOUT_SECS / PROXY_READY_POLL_SECS))"
+  if (( attempts < 1 )); then
+    attempts=1
+  fi
+  start_ts="$(date +%s)"
+  next_warn=$((start_ts + PROXY_READY_WARN_SECS))
+  for _ in $(seq 1 "$attempts"); do
+    if [[ -n "$readiness_reference" ]]; then
+      if manifest_reference_is_readable "$readiness_reference"; then
+        ready=1
+        break
+      fi
+    elif curl -fsS --max-time 1 "http://127.0.0.1:${PORT}/v2/" >/dev/null 2>&1; then
       ready=1
       break
+    fi
+    now="$(date +%s)"
+    if (( now >= next_warn )); then
+      waited="$((now - start_ts))"
+      latest_line="$(awk 'NF { line=$0 } END { print line }' "$log_file" 2>/dev/null || true)"
+      if [[ -n "$latest_line" ]]; then
+        echo "WARNING: docker-registry readiness still waiting after ${waited}s | ${latest_line}"
+      else
+        echo "WARNING: docker-registry readiness still waiting after ${waited}s"
+      fi
+      next_warn=$((now + PROXY_READY_WARN_SECS))
     fi
     if ! kill -0 "${SERVE_PID}" >/dev/null 2>&1; then
       echo "docker-registry exited before readiness"
       cat "${log_file}"
       exit 1
     fi
-    sleep 0.5
+    sleep "${PROXY_READY_POLL_SECS}"
   done
 
   if [[ "${ready}" != "1" ]]; then
@@ -325,6 +355,20 @@ assert_import_reference_seen() {
   fi
 }
 
+manifest_reference_is_readable() {
+  local reference="$1"
+  local url="http://127.0.0.1:${PORT}/v2/boringcache-e2e/cache/manifests/${reference}"
+  local accept_header="Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
+  local digest
+  digest=$(
+    curl -fsS -I --max-time 2 -H "${accept_header}" "${url}" 2>/dev/null \
+      | awk 'tolower($1)=="docker-content-digest:" {print $2}' \
+      | tr -d '\r' \
+      | tail -n1
+  ) || true
+  [[ -n "${digest}" ]]
+}
+
 fetch_manifest_with_retry() {
   local reference="$1"
   local manifest_file="$2"
@@ -429,7 +473,7 @@ fi
 
 echo
 echo "=== Phase 2: Restart proxy and verify persisted warm import ==="
-start_proxy "serve-restart.log" "$(phase_metadata_hints "docker-buildkit-restart")"
+start_proxy "serve-restart.log" "$(phase_metadata_hints "docker-buildkit-restart")" "${CACHE_TAG}"
 reset_builder
 run_build_with_retry "fourth-build-after-restart.log" \
   --cache-from "type=registry,ref=${CACHE_REF}" \
