@@ -68,6 +68,7 @@ fn test_cli_help() {
     assert!(stdout.contains("save"));
     assert!(stdout.contains("restore"));
     assert!(stdout.contains("run"));
+    assert!(stdout.contains("audit"));
     assert!(stdout.contains("workspaces"));
 }
 
@@ -152,6 +153,22 @@ fn test_run_command_help() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Usage: boringcache run"));
     assert!(stdout.contains("TAG_PATH_PAIRS") || stdout.contains("tag:path"));
+    assert!(stdout.contains("--profile"));
+    assert!(stdout.contains("--entry"));
+    assert!(stdout.contains("Supported forms:"));
+    assert!(stdout.contains("boringcache run [WORKSPACE] TAG_PATHS -- COMMAND..."));
+    assert!(stdout.contains("Manual TAG_PATHS are exclusive with --entry and --profile."));
+}
+
+#[test]
+fn test_audit_command_help() {
+    let output = run_cli_command(&["audit", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: boringcache audit"));
+    assert!(stdout.contains("--path"));
+    assert!(stdout.contains("--write"));
 }
 
 #[test]

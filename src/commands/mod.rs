@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod auth;
 pub mod cas_publish;
 pub mod cas_restore;

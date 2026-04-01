@@ -5,6 +5,7 @@ use std::process::Stdio;
 use crate::commands::{restore, save, serve, utils};
 use crate::config::{AuthPurpose, Config};
 use crate::exit_code::ExitCodeError;
+use crate::project_config;
 use crate::ui;
 
 const EXIT_CONFIG: i32 = 78;
@@ -58,7 +59,6 @@ const SCCACHE_BACKEND_ENV_VARS: &[&str] = &[
 #[derive(Debug)]
 enum ChildOutcome {
     Exited(std::process::ExitStatus),
-    Signaled(i32),
 }
 
 #[derive(Debug)]
@@ -72,6 +72,8 @@ struct ProxyContext {
 pub async fn execute(
     workspace: Option<String>,
     tag_path_pairs: Vec<String>,
+    profiles: Vec<String>,
+    entries: Vec<String>,
     verbose: bool,
     require_server_signature: bool,
     no_platform: bool,
@@ -92,13 +94,44 @@ pub async fn execute(
     dry_run: bool,
     command: Vec<String>,
 ) -> Result<()> {
-    let workspace = utils::get_workspace_name(workspace)?;
+    let has_manual_tags = !tag_path_pairs.is_empty();
+    let has_planned_entries = !profiles.is_empty() || !entries.is_empty();
+
+    if has_manual_tags && has_planned_entries {
+        anyhow::bail!("Do not combine manual TAG_PATH_PAIRS with --entry or --profile.");
+    }
+
+    let infer_entries = !has_manual_tags && !has_planned_entries;
+    let current_dir = std::env::current_dir().context("Failed to determine current directory")?;
+    let resolved_plan = project_config::resolve_run_plan(
+        &current_dir,
+        &profiles,
+        &entries,
+        if infer_entries {
+            command.as_slice()
+        } else {
+            &[]
+        },
+    )?;
+    let project_config::ResolvedRunPlan {
+        workspace: project_workspace,
+        tag_path_pairs: planned_pairs,
+        env_vars,
+    } = resolved_plan;
+    let workspace = utils::get_workspace_name_with_fallback(workspace, project_workspace)?;
+    let tag_path_pairs = if has_manual_tags {
+        tag_path_pairs
+    } else {
+        planned_pairs
+    };
     let archive_enabled = !tag_path_pairs.is_empty();
     let proxy_enabled = proxy.is_some();
     let proxy_metadata_hints = serve::resolve_proxy_metadata_hints(&metadata_hints)?;
 
     if !archive_enabled && !proxy_enabled {
-        anyhow::bail!("Provide TAG_PATH_PAIRS, --proxy <TAG>, or both");
+        anyhow::bail!(
+            "No cache entries resolved. Provide manual TAG_PATHS, use --entry or --profile, run an inferrable command, or pass --proxy <TAG>."
+        );
     }
 
     if archive_enabled {
@@ -109,6 +142,7 @@ pub async fn execute(
         print_dry_run(
             &workspace,
             &tag_path_pairs,
+            &env_vars,
             no_platform,
             no_git,
             force,
@@ -131,9 +165,8 @@ pub async fn execute(
 
     if Config::load_for_auth_purpose(AuthPurpose::Restore).is_err() {
         ui::info("[boringcache] No token found — running command without caching");
-        let child_outcome = spawn_command(&command, None).await?;
+        let child_outcome = spawn_command(&command, &env_vars, None).await?;
         return match child_outcome {
-            ChildOutcome::Signaled(signal) => Err(ExitCodeError::silent(128 + signal).into()),
             ChildOutcome::Exited(status) => {
                 let code = status_exit_code(&status);
                 if code == 0 {
@@ -192,7 +225,7 @@ pub async fn execute(
         proxy_handle = Some(handle);
     }
 
-    let child_outcome = spawn_command(&command, proxy_context.as_ref()).await;
+    let child_outcome = spawn_command(&command, &env_vars, proxy_context.as_ref()).await;
 
     let child_outcome = match child_outcome {
         Ok(outcome) => outcome,
@@ -203,10 +236,6 @@ pub async fn execute(
     };
 
     match child_outcome {
-        ChildOutcome::Signaled(signal) => {
-            shutdown_proxy_handle(proxy_handle.take(), fail_on_cache_error, false).await?;
-            Err(ExitCodeError::silent(128 + signal).into())
-        }
         ChildOutcome::Exited(status) => {
             let command_succeeded = status.success();
             let command_exit_code = status_exit_code(&status);
@@ -275,6 +304,7 @@ fn validate_archive_pairs(
 
 async fn spawn_command(
     command: &[String],
+    env_vars: &BTreeMap<String, String>,
     proxy_context: Option<&ProxyContext>,
 ) -> Result<ChildOutcome> {
     if command.is_empty() {
@@ -293,6 +323,7 @@ async fn spawn_command(
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    process.envs(env_vars);
 
     if let Some(proxy_context) = proxy_context {
         inject_proxy_env(&mut process, proxy_context);
@@ -371,11 +402,11 @@ async fn handle_signal(child: &mut tokio::process::Child, signal: i32) -> Result
         }
     }
 
-    let _ = child
+    let status = child
         .wait()
         .await
         .context("Failed to wait for command after signal")?;
-    Ok(ChildOutcome::Signaled(signal))
+    Ok(ChildOutcome::Exited(status))
 }
 
 #[cfg(not(unix))]
@@ -442,6 +473,7 @@ async fn shutdown_proxy_handle(
 fn print_dry_run(
     workspace: &str,
     tag_path_pairs: &[String],
+    env_vars: &BTreeMap<String, String>,
     no_platform: bool,
     no_git: bool,
     force: bool,
@@ -513,6 +545,10 @@ fn print_dry_run(
             proxy_parts.push(format!("{key}={value}"));
         }
         ui::info(&format!("[boringcache]   {}", proxy_parts.join(" ")));
+    }
+
+    for (key, value) in env_vars {
+        ui::info(&format!("[boringcache]   env {key}={value}"));
     }
 
     ui::info(&format!("[boringcache]   {}", command.join(" ")));

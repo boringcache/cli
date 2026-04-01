@@ -19,6 +19,7 @@ pub(crate) mod observability;
 pub(crate) mod optimize;
 pub mod platform;
 pub mod progress;
+pub mod project_config;
 pub(crate) mod request_metrics;
 pub(crate) mod retry_resume;
 pub mod serve;

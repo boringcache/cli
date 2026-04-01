@@ -4,19 +4,15 @@ on:
   workflow_run:
     workflows: ["Build and Release CLI"]
     types: [completed]
-    branches: [main]
   workflow_dispatch:
     inputs:
       cli_version:
         description: "CLI version tag (e.g., v1.12.7). Defaults to latest release."
         required: false
-  push:
-    branches: [main]
-    paths: ["images/**"]
 
 concurrency:
   group: publish-images-${{ github.workflow }}-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || inputs.cli_version || github.ref_name }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -35,7 +31,7 @@ jobs:
       (
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.event == 'push' &&
-        github.event.workflow_run.head_branch == 'main'
+        startsWith(github.event.workflow_run.head_branch, 'v')
       )
 
     steps:
@@ -177,9 +173,12 @@ jobs:
             boringcache --version
           '
 
-      - name: Verify mise + boringcache run (Ruby + bundle install)
+      - name: Verify checked-in repo config + boringcache run (Ruby + bundle install)
         run: |
-          docker run --rm ${{ env.IMAGE }}:bookworm-build sh -c '
+          docker run --rm \
+            -e BORINGCACHE_DEFAULT_WORKSPACE=test-org/test \
+            -v "$PWD/.boringcache.toml:/tmp/boringcache.repo.toml:ro" \
+            ${{ env.IMAGE }}:bookworm-build sh -c '
             set -e
             cd /tmp
             printf "[tools]\nruby = \"3.4.4\"\n" > mise.toml
@@ -191,8 +190,8 @@ jobs:
             mkdir -p myapp && cd myapp
             echo "source \"https://rubygems.org\"" > Gemfile
             echo "gem \"rake\"" >> Gemfile
-            export BUNDLE_PATH="vendor/bundle"
-            boringcache run test-org/test gems:vendor/bundle -- bundle install
+            cp /tmp/boringcache.repo.toml ./.boringcache.toml
+            boringcache run --profile bundle-install -- bundle install
             bundle exec rake --version
           '
 
@@ -201,4 +200,4 @@ jobs:
           echo "## Smoke tests passed" >> "$GITHUB_STEP_SUMMARY"
           echo "- bookworm: mise, boringcache CLI, no-token fallback" >> "$GITHUB_STEP_SUMMARY"
           echo "- bookworm-build: build tools, mise, boringcache CLI" >> "$GITHUB_STEP_SUMMARY"
-          echo "- mise + boringcache run: Ruby 3.4.4, bundle install, no-token fallback" >> "$GITHUB_STEP_SUMMARY"
+          echo "- checked-in repo config + boringcache run: Ruby 3.4.4, profile-driven bundle install, no-token fallback" >> "$GITHUB_STEP_SUMMARY"

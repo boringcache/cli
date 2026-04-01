@@ -14,30 +14,35 @@ pub fn expand_tilde_path(path: &str) -> String {
 }
 
 pub fn get_workspace_name(workspace_option: Option<String>) -> Result<String> {
-    if let Some(workspace) = workspace_option {
-        return Ok(workspace);
-    }
+    get_workspace_name_with_fallback(workspace_option, None)
+}
 
-    configured_workspace().ok_or_else(|| {
-        anyhow!(
-            "No workspace specified. Set BORINGCACHE_DEFAULT_WORKSPACE or run `boringcache use`."
-        )
-    })
+pub fn get_workspace_name_with_fallback(
+    workspace_option: Option<String>,
+    fallback_workspace: Option<String>,
+) -> Result<String> {
+    normalize_workspace(workspace_option)
+        .or_else(|| normalize_workspace(fallback_workspace))
+        .or_else(configured_workspace)
+        .ok_or_else(|| {
+            anyhow!(
+                "No workspace specified. Set BORINGCACHE_DEFAULT_WORKSPACE or run `boringcache use`."
+            )
+        })
 }
 
 pub fn configured_workspace() -> Option<String> {
-    if let Some(workspace) = crate::config::env_var("BORINGCACHE_DEFAULT_WORKSPACE") {
-        let normalized = workspace.trim().to_string();
-        if !normalized.is_empty() {
-            return Some(normalized);
-        }
-    }
+    normalize_workspace(crate::config::env_var("BORINGCACHE_DEFAULT_WORKSPACE")).or_else(|| {
+        Config::load()
+            .ok()
+            .and_then(|config| normalize_workspace(config.default_workspace))
+    })
+}
 
-    Config::load()
-        .ok()
-        .and_then(|config| config.default_workspace)
-        .map(|workspace| workspace.trim().to_string())
-        .filter(|workspace| !workspace.is_empty())
+fn normalize_workspace(workspace: Option<String>) -> Option<String> {
+    workspace
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub async fn resolve_workspace(

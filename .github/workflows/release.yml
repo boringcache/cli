@@ -11,7 +11,7 @@ permissions:
 env:
   BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
   BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
-  SCCACHE_VERSION: "v0.13.0"
+  SCCACHE_VERSION: "v0.14.0"
 
 jobs:
   require-cli-ci:
@@ -373,6 +373,39 @@ jobs:
             '
 
       # Native builds for Ubuntu/macOS/Windows
+      - name: Install sccache prebuilt (macOS Intel)
+        if: matrix.use_docker != true && matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          INSTALL_DIR="${HOME}/.local/bin"
+          TEMP_DIR="$(mktemp -d)"
+          ARCHIVE_PATH="${TEMP_DIR}/sccache.tar.gz"
+          ASSET="sccache-${{ env.SCCACHE_VERSION }}-x86_64-apple-darwin.tar.gz"
+          curl -fsSL "https://github.com/mozilla/sccache/releases/download/${{ env.SCCACHE_VERSION }}/${ASSET}" -o "${ARCHIVE_PATH}"
+          tar -xzf "${ARCHIVE_PATH}" -C "${TEMP_DIR}"
+          mkdir -p "${INSTALL_DIR}"
+          cp "${TEMP_DIR}/sccache-${{ env.SCCACHE_VERSION }}-x86_64-apple-darwin/sccache" "${INSTALL_DIR}/sccache"
+          chmod +x "${INSTALL_DIR}/sccache"
+          echo "${INSTALL_DIR}" >> "${GITHUB_PATH}"
+          "${INSTALL_DIR}/sccache" --version
+
+      - name: Install sccache prebuilt (Windows ARM64)
+        if: matrix.use_docker != true && matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $HOME ".local\bin"
+          $tempDir = Join-Path $env:RUNNER_TEMP "sccache-${{ env.SCCACHE_VERSION }}-${{ matrix.name }}"
+          $archivePath = Join-Path $tempDir "sccache.zip"
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+          $asset = "sccache-${{ env.SCCACHE_VERSION }}-aarch64-pc-windows-msvc.zip"
+          Invoke-WebRequest -Uri "https://github.com/mozilla/sccache/releases/download/${{ env.SCCACHE_VERSION }}/$asset" -OutFile $archivePath
+          Expand-Archive -Path $archivePath -DestinationPath $tempDir -Force
+          Copy-Item (Join-Path $tempDir "sccache-${{ env.SCCACHE_VERSION }}-aarch64-pc-windows-msvc\sccache.exe") (Join-Path $installDir "sccache.exe") -Force
+          Add-Content -Path $env:GITHUB_PATH -Value $installDir
+          & (Join-Path $installDir "sccache.exe") --version
+
       - name: Setup Rust (Native BoringCache)
         id: boringcache-rust-native
         if: matrix.use_docker != true
