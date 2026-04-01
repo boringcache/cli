@@ -55,6 +55,8 @@ target
 .act
 .boringcache
 .planning/
+openapi.json
+openapi.v2.json
 build/
 dist/
 .examples/
