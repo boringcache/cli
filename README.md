@@ -74,6 +74,7 @@ boringcache audit --path images --path .github/workflows/publish-images.yml --wr
 ```
 
 `audit` skips dynamic tags such as `${TAG}:path` and placeholder pairs such as `tag:path`.
+`boringcache onboard` also writes repo config when applied changes live alongside literal manual `boringcache run tag:path` usage in the scanned files.
 
 ## Daily terminal use
 

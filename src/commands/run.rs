@@ -59,7 +59,6 @@ const SCCACHE_BACKEND_ENV_VARS: &[&str] = &[
 #[derive(Debug)]
 enum ChildOutcome {
     Exited(std::process::ExitStatus),
-    Signaled(i32),
 }
 
 #[derive(Debug)]
@@ -168,7 +167,6 @@ pub async fn execute(
         ui::info("[boringcache] No token found — running command without caching");
         let child_outcome = spawn_command(&command, &env_vars, None).await?;
         return match child_outcome {
-            ChildOutcome::Signaled(signal) => Err(ExitCodeError::silent(128 + signal).into()),
             ChildOutcome::Exited(status) => {
                 let code = status_exit_code(&status);
                 if code == 0 {
@@ -238,10 +236,6 @@ pub async fn execute(
     };
 
     match child_outcome {
-        ChildOutcome::Signaled(signal) => {
-            shutdown_proxy_handle(proxy_handle.take(), fail_on_cache_error, false).await?;
-            Err(ExitCodeError::silent(128 + signal).into())
-        }
         ChildOutcome::Exited(status) => {
             let command_succeeded = status.success();
             let command_exit_code = status_exit_code(&status);
@@ -408,11 +402,11 @@ async fn handle_signal(child: &mut tokio::process::Child, signal: i32) -> Result
         }
     }
 
-    let _ = child
+    let status = child
         .wait()
         .await
         .context("Failed to wait for command after signal")?;
-    Ok(ChildOutcome::Signaled(signal))
+    Ok(ChildOutcome::Exited(status))
 }
 
 #[cfg(not(unix))]

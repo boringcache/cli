@@ -141,6 +141,7 @@ pub async fn execute(
 
             ui::blank_line();
             ui::info("Or add a CI config and run 'boringcache onboard' again.");
+            print_repo_config_tip();
         }
         return Ok(());
     }
@@ -187,6 +188,7 @@ pub async fn execute(
     if sendable.is_empty() {
         if !json_output {
             ui::info("No files need optimization.");
+            print_repo_config_tip();
         } else {
             println!("{{\"results\":[]}}");
         }
@@ -373,10 +375,39 @@ pub async fn execute(
         if written == 0 {
             ui::warn("No files were written.");
         } else {
+            let repo_config = seed_repo_config_from_files(&files)?;
             ui::blank_line();
+            if let Some(result) = &repo_config {
+                ui::info(&format!(
+                    "Seeded repo config: {}",
+                    result.config_path.display()
+                ));
+                ui::info(&format!(
+                    "Added {} entr{} and {} profile{}.",
+                    result.added_entries,
+                    if result.added_entries == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    },
+                    result.added_profiles,
+                    if result.added_profiles == 1 { "" } else { "s" }
+                ));
+                ui::blank_line();
+            }
             ui::info("Done! Next steps:");
             ui::info("  1. Review: git diff");
             ui::info("  2. Commit and push to trigger your first cached CI run");
+            if let Some(result) = repo_config {
+                ui::info(&format!(
+                    "  3. Review repo config: {}",
+                    result.config_path.display()
+                ));
+            } else {
+                ui::info(
+                    "  3. Seed repo config from existing manual tags: boringcache audit --write",
+                );
+            }
 
             if let Ok(config) = Config::load()
                 && let Some(ref ws) = config.default_workspace
@@ -388,6 +419,27 @@ pub async fn execute(
     }
 
     Ok(())
+}
+
+fn print_repo_config_tip() {
+    ui::blank_line();
+    ui::info("If you want shared cache names across local runs, Dockerfiles, and CI:");
+    ui::info("  boringcache audit --write");
+}
+
+fn seed_repo_config_from_files(
+    files: &[ScannedFile],
+) -> Result<Option<crate::commands::audit::RepoConfigWriteResult>> {
+    let scan_paths = files
+        .iter()
+        .map(|file| file.display_path.clone())
+        .collect::<Vec<_>>();
+    let result = crate::commands::audit::write_repo_config_for_paths(None, &scan_paths)?;
+    if result.wrote {
+        Ok(Some(result))
+    } else {
+        Ok(None)
+    }
 }
 
 fn run_deterministic_pass<'a>(

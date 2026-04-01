@@ -87,6 +87,14 @@ enum SkipReason {
     Placeholder,
 }
 
+#[derive(Debug, Clone)]
+pub struct RepoConfigWriteResult {
+    pub config_path: PathBuf,
+    pub wrote: bool,
+    pub added_entries: usize,
+    pub added_profiles: usize,
+}
+
 pub async fn execute(path: Option<String>, write: bool, json_output: bool) -> Result<()> {
     execute_with_paths(path, Vec::new(), write, json_output).await
 }
@@ -113,14 +121,9 @@ fn default_scan_paths(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-pub async fn execute_with_paths(
-    root: Option<String>,
-    scan_paths: Vec<String>,
-    write: bool,
-    json_output: bool,
-) -> Result<()> {
+fn resolve_audit_root(root: Option<&Path>) -> Result<PathBuf> {
     let requested_root = match root {
-        Some(value) => PathBuf::from(value),
+        Some(value) => value.to_path_buf(),
         None => std::env::current_dir().context("Failed to read current directory")?,
     };
     let start_dir = if requested_root.is_dir() {
@@ -131,7 +134,15 @@ pub async fn execute_with_paths(
             .map(Path::to_path_buf)
             .context("Audit path must point to a directory or a file inside the repo")?
     };
-    let root = discover_repo_root(&start_dir)?;
+    discover_repo_root(&start_dir)
+}
+
+fn audit_repo(
+    root: Option<&Path>,
+    scan_paths: &[String],
+    write: bool,
+) -> Result<(AuditReport, RepoConfigWriteResult)> {
+    let root = resolve_audit_root(root)?;
     let existing = discover(&root)?;
     let config_path = existing
         .as_ref()
@@ -141,12 +152,14 @@ pub async fn execute_with_paths(
         .as_ref()
         .map(|loaded| loaded.config.clone())
         .unwrap_or_default();
-    let resolved_scan_paths = resolve_scan_paths(&root, &scan_paths);
+    let resolved_scan_paths = resolve_scan_paths(&root, scan_paths);
     let scan = scan_repo(&resolved_scan_paths)?;
     let merge = merge_suggestions(&mut config, &scan);
 
+    let added_entries = merge.added_entries.len();
+    let added_profiles = merge.added_profiles.len();
     let mut wrote = false;
-    if write && (!merge.added_entries.is_empty() || !merge.added_profiles.is_empty()) {
+    if write && (added_entries > 0 || added_profiles > 0) {
         let contents = toml::to_string_pretty(&config).context("Failed to render repo config")?;
         std::fs::write(&config_path, contents)
             .with_context(|| format!("Failed to write {}", config_path.display()))?;
@@ -186,6 +199,32 @@ pub async fn execute_with_paths(
         skipped_configured_entries: merge.skipped_configured_entries,
         skipped_configured_profiles: merge.skipped_configured_profiles,
     };
+    let write_result = RepoConfigWriteResult {
+        config_path,
+        wrote,
+        added_entries,
+        added_profiles,
+    };
+
+    Ok((report, write_result))
+}
+
+pub fn write_repo_config_for_paths(
+    root: Option<&Path>,
+    scan_paths: &[String],
+) -> Result<RepoConfigWriteResult> {
+    let (_, result) = audit_repo(root, scan_paths, true)?;
+    Ok(result)
+}
+
+pub async fn execute_with_paths(
+    root: Option<String>,
+    scan_paths: Vec<String>,
+    write: bool,
+    json_output: bool,
+) -> Result<()> {
+    let requested_root = root.map(PathBuf::from);
+    let (report, _) = audit_repo(requested_root.as_deref(), &scan_paths, write)?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&report)?);
