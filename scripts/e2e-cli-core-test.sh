@@ -119,7 +119,7 @@ run_dashboard_smoke() {
   dashboard_cmd="${dashboard_cmd% }"
 
   if script -qec "printf ready >/dev/null" /dev/null >/dev/null 2>&1; then
-    (sleep 2; printf 'q') |
+    ({ sleep 2; printf 'q' || true; } 2>/dev/null) |
       TERM=xterm-256color COLUMNS=80 LINES=24 \
       script -qec "${dashboard_cmd}" "${log_file}" >/dev/null 2>&1
 
@@ -129,7 +129,7 @@ run_dashboard_smoke() {
     assert_file_contains "${log_file}" "Help"
     assert_file_not_contains "${log_file}" "needs a larger terminal"
   else
-    (sleep 2; printf 'q') |
+    ({ sleep 2; printf 'q' || true; } 2>/dev/null) |
       TERM=xterm-256color COLUMNS=80 LINES=24 \
       script -q "${log_file}" "${CLI}" dashboard "${WORKSPACE}" --interval 5 >/dev/null 2>&1
 

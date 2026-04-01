@@ -604,7 +604,9 @@ jobs:
             -p "boringcache-linux-amd64" \
             -p "boringcache-linux-arm64" \
             -p "boringcache-linux-musl-amd64" \
-            -p "boringcache-linux-musl-arm64"
+            -p "boringcache-linux-musl-arm64" \
+            -p "boringcache-macos-universal" \
+            -p "boringcache-windows-amd64.exe"
 
       - name: Create and upload aliases
         env:
@@ -631,6 +633,15 @@ jobs:
 
           cp boringcache-linux-musl-arm64 boringcache-alpine-arm64
           gh release upload "${TAG}" boringcache-alpine-arm64 --repo "${REPO}" --clobber
+
+          cp boringcache-macos-universal boringcache-macos-14-arm64
+          gh release upload "${TAG}" boringcache-macos-14-arm64 --repo "${REPO}" --clobber
+
+          cp boringcache-macos-universal boringcache-macos-15-arm64
+          gh release upload "${TAG}" boringcache-macos-15-arm64 --repo "${REPO}" --clobber
+
+          cp boringcache-windows-amd64.exe boringcache-windows-2022-amd64.exe
+          gh release upload "${TAG}" boringcache-windows-2022-amd64.exe --repo "${REPO}" --clobber
 
   # Generate and upload SHA256 checksums
   generate-checksums:

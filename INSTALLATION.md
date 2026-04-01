@@ -111,9 +111,8 @@ The GitHub release workflow creates these binaries:
 - `boringcache-alpine-amd64`
 - `boringcache-arch-amd64`
 - `boringcache-arch-arm64`
-- `boringcache-macos-14-arm64`
-- `boringcache-macos-15-arm64`
-- `boringcache-windows-2022-amd64.exe`
+- `boringcache-macos-universal`
+- `boringcache-windows-amd64.exe`
 
 ## Installation Locations
 
