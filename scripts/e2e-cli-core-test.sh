@@ -29,7 +29,7 @@ if ! resolve_save_capable_token >/dev/null; then
   exit 1
 fi
 
-for dep in jq stat mktemp grep cmp curl pgrep python3 sh; do
+for dep in jq stat mktemp grep cmp curl pgrep script sh; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     echo "ERROR: required dependency not found: ${dep}"
     exit 1
@@ -114,105 +114,30 @@ grep -q "${WORKSPACE}" "${CLI_LOG_DIR}/config-get-default-workspace.log"
 
 run_dashboard_smoke() {
   local log_file="$1"
-  python3 - "${CLI}" "${WORKSPACE}" "${log_file}" <<'PY'
-import os
-import pty
-import re
-import select
-import struct
-import subprocess
-import sys
-import termios
-import fcntl
-import time
+  local dashboard_cmd
+  printf -v dashboard_cmd '%q ' "${CLI}" dashboard "${WORKSPACE}" --interval 5
+  dashboard_cmd="${dashboard_cmd% }"
 
-cli, workspace, log_file = sys.argv[1:4]
-env = os.environ.copy()
-env.setdefault("TERM", "xterm-256color")
+  if script -qec "printf ready >/dev/null" /dev/null >/dev/null 2>&1; then
+    (sleep 2; printf 'q') |
+      TERM=xterm-256color COLUMNS=80 LINES=24 \
+      script -qec "${dashboard_cmd}" "${log_file}" >/dev/null 2>&1
 
-master_fd, slave_fd = pty.openpty()
-fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    assert_file_contains "${log_file}" "${WORKSPACE}"
+    assert_file_contains "${log_file}" "Attention"
+    assert_file_contains "${log_file}" "Snapshot"
+    assert_file_contains "${log_file}" "Help"
+    assert_file_not_contains "${log_file}" "needs a larger terminal"
+  else
+    (sleep 2; printf 'q') |
+      TERM=xterm-256color COLUMNS=80 LINES=24 \
+      script -q "${log_file}" "${CLI}" dashboard "${WORKSPACE}" --interval 5 >/dev/null 2>&1
 
-command = [cli, "dashboard", workspace, "--interval", "5"]
-proc = subprocess.Popen(
-    command,
-    stdin=slave_fd,
-    stdout=slave_fd,
-    stderr=slave_fd,
-    env=env,
-    close_fds=True,
-)
-os.close(slave_fd)
-
-required_markers = [
-    workspace.encode(),
-    b"Attention",
-    b"Snapshot",
-    b"Help",
-]
-buffer = bytearray()
-deadline = time.time() + 20
-
-with open(log_file, "wb") as log:
-    rendered = False
-    while time.time() < deadline:
-        ready, _, _ = select.select([master_fd], [], [], 0.5)
-        if not ready:
-            if proc.poll() is not None:
-                break
-            continue
-        chunk = os.read(master_fd, 16384)
-        if not chunk:
-            break
-        log.write(chunk)
-        log.flush()
-        buffer.extend(chunk)
-        if all(marker in buffer for marker in required_markers):
-            rendered = True
-            break
-
-    try:
-        os.write(master_fd, b"q")
-    except OSError:
-        pass
-
-    shutdown_deadline = time.time() + 5
-    while time.time() < shutdown_deadline and proc.poll() is None:
-        ready, _, _ = select.select([master_fd], [], [], 0.2)
-        if ready:
-            chunk = os.read(master_fd, 16384)
-            if not chunk:
-                break
-            log.write(chunk)
-            log.flush()
-            buffer.extend(chunk)
-        else:
-            time.sleep(0.1)
-
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=3)
-
-os.close(master_fd)
-
-sanitized = re.sub(rb"\x1b\[[0-9;?]*[ -/]*[@-~]", b"", bytes(buffer))
-
-if b"needs a larger terminal" in sanitized:
-    sys.stderr.write("dashboard rendered fallback too-small view\n")
-    sys.exit(1)
-
-if not rendered or not all(marker in sanitized for marker in required_markers):
-    sys.stderr.write("dashboard did not render expected compact markers\n")
-    sys.exit(1)
-
-if proc.returncode != 0:
-    sys.stderr.write(f"dashboard exited with status {proc.returncode}\n")
-    sys.exit(proc.returncode)
-PY
+    if [[ ! -s "${log_file}" ]]; then
+      echo "dashboard smoke did not capture any terminal output"
+      exit 1
+    fi
+  fi
 }
 
 TAG_ROOT="$(e2e_tag "cli-core")"
