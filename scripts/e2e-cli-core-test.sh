@@ -115,7 +115,7 @@ grep -q "${WORKSPACE}" "${CLI_LOG_DIR}/config-get-default-workspace.log"
 run_dashboard_smoke() {
   local log_file="$1"
   local dashboard_cmd
-  printf -v dashboard_cmd '%q ' "${CLI}" dashboard "${WORKSPACE}" --interval 5
+  printf -v dashboard_cmd '%q ' env -u CI "${CLI}" dashboard "${WORKSPACE}" --interval 5
   dashboard_cmd="${dashboard_cmd% }"
 
   if script -qec "printf ready >/dev/null" /dev/null >/dev/null 2>&1; then
