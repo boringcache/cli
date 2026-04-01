@@ -1,3 +1,4 @@
+use serde_json::Value;
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
@@ -205,6 +206,106 @@ entries = ["bundler"]
         "env BUNDLE_PATH={}",
         canonical_temp_dir.join("vendor/bundle").display()
     )));
+}
+
+#[test]
+fn test_run_dry_run_json_resolves_builtin_entry_without_command() {
+    let temp_dir = TempDir::new().expect("temp dir");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args([
+            "run",
+            "test-org/test-workspace",
+            "--entry",
+            "bundler",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("Failed to execute json dry-run command");
+
+    assert!(
+        output.status.success(),
+        "JSON dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    let canonical_temp_dir = temp_dir
+        .path()
+        .canonicalize()
+        .expect("canonicalize temp dir");
+    let expected_pair = format!(
+        "bundler:{}",
+        canonical_temp_dir.join("vendor/bundle").display()
+    );
+
+    assert_eq!(parsed["workspace"], "test-org/test-workspace");
+    assert_eq!(parsed["command"], serde_json::json!([]));
+    assert_eq!(parsed["tag_path_pairs"], serde_json::json!([expected_pair]));
+    assert_eq!(
+        parsed["env_vars"]["BUNDLE_PATH"],
+        canonical_temp_dir
+            .join("vendor/bundle")
+            .display()
+            .to_string()
+    );
+}
+
+#[test]
+fn test_run_dry_run_json_uses_profile_from_project_config_without_command() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[entries.bundler]
+tag = "bundler-gems"
+
+[profiles.bundle-install]
+entries = ["bundler"]
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["run", "--profile", "bundle-install", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute profile json dry-run command");
+
+    assert!(
+        output.status.success(),
+        "JSON dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    let canonical_temp_dir = temp_dir
+        .path()
+        .canonicalize()
+        .expect("canonicalize temp dir");
+    let expected_pair = format!(
+        "bundler-gems:{}",
+        canonical_temp_dir.join("vendor/bundle").display()
+    );
+
+    assert_eq!(parsed["workspace"], "test-org/test-workspace");
+    assert_eq!(parsed["command"], serde_json::json!([]));
+    assert_eq!(parsed["tag_path_pairs"], serde_json::json!([expected_pair]));
+    assert_eq!(
+        parsed["env_vars"]["BUNDLE_PATH"],
+        canonical_temp_dir
+            .join("vendor/bundle")
+            .display()
+            .to_string()
+    );
 }
 
 #[test]

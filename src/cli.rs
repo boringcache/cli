@@ -474,7 +474,19 @@ pub enum Commands {
         #[arg(long, help = "Print restore/save commands without executing")]
         dry_run: bool,
 
-        #[arg(last = true, required = true, help = "Command to execute (after --)")]
+        #[arg(
+            short,
+            long,
+            requires = "dry_run",
+            help = "Print machine-readable dry-run plan for CI and scripts"
+        )]
+        json: bool,
+
+        #[arg(
+            last = true,
+            required_unless_present = "dry_run",
+            help = "Command to execute (after --)"
+        )]
         command: Vec<String>,
     },
 

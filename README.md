@@ -66,6 +66,12 @@ boringcache run -- bundle install
 
 Manual `tag:path` pairs are exclusive with `--entry` and `--profile`.
 
+For integrations and CI wrappers, `boringcache run --dry-run --json` is the machine-readable way to resolve workspace, cache entries, exported env vars, and optional proxy metadata without executing the wrapped command:
+
+```bash
+boringcache run --entry bundler --dry-run --json
+```
+
 To seed or refresh repo config from literal manual tags in Dockerfiles, scripts, or selected workflow files, run:
 
 ```bash

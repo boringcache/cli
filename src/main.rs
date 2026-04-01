@@ -402,6 +402,7 @@ async fn main() -> Result<()> {
             fail_on_cache_error,
             fail_on_cache_miss,
             dry_run,
+            json,
             command,
         } => {
             let (effective_workspace, tag_path_strings) =
@@ -430,6 +431,7 @@ async fn main() -> Result<()> {
                 fail_on_cache_error,
                 fail_on_cache_miss,
                 dry_run,
+                json,
                 command,
             )
             .await

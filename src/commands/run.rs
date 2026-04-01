@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::process::Stdio;
 
@@ -68,6 +69,25 @@ struct ProxyContext {
     cache_ref: String,
 }
 
+#[derive(Debug, Serialize)]
+struct DryRunPlan {
+    workspace: String,
+    tag_path_pairs: Vec<String>,
+    env_vars: BTreeMap<String, String>,
+    command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proxy: Option<DryRunProxyPlan>,
+}
+
+#[derive(Debug, Serialize)]
+struct DryRunProxyPlan {
+    tag: String,
+    host: String,
+    port: u16,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    metadata_hints: BTreeMap<String, String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
     workspace: Option<String>,
@@ -92,8 +112,13 @@ pub async fn execute(
     fail_on_cache_error: bool,
     fail_on_cache_miss: bool,
     dry_run: bool,
+    json_output: bool,
     command: Vec<String>,
 ) -> Result<()> {
+    if json_output && !dry_run {
+        anyhow::bail!("--json is only supported with --dry-run for `boringcache run`.");
+    }
+
     let has_manual_tags = !tag_path_pairs.is_empty();
     let has_planned_entries = !profiles.is_empty() || !entries.is_empty();
 
@@ -139,27 +164,37 @@ pub async fn execute(
     }
 
     if dry_run {
-        print_dry_run(
-            &workspace,
-            &tag_path_pairs,
-            &env_vars,
-            no_platform,
-            no_git,
-            force,
-            &exclude,
-            recipient.as_deref(),
-            identity.as_deref(),
-            proxy.as_deref(),
-            &proxy_metadata_hints,
-            &host,
-            port,
-            save_on_failure,
-            skip_restore,
-            skip_save,
-            fail_on_cache_error,
-            fail_on_cache_miss,
-            &command,
-        );
+        if json_output {
+            let proxy_plan = proxy.as_ref().map(|tag| DryRunProxyPlan {
+                tag: tag.to_string(),
+                host: host.clone(),
+                port,
+                metadata_hints: proxy_metadata_hints.clone(),
+            });
+            print_dry_run_json(&workspace, &tag_path_pairs, &env_vars, proxy_plan, &command)?;
+        } else {
+            print_dry_run(
+                &workspace,
+                &tag_path_pairs,
+                &env_vars,
+                no_platform,
+                no_git,
+                force,
+                &exclude,
+                recipient.as_deref(),
+                identity.as_deref(),
+                proxy.as_deref(),
+                &proxy_metadata_hints,
+                &host,
+                port,
+                save_on_failure,
+                skip_restore,
+                skip_save,
+                fail_on_cache_error,
+                fail_on_cache_miss,
+                &command,
+            );
+        }
         return Ok(());
     }
 
@@ -551,7 +586,9 @@ fn print_dry_run(
         ui::info(&format!("[boringcache]   env {key}={value}"));
     }
 
-    ui::info(&format!("[boringcache]   {}", command.join(" ")));
+    if !command.is_empty() {
+        ui::info(&format!("[boringcache]   {}", command.join(" ")));
+    }
 
     if !tag_path_pairs.is_empty() && !skip_save {
         let pairs = format!("\"{}\"", tag_path_pairs.join(","));
@@ -587,4 +624,23 @@ fn print_dry_run(
     if save_on_failure && !tag_path_pairs.is_empty() {
         ui::info("[boringcache]   # save phase enabled for non-zero command exits");
     }
+}
+
+fn print_dry_run_json(
+    workspace: &str,
+    tag_path_pairs: &[String],
+    env_vars: &BTreeMap<String, String>,
+    proxy: Option<DryRunProxyPlan>,
+    command: &[String],
+) -> Result<()> {
+    let plan = DryRunPlan {
+        workspace: workspace.to_string(),
+        tag_path_pairs: tag_path_pairs.to_vec(),
+        env_vars: env_vars.clone(),
+        command: command.to_vec(),
+        proxy,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&plan)?);
+    Ok(())
 }
