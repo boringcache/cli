@@ -35,6 +35,9 @@ const EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS: u64 = 75;
 const EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS: usize = 3;
 const EMPTY_FINALIZE_REMOTE_RETRY_DELAY_MS: u64 = 100;
 const OCI_DEGRADED_HEADER: &str = "X-BoringCache-Cache-Degraded";
+const OCI_PREFETCH_STATE_HEADER: &str = "X-BoringCache-Prefetch-State";
+const OCI_PREFETCH_STATE_READY: &str = "ready";
+const OCI_PREFETCH_STATE_WARMING: &str = "warming";
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_BLOB_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_POINTER_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -58,14 +61,20 @@ pub async fn v2_base(State(state): State<AppState>) -> impl IntoResponse {
         .load(std::sync::atomic::Ordering::Acquire)
     {
         return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [("Docker-Distribution-API-Version", "registry/2.0")],
-            "prefetch in progress",
+            StatusCode::OK,
+            [
+                ("Docker-Distribution-API-Version", "registry/2.0"),
+                (OCI_PREFETCH_STATE_HEADER, OCI_PREFETCH_STATE_WARMING),
+            ],
+            "",
         );
     }
     (
         StatusCode::OK,
-        [("Docker-Distribution-API-Version", "registry/2.0")],
+        [
+            ("Docker-Distribution-API-Version", "registry/2.0"),
+            (OCI_PREFETCH_STATE_HEADER, OCI_PREFETCH_STATE_READY),
+        ],
         "",
     )
 }
