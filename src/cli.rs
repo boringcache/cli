@@ -208,6 +208,48 @@ pub enum Commands {
         json: bool,
     },
 
+    #[command(
+        about = "Open a full-screen workspace dashboard",
+        visible_alias = "tui"
+    )]
+    Dashboard {
+        #[arg(help = "Workspace name (org/project or user/project)")]
+        workspace: Option<String>,
+
+        #[arg(
+            long,
+            default_value = "24h",
+            value_parser = ["1h", "6h", "24h", "7d", "30d"],
+            help = "Time window for operator insights"
+        )]
+        period: String,
+
+        #[arg(
+            short,
+            long,
+            default_value = "5",
+            value_parser = clap::value_parser!(u32).range(1..=10),
+            help = "Maximum number of tools, sessions, and missed keys to show"
+        )]
+        limit: u32,
+
+        #[arg(
+            long = "tag-limit",
+            default_value = "25",
+            value_parser = clap::value_parser!(u32).range(5..=100),
+            help = "Number of tags to load per page"
+        )]
+        tag_limit: u32,
+
+        #[arg(
+            long,
+            default_value = "15",
+            value_parser = clap::value_parser!(u64).range(5..=3600),
+            help = "Seconds between automatic refreshes"
+        )]
+        interval: u64,
+    },
+
     #[command(subcommand, about = "Manage workspace tokens")]
     Token(TokenCommands),
 

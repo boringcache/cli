@@ -3,6 +3,7 @@ pub mod cas_publish;
 pub mod cas_restore;
 pub mod check;
 pub mod config;
+pub mod dashboard;
 pub mod delete;
 pub mod doctor;
 pub mod file_materialize;
