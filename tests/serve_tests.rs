@@ -37,6 +37,31 @@ fn set_scoped_env_var(key: &'static str, value: &str) -> ScopedEnvVar {
     ScopedEnvVar(key)
 }
 
+async fn wait_for_prefetch_state(client: &reqwest::Client, base_url: &str, expected: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let response = client
+            .get(format!("{base_url}/v2/"))
+            .send()
+            .await
+            .expect("get request");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        if response
+            .headers()
+            .get("X-BoringCache-Prefetch-State")
+            .and_then(|value| value.to_str().ok())
+            == Some(expected)
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "proxy did not reach prefetch state {expected} within 10s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard) {
     let guard = test_env::lock();
     let _ = *ORIGINAL_TMPDIR;
@@ -204,29 +229,14 @@ async fn test_startup_manifest_warm_runs_by_default() {
     let base_url = format!("http://127.0.0.1:{}", handle.port);
     let client = reqwest::Client::new();
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let get = client
-            .get(format!("{base_url}/v2/"))
-            .send()
-            .await
-            .expect("get request");
-        if get.status() == reqwest::StatusCode::OK {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "proxy did not become ready within 10s"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_for_prefetch_state(&client, &base_url, "ready").await;
 
     handle.shutdown_and_flush().await.expect("shutdown proxy");
     restore_mock.assert_async().await;
 }
 
 #[tokio::test]
-async fn test_v2_returns_503_before_prefetch_complete() {
+async fn test_v2_returns_200_with_warming_header_before_prefetch_complete() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
     state
@@ -241,7 +251,14 @@ async fn test_v2_returns_503_before_prefetch_complete() {
     .await
     .unwrap();
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("X-BoringCache-Prefetch-State")
+            .unwrap(),
+        "warming"
+    );
 }
 
 #[tokio::test]
@@ -380,22 +397,7 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
     let base_url = format!("http://127.0.0.1:{}", handle.port);
     let client = reqwest::Client::new();
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let get = client
-            .get(format!("{base_url}/v2/"))
-            .send()
-            .await
-            .expect("get request");
-        if get.status() == reqwest::StatusCode::OK {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "proxy did not become ready within 10s"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_for_prefetch_state(&client, &base_url, "ready").await;
 
     warm_blob_a_mock.assert_async().await;
     warm_blob_b_mock.assert_async().await;
@@ -449,6 +451,13 @@ async fn test_v2_base_returns_200() {
             .get("Docker-Distribution-API-Version")
             .unwrap(),
         "registry/2.0"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("X-BoringCache-Prefetch-State")
+            .unwrap(),
+        "ready"
     );
 }
 

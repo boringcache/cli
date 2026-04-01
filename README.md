@@ -217,6 +217,8 @@ Use this when the build tool already has a remote cache protocol and should keep
 boringcache cache-registry my-org/app build-cache --port 5000
 ```
 
+`/v2/` reports proxy availability immediately; startup warmup state is exposed via `X-BoringCache-Prefetch-State: warming|ready`.
+
 That local proxy speaks:
 - OCI registry APIs for BuildKit `type=registry`
 - Bazel HTTP remote cache
