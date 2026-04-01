@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "boring_cache_cli"
-version = "1.12.12"
+version = "1.12.13"
 dependencies = [
  "age",
  "anyhow",
