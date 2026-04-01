@@ -29,7 +29,7 @@ use crate::serve::state::{
 use crate::upload_receipts::try_commit_blob_receipts;
 
 use super::error::RegistryError;
-use super::kv_publish::{upload_blobs, BlobUploadStats};
+use super::kv_publish::{BlobUploadStats, upload_blobs};
 
 const KV_MISS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 const KV_CONFLICT_BACKOFF_MS: u64 = 5_000;
