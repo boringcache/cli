@@ -100,6 +100,9 @@ fn is_retryable_blob_upload_error(message: &str) -> bool {
         || lower.contains("connection reset")
         || lower.contains("broken pipe")
         || lower.contains("connection refused")
+        || lower.contains("unexpected eof")
+        || lower.contains("unexpected-eof")
+        || lower.contains("close_notify")
         || lower.contains("temporarily unavailable")
 }
 
@@ -382,5 +385,11 @@ mod tests {
                 "expected retryable match for {message}"
             );
         }
+    }
+
+    #[test]
+    fn retryable_blob_upload_errors_treat_tls_unexpected_eof_as_retryable() {
+        let message = "client error (SendRequest): connection error: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof";
+        assert!(is_retryable_blob_upload_error(message));
     }
 }

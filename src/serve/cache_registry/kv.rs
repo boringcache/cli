@@ -714,7 +714,6 @@ fn clear_root_tag_misses(state: &AppState) {
         clear_tag_misses(state, &tag);
     }
 }
-
 async fn lookup_published_blob(
     state: &AppState,
     scoped_key: &str,
@@ -1958,6 +1957,9 @@ fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
         || lower.contains("connection refused")
         || lower.contains("broken pipe")
         || lower.contains("connection reset")
+        || lower.contains("unexpected eof")
+        || lower.contains("unexpected-eof")
+        || lower.contains("close_notify")
         || is_blob_verification_pending_message(&lower);
     if transient_status || transient_hint {
         return FlushError::Transient(message);
@@ -4314,6 +4316,15 @@ mod tests {
             "Server returned 400 Bad Request: 714 blob(s) not yet verified in storage — retry after upload completes"
         );
         let classified = classify_flush_error(&error, "confirm failed");
+        assert!(matches!(classified, FlushError::Transient(_)));
+    }
+
+    #[test]
+    fn classify_flush_error_treats_tls_unexpected_eof_as_transient() {
+        let error = anyhow::anyhow!(
+            "blob upload failed: client error (SendRequest): connection error: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof"
+        );
+        let classified = classify_flush_error(&error, "blob upload failed");
         assert!(matches!(classified, FlushError::Transient(_)));
     }
 
