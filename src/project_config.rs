@@ -43,8 +43,37 @@ pub struct LoadedRepoConfig {
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedRunPlan {
     pub workspace: Option<String>,
+    pub repo_config_path: Option<PathBuf>,
     pub tag_path_pairs: Vec<String>,
     pub env_vars: BTreeMap<String, String>,
+    pub archive_entries: Vec<ResolvedRunEntryPlan>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunEntryRequestSource {
+    Profile,
+    Entry,
+    CommandInferred,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunEntryResolutionSource {
+    RepoConfig,
+    BuiltIn,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResolvedRunEntryPlan {
+    pub requested: String,
+    pub request_source: RunEntryRequestSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    pub resolution_source: RunEntryResolutionSource,
+    pub tag: String,
+    pub path: String,
+    pub tag_path_pair: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,7 +133,7 @@ pub fn resolve_run_plan(
         .filter(|value| !value.is_empty())
         .collect();
 
-    let mut resolved_entry_ids: Vec<String> = Vec::new();
+    let mut resolved_entries_to_request: Vec<RequestedRunEntry> = Vec::new();
     let mut seen = BTreeSet::new();
 
     if !normalized_profiles.is_empty() {
@@ -129,7 +158,11 @@ pub fn resolve_run_plan(
                 .map(|entry| canonical_entry_id(entry))
             {
                 if seen.insert(entry_id.clone()) {
-                    resolved_entry_ids.push(entry_id);
+                    resolved_entries_to_request.push(RequestedRunEntry {
+                        entry_id,
+                        request_source: RunEntryRequestSource::Profile,
+                        profile: Some(profile_name.clone()),
+                    });
                 }
             }
         }
@@ -137,23 +170,32 @@ pub fn resolve_run_plan(
 
     for entry_id in normalized_entries {
         if seen.insert(entry_id.clone()) {
-            resolved_entry_ids.push(entry_id);
+            resolved_entries_to_request.push(RequestedRunEntry {
+                entry_id,
+                request_source: RunEntryRequestSource::Entry,
+                profile: None,
+            });
         }
     }
 
-    if resolved_entry_ids.is_empty() {
+    if resolved_entries_to_request.is_empty() {
         for entry_id in infer_entries_from_command(command) {
             if seen.insert(entry_id.clone()) {
-                resolved_entry_ids.push(entry_id);
+                resolved_entries_to_request.push(RequestedRunEntry {
+                    entry_id,
+                    request_source: RunEntryRequestSource::CommandInferred,
+                    profile: None,
+                });
             }
         }
     }
 
-    if resolved_entry_ids.is_empty() {
+    if resolved_entries_to_request.is_empty() {
         return Ok(ResolvedRunPlan {
             workspace: repo_config
                 .as_ref()
                 .and_then(|loaded| sanitize_workspace(loaded.config.workspace.as_deref())),
+            repo_config_path: repo_config.as_ref().map(|loaded| loaded.path.clone()),
             ..ResolvedRunPlan::default()
         });
     }
@@ -164,12 +206,14 @@ pub fn resolve_run_plan(
         .unwrap_or(start_dir);
     let mut tag_path_pairs = Vec::new();
     let mut env_vars = BTreeMap::new();
+    let mut archive_entries = Vec::new();
 
-    for entry_id in resolved_entry_ids {
+    for requested_entry in resolved_entries_to_request {
+        let entry_id = requested_entry.entry_id.as_str();
         let override_config = repo_config
             .as_ref()
-            .and_then(|loaded| find_entry(&loaded.config, &entry_id));
-        let spec = builtin_entry(&entry_id);
+            .and_then(|loaded| find_entry(&loaded.config, entry_id));
+        let spec = builtin_entry(entry_id);
 
         if spec.is_none() && override_config.is_none() {
             let available = repo_config
@@ -184,29 +228,50 @@ pub fn resolve_run_plan(
         }
 
         let resolved = resolve_entry(
-            &entry_id,
+            entry_id,
             override_config,
             spec,
             base_dir,
             repo_config.as_ref().map(|loaded| loaded.path.as_path()),
         )?;
-        tag_path_pairs.push(resolved.tag_path);
-        env_vars.extend(resolved.env_vars);
+        tag_path_pairs.push(resolved.tag_path.clone());
+        env_vars.extend(resolved.env_vars.clone());
+        archive_entries.push(ResolvedRunEntryPlan {
+            requested: requested_entry.entry_id,
+            request_source: requested_entry.request_source,
+            profile: requested_entry.profile,
+            resolution_source: resolved.resolution_source,
+            tag: resolved.tag,
+            path: resolved.path,
+            tag_path_pair: resolved.tag_path,
+        });
     }
 
     Ok(ResolvedRunPlan {
         workspace: repo_config
             .as_ref()
             .and_then(|loaded| sanitize_workspace(loaded.config.workspace.as_deref())),
+        repo_config_path: repo_config.as_ref().map(|loaded| loaded.path.clone()),
         tag_path_pairs,
         env_vars,
+        archive_entries,
     })
 }
 
 #[derive(Debug, Clone)]
 struct ResolvedEntry {
+    tag: String,
+    path: String,
     tag_path: String,
     env_vars: BTreeMap<String, String>,
+    resolution_source: RunEntryResolutionSource,
+}
+
+#[derive(Debug, Clone)]
+struct RequestedRunEntry {
+    entry_id: String,
+    request_source: RunEntryRequestSource,
+    profile: Option<String>,
 }
 
 fn resolve_entry(
@@ -216,6 +281,11 @@ fn resolve_entry(
     base_dir: &Path,
     config_path: Option<&Path>,
 ) -> Result<ResolvedEntry> {
+    let resolution_source = if override_config.is_some() {
+        RunEntryResolutionSource::RepoConfig
+    } else {
+        RunEntryResolutionSource::BuiltIn
+    };
     let tag = override_config
         .and_then(|entry| sanitize_value(entry.tag.as_deref()))
         .or_else(|| spec.map(|spec| spec.default_tag.to_string()))
@@ -242,8 +312,11 @@ fn resolve_entry(
     }
 
     Ok(ResolvedEntry {
+        tag: tag.clone(),
+        path: path_value.clone(),
         tag_path: format!("{tag}:{path_value}"),
         env_vars,
+        resolution_source,
     })
 }
 
