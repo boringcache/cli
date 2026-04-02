@@ -147,6 +147,8 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
@@ -175,9 +177,10 @@ jobs:
 
       - name: Verify checked-in repo config + boringcache run (Ruby + bundle install)
         run: |
+          test -f "${{ github.workspace }}/.boringcache.toml"
           docker run --rm \
             -e BORINGCACHE_DEFAULT_WORKSPACE=test-org/test \
-            -v "$PWD/.boringcache.toml:/tmp/boringcache.repo.toml:ro" \
+            -v "${{ github.workspace }}/.boringcache.toml:/tmp/boringcache.repo.toml:ro" \
             ${{ env.IMAGE }}:bookworm-build sh -c '
             set -e
             cd /tmp
