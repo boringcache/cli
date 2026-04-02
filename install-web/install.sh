@@ -49,8 +49,8 @@ detect_arch() {
     case "$(uname -m)" in
         x86_64|amd64)   echo "amd64";;
         aarch64|arm64)  echo "arm64";;
-        armv7l)         echo "arm64";;  # Fallback for some ARM systems
-        *)              echo "amd64";;  # Default fallback
+        armv7l)         echo "unknown";;  # 32-bit ARM currently unsupported
+        *)              echo "unknown";;  # Default fallback for unsupported architectures
     esac
 }
 
@@ -71,9 +71,9 @@ get_latest_release() {
     # This should be updated when new versions are released
     local fallback_version="v1.12.13"
     
-    print_warning "GitHub API unavailable, using fallback version: $fallback_version"
-    print_warning "This may not be the latest version. Check https://github.com/${repo}/releases manually."
-    
+    print_warning "GitHub API unavailable, using fallback version: $fallback_version" >&2
+    print_warning "This may not be the latest version. Check https://github.com/${repo}/releases manually." >&2
+
     echo "$fallback_version"
 }
 

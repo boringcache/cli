@@ -49,8 +49,8 @@ detect_arch() {
     case "$(uname -m)" in
         x86_64|amd64)   echo "amd64";;
         aarch64|arm64)  echo "arm64";;
-        armv7l)         echo "arm64";;  # Fallback for some ARM systems
-        *)              echo "amd64";;  # Default fallback
+        armv7l)         echo "unknown";;  # 32-bit ARM currently unsupported
+        *)              echo "unknown";;  # Default fallback for unsupported architectures
     esac
 }
 
@@ -228,7 +228,7 @@ main() {
     
     # Get latest release version
     print_status "Fetching latest release information..."
-    VERSION=$(get_latest_release "$REPO" 2>/dev/null)
+    VERSION=$(get_latest_release "$REPO")
     
     if [ -z "$VERSION" ]; then
         print_error "Failed to get latest release version"
