@@ -106,46 +106,47 @@ fn is_retryable_blob_upload_error(message: &str) -> bool {
         || lower.contains("temporarily unavailable")
 }
 
-fn kv_blob_upload_concurrency(operation_count: usize) -> (usize, usize) {
-    if operation_count == 0 {
-        return (1, 1);
-    }
+fn clamp_concurrency(value: usize, operation_count: usize) -> usize {
+    value.min(operation_count).max(1)
+}
 
+fn kv_blob_upload_concurrency(operation_count: usize) -> (usize, usize) {
     if let Ok(val) = std::env::var(KV_BLOB_UPLOAD_CONCURRENCY_ENV)
         && let Ok(v) = val.trim().parse::<usize>()
         && v > 0
     {
-        let fixed = v.min(operation_count).max(1);
+        let fixed = clamp_concurrency(v, operation_count);
         return (fixed, fixed);
     }
 
-    let max = KV_BLOB_UPLOAD_MAX_CONCURRENCY.min(operation_count).max(1);
-    let initial = KV_BLOB_UPLOAD_INITIAL_CONCURRENCY
-        .min(max)
-        .min(operation_count)
-        .max(1);
+    let max = clamp_concurrency(KV_BLOB_UPLOAD_MAX_CONCURRENCY, operation_count);
+    let initial = clamp_concurrency(KV_BLOB_UPLOAD_INITIAL_CONCURRENCY.min(max), operation_count);
     (initial, max)
+}
+
+struct UploadRequest {
+    cache_entry_id: String,
+    blob: Option<BlobDescriptor>,
+    upload_digest: String,
+    upload_url: String,
+    upload_headers: HashMap<String, String>,
+    blob_path: PathBuf,
 }
 
 async fn upload_single_blob_with_retry(
     state: AppState,
-    cache_entry_id: String,
-    blob: Option<BlobDescriptor>,
-    upload_digest: String,
-    mut upload_url: String,
-    mut upload_headers: HashMap<String, String>,
-    blob_path: PathBuf,
+    mut request: UploadRequest,
 ) -> anyhow::Result<(String, BlobUploadOutcome)> {
     let mut last_error: Option<anyhow::Error> = None;
 
     for attempt in 1..=KV_BLOB_UPLOAD_MAX_ATTEMPTS {
         let progress = TransferProgress::new_noop();
         let upload_result = crate::multipart_upload::upload_via_single_url(
-            blob_path.as_path(),
-            &upload_url,
+            request.blob_path.as_path(),
+            &request.upload_url,
             &progress,
             state.api_client.transfer_client(),
-            &upload_headers,
+            &request.upload_headers,
         )
         .await;
         match upload_result {
@@ -155,13 +156,14 @@ async fn upload_single_blob_with_retry(
                 } else {
                     BlobUploadOutcome::Uploaded
                 };
-                return Ok((upload_digest, outcome));
+                return Ok((request.upload_digest.clone(), outcome));
             }
             Err(error) => {
                 let error_text = format!("{error:#}");
                 log::warn!(
-                    "KV blob upload attempt {attempt}/{} failed for {upload_digest}: {error_text}",
+                    "KV blob upload attempt {attempt}/{} failed for {}: {error_text}",
                     KV_BLOB_UPLOAD_MAX_ATTEMPTS,
+                    request.upload_digest,
                 );
                 last_error = Some(error);
                 if attempt >= KV_BLOB_UPLOAD_MAX_ATTEMPTS {
@@ -176,12 +178,12 @@ async fn upload_single_blob_with_retry(
                     break;
                 }
 
-                if let Some(blob) = &blob {
+                if let Some(blob) = &request.blob {
                     let retry_plan_result = state
                         .api_client
                         .blob_upload_urls(
                             &state.workspace,
-                            &cache_entry_id,
+                            &request.cache_entry_id,
                             std::slice::from_ref(blob),
                         )
                         .await;
@@ -190,23 +192,26 @@ async fn upload_single_blob_with_retry(
                             if retry_plan
                                 .already_present
                                 .iter()
-                                .any(|d| d == &upload_digest)
+                                .any(|d| d == &request.upload_digest)
                             {
-                                return Ok((upload_digest, BlobUploadOutcome::AlreadyPresent));
+                                return Ok((
+                                    request.upload_digest.clone(),
+                                    BlobUploadOutcome::AlreadyPresent,
+                                ));
                             }
                             if let Some(fresh_upload) = retry_plan
                                 .upload_urls
                                 .iter()
-                                .find(|item| item.digest == upload_digest)
+                                .find(|item| item.digest == request.upload_digest)
                             {
-                                upload_url = fresh_upload.url.clone();
-                                upload_headers = fresh_upload.headers.clone();
+                                request.upload_url = fresh_upload.url.clone();
+                                request.upload_headers = fresh_upload.headers.clone();
                             }
                         }
                         Err(stage_error) => {
                             log::warn!(
                                 "KV batch flush: failed to refresh upload URL for {}: {stage_error}",
-                                upload_digest
+                                request.upload_digest
                             );
                         }
                     }
@@ -220,7 +225,7 @@ async fn upload_single_blob_with_retry(
     let error = last_error.unwrap_or_else(|| anyhow::anyhow!("unknown blob upload error"));
     Err(anyhow::anyhow!(
         "Failed to upload blob {}: {:#}",
-        upload_digest,
+        request.upload_digest,
         error
     ))
 }
@@ -285,12 +290,14 @@ pub(super) async fn upload_blobs(
                 .map_err(|e| anyhow::anyhow!("KV upload semaphore closed: {e}"))?;
             let result = upload_single_blob_with_retry(
                 state,
-                cache_entry_id,
-                blob,
-                upload.digest,
-                upload.url,
-                upload.headers,
-                blob_path,
+                UploadRequest {
+                    blob,
+                    cache_entry_id,
+                    upload_digest: upload.digest,
+                    upload_url: upload.url,
+                    upload_headers: upload.headers,
+                    blob_path,
+                },
             )
             .await;
             drop(_permit);
@@ -371,7 +378,10 @@ pub(super) async fn upload_blobs(
 
 #[cfg(test)]
 mod tests {
-    use super::is_retryable_blob_upload_error;
+    use super::{
+        KV_BLOB_UPLOAD_CONCURRENCY_ENV, is_retryable_blob_upload_error, kv_blob_upload_concurrency,
+    };
+    use crate::test_env;
 
     #[test]
     fn retryable_blob_upload_errors_keep_legacy_transient_matches() {
@@ -391,5 +401,35 @@ mod tests {
     fn retryable_blob_upload_errors_treat_tls_unexpected_eof_as_retryable() {
         let message = "client error (SendRequest): connection error: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof";
         assert!(is_retryable_blob_upload_error(message));
+    }
+
+    #[test]
+    fn kv_blob_upload_concurrency_clamps_override_to_operation_count() {
+        let _guard = test_env::lock();
+        test_env::set_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV, "99");
+
+        assert_eq!(kv_blob_upload_concurrency(3), (3, 3));
+
+        test_env::remove_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV);
+    }
+
+    #[test]
+    fn kv_blob_upload_concurrency_ignores_non_positive_override() {
+        let _guard = test_env::lock();
+        test_env::set_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV, "0");
+
+        assert_eq!(kv_blob_upload_concurrency(12), (8, 12));
+
+        test_env::remove_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV);
+    }
+
+    #[test]
+    fn kv_blob_upload_concurrency_clamps_defaults_for_small_operation_counts() {
+        let _guard = test_env::lock();
+        test_env::remove_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV);
+
+        assert_eq!(kv_blob_upload_concurrency(0), (1, 1));
+        assert_eq!(kv_blob_upload_concurrency(4), (4, 4));
+        assert_eq!(kv_blob_upload_concurrency(12), (8, 12));
     }
 }
