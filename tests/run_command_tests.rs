@@ -244,8 +244,24 @@ fn test_run_dry_run_json_resolves_builtin_entry_without_command() {
     );
 
     assert_eq!(parsed["workspace"], "test-org/test-workspace");
+    assert_eq!(parsed["workspace_source"], "explicit");
     assert_eq!(parsed["command"], serde_json::json!([]));
     assert_eq!(parsed["tag_path_pairs"], serde_json::json!([expected_pair]));
+    assert_eq!(parsed["archive_entries"][0]["requested"], "bundler");
+    assert_eq!(parsed["archive_entries"][0]["request_source"], "entry");
+    assert_eq!(
+        parsed["archive_entries"][0]["resolution_source"],
+        "built-in"
+    );
+    assert_eq!(parsed["archive_entries"][0]["tag"], "bundler");
+    assert_eq!(
+        parsed["archive_entries"][0]["path"],
+        canonical_temp_dir
+            .join("vendor/bundle")
+            .display()
+            .to_string()
+    );
+    assert_eq!(parsed["archive_entries"][0]["tag_path_pair"], expected_pair);
     assert_eq!(
         parsed["env_vars"]["BUNDLE_PATH"],
         canonical_temp_dir
@@ -297,14 +313,77 @@ entries = ["bundler"]
     );
 
     assert_eq!(parsed["workspace"], "test-org/test-workspace");
+    assert_eq!(parsed["workspace_source"], "repo-config");
+    let repo_config_path = parsed["repo_config_path"]
+        .as_str()
+        .expect("repo_config_path should be present");
+    assert!(
+        repo_config_path.ends_with(".boringcache.toml"),
+        "repo_config_path: {repo_config_path}"
+    );
     assert_eq!(parsed["command"], serde_json::json!([]));
     assert_eq!(parsed["tag_path_pairs"], serde_json::json!([expected_pair]));
+    assert_eq!(parsed["archive_entries"][0]["requested"], "bundler");
+    assert_eq!(parsed["archive_entries"][0]["request_source"], "profile");
+    assert_eq!(parsed["archive_entries"][0]["profile"], "bundle-install");
+    assert_eq!(
+        parsed["archive_entries"][0]["resolution_source"],
+        "repo-config"
+    );
+    assert_eq!(parsed["archive_entries"][0]["tag"], "bundler-gems");
+    assert_eq!(
+        parsed["archive_entries"][0]["path"],
+        canonical_temp_dir
+            .join("vendor/bundle")
+            .display()
+            .to_string()
+    );
+    assert_eq!(parsed["archive_entries"][0]["tag_path_pair"], expected_pair);
     assert_eq!(
         parsed["env_vars"]["BUNDLE_PATH"],
         canonical_temp_dir
             .join("vendor/bundle")
             .display()
             .to_string()
+    );
+}
+
+#[test]
+fn test_run_dry_run_json_marks_manual_pairs_as_manual() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .args([
+            "run",
+            "test-org/test-workspace",
+            "custom-tag:/tmp/custom-path",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("Failed to execute manual json dry-run command");
+
+    assert!(
+        output.status.success(),
+        "JSON dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_eq!(parsed["workspace"], "test-org/test-workspace");
+    assert_eq!(parsed["workspace_source"], "explicit");
+    assert_eq!(
+        parsed["tag_path_pairs"],
+        serde_json::json!(["custom-tag:/tmp/custom-path"])
+    );
+    assert_eq!(parsed["archive_entries"][0]["requested"], "custom-tag");
+    assert_eq!(parsed["archive_entries"][0]["request_source"], "manual");
+    assert_eq!(parsed["archive_entries"][0]["resolution_source"], "manual");
+    assert_eq!(parsed["archive_entries"][0]["tag"], "custom-tag");
+    assert_eq!(parsed["archive_entries"][0]["path"], "/tmp/custom-path");
+    assert_eq!(
+        parsed["archive_entries"][0]["tag_path_pair"],
+        "custom-tag:/tmp/custom-path"
     );
 }
 

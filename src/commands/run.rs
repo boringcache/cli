@@ -72,14 +72,57 @@ struct ProxyContext {
 #[derive(Debug, Serialize)]
 struct DryRunPlan {
     workspace: String,
+    workspace_source: DryRunWorkspaceSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo_config_path: Option<String>,
     tag_path_pairs: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    archive_entries: Vec<DryRunArchiveEntry>,
     env_vars: BTreeMap<String, String>,
     command: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     proxy: Option<DryRunProxyPlan>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum DryRunWorkspaceSource {
+    Explicit,
+    RepoConfig,
+    ConfiguredDefault,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DryRunArchiveEntry {
+    requested: String,
+    request_source: DryRunArchiveEntryRequestSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+    resolution_source: DryRunArchiveResolutionSource,
+    tag: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    tag_path_pair: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum DryRunArchiveEntryRequestSource {
+    Profile,
+    Entry,
+    CommandInferred,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum DryRunArchiveResolutionSource {
+    RepoConfig,
+    BuiltIn,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct DryRunProxyPlan {
     tag: String,
     host: String,
@@ -140,14 +183,60 @@ pub async fn execute(
     )?;
     let project_config::ResolvedRunPlan {
         workspace: project_workspace,
+        repo_config_path,
         tag_path_pairs: planned_pairs,
         env_vars,
+        archive_entries: planned_archive_entries,
     } = resolved_plan;
-    let workspace = utils::get_workspace_name_with_fallback(workspace, project_workspace)?;
+    let explicit_workspace = workspace
+        .clone()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let workspace = utils::get_workspace_name_with_fallback(workspace, project_workspace.clone())?;
+    let workspace_source = if explicit_workspace.is_some() {
+        DryRunWorkspaceSource::Explicit
+    } else if project_workspace.is_some() {
+        DryRunWorkspaceSource::RepoConfig
+    } else {
+        DryRunWorkspaceSource::ConfiguredDefault
+    };
     let tag_path_pairs = if has_manual_tags {
         tag_path_pairs
     } else {
         planned_pairs
+    };
+    let archive_entries = if has_manual_tags {
+        build_manual_archive_entries(&tag_path_pairs)?
+    } else {
+        planned_archive_entries
+            .into_iter()
+            .map(|entry| DryRunArchiveEntry {
+                requested: entry.requested,
+                request_source: match entry.request_source {
+                    project_config::RunEntryRequestSource::Profile => {
+                        DryRunArchiveEntryRequestSource::Profile
+                    }
+                    project_config::RunEntryRequestSource::Entry => {
+                        DryRunArchiveEntryRequestSource::Entry
+                    }
+                    project_config::RunEntryRequestSource::CommandInferred => {
+                        DryRunArchiveEntryRequestSource::CommandInferred
+                    }
+                },
+                profile: entry.profile,
+                resolution_source: match entry.resolution_source {
+                    project_config::RunEntryResolutionSource::RepoConfig => {
+                        DryRunArchiveResolutionSource::RepoConfig
+                    }
+                    project_config::RunEntryResolutionSource::BuiltIn => {
+                        DryRunArchiveResolutionSource::BuiltIn
+                    }
+                },
+                tag: entry.tag,
+                path: Some(entry.path),
+                tag_path_pair: entry.tag_path_pair,
+            })
+            .collect()
     };
     let archive_enabled = !tag_path_pairs.is_empty();
     let proxy_enabled = proxy.is_some();
@@ -171,7 +260,17 @@ pub async fn execute(
                 port,
                 metadata_hints: proxy_metadata_hints.clone(),
             });
-            print_dry_run_json(&workspace, &tag_path_pairs, &env_vars, proxy_plan, &command)?;
+            let plan = DryRunPlan {
+                workspace: workspace.clone(),
+                workspace_source,
+                repo_config_path: repo_config_path.map(|path| path.display().to_string()),
+                tag_path_pairs: tag_path_pairs.clone(),
+                archive_entries: archive_entries.clone(),
+                env_vars: env_vars.clone(),
+                command: command.clone(),
+                proxy: proxy_plan,
+            };
+            print_dry_run_json(plan)?;
         } else {
             print_dry_run(
                 &workspace,
@@ -626,21 +725,25 @@ fn print_dry_run(
     }
 }
 
-fn print_dry_run_json(
-    workspace: &str,
-    tag_path_pairs: &[String],
-    env_vars: &BTreeMap<String, String>,
-    proxy: Option<DryRunProxyPlan>,
-    command: &[String],
-) -> Result<()> {
-    let plan = DryRunPlan {
-        workspace: workspace.to_string(),
-        tag_path_pairs: tag_path_pairs.to_vec(),
-        env_vars: env_vars.clone(),
-        command: command.to_vec(),
-        proxy,
-    };
-
+fn print_dry_run_json(plan: DryRunPlan) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&plan)?);
     Ok(())
+}
+
+fn build_manual_archive_entries(tag_path_pairs: &[String]) -> Result<Vec<DryRunArchiveEntry>> {
+    tag_path_pairs
+        .iter()
+        .map(|pair| {
+            let parsed = utils::parse_restore_format(pair).map_err(anyhow::Error::from)?;
+            Ok(DryRunArchiveEntry {
+                requested: parsed.tag.clone(),
+                request_source: DryRunArchiveEntryRequestSource::Manual,
+                profile: None,
+                resolution_source: DryRunArchiveResolutionSource::Manual,
+                tag: parsed.tag,
+                path: parsed.path,
+                tag_path_pair: pair.clone(),
+            })
+        })
+        .collect()
 }
