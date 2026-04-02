@@ -75,7 +75,7 @@ jobs:
 
       - name: Build & push bookworm
         if: steps.exists.outputs.skip != 'true'
-        uses: boringcache/one@v1
+        uses: boringcache/one@8b09c4f63f3c46c3d8e8d1a572b676f602ffb573
         with:
           mode: docker
           setup: none
@@ -96,7 +96,7 @@ jobs:
 
       - name: Build & push bookworm-build
         if: steps.exists.outputs.skip != 'true'
-        uses: boringcache/one@v1
+        uses: boringcache/one@8b09c4f63f3c46c3d8e8d1a572b676f602ffb573
         with:
           mode: docker
           setup: none

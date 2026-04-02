@@ -55,7 +55,7 @@ jobs:
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         continue-on-error: true
-        uses: boringcache/one@v1
+        uses: boringcache/one@8b09c4f63f3c46c3d8e8d1a572b676f602ffb573
         with:
           setup: none
           mode: rust-sccache
@@ -454,7 +454,7 @@ jobs:
         id: boringcache-rust
         if: steps.gate.outputs.run == 'true'
         continue-on-error: true
-        uses: boringcache/one@v1
+        uses: boringcache/one@8b09c4f63f3c46c3d8e8d1a572b676f602ffb573
         with:
           setup: none
           mode: rust-sccache
