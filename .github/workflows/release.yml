@@ -350,7 +350,8 @@ jobs:
                     --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
                   PROXY_PID=$!
                   PROXY_READY=0
-                  for _ in $(seq 1 30); do
+                  PROXY_READY_ATTEMPTS=180
+                  for _ in $(seq 1 "${PROXY_READY_ATTEMPTS}"); do
                     if curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1; then
                       PROXY_READY=1
                       break
@@ -364,7 +365,7 @@ jobs:
                     echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
                     sccache --start-server || true
                   else
-                    echo "sccache proxy not ready; continuing without remote cache backend"
+                    echo "sccache proxy not ready after $((PROXY_READY_ATTEMPTS / 2))s; continuing without remote cache backend"
                     kill "${PROXY_PID}" >/dev/null 2>&1 || true
                     wait "${PROXY_PID}" >/dev/null 2>&1 || true
                   fi
