@@ -1459,7 +1459,7 @@ impl ApiClient {
         request: &super::models::cache::ConfirmRequest,
     ) -> Result<super::models::cache::CacheConfirmResponse> {
         match self
-            .confirm_with_publish_poll(workspace, cache_entry_id, request, None)
+            .confirm_with_publish_poll(workspace, cache_entry_id, request, None, false)
             .await?
         {
             ConfirmPublishResult::Published(response) => Ok(*response),
@@ -1476,7 +1476,23 @@ impl ApiClient {
         request: &super::models::cache::ConfirmRequest,
         shutdown_requested: &AtomicBool,
     ) -> Result<ConfirmPublishResult> {
-        self.confirm_with_publish_poll(workspace, cache_entry_id, request, Some(shutdown_requested))
+        self.confirm_with_publish_poll(
+            workspace,
+            cache_entry_id,
+            request,
+            Some(shutdown_requested),
+            false,
+        )
+        .await
+    }
+
+    pub async fn confirm_wait_for_publish_or_pending_timeout(
+        &self,
+        workspace: &str,
+        cache_entry_id: &str,
+        request: &super::models::cache::ConfirmRequest,
+    ) -> Result<ConfirmPublishResult> {
+        self.confirm_with_publish_poll(workspace, cache_entry_id, request, None, true)
             .await
     }
 
@@ -1486,6 +1502,7 @@ impl ApiClient {
         cache_entry_id: &str,
         request: &super::models::cache::ConfirmRequest,
         shutdown_requested: Option<&AtomicBool>,
+        accept_server_owned_pending_after_timeout: bool,
     ) -> Result<ConfirmPublishResult> {
         let tag = request
             .tag
@@ -1573,6 +1590,12 @@ impl ApiClient {
                     }
 
                     if started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT {
+                        if should_accept_server_owned_pending_after_timeout(
+                            accept_server_owned_pending_after_timeout,
+                            &metadata,
+                        ) {
+                            return Ok(ConfirmPublishResult::Pending(metadata));
+                        }
                         return Err(error);
                     }
 
@@ -1584,6 +1607,7 @@ impl ApiClient {
                                 metadata,
                                 started_at,
                                 shutdown_requested,
+                                accept_server_owned_pending_after_timeout,
                             )
                             .await?;
                         match poll_result {
@@ -1612,6 +1636,7 @@ impl ApiClient {
         metadata: PendingMetadata,
         started_at: Instant,
         shutdown_requested: Option<&AtomicBool>,
+        accept_server_owned_pending_after_timeout: bool,
     ) -> Result<PendingPublishPollOutcome> {
         loop {
             if should_accept_server_owned_pending(shutdown_requested, &metadata) {
@@ -1619,7 +1644,12 @@ impl ApiClient {
             }
 
             if started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT {
-                if should_accept_server_owned_pending(shutdown_requested, &metadata) {
+                if should_accept_server_owned_pending(shutdown_requested, &metadata)
+                    || should_accept_server_owned_pending_after_timeout(
+                        accept_server_owned_pending_after_timeout,
+                        &metadata,
+                    )
+                {
                     return Ok(PendingPublishPollOutcome::Pending(metadata));
                 }
                 return Err(BoringCacheError::cache_pending_with_metadata(metadata).into());
@@ -1628,7 +1658,13 @@ impl ApiClient {
             let status = match self.upload_session_status(workspace, &metadata).await {
                 Ok(status) => status,
                 Err(error) => {
-                    if should_accept_server_owned_pending(shutdown_requested, &metadata) {
+                    if should_accept_server_owned_pending(shutdown_requested, &metadata)
+                        || (started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT
+                            && should_accept_server_owned_pending_after_timeout(
+                                accept_server_owned_pending_after_timeout,
+                                &metadata,
+                            ))
+                    {
                         return Ok(PendingPublishPollOutcome::Pending(metadata));
                     }
                     return Err(error).context("Failed to poll pending publish status");
@@ -2247,6 +2283,13 @@ fn should_accept_server_owned_pending(
 ) -> bool {
     server_owned_pending_publish(metadata)
         && shutdown_requested.is_some_and(|flag| flag.load(Ordering::Acquire))
+}
+
+fn should_accept_server_owned_pending_after_timeout(
+    accept_server_owned_pending_after_timeout: bool,
+    metadata: &PendingMetadata,
+) -> bool {
+    accept_server_owned_pending_after_timeout && server_owned_pending_publish(metadata)
 }
 
 fn cache_confirm_response_from_tag_pointer(
@@ -2983,6 +3026,39 @@ mod tests {
             retry_after_seconds: Some(1),
         };
         assert!(!server_owned_pending_publish(&no_locator));
+    }
+
+    #[test]
+    fn test_pending_publish_timeout_acceptance_requires_opt_in() {
+        let metadata = PendingMetadata {
+            code: Some("pending_publish".to_string()),
+            upload_session_id: Some("session-1".to_string()),
+            publish_attempt_id: None,
+            poll_path: None,
+            retry_after_seconds: Some(1),
+        };
+
+        assert!(!should_accept_server_owned_pending_after_timeout(
+            false, &metadata
+        ));
+        assert!(should_accept_server_owned_pending_after_timeout(
+            true, &metadata
+        ));
+    }
+
+    #[test]
+    fn test_pending_publish_timeout_acceptance_still_requires_server_owned_pending() {
+        let metadata = PendingMetadata {
+            code: Some("blob_verification_pending".to_string()),
+            upload_session_id: Some("session-1".to_string()),
+            publish_attempt_id: None,
+            poll_path: None,
+            retry_after_seconds: Some(1),
+        };
+
+        assert!(!should_accept_server_owned_pending_after_timeout(
+            true, &metadata
+        ));
     }
 
     #[test]

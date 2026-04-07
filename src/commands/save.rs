@@ -2,7 +2,6 @@ use anyhow::{Context, Error, Result, anyhow};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tokio::task;
 
@@ -73,17 +72,8 @@ async fn confirm_archive_upload(
     cache_entry_id: &str,
     request: &ConfirmRequest,
 ) -> Result<ArchiveConfirmOutcome> {
-    // Archive publish can legitimately transition into a server-owned pending
-    // state after finalize. Treat that as accepted completion instead of
-    // requiring an active shutdown path.
-    let shutdown_requested = AtomicBool::new(true);
     match api_client
-        .confirm_wait_for_publish_or_shutdown_pending(
-            workspace,
-            cache_entry_id,
-            request,
-            &shutdown_requested,
-        )
+        .confirm_wait_for_publish_or_pending_timeout(workspace, cache_entry_id, request)
         .await?
     {
         ConfirmPublishResult::Published(response) => Ok(ArchiveConfirmOutcome::from_response(
