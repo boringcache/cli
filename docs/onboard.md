@@ -50,10 +50,5 @@ boringcache run --profile bundle-install -- bundle install
 boringcache run -- bundle install
 ```
 
-If the repo already has a lot of manual `tag:path` usage and you want to import that into repo config later, use:
-
-```bash
-boringcache audit --write
-```
-
-Most teams do not need that on day one.
+If the repo already has a lot of manual `tag:path` usage, you can import that shape into repo config later with `boringcache audit --write`.
+That is a migration step, not the default getting-started path.

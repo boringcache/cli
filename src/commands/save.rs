@@ -2,10 +2,12 @@ use anyhow::{Context, Error, Result, anyhow};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tokio::task;
 
 use crate::api::ApiClient;
+use crate::api::client::ConfirmPublishResult;
 use crate::api::models::cache::{
     BlobDescriptor, ConfirmRequest, ManifestCheckRequest, SaveRequest,
 };
@@ -45,6 +47,48 @@ struct CasSaveBundle {
     blob_sources: HashMap<String, BlobUploadSource>,
     confirm_spec: cas_publish::CasConfirmSpec,
     empty_payload_error: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ArchiveConfirmOutcome {
+    Published { winner_id: Option<String> },
+    Pending,
+}
+
+impl ArchiveConfirmOutcome {
+    fn from_response(
+        cache_entry_id: &str,
+        response: crate::api::models::cache::CacheConfirmResponse,
+    ) -> Self {
+        let winner_id = response
+            .cache_entry_id
+            .filter(|winner| winner.as_str() != cache_entry_id);
+        Self::Published { winner_id }
+    }
+}
+
+async fn confirm_archive_upload(
+    api_client: &ApiClient,
+    workspace: &str,
+    cache_entry_id: &str,
+    request: &ConfirmRequest,
+) -> Result<ArchiveConfirmOutcome> {
+    let shutdown_requested = AtomicBool::new(false);
+    match api_client
+        .confirm_wait_for_publish_or_shutdown_pending(
+            workspace,
+            cache_entry_id,
+            request,
+            &shutdown_requested,
+        )
+        .await?
+    {
+        ConfirmPublishResult::Published(response) => Ok(ArchiveConfirmOutcome::from_response(
+            cache_entry_id,
+            *response,
+        )),
+        ConfirmPublishResult::Pending(_) => Ok(ArchiveConfirmOutcome::Pending),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1085,22 +1129,29 @@ async fn save_single_archive_entry(
         write_scope_tag: None,
     };
 
-    let confirm_response = api_client
-        .confirm(&workspace, cache_entry_id, &confirm_request)
-        .await
-        .with_context(|| format!("Failed to confirm upload for {}", tag))?;
-    if let Some(winner_id) = confirm_response
-        .cache_entry_id
-        .as_deref()
-        .filter(|winner| *winner != cache_entry_id)
-    {
-        progress_info(
-            &reporter,
-            format!(
-                "  Cache already confirmed as entry {}; using existing entry",
-                winner_id
-            ),
-        );
+    let confirm_outcome =
+        confirm_archive_upload(&api_client, &workspace, cache_entry_id, &confirm_request)
+            .await
+            .with_context(|| format!("Failed to confirm upload for {}", tag))?;
+    match confirm_outcome {
+        ArchiveConfirmOutcome::Published {
+            winner_id: Some(winner_id),
+        } => {
+            progress_info(
+                &reporter,
+                format!(
+                    "  Cache already confirmed as entry {}; using existing entry",
+                    winner_id
+                ),
+            );
+        }
+        ArchiveConfirmOutcome::Published { winner_id: None } => {}
+        ArchiveConfirmOutcome::Pending => {
+            progress_info(
+                &reporter,
+                "  Upload accepted for server-side completion; tag may become visible shortly",
+            );
+        }
     }
     confirm_step.complete()?;
 
@@ -1687,6 +1738,7 @@ async fn save_single_oci_entry(
 
 #[cfg(test)]
 mod tests {
+    use super::ArchiveConfirmOutcome;
     use crate::commands::save_support::{
         conflict_message_from_error, is_cache_pending_error, serialize_manifest,
     };
@@ -1739,5 +1791,45 @@ mod tests {
             Some("sha256:2222222222222222222222222222222222222222222222222222222222222222")
         );
         assert_eq!(archive.compression, "zstd");
+    }
+
+    #[test]
+    fn archive_confirm_outcome_reports_existing_winner() {
+        let response = crate::api::models::cache::CacheConfirmResponse {
+            status: "ready".to_string(),
+            cache_entry_id: Some("entry-existing".to_string()),
+            uploaded_at: None,
+            tag: None,
+            tag_status: None,
+            signature: None,
+            signing_public_key: None,
+            signed_at: None,
+        };
+
+        assert_eq!(
+            ArchiveConfirmOutcome::from_response("entry-new", response),
+            ArchiveConfirmOutcome::Published {
+                winner_id: Some("entry-existing".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn archive_confirm_outcome_ignores_same_entry_winner() {
+        let response = crate::api::models::cache::CacheConfirmResponse {
+            status: "ready".to_string(),
+            cache_entry_id: Some("entry-same".to_string()),
+            uploaded_at: None,
+            tag: None,
+            tag_status: None,
+            signature: None,
+            signing_public_key: None,
+            signed_at: None,
+        };
+
+        assert_eq!(
+            ArchiveConfirmOutcome::from_response("entry-same", response),
+            ArchiveConfirmOutcome::Published { winner_id: None }
+        );
     }
 }

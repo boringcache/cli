@@ -915,7 +915,7 @@ async fn flush_pending_on_shutdown(state: &AppState) {
             };
             if pending_after_flush == 0 {
                 if let Some(cache_entry_id) = expected_root_cache_entry_id.as_deref() {
-                    wait_for_root_tag_visibility(state, cache_entry_id, deadline).await;
+                    wait_for_tag_visibility(state, cache_entry_id, deadline).await;
                 }
                 return;
             }
@@ -973,46 +973,82 @@ async fn flush_pending_on_shutdown(state: &AppState) {
     }
 }
 
-async fn wait_for_root_tag_visibility(
+fn visibility_tags_from_values(
+    registry_root_tag: &str,
+    configured_human_tags: &[String],
+) -> Vec<String> {
+    let mut tags = Vec::with_capacity(1 + configured_human_tags.len());
+
+    let root = registry_root_tag.trim();
+    if !root.is_empty() {
+        tags.push(root.to_string());
+    }
+
+    for tag in configured_human_tags {
+        let trimmed = tag.trim();
+        if trimmed.is_empty() || tags.iter().any(|existing| existing == trimmed) {
+            continue;
+        }
+        tags.push(trimmed.to_string());
+    }
+
+    tags
+}
+
+async fn wait_for_tag_visibility(
     state: &AppState,
     expected_cache_entry_id: &str,
     deadline: std::time::Instant,
 ) {
-    let tag = state.registry_root_tag.trim().to_string();
+    let tags = visibility_tags_from_values(&state.registry_root_tag, &state.configured_human_tags);
     let mut attempts = 0u32;
 
     loop {
         attempts = attempts.saturating_add(1);
+        let mut missing_tags = Vec::new();
 
-        match state
-            .api_client
-            .tag_pointer(&state.workspace, &tag, None)
-            .await
-        {
-            Ok(crate::api::client::TagPointerPollResult::Changed { pointer, .. }) => {
-                if pointer.cache_entry_id.as_deref() == Some(expected_cache_entry_id) {
-                    eprintln!(
-                        "Shutdown: root tag visible for cache_entry_id={} after {} poll(s)",
-                        expected_cache_entry_id, attempts
+        for tag in &tags {
+            match state
+                .api_client
+                .tag_pointer(&state.workspace, tag, None)
+                .await
+            {
+                Ok(crate::api::client::TagPointerPollResult::Changed { pointer, .. }) => {
+                    if pointer.cache_entry_id.as_deref() != Some(expected_cache_entry_id) {
+                        missing_tags.push(tag.clone());
+                    }
+                }
+                Ok(crate::api::client::TagPointerPollResult::NotModified) => {
+                    missing_tags.push(tag.clone());
+                }
+                Ok(crate::api::client::TagPointerPollResult::NotFound) => {
+                    missing_tags.push(tag.clone());
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Shutdown: tag visibility poll failed for {} tag={}: {}",
+                        expected_cache_entry_id,
+                        tag,
+                        error
                     );
-                    return;
+                    missing_tags.push(tag.clone());
                 }
             }
-            Ok(crate::api::client::TagPointerPollResult::NotModified) => {}
-            Ok(crate::api::client::TagPointerPollResult::NotFound) => {}
-            Err(error) => {
-                log::warn!(
-                    "Shutdown: root tag visibility poll failed for {}: {}",
-                    expected_cache_entry_id,
-                    error
-                );
-            }
+        }
+
+        if missing_tags.is_empty() {
+            eprintln!(
+                "Shutdown: registry root and human tags visible for cache_entry_id={} after {} poll(s)",
+                expected_cache_entry_id, attempts
+            );
+            return;
         }
 
         if std::time::Instant::now() >= deadline {
             eprintln!(
-                "Shutdown: root tag did not converge to cache_entry_id={} before timeout",
-                expected_cache_entry_id
+                "Shutdown: tags did not converge to cache_entry_id={} before timeout (missing: {})",
+                expected_cache_entry_id,
+                missing_tags.join(", ")
             );
             return;
         }
@@ -1251,5 +1287,27 @@ mod tests {
     fn blob_prefetch_concurrency_defaults_to_quarter_of_downloads() {
         assert_eq!(blob_prefetch_concurrency(8), (2, false));
         assert_eq!(blob_prefetch_concurrency(16), (4, false));
+    }
+
+    #[test]
+    fn visibility_tags_include_root_and_human_tags_without_duplicates() {
+        let tags = visibility_tags_from_values(
+            "bc_registry_root_v2_123",
+            &[
+                "mode-docker-ubuntu-24-x86_64".to_string(),
+                "mode-docker-ubuntu-24-x86_64".to_string(),
+                "digest-sha256-abc".to_string(),
+                "".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            tags,
+            vec![
+                "bc_registry_root_v2_123".to_string(),
+                "mode-docker-ubuntu-24-x86_64".to_string(),
+                "digest-sha256-abc".to_string(),
+            ]
+        );
     }
 }
