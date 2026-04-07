@@ -98,6 +98,14 @@ COLD_END="$(date +%s)"
 COLD_SECS="$((COLD_END - COLD_START))"
 echo "Cold build completed in ${COLD_SECS}s"
 
+if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
+  if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${REGISTRY_TAG}" "${HUGO_LOG_DIR}" \
+    "${BUDGET_REMOTE_TAG_HITS_MIN}" 30 2 "$(proxy_log)"; then
+    exit 1
+  fi
+  echo "  remote tag verified before warm build (hits=${REMOTE_TAG_CHECK_HITS:-0})"
+fi
+
 docker buildx prune --builder "${BUILDER}" --all --force >/dev/null 2>&1
 
 echo "=== Phase 2: Warm Docker build (cache hit) ==="
@@ -122,6 +130,12 @@ if grep -q "importing cache manifest from" "${WARM_LOG}"; then
   echo "  registry cache import confirmed"
 else
   echo "ERROR: warm build did not import cache from registry"
+  exit 1
+fi
+
+if grep -E -n "failed to configure registry cache importer|httpReadSeeker: failed open: .* not found" "${WARM_LOG}" >/tmp/e2e-hugo-import-failure.log 2>/dev/null; then
+  echo "ERROR: warm build cache import failed"
+  cat /tmp/e2e-hugo-import-failure.log
   exit 1
 fi
 
