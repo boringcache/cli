@@ -151,7 +151,7 @@ RUN boringcache run my-org/my-app node_modules:node_modules --no-platform --no-g
         "workflow: {workflow}"
     );
     assert!(
-        workflow.contains("BORINGCACHE_SAVE_TOKEN: ${{ github.event_name == 'pull_request' && '' || secrets.BORINGCACHE_SAVE_TOKEN }}"),
+        workflow.contains("BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}"),
         "workflow: {workflow}"
     );
 

@@ -18,7 +18,7 @@ Example:
     cache-profiles: bundle-install
   env:
     BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
-    BORINGCACHE_SAVE_TOKEN: ${{ github.event_name == 'pull_request' && '' || secrets.BORINGCACHE_SAVE_TOKEN }}
+    BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
 ```
 
 If you are migrating an existing workflow and do not have repo config yet, raw `entries` and `actions/cache`-compatible `path` / `key` / `restore-keys` inputs still work.
@@ -27,6 +27,7 @@ Keep the trust model simple:
 
 - every job gets `BORINGCACHE_RESTORE_TOKEN`
 - only trusted jobs get `BORINGCACHE_SAVE_TOKEN`
+- `pull_request` jobs stay restore-only by default inside `boringcache/one`; set `save-on-pull-request: true` only when the write scope is intentionally isolated
 - avoid broad legacy `BORINGCACHE_API_TOKEN` use in CI
 
 Read from pull requests.

@@ -24,7 +24,7 @@ pub fn apply(content: &str) -> Option<RuleResult> {
                 .to_string(),
             before_snippet: None,
             after_snippet: Some(
-                "env:\n  BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}\n  BORINGCACHE_SAVE_TOKEN: ${{ github.event_name == 'pull_request' && '' || secrets.BORINGCACHE_SAVE_TOKEN }}"
+                "env:\n  BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}\n  BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}"
                     .to_string(),
             ),
         });
@@ -144,7 +144,7 @@ fn ensure_token_on_boringcache_steps(content: &str) -> (String, bool) {
                     lines.insert(
                         insert_at,
                         format!(
-                            "{}BORINGCACHE_SAVE_TOKEN: ${{{{ github.event_name == 'pull_request' && '' || secrets.BORINGCACHE_SAVE_TOKEN }}}}",
+                            "{}BORINGCACHE_SAVE_TOKEN: ${{{{ secrets.BORINGCACHE_SAVE_TOKEN }}}}",
                             " ".repeat(child_indent + 2)
                         ),
                     );
@@ -164,7 +164,7 @@ fn ensure_token_on_boringcache_steps(content: &str) -> (String, bool) {
             lines.insert(
                 i + 3,
                 format!(
-                    "{}BORINGCACHE_SAVE_TOKEN: ${{{{ github.event_name == 'pull_request' && '' || secrets.BORINGCACHE_SAVE_TOKEN }}}}",
+                    "{}BORINGCACHE_SAVE_TOKEN: ${{{{ secrets.BORINGCACHE_SAVE_TOKEN }}}}",
                     " ".repeat(child_indent + 2)
                 ),
             );
@@ -281,7 +281,7 @@ jobs:
         assert!(
             result
                 .optimized_content
-                .contains("BORINGCACHE_SAVE_TOKEN: ${{ github.event_name == 'pull_request' && '' || secrets.BORINGCACHE_SAVE_TOKEN }}")
+                .contains("BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}")
         );
         assert!(!result.optimized_content.contains("uses: actions/cache"));
         assert!(!result.changes.is_empty());
@@ -314,7 +314,7 @@ jobs:
       - uses: actions/cache@v4
         env:
           BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
-          BORINGCACHE_SAVE_TOKEN: ${{ github.event_name == 'pull_request' && '' || secrets.BORINGCACHE_SAVE_TOKEN }}
+          BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
 "#;
 
         let result = apply(input).expect("expected rewrite");
