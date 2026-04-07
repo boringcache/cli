@@ -3681,7 +3681,7 @@ async fn bind_kv_alias_tag(
     blob_count: u64,
     blob_total_size_bytes: u64,
     file_count: u32,
-    flush_mode: FlushMode,
+    _flush_mode: FlushMode,
 ) -> anyhow::Result<bool> {
     let alias_request = SaveRequest {
         tag: alias_tag.to_string(),
@@ -3728,29 +3728,11 @@ async fn bind_kv_alias_tag(
         write_scope_tag: None,
     };
 
-    let result = if flush_mode == FlushMode::Shutdown {
-        state
-            .api_client
-            .confirm_wait_for_publish_or_shutdown_pending(
-                &state.workspace,
-                &alias_save.cache_entry_id,
-                &alias_confirm,
-                state.shutdown_requested.as_ref(),
-            )
-            .await?
-    } else {
-        crate::api::client::ConfirmPublishResult::Published(Box::new(
-            state
-                .api_client
-                .confirm(&state.workspace, &alias_save.cache_entry_id, &alias_confirm)
-                .await?,
-        ))
-    };
+    let result = confirm_kv_flush(state, &alias_save.cache_entry_id, &alias_confirm)
+        .await
+        .map_err(|error| anyhow::anyhow!("alias confirm failed: {:?}", error))?;
 
-    Ok(matches!(
-        result,
-        crate::api::client::ConfirmPublishResult::Pending(_)
-    ))
+    Ok(matches!(result, KvConfirmOutcome::Pending(_)))
 }
 
 async fn bind_kv_alias_tags(

@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/e2e-helpers.sh"
 
-BINARY="${BINARY:-./target/debug/boringcache}"
+CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BINARY="${BINARY:-${CLI_REPO_ROOT}/target/debug/boringcache}"
 WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
 LOG_DIR="${LOG_DIR:-.}"
 PROXY_PORT="${PROXY_PORT:-5061}"
@@ -111,10 +112,17 @@ else
   GRADLE_BIN="gradle"
 fi
 
+WRAPPER_LOG="${GRADLE_LOG_DIR}/wrapper.log"
 (
   cd "${PROJECT_DIR}"
-  "${GRADLE_BIN}" wrapper --gradle-version "${GRADLE_VERSION}" 2>&1 | tail -n 5
-)
+  "${GRADLE_BIN}" wrapper --gradle-version "${GRADLE_VERSION}" --no-build-cache --no-daemon \
+    >"${WRAPPER_LOG}" 2>&1
+) || {
+  echo "ERROR: failed to generate Gradle wrapper"
+  tail -n 120 "${WRAPPER_LOG}" || true
+  exit 1
+}
+tail -n 5 "${WRAPPER_LOG}" || true
 GRADLEW="${PROJECT_DIR}/gradlew"
 chmod +x "${GRADLEW}"
 
@@ -174,8 +182,10 @@ stop_proxy
 dump_cache_ops_summary
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
-  verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${GRADLE_LOG_DIR}" \
-    "${BUDGET_REMOTE_TAG_HITS_MIN}" 30 2 "$(proxy_log)"
+  if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${GRADLE_LOG_DIR}" \
+    "${BUDGET_REMOTE_TAG_HITS_MIN}" 30 2 "$(proxy_log)"; then
+    exit 1
+  fi
   echo "  remote tag verified (hits=${REMOTE_TAG_CHECK_HITS:-0})"
 fi
 

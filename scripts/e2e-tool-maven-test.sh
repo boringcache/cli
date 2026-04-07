@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/e2e-helpers.sh"
 
-BINARY="${BINARY:-./target/debug/boringcache}"
+CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BINARY="${BINARY:-${CLI_REPO_ROOT}/target/debug/boringcache}"
 WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
 LOG_DIR="${LOG_DIR:-.}"
 PROXY_PORT="${PROXY_PORT:-5060}"
@@ -185,8 +186,10 @@ stop_proxy
 dump_cache_ops_summary
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
-  verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${MAVEN_LOG_DIR}" \
-    "${BUDGET_REMOTE_TAG_HITS_MIN}" 30 2 "$(proxy_log)"
+  if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${MAVEN_LOG_DIR}" \
+    "${BUDGET_REMOTE_TAG_HITS_MIN}" 30 2 "$(proxy_log)"; then
+    exit 1
+  fi
   echo "  remote tag verified (hits=${REMOTE_TAG_CHECK_HITS:-0})"
 fi
 

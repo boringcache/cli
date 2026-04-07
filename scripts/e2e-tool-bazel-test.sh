@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/e2e-helpers.sh"
 
-BINARY="${BINARY:-./target/debug/boringcache}"
+CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BINARY="${BINARY:-${CLI_REPO_ROOT}/target/debug/boringcache}"
 WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
 LOG_DIR="${LOG_DIR:-.}"
 PROXY_PORT="${PROXY_PORT:-5059}"
@@ -14,19 +15,18 @@ BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
 require_save_capable_token
 
-for dep in bazel curl; do
-  if ! command -v "$dep" >/dev/null 2>&1; then
-    if [[ "$dep" == "bazel" ]] && command -v bazelisk >/dev/null 2>&1; then
-      continue
-    fi
-    echo "ERROR: required dependency not found: ${dep}"
-    exit 1
-  fi
-done
+if ! command -v curl >/dev/null 2>&1; then
+  echo "ERROR: required dependency not found: curl"
+  exit 1
+fi
 
-BAZEL_CMD="bazel"
-if ! command -v bazel >/dev/null 2>&1 && command -v bazelisk >/dev/null 2>&1; then
-  BAZEL_CMD="bazelisk"
+if command -v bazelisk >/dev/null 2>&1; then
+  BAZEL_CMD="${BAZEL_CMD:-bazelisk}"
+elif command -v bazel >/dev/null 2>&1; then
+  BAZEL_CMD="${BAZEL_CMD:-bazel}"
+else
+  echo "ERROR: required dependency not found: bazel or bazelisk"
+  exit 1
 fi
 
 if [[ ! -x "${BINARY}" ]]; then
@@ -55,7 +55,7 @@ module(name = "e2e_test", version = "0.1.0")
 EOF
 
 cat > "${PROJECT_DIR}/.bazelversion" <<'EOF'
-7.6.1
+8.0.1
 EOF
 
 cat > "${PROJECT_DIR}/BUILD.bazel" <<'BUILDFILE'
@@ -77,7 +77,7 @@ genrule(
     name = "hash",
     srcs = ["input.txt"],
     outs = ["hashed.txt"],
-    cmd = "sha256sum $< > $@",
+    cmd = "if command -v sha256sum >/dev/null 2>&1; then sha256sum $< > $@; else shasum -a 256 $< > $@; fi",
 )
 BUILDFILE
 
@@ -151,8 +151,10 @@ stop_proxy
 dump_cache_ops_summary
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
-  verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${BAZEL_LOG_DIR}" \
-    "${BUDGET_REMOTE_TAG_HITS_MIN}" 30 2 "$(proxy_log)"
+  if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${BAZEL_LOG_DIR}" \
+    "${BUDGET_REMOTE_TAG_HITS_MIN}" 30 2 "$(proxy_log)"; then
+    exit 1
+  fi
   echo "  remote tag verified (hits=${REMOTE_TAG_CHECK_HITS:-0})"
 fi
 

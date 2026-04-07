@@ -2,8 +2,11 @@
 
 e2e_tag() {
   local name="$1"
-  local run_id="${GITHUB_RUN_ID:-local}"
-  local run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
+  if [[ -z "${BORINGCACHE_E2E_LOCAL_RUN_ID:-}" ]]; then
+    export BORINGCACHE_E2E_LOCAL_RUN_ID="local-$(date +%s)"
+  fi
+  local run_id="${GITHUB_RUN_ID:-${BORINGCACHE_E2E_RUN_ID:-${BORINGCACHE_E2E_LOCAL_RUN_ID}}}"
+  local run_attempt="${GITHUB_RUN_ATTEMPT:-${BORINGCACHE_E2E_RUN_ATTEMPT:-1}}"
   printf 'gha-%s-%s-%s' "$name" "$run_id" "$run_attempt"
 }
 

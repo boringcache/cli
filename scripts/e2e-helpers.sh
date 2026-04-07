@@ -5,7 +5,7 @@ source "${SCRIPT_DIR}/e2e-auth.sh"
 source "${SCRIPT_DIR}/e2e-remote-tag.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
-PROXY_PORT="${PROXY_PORT:-5050}"
+PROXY_PORT="${PROXY_PORT:-}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
 PROXY_READY_WARN_SECS="${PROXY_READY_WARN_SECS:-15}"
@@ -139,7 +139,7 @@ port_listener_details() {
 }
 
 reclaim_stale_proxy_port() {
-  local port="${1:-$PROXY_PORT}"
+  local port="${1:-${PROXY_PORT:-5050}}"
   local listener_pids pid cmd
   listener_pids="$(port_listener_pids "$port")"
   if [[ -z "$listener_pids" ]]; then
@@ -164,7 +164,7 @@ start_proxy() {
   local binary="$1"
   local workspace="$2"
   local tag="$3"
-  local port="${4:-$PROXY_PORT}"
+  local port="${4:-${PROXY_PORT:-5050}}"
   local log_file="${5:-${LOG_DIR}/proxy.log}"
   local extra_args="${6:-}"
 
@@ -208,7 +208,7 @@ start_proxy() {
 }
 
 wait_for_proxy() {
-  local port="${1:-$PROXY_PORT}"
+  local port="${1:-${PROXY_PORT:-5050}}"
   local attempts start_ts next_warn now waited
   attempts="$((PROXY_READY_TIMEOUT_SECS / PROXY_READY_POLL_SECS))"
   if (( attempts < 1 )); then
@@ -348,13 +348,23 @@ timed_run() {
 
 _helper_cleanup() {
   set +e
+  local -a cleanup_callbacks=()
+  local -a tags_to_delete=()
   local cb
-  for cb in "${_HELPER_CLEANUP_CALLBACKS[@]}"; do
-    "$cb"
-  done
+  if [[ "${_HELPER_CLEANUP_CALLBACKS+set}" == "set" ]]; then
+    cleanup_callbacks=("${_HELPER_CLEANUP_CALLBACKS[@]}")
+  fi
+  if [[ "${#cleanup_callbacks[@]}" -gt 0 ]]; then
+    for cb in "${cleanup_callbacks[@]}"; do
+      "$cb"
+    done
+  fi
   stop_proxy
-  if [[ "${#_HELPER_TAGS_TO_DELETE[@]}" -gt 0 && -n "${_HELPER_BINARY:-}" && -n "${_HELPER_WORKSPACE:-}" ]]; then
-    for tag in "${_HELPER_TAGS_TO_DELETE[@]}"; do
+  if [[ "${_HELPER_TAGS_TO_DELETE+set}" == "set" ]]; then
+    tags_to_delete=("${_HELPER_TAGS_TO_DELETE[@]}")
+  fi
+  if [[ "${#tags_to_delete[@]}" -gt 0 && -n "${_HELPER_BINARY:-}" && -n "${_HELPER_WORKSPACE:-}" ]]; then
+    for tag in "${tags_to_delete[@]}"; do
       "$_HELPER_BINARY" delete --no-platform --no-git "$_HELPER_WORKSPACE" "$tag" >/dev/null 2>&1 || true
     done
   fi

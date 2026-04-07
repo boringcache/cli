@@ -2,8 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/e2e-remote-tag.sh"
+source "${SCRIPT_DIR}/e2e-helpers.sh"
 
+CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-}}"
 PORT="${PORT:-5057}"
 HOST="${HOST:-127.0.0.1}"
@@ -13,6 +14,7 @@ LOG_DIR="${LOG_DIR:-/tmp/boringcache-all-protocols-e2e-$(date +%Y%m%d-%H%M%S)}"
 RUN_SCCACHE="${RUN_SCCACHE:-0}"
 RUN_DOCKER="${RUN_DOCKER:-0}"
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
+BINARY="${BINARY:-${CLI_REPO_ROOT}/target/debug/boringcache}"
 mkdir -p "${LOG_DIR}"
 
 require_cmd() {
@@ -96,7 +98,7 @@ echo "==> Tool versions"
 )
 
 echo "==> Building boringcache CLI"
-cargo build --bin boringcache >"${LOG_DIR}/build.log" 2>&1
+cargo build --manifest-path "${CLI_REPO_ROOT}/Cargo.toml" --bin boringcache >"${LOG_DIR}/build.log" 2>&1
 
 echo "==> Starting cache-registry proxy"
 SERVE_PID=""
@@ -111,7 +113,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-./target/debug/boringcache cache-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" \
+"${BINARY}" cache-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" \
   --host "${HOST}" \
   --port "${PORT}" \
   --no-platform \
@@ -296,7 +298,7 @@ func main() {
 	fmt.Println("boringcache local gocacheprog e2e")
 }
 EOF_GO
-GOCACHEPROG_CMD="$(pwd)/target/debug/boringcache go-cacheprog --endpoint http://${HOST}:${PORT} --verbose"
+GOCACHEPROG_CMD="${BINARY} go-cacheprog --endpoint http://${HOST}:${PORT} --verbose"
 (
   cd "${GO_DIR}"
   GOCACHE="$(mktemp -d)" GOCACHEPROG="${GOCACHEPROG_CMD}" go build ./... 2> "${LOG_DIR}/go-build-1.log"
@@ -322,7 +324,7 @@ if [[ "${RUN_SCCACHE}" == "1" ]]; then
   run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_A}" "SCCACHE_DIR=${SCCACHE_DIR_A}" "SCCACHE_WEBDAV_ENDPOINT=http://${HOST}:${PORT}/" sccache --start-server >/dev/null
   run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_A}" sccache --zero-stats >/dev/null
   (
-    cd "$(pwd)"
+    cd "${CLI_REPO_ROOT}"
     run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_A}" "SCCACHE_DIR=${SCCACHE_DIR_A}" "SCCACHE_WEBDAV_ENDPOINT=http://${HOST}:${PORT}/" RUSTC_WRAPPER=sccache "CARGO_TARGET_DIR=${SCCACHE_TARGET_DIR}" cargo build --release --locked >"${LOG_DIR}/sccache-build-1.log" 2>&1
   )
   run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_A}" sccache --show-stats >"${LOG_DIR}/sccache-stats-1.txt" 2>&1
@@ -333,7 +335,7 @@ if [[ "${RUN_SCCACHE}" == "1" ]]; then
   run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_B}" "SCCACHE_DIR=${SCCACHE_DIR_B}" "SCCACHE_WEBDAV_ENDPOINT=http://${HOST}:${PORT}/" sccache --start-server >/dev/null
   run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_B}" sccache --zero-stats >/dev/null
   (
-    cd "$(pwd)"
+    cd "${CLI_REPO_ROOT}"
     run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_B}" "SCCACHE_DIR=${SCCACHE_DIR_B}" "SCCACHE_WEBDAV_ENDPOINT=http://${HOST}:${PORT}/" RUSTC_WRAPPER=sccache "CARGO_TARGET_DIR=${SCCACHE_TARGET_DIR}" cargo build --release --locked >"${LOG_DIR}/sccache-build-2.log" 2>&1
   )
   run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${SCCACHE_PORT_B}" sccache --show-stats >"${LOG_DIR}/sccache-stats-2.txt" 2>&1
@@ -403,12 +405,12 @@ if [[ -n "${SERVE_PID}" ]]; then
 fi
 
 echo "==> Verifying published remote tag resolves"
-if ! verify_remote_tag_visible "./target/debug/boringcache" "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" "${LOG_DIR}/publish-check" "${BUDGET_REMOTE_TAG_HITS_MIN}" "${REMOTE_TAG_VERIFY_ATTEMPTS:-30}" "${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}" "${PROXY_LOG}"; then
+if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" "${LOG_DIR}/publish-check" "${BUDGET_REMOTE_TAG_HITS_MIN}" "${REMOTE_TAG_VERIFY_ATTEMPTS:-30}" "${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}" "${PROXY_LOG}"; then
   exit 1
 fi
 
 echo "==> Verifying human alias tag is visible in workspace entries"
-./target/debug/boringcache ls "${WORKSPACE}" --limit 500 --json > "${LOG_DIR}/workspace-ls.json"
+"${BINARY}" ls "${WORKSPACE}" --limit 500 --json > "${LOG_DIR}/workspace-ls.json"
 python3 - "${LOG_DIR}/workspace-ls.json" "${REGISTRY_ROOT_TAG}" <<'PY'
 import json
 import sys
