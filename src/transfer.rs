@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use std::time::Duration;
 use tokio::time::sleep;
 
-const TRANSFER_RETRY_ATTEMPTS: u32 = 3;
-const TRANSFER_RETRY_BASE_DELAY_MS: u64 = 500;
-const TRANSFER_RETRY_MAX_DELAY_MS: u64 = 2_000;
+const TRANSFER_RETRY_ATTEMPTS: u32 = 5;
+const TRANSFER_RETRY_BASE_DELAY_MS: u64 = 1_000;
+const TRANSFER_RETRY_MAX_DELAY_MS: u64 = 8_000;
 
 fn transfer_retry_delay(attempt: u32) -> Duration {
     let exponent = attempt.saturating_sub(1);

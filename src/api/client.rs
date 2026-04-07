@@ -31,6 +31,8 @@ const API_VERSION_V2: &str = "v2";
 const FALLBACK_API_BASE_URL: &str = "https://api.boringcache.com";
 const CONFIRM_PUBLISH_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_CONFIRM_PUBLISH_TIMEOUT_SECS";
 const DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS: u64 = 10;
+const TRANSFER_CONNECT_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_TRANSFER_CONNECT_TIMEOUT_SECS";
+const DEFAULT_TRANSFER_CONNECT_TIMEOUT_SECS: u64 = 10;
 const PENDING_PUBLISH_POLL_TIMEOUT: Duration = Duration::from_secs(60);
 const PENDING_PUBLISH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const BLOB_RECEIPT_COMMIT_BATCH_MAX: usize = 500;
@@ -2376,6 +2378,15 @@ fn confirm_publish_request_timeout() -> Duration {
     Duration::from_secs(seconds)
 }
 
+fn transfer_connect_timeout() -> Duration {
+    let seconds = std::env::var(TRANSFER_CONNECT_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_TRANSFER_CONNECT_TIMEOUT_SECS);
+    Duration::from_secs(seconds)
+}
+
 fn blob_check_batch_max() -> usize {
     parse_usize_env(BLOB_CHECK_BATCH_MAX_ENV).unwrap_or(BLOB_CHECK_BATCH_MAX)
 }
@@ -2546,7 +2557,7 @@ fn build_transfer_client_with_headers(
             .timeout(Duration::from_secs(10));
     } else {
         builder = builder
-            .connect_timeout(Duration::from_secs(3))
+            .connect_timeout(transfer_connect_timeout())
             .timeout(Duration::from_secs(300));
     }
 
@@ -2987,6 +2998,21 @@ mod tests {
         assert_eq!(confirm_publish_request_timeout(), Duration::from_secs(7));
 
         test_env::remove_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV);
+    }
+
+    #[test]
+    fn test_transfer_connect_timeout_uses_default_and_env_override() {
+        let _guard = test_env::lock();
+        test_env::remove_var(TRANSFER_CONNECT_TIMEOUT_SECS_ENV);
+        assert_eq!(
+            transfer_connect_timeout(),
+            Duration::from_secs(DEFAULT_TRANSFER_CONNECT_TIMEOUT_SECS)
+        );
+
+        test_env::set_var(TRANSFER_CONNECT_TIMEOUT_SECS_ENV, "15");
+        assert_eq!(transfer_connect_timeout(), Duration::from_secs(15));
+
+        test_env::remove_var(TRANSFER_CONNECT_TIMEOUT_SECS_ENV);
     }
 
     #[test]

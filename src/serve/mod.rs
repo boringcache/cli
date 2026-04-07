@@ -13,6 +13,7 @@ use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as HttpConnectionBuilder;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::{TcpListener, TcpSocket, lookup_host};
@@ -39,6 +40,29 @@ const HTTP_VERSION_ENV: &str = "BORINGCACHE_HTTP_VERSION";
 const H2_INITIAL_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 const H2_INITIAL_CONNECTION_WINDOW: u32 = 32 * 1024 * 1024;
 const H2_MAX_CONCURRENT_STREAMS: u32 = 1024;
+const RUNTIME_TEMP_DIR_PREFIX: &str = "boringcache-proxy";
+
+fn new_runtime_temp_dir() -> Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!(
+        "{RUNTIME_TEMP_DIR_PREFIX}-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create runtime temp dir {}", dir.display()))?;
+    Ok(dir)
+}
+
+async fn cleanup_runtime_temp_dir(state: &AppState) {
+    if let Err(error) = tokio::fs::remove_dir_all(&state.runtime_temp_dir).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!(
+            "Failed to clean runtime temp dir {}: {error}",
+            state.runtime_temp_dir.display()
+        );
+    }
+}
 
 fn spawn_runtime_watchdog(
     cache_ops: Arc<cache_registry::cache_ops::Aggregator>,
@@ -178,6 +202,7 @@ pub async fn run_server(
 
     eprintln!("Shutdown: flushing pending KV entries");
     flush_pending_on_shutdown(&state).await;
+    cleanup_runtime_temp_dir(&state).await;
 
     Ok(())
 }
@@ -248,6 +273,7 @@ pub async fn start_server_background(
 
         eprintln!("Shutdown: flushing pending KV entries");
         flush_pending_on_shutdown(&server_state).await;
+        cleanup_runtime_temp_dir(&server_state).await;
         Ok(())
     });
 
@@ -279,9 +305,27 @@ async fn build_server_runtime(
         mpsc::channel(KV_REPLICATION_WORK_QUEUE_CAPACITY);
     let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
     let blob_prefetch_semaphore = Arc::new(tokio::sync::Semaphore::new(pf_concurrency));
+    let runtime_temp_dir = new_runtime_temp_dir()?;
+    let kv_blob_temp_dir = runtime_temp_dir.join("kv-blobs");
+    let oci_upload_temp_dir = runtime_temp_dir.join("oci-uploads");
+    std::fs::create_dir_all(&kv_blob_temp_dir).with_context(|| {
+        format!(
+            "Failed to create KV blob temp dir {}",
+            kv_blob_temp_dir.display()
+        )
+    })?;
+    std::fs::create_dir_all(&oci_upload_temp_dir).with_context(|| {
+        format!(
+            "Failed to create OCI upload temp dir {}",
+            oci_upload_temp_dir.display()
+        )
+    })?;
     let state = AppState {
         api_client,
         workspace: workspace.clone(),
+        runtime_temp_dir,
+        kv_blob_temp_dir,
+        oci_upload_temp_dir,
         read_only,
         tag_resolver,
         configured_human_tags,
@@ -417,15 +461,7 @@ async fn build_server_runtime(
             "default"
         }
     );
-    for dir_name in ["boringcache-kv-blobs", "boringcache-uploads"] {
-        let stale_dir = std::env::temp_dir().join(dir_name);
-        if stale_dir.exists() {
-            let _ = tokio::fs::remove_dir_all(&stale_dir).await;
-        }
-    }
-    tokio::fs::create_dir_all(std::env::temp_dir().join("boringcache-kv-blobs"))
-        .await
-        .context("Failed to create KV temp dir")?;
+    eprintln!("  Runtime Temp: {}", state.runtime_temp_dir.display());
 
     Ok((state, listener, kv_replication_work_rx))
 }

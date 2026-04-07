@@ -73,7 +73,10 @@ async fn confirm_archive_upload(
     cache_entry_id: &str,
     request: &ConfirmRequest,
 ) -> Result<ArchiveConfirmOutcome> {
-    let shutdown_requested = AtomicBool::new(false);
+    // Archive publish can legitimately transition into a server-owned pending
+    // state after finalize. Treat that as accepted completion instead of
+    // requiring an active shutdown path.
+    let shutdown_requested = AtomicBool::new(true);
     match api_client
         .confirm_wait_for_publish_or_shutdown_pending(
             workspace,
@@ -1361,7 +1364,16 @@ where
         return Err(err);
     }
 
-    if save_response.exists {
+    let resumable_pending_existing = save_response.is_resumable_pending_cas();
+
+    if resumable_pending_existing {
+        progress_info(
+            &reporter,
+            "  Resuming pending CAS upload for this cache entry",
+        );
+    }
+
+    if save_response.should_skip_existing_uploads() {
         complete_skipped_step(
             &mut session,
             "Checking remote blobs",
@@ -1831,5 +1843,34 @@ mod tests {
             ArchiveConfirmOutcome::from_response("entry-same", response),
             ArchiveConfirmOutcome::Published { winner_id: None }
         );
+    }
+
+    #[test]
+    fn resumable_pending_cas_save_requires_pending_cas_upload_metadata() {
+        let resumable: crate::api::models::cache::SaveResponse = serde_json::from_value(
+            serde_json::json!({
+                "tag": "cache-tag",
+                "cache_entry_id": "entry-1",
+                "upload_session_id": "session-1",
+                "upload_state": "uploading",
+                "exists": true,
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": 128,
+                "cas_layout": "oci",
+                "manifest_upload_url": "https://example.test/manifest",
+                "upload_headers": {},
+                "manifest_root_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "status": "pending"
+            }),
+        )
+        .unwrap();
+        assert!(resumable.is_resumable_pending_cas());
+        assert!(!resumable.should_skip_existing_uploads());
+
+        let mut missing_manifest = resumable;
+        missing_manifest.manifest_upload_url = None;
+        assert!(!missing_manifest.is_resumable_pending_cas());
+        assert!(missing_manifest.should_skip_existing_uploads());
     }
 }

@@ -143,6 +143,18 @@ pub mod cache {
                 .as_deref()
                 .or(self.multipart_upload_id.as_deref())
         }
+
+        pub fn is_resumable_pending_cas(&self) -> bool {
+            self.exists
+                && self.status.as_deref() == Some("pending")
+                && self.storage_mode.as_deref() == Some("cas")
+                && self.upload_session_id.is_some()
+                && self.manifest_upload_url.is_some()
+        }
+
+        pub fn should_skip_existing_uploads(&self) -> bool {
+            self.exists && !self.is_resumable_pending_cas()
+        }
     }
 
     #[derive(Debug, Deserialize)]

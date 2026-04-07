@@ -85,6 +85,9 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
     let state = AppState {
         api_client,
         workspace: "org/repo".to_string(),
+        runtime_temp_dir: temp_home.path().join("proxy-runtime"),
+        kv_blob_temp_dir: temp_home.path().join("proxy-runtime/kv-blobs"),
+        oci_upload_temp_dir: temp_home.path().join("proxy-runtime/oci-uploads"),
         read_only: false,
         tag_resolver: TagResolver::new(None, GitContext::default(), false),
         configured_human_tags: Vec::new(),

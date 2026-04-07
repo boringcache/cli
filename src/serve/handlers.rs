@@ -1101,8 +1101,12 @@ async fn download_oci_blob_to_cache(
         .map_err(|e| OciError::internal(format!("Blob storage returned error: {e}")))?;
 
     let digest_hex = crate::cas_file::sha256_hex(digest.as_bytes());
-    let temp_path = std::env::temp_dir().join(format!(
-        "boringcache-oci-dl-{}-{}",
+    let temp_dir = state.runtime_temp_dir.join("oci-downloads");
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to create temp dir: {e}")))?;
+    let temp_path = temp_dir.join(format!(
+        "blob-{}-{}",
         &digest_hex[..16],
         uuid::Uuid::new_v4()
     ));
@@ -1396,7 +1400,7 @@ async fn start_upload(
 
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    let temp_dir = std::env::temp_dir().join("boringcache-uploads");
+    let temp_dir = state.oci_upload_temp_dir.clone();
     tokio::fs::create_dir_all(&temp_dir)
         .await
         .map_err(|e| OciError::internal(format!("Failed to create temp dir: {e}")))?;
@@ -2257,8 +2261,10 @@ async fn stage_manifest_reference_upload(
         )));
     }
 
-    let temp_dir =
-        std::env::temp_dir().join(format!("boringcache-oci-manifest-{}", uuid::Uuid::new_v4()));
+    let temp_dir = state
+        .runtime_temp_dir
+        .join("oci-manifests")
+        .join(uuid::Uuid::new_v4().to_string());
     tokio::fs::create_dir_all(&temp_dir)
         .await
         .map_err(|e| OciError::internal(format!("Failed to create temp dir: {e}")))?;
@@ -2323,10 +2329,19 @@ mod tests {
     fn test_state() -> AppState {
         let (kv_replication_work_tx, _kv_replication_work_rx) =
             tokio::sync::mpsc::channel(crate::serve::state::KV_REPLICATION_WORK_QUEUE_CAPACITY);
+        let runtime_temp_dir = std::env::temp_dir().join(format!(
+            "boringcache-handler-runtime-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(runtime_temp_dir.join("kv-blobs")).expect("kv blob temp dir");
+        std::fs::create_dir_all(runtime_temp_dir.join("oci-uploads")).expect("oci upload temp dir");
         AppState {
             api_client: ApiClient::new_with_token_override(Some("test-token".to_string()))
                 .expect("api client"),
             workspace: "boringcache/benchmarks".to_string(),
+            runtime_temp_dir: runtime_temp_dir.clone(),
+            kv_blob_temp_dir: runtime_temp_dir.join("kv-blobs"),
+            oci_upload_temp_dir: runtime_temp_dir.join("oci-uploads"),
             read_only: false,
             tag_resolver: TagResolver::new(None, GitContext::default(), false),
             configured_human_tags: Vec::new(),

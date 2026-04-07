@@ -419,7 +419,7 @@ pub(crate) async fn put_kv_object(
     }
 
     put_probe.stage("read_body");
-    let (path, blob_size, blob_digest) = write_body_to_temp_file(body, &put_probe).await?;
+    let (path, blob_size, blob_digest) = write_body_to_temp_file(state, body, &put_probe).await?;
 
     if let Some(expected_digest) = expected_bazel_cas_blob_digest(namespace, key)
         && !blob_digest.eq_ignore_ascii_case(&expected_digest)
@@ -1285,8 +1285,12 @@ async fn do_download_blob_to_cache(
 
     let digest_hex = crate::cas_file::sha256_hex(blob.digest.as_bytes());
     let temp_suffix = KV_BLOB_DOWNLOAD_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temp_path = std::env::temp_dir().join(format!(
-        "boringcache-dl-{}-{}-{temp_suffix:016x}",
+    let temp_dir = state.runtime_temp_dir.join("kv-downloads");
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| RegistryError::internal(format!("Failed to create temp dir: {e}")))?;
+    let temp_path = temp_dir.join(format!(
+        "blob-{}-{}-{temp_suffix:016x}",
         &digest_hex[..16],
         std::process::id(),
     ));
@@ -3408,7 +3412,7 @@ async fn do_flush(
         }
     };
 
-    if save_response.exists {
+    if save_response.should_skip_existing_uploads() {
         let mut pending_blob_by_digest: HashMap<String, u64> = HashMap::new();
         for blob in filtered_pending_entries.values() {
             pending_blob_by_digest
@@ -3967,10 +3971,11 @@ async fn cleanup_temp_file(path: &PathBuf) {
 }
 
 async fn write_body_to_temp_file(
+    state: &AppState,
     body: Body,
     put_probe: &super::PutProbeGuard,
 ) -> Result<(PathBuf, u64, String), RegistryError> {
-    let temp_dir = std::env::temp_dir().join("boringcache-kv-blobs");
+    let temp_dir = state.kv_blob_temp_dir.clone();
     let path = temp_dir.join(uuid::Uuid::new_v4().to_string());
     let ingest_start = std::time::Instant::now();
 
@@ -4134,10 +4139,16 @@ mod tests {
             ApiClient::new_with_token_override(Some("test-token".to_string())).expect("client");
         let (kv_replication_work_tx, _kv_replication_work_rx) =
             tokio::sync::mpsc::channel(crate::serve::state::KV_REPLICATION_WORK_QUEUE_CAPACITY);
+        let runtime_temp_dir = temp_home.path().join("serve-runtime");
+        std::fs::create_dir_all(runtime_temp_dir.join("kv-blobs")).expect("kv blob temp dir");
+        std::fs::create_dir_all(runtime_temp_dir.join("oci-uploads")).expect("oci upload temp dir");
 
         let state = AppState {
             api_client,
             workspace: "org/repo".to_string(),
+            runtime_temp_dir: runtime_temp_dir.clone(),
+            kv_blob_temp_dir: runtime_temp_dir.join("kv-blobs"),
+            oci_upload_temp_dir: runtime_temp_dir.join("oci-uploads"),
             read_only: false,
             tag_resolver: TagResolver::new(None, GitContext::default(), false),
             configured_human_tags: Vec::new(),
@@ -4219,10 +4230,16 @@ mod tests {
             ApiClient::new_with_token_override(Some("test-token".to_string())).expect("client");
         let (kv_replication_work_tx, _kv_replication_work_rx) =
             tokio::sync::mpsc::channel(crate::serve::state::KV_REPLICATION_WORK_QUEUE_CAPACITY);
+        let runtime_temp_dir = temp_home.path().join("serve-runtime");
+        std::fs::create_dir_all(runtime_temp_dir.join("kv-blobs")).expect("kv blob temp dir");
+        std::fs::create_dir_all(runtime_temp_dir.join("oci-uploads")).expect("oci upload temp dir");
 
         let state = AppState {
             api_client,
             workspace: "org/repo".to_string(),
+            runtime_temp_dir: runtime_temp_dir.clone(),
+            kv_blob_temp_dir: runtime_temp_dir.join("kv-blobs"),
+            oci_upload_temp_dir: runtime_temp_dir.join("oci-uploads"),
             read_only: true,
             tag_resolver: TagResolver::new(None, GitContext::default(), false),
             configured_human_tags: Vec::new(),

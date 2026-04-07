@@ -48,7 +48,7 @@ where
     Confirm: FnOnce(Option<String>) -> ConfirmFuture,
     ConfirmFuture: Future<Output = Result<C, E>>,
 {
-    let manifest_etag = if save_response.exists {
+    let manifest_etag = if save_response.should_skip_existing_uploads() {
         None
     } else {
         let blob_receipts = upload_blobs(save_response).await?;

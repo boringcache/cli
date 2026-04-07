@@ -19,6 +19,9 @@ pub fn diagnostics_enabled() -> bool {
 pub struct AppState {
     pub api_client: ApiClient,
     pub workspace: String,
+    pub runtime_temp_dir: PathBuf,
+    pub kv_blob_temp_dir: PathBuf,
+    pub oci_upload_temp_dir: PathBuf,
     pub read_only: bool,
     pub tag_resolver: TagResolver,
     pub configured_human_tags: Vec<String>,
