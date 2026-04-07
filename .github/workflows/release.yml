@@ -177,6 +177,7 @@ jobs:
             name: linux-musl-amd64
             container: alpine:3.21
             target: x86_64-unknown-linux-musl
+            cli_platform: alpine-amd64
             binary_name: boringcache-linux-musl-amd64
             use_docker: true
             musl: true
@@ -185,6 +186,7 @@ jobs:
             name: linux-musl-arm64
             container: alpine:3.21
             target: aarch64-unknown-linux-musl
+            cli_platform: alpine-arm64
             binary_name: boringcache-linux-musl-arm64
             use_docker: true
             musl: true
@@ -235,6 +237,7 @@ jobs:
           setup: none
           cache-runtime: "false"
           mode: docker
+          cli-platform: ${{ matrix.cli_platform }}
           workspace: ${{ github.repository }}
           image: boringcache-cli-release-build-${{ matrix.name }}
           tags: latest
@@ -286,6 +289,7 @@ jobs:
             "$DOCKER_IMAGE" \
             sh -c '
               set -e
+              SCCACHE_PROXY_CONFIGURED=0
 
               # Prefer the cached toolchain image above, but keep a plain-container fallback.
               if [ -f /etc/alpine-release ]; then
@@ -323,7 +327,9 @@ jobs:
               fi
 
               # Install sccache + start proxy for compilation caching
-              if boringcache --version >/dev/null 2>&1; then
+              BORINGCACHE_VERSION="$(boringcache --version 2>/dev/null || true)"
+              if [ -n "${BORINGCACHE_VERSION}" ]; then
+                echo "container boringcache: ${BORINGCACHE_VERSION}"
                 if ! command -v sccache >/dev/null 2>&1; then
                   SCCACHE_ARCH=$(uname -m)
                   SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/${{ env.SCCACHE_VERSION }}/sccache-${{ env.SCCACHE_VERSION }}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz"
@@ -363,6 +369,8 @@ jobs:
                     wait "${PROXY_PID}" >/dev/null 2>&1 || true
                   fi
                 fi
+              else
+                echo "::warning::Container boringcache CLI is unavailable; skipping proxy-backed sccache."
               fi
 
               # Add target
