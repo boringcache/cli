@@ -11,6 +11,7 @@ ENV PATH=/usr/local/cargo/bin:/usr/local/bin:${PATH}
 
 RUN set -eux; \
     apk add --no-cache \
+      bash \
       build-base \
       ca-certificates \
       curl \
