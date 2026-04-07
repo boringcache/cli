@@ -375,6 +375,21 @@ impl ApiClient {
         self.parse_json_response(response).await
     }
 
+    pub async fn start_cli_connect_email_auth(
+        &self,
+        session_id: &str,
+        request: &super::models::cli_connect::CliConnectEmailAuthRequest,
+    ) -> Result<super::models::cli_connect::CliConnectEmailAuthResponse> {
+        let url = self.build_v2_url(&format!("cli-connect/sessions/{session_id}/email-auth"));
+        debug!("POST {}", url);
+
+        let response = self
+            .send_public_request(self.client.post(&url).json(request))
+            .await?;
+
+        self.parse_json_response(response).await
+    }
+
     async fn post_with_base<T, R>(&self, base_url: &str, endpoint: &str, body: &T) -> Result<R>
     where
         T: Serialize,
@@ -2439,20 +2454,26 @@ pub(crate) fn derive_api_base_urls(configured_base_url: &str) -> (String, String
 }
 
 fn api_batch_concurrency(chunk_count: usize) -> usize {
+    let cpu_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let is_ci = std::env::var_os("CI").is_some();
+    api_batch_concurrency_for_context(chunk_count, cpu_count, is_ci)
+}
+
+fn api_batch_concurrency_for_context(chunk_count: usize, cpu_count: usize, is_ci: bool) -> usize {
     if chunk_count == 0 {
         return 1;
     }
 
-    let cpu_count = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let ci_cap = if std::env::var_os("CI").is_some() {
-        4
+    let cpu_limited = if is_ci {
+        cpu_count.saturating_mul(2)
     } else {
-        8
+        cpu_count
     };
+    let cap = 8;
 
-    chunk_count.min(ci_cap).min(cpu_count.max(1)).max(1)
+    chunk_count.min(cap).min(cpu_limited.max(1)).max(1)
 }
 
 fn ensure_crypto_provider() {
@@ -2598,13 +2619,11 @@ mod tests {
 
     #[test]
     fn test_api_batch_concurrency_is_bounded() {
-        assert_eq!(api_batch_concurrency(1), 1);
-
-        let medium = api_batch_concurrency(4);
-        assert!((1..=4).contains(&medium));
-
-        let larger = api_batch_concurrency(32);
-        assert!((1..=32).contains(&larger));
+        assert_eq!(api_batch_concurrency_for_context(1, 4, false), 1);
+        assert_eq!(api_batch_concurrency_for_context(4, 4, false), 4);
+        assert_eq!(api_batch_concurrency_for_context(32, 4, false), 4);
+        assert_eq!(api_batch_concurrency_for_context(32, 4, true), 8);
+        assert_eq!(api_batch_concurrency_for_context(32, 2, true), 4);
     }
 
     #[test]
@@ -3549,6 +3568,67 @@ mod tests {
             message.contains("CLI connect poll rejected"),
             "unexpected error message: {message}"
         );
+        mock.assert_async().await;
+
+        if let Some(home) = original_home {
+            test_env::set_var("HOME", home);
+        }
+        test_env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_start_cli_connect_email_auth_without_auth_token() {
+        let _guard = test_env::lock();
+
+        if !networking_available() {
+            eprintln!(
+                "skipping test_start_cli_connect_email_auth_without_auth_token: networking disabled in sandbox"
+            );
+            return;
+        }
+
+        let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+        test_env::set_var("HOME", temp_home.path());
+        test_env::remove_var("BORINGCACHE_API_TOKEN");
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v2/cli-connect/sessions/abc123/email-auth")
+            .match_header("content-type", "application/json")
+            .match_body(
+                Matcher::Json(json!({
+                    "email": "new@example.com",
+                    "name": "New User",
+                    "username": "new-user"
+                })),
+            )
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"session_id":"abc123","status":"email_sent","next_step":"Check your email to continue, then return to approve CLI access.","field_errors":{}}"#,
+            )
+            .create_async()
+            .await;
+
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+        let client = ApiClient::new().expect("client should initialize without auth token");
+        let response = client
+            .start_cli_connect_email_auth(
+                "abc123",
+                &crate::api::models::cli_connect::CliConnectEmailAuthRequest {
+                    email: "new@example.com".to_string(),
+                    name: Some("New User".to_string()),
+                    username: Some("new-user".to_string()),
+                },
+            )
+            .await
+            .expect("cli connect email auth should succeed");
+
+        assert_eq!(response.session_id, "abc123");
+        assert_eq!(response.status, "email_sent");
         mock.assert_async().await;
 
         if let Some(home) = original_home {

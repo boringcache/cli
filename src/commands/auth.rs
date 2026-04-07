@@ -4,6 +4,10 @@ use crate::ui;
 use anyhow::Result;
 
 pub async fn execute(token: String) -> Result<()> {
+    execute_with_options(token, true).await
+}
+
+pub async fn execute_with_options(token: String, show_ready_hint: bool) -> Result<()> {
     ui::info("Validating token with server...");
 
     let api_client = ApiClient::new_with_token_override(Some(token.clone()))?;
@@ -62,7 +66,8 @@ pub async fn execute(token: String) -> Result<()> {
 
     crate::commands::onboard::ensure_default_workspace_after_onboarding(&token).await?;
 
-    if let Ok(config) = Config::load()
+    if show_ready_hint
+        && let Ok(config) = Config::load()
         && config.default_workspace.is_some()
     {
         ui::blank_line();

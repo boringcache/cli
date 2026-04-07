@@ -32,6 +32,7 @@ const KV_REFRESH_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 const KV_REPLICATION_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 const BLOB_DOWNLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY";
 const CACHE_PREFETCH_CONCURRENCY_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_CONCURRENCY";
+const BLOB_READ_CACHE_MAX_BYTES_ENV: &str = "BORINGCACHE_BLOB_READ_CACHE_MAX_BYTES";
 const TCP_LISTEN_BACKLOG_ENV: &str = "BORINGCACHE_TCP_LISTEN_BACKLOG";
 const DEFAULT_TCP_LISTEN_BACKLOG: u32 = 1024;
 const HTTP_VERSION_ENV: &str = "BORINGCACHE_HTTP_VERSION";
@@ -277,7 +278,7 @@ async fn build_server_runtime(
     let (kv_replication_work_tx, kv_replication_work_rx) =
         mpsc::channel(KV_REPLICATION_WORK_QUEUE_CAPACITY);
     let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
-    let blob_prefetch_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
+    let blob_prefetch_semaphore = Arc::new(tokio::sync::Semaphore::new(pf_concurrency));
     let state = AppState {
         api_client,
         workspace: workspace.clone(),
@@ -805,10 +806,21 @@ async fn flush_cache_ops(state: &AppState) {
 }
 
 fn blob_read_cache_max_bytes() -> u64 {
+    if let Some(configured) = parse_positive_u64_env(BLOB_READ_CACHE_MAX_BYTES_ENV) {
+        return configured;
+    }
+
     let resources = crate::platform::resources::SystemResources::detect();
+    let is_ci = std::env::var("CI").is_ok();
     let auto_max = match resources.memory_strategy {
         crate::platform::resources::MemoryStrategy::Balanced => 1024_u64 * 1024 * 1024,
-        crate::platform::resources::MemoryStrategy::Aggressive => DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
+        crate::platform::resources::MemoryStrategy::Aggressive => {
+            if is_ci {
+                DEFAULT_BLOB_READ_CACHE_MAX_BYTES.saturating_mul(2)
+            } else {
+                DEFAULT_BLOB_READ_CACHE_MAX_BYTES
+            }
+        }
         crate::platform::resources::MemoryStrategy::UltraAggressive => {
             DEFAULT_BLOB_READ_CACHE_MAX_BYTES.saturating_mul(2)
         }
@@ -841,6 +853,18 @@ fn parse_positive_u32_env(name: &str) -> Option<u32> {
         return None;
     }
     match trimmed.parse::<u32>() {
+        Ok(value) if value > 0 => Some(value),
+        _ => None,
+    }
+}
+
+fn parse_positive_u64_env(name: &str) -> Option<u64> {
+    let raw = std::env::var(name).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<u64>() {
         Ok(value) if value > 0 => Some(value),
         _ => None,
     }
@@ -1203,5 +1227,29 @@ mod tests {
         test_env::set_var(TCP_LISTEN_BACKLOG_ENV, "4096");
         assert_eq!(tcp_listen_backlog(), 4096);
         test_env::remove_var(TCP_LISTEN_BACKLOG_ENV);
+    }
+
+    #[test]
+    fn blob_read_cache_max_bytes_honors_env_override() {
+        let _guard = test_env::lock();
+        test_env::set_var(BLOB_READ_CACHE_MAX_BYTES_ENV, "3145728");
+        assert_eq!(blob_read_cache_max_bytes(), 3_145_728);
+        test_env::remove_var(BLOB_READ_CACHE_MAX_BYTES_ENV);
+    }
+
+    #[test]
+    fn blob_read_cache_max_bytes_scales_up_on_ci() {
+        let _guard = test_env::lock();
+        test_env::remove_var(BLOB_READ_CACHE_MAX_BYTES_ENV);
+        test_env::set_var("CI", "1");
+        let max = blob_read_cache_max_bytes();
+        assert!(max >= DEFAULT_BLOB_READ_CACHE_MAX_BYTES);
+        test_env::remove_var("CI");
+    }
+
+    #[test]
+    fn blob_prefetch_concurrency_defaults_to_quarter_of_downloads() {
+        assert_eq!(blob_prefetch_concurrency(8), (2, false));
+        assert_eq!(blob_prefetch_concurrency(16), (4, false));
     }
 }

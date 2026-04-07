@@ -190,13 +190,30 @@ pub enum Commands {
         token: String,
     },
 
-    #[command(about = "Sign in by approving CLI access in a browser (local or another device)")]
+    #[command(about = "Sign in or create an account for this CLI session")]
     Login {
         #[arg(
             long,
             help = "Print the approval URL and wait without trying to open a local browser"
         )]
         manual: bool,
+
+        #[arg(long, help = "Start sign-in by email for this CLI session")]
+        email: Option<String>,
+
+        #[arg(
+            long,
+            requires = "email",
+            help = "Display name to use if this email needs a new account"
+        )]
+        name: Option<String>,
+
+        #[arg(
+            long,
+            requires = "email",
+            help = "Username to use if this email needs a new account"
+        )]
+        username: Option<String>,
     },
 
     #[command(about = "Check terminal cache setup, token scope, and workspace resolution")]
@@ -726,6 +743,23 @@ pub enum Commands {
         #[arg(help = "Path to a specific CI/CD file to scan (scans project if omitted)")]
         path: Option<String>,
 
+        #[arg(long, help = "Start onboarding by email for this CLI session")]
+        email: Option<String>,
+
+        #[arg(
+            long,
+            requires = "email",
+            help = "Display name to use if this email needs a new account"
+        )]
+        name: Option<String>,
+
+        #[arg(
+            long,
+            requires = "email",
+            help = "Username to use if this email needs a new account"
+        )]
+        username: Option<String>,
+
         #[arg(long, help = "Apply changes without prompting")]
         apply: bool,
 
@@ -746,6 +780,23 @@ pub enum Commands {
     Optimize {
         #[arg(help = "Path to a specific CI/CD file to scan (scans project if omitted)")]
         path: Option<String>,
+
+        #[arg(long, help = "Start onboarding by email for this CLI session")]
+        email: Option<String>,
+
+        #[arg(
+            long,
+            requires = "email",
+            help = "Display name to use if this email needs a new account"
+        )]
+        name: Option<String>,
+
+        #[arg(
+            long,
+            requires = "email",
+            help = "Username to use if this email needs a new account"
+        )]
+        username: Option<String>,
 
         #[arg(long, help = "Apply changes without prompting")]
         apply: bool,
@@ -848,4 +899,40 @@ pub enum ConfigSubcommand {
         #[arg(short, long, help = "Output in JSON format")]
         json: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn test_login_parses_email_signup_flags() {
+        let cli = Cli::parse_from([
+            "boringcache",
+            "login",
+            "--manual",
+            "--email",
+            "jane@example.com",
+            "--name",
+            "Jane Doe",
+            "--username",
+            "jane-doe",
+        ]);
+
+        match cli.command {
+            Commands::Login {
+                manual,
+                email,
+                name,
+                username,
+            } => {
+                assert!(manual);
+                assert_eq!(email.as_deref(), Some("jane@example.com"));
+                assert_eq!(name.as_deref(), Some("Jane Doe"));
+                assert_eq!(username.as_deref(), Some("jane-doe"));
+            }
+            _ => panic!("expected login command"),
+        }
+    }
 }

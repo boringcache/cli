@@ -11,6 +11,7 @@ use crate::optimize::{CiType, FileRelevance, MAX_FILES_PER_REQUEST};
 use crate::types::Result;
 use crate::ui;
 use chrono::{DateTime, Utc};
+use jwalk::WalkDir;
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -74,8 +75,40 @@ struct ProposedChange<'a> {
     analysis: OptimizationAnalysis,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CliEmailAuthOptions {
+    email: String,
+    name: Option<String>,
+    username: Option<String>,
+}
+
+impl CliEmailAuthOptions {
+    pub(crate) fn from_inputs(
+        email: Option<String>,
+        name: Option<String>,
+        username: Option<String>,
+    ) -> Option<Self> {
+        email.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(Self {
+                    email: trimmed,
+                    name: normalize_optional_input(name),
+                    username: normalize_optional_input(username),
+                })
+            }
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     path: Option<String>,
+    email: Option<String>,
+    name: Option<String>,
+    username: Option<String>,
     auto_apply: bool,
     dry_run: bool,
     manual: bool,
@@ -91,15 +124,19 @@ pub async fn execute(
         };
 
         if needs_auth {
+            let cli_email_auth = CliEmailAuthOptions::from_inputs(email, name, username);
+
             ui::info("Welcome to BoringCache.");
             ui::blank_line();
             ui::info("Let's connect your account and set up caching for this project.");
+            ui::info("Repo scanning and config changes stay local to this machine.");
+            ui::info("Browser approval only grants this CLI workspace access.");
             ui::blank_line();
 
-            let token = match run_cli_connect_onboarding(manual).await {
+            let token = match run_cli_connect_onboarding(manual, cli_email_auth).await {
                 Ok(token) => token,
                 Err(err) => {
-                    ui::warn(&format!("Browser sign-in failed: {err}"));
+                    ui::warn(&format!("Interactive sign-in failed: {err}"));
                     if !prompt_yes_no("Paste a token manually instead? [Y/n] ", true)? {
                         return Err(err);
                     }
@@ -107,7 +144,7 @@ pub async fn execute(
                 }
             };
 
-            crate::commands::auth::execute(token.clone()).await?;
+            crate::commands::auth::execute_with_options(token.clone(), false).await?;
             ensure_default_workspace_after_onboarding(&token).await?;
             ui::blank_line();
         }
@@ -215,30 +252,42 @@ pub async fn execute(
     let (mut results, api_fallback) = run_deterministic_pass(&sendable, json_output);
 
     if !api_fallback.is_empty() {
-        ensure_ai_assist_ready(json_output).await?;
+        match ensure_ai_assist_ready(json_output).await {
+            Ok(()) => {
+                if !json_output {
+                    ui::info(&format!(
+                        "Deterministic pass skipped {} file{}; running AI assist fallback...",
+                        api_fallback.len(),
+                        if api_fallback.len() == 1 { "" } else { "s" }
+                    ));
+                    ui::blank_line();
+                }
 
-        if !json_output {
-            ui::info(&format!(
-                "Deterministic pass skipped {} file{}; running AI assist fallback...",
-                api_fallback.len(),
-                if api_fallback.len() == 1 { "" } else { "s" }
-            ));
-            ui::blank_line();
+                let api_files: Vec<OptimizeFileRequest> = api_fallback
+                    .iter()
+                    .map(|f| OptimizeFileRequest {
+                        path: f.display_path.clone(),
+                        content: f.content.clone(),
+                        input_type: f.ci_type.api_key().map(String::from),
+                    })
+                    .collect();
+
+                let request = OptimizeRequest { files: api_files };
+                let client = ApiClient::new()?;
+                let response: OptimizeResponse = client.optimize(&request).await?;
+                results.extend(response.results);
+            }
+            Err(error) => {
+                if results.is_empty() {
+                    return Err(error);
+                }
+
+                if !json_output {
+                    ui::warn(&format!("Skipping AI assist fallback: {error}"));
+                    ui::blank_line();
+                }
+            }
         }
-
-        let api_files: Vec<OptimizeFileRequest> = api_fallback
-            .iter()
-            .map(|f| OptimizeFileRequest {
-                path: f.display_path.clone(),
-                content: f.content.clone(),
-                input_type: f.ci_type.api_key().map(String::from),
-            })
-            .collect();
-
-        let request = OptimizeRequest { files: api_files };
-        let client = ApiClient::new()?;
-        let response: OptimizeResponse = client.optimize(&request).await?;
-        results.extend(response.results);
     }
 
     if json_output {
@@ -404,9 +453,7 @@ pub async fn execute(
                     result.config_path.display()
                 ));
             } else {
-                ui::info(
-                    "  3. Seed repo config from existing manual tags: boringcache audit --write",
-                );
+                print_repo_config_tip();
             }
 
             if let Ok(config) = Config::load()
@@ -423,7 +470,7 @@ pub async fn execute(
 
 fn print_repo_config_tip() {
     ui::blank_line();
-    ui::info("If you want shared cache names across local runs, Dockerfiles, and CI:");
+    ui::info("Optional later: if you already use raw tag:path pairs and want repo config:");
     ui::info("  boringcache audit --write");
 }
 
@@ -527,9 +574,7 @@ fn scan_project() -> Result<Vec<ScannedFile>> {
 
     scan_glob(&cwd, ".github/workflows", &["yml", "yaml"], &mut files);
 
-    scan_exact(&cwd, "Dockerfile", &mut files);
-    scan_glob_prefix(&cwd, ".", "Dockerfile.", &mut files);
-    scan_glob_suffix(&cwd, ".", ".dockerfile", &mut files);
+    scan_dockerfiles_recursively(&cwd, &mut files);
 
     scan_exact(&cwd, ".gitlab-ci.yml", &mut files);
     scan_exact(&cwd, ".circleci/config.yml", &mut files);
@@ -542,6 +587,41 @@ fn scan_project() -> Result<Vec<ScannedFile>> {
     scan_exact(&cwd, "Jenkinsfile", &mut files);
 
     Ok(files)
+}
+
+fn scan_dockerfiles_recursively(root: &Path, files: &mut Vec<ScannedFile>) {
+    for entry in WalkDir::new(root) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+
+        if entry.file_type().is_dir() {
+            continue;
+        }
+
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+
+        if name != "Dockerfile"
+            && !name.starts_with("Dockerfile.")
+            && !name.ends_with(".dockerfile")
+        {
+            continue;
+        }
+
+        let display = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
+
+        if let Some(file) = try_read_file(&path, &display) {
+            files.push(file);
+        }
+    }
 }
 
 fn scan_exact(root: &Path, relative: &str, files: &mut Vec<ScannedFile>) {
@@ -570,58 +650,6 @@ fn scan_glob(root: &Path, dir: &str, extensions: &[&str], files: &mut Vec<Scanne
                 dir,
                 path.file_name().unwrap_or_default().to_string_lossy()
             );
-            if let Some(file) = try_read_file(&path, &display) {
-                files.push(file);
-            }
-        }
-    }
-}
-
-fn scan_glob_prefix(root: &Path, dir: &str, prefix: &str, files: &mut Vec<ScannedFile>) {
-    let dir_path = root.join(dir);
-    let entries = match std::fs::read_dir(&dir_path) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if name.starts_with(prefix) && name != "Dockerfile" {
-            let display = if dir == "." {
-                name.to_string()
-            } else {
-                format!("{}/{}", dir, name)
-            };
-            if let Some(file) = try_read_file(&path, &display) {
-                files.push(file);
-            }
-        }
-    }
-}
-
-fn scan_glob_suffix(root: &Path, dir: &str, suffix: &str, files: &mut Vec<ScannedFile>) {
-    let dir_path = root.join(dir);
-    let entries = match std::fs::read_dir(&dir_path) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if name.ends_with(suffix) {
-            let display = if dir == "." {
-                name.to_string()
-            } else {
-                format!("{}/{}", dir, name)
-            };
             if let Some(file) = try_read_file(&path, &display) {
                 files.push(file);
             }
@@ -714,6 +742,17 @@ fn prompt_non_empty(message: &str) -> Result<String> {
     }
 }
 
+fn normalize_optional_input(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
 async fn ensure_ai_assist_ready(json_output: bool) -> Result<()> {
     if optimize_auth_configured() {
         return Ok(());
@@ -730,7 +769,10 @@ async fn ensure_ai_assist_ready(json_output: bool) -> Result<()> {
     );
 }
 
-pub async fn run_cli_connect_onboarding(manual: bool) -> Result<String> {
+pub(crate) async fn run_cli_connect_onboarding(
+    manual: bool,
+    email_auth: Option<CliEmailAuthOptions>,
+) -> Result<String> {
     let client = ApiClient::new()?;
     let connect = client.create_cli_connect_session().await?;
     let verification_url_with_code = format!(
@@ -740,22 +782,35 @@ pub async fn run_cli_connect_onboarding(manual: bool) -> Result<String> {
     );
 
     ui::blank_line();
-    ui::info("Approve CLI access:");
-    ui::info(&format!("  1. Open {}", connect.verification_url));
-    ui::info(&format!("  2. Enter code {}", connect.user_code));
-    ui::info(&format!("  Direct link: {}", connect.authorize_url));
+    let email_auth_selected = email_auth.is_some();
 
-    if !manual && try_open_browser(&verification_url_with_code) {
-        ui::info("Opened verification page automatically.");
-    } else if manual {
-        ui::info(
-            "Manual mode: open the verification URL on this machine or another device. The CLI will keep waiting for approval.",
-        );
+    if let Some(email_auth) = email_auth {
+        ui::info("Continue onboarding by email:");
+        ui::info(&format!("  Email: {}", email_auth.email));
+        ui::info(&format!("  Browser fallback: {}", connect.authorize_url));
+        start_cli_connect_email_auth(&client, &connect.session_id, email_auth).await?;
     } else {
-        ui::info("Could not open browser automatically. Open the verification URL manually.");
+        ui::info("Approve CLI access:");
+        ui::info(&format!("  1. Open {}", connect.verification_url));
+        ui::info(&format!("  2. Enter code {}", connect.user_code));
+        ui::info(&format!("  Direct link: {}", connect.authorize_url));
+
+        if !manual && try_open_browser(&verification_url_with_code) {
+            ui::info("Opened verification page automatically.");
+        } else if manual {
+            ui::info(
+                "Manual mode: open the verification URL on this machine or another device. The CLI will keep waiting for approval.",
+            );
+        } else {
+            ui::info("Could not open browser automatically. Open the verification URL manually.");
+        }
     }
 
-    ui::info("Waiting for browser approval...");
+    if email_auth_selected {
+        ui::info("Waiting for email confirmation and browser approval...");
+    } else {
+        ui::info("Waiting for browser approval...");
+    }
     let poll_interval = Duration::from_secs(connect.poll_interval_seconds.clamp(1, 10));
     let expires_at = parse_cli_connect_expiry(&connect.expires_at);
 
@@ -790,6 +845,72 @@ pub async fn run_cli_connect_onboarding(manual: bool) -> Result<String> {
             }
         }
     }
+}
+
+async fn start_cli_connect_email_auth(
+    client: &ApiClient,
+    session_id: &str,
+    mut email_auth: CliEmailAuthOptions,
+) -> Result<()> {
+    ensure_email_signup_details(&mut email_auth)?;
+
+    loop {
+        let response = client
+            .start_cli_connect_email_auth(
+                session_id,
+                &crate::api::models::cli_connect::CliConnectEmailAuthRequest {
+                    email: email_auth.email.clone(),
+                    name: email_auth.name.clone(),
+                    username: email_auth.username.clone(),
+                },
+            )
+            .await?;
+
+        match response.status.as_str() {
+            "email_sent" => {
+                if let Some(next_step) = response.next_step.as_deref() {
+                    ui::info(next_step);
+                }
+                return Ok(());
+            }
+            "signup_details_invalid" => {
+                ui::warn("The account details for a new signup need another pass.");
+
+                if let Some(errors) = response.field_errors.get("name") {
+                    for error in errors {
+                        ui::warn(&format!("Display name: {error}"));
+                    }
+                    email_auth.name = Some(prompt_non_empty("Display name: ")?);
+                }
+
+                if let Some(errors) = response.field_errors.get("username") {
+                    for error in errors {
+                        ui::warn(&format!("Username: {error}"));
+                    }
+                    email_auth.username = Some(prompt_non_empty("Username: ")?);
+                }
+            }
+            other => anyhow::bail!("Unexpected CLI email auth status '{other}'."),
+        }
+    }
+}
+
+fn ensure_email_signup_details(email_auth: &mut CliEmailAuthOptions) -> Result<()> {
+    if email_auth.name.is_some() && email_auth.username.is_some() {
+        return Ok(());
+    }
+
+    ui::info("If this email is new, the CLI can create the account from here.");
+
+    if email_auth.name.is_none() {
+        email_auth.name = Some(prompt_non_empty("Display name (used only if needed): ")?);
+    }
+
+    if email_auth.username.is_none() {
+        email_auth.username = Some(prompt_non_empty("Username (used only if needed): ")?);
+    }
+
+    Ok(())
 }
 
 fn parse_cli_connect_expiry(value: &str) -> Option<DateTime<Utc>> {

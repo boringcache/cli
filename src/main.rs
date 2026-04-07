@@ -203,7 +203,12 @@ async fn main() -> Result<()> {
 
     let result = match cli.command {
         cli::Commands::Auth { token } => commands::auth::execute(token).await,
-        cli::Commands::Login { manual } => commands::login::execute(manual).await,
+        cli::Commands::Login {
+            manual,
+            email,
+            name,
+            username,
+        } => commands::login::execute(manual, email, name, username).await,
         cli::Commands::Doctor { workspace, json } => {
             commands::doctor::execute(workspace, json).await
         }
@@ -535,6 +540,9 @@ async fn main() -> Result<()> {
         cli::Commands::Workspaces { json } => commands::workspaces::execute(json).await,
         cli::Commands::Onboard {
             path,
+            email,
+            name,
+            username,
             apply,
             dry_run,
             manual,
@@ -542,11 +550,17 @@ async fn main() -> Result<()> {
         }
         | cli::Commands::Optimize {
             path,
+            email,
+            name,
+            username,
             apply,
             dry_run,
             manual,
             json,
-        } => commands::onboard::execute(path, apply, dry_run, manual, json).await,
+        } => {
+            commands::onboard::execute(path, email, name, username, apply, dry_run, manual, json)
+                .await
+        }
         cli::Commands::Serve {
             workspace,
             tag,

@@ -121,8 +121,8 @@ impl SystemResources {
         };
 
         concurrency = match self.disk_type {
-            DiskType::NvmeSsd => concurrency.min(12),
-            DiskType::SataSsd => concurrency.min(4),
+            DiskType::NvmeSsd => concurrency.min(16),
+            DiskType::SataSsd => concurrency.min(if is_ci { 8 } else { 4 }),
         };
 
         if self.cpu_load_percent > 75.0 && concurrency > 1 {
@@ -130,9 +130,18 @@ impl SystemResources {
         }
 
         if is_ci {
-            concurrency = concurrency.min(4);
+            let ci_cap = if self.available_memory_gb >= 12.0 {
+                8
+            } else if self.available_memory_gb >= 8.0 {
+                6
+            } else {
+                4
+            };
+            concurrency = concurrency.min(ci_cap);
             if self.cpu_cores <= 2 {
                 concurrency = concurrency.min(2);
+            } else if self.cpu_cores <= 4 {
+                concurrency = concurrency.min(8);
             }
         } else {
             let cpu_headroom = (self.cpu_cores.saturating_sub(1)).max(1);
@@ -310,5 +319,35 @@ mod tests {
         let resources = SystemResources::detect();
         assert!(resources.extraction_buffer_size() > 0);
         assert!(resources.multipart_threshold() > 0);
+    }
+
+    #[test]
+    fn recommended_download_concurrency_scales_up_on_capable_ci_runners() {
+        let resources = SystemResources {
+            cpu_cores: 4,
+            available_memory_gb: 16.0,
+            cpu_load_percent: 10.0,
+            max_parallel_chunks: 8,
+            memory_strategy: MemoryStrategy::Aggressive,
+            disk_type: DiskType::NvmeSsd,
+            disk_speed_estimate_mb_s: 2_000.0,
+        };
+
+        assert_eq!(resources.recommended_download_concurrency(true), 8);
+    }
+
+    #[test]
+    fn recommended_download_concurrency_stays_conservative_on_small_ci_runners() {
+        let resources = SystemResources {
+            cpu_cores: 2,
+            available_memory_gb: 3.5,
+            cpu_load_percent: 10.0,
+            max_parallel_chunks: 8,
+            memory_strategy: MemoryStrategy::Balanced,
+            disk_type: DiskType::SataSsd,
+            disk_speed_estimate_mb_s: 500.0,
+        };
+
+        assert_eq!(resources.recommended_download_concurrency(true), 2);
     }
 }

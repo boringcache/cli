@@ -245,16 +245,16 @@ main() {
     print_success "🎉 Installation complete!"
     echo
     print_status "Next steps:"
-    print_status "1. Authenticate with your API token:"
-    print_status "   ${BINARY_NAME} auth --token YOUR_API_TOKEN"
+    print_status "1. Move into your repo:"
+    print_status "   cd your-project"
     echo
-    print_status "2. Save cache (tag:path format):"
-    print_status "   ${BINARY_NAME} save my-workspace \"node-deps:node_modules,build-cache:target\""
+    print_status "2. Connect the CLI:"
+    print_status "   ${BINARY_NAME} onboard"
     echo
-    print_status "3. Restore cache (tag:path format):"
-    print_status "   ${BINARY_NAME} restore my-workspace \"node-deps:node_modules,build-cache:target\""
+    print_status "3. Wrap one repeated step:"
+    print_status "   ${BINARY_NAME} run -- bundle install"
     echo
-    print_status "📖 For more information, visit: https://github.com/${REPO}"
+    print_status "📖 Docs: https://boringcache.com/docs"
 }
 
 # Run main function

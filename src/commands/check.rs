@@ -127,10 +127,7 @@ async fn execute_inner(
 
         let resolver =
             crate::tag_utils::TagResolver::new(platform.clone(), git_context, git_enabled);
-        let effective_tag = resolver
-            .effective_save_tag(tag)
-            .unwrap_or_else(|_| tag.clone());
-        let candidates = vec![effective_tag];
+        let candidates = resolver.restore_tag_candidates(tag);
 
         for candidate in &candidates {
             if !all_candidates.contains(candidate) {

@@ -20,10 +20,12 @@ pub fn apply(content: &str) -> Option<RuleResult> {
     let (optimized_content, token_added) = ensure_token_on_boringcache_steps(&rewritten);
     if token_added {
         changes.push(OptimizeChange {
-            description: "Added BORINGCACHE_API_TOKEN env to BoringCache action steps".to_string(),
+            description: "Added split restore/save token env to BoringCache action steps"
+                .to_string(),
             before_snippet: None,
             after_snippet: Some(
-                "env:\n  BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}".to_string(),
+                "env:\n  BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}\n  BORINGCACHE_SAVE_TOKEN: ${{ github.event_name == 'pull_request' && '' || secrets.BORINGCACHE_SAVE_TOKEN }}"
+                    .to_string(),
             ),
         });
     }
@@ -119,18 +121,34 @@ fn ensure_token_on_boringcache_steps(content: &str) -> (String, bool) {
 
         if let Some(env_start) = env_start {
             let env_end = find_env_block_end(&lines, env_start + 1, child_indent);
-            let has_token = lines[env_start + 1..env_end]
+            let has_restore_token = lines[env_start + 1..env_end]
                 .iter()
-                .any(|line| line.trim_start().starts_with("BORINGCACHE_API_TOKEN:"));
+                .any(|line| line.trim_start().starts_with("BORINGCACHE_RESTORE_TOKEN:"));
+            let has_save_token = lines[env_start + 1..env_end]
+                .iter()
+                .any(|line| line.trim_start().starts_with("BORINGCACHE_SAVE_TOKEN:"));
 
-            if !has_token {
-                lines.insert(
-                    env_end,
-                    format!(
-                        "{}BORINGCACHE_API_TOKEN: ${{{{ secrets.BORINGCACHE_API_TOKEN }}}}",
-                        " ".repeat(child_indent + 2)
-                    ),
-                );
+            if !has_restore_token || !has_save_token {
+                let mut insert_at = env_end;
+                if !has_restore_token {
+                    lines.insert(
+                        insert_at,
+                        format!(
+                            "{}BORINGCACHE_RESTORE_TOKEN: ${{{{ secrets.BORINGCACHE_RESTORE_TOKEN }}}}",
+                            " ".repeat(child_indent + 2)
+                        ),
+                    );
+                    insert_at += 1;
+                }
+                if !has_save_token {
+                    lines.insert(
+                        insert_at,
+                        format!(
+                            "{}BORINGCACHE_SAVE_TOKEN: ${{{{ github.event_name == 'pull_request' && '' || secrets.BORINGCACHE_SAVE_TOKEN }}}}",
+                            " ".repeat(child_indent + 2)
+                        ),
+                    );
+                }
                 inserted_token = true;
                 i += 1;
             }
@@ -139,12 +157,19 @@ fn ensure_token_on_boringcache_steps(content: &str) -> (String, bool) {
             lines.insert(
                 i + 2,
                 format!(
-                    "{}BORINGCACHE_API_TOKEN: ${{{{ secrets.BORINGCACHE_API_TOKEN }}}}",
+                    "{}BORINGCACHE_RESTORE_TOKEN: ${{{{ secrets.BORINGCACHE_RESTORE_TOKEN }}}}",
+                    " ".repeat(child_indent + 2)
+                ),
+            );
+            lines.insert(
+                i + 3,
+                format!(
+                    "{}BORINGCACHE_SAVE_TOKEN: ${{{{ github.event_name == 'pull_request' && '' || secrets.BORINGCACHE_SAVE_TOKEN }}}}",
                     " ".repeat(child_indent + 2)
                 ),
             );
             inserted_token = true;
-            i += 2;
+            i += 3;
         }
 
         i += 1;
@@ -227,7 +252,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transforms_actions_cache_and_injects_token() {
+    fn transforms_actions_cache_and_injects_split_tokens() {
         let input = r#"name: CI
 on: [push]
 jobs:
@@ -251,7 +276,12 @@ jobs:
         assert!(
             result
                 .optimized_content
-                .contains("BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}")
+                .contains("BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}")
+        );
+        assert!(
+            result
+                .optimized_content
+                .contains("BORINGCACHE_SAVE_TOKEN: ${{ github.event_name == 'pull_request' && '' || secrets.BORINGCACHE_SAVE_TOKEN }}")
         );
         assert!(!result.optimized_content.contains("uses: actions/cache"));
         assert!(!result.changes.is_empty());
@@ -277,20 +307,26 @@ jobs:
     }
 
     #[test]
-    fn does_not_duplicate_existing_token() {
+    fn does_not_duplicate_existing_split_tokens() {
         let input = r#"jobs:
   test:
     steps:
       - uses: actions/cache@v4
         env:
-          BORINGCACHE_API_TOKEN: ${{ secrets.BORINGCACHE_API_TOKEN }}
+          BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
+          BORINGCACHE_SAVE_TOKEN: ${{ github.event_name == 'pull_request' && '' || secrets.BORINGCACHE_SAVE_TOKEN }}
 "#;
 
         let result = apply(input).expect("expected rewrite");
-        let token_count = result
+        let restore_token_count = result
             .optimized_content
-            .matches("BORINGCACHE_API_TOKEN:")
+            .matches("BORINGCACHE_RESTORE_TOKEN:")
             .count();
-        assert_eq!(token_count, 1);
+        let save_token_count = result
+            .optimized_content
+            .matches("BORINGCACHE_SAVE_TOKEN:")
+            .count();
+        assert_eq!(restore_token_count, 1);
+        assert_eq!(save_token_count, 1);
     }
 }

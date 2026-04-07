@@ -1348,6 +1348,16 @@ pub mod optimize {
 
 pub mod cli_connect {
     use super::*;
+    use std::collections::HashMap;
+
+    #[derive(Debug, Serialize)]
+    pub struct CliConnectEmailAuthRequest {
+        pub email: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub username: Option<String>,
+    }
 
     #[derive(Debug, Deserialize, Serialize)]
     pub struct CliConnectSessionCreateResponse {
@@ -1375,6 +1385,16 @@ pub mod cli_connect {
         pub token: Option<String>,
         #[serde(default)]
         pub workspace: Option<CliConnectWorkspace>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct CliConnectEmailAuthResponse {
+        pub session_id: String,
+        pub status: String,
+        #[serde(default)]
+        pub next_step: Option<String>,
+        #[serde(default)]
+        pub field_errors: HashMap<String, Vec<String>>,
     }
 }
 
