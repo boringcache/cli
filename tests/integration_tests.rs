@@ -361,6 +361,16 @@ fn test_restore_lookup_only_flag_help() {
 }
 
 #[test]
+fn test_check_exact_flag_help() {
+    let output = run_cli_command(&["check", "--help"]);
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--exact"));
+    assert!(stdout.contains("Resolve and check only exact scoped tags"));
+}
+
+#[test]
 fn test_restore_new_flags_require_auth() {
     let output = run_cli_command_isolated(&[
         "restore",

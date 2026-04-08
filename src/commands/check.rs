@@ -3,6 +3,16 @@ use crate::ui;
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 
+#[derive(Debug, Clone, Copy)]
+pub struct CheckOptions {
+    pub no_platform: bool,
+    pub no_git: bool,
+    pub fail_on_miss: bool,
+    pub json_output: bool,
+    pub require_server_signature: bool,
+    pub exact: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckResult {
     pub tag: String,
@@ -26,24 +36,10 @@ pub struct CheckSummary {
 pub async fn execute(
     workspace: Option<String>,
     tags: Vec<String>,
-    no_platform: bool,
-    no_git: bool,
-    fail_on_miss: bool,
-    json_output: bool,
-    require_server_signature: bool,
+    options: CheckOptions,
 ) -> Result<()> {
-    if let Err(err) = execute_inner(
-        workspace,
-        tags,
-        no_platform,
-        no_git,
-        fail_on_miss,
-        json_output,
-        require_server_signature,
-    )
-    .await
-    {
-        if fail_on_miss || require_server_signature {
+    if let Err(err) = execute_inner(workspace, tags, options).await {
+        if options.fail_on_miss || options.require_server_signature {
             return Err(err);
         }
         ui::warn(&format!("{:#}", err));
@@ -54,16 +50,12 @@ pub async fn execute(
 async fn execute_inner(
     workspace: Option<String>,
     tags: Vec<String>,
-    no_platform: bool,
-    no_git: bool,
-    fail_on_miss: bool,
-    json_output: bool,
-    require_server_signature: bool,
+    options: CheckOptions,
 ) -> Result<()> {
     let workspace = crate::commands::utils::get_workspace_name(workspace)?;
 
     if tags.is_empty() {
-        if json_output {
+        if options.json_output {
             let summary = CheckSummary {
                 workspace: workspace.clone(),
                 total: 0,
@@ -92,7 +84,7 @@ async fn execute_inner(
     }
 
     if valid_tags.is_empty() {
-        if json_output {
+        if options.json_output {
             let summary = CheckSummary {
                 workspace: workspace.clone(),
                 total: 0,
@@ -107,13 +99,13 @@ async fn execute_inner(
         return Ok(());
     }
 
-    let platform = if no_platform {
+    let platform = if options.no_platform {
         None
     } else {
         Some(crate::platform::Platform::detect()?)
     };
 
-    let git_enabled = !no_git && !crate::git::is_git_disabled_by_env();
+    let git_enabled = !options.no_git && !crate::git::is_git_disabled_by_env();
 
     let mut all_candidates: Vec<String> = Vec::new();
     let mut tag_to_candidates: Vec<(String, Vec<String>)> = Vec::new();
@@ -127,7 +119,11 @@ async fn execute_inner(
 
         let resolver =
             crate::tag_utils::TagResolver::new(platform.clone(), git_context, git_enabled);
-        let candidates = resolver.restore_tag_candidates(tag);
+        let candidates = if options.exact {
+            vec![resolver.effective_save_tag(tag)?]
+        } else {
+            resolver.restore_tag_candidates(tag)
+        };
 
         for candidate in &candidates {
             if !all_candidates.contains(candidate) {
@@ -140,7 +136,7 @@ async fn execute_inner(
 
     let api_client = ApiClient::for_restore()?;
 
-    if !json_output {
+    if !options.json_output {
         ui::info(&format!(
             "Checking {} tag{} in {}",
             valid_tags.len(),
@@ -150,13 +146,17 @@ async fn execute_inner(
     }
 
     let resolution_result = api_client
-        .restore(&workspace, &all_candidates, require_server_signature)
+        .restore(
+            &workspace,
+            &all_candidates,
+            options.require_server_signature,
+        )
         .await?;
 
     let mut results_by_tag: std::collections::HashMap<String, crate::api::CacheResolutionEntry> =
         std::collections::HashMap::new();
     for entry in resolution_result {
-        if require_server_signature && entry.status == "hit" {
+        if options.require_server_signature && entry.status == "hit" {
             verify_check_signature(&entry)?;
         }
         results_by_tag.insert(entry.tag.clone(), entry);
@@ -209,7 +209,7 @@ async fn execute_inner(
         .map(|r| r.requested_tag.clone())
         .collect();
 
-    if json_output {
+    if options.json_output {
         let summary = CheckSummary {
             workspace: workspace.clone(),
             total: check_results.len(),
@@ -258,7 +258,7 @@ async fn execute_inner(
         }
     }
 
-    if fail_on_miss && !missing_tags.is_empty() {
+    if options.fail_on_miss && !missing_tags.is_empty() {
         anyhow::bail!("Cache miss for tags: {}", missing_tags.join(", "));
     }
 

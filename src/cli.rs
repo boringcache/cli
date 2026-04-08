@@ -528,6 +528,12 @@ pub enum Commands {
 
         #[arg(short, long, help = "Output in JSON format")]
         json: bool,
+
+        #[arg(
+            long,
+            help = "Resolve and check only exact scoped tags (skip branch/default fallback candidates)"
+        )]
+        exact: bool,
     },
 
     #[command(name = "rm", visible_alias = "delete", about = "Delete cache tags")]

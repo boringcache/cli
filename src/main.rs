@@ -448,6 +448,7 @@ async fn main() -> Result<()> {
             no_git,
             fail_on_miss,
             json,
+            exact,
         } => {
             let tag_list: Vec<String> = tags
                 .split(',')
@@ -460,11 +461,14 @@ async fn main() -> Result<()> {
             commands::check::execute(
                 effective_workspace,
                 tag_list,
-                no_platform,
-                no_git,
-                fail_on_miss,
-                json,
-                require_server_signature,
+                commands::check::CheckOptions {
+                    no_platform,
+                    no_git,
+                    fail_on_miss,
+                    json_output: json,
+                    require_server_signature,
+                    exact,
+                },
             )
             .await
         }
