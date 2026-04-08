@@ -54,6 +54,14 @@ enum PendingPublishPollOutcome {
 }
 
 #[derive(Clone, Copy)]
+struct PendingPublishPollContext<'a> {
+    started_at: Instant,
+    pending_started_at: Instant,
+    shutdown_pending_policy: ShutdownPendingPublishPolicy<'a>,
+    accept_server_owned_pending_after_timeout: bool,
+}
+
+#[derive(Clone, Copy)]
 struct ShutdownPendingPublishPolicy<'a> {
     shutdown_requested: Option<&'a AtomicBool>,
     grace: Duration,
@@ -63,13 +71,13 @@ impl ShutdownPendingPublishPolicy<'_> {
     fn should_accept_server_owned_pending(
         self,
         metadata: &PendingMetadata,
-        started_at: Instant,
+        pending_started_at: Instant,
     ) -> bool {
         server_owned_pending_publish(metadata)
             && self
                 .shutdown_requested
                 .is_some_and(|flag| flag.load(Ordering::Acquire))
-            && started_at.elapsed() >= self.grace
+            && pending_started_at.elapsed() >= self.grace
     }
 }
 
@@ -574,10 +582,7 @@ impl ApiClient {
                     let request = request.header("Authorization", format!("Bearer {}", token));
                     match request.send().await {
                         Ok(response) => {
-                            if response.status() == StatusCode::TOO_MANY_REQUESTS
-                                || response.status() == StatusCode::SERVICE_UNAVAILABLE
-                                || response.status() == StatusCode::GATEWAY_TIMEOUT
-                            {
+                            if is_retryable_api_status(response.status()) {
                                 anyhow::bail!("Transient error: {}", response.status());
                             }
                             Ok((response, retry_count))
@@ -798,10 +803,7 @@ impl ApiClient {
                 async move {
                     match request.send().await {
                         Ok(response) => {
-                            if response.status() == StatusCode::TOO_MANY_REQUESTS
-                                || response.status() == StatusCode::SERVICE_UNAVAILABLE
-                                || response.status() == StatusCode::GATEWAY_TIMEOUT
-                            {
+                            if is_retryable_api_status(response.status()) {
                                 anyhow::bail!("Transient error: {}", response.status());
                             }
                             Ok(response)
@@ -1650,6 +1652,7 @@ impl ApiClient {
             shutdown_requested,
             grace: shutdown_pending_publish_grace(),
         };
+        let mut pending_started_at: Option<Instant> = None;
 
         let response: TagPointer = loop {
             let publish_result = self
@@ -1666,9 +1669,10 @@ impl ApiClient {
                     let Some(metadata) = pending_metadata_from_error(&error).cloned() else {
                         return Err(error);
                     };
+                    let pending_started_at = *pending_started_at.get_or_insert_with(Instant::now);
 
                     if shutdown_pending_policy
-                        .should_accept_server_owned_pending(&metadata, started_at)
+                        .should_accept_server_owned_pending(&metadata, pending_started_at)
                     {
                         return Ok(ConfirmPublishResult::Pending(metadata));
                     }
@@ -1684,15 +1688,14 @@ impl ApiClient {
                     }
 
                     if metadata.poll_path.is_some() || metadata.upload_session_id.is_some() {
+                        let poll_context = PendingPublishPollContext {
+                            started_at,
+                            pending_started_at,
+                            shutdown_pending_policy,
+                            accept_server_owned_pending_after_timeout,
+                        };
                         let poll_result = self
-                            .poll_pending_publish(
-                                workspace,
-                                tag,
-                                metadata,
-                                started_at,
-                                shutdown_pending_policy,
-                                accept_server_owned_pending_after_timeout,
-                            )
+                            .poll_pending_publish(workspace, tag, metadata, poll_context)
                             .await?;
                         match poll_result {
                             PendingPublishPollOutcome::Published(pointer) => break pointer,
@@ -1718,21 +1721,24 @@ impl ApiClient {
         workspace: &str,
         tag: &str,
         metadata: PendingMetadata,
-        started_at: Instant,
-        shutdown_pending_policy: ShutdownPendingPublishPolicy<'_>,
-        accept_server_owned_pending_after_timeout: bool,
+        context: PendingPublishPollContext<'_>,
     ) -> Result<PendingPublishPollOutcome> {
         let mut transient_poll_errors = 0u32;
 
         loop {
-            if shutdown_pending_policy.should_accept_server_owned_pending(&metadata, started_at) {
+            if context
+                .shutdown_pending_policy
+                .should_accept_server_owned_pending(&metadata, context.pending_started_at)
+            {
                 return Ok(PendingPublishPollOutcome::Pending(metadata));
             }
 
-            if started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT {
-                if shutdown_pending_policy.should_accept_server_owned_pending(&metadata, started_at)
+            if context.started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT {
+                if context
+                    .shutdown_pending_policy
+                    .should_accept_server_owned_pending(&metadata, context.pending_started_at)
                     || should_accept_server_owned_pending_after_timeout(
-                        accept_server_owned_pending_after_timeout,
+                        context.accept_server_owned_pending_after_timeout,
                         &metadata,
                     )
                 {
@@ -1747,7 +1753,7 @@ impl ApiClient {
                     status
                 }
                 Err(error) => {
-                    if started_at.elapsed() < PENDING_PUBLISH_POLL_TIMEOUT
+                    if context.started_at.elapsed() < PENDING_PUBLISH_POLL_TIMEOUT
                         && should_retry_pending_publish_poll_error(&error)
                     {
                         transient_poll_errors = transient_poll_errors.saturating_add(1);
@@ -1765,11 +1771,12 @@ impl ApiClient {
                         continue;
                     }
 
-                    if shutdown_pending_policy
-                        .should_accept_server_owned_pending(&metadata, started_at)
-                        || (started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT
+                    if context
+                        .shutdown_pending_policy
+                        .should_accept_server_owned_pending(&metadata, context.pending_started_at)
+                        || (context.started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT
                             && should_accept_server_owned_pending_after_timeout(
-                                accept_server_owned_pending_after_timeout,
+                                context.accept_server_owned_pending_after_timeout,
                                 &metadata,
                             ))
                     {
@@ -1814,8 +1821,9 @@ impl ApiClient {
                     );
                 }
                 _ => {
-                    if shutdown_pending_policy
-                        .should_accept_server_owned_pending(&metadata, started_at)
+                    if context
+                        .shutdown_pending_policy
+                        .should_accept_server_owned_pending(&metadata, context.pending_started_at)
                     {
                         return Ok(PendingPublishPollOutcome::Pending(metadata));
                     }
@@ -2447,6 +2455,18 @@ fn should_retry_pending_publish_poll_error(error: &anyhow::Error) -> bool {
         || lower.contains("gateway timeout")
         || lower.contains("request timeout")
         || lower.contains("timed out")
+}
+
+fn is_retryable_api_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
 }
 
 fn cache_confirm_response_from_tag_pointer(
@@ -3238,6 +3258,28 @@ mod tests {
     }
 
     #[test]
+    fn test_shutdown_pending_publish_policy_grace_starts_when_pending_is_observed() {
+        let shutdown_requested = AtomicBool::new(true);
+        let policy = ShutdownPendingPublishPolicy {
+            shutdown_requested: Some(&shutdown_requested),
+            grace: Duration::from_secs(5),
+        };
+        let metadata = PendingMetadata {
+            code: Some("pending_publish".to_string()),
+            upload_session_id: Some("session-1".to_string()),
+            publish_attempt_id: Some("attempt-1".to_string()),
+            poll_path: Some("/v2/workspaces/ns/ws/upload-sessions/session-1".to_string()),
+            retry_after_seconds: Some(1),
+        };
+
+        assert!(!policy.should_accept_server_owned_pending(&metadata, Instant::now()));
+        assert!(policy.should_accept_server_owned_pending(
+            &metadata,
+            Instant::now() - Duration::from_secs(5)
+        ));
+    }
+
+    #[test]
     fn test_pending_publish_poll_delay_respects_retry_after_floor_and_cap() {
         assert_eq!(
             pending_publish_poll_delay(Some(0)),
@@ -3312,6 +3354,17 @@ mod tests {
 
         let permanent = anyhow::anyhow!("Server returned 403 Forbidden");
         assert!(!should_retry_pending_publish_poll_error(&permanent));
+    }
+
+    #[test]
+    fn test_retryable_api_status_includes_transient_server_errors() {
+        assert!(is_retryable_api_status(StatusCode::REQUEST_TIMEOUT));
+        assert!(is_retryable_api_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_api_status(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_retryable_api_status(StatusCode::BAD_GATEWAY));
+        assert!(is_retryable_api_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_retryable_api_status(StatusCode::GATEWAY_TIMEOUT));
+        assert!(!is_retryable_api_status(StatusCode::FORBIDDEN));
     }
 
     #[test]

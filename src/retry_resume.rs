@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use crate::error::BoringCacheError;
 use crate::ui;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -52,7 +53,8 @@ impl RetryConfig {
             match operation_result {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    if crate::error::is_connection_error(&e)
+                    if e.downcast_ref::<BoringCacheError>()
+                        .is_some_and(|error| matches!(error, BoringCacheError::ConnectionError(_)))
                         || crate::error::is_non_retryable_error(&e)
                     {
                         return Err(e);
@@ -339,6 +341,33 @@ mod tests {
                 .to_string()
                 .contains("failed after 3 attempts")
         );
+    }
+
+    #[tokio::test]
+    async fn test_retry_retries_timeout_errors() {
+        let config = RetryConfig::new(false);
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let call_count_clone = call_count.clone();
+        let result = config
+            .retry_with_backoff("test operation", move || {
+                let count = call_count_clone.clone();
+                async move {
+                    let current_count = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    if current_count < 3 {
+                        Err::<i32, anyhow::Error>(anyhow::anyhow!(
+                            "Request timeout: error sending request for url"
+                        ))
+                    } else {
+                        Ok::<i32, anyhow::Error>(42)
+                    }
+                }
+            })
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[test]
