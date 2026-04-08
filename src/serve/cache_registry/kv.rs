@@ -30,7 +30,7 @@ use crate::serve::state::{
 use crate::upload_receipts::try_commit_blob_receipts;
 
 use super::error::RegistryError;
-use super::kv_publish::{BlobUploadStats, upload_blobs};
+use super::kv_publish::{BlobUploadStats, partial_blob_upload_stats, upload_blobs};
 
 const KV_MISS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 const KV_CONFLICT_BACKOFF_MS: u64 = 5_000;
@@ -78,7 +78,7 @@ const KV_VERSION_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 const KV_VERSION_POLL_JITTER_MS: u64 = 500;
 const KV_VERSION_REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
 const KV_PENDING_PUBLISH_HANDOFF_DIR: &str = "kv-pending-publish";
-const KV_PENDING_PUBLISH_HANDOFF_VERSION: u32 = 1;
+const KV_PENDING_PUBLISH_HANDOFF_VERSION: u32 = 2;
 const KV_PENDING_PUBLISH_HANDOFF_MAX_AGE: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
 const KV_PENDING_PUBLISH_HANDOFF_RECONCILE_TIMEOUT: std::time::Duration =
@@ -103,6 +103,15 @@ struct KvPendingPublishHandoff {
     blob_order: Vec<BlobDescriptor>,
     root_pending: Option<PendingMetadata>,
     pending_alias_tags: bool,
+    pending_blob_paths: HashMap<String, PathBuf>,
+    pending_blob_sequences: HashMap<String, u64>,
+}
+
+struct PendingPublishHandoffPersist<'a> {
+    root_pending: Option<&'a PendingMetadata>,
+    pending_alias_tags: bool,
+    pending_blob_paths: Option<&'a HashMap<String, PathBuf>>,
+    pending_blob_sequences: Option<&'a HashMap<String, u64>>,
 }
 
 fn kv_trace_enabled() -> bool {
@@ -827,10 +836,15 @@ async fn persist_kv_pending_publish_handoff(
     entries: &BTreeMap<String, BlobDescriptor>,
     blob_order: &[BlobDescriptor],
     cache_entry_id: &str,
-    root_pending: Option<&PendingMetadata>,
-    pending_alias_tags: bool,
+    pending: PendingPublishHandoffPersist<'_>,
 ) {
-    if root_pending.is_none() && !pending_alias_tags {
+    let pending_blob_paths = pending.pending_blob_paths.cloned().unwrap_or_default();
+    let pending_blob_sequences = pending.pending_blob_sequences.cloned().unwrap_or_default();
+
+    if pending.root_pending.is_none()
+        && !pending.pending_alias_tags
+        && pending_blob_paths.is_empty()
+    {
         clear_kv_pending_publish_handoff(state).await;
         return;
     }
@@ -844,8 +858,10 @@ async fn persist_kv_pending_publish_handoff(
         cache_entry_id: cache_entry_id.to_string(),
         entries: entries.clone(),
         blob_order: blob_order.to_vec(),
-        root_pending: root_pending.cloned(),
-        pending_alias_tags,
+        root_pending: pending.root_pending.cloned(),
+        pending_alias_tags: pending.pending_alias_tags,
+        pending_blob_paths,
+        pending_blob_sequences,
     };
 
     let path = kv_pending_publish_handoff_path(state);
@@ -892,10 +908,11 @@ async fn persist_kv_pending_publish_handoff(
     }
 
     eprintln!(
-        "KV pending publish handoff persisted: cache_entry_id={} root_pending={} alias_pending={}",
+        "KV pending publish handoff persisted: cache_entry_id={} root_pending={} alias_pending={} local_pending_blobs={}",
         cache_entry_id,
-        root_pending.is_some(),
-        pending_alias_tags
+        pending.root_pending.is_some(),
+        pending.pending_alias_tags,
+        handoff.pending_blob_paths.len()
     );
 }
 
@@ -1005,6 +1022,24 @@ pub(crate) async fn restore_kv_pending_publish_handoff(state: &AppState) {
         return;
     };
 
+    if !handoff.pending_blob_paths.is_empty() {
+        let restored_cleanup_paths = {
+            let mut pending = state.kv_pending.write().await;
+            pending.restore(
+                handoff.entries.clone(),
+                handoff.pending_blob_paths.clone(),
+                handoff.pending_blob_sequences.clone(),
+            )
+        };
+        cleanup_paths(restored_cleanup_paths).await;
+        let _ = enqueue_replication_flush_hint(state, true, false);
+        eprintln!(
+            "KV startup: restored pending upload handoff entries={} blobs={}",
+            handoff.entries.len(),
+            handoff.pending_blob_paths.len()
+        );
+    }
+
     if let Some(_pending) = handoff.root_pending.as_ref() {
         {
             let mut published = state.kv_published_index.write().await;
@@ -1024,7 +1059,7 @@ pub(crate) async fn restore_kv_pending_publish_handoff(state: &AppState) {
             handoff.cache_entry_id,
             handoff.entries.len()
         );
-    } else {
+    } else if handoff.pending_alias_tags {
         eprintln!(
             "KV startup: restored alias visibility handoff cache_entry_id={}",
             handoff.cache_entry_id
@@ -1032,9 +1067,11 @@ pub(crate) async fn restore_kv_pending_publish_handoff(state: &AppState) {
     }
 
     let reconcile_state = state.clone();
-    tokio::spawn(async move {
-        reconcile_kv_pending_publish_handoff(reconcile_state, handoff).await;
-    });
+    if handoff.root_pending.is_some() || handoff.pending_alias_tags {
+        tokio::spawn(async move {
+            reconcile_kv_pending_publish_handoff(reconcile_state, handoff).await;
+        });
+    }
 }
 
 pub(crate) async fn should_skip_shutdown_tag_visibility_wait(
@@ -1044,6 +1081,14 @@ pub(crate) async fn should_skip_shutdown_tag_visibility_wait(
     read_kv_pending_publish_handoff(state)
         .await
         .is_some_and(|handoff| handoff.cache_entry_id == expected_cache_entry_id)
+}
+
+pub(crate) async fn should_preserve_runtime_temp_dir_for_shutdown_handoff(
+    state: &AppState,
+) -> bool {
+    read_kv_pending_publish_handoff(state)
+        .await
+        .is_some_and(|handoff| !handoff.pending_blob_paths.is_empty())
 }
 
 async fn lookup_published_blob(
@@ -2193,6 +2238,7 @@ pub(crate) enum FlushResult {
     Conflict,
     Error,
     Permanent,
+    Deferred,
 }
 
 #[derive(Debug)]
@@ -2569,14 +2615,38 @@ async fn flush_kv_index_with_mode(state: &AppState, flush_mode: FlushMode) -> Fl
         }
         Err(FlushError::Transient(msg)) => {
             eprintln!("KV batch flush failed: {msg}");
-            let mut pending = state.kv_pending.write().await;
-            let paths_to_cleanup =
-                pending.restore(pending_entries, pending_blob_paths, pending_blob_sequences);
-            drop(pending);
-            cleanup_paths(paths_to_cleanup).await;
-            let (base_ms, jitter_ms) = transient_backoff_window(&msg);
-            set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
-            FlushResult::Error
+            let should_defer_to_restart_handoff = flush_mode == FlushMode::Shutdown
+                || state.shutdown_requested.load(Ordering::Acquire);
+            if should_defer_to_restart_handoff {
+                let blob_order = pending_entries.values().cloned().collect::<Vec<_>>();
+                persist_kv_pending_publish_handoff(
+                    state,
+                    &pending_entries,
+                    &blob_order,
+                    "",
+                    PendingPublishHandoffPersist {
+                        root_pending: None,
+                        pending_alias_tags: false,
+                        pending_blob_paths: Some(&pending_blob_paths),
+                        pending_blob_sequences: Some(&pending_blob_sequences),
+                    },
+                )
+                .await;
+                eprintln!(
+                    "KV batch flush: deferred pending upload handoff with {entry_count} entries ({} blobs)",
+                    pending_blob_paths.len()
+                );
+                FlushResult::Deferred
+            } else {
+                let mut pending = state.kv_pending.write().await;
+                let paths_to_cleanup =
+                    pending.restore(pending_entries, pending_blob_paths, pending_blob_sequences);
+                drop(pending);
+                cleanup_paths(paths_to_cleanup).await;
+                let (base_ms, jitter_ms) = transient_backoff_window(&msg);
+                set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
+                FlushResult::Error
+            }
         }
         Err(FlushError::Permanent(msg)) => {
             eprintln!("KV batch flush dropped permanently: {msg}");
@@ -3821,6 +3891,29 @@ async fn do_flush(
                     }
                 }
                 Err(error) => {
+                    if let Some(partial_stats) = partial_blob_upload_stats(&error) {
+                        if let Err(commit_error) = try_commit_blob_receipts(
+                            &state.api_client,
+                            &state.workspace,
+                            save_response.upload_session_id.as_deref(),
+                            partial_stats.uploaded_receipts.clone(),
+                        )
+                        .await
+                        {
+                            log::warn!(
+                                "KV flush: exists=true partial blob receipt commit failed: {commit_error:#}"
+                            );
+                        }
+                        if partial_stats.uploaded_count > 0 || partial_stats.missing_local_count > 0
+                        {
+                            eprintln!(
+                                "KV flush: exists=true preserved partial blob uploads uploaded={} already_present={} missing_local={}",
+                                partial_stats.uploaded_count,
+                                partial_stats.already_present_count,
+                                partial_stats.missing_local_count
+                            );
+                        }
+                    }
                     log::warn!("KV flush: exists=true blob reconcile failed: {error}");
                 }
             }
@@ -3858,8 +3951,12 @@ async fn do_flush(
             &entries,
             &merged_blob_order,
             &save_response.cache_entry_id,
-            kv_confirm_pending_metadata(&confirm_outcome),
-            pending_alias_count > 0,
+            PendingPublishHandoffPersist {
+                root_pending: kv_confirm_pending_metadata(&confirm_outcome),
+                pending_alias_tags: pending_alias_count > 0,
+                pending_blob_paths: None,
+                pending_blob_sequences: None,
+            },
         )
         .await;
 
@@ -3915,11 +4012,42 @@ async fn do_flush(
         expected_manifest_size,
         |save_response| {
             let cache_entry_id = save_response.cache_entry_id.clone();
+            let upload_session_id = save_response.upload_session_id.clone();
             async move {
                 let upload_stats = if !blobs.is_empty() {
-                    upload_blobs(state, &cache_entry_id, &blobs, &filtered_pending_blob_paths)
+                    match upload_blobs(state, &cache_entry_id, &blobs, &filtered_pending_blob_paths)
                         .await
-                        .map_err(|e| classify_flush_error(&e, "blob upload failed"))?
+                    {
+                        Ok(upload_stats) => upload_stats,
+                        Err(error) => {
+                            if let Some(partial_stats) = partial_blob_upload_stats(&error) {
+                                if let Err(commit_error) = try_commit_blob_receipts(
+                                    &state.api_client,
+                                    &state.workspace,
+                                    upload_session_id.as_deref(),
+                                    partial_stats.uploaded_receipts.clone(),
+                                )
+                                .await
+                                {
+                                    log::warn!(
+                                        "KV flush: partial blob receipt commit failed: {commit_error:#}"
+                                    );
+                                }
+                                if partial_stats.uploaded_count > 0
+                                    || partial_stats.missing_local_count > 0
+                                {
+                                    eprintln!(
+                                        "KV flush: preserved partial blob uploads uploaded={} already_present={} missing_local={}",
+                                        partial_stats.uploaded_count,
+                                        partial_stats.already_present_count,
+                                        partial_stats.missing_local_count
+                                    );
+                                }
+                                *publish_upload_stats.lock().unwrap() = partial_stats;
+                            }
+                            return Err(classify_flush_error(&error, "blob upload failed"));
+                        }
+                    }
                 } else {
                     BlobUploadStats::default()
                 };
@@ -3985,8 +4113,12 @@ async fn do_flush(
         &entries,
         &merged_blob_order,
         &save_response.cache_entry_id,
-        kv_confirm_pending_metadata(&confirm_outcome),
-        pending_alias_count > 0,
+        PendingPublishHandoffPersist {
+            root_pending: kv_confirm_pending_metadata(&confirm_outcome),
+            pending_alias_tags: pending_alias_count > 0,
+            pending_blob_paths: None,
+            pending_blob_sequences: None,
+        },
     )
     .await;
 
@@ -5093,10 +5225,12 @@ mod tests {
     async fn shutdown_confirm_hands_off_pending_publish() {
         let _guard = test_env::lock();
         let _env_guard = TestEnvGuard::capture(&["BORINGCACHE_API_URL"]);
+        test_env::set_var("BORINGCACHE_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS", "0");
         if !networking_available() {
             eprintln!(
                 "skipping shutdown_confirm_hands_off_pending_publish: networking disabled in sandbox"
             );
+            test_env::remove_var("BORINGCACHE_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS");
             return;
         }
 
@@ -5153,9 +5287,107 @@ mod tests {
             "shutdown confirm should hand off pending publish"
         );
 
+        test_env::remove_var("BORINGCACHE_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS");
         capabilities.assert_async().await;
         pointer_initial.assert_async().await;
         publish.assert_async().await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn shutdown_confirm_waits_for_pending_publish_completion_within_grace() {
+        let _guard = test_env::lock();
+        let _env_guard = TestEnvGuard::capture(&["BORINGCACHE_API_URL"]);
+        test_env::set_var("BORINGCACHE_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS", "10");
+        if !networking_available() {
+            eprintln!(
+                "skipping shutdown_confirm_waits_for_pending_publish_completion_within_grace: networking disabled in sandbox"
+            );
+            test_env::remove_var("BORINGCACHE_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS");
+            return;
+        }
+
+        let mut server = Server::new_async().await;
+        let (state, _temp_home) = setup_state(&server).await;
+        state.shutdown_requested.store(true, Ordering::Release);
+
+        let capabilities = server
+            .mock("GET", "/v2/capabilities")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"features":{"tag_publish_v2":true,"pending_publish_status_v2":true,"upload_sessions_v2":true,"cas_publish_bootstrap_if_match":"0"}}"#,
+            )
+            .create_async()
+            .await;
+        let pointer_initial = server
+            .mock(
+                "GET",
+                "/v2/workspaces/org/repo/caches/tags/registry/pointer",
+            )
+            .match_header("authorization", "Bearer test-token")
+            .with_status(404)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let pointer_after_publish = server
+            .mock(
+                "GET",
+                "/v2/workspaces/org/repo/caches/tags/registry/pointer",
+            )
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"version":"1","cache_entry_id":"entry-1","status":"published"}"#)
+            .create_async()
+            .await;
+        let publish = server
+            .mock("PUT", "/v2/workspaces/org/repo/caches/tags/registry/publish")
+            .match_header("authorization", "Bearer test-token")
+            .match_header("if-match", "0")
+            .match_header("x-boringcache-pending-publish-poll", "1")
+            .match_header("content-type", Matcher::Regex("application/json".to_string()))
+            .with_status(423)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"success":false,"error":"upload not yet fully verified in storage — retry after upload completes","code":"pending_publish","details":{"upload_session_id":"session-1","publish_attempt_id":"attempt-1","retry_after_seconds":1,"poll_path":"/v2/workspaces/org/repo/upload-sessions/session-1"}}"#,
+            )
+            .create_async()
+            .await;
+        let status = server
+            .mock("GET", "/v2/workspaces/org/repo/upload-sessions/session-1")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"upload_session_id":"session-1","cache_entry_id":"entry-1","state":"published","publish_attempt_id":"attempt-1","publish_state":"published"}"#,
+            )
+            .create_async()
+            .await;
+
+        let outcome = confirm_kv_flush(
+            &state,
+            "entry-1",
+            &confirm_request_for("registry"),
+            FlushMode::Shutdown,
+        )
+        .await
+        .expect("shutdown flush should complete publish when it settles within grace");
+
+        assert!(
+            matches!(outcome, KvConfirmOutcome::Published),
+            "shutdown confirm should prefer published over handoff within grace"
+        );
+
+        test_env::remove_var("BORINGCACHE_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS");
+        capabilities.assert_async().await;
+        pointer_initial.assert_async().await;
+        pointer_after_publish.assert_async().await;
+        publish.assert_async().await;
+        status.assert_async().await;
     }
 
     #[tokio::test]
@@ -5186,8 +5418,12 @@ mod tests {
             &entries,
             &entries.values().cloned().collect::<Vec<_>>(),
             "entry-1",
-            Some(&pending),
-            false,
+            PendingPublishHandoffPersist {
+                root_pending: Some(&pending),
+                pending_alias_tags: false,
+                pending_blob_paths: None,
+                pending_blob_sequences: None,
+            },
         )
         .await;
 
@@ -5230,8 +5466,12 @@ mod tests {
             &entries,
             &entries.values().cloned().collect::<Vec<_>>(),
             "entry-1",
-            Some(&pending),
-            false,
+            PendingPublishHandoffPersist {
+                root_pending: Some(&pending),
+                pending_alias_tags: false,
+                pending_blob_paths: None,
+                pending_blob_sequences: None,
+            },
         )
         .await;
 
@@ -5260,12 +5500,64 @@ mod tests {
         assert!(!should_skip_shutdown_tag_visibility_wait(&state, "entry-1").await);
     }
 
+    #[tokio::test]
+    async fn restore_pending_upload_handoff_rehydrates_pending_store() {
+        let _guard = test_env::lock();
+        let _env_guard = TestEnvGuard::capture(&["BORINGCACHE_API_URL"]);
+        let server = Server::new_async().await;
+        let (state, _temp_home) = setup_state(&server).await;
+
+        let digest = format!("sha256:{}", "c".repeat(64));
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "scoped/key".to_string(),
+            BlobDescriptor {
+                digest: digest.clone(),
+                size_bytes: 8,
+            },
+        );
+        let blob_order = entries.values().cloned().collect::<Vec<_>>();
+        let blob_path = state.kv_blob_temp_dir.join("pending-upload.bin");
+        tokio::fs::write(&blob_path, b"blob-data")
+            .await
+            .expect("write pending blob");
+        let pending_blob_paths = HashMap::from([(digest.clone(), blob_path.clone())]);
+        let pending_blob_sequences = HashMap::from([(digest.clone(), 7u64)]);
+
+        persist_kv_pending_publish_handoff(
+            &state,
+            &entries,
+            &blob_order,
+            "",
+            PendingPublishHandoffPersist {
+                root_pending: None,
+                pending_alias_tags: false,
+                pending_blob_paths: Some(&pending_blob_paths),
+                pending_blob_sequences: Some(&pending_blob_sequences),
+            },
+        )
+        .await;
+
+        assert!(should_preserve_runtime_temp_dir_for_shutdown_handoff(&state).await);
+
+        restore_kv_pending_publish_handoff(&state).await;
+
+        let pending = state.kv_pending.read().await;
+        let blob = pending.get("scoped/key").expect("restored pending entry");
+        assert_eq!(blob.digest, digest);
+        assert_eq!(pending.entry_count(), 1);
+        assert_eq!(pending.blob_count(), 1);
+        assert_eq!(pending.blob_path(&digest), Some(&blob_path));
+        drop(pending);
+    }
+
     #[test]
     fn should_clear_flushing_after_flush_skips_ok_path() {
         assert!(!should_clear_flushing_after_flush(&FlushResult::Ok));
         assert!(should_clear_flushing_after_flush(&FlushResult::Conflict));
         assert!(should_clear_flushing_after_flush(&FlushResult::Error));
         assert!(should_clear_flushing_after_flush(&FlushResult::Permanent));
+        assert!(should_clear_flushing_after_flush(&FlushResult::Deferred));
     }
 
     #[test]

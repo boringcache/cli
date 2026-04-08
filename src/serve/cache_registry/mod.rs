@@ -199,6 +199,7 @@ pub(crate) use kv::poll_tag_version_loop;
 pub(crate) use kv::prefetch_manifest_blobs;
 pub(crate) use kv::refresh_kv_index;
 pub(crate) use kv::restore_kv_pending_publish_handoff;
+pub(crate) use kv::should_preserve_runtime_temp_dir_for_shutdown_handoff;
 pub(crate) use kv::should_skip_shutdown_tag_visibility_wait;
 pub(crate) use kv::try_schedule_flush;
 

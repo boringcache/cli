@@ -31,6 +31,9 @@ const API_VERSION_V2: &str = "v2";
 const FALLBACK_API_BASE_URL: &str = "https://api.boringcache.com";
 const CONFIRM_PUBLISH_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_CONFIRM_PUBLISH_TIMEOUT_SECS";
 const DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS: u64 = 10;
+const SHUTDOWN_PENDING_PUBLISH_GRACE_SECS_ENV: &str =
+    "BORINGCACHE_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS";
+const DEFAULT_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS: u64 = 10;
 const TRANSFER_CONNECT_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_TRANSFER_CONNECT_TIMEOUT_SECS";
 const DEFAULT_TRANSFER_CONNECT_TIMEOUT_SECS: u64 = 10;
 const PENDING_PUBLISH_POLL_TIMEOUT: Duration = Duration::from_secs(180);
@@ -48,6 +51,26 @@ pub enum ConfirmPublishResult {
 enum PendingPublishPollOutcome {
     Published(TagPointer),
     Pending(PendingMetadata),
+}
+
+#[derive(Clone, Copy)]
+struct ShutdownPendingPublishPolicy<'a> {
+    shutdown_requested: Option<&'a AtomicBool>,
+    grace: Duration,
+}
+
+impl ShutdownPendingPublishPolicy<'_> {
+    fn should_accept_server_owned_pending(
+        self,
+        metadata: &PendingMetadata,
+        started_at: Instant,
+    ) -> bool {
+        server_owned_pending_publish(metadata)
+            && self
+                .shutdown_requested
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+            && started_at.elapsed() >= self.grace
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1623,6 +1646,10 @@ impl ApiClient {
             },
         };
         let started_at = Instant::now();
+        let shutdown_pending_policy = ShutdownPendingPublishPolicy {
+            shutdown_requested,
+            grace: shutdown_pending_publish_grace(),
+        };
 
         let response: TagPointer = loop {
             let publish_result = self
@@ -1640,7 +1667,9 @@ impl ApiClient {
                         return Err(error);
                     };
 
-                    if should_accept_server_owned_pending(shutdown_requested, &metadata) {
+                    if shutdown_pending_policy
+                        .should_accept_server_owned_pending(&metadata, started_at)
+                    {
                         return Ok(ConfirmPublishResult::Pending(metadata));
                     }
 
@@ -1661,7 +1690,7 @@ impl ApiClient {
                                 tag,
                                 metadata,
                                 started_at,
-                                shutdown_requested,
+                                shutdown_pending_policy,
                                 accept_server_owned_pending_after_timeout,
                             )
                             .await?;
@@ -1690,18 +1719,18 @@ impl ApiClient {
         tag: &str,
         metadata: PendingMetadata,
         started_at: Instant,
-        shutdown_requested: Option<&AtomicBool>,
+        shutdown_pending_policy: ShutdownPendingPublishPolicy<'_>,
         accept_server_owned_pending_after_timeout: bool,
     ) -> Result<PendingPublishPollOutcome> {
         let mut transient_poll_errors = 0u32;
 
         loop {
-            if should_accept_server_owned_pending(shutdown_requested, &metadata) {
+            if shutdown_pending_policy.should_accept_server_owned_pending(&metadata, started_at) {
                 return Ok(PendingPublishPollOutcome::Pending(metadata));
             }
 
             if started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT {
-                if should_accept_server_owned_pending(shutdown_requested, &metadata)
+                if shutdown_pending_policy.should_accept_server_owned_pending(&metadata, started_at)
                     || should_accept_server_owned_pending_after_timeout(
                         accept_server_owned_pending_after_timeout,
                         &metadata,
@@ -1736,7 +1765,8 @@ impl ApiClient {
                         continue;
                     }
 
-                    if should_accept_server_owned_pending(shutdown_requested, &metadata)
+                    if shutdown_pending_policy
+                        .should_accept_server_owned_pending(&metadata, started_at)
                         || (started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT
                             && should_accept_server_owned_pending_after_timeout(
                                 accept_server_owned_pending_after_timeout,
@@ -1784,7 +1814,9 @@ impl ApiClient {
                     );
                 }
                 _ => {
-                    if should_accept_server_owned_pending(shutdown_requested, &metadata) {
+                    if shutdown_pending_policy
+                        .should_accept_server_owned_pending(&metadata, started_at)
+                    {
                         return Ok(PendingPublishPollOutcome::Pending(metadata));
                     }
 
@@ -2362,14 +2394,6 @@ fn server_owned_pending_publish(metadata: &PendingMetadata) -> bool {
     metadata.poll_path.is_some() || metadata.upload_session_id.is_some()
 }
 
-fn should_accept_server_owned_pending(
-    shutdown_requested: Option<&AtomicBool>,
-    metadata: &PendingMetadata,
-) -> bool {
-    server_owned_pending_publish(metadata)
-        && shutdown_requested.is_some_and(|flag| flag.load(Ordering::Acquire))
-}
-
 fn should_accept_server_owned_pending_after_timeout(
     accept_server_owned_pending_after_timeout: bool,
     metadata: &PendingMetadata,
@@ -2551,6 +2575,14 @@ fn confirm_publish_request_timeout() -> Duration {
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS);
+    Duration::from_secs(seconds)
+}
+
+fn shutdown_pending_publish_grace() -> Duration {
+    let seconds = std::env::var(SHUTDOWN_PENDING_PUBLISH_GRACE_SECS_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS);
     Duration::from_secs(seconds)
 }
 
@@ -3295,6 +3327,24 @@ mod tests {
         assert_eq!(confirm_publish_request_timeout(), Duration::from_secs(7));
 
         test_env::remove_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV);
+    }
+
+    #[test]
+    fn test_shutdown_pending_publish_grace_uses_default_and_env_override() {
+        let _guard = test_env::lock();
+        test_env::remove_var(SHUTDOWN_PENDING_PUBLISH_GRACE_SECS_ENV);
+        assert_eq!(
+            shutdown_pending_publish_grace(),
+            Duration::from_secs(DEFAULT_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS)
+        );
+
+        test_env::set_var(SHUTDOWN_PENDING_PUBLISH_GRACE_SECS_ENV, "0");
+        assert_eq!(shutdown_pending_publish_grace(), Duration::from_secs(0));
+
+        test_env::set_var(SHUTDOWN_PENDING_PUBLISH_GRACE_SECS_ENV, "3");
+        assert_eq!(shutdown_pending_publish_grace(), Duration::from_secs(3));
+
+        test_env::remove_var(SHUTDOWN_PENDING_PUBLISH_GRACE_SECS_ENV);
     }
 
     #[test]

@@ -58,6 +58,13 @@ fn new_runtime_temp_dir() -> Result<PathBuf> {
 }
 
 async fn cleanup_runtime_temp_dir(state: &AppState) {
+    if cache_registry::should_preserve_runtime_temp_dir_for_shutdown_handoff(state).await {
+        eprintln!(
+            "Shutdown: preserving runtime temp dir {} for pending upload handoff",
+            state.runtime_temp_dir.display()
+        );
+        return;
+    }
     if let Err(error) = tokio::fs::remove_dir_all(&state.runtime_temp_dir).await
         && error.kind() != std::io::ErrorKind::NotFound
     {
@@ -792,6 +799,11 @@ async fn process_replication_work(state: &AppState, urgent: bool, consecutive_fa
                 .kv_replication_flush_permanent
                 .fetch_add(1, Ordering::AcqRel);
         }
+        cache_registry::FlushResult::Deferred => {
+            state
+                .kv_replication_flush_error
+                .fetch_add(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -800,7 +812,7 @@ fn update_consecutive_failures_on_flush_result(
     consecutive_failures: &mut u32,
 ) {
     match result {
-        cache_registry::FlushResult::Error => {
+        cache_registry::FlushResult::Error | cache_registry::FlushResult::Deferred => {
             *consecutive_failures = consecutive_failures.saturating_add(1);
         }
         cache_registry::FlushResult::Ok
@@ -1042,6 +1054,12 @@ async fn flush_pending_on_shutdown(state: &AppState) {
                     cache_registry::FlushResult::Permanent => {
                         let mut gate = state.kv_next_flush_at.write().await;
                         *gate = None;
+                    }
+                    cache_registry::FlushResult::Deferred => {
+                        let mut gate = state.kv_next_flush_at.write().await;
+                        *gate = None;
+                        eprintln!("Shutdown: deferred pending upload flush via restart handoff");
+                        return;
                     }
                     cache_registry::FlushResult::Conflict | cache_registry::FlushResult::Error => {}
                 }
