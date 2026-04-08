@@ -11,7 +11,7 @@ const KV_BLOB_UPLOAD_RETRY_BASE_MS: u64 = 300;
 const KV_BLOB_UPLOAD_RETRY_MAX_MS: u64 = 1_500;
 const KV_BLOB_UPLOAD_MAX_CONCURRENCY: usize = 64;
 const KV_BLOB_UPLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_KV_BLOB_UPLOAD_CONCURRENCY";
-const KV_BLOB_UPLOAD_INITIAL_CONCURRENCY: usize = 8;
+const KV_BLOB_UPLOAD_INITIAL_CONCURRENCY: usize = 16;
 
 #[derive(Default, Clone)]
 pub(super) struct BlobUploadStats {
@@ -418,7 +418,7 @@ mod tests {
         let _guard = test_env::lock();
         test_env::set_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV, "0");
 
-        assert_eq!(kv_blob_upload_concurrency(12), (8, 12));
+        assert_eq!(kv_blob_upload_concurrency(12), (12, 12));
 
         test_env::remove_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV);
     }
@@ -430,6 +430,6 @@ mod tests {
 
         assert_eq!(kv_blob_upload_concurrency(0), (1, 1));
         assert_eq!(kv_blob_upload_concurrency(4), (4, 4));
-        assert_eq!(kv_blob_upload_concurrency(12), (8, 12));
+        assert_eq!(kv_blob_upload_concurrency(12), (12, 12));
     }
 }

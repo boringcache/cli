@@ -131,17 +131,20 @@ impl SystemResources {
 
         if is_ci {
             let ci_cap = if self.available_memory_gb >= 12.0 {
-                8
+                12
             } else if self.available_memory_gb >= 8.0 {
-                6
+                8
             } else {
                 4
             };
             concurrency = concurrency.min(ci_cap);
             if self.cpu_cores <= 2 {
                 concurrency = concurrency.min(2);
-            } else if self.cpu_cores <= 4 {
-                concurrency = concurrency.min(8);
+            } else if matches!(self.disk_type, DiskType::NvmeSsd)
+                && self.available_memory_gb >= 12.0
+                && self.cpu_cores >= 4
+            {
+                concurrency = concurrency.max(12);
             }
         } else {
             let cpu_headroom = (self.cpu_cores.saturating_sub(1)).max(1);
@@ -333,7 +336,7 @@ mod tests {
             disk_speed_estimate_mb_s: 2_000.0,
         };
 
-        assert_eq!(resources.recommended_download_concurrency(true), 8);
+        assert_eq!(resources.recommended_download_concurrency(true), 12);
     }
 
     #[test]

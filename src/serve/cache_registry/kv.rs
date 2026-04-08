@@ -61,7 +61,7 @@ const KV_BLOB_PRELOAD_MAX_BLOBS: usize = 2_000;
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 const KV_BLOB_PRELOAD_MAX_BLOBS_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_BATCH_MAX";
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_MAX_BLOB_BYTES";
-const KV_STARTUP_PREFETCH_MAX_BLOBS: usize = 256;
+const KV_STARTUP_PREFETCH_MAX_BLOBS: usize = 2_048;
 const KV_STARTUP_PREFETCH_MIN_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 const KV_STARTUP_PREFETCH_MAX_BLOBS_ENV: &str = "BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS";
@@ -2840,7 +2840,7 @@ fn kv_startup_prefetch_max_blobs() -> usize {
 
 fn kv_startup_prefetch_max_total_bytes(cache_max: u64) -> u64 {
     parse_positive_u64_env(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV).unwrap_or_else(|| {
-        cache_max.saturating_div(8).clamp(
+        cache_max.saturating_div(4).clamp(
             KV_STARTUP_PREFETCH_MIN_TOTAL_BYTES,
             KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES,
         )

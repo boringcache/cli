@@ -977,7 +977,7 @@ impl UploadSessionStore {
     }
 }
 
-const DEFAULT_MAX_SPOOL_BYTES: u64 = 512 * 1024 * 1024;
+const DEFAULT_MAX_SPOOL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_SPOOL_BYTES_ENV: &str = "BORINGCACHE_MAX_SPOOL_BYTES";
 
 pub fn max_spool_bytes() -> u64 {
@@ -988,7 +988,7 @@ pub fn max_spool_bytes() -> u64 {
         .unwrap_or(DEFAULT_MAX_SPOOL_BYTES)
 }
 
-const DEFAULT_FLUSH_BLOB_THRESHOLD: usize = 500;
+const DEFAULT_FLUSH_BLOB_THRESHOLD: usize = 2_000;
 const FLUSH_BLOB_THRESHOLD_ENV: &str = "BORINGCACHE_FLUSH_BLOB_THRESHOLD";
 
 pub fn flush_blob_threshold() -> usize {

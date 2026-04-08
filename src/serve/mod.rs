@@ -849,7 +849,13 @@ fn blob_read_cache_max_bytes() -> u64 {
     let resources = crate::platform::resources::SystemResources::detect();
     let is_ci = std::env::var("CI").is_ok();
     let auto_max = match resources.memory_strategy {
-        crate::platform::resources::MemoryStrategy::Balanced => 1024_u64 * 1024 * 1024,
+        crate::platform::resources::MemoryStrategy::Balanced => {
+            if is_ci {
+                DEFAULT_BLOB_READ_CACHE_MAX_BYTES
+            } else {
+                1024_u64 * 1024 * 1024
+            }
+        }
         crate::platform::resources::MemoryStrategy::Aggressive => {
             if is_ci {
                 DEFAULT_BLOB_READ_CACHE_MAX_BYTES.saturating_mul(2)
@@ -922,7 +928,7 @@ fn blob_prefetch_concurrency(download_concurrency: usize) -> (usize, bool) {
     if let Some(configured) = parse_positive_usize_env(CACHE_PREFETCH_CONCURRENCY_ENV) {
         return (configured.min(max_download), true);
     }
-    let adaptive = (max_download / 4).clamp(2, 16).min(max_download);
+    let adaptive = (max_download / 2).clamp(2, 16).min(max_download);
     (adaptive.max(1), false)
 }
 
@@ -1320,9 +1326,9 @@ mod tests {
     }
 
     #[test]
-    fn blob_prefetch_concurrency_defaults_to_quarter_of_downloads() {
-        assert_eq!(blob_prefetch_concurrency(8), (2, false));
-        assert_eq!(blob_prefetch_concurrency(16), (4, false));
+    fn blob_prefetch_concurrency_defaults_to_half_of_downloads() {
+        assert_eq!(blob_prefetch_concurrency(8), (4, false));
+        assert_eq!(blob_prefetch_concurrency(16), (8, false));
     }
 
     #[test]
