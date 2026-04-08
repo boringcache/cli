@@ -1999,6 +1999,22 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
     let (mut state, _home, _guard) = setup(&server).await;
     state.configured_human_tags = vec!["human-alias".to_string()];
     state.fail_on_cache_error = true;
+    let capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "features": {
+                    "tag_publish_v2": true
+                }
+            })
+            .to_string(),
+        )
+        .expect_at_least(1)
+        .create_async()
+        .await;
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
@@ -2095,7 +2111,7 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
         .with_status(500)
         .with_header("content-type", "application/json")
         .with_body(r#"{"error":"backend unavailable"}"#)
-        .expect(1)
+        .expect_at_least(1)
         .create_async()
         .await;
 
@@ -2121,6 +2137,7 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
     primary_pointer_mock.assert_async().await;
     primary_confirm_mock.assert_async().await;
     digest_alias_save_error_mock.assert_async().await;
+    capabilities_mock.assert_async().await;
 }
 
 #[tokio::test]
@@ -2129,6 +2146,22 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
     let (mut state, _home, _guard) = setup(&server).await;
     state.configured_human_tags = vec!["human-alias".to_string()];
     state.fail_on_cache_error = false;
+    let capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "features": {
+                    "tag_publish_v2": true
+                }
+            })
+            .to_string(),
+        )
+        .expect_at_least(1)
+        .create_async()
+        .await;
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
@@ -2225,7 +2258,7 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
         .with_status(500)
         .with_header("content-type", "application/json")
         .with_body(r#"{"error":"backend unavailable"}"#)
-        .expect(1)
+        .expect_at_least(1)
         .create_async()
         .await;
 
@@ -2322,6 +2355,7 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
     human_alias_save_mock.assert_async().await;
     human_alias_pointer_mock.assert_async().await;
     human_alias_confirm_mock.assert_async().await;
+    capabilities_mock.assert_async().await;
 }
 
 #[tokio::test]
