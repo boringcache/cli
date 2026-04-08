@@ -658,49 +658,56 @@ jobs:
           stress_sccache_start_timeouts="${stress_sccache_start_timeouts:-0}"
           stress_sccache_unexpected_shutdowns="${stress_sccache_unexpected_shutdowns:-0}"
 
+          write_metric() {
+            local key="$1"
+            local value="$2"
+            value="${value//\'/\'\\\'\'}"
+            printf "%s='%s'\n" "$key" "$value"
+          }
+
           {
-            echo "backend=${{ matrix.backend }}"
-            echo "backend_label=${{ matrix.backend_label }}"
-            echo "phase=${phase}"
-            echo "phase_label=${{ matrix.phase_label }}"
-            echo "benchmark_scope=${benchmark_scope}"
-            echo "target_dir_mode=${target_dir_mode}"
-            echo "warm_sccache_dir_mode=${warm_sccache_dir_mode}"
-            echo "status=${status}"
-            echo "cold_seconds=${cold}"
-            echo "warm_seconds=${warm}"
-            echo "warm_rust_hit_rate=${warm_rust_hit_rate}"
-            echo "warm_avg_cache_read_hit=${warm_avg_read_hit}"
-            echo "efficacy_two_pass_hit_rate=${efficacy_two_pass_hit_rate}"
-            echo "efficacy_cache_ops_sccache_hit_rate=${efficacy_cache_ops_hit_rate}"
-            echo "efficacy_proxy_429=${efficacy_proxy_429}"
-            echo "efficacy_proxy_tag_conflicts=${efficacy_proxy_conflicts}"
-            echo "prewarm_seconds=${prewarm}"
-            echo "parallel_avg_seconds=${parallel_avg}"
-            echo "parallel_rust_hit_rate=${parallel_rust_hit_rate}"
-            echo "stress_lock_waits=${stress_lock_waits}"
-            echo "stress_sccache_start_timeouts=${stress_sccache_start_timeouts}"
-            echo "stress_sccache_unexpected_shutdowns=${stress_sccache_unexpected_shutdowns}"
-            echo "stress_proxy_429=${stress_proxy_429}"
-            echo "stress_proxy_tag_conflicts=${stress_proxy_conflicts}"
-            echo "request_metrics_total=${request_metrics_total}"
-            echo "request_metrics_failures=${request_metrics_failures}"
-            echo "request_metrics_retry_events=${request_metrics_retry_events}"
-            echo "request_metrics_check_p95_ms=${request_metrics_check_p95_ms}"
-            echo "request_metrics_download_p95_ms=${request_metrics_download_p95_ms}"
-            echo "request_metrics_save_p95_ms=${request_metrics_save_p95_ms}"
-            echo "request_metrics_publish_p95_ms=${request_metrics_publish_p95_ms}"
-            echo "request_metrics_prefetch_cycles=${request_metrics_prefetch_cycles}"
-            echo "request_metrics_cache_ops_records_total=${request_metrics_cache_ops_records_total}"
-            echo "request_metrics_cache_ops_sccache_hits=${request_metrics_cache_ops_sccache_hits}"
-            echo "request_metrics_cache_ops_sccache_misses=${request_metrics_cache_ops_sccache_misses}"
-            echo "request_metrics_cache_ops_sccache_errors=${request_metrics_cache_ops_sccache_errors}"
-            echo "request_metrics_cache_ops_sccache_hit_rate=${request_metrics_cache_ops_sccache_hit_rate}"
-            echo "request_metrics_cache_ops_sccache_get_records_total=${request_metrics_cache_ops_sccache_get_records_total}"
-            echo "request_metrics_cache_ops_sccache_get_hits=${request_metrics_cache_ops_sccache_get_hits}"
-            echo "request_metrics_cache_ops_sccache_get_misses=${request_metrics_cache_ops_sccache_get_misses}"
-            echo "request_metrics_cache_ops_sccache_get_errors=${request_metrics_cache_ops_sccache_get_errors}"
-            echo "request_metrics_cache_ops_sccache_get_hit_rate=${request_metrics_cache_ops_sccache_get_hit_rate}"
+            write_metric backend "${{ matrix.backend }}"
+            write_metric backend_label "${{ matrix.backend_label }}"
+            write_metric phase "${phase}"
+            write_metric phase_label "${{ matrix.phase_label }}"
+            write_metric benchmark_scope "${benchmark_scope}"
+            write_metric target_dir_mode "${target_dir_mode}"
+            write_metric warm_sccache_dir_mode "${warm_sccache_dir_mode}"
+            write_metric status "${status}"
+            write_metric cold_seconds "${cold}"
+            write_metric warm_seconds "${warm}"
+            write_metric warm_rust_hit_rate "${warm_rust_hit_rate}"
+            write_metric warm_avg_cache_read_hit "${warm_avg_read_hit}"
+            write_metric efficacy_two_pass_hit_rate "${efficacy_two_pass_hit_rate}"
+            write_metric efficacy_cache_ops_sccache_hit_rate "${efficacy_cache_ops_hit_rate}"
+            write_metric efficacy_proxy_429 "${efficacy_proxy_429}"
+            write_metric efficacy_proxy_tag_conflicts "${efficacy_proxy_conflicts}"
+            write_metric prewarm_seconds "${prewarm}"
+            write_metric parallel_avg_seconds "${parallel_avg}"
+            write_metric parallel_rust_hit_rate "${parallel_rust_hit_rate}"
+            write_metric stress_lock_waits "${stress_lock_waits}"
+            write_metric stress_sccache_start_timeouts "${stress_sccache_start_timeouts}"
+            write_metric stress_sccache_unexpected_shutdowns "${stress_sccache_unexpected_shutdowns}"
+            write_metric stress_proxy_429 "${stress_proxy_429}"
+            write_metric stress_proxy_tag_conflicts "${stress_proxy_conflicts}"
+            write_metric request_metrics_total "${request_metrics_total}"
+            write_metric request_metrics_failures "${request_metrics_failures}"
+            write_metric request_metrics_retry_events "${request_metrics_retry_events}"
+            write_metric request_metrics_check_p95_ms "${request_metrics_check_p95_ms}"
+            write_metric request_metrics_download_p95_ms "${request_metrics_download_p95_ms}"
+            write_metric request_metrics_save_p95_ms "${request_metrics_save_p95_ms}"
+            write_metric request_metrics_publish_p95_ms "${request_metrics_publish_p95_ms}"
+            write_metric request_metrics_prefetch_cycles "${request_metrics_prefetch_cycles}"
+            write_metric request_metrics_cache_ops_records_total "${request_metrics_cache_ops_records_total}"
+            write_metric request_metrics_cache_ops_sccache_hits "${request_metrics_cache_ops_sccache_hits}"
+            write_metric request_metrics_cache_ops_sccache_misses "${request_metrics_cache_ops_sccache_misses}"
+            write_metric request_metrics_cache_ops_sccache_errors "${request_metrics_cache_ops_sccache_errors}"
+            write_metric request_metrics_cache_ops_sccache_hit_rate "${request_metrics_cache_ops_sccache_hit_rate}"
+            write_metric request_metrics_cache_ops_sccache_get_records_total "${request_metrics_cache_ops_sccache_get_records_total}"
+            write_metric request_metrics_cache_ops_sccache_get_hits "${request_metrics_cache_ops_sccache_get_hits}"
+            write_metric request_metrics_cache_ops_sccache_get_misses "${request_metrics_cache_ops_sccache_get_misses}"
+            write_metric request_metrics_cache_ops_sccache_get_errors "${request_metrics_cache_ops_sccache_get_errors}"
+            write_metric request_metrics_cache_ops_sccache_get_hit_rate "${request_metrics_cache_ops_sccache_get_hit_rate}"
           } > "${log_dir}/metrics.env"
 
       - name: Upload benchmark artifacts
@@ -925,6 +932,28 @@ jobs:
       - name: Write summary
         run: |
           set -euo pipefail
+          load_kv_env_file() {
+            local env_file="$1"
+            local line key value
+            while IFS= read -r line || [[ -n "$line" ]]; do
+              [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+              [[ "$line" == *=* ]] || continue
+              key="${line%%=*}"
+              value="${line#*=}"
+              if ! [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                continue
+              fi
+              if [[ "${#value}" -ge 2 ]]; then
+                if [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+                  value="${value:1:${#value}-2}"
+                elif [[ "${value:0:1}" == "\"" && "${value: -1}" == "\"" ]]; then
+                  value="${value:1:${#value}-2}"
+                fi
+              fi
+              printf -v "$key" '%s' "$value"
+            done < "$env_file"
+          }
+
           echo "# E2E / Test Results" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Test | Status |" >> "$GITHUB_STEP_SUMMARY"
@@ -935,8 +964,7 @@ jobs:
             echo "| no-artifacts | skipped |" >> "$GITHUB_STEP_SUMMARY"
           else
             for metrics in "${e2e_metric_files[@]}"; do
-              # shellcheck disable=SC1090
-              source "$metrics"
+              load_kv_env_file "$metrics"
               echo "| ${label:-$leg} | ${status} |" >> "$GITHUB_STEP_SUMMARY"
             done
           fi
@@ -968,8 +996,7 @@ jobs:
           proxy_warm=""
 
           for metrics in "${benchmark_metric_files[@]}"; do
-            # shellcheck disable=SC1090
-            source "$metrics"
+            load_kv_env_file "$metrics"
             if [[ "${phase}" != "efficacy" ]]; then
               continue
             fi
@@ -999,8 +1026,7 @@ jobs:
           proxy_parallel=""
 
           for metrics in "${benchmark_metric_files[@]}"; do
-            # shellcheck disable=SC1090
-            source "$metrics"
+            load_kv_env_file "$metrics"
             if [[ "${phase}" != "stress" ]]; then
               continue
             fi
