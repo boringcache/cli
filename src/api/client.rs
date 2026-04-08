@@ -2435,7 +2435,9 @@ fn blob_check_batch_max() -> usize {
 }
 
 fn blob_url_batch_max() -> usize {
-    parse_usize_env(BLOB_URL_BATCH_MAX_ENV).unwrap_or(BLOB_URL_BATCH_MAX)
+    parse_usize_env(BLOB_URL_BATCH_MAX_ENV)
+        .map(|value| value.min(BLOB_URL_BATCH_MAX))
+        .unwrap_or(BLOB_URL_BATCH_MAX)
 }
 
 fn blob_check_batch_concurrency(chunk_count: usize) -> usize {
@@ -2698,6 +2700,15 @@ mod tests {
         assert_eq!(blob_url_batch_max(), 9);
         test_env::remove_var(BLOB_URL_BATCH_MAX_ENV);
         assert_eq!(blob_url_batch_max(), BLOB_URL_BATCH_MAX);
+    }
+
+    #[test]
+    fn test_blob_url_batch_max_env_override_caps_to_api_limit() {
+        let _guard = test_env::lock();
+
+        test_env::set_var(BLOB_URL_BATCH_MAX_ENV, "4000");
+        assert_eq!(blob_url_batch_max(), BLOB_URL_BATCH_MAX);
+        test_env::remove_var(BLOB_URL_BATCH_MAX_ENV);
     }
 
     #[test]
