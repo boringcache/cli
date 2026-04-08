@@ -2010,11 +2010,10 @@ async fn confirm_kv_flush(
                 .map(|_| KvConfirmOutcome::Published),
             FlushMode::Normal => state
                 .api_client
-                .confirm_wait_for_publish_or_shutdown_pending(
+                .confirm_wait_for_publish_or_pending_timeout(
                     &state.workspace,
                     cache_entry_id,
                     confirm_request,
-                    state.shutdown_requested.as_ref(),
                 )
                 .await
                 .map(|response| match response {
@@ -4578,12 +4577,12 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn normal_confirm_accepts_pending_publish_once_shutdown_requested() {
+    async fn normal_confirm_waits_for_pending_publish_completion_even_when_shutdown_requested() {
         let _guard = test_env::lock();
         let _env_guard = TestEnvGuard::capture(&["BORINGCACHE_API_URL"]);
         if !networking_available() {
             eprintln!(
-                "skipping normal_confirm_accepts_pending_publish_once_shutdown_requested: networking disabled in sandbox"
+                "skipping normal_confirm_waits_for_pending_publish_completion_even_when_shutdown_requested: networking disabled in sandbox"
             );
             return;
         }
@@ -4611,6 +4610,18 @@ mod tests {
             .with_status(404)
             .with_header("content-type", "application/json")
             .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let pointer_after_publish = server
+            .mock(
+                "GET",
+                "/v2/workspaces/org/repo/caches/tags/registry/pointer",
+            )
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"version":"1","cache_entry_id":"entry-1","status":"published"}"#)
             .create_async()
             .await;
         let publish = server
@@ -4626,6 +4637,16 @@ mod tests {
             )
             .create_async()
             .await;
+        let status = server
+            .mock("GET", "/v2/workspaces/org/repo/upload-sessions/session-1")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"upload_session_id":"session-1","cache_entry_id":"entry-1","state":"published","publish_attempt_id":"attempt-1","publish_state":"published"}"#,
+            )
+            .create_async()
+            .await;
 
         let outcome = confirm_kv_flush(
             &state,
@@ -4634,20 +4655,18 @@ mod tests {
             FlushMode::Normal,
         )
         .await
-        .expect("shutdown-aware normal flush should accept pending publish");
+        .expect("normal flush should wait for pending publish completion");
 
-        match outcome {
-            KvConfirmOutcome::Pending(metadata) => {
-                assert_eq!(metadata.code.as_deref(), Some("pending_publish"));
-                assert_eq!(metadata.upload_session_id.as_deref(), Some("session-1"));
-                assert_eq!(metadata.publish_attempt_id.as_deref(), Some("attempt-1"));
-            }
-            KvConfirmOutcome::Published => panic!("expected pending handoff"),
-        }
+        assert!(
+            matches!(outcome, KvConfirmOutcome::Published),
+            "normal confirm should publish instead of handing off pending state"
+        );
 
         capabilities.assert_async().await;
         pointer.assert_async().await;
+        pointer_after_publish.assert_async().await;
         publish.assert_async().await;
+        status.assert_async().await;
     }
 
     #[tokio::test]

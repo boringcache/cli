@@ -956,6 +956,12 @@ async fn flush_pending_on_shutdown(state: &AppState) {
                 pending.entry_count()
             };
             if pending_after_flush == 0 {
+                if expected_root_cache_entry_id.is_none() {
+                    expected_root_cache_entry_id = {
+                        let published = state.kv_published_index.read().await;
+                        published.cache_entry_id().map(|value| value.to_string())
+                    };
+                }
                 if let Some(cache_entry_id) = expected_root_cache_entry_id.as_deref() {
                     wait_for_tag_visibility(state, cache_entry_id, deadline).await;
                 }
