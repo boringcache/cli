@@ -1095,7 +1095,7 @@ async fn test_run_workflow_restore_then_save_lifecycle_success() {
 
     let check_mock = server
         .mock("POST", "/v2/workspaces/test/workspace/caches/check")
-        .expect(2)
+        .expect(1)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
