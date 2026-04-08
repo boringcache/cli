@@ -847,7 +847,9 @@ impl ApiClient {
                 anyhow::anyhow!("Resource not found: {}", url)
             }
             StatusCode::TOO_MANY_REQUESTS => {
-                anyhow::anyhow!("Rate limit exceeded. Please try again later.")
+                anyhow::anyhow!(
+                    "Rate limit exceeded (429 Too Many Requests). Please try again later."
+                )
             }
             StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => {
                 let message = parsed_payload
@@ -2375,7 +2377,10 @@ fn pending_publish_poll_delay(retry_after_seconds: Option<u64>) -> Duration {
 
 fn is_rate_limit_error(error: &anyhow::Error) -> bool {
     let lower = format!("{error:#}").to_lowercase();
-    lower.contains("429") || lower.contains("too many requests")
+    lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("rate limit exceeded")
+        || lower.contains("throttled")
 }
 
 fn pending_publish_poll_error_delay(
@@ -2388,8 +2393,11 @@ fn pending_publish_poll_error_delay(
         return base;
     }
 
+    // Start a little slower on throttling to avoid hammering publish-status APIs.
+    let throttled_base = base.max(Duration::from_secs(2));
     let multiplier = 1u32 << consecutive_errors.saturating_sub(1).min(4);
-    base.checked_mul(multiplier)
+    throttled_base
+        .checked_mul(multiplier)
         .unwrap_or(PENDING_PUBLISH_POLL_MAX_INTERVAL)
         .min(PENDING_PUBLISH_POLL_MAX_INTERVAL)
 }
@@ -3219,19 +3227,19 @@ mod tests {
 
         assert_eq!(
             pending_publish_poll_error_delay(Some(1), &throttled, 1),
-            Duration::from_secs(1)
-        );
-        assert_eq!(
-            pending_publish_poll_error_delay(Some(1), &throttled, 2),
             Duration::from_secs(2)
         );
         assert_eq!(
-            pending_publish_poll_error_delay(Some(1), &throttled, 3),
+            pending_publish_poll_error_delay(Some(1), &throttled, 2),
             Duration::from_secs(4)
         );
         assert_eq!(
-            pending_publish_poll_error_delay(Some(1), &throttled, 4),
+            pending_publish_poll_error_delay(Some(1), &throttled, 3),
             Duration::from_secs(8)
+        );
+        assert_eq!(
+            pending_publish_poll_error_delay(Some(1), &throttled, 4),
+            PENDING_PUBLISH_POLL_MAX_INTERVAL
         );
         assert_eq!(
             pending_publish_poll_error_delay(Some(1), &throttled, 5),
@@ -3255,6 +3263,9 @@ mod tests {
             "Failed to poll pending publish status: API request failed after 3 attempts: Transient error: 429 Too Many Requests"
         );
         assert!(should_retry_pending_publish_poll_error(&throttled));
+
+        let throttled_message = anyhow::anyhow!("Rate limit exceeded. Please try again later.");
+        assert!(should_retry_pending_publish_poll_error(&throttled_message));
 
         let unavailable = anyhow::anyhow!("Server returned 503 Service Unavailable");
         assert!(should_retry_pending_publish_poll_error(&unavailable));
