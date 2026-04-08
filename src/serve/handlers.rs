@@ -2005,22 +2005,13 @@ async fn put_manifest(
                         write_scope_tag: Some(write_scope_tag),
                     };
 
-                    tokio::time::timeout(
-                        OCI_API_CALL_TIMEOUT,
-                        state.api_client.confirm(
-                            &state.workspace,
-                            &cache_entry_id,
-                            &confirm_request,
-                        ),
-                    )
-                    .await
-                    .map_err(|_| {
-                        OciError::internal(format!(
-                            "confirm timed out after {}s",
-                            OCI_API_CALL_TIMEOUT.as_secs()
-                        ))
-                    })?
-                    .map_err(|e| OciError::internal(format!("confirm failed: {e}")))?;
+                    // Do not wrap confirm in the short OCI API timeout: confirm already
+                    // owns pending-publish polling and must be allowed to finish publishing.
+                    state
+                        .api_client
+                        .confirm(&state.workspace, &cache_entry_id, &confirm_request)
+                        .await
+                        .map_err(|e| OciError::internal(format!("confirm failed: {e}")))?;
                     Ok(())
                 }
             },

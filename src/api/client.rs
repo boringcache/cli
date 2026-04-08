@@ -295,6 +295,14 @@ impl ApiClient {
         self.get_with_base(&self.v2_base_url, endpoint).await
     }
 
+    async fn get_v2_no_retry<T>(&self, endpoint: &str) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        self.get_with_base_no_retry(&self.v2_base_url, endpoint)
+            .await
+    }
+
     async fn get_with_base<T>(&self, base_url: &str, endpoint: &str) -> Result<T>
     where
         T: for<'de> Deserialize<'de>,
@@ -303,10 +311,31 @@ impl ApiClient {
         self.parse_json_response(response).await
     }
 
+    async fn get_with_base_no_retry<T>(&self, base_url: &str, endpoint: &str) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let response = self
+            .get_response_with_base_no_retry(base_url, endpoint)
+            .await?;
+        self.parse_json_response(response).await
+    }
+
     async fn get_response_with_base(&self, base_url: &str, endpoint: &str) -> Result<Response> {
         let url = Self::build_url_from_base(base_url, endpoint);
         debug!("GET {}", url);
         self.send_authenticated_request(self.client.get(&url)).await
+    }
+
+    async fn get_response_with_base_no_retry(
+        &self,
+        base_url: &str,
+        endpoint: &str,
+    ) -> Result<Response> {
+        let url = Self::build_url_from_base(base_url, endpoint);
+        debug!("GET {}", url);
+        self.send_authenticated_request_no_retry(self.client.get(&url))
+            .await
     }
 
     pub async fn post<T, R>(&self, endpoint: &str, body: &T) -> Result<R>
@@ -448,6 +477,29 @@ impl ApiClient {
             .send_authenticated_request_with_retry_count(request)
             .await;
         result
+    }
+
+    async fn send_authenticated_request_no_retry(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<Response> {
+        let token = self
+            .auth_token
+            .as_ref()
+            .ok_or(BoringCacheError::TokenNotFound)?;
+        let request = request.header("Authorization", format!("Bearer {}", token));
+
+        match request.send().await {
+            Ok(response) => Ok(response),
+            Err(err) if err.is_connect() => Err(BoringCacheError::ConnectionError(
+                "ERROR: Cannot connect to BoringCache server. Please check:\n\
+                     • Is the API URL correct? (Check with: boringcache config)\n\
+                     • Is there a firewall blocking the connection?"
+                    .to_string(),
+            )
+            .into()),
+            Err(err) => Err(map_request_send_error(err)),
+        }
     }
 
     async fn send_authenticated_request_with_retry_count(
@@ -1639,6 +1691,8 @@ impl ApiClient {
         shutdown_requested: Option<&AtomicBool>,
         accept_server_owned_pending_after_timeout: bool,
     ) -> Result<PendingPublishPollOutcome> {
+        let mut transient_poll_errors = 0u32;
+
         loop {
             if should_accept_server_owned_pending(shutdown_requested, &metadata) {
                 return Ok(PendingPublishPollOutcome::Pending(metadata));
@@ -1657,15 +1711,24 @@ impl ApiClient {
             }
 
             let status = match self.upload_session_status(workspace, &metadata).await {
-                Ok(status) => status,
+                Ok(status) => {
+                    transient_poll_errors = 0;
+                    status
+                }
                 Err(error) => {
                     if started_at.elapsed() < PENDING_PUBLISH_POLL_TIMEOUT
                         && should_retry_pending_publish_poll_error(&error)
                     {
-                        let delay = pending_publish_poll_delay(metadata.retry_after_seconds);
+                        transient_poll_errors = transient_poll_errors.saturating_add(1);
+                        let delay = pending_publish_poll_error_delay(
+                            metadata.retry_after_seconds,
+                            &error,
+                            transient_poll_errors,
+                        );
                         log::warn!(
-                            "Pending publish poll transient error for tag={tag}: {error}; retrying in {:.1}s",
-                            delay.as_secs_f32()
+                            "Pending publish poll transient error for tag={tag}: {error}; retrying in {:.1}s (consecutive_errors={})",
+                            delay.as_secs_f32(),
+                            transient_poll_errors
                         );
                         sleep(delay).await;
                         continue;
@@ -1740,7 +1803,7 @@ impl ApiClient {
                 .trim_start_matches('/')
                 .strip_prefix("v2/")
                 .unwrap_or_else(|| path.trim_start_matches('/'));
-            return self.get_v2(normalized).await;
+            return self.get_v2_no_retry(normalized).await;
         }
 
         let upload_session_id = metadata
@@ -1749,7 +1812,7 @@ impl ApiClient {
             .context("Pending publish response did not include upload_session_id")?;
         let endpoint =
             self.workspace_endpoint(workspace, &format!("upload-sessions/{upload_session_id}"))?;
-        self.get_v2(&endpoint).await
+        self.get_v2_no_retry(&endpoint).await
     }
 
     pub async fn complete_multipart(
@@ -2310,14 +2373,34 @@ fn pending_publish_poll_delay(retry_after_seconds: Option<u64>) -> Duration {
         .min(PENDING_PUBLISH_POLL_MAX_INTERVAL)
 }
 
+fn is_rate_limit_error(error: &anyhow::Error) -> bool {
+    let lower = format!("{error:#}").to_lowercase();
+    lower.contains("429") || lower.contains("too many requests")
+}
+
+fn pending_publish_poll_error_delay(
+    retry_after_seconds: Option<u64>,
+    error: &anyhow::Error,
+    consecutive_errors: u32,
+) -> Duration {
+    let base = pending_publish_poll_delay(retry_after_seconds);
+    if !is_rate_limit_error(error) {
+        return base;
+    }
+
+    let multiplier = 1u32 << consecutive_errors.saturating_sub(1).min(4);
+    base.checked_mul(multiplier)
+        .unwrap_or(PENDING_PUBLISH_POLL_MAX_INTERVAL)
+        .min(PENDING_PUBLISH_POLL_MAX_INTERVAL)
+}
+
 fn should_retry_pending_publish_poll_error(error: &anyhow::Error) -> bool {
     if crate::error::is_connection_error(error) {
         return true;
     }
 
     let lower = format!("{error:#}").to_lowercase();
-    lower.contains("429")
-        || lower.contains("too many requests")
+    is_rate_limit_error(error)
         || lower.contains("503")
         || lower.contains("service unavailable")
         || lower.contains("504")
@@ -3127,6 +3210,42 @@ mod tests {
             pending_publish_poll_delay(Some(60)),
             PENDING_PUBLISH_POLL_MAX_INTERVAL,
             "retry_after should cap at max interval"
+        );
+    }
+
+    #[test]
+    fn test_pending_publish_poll_error_delay_backs_off_on_rate_limit() {
+        let throttled = anyhow::anyhow!("Transient error: 429 Too Many Requests");
+
+        assert_eq!(
+            pending_publish_poll_error_delay(Some(1), &throttled, 1),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            pending_publish_poll_error_delay(Some(1), &throttled, 2),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            pending_publish_poll_error_delay(Some(1), &throttled, 3),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            pending_publish_poll_error_delay(Some(1), &throttled, 4),
+            Duration::from_secs(8)
+        );
+        assert_eq!(
+            pending_publish_poll_error_delay(Some(1), &throttled, 5),
+            PENDING_PUBLISH_POLL_MAX_INTERVAL,
+            "rate-limit backoff should cap at max interval"
+        );
+    }
+
+    #[test]
+    fn test_pending_publish_poll_error_delay_uses_base_for_non_rate_limit_errors() {
+        let unavailable = anyhow::anyhow!("503 Service Unavailable");
+        assert_eq!(
+            pending_publish_poll_error_delay(Some(2), &unavailable, 4),
+            Duration::from_secs(2)
         );
     }
 

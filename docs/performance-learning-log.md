@@ -19,6 +19,25 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Enforce a minimum graceful-stop budget of `210s` even if lower env values are set.
   - Remove per-tool hardcoded remote-tag verify timings (`30/2`), use shared defaults.
 
+## 2026-04-08 - OCI publish confirm timed out before pending publish settled (Hugo/Turbo)
+
+- Symptom:
+  - OCI tool e2e legs failed with remote tag not published after cold save.
+  - Proxy logs showed `Best-effort OCI manifest publish fallback ... (500 Internal Server Error)`.
+- Root cause:
+  - OCI manifest put wrapped `api_client.confirm(...)` in a hard `30s` handler timeout.
+  - Confirm supports server-owned pending publish and may legitimately take longer than `30s`.
+  - On timeout, the request degraded/fell back before publish completed, so tag checks observed misses.
+- Secondary pressure signal:
+  - Pending publish status polls hit `429 Too Many Requests` under concurrent CI load.
+  - Poll path used generic request retries (`3` attempts), amplifying each poll cycle.
+- Product-side changes:
+  - Remove the extra `30s` wrapper around OCI confirm in `serve/handlers.rs`; rely on confirm’s publish lifecycle.
+  - Use single-attempt status GETs for pending publish poll path.
+  - Add explicit poll backoff on `429` (rate-limit aware) to reduce retry storms.
+- Guardrail:
+  - Do not add short outer timeouts around publish confirm paths; use one authoritative publish lifecycle.
+
 ## Merge Checklist For Cache-Registry Changes
 
 Before merging changes touching `src/serve/cache_registry/*`, `src/serve/mod.rs`, or publish/confirm client paths:
