@@ -33,7 +33,7 @@ const CONFIRM_PUBLISH_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_CONFIRM_PUBLISH_TIME
 const DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS: u64 = 10;
 const TRANSFER_CONNECT_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_TRANSFER_CONNECT_TIMEOUT_SECS";
 const DEFAULT_TRANSFER_CONNECT_TIMEOUT_SECS: u64 = 10;
-const PENDING_PUBLISH_POLL_TIMEOUT: Duration = Duration::from_secs(60);
+const PENDING_PUBLISH_POLL_TIMEOUT: Duration = Duration::from_secs(180);
 const PENDING_PUBLISH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const BLOB_RECEIPT_COMMIT_BATCH_MAX: usize = 500;
 
@@ -1711,7 +1711,7 @@ impl ApiClient {
                     }
 
                     let delay = Duration::from_secs(metadata.retry_after_seconds.unwrap_or(1))
-                        .min(PENDING_PUBLISH_POLL_INTERVAL.max(Duration::from_secs(1)));
+                        .min(PENDING_PUBLISH_POLL_INTERVAL.max(Duration::from_millis(200)));
                     sleep(delay).await;
                 }
             }

@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/e2e-helpers.sh"
 
-BINARY="${BINARY:-./target/debug/boringcache}"
+CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BINARY="${BINARY:-${CLI_REPO_ROOT}/target/debug/boringcache}"
 WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
 BORINGCACHE_API_URL="${BORINGCACHE_API_URL:-https://api.boringcache.com}"
 LOG_DIR="${LOG_DIR:-.}"

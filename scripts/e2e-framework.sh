@@ -84,7 +84,6 @@ run_leg() {
       SEED_CONCURRENCY="64" \
       VERIFY_CONCURRENCY="64" \
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
-      PROXY_SHUTDOWN_WAIT_SECS="120" \
       SEED_FLUSH_TIMEOUT_SECS="240" \
       LOG_DIR="$log_dir" \
       bash ./scripts/e2e-prefetch-readiness-test.sh

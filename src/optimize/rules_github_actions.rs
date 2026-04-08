@@ -20,11 +20,10 @@ pub fn apply(content: &str) -> Option<RuleResult> {
     let (optimized_content, token_added) = ensure_token_on_boringcache_steps(&rewritten);
     if token_added {
         changes.push(OptimizeChange {
-            description: "Added split restore/save token env to BoringCache action steps"
-                .to_string(),
+            description: "Added restore token env to BoringCache action steps".to_string(),
             before_snippet: None,
             after_snippet: Some(
-                "env:\n  BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}\n  BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}"
+                "env:\n  BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}"
                     .to_string(),
             ),
         });
@@ -124,31 +123,15 @@ fn ensure_token_on_boringcache_steps(content: &str) -> (String, bool) {
             let has_restore_token = lines[env_start + 1..env_end]
                 .iter()
                 .any(|line| line.trim_start().starts_with("BORINGCACHE_RESTORE_TOKEN:"));
-            let has_save_token = lines[env_start + 1..env_end]
-                .iter()
-                .any(|line| line.trim_start().starts_with("BORINGCACHE_SAVE_TOKEN:"));
 
-            if !has_restore_token || !has_save_token {
-                let mut insert_at = env_end;
-                if !has_restore_token {
-                    lines.insert(
-                        insert_at,
-                        format!(
-                            "{}BORINGCACHE_RESTORE_TOKEN: ${{{{ secrets.BORINGCACHE_RESTORE_TOKEN }}}}",
-                            " ".repeat(child_indent + 2)
-                        ),
-                    );
-                    insert_at += 1;
-                }
-                if !has_save_token {
-                    lines.insert(
-                        insert_at,
-                        format!(
-                            "{}BORINGCACHE_SAVE_TOKEN: ${{{{ secrets.BORINGCACHE_SAVE_TOKEN }}}}",
-                            " ".repeat(child_indent + 2)
-                        ),
-                    );
-                }
+            if !has_restore_token {
+                lines.insert(
+                    env_end,
+                    format!(
+                        "{}BORINGCACHE_RESTORE_TOKEN: ${{{{ secrets.BORINGCACHE_RESTORE_TOKEN }}}}",
+                        " ".repeat(child_indent + 2)
+                    ),
+                );
                 inserted_token = true;
                 i += 1;
             }
@@ -161,15 +144,8 @@ fn ensure_token_on_boringcache_steps(content: &str) -> (String, bool) {
                     " ".repeat(child_indent + 2)
                 ),
             );
-            lines.insert(
-                i + 3,
-                format!(
-                    "{}BORINGCACHE_SAVE_TOKEN: ${{{{ secrets.BORINGCACHE_SAVE_TOKEN }}}}",
-                    " ".repeat(child_indent + 2)
-                ),
-            );
             inserted_token = true;
-            i += 3;
+            i += 2;
         }
 
         i += 1;
@@ -252,7 +228,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transforms_actions_cache_and_injects_split_tokens() {
+    fn transforms_actions_cache_and_injects_restore_token() {
         let input = r#"name: CI
 on: [push]
 jobs:
@@ -279,7 +255,7 @@ jobs:
                 .contains("BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}")
         );
         assert!(
-            result
+            !result
                 .optimized_content
                 .contains("BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}")
         );
@@ -307,7 +283,7 @@ jobs:
     }
 
     #[test]
-    fn does_not_duplicate_existing_split_tokens() {
+    fn does_not_duplicate_existing_tokens() {
         let input = r#"jobs:
   test:
     steps:
@@ -322,11 +298,11 @@ jobs:
             .optimized_content
             .matches("BORINGCACHE_RESTORE_TOKEN:")
             .count();
-        let save_token_count = result
-            .optimized_content
-            .matches("BORINGCACHE_SAVE_TOKEN:")
-            .count();
         assert_eq!(restore_token_count, 1);
-        assert_eq!(save_token_count, 1);
+        assert!(
+            result
+                .optimized_content
+                .contains("BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}")
+        );
     }
 }

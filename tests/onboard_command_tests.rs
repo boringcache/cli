@@ -151,8 +151,8 @@ RUN boringcache run my-org/my-app node_modules:node_modules --no-platform --no-g
         "workflow: {workflow}"
     );
     assert!(
-        workflow.contains("BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}"),
-        "workflow: {workflow}"
+        !workflow.contains("BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}"),
+        "workflow should not add a save token by default: {workflow}"
     );
 
     let config = std::fs::read_to_string(temp_dir.path().join(".boringcache.toml"))

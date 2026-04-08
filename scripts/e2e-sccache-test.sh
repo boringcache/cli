@@ -29,7 +29,7 @@ EFFICACY_FRESH_WARM_SCCACHE_DIR="${EFFICACY_FRESH_WARM_SCCACHE_DIR:-0}"
 SCCACHE_BACKEND="${SCCACHE_BACKEND:-proxy}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
-PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-20}"
+PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-210}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-0}"
 BUILD_HEARTBEAT_SECS="${BUILD_HEARTBEAT_SECS:-30}"
 BUILD_CLEANUP_WAIT_SECS="${BUILD_CLEANUP_WAIT_SECS:-20}"
@@ -1051,7 +1051,7 @@ phase_efficacy() {
     ensure_proxy_ready "$proxy_log"
     echo ""
     echo "=== Phase 1b: Verify published remote tag before efficacy warm pass ==="
-    if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$EFFICACY_TAG" "$phase_dir" "${BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN:-1}" "${REMOTE_TAG_VERIFY_ATTEMPTS:-30}" "${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}" "$proxy_log"; then
+    if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$EFFICACY_TAG" "$phase_dir" "${BUDGET_EFFICACY_REMOTE_TAG_HITS_MIN:-1}" "${REMOTE_TAG_VERIFY_ATTEMPTS}" "${REMOTE_TAG_VERIFY_SLEEP_SECS}" "$proxy_log"; then
       exit 1
     fi
     EFFICACY_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"
@@ -1380,6 +1380,7 @@ echo ""
 echo "========================================="
 if [[ "$RUN_EFFICACY" == "1" ]]; then
   echo "Phase 1 (key-stable efficacy)"
+  echo "  Scope:                same-runner, reused target dir"
   echo "  Cold:                 ${EFFICACY_COLD_SECONDS}s"
   echo "  Warm:                 ${EFFICACY_WARM_SECONDS}s"
   echo "  Delta (cold-warm):    ${EFFICACY_DELTA}"
@@ -1395,6 +1396,7 @@ if [[ "$RUN_EFFICACY" == "1" ]]; then
   echo "  Warm avg read hit:    ${EFFICACY_AVG_READ_HIT}s"
   echo "  Proxy 429:            ${EFFICACY_PROXY_429:-0}"
   echo "  Proxy tag conflicts:  ${EFFICACY_PROXY_CONFLICTS:-0}"
+  echo "  Note:                 compare against internal cache-registry health only, not fresh-runner benchmark repos"
   echo "  Logs:                 ${LOG_DIR}/efficacy"
 fi
 

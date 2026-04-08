@@ -31,6 +31,12 @@ use crate::tag_utils::TagResolver;
 
 const KV_REFRESH_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const KV_REPLICATION_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const KV_IDLE_FLUSH_WINDOW_DEFAULT_MS: u64 = 10_000;
+const KV_IDLE_FLUSH_WINDOW_SMALL_BATCH_MS: u64 = 2_000;
+const KV_SMALL_BATCH_IMMEDIATE_FLUSH_MAX_BLOBS: usize = 8;
+const KV_SMALL_BATCH_IMMEDIATE_FLUSH_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BLOBS: usize = 64;
+const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const BLOB_DOWNLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY";
 const CACHE_PREFETCH_CONCURRENCY_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_CONCURRENCY";
 const BLOB_READ_CACHE_MAX_BYTES_ENV: &str = "BORINGCACHE_BLOB_READ_CACHE_MAX_BYTES";
@@ -677,20 +683,61 @@ async fn should_flush_pending(state: &AppState, urgent: bool) -> bool {
     use crate::serve::state::FLUSH_SIZE_THRESHOLD;
 
     let pending = state.kv_pending.read().await;
-    if pending.is_empty() {
+    let pending_blob_count = pending.blob_count();
+    let pending_spool_bytes = pending.total_spool_bytes();
+    let last_put_ms = state.kv_last_put.load(Ordering::Acquire);
+    should_flush_pending_values(
+        urgent,
+        pending_blob_count,
+        pending_spool_bytes,
+        last_put_ms,
+        unix_time_ms_now(),
+        crate::serve::state::flush_blob_threshold(),
+        FLUSH_SIZE_THRESHOLD,
+    )
+}
+
+fn flush_idle_window_ms(pending_blob_count: usize, pending_spool_bytes: u64) -> u64 {
+    if pending_blob_count <= KV_SMALL_BATCH_IMMEDIATE_FLUSH_MAX_BLOBS
+        && pending_spool_bytes <= KV_SMALL_BATCH_IMMEDIATE_FLUSH_MAX_BYTES
+    {
+        return 0;
+    }
+
+    if pending_blob_count <= KV_SMALL_BATCH_IDLE_FLUSH_MAX_BLOBS
+        && pending_spool_bytes <= KV_SMALL_BATCH_IDLE_FLUSH_MAX_BYTES
+    {
+        return KV_IDLE_FLUSH_WINDOW_SMALL_BATCH_MS;
+    }
+
+    KV_IDLE_FLUSH_WINDOW_DEFAULT_MS
+}
+
+fn should_flush_pending_values(
+    urgent: bool,
+    pending_blob_count: usize,
+    pending_spool_bytes: u64,
+    last_put_ms: u64,
+    now_ms: u64,
+    flush_blob_threshold: usize,
+    flush_size_threshold: u64,
+) -> bool {
+    if pending_blob_count == 0 {
         return false;
     }
     if urgent {
         return true;
     }
-    if pending.blob_count() >= crate::serve::state::flush_blob_threshold()
-        || pending.total_spool_bytes() >= FLUSH_SIZE_THRESHOLD
-    {
+    if pending_blob_count >= flush_blob_threshold || pending_spool_bytes >= flush_size_threshold {
         return true;
     }
 
-    let last_put_ms = state.kv_last_put.load(Ordering::Acquire);
-    last_put_ms > 0 && unix_time_ms_now().saturating_sub(last_put_ms) >= 10_000
+    let idle_window_ms = flush_idle_window_ms(pending_blob_count, pending_spool_bytes);
+    if idle_window_ms == 0 {
+        return true;
+    }
+
+    last_put_ms > 0 && now_ms.saturating_sub(last_put_ms) >= idle_window_ms
 }
 
 async fn process_replication_work(state: &AppState, urgent: bool, consecutive_failures: &mut u32) {
@@ -1357,5 +1404,101 @@ mod tests {
                 "digest-sha256-abc".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn should_flush_pending_values_flushes_immediately_for_tiny_batches() {
+        let now_ms = 10_000;
+        assert!(should_flush_pending_values(
+            false,
+            2,
+            1_024,
+            now_ms,
+            now_ms,
+            2_000,
+            crate::serve::state::FLUSH_SIZE_THRESHOLD,
+        ));
+    }
+
+    #[test]
+    fn should_flush_pending_values_uses_short_idle_window_for_small_batches() {
+        let now_ms = 10_000;
+        assert!(!should_flush_pending_values(
+            false,
+            32,
+            4 * 1024 * 1024,
+            now_ms - 1_500,
+            now_ms,
+            2_000,
+            crate::serve::state::FLUSH_SIZE_THRESHOLD,
+        ));
+        assert!(should_flush_pending_values(
+            false,
+            32,
+            4 * 1024 * 1024,
+            now_ms - 2_000,
+            now_ms,
+            2_000,
+            crate::serve::state::FLUSH_SIZE_THRESHOLD,
+        ));
+    }
+
+    #[test]
+    fn should_flush_pending_values_uses_default_idle_window_for_large_batches() {
+        let now_ms = 20_000;
+        assert!(!should_flush_pending_values(
+            false,
+            128,
+            128 * 1024 * 1024,
+            now_ms - 9_500,
+            now_ms,
+            2_000,
+            crate::serve::state::FLUSH_SIZE_THRESHOLD,
+        ));
+        assert!(should_flush_pending_values(
+            false,
+            128,
+            128 * 1024 * 1024,
+            now_ms - 10_000,
+            now_ms,
+            2_000,
+            crate::serve::state::FLUSH_SIZE_THRESHOLD,
+        ));
+    }
+
+    #[test]
+    fn should_flush_pending_values_flushes_when_threshold_is_reached() {
+        let now_ms = 10_000;
+        assert!(should_flush_pending_values(
+            false,
+            2_000,
+            1_024,
+            now_ms,
+            now_ms,
+            2_000,
+            crate::serve::state::FLUSH_SIZE_THRESHOLD,
+        ));
+        assert!(should_flush_pending_values(
+            false,
+            1,
+            crate::serve::state::FLUSH_SIZE_THRESHOLD,
+            now_ms,
+            now_ms,
+            2_000,
+            crate::serve::state::FLUSH_SIZE_THRESHOLD,
+        ));
+    }
+
+    #[test]
+    fn should_flush_pending_values_respects_urgent_signal() {
+        assert!(should_flush_pending_values(
+            true,
+            1,
+            1_024,
+            0,
+            0,
+            2_000,
+            crate::serve::state::FLUSH_SIZE_THRESHOLD,
+        ));
     }
 }

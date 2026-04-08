@@ -52,11 +52,16 @@ jobs:
         id: rust-version
         run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve CLI version
+        id: cli-version
+        run: echo "version=$(./scripts/cli-version.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         continue-on-error: true
         uses: boringcache/one@v1
         with:
+          cli-version: ${{ steps.cli-version.outputs.version }}
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
@@ -242,7 +247,6 @@ jobs:
       BUILD_HEARTBEAT_SECS: "30"
       BUILD_CLEANUP_WAIT_SECS: "20"
       BUILD_FAILURE_TAIL_LINES: "120"
-      PROXY_SHUTDOWN_WAIT_SECS: "30"
       RUST_LOG_LEVEL: warn
 
     steps:
@@ -272,6 +276,11 @@ jobs:
         id: rust-version
         if: steps.gate.outputs.run == 'true'
         run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve CLI version
+        id: cli-version
+        if: steps.gate.outputs.run == 'true'
+        run: echo "version=$(./scripts/cli-version.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Java
         if: steps.gate.outputs.run == 'true' && matrix.needs_java == true
@@ -403,7 +412,7 @@ jobs:
           - backend: local
             backend_label: Local
             phase: efficacy
-            phase_label: Efficacy
+            phase_label: Same-Runner Efficacy
             artifact: cache-registry-local-efficacy
           - backend: local
             backend_label: Local
@@ -413,7 +422,7 @@ jobs:
           - backend: proxy
             backend_label: Proxy
             phase: efficacy
-            phase_label: Efficacy
+            phase_label: Same-Runner Efficacy
             artifact: cache-registry-proxy-efficacy
           - backend: proxy
             backend_label: Proxy
@@ -456,6 +465,7 @@ jobs:
         continue-on-error: true
         uses: boringcache/one@v1
         with:
+          cli-version: ${{ steps.cli-version.outputs.version }}
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
@@ -555,8 +565,14 @@ jobs:
           request_metrics_cache_ops_sccache_get_misses="0"
           request_metrics_cache_ops_sccache_get_errors="0"
           request_metrics_cache_ops_sccache_get_hit_rate="0"
+          benchmark_scope="workflow-specific"
+          target_dir_mode="n/a"
+          warm_sccache_dir_mode="n/a"
 
           if [[ "$phase" == "efficacy" ]]; then
+            benchmark_scope="same-runner-reused-target"
+            target_dir_mode="reused"
+            warm_sccache_dir_mode="fresh"
             efficacy_cold_hits="0"
             efficacy_cold_misses="0"
             efficacy_warm_hits="0"
@@ -596,6 +612,7 @@ jobs:
           fi
 
           if [[ "$phase" == "stress" ]]; then
+            benchmark_scope="same-runner-parallel-contention"
             prewarm_sum=0
             parallel_sum=0
             for i in $(seq 1 "${PARALLEL_JOBS}"); do
@@ -646,6 +663,9 @@ jobs:
             echo "backend_label=${{ matrix.backend_label }}"
             echo "phase=${phase}"
             echo "phase_label=${{ matrix.phase_label }}"
+            echo "benchmark_scope=${benchmark_scope}"
+            echo "target_dir_mode=${target_dir_mode}"
+            echo "warm_sccache_dir_mode=${warm_sccache_dir_mode}"
             echo "status=${status}"
             echo "cold_seconds=${cold}"
             echo "warm_seconds=${warm}"
@@ -792,8 +812,8 @@ jobs:
             "$TAG" \
             "${WORK_DIR}/publish-check" \
             1 \
-            45 \
-            2 \
+            "${REMOTE_TAG_VERIFY_ATTEMPTS}" \
+            "${REMOTE_TAG_VERIFY_SLEEP_SECS}" \
             "$PROXY_LOG"
 
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"

@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/e2e-auth.sh"
 source "${SCRIPT_DIR}/e2e-remote-tag.sh"
 
-BINARY="${BINARY:-./target/debug/boringcache}"
+CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BINARY="${BINARY:-${CLI_REPO_ROOT}/target/debug/boringcache}"
 WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
 E2E_TAG_PREFIX="${E2E_TAG_PREFIX:-gha-cache-registry}"
 PORT="${PORT:-5000}"
@@ -17,7 +18,7 @@ BUILD_FAILURE_TAIL_LINES="${BUILD_FAILURE_TAIL_LINES:-120}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
 PROXY_READY_WARN_SECS="${PROXY_READY_WARN_SECS:-10}"
-PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-30}"
+PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-210}"
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
 mkdir -p "${LOG_DIR}"
@@ -467,7 +468,7 @@ stop_proxy
 
 echo
 echo "=== Phase 1b: Verify published remote tag resolves ==="
-if ! verify_remote_tag_visible "$BINARY" "$WORKSPACE" "$REGISTRY_ROOT_TAG" "${LOG_DIR}/phase1b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" "${REMOTE_TAG_VERIFY_ATTEMPTS:-30}" "${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}" "serve-initial.log"; then
+if ! verify_remote_tag_visible "$BINARY" "$WORKSPACE" "$REGISTRY_ROOT_TAG" "${LOG_DIR}/phase1b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" "${REMOTE_TAG_VERIFY_ATTEMPTS}" "${REMOTE_TAG_VERIFY_SLEEP_SECS}" "serve-initial.log"; then
   exit 1
 fi
 

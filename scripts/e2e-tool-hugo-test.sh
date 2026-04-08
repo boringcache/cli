@@ -14,7 +14,6 @@ RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-300}"
 BUILD_HEARTBEAT_SECS="${BUILD_HEARTBEAT_SECS:-30}"
 BUILD_CLEANUP_WAIT_SECS="${BUILD_CLEANUP_WAIT_SECS:-20}"
-PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-30}"
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
 require_save_capable_token
@@ -101,7 +100,7 @@ echo "Cold build completed in ${COLD_SECS}s"
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
   if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${REGISTRY_TAG}" "${HUGO_LOG_DIR}" \
-    "${BUDGET_REMOTE_TAG_HITS_MIN}" 30 2 "$(proxy_log)"; then
+    "${BUDGET_REMOTE_TAG_HITS_MIN}" "${REMOTE_TAG_VERIFY_ATTEMPTS}" "${REMOTE_TAG_VERIFY_SLEEP_SECS}" "$(proxy_log)"; then
     exit 1
   fi
   echo "  remote tag verified before warm build (hits=${REMOTE_TAG_CHECK_HITS:-0})"
@@ -152,7 +151,7 @@ dump_cache_ops_summary
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
   if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${REGISTRY_TAG}" "${HUGO_LOG_DIR}" \
-    "${BUDGET_REMOTE_TAG_HITS_MIN}" 30 2 "$(proxy_log)"; then
+    "${BUDGET_REMOTE_TAG_HITS_MIN}" "${REMOTE_TAG_VERIFY_ATTEMPTS}" "${REMOTE_TAG_VERIFY_SLEEP_SECS}" "$(proxy_log)"; then
     exit 1
   fi
   echo "  remote tag verified (hits=${REMOTE_TAG_CHECK_HITS:-0})"

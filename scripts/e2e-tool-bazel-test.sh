@@ -152,7 +152,7 @@ dump_cache_ops_summary
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
   if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${BAZEL_LOG_DIR}" \
-    "${BUDGET_REMOTE_TAG_HITS_MIN}" 30 2 "$(proxy_log)"; then
+    "${BUDGET_REMOTE_TAG_HITS_MIN}" "${REMOTE_TAG_VERIFY_ATTEMPTS}" "${REMOTE_TAG_VERIFY_SLEEP_SECS}" "$(proxy_log)"; then
     exit 1
   fi
   echo "  remote tag verified (hits=${REMOTE_TAG_CHECK_HITS:-0})"
