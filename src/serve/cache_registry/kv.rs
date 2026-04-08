@@ -5,6 +5,7 @@ use futures_util::StreamExt;
 use futures_util::future::join_all;
 use rand::Rng;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -76,6 +77,12 @@ const KV_VERSION_POLL_ACTIVE_WINDOW: std::time::Duration = std::time::Duration::
 const KV_VERSION_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const KV_VERSION_POLL_JITTER_MS: u64 = 500;
 const KV_VERSION_REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
+const KV_PENDING_PUBLISH_HANDOFF_DIR: &str = "kv-pending-publish";
+const KV_PENDING_PUBLISH_HANDOFF_VERSION: u32 = 1;
+const KV_PENDING_PUBLISH_HANDOFF_MAX_AGE: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+const KV_PENDING_PUBLISH_HANDOFF_RECONCILE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
 const SERVE_METRIC_SOURCE: &str = "serve";
 const SERVE_PRELOAD_INDEX_OPERATION: &str = "cache_preload_index_fetch";
 const SERVE_PREFETCH_OPERATION: &str = "blob_prefetch_cycle";
@@ -83,6 +90,20 @@ const SERVE_PRELOAD_INDEX_PATH: &str = "/serve/cache_registry/preload-index";
 const SERVE_PREFETCH_PATH: &str = "/serve/cache_registry/prefetch";
 const LOOKUP_REFRESH_FLIGHT_KEY: &str = "lookup_refresh";
 static KV_BLOB_DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KvPendingPublishHandoff {
+    version: u32,
+    persisted_at_unix_ms: u64,
+    workspace: String,
+    registry_root_tag: String,
+    configured_human_tags: Vec<String>,
+    cache_entry_id: String,
+    entries: BTreeMap<String, BlobDescriptor>,
+    blob_order: Vec<BlobDescriptor>,
+    root_pending: Option<PendingMetadata>,
+    pending_alias_tags: bool,
+}
 
 fn kv_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -714,6 +735,317 @@ fn clear_root_tag_misses(state: &AppState) {
         clear_tag_misses(state, &tag);
     }
 }
+
+fn kv_pending_publish_handoff_path(state: &AppState) -> PathBuf {
+    let human_tags = state
+        .configured_human_tags
+        .iter()
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+    let scope = format!(
+        "{}|{}|{}",
+        state.workspace,
+        state.registry_root_tag.trim(),
+        human_tags
+    );
+    let digest = crate::cas_oci::sha256_hex(scope.as_bytes());
+    state
+        .blob_read_cache
+        .cache_dir()
+        .join(KV_PENDING_PUBLISH_HANDOFF_DIR)
+        .join(format!("{digest}.json"))
+}
+
+fn kv_pending_publish_handoff_is_expired(handoff: &KvPendingPublishHandoff) -> bool {
+    let now_ms = crate::serve::state::unix_time_ms_now();
+    now_ms.saturating_sub(handoff.persisted_at_unix_ms)
+        > KV_PENDING_PUBLISH_HANDOFF_MAX_AGE.as_millis() as u64
+}
+
+fn kv_pending_publish_handoff_matches_state(
+    handoff: &KvPendingPublishHandoff,
+    state: &AppState,
+) -> bool {
+    handoff.version == KV_PENDING_PUBLISH_HANDOFF_VERSION
+        && handoff.workspace == state.workspace
+        && handoff.registry_root_tag == state.registry_root_tag
+        && handoff.configured_human_tags == state.configured_human_tags
+}
+
+async fn read_kv_pending_publish_handoff(state: &AppState) -> Option<KvPendingPublishHandoff> {
+    let path = kv_pending_publish_handoff_path(state);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            log::warn!(
+                "KV pending publish handoff: failed to read {}: {error}",
+                path.display()
+            );
+            return None;
+        }
+    };
+
+    let handoff = match serde_json::from_slice::<KvPendingPublishHandoff>(&bytes) {
+        Ok(handoff) => handoff,
+        Err(error) => {
+            log::warn!(
+                "KV pending publish handoff: failed to parse {}: {error}",
+                path.display()
+            );
+            let _ = tokio::fs::remove_file(&path).await;
+            return None;
+        }
+    };
+
+    if !kv_pending_publish_handoff_matches_state(&handoff, state)
+        || kv_pending_publish_handoff_is_expired(&handoff)
+    {
+        let _ = tokio::fs::remove_file(&path).await;
+        return None;
+    }
+
+    Some(handoff)
+}
+
+async fn clear_kv_pending_publish_handoff(state: &AppState) {
+    let path = kv_pending_publish_handoff_path(state);
+    if let Err(error) = tokio::fs::remove_file(&path).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!(
+            "KV pending publish handoff: failed to remove {}: {error}",
+            path.display()
+        );
+    }
+}
+
+async fn persist_kv_pending_publish_handoff(
+    state: &AppState,
+    entries: &BTreeMap<String, BlobDescriptor>,
+    blob_order: &[BlobDescriptor],
+    cache_entry_id: &str,
+    root_pending: Option<&PendingMetadata>,
+    pending_alias_tags: bool,
+) {
+    if root_pending.is_none() && !pending_alias_tags {
+        clear_kv_pending_publish_handoff(state).await;
+        return;
+    }
+
+    let handoff = KvPendingPublishHandoff {
+        version: KV_PENDING_PUBLISH_HANDOFF_VERSION,
+        persisted_at_unix_ms: crate::serve::state::unix_time_ms_now(),
+        workspace: state.workspace.clone(),
+        registry_root_tag: state.registry_root_tag.clone(),
+        configured_human_tags: state.configured_human_tags.clone(),
+        cache_entry_id: cache_entry_id.to_string(),
+        entries: entries.clone(),
+        blob_order: blob_order.to_vec(),
+        root_pending: root_pending.cloned(),
+        pending_alias_tags,
+    };
+
+    let path = kv_pending_publish_handoff_path(state);
+    let Some(parent) = path.parent() else {
+        log::warn!(
+            "KV pending publish handoff: invalid path {}",
+            path.display()
+        );
+        return;
+    };
+
+    if let Err(error) = tokio::fs::create_dir_all(parent).await {
+        log::warn!(
+            "KV pending publish handoff: failed to create {}: {error}",
+            parent.display()
+        );
+        return;
+    }
+
+    let payload = match serde_json::to_vec(&handoff) {
+        Ok(payload) => payload,
+        Err(error) => {
+            log::warn!("KV pending publish handoff: failed to encode snapshot: {error}");
+            return;
+        }
+    };
+
+    let temp_path = path.with_extension("json.tmp");
+    if let Err(error) = tokio::fs::write(&temp_path, payload).await {
+        log::warn!(
+            "KV pending publish handoff: failed to write {}: {error}",
+            temp_path.display()
+        );
+        return;
+    }
+    if let Err(error) = tokio::fs::rename(&temp_path, &path).await {
+        log::warn!(
+            "KV pending publish handoff: failed to rename {} -> {}: {error}",
+            temp_path.display(),
+            path.display()
+        );
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return;
+    }
+
+    eprintln!(
+        "KV pending publish handoff persisted: cache_entry_id={} root_pending={} alias_pending={}",
+        cache_entry_id,
+        root_pending.is_some(),
+        pending_alias_tags
+    );
+}
+
+async fn kv_publish_tags_visible(state: &AppState, expected_cache_entry_id: &str) -> bool {
+    for tag in kv_root_tags(state) {
+        let visible = match state
+            .api_client
+            .tag_pointer(&state.workspace, &tag, None)
+            .await
+        {
+            Ok(crate::api::client::TagPointerPollResult::Changed { pointer, .. }) => {
+                pointer.cache_entry_id.as_deref() == Some(expected_cache_entry_id)
+            }
+            Ok(crate::api::client::TagPointerPollResult::NotModified)
+            | Ok(crate::api::client::TagPointerPollResult::NotFound) => false,
+            Err(error) => {
+                log::warn!(
+                    "KV pending publish handoff: tag visibility poll failed for {} tag={}: {}",
+                    expected_cache_entry_id,
+                    tag,
+                    error
+                );
+                false
+            }
+        };
+        if !visible {
+            return false;
+        }
+    }
+    true
+}
+
+async fn reconcile_kv_pending_publish_handoff(state: AppState, handoff: KvPendingPublishHandoff) {
+    let deadline = std::time::Instant::now() + KV_PENDING_PUBLISH_HANDOFF_RECONCILE_TIMEOUT;
+
+    loop {
+        if kv_publish_tags_visible(&state, &handoff.cache_entry_id).await {
+            clear_kv_pending_publish_handoff(&state).await;
+            eprintln!(
+                "KV pending publish handoff settled: cache_entry_id={} tags now visible",
+                handoff.cache_entry_id
+            );
+            return;
+        }
+
+        let Some(metadata) = handoff.root_pending.as_ref() else {
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        };
+
+        match state
+            .api_client
+            .pending_publish_status(&state.workspace, metadata)
+            .await
+        {
+            Ok(status) => {
+                let publish_state = status
+                    .publish_state
+                    .as_deref()
+                    .unwrap_or(status.state.as_str());
+                match publish_state {
+                    "published" => {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                    "failed" | "conflicted" => {
+                        {
+                            let mut published = state.kv_published_index.write().await;
+                            if published.cache_entry_id() == Some(handoff.cache_entry_id.as_str()) {
+                                published.set_empty_incomplete();
+                            }
+                        }
+                        clear_kv_pending_publish_handoff(&state).await;
+                        refresh_kv_index_keys_only(&state).await;
+                        eprintln!(
+                            "KV pending publish handoff invalidated: cache_entry_id={} state={publish_state}",
+                            handoff.cache_entry_id
+                        );
+                        return;
+                    }
+                    _ => {
+                        let delay = std::time::Duration::from_secs(
+                            metadata.retry_after_seconds.unwrap_or(1).max(1),
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "KV pending publish handoff: status poll failed for cache_entry_id={}: {error}",
+                    handoff.cache_entry_id
+                );
+                if std::time::Instant::now() >= deadline {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+pub(crate) async fn restore_kv_pending_publish_handoff(state: &AppState) {
+    let Some(handoff) = read_kv_pending_publish_handoff(state).await else {
+        return;
+    };
+
+    if let Some(_pending) = handoff.root_pending.as_ref() {
+        {
+            let mut published = state.kv_published_index.write().await;
+            published.update(
+                handoff
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                handoff.blob_order.clone(),
+                handoff.cache_entry_id.clone(),
+            );
+        }
+        clear_root_tag_misses(state);
+        eprintln!(
+            "KV startup: restored pending publish handoff cache_entry_id={} entries={}",
+            handoff.cache_entry_id,
+            handoff.entries.len()
+        );
+    } else {
+        eprintln!(
+            "KV startup: restored alias visibility handoff cache_entry_id={}",
+            handoff.cache_entry_id
+        );
+    }
+
+    let reconcile_state = state.clone();
+    tokio::spawn(async move {
+        reconcile_kv_pending_publish_handoff(reconcile_state, handoff).await;
+    });
+}
+
+pub(crate) async fn should_skip_shutdown_tag_visibility_wait(
+    state: &AppState,
+    expected_cache_entry_id: &str,
+) -> bool {
+    read_kv_pending_publish_handoff(state)
+        .await
+        .is_some_and(|handoff| handoff.cache_entry_id == expected_cache_entry_id)
+}
+
 async fn lookup_published_blob(
     state: &AppState,
     scoped_key: &str,
@@ -1875,6 +2207,13 @@ enum KvConfirmOutcome {
     Pending(PendingMetadata),
 }
 
+fn kv_confirm_pending_metadata(outcome: &KvConfirmOutcome) -> Option<&PendingMetadata> {
+    match outcome {
+        KvConfirmOutcome::Published => None,
+        KvConfirmOutcome::Pending(metadata) => Some(metadata),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FlushMode {
     Normal,
@@ -2005,9 +2344,21 @@ async fn confirm_kv_flush(
         let result: Result<KvConfirmOutcome, anyhow::Error> = match flush_mode {
             FlushMode::Shutdown => state
                 .api_client
-                .confirm(&state.workspace, cache_entry_id, confirm_request)
+                .confirm_wait_for_publish_or_shutdown_pending(
+                    &state.workspace,
+                    cache_entry_id,
+                    confirm_request,
+                    state.shutdown_requested.as_ref(),
+                )
                 .await
-                .map(|_| KvConfirmOutcome::Published),
+                .map(|response| match response {
+                    crate::api::client::ConfirmPublishResult::Published(_) => {
+                        KvConfirmOutcome::Published
+                    }
+                    crate::api::client::ConfirmPublishResult::Pending(metadata) => {
+                        KvConfirmOutcome::Pending(metadata)
+                    }
+                }),
             FlushMode::Normal => state
                 .api_client
                 .confirm_wait_for_publish_or_pending_timeout(
@@ -3502,6 +3853,15 @@ async fn do_flush(
             flush_mode,
         )
         .await?;
+        persist_kv_pending_publish_handoff(
+            state,
+            &entries,
+            &merged_blob_order,
+            &save_response.cache_entry_id,
+            kv_confirm_pending_metadata(&confirm_outcome),
+            pending_alias_count > 0,
+        )
+        .await;
 
         let (publish_state, upload_session_id, publish_attempt_id) = match &confirm_outcome {
             KvConfirmOutcome::Pending(metadata) => (
@@ -3620,6 +3980,15 @@ async fn do_flush(
         flush_mode,
     )
     .await?;
+    persist_kv_pending_publish_handoff(
+        state,
+        &entries,
+        &merged_blob_order,
+        &save_response.cache_entry_id,
+        kv_confirm_pending_metadata(&confirm_outcome),
+        pending_alias_count > 0,
+    )
+    .await;
 
     let (publish_state, upload_session_id, publish_attempt_id) = match &confirm_outcome {
         KvConfirmOutcome::Pending(metadata) => (
@@ -4721,12 +5090,12 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn shutdown_confirm_waits_for_pending_publish_completion() {
+    async fn shutdown_confirm_hands_off_pending_publish() {
         let _guard = test_env::lock();
         let _env_guard = TestEnvGuard::capture(&["BORINGCACHE_API_URL"]);
         if !networking_available() {
             eprintln!(
-                "skipping shutdown_confirm_waits_for_pending_publish_completion: networking disabled in sandbox"
+                "skipping shutdown_confirm_hands_off_pending_publish: networking disabled in sandbox"
             );
             return;
         }
@@ -4757,17 +5126,6 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        let pointer_after_publish = server
-            .mock(
-                "GET",
-                "/v2/workspaces/org/repo/caches/tags/registry/pointer",
-            )
-            .match_header("authorization", "Bearer test-token")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"version":"1","cache_entry_id":"entry-1","status":"published"}"#)
-            .create_async()
-            .await;
         let publish = server
             .mock("PUT", "/v2/workspaces/org/repo/caches/tags/registry/publish")
             .match_header("authorization", "Bearer test-token")
@@ -4781,17 +5139,6 @@ mod tests {
             )
             .create_async()
             .await;
-        let status = server
-            .mock("GET", "/v2/workspaces/org/repo/upload-sessions/session-1")
-            .match_header("authorization", "Bearer test-token")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                r#"{"upload_session_id":"session-1","cache_entry_id":"entry-1","state":"published","publish_attempt_id":"attempt-1","publish_state":"published"}"#,
-            )
-            .create_async()
-            .await;
-
         let outcome = confirm_kv_flush(
             &state,
             "entry-1",
@@ -4799,18 +5146,118 @@ mod tests {
             FlushMode::Shutdown,
         )
         .await
-        .expect("shutdown flush should wait for pending publish completion");
+        .expect("shutdown flush should hand off pending publish state");
 
         assert!(
-            matches!(outcome, KvConfirmOutcome::Published),
-            "shutdown confirm should not hand off pending publish"
+            matches!(outcome, KvConfirmOutcome::Pending(_)),
+            "shutdown confirm should hand off pending publish"
         );
 
         capabilities.assert_async().await;
         pointer_initial.assert_async().await;
-        pointer_after_publish.assert_async().await;
         publish.assert_async().await;
-        status.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn pending_publish_handoff_marks_shutdown_visibility_wait_skippable() {
+        let _guard = test_env::lock();
+        let _env_guard = TestEnvGuard::capture(&["BORINGCACHE_API_URL"]);
+        let server = Server::new_async().await;
+        let (state, _temp_home) = setup_state(&server).await;
+
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "scoped/key".to_string(),
+            BlobDescriptor {
+                digest: format!("sha256:{}", "a".repeat(64)),
+                size_bytes: 12,
+            },
+        );
+        let pending = PendingMetadata {
+            code: Some("pending_publish".to_string()),
+            upload_session_id: Some("session-1".to_string()),
+            publish_attempt_id: Some("attempt-1".to_string()),
+            poll_path: Some("/v2/workspaces/org/repo/upload-sessions/session-1".to_string()),
+            retry_after_seconds: Some(1),
+        };
+
+        persist_kv_pending_publish_handoff(
+            &state,
+            &entries,
+            &entries.values().cloned().collect::<Vec<_>>(),
+            "entry-1",
+            Some(&pending),
+            false,
+        )
+        .await;
+
+        assert!(should_skip_shutdown_tag_visibility_wait(&state, "entry-1").await);
+        assert!(!should_skip_shutdown_tag_visibility_wait(&state, "entry-2").await);
+    }
+
+    #[tokio::test]
+    async fn restore_pending_publish_handoff_reloads_published_index() {
+        let _guard = test_env::lock();
+        let _env_guard = TestEnvGuard::capture(&["BORINGCACHE_API_URL"]);
+        if !networking_available() {
+            eprintln!(
+                "skipping restore_pending_publish_handoff_reloads_published_index: networking disabled in sandbox"
+            );
+            return;
+        }
+
+        let mut server = Server::new_async().await;
+        let (state, _temp_home) = setup_state(&server).await;
+
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "scoped/key".to_string(),
+            BlobDescriptor {
+                digest: format!("sha256:{}", "b".repeat(64)),
+                size_bytes: 34,
+            },
+        );
+        let pending = PendingMetadata {
+            code: Some("pending_publish".to_string()),
+            upload_session_id: Some("session-1".to_string()),
+            publish_attempt_id: Some("attempt-1".to_string()),
+            poll_path: Some("/v2/workspaces/org/repo/upload-sessions/session-1".to_string()),
+            retry_after_seconds: Some(1),
+        };
+
+        persist_kv_pending_publish_handoff(
+            &state,
+            &entries,
+            &entries.values().cloned().collect::<Vec<_>>(),
+            "entry-1",
+            Some(&pending),
+            false,
+        )
+        .await;
+
+        let pointer = server
+            .mock(
+                "GET",
+                "/v2/workspaces/org/repo/caches/tags/registry/pointer",
+            )
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"tag":"registry","cache_entry_id":"entry-1","version":"1"}"#)
+            .create_async()
+            .await;
+
+        restore_kv_pending_publish_handoff(&state).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let published = state.kv_published_index.read().await;
+        let (blob, cache_entry_id) = published.get("scoped/key").expect("restored entry");
+        assert_eq!(cache_entry_id, "entry-1");
+        assert_eq!(blob.size_bytes, 34);
+        drop(published);
+
+        pointer.assert_async().await;
+        assert!(!should_skip_shutdown_tag_visibility_wait(&state, "entry-1").await);
     }
 
     #[test]

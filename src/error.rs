@@ -1,13 +1,14 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConflictMetadata {
     pub current_version: Option<String>,
     pub current_cache_entry_id: Option<String>,
     pub current_tag: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingMetadata {
     pub code: Option<String>,
     pub upload_session_id: Option<String>,

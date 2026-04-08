@@ -371,6 +371,8 @@ async fn build_server_runtime(
         prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
+    cache_registry::restore_kv_pending_publish_handoff(&state).await;
+
     let addr = format!("{host}:{port}");
     let mut resolved = lookup_host(&addr)
         .await
@@ -1002,7 +1004,19 @@ async fn flush_pending_on_shutdown(state: &AppState) {
                     };
                 }
                 if let Some(cache_entry_id) = expected_root_cache_entry_id.as_deref() {
-                    wait_for_tag_visibility(state, cache_entry_id, deadline).await;
+                    if cache_registry::should_skip_shutdown_tag_visibility_wait(
+                        state,
+                        cache_entry_id,
+                    )
+                    .await
+                    {
+                        eprintln!(
+                            "Shutdown: deferred tag visibility wait for cache_entry_id={} via pending publish handoff",
+                            cache_entry_id
+                        );
+                    } else {
+                        wait_for_tag_visibility(state, cache_entry_id, deadline).await;
+                    }
                 }
                 return;
             }

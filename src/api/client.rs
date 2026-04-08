@@ -1817,6 +1817,14 @@ impl ApiClient {
         self.get_v2_no_retry(&endpoint).await
     }
 
+    pub async fn pending_publish_status(
+        &self,
+        workspace: &str,
+        metadata: &PendingMetadata,
+    ) -> Result<super::models::cache::UploadSessionStatusResponse> {
+        self.upload_session_status(workspace, metadata).await
+    }
+
     pub async fn complete_multipart(
         &self,
         workspace: &str,
