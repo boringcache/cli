@@ -33,8 +33,6 @@ const KV_REFRESH_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 const KV_REPLICATION_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 const KV_IDLE_FLUSH_WINDOW_DEFAULT_MS: u64 = 10_000;
 const KV_IDLE_FLUSH_WINDOW_SMALL_BATCH_MS: u64 = 2_000;
-const KV_SMALL_BATCH_IMMEDIATE_FLUSH_MAX_BLOBS: usize = 8;
-const KV_SMALL_BATCH_IMMEDIATE_FLUSH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BLOBS: usize = 64;
 const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const BLOB_DOWNLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY";
@@ -698,12 +696,6 @@ async fn should_flush_pending(state: &AppState, urgent: bool) -> bool {
 }
 
 fn flush_idle_window_ms(pending_blob_count: usize, pending_spool_bytes: u64) -> u64 {
-    if pending_blob_count <= KV_SMALL_BATCH_IMMEDIATE_FLUSH_MAX_BLOBS
-        && pending_spool_bytes <= KV_SMALL_BATCH_IMMEDIATE_FLUSH_MAX_BYTES
-    {
-        return 0;
-    }
-
     if pending_blob_count <= KV_SMALL_BATCH_IDLE_FLUSH_MAX_BLOBS
         && pending_spool_bytes <= KV_SMALL_BATCH_IDLE_FLUSH_MAX_BYTES
     {
@@ -1407,13 +1399,22 @@ mod tests {
     }
 
     #[test]
-    fn should_flush_pending_values_flushes_immediately_for_tiny_batches() {
+    fn should_flush_pending_values_coalesces_tiny_batches_with_short_idle_window() {
         let now_ms = 10_000;
+        assert!(!should_flush_pending_values(
+            false,
+            2,
+            1_024,
+            now_ms - 1_500,
+            now_ms,
+            2_000,
+            crate::serve::state::FLUSH_SIZE_THRESHOLD,
+        ));
         assert!(should_flush_pending_values(
             false,
             2,
             1_024,
-            now_ms,
+            now_ms - 2_000,
             now_ms,
             2_000,
             crate::serve::state::FLUSH_SIZE_THRESHOLD,

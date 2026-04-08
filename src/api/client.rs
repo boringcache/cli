@@ -35,6 +35,7 @@ const TRANSFER_CONNECT_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_TRANSFER_CONNECT_TI
 const DEFAULT_TRANSFER_CONNECT_TIMEOUT_SECS: u64 = 10;
 const PENDING_PUBLISH_POLL_TIMEOUT: Duration = Duration::from_secs(180);
 const PENDING_PUBLISH_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const PENDING_PUBLISH_POLL_MAX_INTERVAL: Duration = Duration::from_secs(10);
 const BLOB_RECEIPT_COMMIT_BATCH_MAX: usize = 500;
 
 #[derive(Debug)]
@@ -1658,6 +1659,18 @@ impl ApiClient {
             let status = match self.upload_session_status(workspace, &metadata).await {
                 Ok(status) => status,
                 Err(error) => {
+                    if started_at.elapsed() < PENDING_PUBLISH_POLL_TIMEOUT
+                        && should_retry_pending_publish_poll_error(&error)
+                    {
+                        let delay = pending_publish_poll_delay(metadata.retry_after_seconds);
+                        log::warn!(
+                            "Pending publish poll transient error for tag={tag}: {error}; retrying in {:.1}s",
+                            delay.as_secs_f32()
+                        );
+                        sleep(delay).await;
+                        continue;
+                    }
+
                     if should_accept_server_owned_pending(shutdown_requested, &metadata)
                         || (started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT
                             && should_accept_server_owned_pending_after_timeout(
@@ -1710,8 +1723,7 @@ impl ApiClient {
                         return Ok(PendingPublishPollOutcome::Pending(metadata));
                     }
 
-                    let delay = Duration::from_secs(metadata.retry_after_seconds.unwrap_or(1))
-                        .min(PENDING_PUBLISH_POLL_INTERVAL.max(Duration::from_millis(200)));
+                    let delay = pending_publish_poll_delay(metadata.retry_after_seconds);
                     sleep(delay).await;
                 }
             }
@@ -2290,6 +2302,28 @@ fn should_accept_server_owned_pending_after_timeout(
     metadata: &PendingMetadata,
 ) -> bool {
     accept_server_owned_pending_after_timeout && server_owned_pending_publish(metadata)
+}
+
+fn pending_publish_poll_delay(retry_after_seconds: Option<u64>) -> Duration {
+    Duration::from_secs(retry_after_seconds.unwrap_or(1).max(1))
+        .max(PENDING_PUBLISH_POLL_INTERVAL)
+        .min(PENDING_PUBLISH_POLL_MAX_INTERVAL)
+}
+
+fn should_retry_pending_publish_poll_error(error: &anyhow::Error) -> bool {
+    if crate::error::is_connection_error(error) {
+        return true;
+    }
+
+    let lower = format!("{error:#}").to_lowercase();
+    lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("503")
+        || lower.contains("service unavailable")
+        || lower.contains("504")
+        || lower.contains("gateway timeout")
+        || lower.contains("request timeout")
+        || lower.contains("timed out")
 }
 
 fn cache_confirm_response_from_tag_pointer(
@@ -3070,6 +3104,44 @@ mod tests {
         assert!(!should_accept_server_owned_pending_after_timeout(
             true, &metadata
         ));
+    }
+
+    #[test]
+    fn test_pending_publish_poll_delay_respects_retry_after_floor_and_cap() {
+        assert_eq!(
+            pending_publish_poll_delay(Some(0)),
+            Duration::from_secs(1),
+            "retry_after=0 should floor to 1s"
+        );
+        assert_eq!(
+            pending_publish_poll_delay(Some(1)),
+            Duration::from_secs(1),
+            "retry_after=1 should remain 1s"
+        );
+        assert_eq!(
+            pending_publish_poll_delay(Some(3)),
+            Duration::from_secs(3),
+            "retry_after=3 should remain 3s"
+        );
+        assert_eq!(
+            pending_publish_poll_delay(Some(60)),
+            PENDING_PUBLISH_POLL_MAX_INTERVAL,
+            "retry_after should cap at max interval"
+        );
+    }
+
+    #[test]
+    fn test_should_retry_pending_publish_poll_error_detects_transient_statuses() {
+        let throttled = anyhow::anyhow!(
+            "Failed to poll pending publish status: API request failed after 3 attempts: Transient error: 429 Too Many Requests"
+        );
+        assert!(should_retry_pending_publish_poll_error(&throttled));
+
+        let unavailable = anyhow::anyhow!("Server returned 503 Service Unavailable");
+        assert!(should_retry_pending_publish_poll_error(&unavailable));
+
+        let permanent = anyhow::anyhow!("Server returned 403 Forbidden");
+        assert!(!should_retry_pending_publish_poll_error(&permanent));
     }
 
     #[test]
