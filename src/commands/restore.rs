@@ -10,7 +10,7 @@ use crate::telemetry::StorageMetrics;
 use crate::transfer::send_transfer_request_with_retry;
 use crate::ui;
 use anyhow::{Context, Error, Result, anyhow};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -447,6 +447,7 @@ async fn execute_batch_restore_inner(
 
     let mut plans: Vec<RestorePlan> = Vec::with_capacity(preflight_result.valid_specs.len());
     let mut all_candidates: Vec<String> = Vec::new();
+    let mut seen_candidates: HashSet<String> = HashSet::new();
     let mut tags_display: Vec<String> = Vec::with_capacity(preflight_result.valid_specs.len());
 
     for spec in &preflight_result.valid_specs {
@@ -466,7 +467,7 @@ async fn execute_batch_restore_inner(
             .unwrap_or_else(|| ".".to_string());
 
         for candidate in &candidates {
-            if !all_candidates.contains(candidate) {
+            if seen_candidates.insert(candidate.clone()) {
                 all_candidates.push(candidate.clone());
             }
         }

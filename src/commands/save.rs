@@ -3,12 +3,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::OnceCell;
 use tokio::task;
 
 use crate::api::ApiClient;
 use crate::api::client::ConfirmPublishResult;
 use crate::api::models::cache::{
-    BlobDescriptor, ConfirmRequest, ManifestCheckRequest, SaveRequest,
+    BlobDescriptor, ConfirmRequest, ManifestCheckRequest, ManifestCheckResult, SaveRequest,
 };
 use crate::archive::{TarArchiveInfo, create_tar_archive};
 use crate::ci_detection::detect_ci_environment;
@@ -82,6 +83,48 @@ async fn confirm_archive_upload(
         )),
         ConfirmPublishResult::Pending(_) => Ok(ArchiveConfirmOutcome::Pending),
     }
+}
+
+async fn shared_save_api_client(shared_client: &OnceCell<ApiClient>) -> Result<ApiClient> {
+    let client = shared_client
+        .get_or_try_init(|| async { ApiClient::for_save() })
+        .await?;
+    Ok(client.clone())
+}
+
+fn build_archive_manifest_checks(
+    tag: &str,
+    manifest_root_digest: &str,
+    force: bool,
+) -> Vec<ManifestCheckRequest> {
+    let mut checks = Vec::with_capacity(if force { 1 } else { 2 });
+    checks.push(ManifestCheckRequest {
+        tag: tag.to_string(),
+        manifest_root_digest: manifest_root_digest.to_string(),
+        lookup: None,
+    });
+    if !force {
+        checks.push(ManifestCheckRequest {
+            tag: tag.to_string(),
+            manifest_root_digest: manifest_root_digest.to_string(),
+            lookup: Some("digest".to_string()),
+        });
+    }
+    checks
+}
+
+fn digest_existing_cache_entry_id_from_result(result: &ManifestCheckResult) -> Option<String> {
+    let digest_exists = result.exists
+        && result
+            .status
+            .as_deref()
+            .map(|status| status != "pending" && status != "uploading")
+            .unwrap_or(true);
+
+    if digest_exists {
+        return result.cache_entry_id.as_deref().map(str::to_string);
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -202,8 +245,10 @@ async fn execute_batch_save_inner(
     let max_concurrent = crate::commands::utils::get_optimal_concurrency(total_entries, "save");
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent.max(1)));
     let mut tasks = Vec::with_capacity(total_entries);
+    let shared_api_client: Arc<OnceCell<ApiClient>> = Arc::new(OnceCell::new());
 
     for (position, (tag, expanded_path)) in prepared_entries.into_iter().enumerate() {
+        let shared_api_client = shared_api_client.clone();
         let workspace = workspace.clone();
         let exclude = exclude.clone();
         let recipient = recipient.clone();
@@ -214,6 +259,7 @@ async fn execute_batch_save_inner(
                 .await
                 .map_err(|e| anyhow!("Save worker semaphore closed: {e}"))?;
             let result = save_single_entry(
+                shared_api_client,
                 workspace,
                 tag.clone(),
                 expanded_path,
@@ -292,6 +338,7 @@ async fn execute_batch_save_inner(
 
 #[allow(clippy::too_many_arguments)]
 async fn save_single_entry(
+    shared_api_client: Arc<OnceCell<ApiClient>>,
     workspace: String,
     tag: String,
     path: String,
@@ -344,14 +391,18 @@ async fn save_single_entry(
     let archive_path = path.clone();
     let archive_exclude = exclude.clone();
     let archive_recipient = recipient.clone();
+    let archive_api_client = shared_api_client.clone();
     let oci_workspace = workspace.clone();
     let oci_tag = tag.clone();
     let oci_path = path.clone();
+    let oci_api_client = shared_api_client.clone();
+    let file_api_client = shared_api_client;
 
     adapter
         .dispatch(
             || {
                 save_single_archive_entry(
+                    archive_api_client,
                     archive_workspace,
                     archive_tag,
                     archive_path,
@@ -366,7 +417,7 @@ async fn save_single_entry(
             },
             || async move {
                 save_single_oci_entry(
-                    ApiClient::for_save()?,
+                    oci_api_client,
                     oci_workspace,
                     oci_tag,
                     oci_path,
@@ -379,7 +430,7 @@ async fn save_single_entry(
             },
             || async move {
                 save_single_file_entry(
-                    ApiClient::for_save()?,
+                    file_api_client,
                     workspace,
                     tag,
                     path,
@@ -398,6 +449,7 @@ async fn save_single_entry(
 
 #[allow(clippy::too_many_arguments)]
 async fn save_single_archive_entry(
+    shared_api_client: Arc<OnceCell<ApiClient>>,
     workspace: String,
     tag: String,
     path: String,
@@ -451,8 +503,6 @@ async fn save_single_archive_entry(
         anyhow::bail!(message);
     }
 
-    let api_client = ApiClient::for_save()?;
-
     let recipient_str = if encrypt {
         Some(
             recipient.as_deref().ok_or_else(|| {
@@ -469,21 +519,17 @@ async fn save_single_archive_entry(
         .transpose()?;
 
     let manifest_files = manifest_files_from_draft(&draft);
+    let api_client = shared_save_api_client(shared_api_client.as_ref()).await?;
 
     let check_step = session.start_step("Checking cache".to_string(), None)?;
+    let check_requests = build_archive_manifest_checks(&tag, &manifest_root_digest, force);
     let check_response = api_client
-        .check_manifests(
-            &workspace,
-            &[ManifestCheckRequest {
-                tag: tag.clone(),
-                manifest_root_digest: manifest_root_digest.clone(),
-                lookup: None,
-            }],
-        )
+        .check_manifests(&workspace, &check_requests)
         .await;
 
     let mut cache_exists = false;
     let mut cache_pending = false;
+    let mut digest_existing_cache_entry_id: Option<String> = None;
     match check_response {
         Ok(response) => {
             if let Some(result) = response.results.first()
@@ -499,6 +545,12 @@ async fn save_single_archive_entry(
                     "cache hit"
                 };
                 check_step.update_progress(100.0, Some(status_msg.to_string()))?;
+            }
+            if !force
+                && !cache_exists
+                && let Some(result) = response.results.get(1)
+            {
+                digest_existing_cache_entry_id = digest_existing_cache_entry_id_from_result(result);
             }
         }
         Err(err) => {
@@ -540,44 +592,6 @@ async fn save_single_archive_entry(
         drop(reporter);
         progress_system.shutdown()?;
         return Ok(SaveStatus::AlreadyExists);
-    }
-
-    let mut digest_existing_cache_entry_id: Option<String> = None;
-    if !cache_exists && !force {
-        let digest_check_response = api_client
-            .check_manifests(
-                &workspace,
-                &[ManifestCheckRequest {
-                    tag: tag.clone(),
-                    manifest_root_digest: manifest_root_digest.clone(),
-                    lookup: Some("digest".to_string()),
-                }],
-            )
-            .await;
-
-        match digest_check_response {
-            Ok(response) => {
-                if let Some(result) = response.results.first() {
-                    let digest_exists = result.exists
-                        && result
-                            .status
-                            .as_deref()
-                            .map(|status| status != "pending" && status != "uploading")
-                            .unwrap_or(true);
-
-                    if digest_exists && let Some(cache_entry_id) = result.cache_entry_id.as_deref()
-                    {
-                        digest_existing_cache_entry_id = Some(cache_entry_id.to_string());
-                    }
-                }
-            }
-            Err(err) => {
-                progress_warning(
-                    &reporter,
-                    format!("  Digest check failed ({}); proceeding", err),
-                );
-            }
-        }
     }
 
     let archive_step = session.start_step("Creating archive".to_string(), None)?;
@@ -1213,7 +1227,7 @@ async fn save_single_archive_entry(
 
 #[allow(clippy::too_many_arguments)]
 async fn save_single_cas_entry<F>(
-    api_client: ApiClient,
+    shared_api_client: Arc<OnceCell<ApiClient>>,
     workspace: String,
     tag: String,
     path: String,
@@ -1251,6 +1265,7 @@ where
         progress_system.shutdown()?;
         anyhow::bail!(message.clone());
     }
+    let api_client = shared_save_api_client(shared_api_client.as_ref()).await?;
 
     let create_step = session.start_step("Creating cache entry".to_string(), None)?;
     let request = cas_publish::build_save_request(
@@ -1573,7 +1588,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 async fn save_single_file_entry(
-    api_client: ApiClient,
+    shared_api_client: Arc<OnceCell<ApiClient>>,
     workspace: String,
     tag: String,
     path: String,
@@ -1587,7 +1602,7 @@ async fn save_single_file_entry(
     let bundle_tag = tag.clone();
     let bundle_path = path.clone();
     save_single_cas_entry(
-        api_client,
+        shared_api_client,
         workspace,
         tag,
         path,
@@ -1664,7 +1679,7 @@ async fn save_single_file_entry(
 
 #[allow(clippy::too_many_arguments)]
 async fn save_single_oci_entry(
-    api_client: ApiClient,
+    shared_api_client: Arc<OnceCell<ApiClient>>,
     workspace: String,
     tag: String,
     path: String,
@@ -1675,7 +1690,7 @@ async fn save_single_oci_entry(
 ) -> Result<SaveStatus> {
     let bundle_tag = tag.clone();
     save_single_cas_entry(
-        api_client,
+        shared_api_client,
         workspace,
         tag,
         path,
@@ -1740,10 +1755,39 @@ async fn save_single_oci_entry(
 
 #[cfg(test)]
 mod tests {
-    use super::ArchiveConfirmOutcome;
+    use super::{
+        ArchiveConfirmOutcome, build_archive_manifest_checks,
+        digest_existing_cache_entry_id_from_result,
+    };
+    use crate::api::models::cache::ManifestCheckResult;
     use crate::commands::save_support::{
         conflict_message_from_error, is_cache_pending_error, serialize_manifest,
     };
+
+    fn manifest_check_result(
+        exists: bool,
+        status: Option<&str>,
+        cache_entry_id: Option<&str>,
+    ) -> ManifestCheckResult {
+        ManifestCheckResult {
+            tag: "tag".to_string(),
+            exists,
+            pending: false,
+            manifest_root_digest: None,
+            cache_entry_id: cache_entry_id.map(str::to_string),
+            content_hash: None,
+            manifest_digest: None,
+            manifest_url: None,
+            compression_algorithm: None,
+            archive_urls: Vec::new(),
+            size: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            uploaded_at: None,
+            status: status.map(str::to_string),
+            error: None,
+        }
+    }
 
     #[test]
     fn conflict_message_is_extracted_from_boringcache_error() {
@@ -1770,6 +1814,45 @@ mod tests {
 
         assert!(!is_cache_pending_error(&err));
         assert_eq!(conflict_message_from_error(&err), None);
+    }
+
+    #[test]
+    fn archive_manifest_checks_include_digest_lookup_when_not_forced() {
+        let checks = build_archive_manifest_checks("ruby-deps", "sha256:abc", false);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].lookup, None);
+        assert_eq!(checks[1].lookup.as_deref(), Some("digest"));
+    }
+
+    #[test]
+    fn archive_manifest_checks_skip_digest_lookup_when_forced() {
+        let checks = build_archive_manifest_checks("ruby-deps", "sha256:abc", true);
+        assert_eq!(checks.len(), 1);
+        let check = &checks[0];
+        assert_eq!(check.tag, "ruby-deps");
+        assert_eq!(check.manifest_root_digest, "sha256:abc");
+        assert_eq!(check.lookup, None);
+    }
+
+    #[test]
+    fn digest_lookup_accepts_ready_entry_with_cache_entry_id() {
+        let result = manifest_check_result(true, Some("ready"), Some("entry-123"));
+        assert_eq!(
+            digest_existing_cache_entry_id_from_result(&result),
+            Some("entry-123".to_string())
+        );
+    }
+
+    #[test]
+    fn digest_lookup_ignores_pending_entries() {
+        let result = manifest_check_result(true, Some("pending"), Some("entry-123"));
+        assert_eq!(digest_existing_cache_entry_id_from_result(&result), None);
+    }
+
+    #[test]
+    fn digest_lookup_ignores_missing_entries() {
+        let result = manifest_check_result(false, Some("ready"), Some("entry-123"));
+        assert_eq!(digest_existing_cache_entry_id_from_result(&result), None);
     }
 
     #[test]
