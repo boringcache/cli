@@ -45,6 +45,8 @@ const H2_INITIAL_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 const H2_INITIAL_CONNECTION_WINDOW: u32 = 32 * 1024 * 1024;
 const H2_MAX_CONCURRENT_STREAMS: u32 = 1024;
 const RUNTIME_TEMP_DIR_PREFIX: &str = "boringcache-proxy";
+const SHUTDOWN_TAG_VISIBILITY_HANDOFF_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(5);
 
 fn new_runtime_temp_dir() -> Result<PathBuf> {
     let dir = std::env::temp_dir().join(format!(
@@ -58,6 +60,13 @@ fn new_runtime_temp_dir() -> Result<PathBuf> {
 }
 
 async fn cleanup_runtime_temp_dir(state: &AppState) {
+    if cache_registry::should_preserve_runtime_temp_dir_for_shutdown_handoff(state).await {
+        eprintln!(
+            "Shutdown: preserving runtime temp dir {} for pending upload handoff",
+            state.runtime_temp_dir.display()
+        );
+        return;
+    }
     if let Err(error) = tokio::fs::remove_dir_all(&state.runtime_temp_dir).await
         && error.kind() != std::io::ErrorKind::NotFound
     {
@@ -370,6 +379,8 @@ async fn build_server_runtime(
         backend_breaker: Arc::new(state::BackendCircuitBreaker::new()),
         prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
+
+    cache_registry::restore_kv_pending_publish_handoff(&state).await;
 
     let addr = format!("{host}:{port}");
     let mut resolved = lookup_host(&addr)
@@ -790,6 +801,11 @@ async fn process_replication_work(state: &AppState, urgent: bool, consecutive_fa
                 .kv_replication_flush_permanent
                 .fetch_add(1, Ordering::AcqRel);
         }
+        cache_registry::FlushResult::Deferred => {
+            state
+                .kv_replication_flush_error
+                .fetch_add(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -798,7 +814,7 @@ fn update_consecutive_failures_on_flush_result(
     consecutive_failures: &mut u32,
 ) {
     match result {
-        cache_registry::FlushResult::Error => {
+        cache_registry::FlushResult::Error | cache_registry::FlushResult::Deferred => {
             *consecutive_failures = consecutive_failures.saturating_add(1);
         }
         cache_registry::FlushResult::Ok
@@ -1002,7 +1018,23 @@ async fn flush_pending_on_shutdown(state: &AppState) {
                     };
                 }
                 if let Some(cache_entry_id) = expected_root_cache_entry_id.as_deref() {
-                    wait_for_tag_visibility(state, cache_entry_id, deadline).await;
+                    if cache_registry::should_skip_shutdown_tag_visibility_wait(
+                        state,
+                        cache_entry_id,
+                    )
+                    .await
+                    {
+                        let handoff_deadline = shutdown_handoff_visibility_deadline(deadline);
+                        if wait_for_tag_visibility(state, cache_entry_id, handoff_deadline).await {
+                            return;
+                        }
+                        eprintln!(
+                            "Shutdown: deferred tag visibility wait for cache_entry_id={} via pending publish handoff",
+                            cache_entry_id
+                        );
+                    } else {
+                        let _ = wait_for_tag_visibility(state, cache_entry_id, deadline).await;
+                    }
                 }
                 return;
             }
@@ -1028,6 +1060,12 @@ async fn flush_pending_on_shutdown(state: &AppState) {
                     cache_registry::FlushResult::Permanent => {
                         let mut gate = state.kv_next_flush_at.write().await;
                         *gate = None;
+                    }
+                    cache_registry::FlushResult::Deferred => {
+                        let mut gate = state.kv_next_flush_at.write().await;
+                        *gate = None;
+                        eprintln!("Shutdown: deferred pending upload flush via restart handoff");
+                        return;
                     }
                     cache_registry::FlushResult::Conflict | cache_registry::FlushResult::Error => {}
                 }
@@ -1060,6 +1098,15 @@ async fn flush_pending_on_shutdown(state: &AppState) {
     }
 }
 
+fn shutdown_handoff_visibility_deadline(deadline: std::time::Instant) -> std::time::Instant {
+    let handoff_deadline = std::time::Instant::now() + SHUTDOWN_TAG_VISIBILITY_HANDOFF_GRACE;
+    if handoff_deadline < deadline {
+        handoff_deadline
+    } else {
+        deadline
+    }
+}
+
 fn visibility_tags_from_values(
     registry_root_tag: &str,
     configured_human_tags: &[String],
@@ -1086,7 +1133,7 @@ async fn wait_for_tag_visibility(
     state: &AppState,
     expected_cache_entry_id: &str,
     deadline: std::time::Instant,
-) {
+) -> bool {
     let tags = visibility_tags_from_values(&state.registry_root_tag, &state.configured_human_tags);
     let mut attempts = 0u32;
 
@@ -1128,7 +1175,7 @@ async fn wait_for_tag_visibility(
                 "Shutdown: registry root and human tags visible for cache_entry_id={} after {} poll(s)",
                 expected_cache_entry_id, attempts
             );
-            return;
+            return true;
         }
 
         if std::time::Instant::now() >= deadline {
@@ -1137,7 +1184,7 @@ async fn wait_for_tag_visibility(
                 expected_cache_entry_id,
                 missing_tags.join(", ")
             );
-            return;
+            return false;
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -1501,5 +1548,20 @@ mod tests {
             2_000,
             crate::serve::state::FLUSH_SIZE_THRESHOLD,
         ));
+    }
+
+    #[test]
+    fn shutdown_handoff_visibility_deadline_caps_wait_to_short_grace() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let bounded = shutdown_handoff_visibility_deadline(deadline);
+        let wait = bounded.saturating_duration_since(std::time::Instant::now());
+        assert!(wait <= SHUTDOWN_TAG_VISIBILITY_HANDOFF_GRACE);
+    }
+
+    #[test]
+    fn shutdown_handoff_visibility_deadline_respects_earlier_deadline() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        let bounded = shutdown_handoff_visibility_deadline(deadline);
+        assert!(bounded <= deadline);
     }
 }

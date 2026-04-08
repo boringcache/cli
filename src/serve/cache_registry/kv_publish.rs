@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,12 +14,43 @@ const KV_BLOB_UPLOAD_MAX_CONCURRENCY: usize = 64;
 const KV_BLOB_UPLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_KV_BLOB_UPLOAD_CONCURRENCY";
 const KV_BLOB_UPLOAD_INITIAL_CONCURRENCY: usize = 16;
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct BlobUploadStats {
     pub(super) uploaded_count: u64,
     pub(super) already_present_count: u64,
     pub(super) missing_local_count: u64,
     pub(super) uploaded_receipts: Vec<BlobReceipt>,
+}
+
+#[derive(Debug)]
+struct PartialBlobUploadError {
+    stats: BlobUploadStats,
+    failures: Vec<String>,
+}
+
+impl fmt::Display for PartialBlobUploadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let summary = self
+            .failures
+            .first()
+            .map(String::as_str)
+            .unwrap_or("unknown blob upload failure");
+        write!(
+            f,
+            "Failed to upload {} blob(s) after preserving {} uploaded receipt(s): {}",
+            self.failures.len(),
+            self.stats.uploaded_receipts.len(),
+            summary
+        )
+    }
+}
+
+impl std::error::Error for PartialBlobUploadError {}
+
+pub(super) fn partial_blob_upload_stats(error: &anyhow::Error) -> Option<BlobUploadStats> {
+    error
+        .downcast_ref::<PartialBlobUploadError>()
+        .map(|partial| partial.stats.clone())
 }
 
 #[derive(Clone, Copy)]
@@ -305,6 +337,7 @@ pub(super) async fn upload_blobs(
         });
     }
 
+    let mut failures = Vec::new();
     loop {
         let next_task_result = tasks.join_next().await;
         let Some(task_result) = next_task_result else {
@@ -313,22 +346,12 @@ pub(super) async fn upload_blobs(
         let (digest, outcome) = match task_result {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => {
-                tasks.abort_all();
-                loop {
-                    if tasks.join_next().await.is_none() {
-                        break;
-                    }
-                }
-                return Err(error);
+                failures.push(format!("{error:#}"));
+                continue;
             }
             Err(error) => {
-                tasks.abort_all();
-                loop {
-                    if tasks.join_next().await.is_none() {
-                        break;
-                    }
-                }
-                return Err(anyhow::anyhow!("Blob upload task failed: {error}"));
+                failures.push(format!("Blob upload task failed: {error}"));
+                continue;
             }
         };
 
@@ -365,6 +388,20 @@ pub(super) async fn upload_blobs(
         }
     }
 
+    if !failures.is_empty() {
+        eprintln!(
+            "KV blob upload partial failure: uploaded={} already_present={} missing_local={} failed={}",
+            stats.uploaded_count,
+            stats.already_present_count,
+            stats.missing_local_count,
+            failures.len(),
+        );
+        return Err(anyhow::Error::new(PartialBlobUploadError {
+            stats,
+            failures,
+        }));
+    }
+
     eprintln!(
         "KV blob upload complete: uploaded={} already_present={} missing_local={} final_concurrency={}",
         stats.uploaded_count,
@@ -379,7 +416,8 @@ pub(super) async fn upload_blobs(
 #[cfg(test)]
 mod tests {
     use super::{
-        KV_BLOB_UPLOAD_CONCURRENCY_ENV, is_retryable_blob_upload_error, kv_blob_upload_concurrency,
+        BlobUploadStats, KV_BLOB_UPLOAD_CONCURRENCY_ENV, is_retryable_blob_upload_error,
+        kv_blob_upload_concurrency, partial_blob_upload_stats,
     };
     use crate::test_env;
 
@@ -431,5 +469,39 @@ mod tests {
         assert_eq!(kv_blob_upload_concurrency(0), (1, 1));
         assert_eq!(kv_blob_upload_concurrency(4), (4, 4));
         assert_eq!(kv_blob_upload_concurrency(12), (12, 12));
+    }
+
+    #[test]
+    fn partial_blob_upload_stats_extracts_preserved_receipts() {
+        let stats = BlobUploadStats {
+            uploaded_count: 2,
+            already_present_count: 1,
+            missing_local_count: 0,
+            uploaded_receipts: vec![
+                crate::api::models::cache::BlobReceipt {
+                    digest: "sha256:abc".to_string(),
+                    etag: None,
+                },
+                crate::api::models::cache::BlobReceipt {
+                    digest: "sha256:def".to_string(),
+                    etag: None,
+                },
+            ],
+        };
+        let error = anyhow::Error::new(super::PartialBlobUploadError {
+            stats: stats.clone(),
+            failures: vec!["timed out".to_string()],
+        });
+
+        let extracted = partial_blob_upload_stats(&error).expect("stats should be preserved");
+        assert_eq!(extracted.uploaded_count, 2);
+        assert_eq!(extracted.already_present_count, 1);
+        assert_eq!(extracted.uploaded_receipts.len(), 2);
+    }
+
+    #[test]
+    fn partial_blob_upload_stats_returns_none_for_other_errors() {
+        let error = anyhow::anyhow!("plain error");
+        assert!(partial_blob_upload_stats(&error).is_none());
     }
 }
