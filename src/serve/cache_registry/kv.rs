@@ -3421,6 +3421,10 @@ async fn do_flush(
             return Err(classify_flush_error(&e, "save_entry failed"));
         }
     };
+    let confirm_cache_entry_id = save_response.cache_entry_id.clone();
+    let confirm_manifest_digest = manifest_root_digest.clone();
+    let confirm_tag = tag.clone();
+    let confirm_write_scope_tag = kv_primary_write_scope_tag(state);
 
     if save_response.should_skip_existing_uploads() {
         let mut pending_blob_by_digest: HashMap<String, u64> = HashMap::new();
@@ -3471,7 +3475,24 @@ async fn do_flush(
             }
         }
 
-        bind_kv_alias_tags(
+        let confirm_request = ConfirmRequest {
+            manifest_digest: confirm_manifest_digest.clone(),
+            manifest_size: expected_manifest_size,
+            manifest_etag: None,
+            archive_size: None,
+            archive_etag: None,
+            blob_count: Some(blob_count),
+            blob_total_size_bytes: Some(blob_total_size_bytes),
+            file_count: Some(file_count),
+            uncompressed_size: None,
+            compressed_size: None,
+            storage_mode: Some("cas".to_string()),
+            tag: Some(confirm_tag.clone()),
+            write_scope_tag: confirm_write_scope_tag.clone(),
+        };
+        let confirm_outcome =
+            confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request, flush_mode).await?;
+        let pending_alias_count = bind_kv_alias_tags(
             state,
             &manifest_root_digest,
             expected_manifest_size,
@@ -3481,6 +3502,39 @@ async fn do_flush(
             flush_mode,
         )
         .await?;
+
+        let (publish_state, upload_session_id, publish_attempt_id) = match &confirm_outcome {
+            KvConfirmOutcome::Pending(metadata) => (
+                "pending",
+                metadata.upload_session_id.as_deref().unwrap_or("-"),
+                metadata.publish_attempt_id.as_deref().unwrap_or("-"),
+            ),
+            KvConfirmOutcome::Published => ("published", "-", "-"),
+        };
+
+        eprintln!(
+            "KV flush root publish: tag={} cache_entry_id={} state={} upload_session_id={} publish_attempt_id={} pending_alias_tags={}",
+            tag,
+            save_response.cache_entry_id,
+            publish_state,
+            upload_session_id,
+            publish_attempt_id,
+            pending_alias_count
+        );
+        if let KvConfirmOutcome::Pending(metadata) = &confirm_outcome {
+            eprintln!(
+                "KV publish accepted for server-side completion: cache_entry_id={} upload_session_id={} publish_attempt_id={} pending_alias_tags={}",
+                save_response.cache_entry_id,
+                metadata.upload_session_id.as_deref().unwrap_or("-"),
+                metadata.publish_attempt_id.as_deref().unwrap_or("-"),
+                pending_alias_count
+            );
+        } else if pending_alias_count > 0 {
+            eprintln!(
+                "KV alias publish accepted for server-side completion: cache_entry_id={} pending_alias_tags={}",
+                save_response.cache_entry_id, pending_alias_count
+            );
+        }
 
         eprintln!(
             "KV flush: save_entry returned exists=true ({total_count} entries, {blob_count} blobs, digest={manifest_root_digest})"
@@ -3493,10 +3547,6 @@ async fn do_flush(
 
     let upload_stats_holder = Arc::new(std::sync::Mutex::new(BlobUploadStats::default()));
     let publish_upload_stats = upload_stats_holder.clone();
-    let confirm_cache_entry_id = save_response.cache_entry_id.clone();
-    let confirm_manifest_digest = manifest_root_digest.clone();
-    let confirm_tag = tag.clone();
-    let confirm_write_scope_tag = kv_primary_write_scope_tag(state);
     let confirm_outcome = crate::serve::cas_publish::publish_after_save(
         &state.api_client,
         &state.workspace,
