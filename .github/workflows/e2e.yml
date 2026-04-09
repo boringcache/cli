@@ -52,16 +52,11 @@ jobs:
         id: rust-version
         run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve CLI version
-        id: cli-version
-        run: echo "version=$(./scripts/cli-version.sh)" >> "$GITHUB_OUTPUT"
-
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         continue-on-error: true
         uses: boringcache/one@v1
         with:
-          cli-version: ${{ steps.cli-version.outputs.version }}
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
@@ -344,14 +339,14 @@ jobs:
         run: npm install -g turbo
 
       - name: Download prebuilt CLI binary
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' && matrix.leg != 'cli-contract'
         uses: actions/download-artifact@v8
         with:
           name: e2e-cli-release-linux-amd64
           path: ${{ runner.temp }}/boringcache-bin
 
       - name: Prepare CLI binary
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' && matrix.leg != 'cli-contract'
         run: chmod +x "${RUNNER_TEMP}/boringcache-bin/boringcache"
 
       - name: Run e2e leg
@@ -456,18 +451,12 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve CLI version
-        id: cli-version
-        if: steps.gate.outputs.run == 'true'
-        run: echo "version=$(./scripts/cli-version.sh)" >> "$GITHUB_OUTPUT"
-
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         if: steps.gate.outputs.run == 'true'
         continue-on-error: true
         uses: boringcache/one@v1
         with:
-          cli-version: ${{ steps.cli-version.outputs.version }}
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}

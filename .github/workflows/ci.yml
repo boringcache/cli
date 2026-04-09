@@ -29,16 +29,11 @@ jobs:
         id: rust-version
         run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve CLI version
-        id: cli-version
-        run: echo "version=$(./scripts/cli-version.sh)" >> "$GITHUB_OUTPUT"
-
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         continue-on-error: true
         uses: boringcache/one@v1
         with:
-          cli-version: ${{ steps.cli-version.outputs.version }}
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
@@ -110,16 +105,11 @@ jobs:
         id: rust-version
         run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve CLI version
-        id: cli-version
-        run: echo "version=$(./scripts/cli-version.sh)" >> "$GITHUB_OUTPUT"
-
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         continue-on-error: true
         uses: boringcache/one@v1
         with:
-          cli-version: ${{ steps.cli-version.outputs.version }}
           setup: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
@@ -188,18 +178,12 @@ jobs:
         shell: bash
         run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve CLI version
-        id: cli-version
-        shell: bash
-        run: echo "version=$(./scripts/cli-version.sh)" >> "$GITHUB_OUTPUT"
-
       - name: Setup BoringCache Docker cache
         id: boringcache-docker-build
         if: matrix.use_docker == true
         continue-on-error: true
         uses: boringcache/one@v1
         with:
-          cli-version: ${{ steps.cli-version.outputs.version }}
           setup: none
           cache-runtime: "false"
           mode: docker
@@ -366,7 +350,6 @@ jobs:
         continue-on-error: true
         uses: boringcache/one@v1
         with:
-          cli-version: ${{ steps.cli-version.outputs.version }}
           setup: none
           cache-runtime: "false"
           mode: rust-sccache
