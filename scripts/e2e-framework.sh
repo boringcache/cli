@@ -225,6 +225,7 @@ markers_for_leg() {
   case "$leg" in
     integrity)
       cat <<'EOF'
+=== Phase 0: verify downloaded CLI artifact checksum ===
 === Phase 1: allow in-root relative symlinks ===
 === Phase 2: reject absolute symlinks ===
 === Phase 3: reject escaping relative symlinks ===

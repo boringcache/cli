@@ -66,6 +66,27 @@ cleanup() {
 trap dump_logs ERR
 trap cleanup EXIT
 
+compute_sha256() {
+  local path="$1"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    local digest _
+    read -r digest _ < <(sha256sum "${path}")
+    printf '%s\n' "${digest}"
+    return 0
+  fi
+
+  if command -v shasum >/dev/null 2>&1; then
+    local digest _
+    read -r digest _ < <(shasum -a 256 "${path}")
+    printf '%s\n' "${digest}"
+    return 0
+  fi
+
+  echo "ERROR: neither sha256sum nor shasum is available"
+  exit 1
+}
+
 wait_for_visibility() {
   local tag="$1"
   local log_file="$2"
@@ -115,6 +136,22 @@ export HOME="${CLI_HOME}"
 bootstrap_cli_session "${CLI}" "${WORKSPACE}" "${BORINGCACHE_API_URL}" "${E2E_LOG_DIR}/auth.log" admin
 
 TAG_ROOT="$(e2e_tag "cli-integrity")"
+
+echo "=== Phase 0: verify downloaded CLI artifact checksum ==="
+CHECKSUM_FILE="$(dirname "${CLI}")/boringcache.sha256"
+if [[ ! -f "${CHECKSUM_FILE}" ]]; then
+  echo "expected checksum file next to downloaded CLI artifact: ${CHECKSUM_FILE}"
+  exit 1
+fi
+read -r EXPECTED_CHECKSUM _ < "${CHECKSUM_FILE}"
+ACTUAL_CHECKSUM="$(compute_sha256 "${CLI}")"
+if [[ -z "${EXPECTED_CHECKSUM}" || "${EXPECTED_CHECKSUM}" != "${ACTUAL_CHECKSUM}" ]]; then
+  echo "downloaded CLI artifact checksum mismatch"
+  echo "expected: ${EXPECTED_CHECKSUM:-<empty>}"
+  echo "actual:   ${ACTUAL_CHECKSUM}"
+  exit 1
+fi
+"${CLI}" --version > "${E2E_LOG_DIR}/artifact-version.log"
 
 SAFE_TAG="${TAG_ROOT}-safe-relative"
 SAFE_SRC="${E2E_LOG_DIR}/safe-src"
