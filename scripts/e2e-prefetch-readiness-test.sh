@@ -65,7 +65,7 @@ http_prefetch_probe() {
   )"
 
   local status state
-  status="$(printf '%s\n' "$response" | awk 'tolower($1) ~ /^http\\// { status = $2 } END { print status }')"
+  status="$(printf '%s\n' "$response" | awk 'tolower($1) ~ /^http\// { status = $2 } END { print status }')"
   state="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-prefetch-state" { gsub("\\r", "", $2); state = tolower($2) } END { print state }')"
   if [[ -z "$status" ]]; then
     status="000"
