@@ -3636,6 +3636,21 @@ fn startup_prefetch_blobs(
     select_startup_prefetch_slice(ordered_blobs, max_blobs, max_total_bytes)
 }
 
+fn startup_download_url_preload_blobs<'a>(
+    unique_blobs: &'a [BlobDescriptor],
+    startup_blobs: &'a [BlobDescriptor],
+    tuning_profile: CacheRegistryTuningProfile,
+) -> &'a [BlobDescriptor] {
+    match tuning_profile {
+        CacheRegistryTuningProfile::Bazel => unique_blobs,
+        CacheRegistryTuningProfile::Generic | CacheRegistryTuningProfile::Sccache => startup_blobs,
+    }
+}
+
+fn should_preload_remaining_download_urls(tuning_profile: CacheRegistryTuningProfile) -> bool {
+    !matches!(tuning_profile, CacheRegistryTuningProfile::Bazel)
+}
+
 fn build_startup_prefetch_targets<F>(
     startup_blobs: &[BlobDescriptor],
     mut cached_url_for_digest: F,
@@ -3930,6 +3945,11 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
                 startup_max_total_bytes,
                 whole_tag_hydration,
             );
+            let startup_url_preload_blobs = startup_download_url_preload_blobs(
+                &unique_blobs,
+                &startup_blobs,
+                state.tuning_profile,
+            );
             let startup_target_bytes: u64 = startup_blobs
                 .iter()
                 .map(|blob| blob.size_bytes)
@@ -3953,11 +3973,13 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
                 );
             } else if state.tuning_profile == CacheRegistryTuningProfile::Bazel {
                 eprintln!(
-                    "Prefetch: {count} entries loaded, Bazel startup slice prioritizes AC={} small_cas={} deferred={} under {:.1} MB budget...",
+                    "Prefetch: {count} entries loaded, Bazel startup slice prioritizes AC={} small_cas={} deferred={} under {:.1} MB budget and resolves {}/{} download URLs before serving...",
                     startup_candidates.bazel_action_cache_blobs,
                     startup_candidates.bazel_small_cas_blobs,
                     startup_candidates.bazel_other_blobs,
                     startup_max_total_bytes as f64 / (1024.0 * 1024.0),
+                    startup_url_preload_blobs.len(),
+                    total_unique_blobs,
                 );
             } else {
                 eprintln!(
@@ -3969,7 +3991,8 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
             }
 
             let startup_url_stats =
-                preload_download_urls_for_blobs(state, &cache_entry_id, &startup_blobs).await;
+                preload_download_urls_for_blobs(state, &cache_entry_id, startup_url_preload_blobs)
+                    .await;
             eprintln!(
                 "Prefetch: startup URL coverage resolved={}/{} missing={}",
                 startup_url_stats.resolved, startup_url_stats.requested, startup_url_stats.missing,
@@ -4018,10 +4041,12 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
                     .filter(|blob| !startup_digests.contains(&blob.digest))
                     .collect::<Vec<_>>()
             };
+            let preload_remaining_download_urls =
+                should_preload_remaining_download_urls(state.tuning_profile);
             let background_state = state.clone();
             let background_cache_entry_id = cache_entry_id.clone();
             tokio::spawn(async move {
-                if !remaining_blobs.is_empty() {
+                if preload_remaining_download_urls && !remaining_blobs.is_empty() {
                     let _ = preload_download_urls_for_blobs(
                         &background_state,
                         &background_cache_entry_id,
@@ -6662,6 +6687,55 @@ mod tests {
             Some("https://example.com/blob-1")
         );
         assert!(targets[1].cached_url.is_none());
+    }
+
+    #[test]
+    fn bazel_startup_download_url_preload_covers_full_tag() {
+        let unique_blobs = vec![
+            BlobDescriptor {
+                digest: "sha256:1".to_string(),
+                size_bytes: 128,
+            },
+            BlobDescriptor {
+                digest: "sha256:2".to_string(),
+                size_bytes: 256,
+            },
+        ];
+        let startup_blobs = vec![unique_blobs[0].clone()];
+
+        let selected = startup_download_url_preload_blobs(
+            &unique_blobs,
+            &startup_blobs,
+            CacheRegistryTuningProfile::Bazel,
+        );
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].digest, "sha256:1");
+        assert_eq!(selected[1].digest, "sha256:2");
+    }
+
+    #[test]
+    fn generic_startup_download_url_preload_stays_on_startup_slice() {
+        let unique_blobs = vec![
+            BlobDescriptor {
+                digest: "sha256:1".to_string(),
+                size_bytes: 128,
+            },
+            BlobDescriptor {
+                digest: "sha256:2".to_string(),
+                size_bytes: 256,
+            },
+        ];
+        let startup_blobs = vec![unique_blobs[0].clone()];
+
+        let selected = startup_download_url_preload_blobs(
+            &unique_blobs,
+            &startup_blobs,
+            CacheRegistryTuningProfile::Generic,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].digest, "sha256:1");
     }
 
     #[test]
