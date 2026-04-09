@@ -52,6 +52,21 @@ fn manifest_check_is_ready(result: &ManifestCheckResult) -> bool {
     result.exists && !manifest_check_is_pending(result)
 }
 
+fn ensure_mount_sync_won(
+    attempted_cache_entry_id: &str,
+    response: &crate::api::models::cache::CacheConfirmResponse,
+    tag: &str,
+) -> Result<()> {
+    if let Some(winner_id) = response.cache_entry_id.as_deref()
+        && winner_id != attempted_cache_entry_id
+    {
+        anyhow::bail!(
+            "mount sync for {tag} did not publish the updated entry; server kept existing entry {winner_id}"
+        );
+    }
+    Ok(())
+}
+
 pub async fn execute(workspace: String, tag_path: String, options: MountOptions) -> Result<()> {
     let (tag, local_path) = parse_tag_path(&tag_path)?;
     let expanded_path = crate::commands::utils::expand_tilde_path(&local_path);
@@ -1185,7 +1200,7 @@ async fn sync_to_remote_cas(
         bundle.total_size_bytes,
         bundle.cas_layout.clone(),
         &bundle.confirm_spec,
-        false,
+        true,
     );
 
     if verbose {
@@ -1232,15 +1247,17 @@ async fn sync_to_remote_cas(
         ui::info("  Confirming CAS upload...");
     }
 
-    cas_publish::confirm_upload(
-        api_client,
-        workspace,
+    let confirm_request =
+        cas_publish::build_confirm_request(&bundle.confirm_spec, publish_result.manifest_etag);
+    let confirm_response = api_client
+        .confirm(workspace, &save_response.cache_entry_id, &confirm_request)
+        .await
+        .with_context(|| format!("Failed to confirm CAS upload for {}", resolved_tag))?;
+    ensure_mount_sync_won(
         &save_response.cache_entry_id,
-        &bundle.confirm_spec,
-        publish_result.manifest_etag,
-    )
-    .await
-    .with_context(|| format!("Failed to confirm CAS upload for {}", resolved_tag))?;
+        &confirm_response,
+        resolved_tag,
+    )?;
 
     if verbose {
         ui::info(&format!(
@@ -1441,7 +1458,7 @@ async fn sync_to_remote_archive(
         file_count: Some(file_count),
         expected_manifest_digest: Some(expected_manifest_digest.clone()),
         expected_manifest_size: Some(manifest_bytes.len() as u64),
-        force: None,
+        force: Some(true),
         use_multipart: Some(use_multipart),
         ci_provider: Some(ci_provider),
         encrypted: if encrypt { Some(true) } else { None },
@@ -1576,9 +1593,14 @@ async fn sync_to_remote_archive(
         write_scope_tag: None,
     };
 
-    api_client
+    let confirm_response = api_client
         .confirm(workspace, &save_response.cache_entry_id, &confirm_request)
         .await?;
+    ensure_mount_sync_won(
+        &save_response.cache_entry_id,
+        &confirm_response,
+        resolved_tag,
+    )?;
 
     if verbose {
         ui::info(&format!(
@@ -1900,6 +1922,45 @@ mod tests {
         let expected = crate::cas_oci::prefixed_sha256_digest(&pointer_bytes);
 
         assert_eq!(digest, expected);
+    }
+
+    #[test]
+    fn mount_sync_accepts_confirm_without_winner_switch() {
+        let response = crate::api::models::cache::CacheConfirmResponse {
+            status: "published".to_string(),
+            cache_entry_id: Some("entry-1".to_string()),
+            uploaded_at: None,
+            tag: None,
+            tag_status: None,
+            signature: None,
+            signing_public_key: None,
+            signed_at: None,
+        };
+
+        ensure_mount_sync_won("entry-1", &response, "cache-tag").expect("same entry should pass");
+    }
+
+    #[test]
+    fn mount_sync_rejects_confirm_when_existing_entry_wins() {
+        let response = crate::api::models::cache::CacheConfirmResponse {
+            status: "published".to_string(),
+            cache_entry_id: Some("entry-existing".to_string()),
+            uploaded_at: None,
+            tag: None,
+            tag_status: None,
+            signature: None,
+            signing_public_key: None,
+            signed_at: None,
+        };
+
+        let error = ensure_mount_sync_won("entry-new", &response, "cache-tag")
+            .expect_err("winner switch should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("did not publish the updated entry"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
