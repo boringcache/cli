@@ -265,8 +265,15 @@ if [[ "${run_seed_visible}" != "1" ]]; then
   exit 1
 fi
 
-run_archive_script=$'[ "$(cat "$1/restored.txt")" = "run-warm-cache-'"${RUN_SHA}"'" ] || exit 27\nprintf "run-generated-%s\\n" "'"${RUN_ID}"'" > "$1/generated.txt"'
-"${CLI}" run --no-platform --no-git --force --fail-on-cache-error "${WORKSPACE}" "${RUN_TAG}:${RUN_TARGET_DIR}" -- sh -ec "${run_archive_script}" _ "${RUN_TARGET_DIR}" > "${CLI_LOG_DIR}/run-archive.log"
+RUN_ARCHIVE_SCRIPT="${CLI_LOG_DIR}/run-archive-child.sh"
+cat > "${RUN_ARCHIVE_SCRIPT}" <<EOF
+#!/usr/bin/env sh
+set -eu
+[ "\$(cat "\$1/restored.txt")" = "run-warm-cache-${RUN_SHA}" ] || exit 27
+printf "run-generated-%s\n" "${RUN_ID}" > "\$1/generated.txt"
+EOF
+chmod +x "${RUN_ARCHIVE_SCRIPT}"
+"${CLI}" run --no-platform --no-git --force --fail-on-cache-error "${WORKSPACE}" "${RUN_TAG}:${RUN_TARGET_DIR}" -- sh "${RUN_ARCHIVE_SCRIPT}" "${RUN_TARGET_DIR}" > "${CLI_LOG_DIR}/run-archive.log"
 
 "${CLI}" restore --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}:${RUN_VERIFY_DIR}" > "${CLI_LOG_DIR}/run-verify-restore.log"
 if [[ ! -f "${RUN_VERIFY_DIR}/generated.txt" ]]; then
@@ -295,8 +302,19 @@ if [[ -f "${RUN_MISS_SENTINEL}" ]]; then
   exit 1
 fi
 
-run_proxy_script=$'endpoint="${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}"\n[ -n "${endpoint}" ] || exit 31\n[ "${TURBO_API:-}" = "${endpoint}" ] || exit 32\nexpected_ref="127.0.0.1:$1/cache:$2"\n[ "$3" = "${expected_ref}" ] || exit 33\ncurl -fsS --max-time 2 "${endpoint}/v2/" >/dev/null || exit 34'
-"${CLI}" run "${WORKSPACE}" --proxy "${RUN_PROXY_TAG}" --no-platform --no-git --host 127.0.0.1 --port 0 -- sh -ec "${run_proxy_script}" _ "{PORT}" "${RUN_PROXY_TAG}" "{CACHE_REF}" > "${CLI_LOG_DIR}/run-proxy.log"
+RUN_PROXY_SCRIPT="${CLI_LOG_DIR}/run-proxy-child.sh"
+cat > "${RUN_PROXY_SCRIPT}" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+endpoint="${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}"
+[ -n "${endpoint}" ] || exit 31
+[ "${TURBO_API:-}" = "${endpoint}" ] || exit 32
+expected_ref="127.0.0.1:$1/cache:$2"
+[ "$3" = "${expected_ref}" ] || exit 33
+curl -fsS --max-time 2 "${endpoint}/v2/" >/dev/null || exit 34
+EOF
+chmod +x "${RUN_PROXY_SCRIPT}"
+"${CLI}" run "${WORKSPACE}" --proxy "${RUN_PROXY_TAG}" --no-platform --no-git --host 127.0.0.1 --port 0 -- sh "${RUN_PROXY_SCRIPT}" "{PORT}" "${RUN_PROXY_TAG}" "{CACHE_REF}" > "${CLI_LOG_DIR}/run-proxy.log"
 
 "${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-delete.log"
 
