@@ -32,6 +32,7 @@ SCCACHE_CONFLICT_ENV_VARS=(
   SCCACHE_WEBDAV_USERNAME
   SCCACHE_WEBDAV_PASSWORD
 )
+declare -ag E2E_TAG_SCOPE_FLAGS=(--no-platform --no-git)
 
 _HELPER_PROXY_PID=""
 _HELPER_PROXY_LOG=""
@@ -196,8 +197,7 @@ start_proxy() {
       "$binary" cache-registry "$workspace" "$tag" \
       --host "$PROXY_HOST" \
       --port "$port" \
-      --no-platform \
-      --no-git \
+      "${E2E_TAG_SCOPE_FLAGS[@]}" \
       $extra_args >>"$log_file" 2>&1 &
   else
     RUST_LOG="${RUST_LOG:-warn}" \
@@ -207,8 +207,7 @@ start_proxy() {
       "$binary" cache-registry "$workspace" "$tag" \
       --host "$PROXY_HOST" \
       --port "$port" \
-      --no-platform \
-      --no-git >>"$log_file" 2>&1 &
+      "${E2E_TAG_SCOPE_FLAGS[@]}" >>"$log_file" 2>&1 &
   fi
   _HELPER_PROXY_PID=$!
 }
@@ -298,7 +297,7 @@ wait_for_visibility() {
   local attempts="${4:-15}"
   local log_file="${LOG_DIR:-.}/visibility-${tag}.log"
   for _ in $(seq 1 "$attempts"); do
-    if "$binary" check --no-platform --no-git --fail-on-miss "$workspace" "$tag" \
+    if "$binary" check "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-miss "$workspace" "$tag" \
       > "$log_file" 2>&1; then
       return 0
     fi
@@ -371,7 +370,7 @@ _helper_cleanup() {
   fi
   if [[ "${#tags_to_delete[@]}" -gt 0 && -n "${_HELPER_BINARY:-}" && -n "${_HELPER_WORKSPACE:-}" ]]; then
     for tag in "${tags_to_delete[@]}"; do
-      "$_HELPER_BINARY" delete --no-platform --no-git "$_HELPER_WORKSPACE" "$tag" >/dev/null 2>&1 || true
+      "$_HELPER_BINARY" delete "${E2E_TAG_SCOPE_FLAGS[@]}" "$_HELPER_WORKSPACE" "$tag" >/dev/null 2>&1 || true
     done
   fi
 }

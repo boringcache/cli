@@ -180,10 +180,10 @@ printf 'cli-e2e-nested-%s\n' "${RUN_ID}" > "${SRC_DIR}/nested.txt"
 printf 'cli-e2e-file-%s\n' "${RUN_ATTEMPT}" > "${SINGLE_FILE}"
 
 echo "=== Phase 1: Save/restore/delete (archive cache path) ==="
-"${CLI}" save --no-platform --no-git "${WORKSPACE}" "${TAG_DIR}:${SRC_DIR},${TAG_FILE}:${SINGLE_FILE}" > "${CLI_LOG_DIR}/save.log"
+"${CLI}" save "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${TAG_DIR}:${SRC_DIR},${TAG_FILE}:${SINGLE_FILE}" > "${CLI_LOG_DIR}/save.log"
 save_visible=0
 for _ in $(seq 1 10); do
-  if "${CLI}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/check-hit.log" 2>&1; then
+  if "${CLI}" check "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-miss "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/check-hit.log" 2>&1; then
     save_visible=1
     break
   fi
@@ -198,14 +198,14 @@ fi
 echo "=== Phase 1b: dashboard compact TUI smoke ==="
 run_dashboard_smoke "${CLI_LOG_DIR}/dashboard.log"
 
-"${CLI}" restore --no-platform --no-git "${WORKSPACE}" "${TAG_DIR}:${RESTORE_DIR},${TAG_FILE}:${RESTORE_FILE_DIR}" > "${CLI_LOG_DIR}/restore.log"
+"${CLI}" restore "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${TAG_DIR}:${RESTORE_DIR},${TAG_FILE}:${RESTORE_FILE_DIR}" > "${CLI_LOG_DIR}/restore.log"
 
 cmp -s "${SRC_DIR}/a.txt" "${RESTORE_DIR}/a.txt"
 cmp -s "${SRC_DIR}/nested.txt" "${RESTORE_DIR}/nested.txt"
 cmp -s "${SINGLE_FILE}" "${RESTORE_FILE_DIR}/single.txt"
 
 set +e
-"${CLI}" restore --no-platform --no-git --lookup-only --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/missing-target" > "${CLI_LOG_DIR}/restore-miss.log" 2>&1
+"${CLI}" restore "${E2E_TAG_SCOPE_FLAGS[@]}" --lookup-only --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/missing-target" > "${CLI_LOG_DIR}/restore-miss.log" 2>&1
 restore_miss_status=$?
 set -e
 if [[ "${restore_miss_status}" -eq 0 ]]; then
@@ -219,10 +219,10 @@ if ! grep -q "Cache miss for tags" "${CLI_LOG_DIR}/restore-miss.log"; then
   exit 1
 fi
 
-"${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/delete.log"
+"${CLI}" delete "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/delete.log"
 deleted_confirmed=0
 for _ in $(seq 1 10); do
-  if "${CLI}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/check-after-delete.log" 2>&1; then
+  if "${CLI}" check "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-miss "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/check-after-delete.log" 2>&1; then
     sleep 1
     continue
   fi
@@ -249,11 +249,11 @@ REPO_CONFIG_PROFILE="bundle-install"
 echo "=== Phase 2: run command cache integration ==="
 mkdir -p "${RUN_SEED_DIR}"
 printf 'run-warm-cache-%s\n' "${RUN_SHA}" > "${RUN_SEED_DIR}/restored.txt"
-"${CLI}" save --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}:${RUN_SEED_DIR}" > "${CLI_LOG_DIR}/run-seed-save.log"
+"${CLI}" save "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${RUN_TAG}:${RUN_SEED_DIR}" > "${CLI_LOG_DIR}/run-seed-save.log"
 
 run_seed_visible=0
 for _ in $(seq 1 10); do
-  if "${CLI}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-seed-check.log" 2>&1; then
+  if "${CLI}" check "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-miss "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-seed-check.log" 2>&1; then
     run_seed_visible=1
     break
   fi
@@ -273,9 +273,9 @@ set -eu
 printf "run-generated-%s\n" "${RUN_ID}" > "\$1/generated.txt"
 EOF
 chmod +x "${RUN_ARCHIVE_SCRIPT}"
-"${CLI}" run --no-platform --no-git --force --fail-on-cache-error "${WORKSPACE}" "${RUN_TAG}:${RUN_TARGET_DIR}" -- sh "${RUN_ARCHIVE_SCRIPT}" "${RUN_TARGET_DIR}" > "${CLI_LOG_DIR}/run-archive.log"
+"${CLI}" run "${E2E_TAG_SCOPE_FLAGS[@]}" --force --fail-on-cache-error "${WORKSPACE}" "${RUN_TAG}:${RUN_TARGET_DIR}" -- sh "${RUN_ARCHIVE_SCRIPT}" "${RUN_TARGET_DIR}" > "${CLI_LOG_DIR}/run-archive.log"
 
-"${CLI}" restore --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}:${RUN_VERIFY_DIR}" > "${CLI_LOG_DIR}/run-verify-restore.log"
+"${CLI}" restore "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${RUN_TAG}:${RUN_VERIFY_DIR}" > "${CLI_LOG_DIR}/run-verify-restore.log"
 if [[ ! -f "${RUN_VERIFY_DIR}/generated.txt" ]]; then
   echo "run verify restore is missing generated.txt"
   cat "${CLI_LOG_DIR}/run-verify-restore.log"
@@ -288,7 +288,7 @@ if ! grep -q "run-generated-${RUN_ID}" "${RUN_VERIFY_DIR}/generated.txt"; then
 fi
 
 set +e
-"${CLI}" run --no-platform --no-git --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/run-missing-target" -- sh -ec 'printf "unexpected-run\n" > "$1"' _ "${RUN_MISS_SENTINEL}" > "${CLI_LOG_DIR}/run-miss.log" 2>&1
+"${CLI}" run "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/run-missing-target" -- sh -ec 'printf "unexpected-run\n" > "$1"' _ "${RUN_MISS_SENTINEL}" > "${CLI_LOG_DIR}/run-miss.log" 2>&1
 run_miss_status=$?
 set -e
 if [[ "${run_miss_status}" -ne 78 ]]; then
@@ -314,9 +314,9 @@ expected_ref="127.0.0.1:$1/cache:$2"
 curl -fsS --max-time 2 "${endpoint}/v2/" >/dev/null || exit 34
 EOF
 chmod +x "${RUN_PROXY_SCRIPT}"
-"${CLI}" run "${WORKSPACE}" --proxy "${RUN_PROXY_TAG}" --no-platform --no-git --host 127.0.0.1 --port 0 -- sh "${RUN_PROXY_SCRIPT}" "{PORT}" "${RUN_PROXY_TAG}" "{CACHE_REF}" > "${CLI_LOG_DIR}/run-proxy.log"
+"${CLI}" run "${WORKSPACE}" --proxy "${RUN_PROXY_TAG}" "${E2E_TAG_SCOPE_FLAGS[@]}" --host 127.0.0.1 --port 0 -- sh "${RUN_PROXY_SCRIPT}" "{PORT}" "${RUN_PROXY_TAG}" "{CACHE_REF}" > "${CLI_LOG_DIR}/run-proxy.log"
 
-"${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-delete.log"
+"${CLI}" delete "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-delete.log"
 
 echo "=== Phase 2b: repo config profiles ==="
 mkdir -p "${REPO_CONFIG_BIN_DIR}"
@@ -367,7 +367,7 @@ chmod +x "${REPO_CONFIG_BIN_DIR}/bundle"
   PATH="${REPO_CONFIG_BIN_DIR}:$PATH" \
     REPO_CONFIG_MODE=seed \
     RUN_ID_FOR_E2E="${RUN_ID}" \
-    "${CLI}" run --no-platform --no-git --skip-restore --profile "${REPO_CONFIG_PROFILE}" -- bundle install \
+    "${CLI}" run "${E2E_TAG_SCOPE_FLAGS[@]}" --skip-restore --profile "${REPO_CONFIG_PROFILE}" -- bundle install \
       > "${CLI_LOG_DIR}/repo-config-seed.log"
 )
 
@@ -378,7 +378,7 @@ rm -rf "${REPO_CONFIG_DIR}/vendor"
   PATH="${REPO_CONFIG_BIN_DIR}:$PATH" \
     REPO_CONFIG_MODE=verify \
     RUN_ID_FOR_E2E="${RUN_ID}" \
-    "${CLI}" run --no-platform --no-git --skip-save --profile "${REPO_CONFIG_PROFILE}" -- bundle install \
+    "${CLI}" run "${E2E_TAG_SCOPE_FLAGS[@]}" --skip-save --profile "${REPO_CONFIG_PROFILE}" -- bundle install \
       > "${CLI_LOG_DIR}/repo-config-restore.log"
 )
 
@@ -399,7 +399,7 @@ fi
 
 mkdir -p "${MOUNT_SRC_DIR}"
 printf 'mount-initial-%s\n' "${RUN_SHA}" > "${MOUNT_SRC_DIR}/file.txt"
-"${CLI}" save --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_SRC_DIR}" > "${CLI_LOG_DIR}/mount-save.log"
+"${CLI}" save "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_SRC_DIR}" > "${CLI_LOG_DIR}/mount-save.log"
 
 encrypted_visible=0
 for _ in $(seq 1 10); do
@@ -425,7 +425,7 @@ cleanup_mount() {
 }
 trap cleanup_mount EXIT
 
-"${CLI}" mount --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_WATCH_DIR}" --identity "${IDENTITY_FILE}" --verbose > "${MOUNT_LOG}" 2>&1 &
+"${CLI}" mount "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_WATCH_DIR}" --identity "${IDENTITY_FILE}" --verbose > "${MOUNT_LOG}" 2>&1 &
 MOUNT_PID=$!
 
 mount_ready=0
@@ -463,9 +463,9 @@ fi
 MOUNT_PID=""
 trap - EXIT
 
-"${CLI}" restore --no-platform --no-git --identity "${IDENTITY_FILE}" "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_RESTORE_DIR}" > "${CLI_LOG_DIR}/mount-restore.log"
+"${CLI}" restore "${E2E_TAG_SCOPE_FLAGS[@]}" --identity "${IDENTITY_FILE}" "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_RESTORE_DIR}" > "${CLI_LOG_DIR}/mount-restore.log"
 grep -q "mount-updated-${RUN_ID}" "${MOUNT_RESTORE_DIR}/file.txt"
 
-"${CLI}" delete --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}" > "${CLI_LOG_DIR}/mount-delete.log"
+"${CLI}" delete "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${TAG_MOUNT}" > "${CLI_LOG_DIR}/mount-delete.log"
 
 echo "CLI core e2e passed. Logs: ${CLI_LOG_DIR}"

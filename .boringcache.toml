@@ -1,5 +1,14 @@
+workspace = "boringcache/cli"
+
+[entries.bundler]
+tag = "bundler"
+
 [entries.mise]
+tag = "mise-installs"
 default_path = "/mise/installs"
+
+[entries.node_modules]
+tag = "node_modules"
 
 [profiles.bundle-install]
 entries = ["bundler"]
