@@ -555,7 +555,8 @@ async fn initial_restore_archive(
         }
     }
 
-    let final_archive_path = if hit.encrypted || manifest.encryption.is_some() {
+    let decrypted_temp_path;
+    let final_archive_path: PathBuf = if hit.encrypted || manifest.encryption.is_some() {
         if verbose {
             ui::info("  Decrypting archive...");
         }
@@ -616,8 +617,11 @@ async fn initial_restore_archive(
             ));
         }
 
-        decrypted_path.to_path_buf()
+        let path = decrypted_path.to_path_buf();
+        decrypted_temp_path = Some(decrypted_path);
+        path
     } else {
+        decrypted_temp_path = None;
         archive_path.clone()
     };
 
@@ -653,6 +657,8 @@ async fn initial_restore_archive(
     crate::archive::extract_tar_archive(&final_archive_path, local_path, verbose, None)
         .await
         .context("Failed to extract archive")?;
+
+    drop(decrypted_temp_path);
 
     Ok(RestoreAction::Downloaded)
 }
@@ -1778,6 +1784,10 @@ fn local_oci_manifest_digest(path: &Path) -> Result<Option<String>> {
 mod tests {
     use super::*;
     use crate::api::models::cache::ManifestCheckResult;
+    use crate::{archive, encryption, manifest, test_env};
+    use chrono::Utc;
+    use mockito::Server;
+    use std::fs;
 
     #[test]
     fn manifest_check_ready_requires_non_pending_status() {
@@ -1890,5 +1900,143 @@ mod tests {
         let expected = crate::cas_oci::prefixed_sha256_digest(&pointer_bytes);
 
         assert_eq!(digest, expected);
+    }
+
+    #[tokio::test]
+    async fn initial_restore_archive_extracts_encrypted_archive() {
+        let _guard = test_env::lock();
+        test_env::set_var("BORINGCACHE_TEST_MODE", "1");
+
+        let mut server = Server::new_async().await;
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
+        test_env::set_var("BORINGCACHE_API_TOKEN", "test-token-123");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source_dir = temp_dir.path().join("data");
+        fs::create_dir(&source_dir).unwrap();
+        fs::write(source_dir.join("hello.txt"), "hello").unwrap();
+
+        let (identity, recipient) = encryption::generate_keypair();
+        let identity_path = temp_dir.path().join("age-identity.txt");
+        encryption::save_identity(&identity, &identity_path).unwrap();
+
+        let draft = manifest::ManifestBuilder::new(&source_dir).build().unwrap();
+        let root_digest = manifest::diff::compute_digest_from_draft(&draft);
+        let archive_info =
+            archive::create_tar_archive(&draft, source_dir.to_str().unwrap(), false, None)
+                .await
+                .unwrap();
+        let archive_bytes = fs::read(&archive_info.archive_path).unwrap();
+
+        let file_count = archive_info.manifest_files.len() as u64;
+        let manifest_doc = manifest::Manifest {
+            format_version: 1,
+            tag: "cache-tag".to_string(),
+            root: manifest::ManifestRoot {
+                digest: root_digest.clone(),
+                algo: "sha256".to_string(),
+            },
+            summary: manifest::ManifestSummary {
+                file_count,
+                raw_size: archive_info.uncompressed_size,
+                changed_count: file_count,
+                removed_count: 0,
+            },
+            entry: None,
+            archive: None,
+            files: archive_info.manifest_files.clone(),
+            encryption: Some(manifest::EncryptionMetadata {
+                algorithm: encryption::ENCRYPTION_ALGORITHM_AGE_X25519.to_string(),
+                recipient_hint: Some(encryption::recipient_hint(&recipient.to_string())),
+                encrypted_at: Utc::now(),
+            }),
+            signature: None,
+        };
+
+        let manifest_cbor = manifest::io::encode_manifest(&manifest_doc).unwrap();
+        let manifest_bytes = manifest::io::compress_manifest(&manifest_cbor).unwrap();
+        let manifest_encrypted = encryption::encrypt_data(&manifest_bytes, &recipient).unwrap();
+        let archive_encrypted = encryption::encrypt_data(&archive_bytes, &recipient).unwrap();
+
+        let manifest_url = format!("{}/manifest", server.url());
+        let archive_url = format!("{}/archive", server.url());
+
+        let _manifest_mock = server
+            .mock("GET", "/manifest")
+            .with_status(200)
+            .with_header("content-type", "application/octet-stream")
+            .with_body(manifest_encrypted)
+            .create_async()
+            .await;
+
+        let archive_len = archive_encrypted.len().to_string();
+        let _archive_head_mock = server
+            .mock("HEAD", "/archive")
+            .with_status(200)
+            .with_header("content-length", archive_len.as_str())
+            .create_async()
+            .await;
+
+        let archive_encrypted_len = archive_encrypted.len() as u64;
+        let _archive_get_mock = server
+            .mock("GET", "/archive")
+            .with_status(200)
+            .with_header("content-length", archive_len.as_str())
+            .with_body(archive_encrypted)
+            .create_async()
+            .await;
+
+        let api_client = crate::api::ApiClient::for_save().unwrap();
+        let hit = crate::api::models::cache::CacheResolutionEntry {
+            tag: "cache-tag".to_string(),
+            primary_tag: None,
+            signature_tag: None,
+            status: "hit".to_string(),
+            cache_entry_id: Some("123".to_string()),
+            manifest_url: Some(manifest_url),
+            manifest_root_digest: Some(root_digest),
+            manifest_digest: None,
+            compression_algorithm: Some("zstd".to_string()),
+            storage_mode: None,
+            blob_count: None,
+            blob_total_size_bytes: None,
+            cas_layout: None,
+            archive_urls: vec![archive_url],
+            size: Some(archive_info.compressed_size),
+            uncompressed_size: Some(archive_info.uncompressed_size),
+            compressed_size: Some(archive_encrypted_len),
+            uploaded_at: None,
+            content_hash: None,
+            pending: false,
+            error: None,
+            workspace_signing_public_key: None,
+            server_signature: None,
+            server_signed_at: None,
+            encrypted: true,
+        };
+
+        let target_dir = temp_dir.path().join("mount-target");
+        let result = initial_restore_archive(
+            &api_client,
+            &hit,
+            &target_dir,
+            false,
+            false,
+            Some(identity_path.to_string_lossy().into_owned()),
+            Arc::new(Mutex::new(encryption::PassphraseCache::default())),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(result, RestoreAction::Downloaded));
+        assert_eq!(
+            fs::read_to_string(target_dir.join("hello.txt")).unwrap(),
+            "hello"
+        );
+
+        test_env::remove_var("BORINGCACHE_API_TOKEN");
+        test_env::remove_var("BORINGCACHE_API_URL");
+        test_env::remove_var("BORINGCACHE_TEST_MODE");
     }
 }
