@@ -13,6 +13,8 @@ RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 RUN_SHA="${GITHUB_SHA:-localsha}"
 MOUNT_SHUTDOWN_WAIT_SECS="${MOUNT_SHUTDOWN_WAIT_SECS:-20}"
+CLI_CONTROL_PLANE_RETRY_ATTEMPTS="${CLI_CONTROL_PLANE_RETRY_ATTEMPTS:-2}"
+CLI_CONTROL_PLANE_RETRY_DELAY_SECS="${CLI_CONTROL_PLANE_RETRY_DELAY_SECS:-2}"
 
 require_positive() {
   local name="$1"
@@ -24,6 +26,8 @@ require_positive() {
 }
 
 require_positive "MOUNT_SHUTDOWN_WAIT_SECS" "$MOUNT_SHUTDOWN_WAIT_SECS"
+require_positive "CLI_CONTROL_PLANE_RETRY_ATTEMPTS" "$CLI_CONTROL_PLANE_RETRY_ATTEMPTS"
+require_positive "CLI_CONTROL_PLANE_RETRY_DELAY_SECS" "$CLI_CONTROL_PLANE_RETRY_DELAY_SECS"
 
 if ! resolve_save_capable_token >/dev/null; then
   echo "ERROR: configure BORINGCACHE_SAVE_TOKEN"
@@ -123,12 +127,52 @@ dump_cli_debug_logs_on_failure() {
 
 trap 'dump_cli_debug_logs_on_failure "$?"' EXIT
 
+run_cli_control_plane_capture() {
+  local label="$1"
+  local output_path="$2"
+  shift 2
+
+  local stderr_log="${output_path}.stderr.log"
+  local stdout_tmp
+  local attempt
+  local status=1
+
+  rm -f "${stderr_log}"
+
+  for ((attempt = 1; attempt <= CLI_CONTROL_PLANE_RETRY_ATTEMPTS; attempt++)); do
+    stdout_tmp="$(mktemp)"
+    if "$@" > "${stdout_tmp}" 2> "${stderr_log}"; then
+      mv "${stdout_tmp}" "${output_path}"
+      rm -f "${stderr_log}"
+      return 0
+    fi
+    status=$?
+    rm -f "${stdout_tmp}"
+    if (( attempt == CLI_CONTROL_PLANE_RETRY_ATTEMPTS )); then
+      echo "ERROR: ${label} failed after ${CLI_CONTROL_PLANE_RETRY_ATTEMPTS} attempt(s)"
+      if [[ -s "${stderr_log}" ]]; then
+        tail -n 80 "${stderr_log}" || true
+      fi
+      return "${status}"
+    fi
+    echo "WARNING: ${label} failed on attempt ${attempt}/${CLI_CONTROL_PLANE_RETRY_ATTEMPTS}; retrying in ${CLI_CONTROL_PLANE_RETRY_DELAY_SECS}s"
+    if [[ -s "${stderr_log}" ]]; then
+      tail -n 20 "${stderr_log}" || true
+    fi
+    sleep "${CLI_CONTROL_PLANE_RETRY_DELAY_SECS}"
+  done
+
+  return "${status}"
+}
+
 bootstrap_cli_session "${CLI}" "${WORKSPACE}" "${BORINGCACHE_API_URL}" "${CLI_LOG_DIR}/auth.log" admin
 "${CLI}" config get default_workspace > "${CLI_LOG_DIR}/config-get-default-workspace.log"
 grep -q "${WORKSPACE}" "${CLI_LOG_DIR}/config-get-default-workspace.log"
 "${CLI}" config list --json > "${CLI_LOG_DIR}/config-list.json"
-"${CLI}" workspaces --json > "${CLI_LOG_DIR}/workspaces.json"
-"${CLI}" ls --limit 1 --json > "${CLI_LOG_DIR}/ls.json"
+run_cli_control_plane_capture "workspaces smoke" "${CLI_LOG_DIR}/workspaces.json" \
+  "${CLI}" workspaces --json
+run_cli_control_plane_capture "ls smoke" "${CLI_LOG_DIR}/ls.json" \
+  "${CLI}" ls --limit 1 --json
 
 run_dashboard_smoke() {
   local log_file="$1"
