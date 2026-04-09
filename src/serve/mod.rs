@@ -23,9 +23,10 @@ use tower::ServiceExt;
 use crate::api::client::ApiClient;
 use crate::observability;
 use crate::serve::state::{
-    AppState, BlobLocatorCache, BlobReadCache, DEFAULT_BLOB_READ_CACHE_MAX_BYTES,
-    KV_BACKLOG_POLICY, KV_REPLICATION_WORK_QUEUE_CAPACITY, KvPendingStore, KvPublishedIndex,
-    KvReplicationWork, UploadSessionStore, diagnostics_enabled, unix_time_ms_now,
+    AppState, BlobLocatorCache, BlobReadCache, BlobReadMetrics, CacheRegistryTuningProfile,
+    DEFAULT_BLOB_READ_CACHE_MAX_BYTES, KV_BACKLOG_POLICY, KV_REPLICATION_WORK_QUEUE_CAPACITY,
+    KvPendingStore, KvPublishedIndex, KvReplicationWork, UploadSessionStore, diagnostics_enabled,
+    unix_time_ms_now,
 };
 use crate::tag_utils::TagResolver;
 
@@ -41,6 +42,20 @@ const BLOB_READ_CACHE_MAX_BYTES_ENV: &str = "BORINGCACHE_BLOB_READ_CACHE_MAX_BYT
 const TCP_LISTEN_BACKLOG_ENV: &str = "BORINGCACHE_TCP_LISTEN_BACKLOG";
 const DEFAULT_TCP_LISTEN_BACKLOG: u32 = 1024;
 const HTTP_VERSION_ENV: &str = "BORINGCACHE_HTTP_VERSION";
+const PUBLIC_PROXY_TUNING_ENVS: &[&str] =
+    &[BLOB_DOWNLOAD_CONCURRENCY_ENV, BLOB_READ_CACHE_MAX_BYTES_ENV];
+const INTERNAL_PROXY_TUNING_ENVS: &[&str] = &[
+    CACHE_PREFETCH_CONCURRENCY_ENV,
+    "BORINGCACHE_CACHE_PREFETCH_BATCH_MAX",
+    "BORINGCACHE_CACHE_PREFETCH_MAX_BLOB_BYTES",
+    "BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS",
+    "BORINGCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES",
+    "BORINGCACHE_BLOB_PREFETCH_MAX_INFLIGHT_BYTES",
+    "BORINGCACHE_CACHE_CHECK_BATCH_MAX",
+    "BORINGCACHE_CACHE_CHECK_BATCH_CONCURRENCY",
+    "BORINGCACHE_CACHE_URL_BATCH_MAX",
+    "BORINGCACHE_CACHE_URL_BATCH_CONCURRENCY",
+];
 const H2_INITIAL_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 const H2_INITIAL_CONNECTION_WINDOW: u32 = 32 * 1024 * 1024;
 const H2_MAX_CONCURRENT_STREAMS: u32 = 1024;
@@ -311,9 +326,15 @@ async fn build_server_runtime(
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<(AppState, TcpListener, mpsc::Receiver<KvReplicationWork>)> {
-    let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
-    let (dl_concurrency, dl_from_env) = blob_download_concurrency();
-    let (pf_concurrency, pf_from_env) = blob_prefetch_concurrency(dl_concurrency);
+    let tuning_profile =
+        cache_registry_tuning_profile(&configured_human_tags, &proxy_metadata_hints);
+    let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes(
+        tuning_profile,
+    ))?);
+    let blob_read_metrics = Arc::new(BlobReadMetrics::new());
+    let prefetch_metrics = Arc::new(state::PrefetchMetrics::new());
+    let (dl_concurrency, dl_from_env) = blob_download_concurrency(tuning_profile);
+    let (pf_concurrency, pf_from_env) = blob_prefetch_concurrency(dl_concurrency, tuning_profile);
     let (kv_replication_work_tx, kv_replication_work_rx) =
         mpsc::channel(KV_REPLICATION_WORK_QUEUE_CAPACITY);
     let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
@@ -367,6 +388,9 @@ async fn build_server_runtime(
         kv_recent_misses: Arc::new(dashmap::DashMap::new()),
         kv_miss_generations: Arc::new(dashmap::DashMap::new()),
         blob_read_cache,
+        blob_read_metrics,
+        prefetch_metrics,
+        tuning_profile,
         blob_download_max_concurrency: dl_concurrency,
         blob_download_semaphore,
         blob_prefetch_semaphore,
@@ -448,6 +472,7 @@ async fn build_server_runtime(
         state.blob_read_cache.cache_dir().display(),
         state.blob_read_cache.max_bytes()
     );
+    eprintln!("  Tuning Profile: {}", state.tuning_profile.as_str());
     let src = |from_env: bool| if from_env { "env" } else { "auto" };
     let pf_label = if pf_concurrency == 0 {
         format!("disabled ({})", src(pf_from_env))
@@ -458,6 +483,19 @@ async fn build_server_runtime(
         "  Blob Download Concurrency: {dl_concurrency} max ({}), prefetch: {pf_label}",
         src(dl_from_env)
     );
+    let expert_overrides = configured_env_overrides(PUBLIC_PROXY_TUNING_ENVS);
+    if expert_overrides.is_empty() {
+        eprintln!("  Expert Tuning Overrides: none");
+    } else {
+        eprintln!("  Expert Tuning Overrides: {}", expert_overrides.join(", "));
+    }
+    let internal_overrides = configured_env_overrides(INTERNAL_PROXY_TUNING_ENVS);
+    if !internal_overrides.is_empty() {
+        eprintln!(
+            "  Internal Debug Overrides: {}",
+            internal_overrides.join(", ")
+        );
+    }
     eprintln!("  Replication queue: {KV_REPLICATION_WORK_QUEUE_CAPACITY} (bounded)");
     eprintln!(
         "  Manifest warm: {} (auto)",
@@ -783,6 +821,16 @@ async fn process_replication_work(state: &AppState, urgent: bool, consecutive_fa
             let mut gate = state.kv_next_flush_at.write().await;
             *gate = None;
             state.kv_replication_flush_ok.fetch_add(1, Ordering::AcqRel);
+            let remaining_pending = {
+                let pending = state.kv_pending.read().await;
+                pending.entry_count()
+            };
+            if remaining_pending > 0 {
+                eprintln!(
+                    "KV flush: {remaining_pending} pending entries arrived during flush, scheduling follow-up"
+                );
+                let _ = cache_registry::enqueue_replication_flush_hint(state, true, false);
+            }
         }
         cache_registry::FlushResult::Conflict => {
             state
@@ -826,6 +874,16 @@ fn update_consecutive_failures_on_flush_result(
 }
 
 async fn flush_cache_ops(state: &AppState) {
+    let blob_read_hints = state.blob_read_metrics.metadata_hints();
+    if !blob_read_hints.is_empty() {
+        state
+            .cache_ops
+            .merge_session_metadata_hints(blob_read_hints);
+    }
+    let prefetch_hints = state.prefetch_metrics.metadata_hints();
+    if !prefetch_hints.is_empty() {
+        state.cache_ops.merge_session_metadata_hints(prefetch_hints);
+    }
     if state.cache_ops.is_empty() {
         return;
     }
@@ -896,7 +954,32 @@ async fn flush_cache_ops(state: &AppState) {
     }
 }
 
-fn blob_read_cache_max_bytes() -> u64 {
+fn cache_registry_tuning_profile(
+    configured_human_tags: &[String],
+    proxy_metadata_hints: &BTreeMap<String, String>,
+) -> CacheRegistryTuningProfile {
+    let hinted_tool = proxy_metadata_hints.get("tool");
+    let tag_matches = |needle: &str| {
+        configured_human_tags.iter().any(|tag| {
+            tag.split([':', ',', '/', '-', '_'])
+                .any(|part| part.eq_ignore_ascii_case(needle))
+        })
+    };
+
+    if hinted_tool.is_some_and(|tool| tool.eq_ignore_ascii_case("sccache"))
+        || tag_matches("sccache")
+    {
+        CacheRegistryTuningProfile::Sccache
+    } else if hinted_tool.is_some_and(|tool| tool.eq_ignore_ascii_case("bazel"))
+        || tag_matches("bazel")
+    {
+        CacheRegistryTuningProfile::Bazel
+    } else {
+        CacheRegistryTuningProfile::Generic
+    }
+}
+
+fn blob_read_cache_max_bytes(tuning_profile: CacheRegistryTuningProfile) -> u64 {
     if let Some(configured) = parse_positive_u64_env(BLOB_READ_CACHE_MAX_BYTES_ENV) {
         return configured;
     }
@@ -921,6 +1004,17 @@ fn blob_read_cache_max_bytes() -> u64 {
         crate::platform::resources::MemoryStrategy::UltraAggressive => {
             DEFAULT_BLOB_READ_CACHE_MAX_BYTES.saturating_mul(2)
         }
+    };
+    let auto_max = match tuning_profile {
+        CacheRegistryTuningProfile::Generic => auto_max,
+        CacheRegistryTuningProfile::Bazel if is_ci => {
+            auto_max.max(DEFAULT_BLOB_READ_CACHE_MAX_BYTES)
+        }
+        CacheRegistryTuningProfile::Bazel => auto_max,
+        CacheRegistryTuningProfile::Sccache if is_ci => {
+            auto_max.max(DEFAULT_BLOB_READ_CACHE_MAX_BYTES.saturating_mul(2))
+        }
+        CacheRegistryTuningProfile::Sccache => auto_max.max(DEFAULT_BLOB_READ_CACHE_MAX_BYTES),
     };
     auto_max.max(512_u64 * 1024 * 1024)
 }
@@ -967,23 +1061,87 @@ fn parse_positive_u64_env(name: &str) -> Option<u64> {
     }
 }
 
+fn configured_env_overrides(names: &[&'static str]) -> Vec<&'static str> {
+    names
+        .iter()
+        .copied()
+        .filter(|name| std::env::var_os(name).is_some())
+        .collect()
+}
+
 fn tcp_listen_backlog() -> u32 {
     parse_positive_u32_env(TCP_LISTEN_BACKLOG_ENV).unwrap_or(DEFAULT_TCP_LISTEN_BACKLOG)
 }
 
-fn blob_download_concurrency() -> (usize, bool) {
+fn blob_download_concurrency(tuning_profile: CacheRegistryTuningProfile) -> (usize, bool) {
     if let Some(configured) = parse_positive_usize_env(BLOB_DOWNLOAD_CONCURRENCY_ENV) {
         return (configured, true);
     }
-    (auto_transfer_concurrency(), false)
+
+    let resources = crate::platform::resources::SystemResources::detect();
+    let is_ci = std::env::var("CI").is_ok();
+    let mut adaptive = auto_transfer_concurrency();
+
+    let floor = match tuning_profile {
+        CacheRegistryTuningProfile::Generic => 0,
+        CacheRegistryTuningProfile::Bazel if is_ci => {
+            if resources.available_memory_gb >= 8.0 && resources.cpu_cores >= 4 {
+                12
+            } else if resources.cpu_cores >= 4 {
+                8
+            } else {
+                6
+            }
+        }
+        CacheRegistryTuningProfile::Bazel => {
+            if resources.available_memory_gb >= 8.0 && resources.cpu_cores >= 4 {
+                6
+            } else {
+                4
+            }
+        }
+        CacheRegistryTuningProfile::Sccache if is_ci => {
+            if resources.available_memory_gb >= 12.0 && resources.cpu_cores >= 4 {
+                16
+            } else if resources.available_memory_gb >= 8.0 && resources.cpu_cores >= 4 {
+                12
+            } else if resources.cpu_cores >= 4 {
+                8
+            } else {
+                6
+            }
+        }
+        CacheRegistryTuningProfile::Sccache => {
+            if resources.available_memory_gb >= 8.0 && resources.cpu_cores >= 4 {
+                8
+            } else {
+                6
+            }
+        }
+    };
+    if floor > 0 {
+        adaptive = adaptive.max(floor);
+    }
+
+    (adaptive.clamp(1, 32), false)
 }
 
-fn blob_prefetch_concurrency(download_concurrency: usize) -> (usize, bool) {
+fn blob_prefetch_concurrency(
+    download_concurrency: usize,
+    tuning_profile: CacheRegistryTuningProfile,
+) -> (usize, bool) {
     let max_download = download_concurrency.max(1);
     if let Some(configured) = parse_positive_usize_env(CACHE_PREFETCH_CONCURRENCY_ENV) {
         return (configured.min(max_download), true);
     }
-    let adaptive = (max_download / 2).clamp(2, 16).min(max_download);
+
+    let adaptive = match tuning_profile {
+        CacheRegistryTuningProfile::Generic => (max_download / 2).clamp(2, 16).min(max_download),
+        CacheRegistryTuningProfile::Bazel => {
+            ((max_download * 3) / 4).clamp(3, 16).min(max_download)
+        }
+        CacheRegistryTuningProfile::Sccache => max_download.clamp(4, 32).min(max_download),
+    };
     (adaptive.max(1), false)
 }
 
@@ -1403,7 +1561,10 @@ mod tests {
     fn blob_read_cache_max_bytes_honors_env_override() {
         let _guard = test_env::lock();
         test_env::set_var(BLOB_READ_CACHE_MAX_BYTES_ENV, "3145728");
-        assert_eq!(blob_read_cache_max_bytes(), 3_145_728);
+        assert_eq!(
+            blob_read_cache_max_bytes(CacheRegistryTuningProfile::Generic),
+            3_145_728
+        );
         test_env::remove_var(BLOB_READ_CACHE_MAX_BYTES_ENV);
     }
 
@@ -1412,15 +1573,84 @@ mod tests {
         let _guard = test_env::lock();
         test_env::remove_var(BLOB_READ_CACHE_MAX_BYTES_ENV);
         test_env::set_var("CI", "1");
-        let max = blob_read_cache_max_bytes();
+        let max = blob_read_cache_max_bytes(CacheRegistryTuningProfile::Generic);
         assert!(max >= DEFAULT_BLOB_READ_CACHE_MAX_BYTES);
         test_env::remove_var("CI");
     }
 
     #[test]
     fn blob_prefetch_concurrency_defaults_to_half_of_downloads() {
-        assert_eq!(blob_prefetch_concurrency(8), (4, false));
-        assert_eq!(blob_prefetch_concurrency(16), (8, false));
+        assert_eq!(
+            blob_prefetch_concurrency(8, CacheRegistryTuningProfile::Generic),
+            (4, false)
+        );
+        assert_eq!(
+            blob_prefetch_concurrency(16, CacheRegistryTuningProfile::Generic),
+            (8, false)
+        );
+    }
+
+    #[test]
+    fn blob_prefetch_concurrency_keeps_sccache_prefetch_aggressive() {
+        assert_eq!(
+            blob_prefetch_concurrency(8, CacheRegistryTuningProfile::Sccache),
+            (8, false)
+        );
+        assert_eq!(
+            blob_prefetch_concurrency(16, CacheRegistryTuningProfile::Sccache),
+            (16, false)
+        );
+    }
+
+    #[test]
+    fn blob_prefetch_concurrency_keeps_bazel_more_eager_than_generic() {
+        assert_eq!(
+            blob_prefetch_concurrency(8, CacheRegistryTuningProfile::Bazel),
+            (6, false)
+        );
+        assert_eq!(
+            blob_prefetch_concurrency(16, CacheRegistryTuningProfile::Bazel),
+            (12, false)
+        );
+    }
+
+    #[test]
+    fn cache_registry_tuning_profile_detects_bazel_from_metadata_hint() {
+        let hints = BTreeMap::from([("tool".to_string(), "bazel".to_string())]);
+        assert_eq!(
+            cache_registry_tuning_profile(&[], &hints),
+            CacheRegistryTuningProfile::Bazel
+        );
+    }
+
+    #[test]
+    fn cache_registry_tuning_profile_detects_bazel_from_tags() {
+        let tags = vec!["grpc-bazel".to_string(), "digest-sha256-abc".to_string()];
+        assert_eq!(
+            cache_registry_tuning_profile(&tags, &BTreeMap::new()),
+            CacheRegistryTuningProfile::Bazel
+        );
+    }
+
+    #[test]
+    fn cache_registry_tuning_profile_detects_sccache_from_metadata_hint() {
+        let hints = BTreeMap::from([("tool".to_string(), "sccache".to_string())]);
+        assert_eq!(
+            cache_registry_tuning_profile(&[], &hints),
+            CacheRegistryTuningProfile::Sccache
+        );
+    }
+
+    #[test]
+    fn cache_registry_tuning_profile_detects_sccache_from_tags() {
+        let tags = vec![
+            "mode-sccache-linux".to_string(),
+            "digest-sha256-abc".to_string(),
+        ];
+        assert_eq!(
+            cache_registry_tuning_profile(&tags, &BTreeMap::new()),
+            CacheRegistryTuningProfile::Sccache
+        );
     }
 
     #[test]

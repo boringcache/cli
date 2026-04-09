@@ -13,6 +13,8 @@ If you are new to BoringCache, start here:
 If you are working on the CLI repo itself:
 
 - [Development](development.md)
+- [Adapter cache profiles](adapter-cache-profiles.md)
+- [Performance learning log](performance-learning-log.md)
 - [Installation setup](../INSTALLATION.md)
 
 The website docs live at [boringcache.com/docs](https://boringcache.com/docs).

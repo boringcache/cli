@@ -44,3 +44,15 @@ GOCACHEPROG="boringcache go-cacheprog --endpoint http://127.0.0.1:5000" go build
 
 The proxy binds to `127.0.0.1` by default.
 Use `--host 0.0.0.0` when the client runs in another container.
+
+## Expert tuning
+
+Most users should rely on the adapter profile and host-resource auto tuning.
+
+The intended expert overrides are:
+
+- `BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY` to cap read/download parallelism
+- `BORINGCACHE_BLOB_READ_CACHE_MAX_BYTES` to grow or shrink the local blob cache
+
+Other proxy env vars that control prefetch batches, URL batch sizes, startup slice limits, or inflight byte budgets are internal/debug controls.
+They are useful for benchmarking and incident response, but they are not the normal operator surface and may change as the profiles improve.

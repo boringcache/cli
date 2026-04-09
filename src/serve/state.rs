@@ -15,6 +15,23 @@ pub fn diagnostics_enabled() -> bool {
     log::log_enabled!(log::Level::Debug)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheRegistryTuningProfile {
+    Generic,
+    Bazel,
+    Sccache,
+}
+
+impl CacheRegistryTuningProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Bazel => "bazel",
+            Self::Sccache => "sccache",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub api_client: ApiClient,
@@ -50,6 +67,9 @@ pub struct AppState {
     pub kv_recent_misses: Arc<DashMap<String, Instant>>,
     pub kv_miss_generations: Arc<DashMap<String, u64>>,
     pub blob_read_cache: Arc<BlobReadCache>,
+    pub blob_read_metrics: Arc<BlobReadMetrics>,
+    pub prefetch_metrics: Arc<PrefetchMetrics>,
+    pub tuning_profile: CacheRegistryTuningProfile,
     pub blob_download_max_concurrency: usize,
     pub blob_download_semaphore: Arc<tokio::sync::Semaphore>,
     pub blob_prefetch_semaphore: Arc<tokio::sync::Semaphore>,
@@ -57,6 +77,224 @@ pub struct AppState {
     pub oci_manifest_cache: Arc<DashMap<String, Arc<OciManifestCacheEntry>>>,
     pub backend_breaker: Arc<BackendCircuitBreaker>,
     pub prefetch_complete: Arc<AtomicBool>,
+}
+
+pub struct BlobReadMetrics {
+    local_count: AtomicU64,
+    remote_count: AtomicU64,
+    local_bytes: AtomicU64,
+    remote_bytes: AtomicU64,
+    local_duration_ms: AtomicU64,
+    remote_duration_ms: AtomicU64,
+}
+
+impl BlobReadMetrics {
+    pub fn new() -> Self {
+        Self {
+            local_count: AtomicU64::new(0),
+            remote_count: AtomicU64::new(0),
+            local_bytes: AtomicU64::new(0),
+            remote_bytes: AtomicU64::new(0),
+            local_duration_ms: AtomicU64::new(0),
+            remote_duration_ms: AtomicU64::new(0),
+        }
+    }
+
+    pub fn record_local(&self, bytes: u64, duration_ms: u64) {
+        self.local_count.fetch_add(1, Ordering::AcqRel);
+        self.local_bytes.fetch_add(bytes, Ordering::AcqRel);
+        self.local_duration_ms
+            .fetch_add(duration_ms, Ordering::AcqRel);
+    }
+
+    pub fn record_remote(&self, bytes: u64, duration_ms: u64) {
+        self.remote_count.fetch_add(1, Ordering::AcqRel);
+        self.remote_bytes.fetch_add(bytes, Ordering::AcqRel);
+        self.remote_duration_ms
+            .fetch_add(duration_ms, Ordering::AcqRel);
+    }
+
+    pub fn metadata_hints(&self) -> BTreeMap<String, String> {
+        let local_count = self.local_count.load(Ordering::Acquire);
+        let remote_count = self.remote_count.load(Ordering::Acquire);
+        let total_count = local_count.saturating_add(remote_count);
+        if total_count == 0 {
+            return BTreeMap::new();
+        }
+
+        let local_bytes = self.local_bytes.load(Ordering::Acquire);
+        let remote_bytes = self.remote_bytes.load(Ordering::Acquire);
+        let local_duration_ms = self.local_duration_ms.load(Ordering::Acquire);
+        let remote_duration_ms = self.remote_duration_ms.load(Ordering::Acquire);
+        let local_hit_rate_pct = ((local_count as f64 / total_count as f64) * 100.0).round();
+        let local_avg_ms = if local_count == 0 {
+            0
+        } else {
+            local_duration_ms / local_count
+        };
+        let remote_avg_ms = if remote_count == 0 {
+            0
+        } else {
+            remote_duration_ms / remote_count
+        };
+
+        BTreeMap::from([
+            ("blob_read_local_count".to_string(), local_count.to_string()),
+            (
+                "blob_read_remote_count".to_string(),
+                remote_count.to_string(),
+            ),
+            ("blob_read_local_bytes".to_string(), local_bytes.to_string()),
+            (
+                "blob_read_remote_bytes".to_string(),
+                remote_bytes.to_string(),
+            ),
+            (
+                "blob_read_local_hit_rate_pct".to_string(),
+                local_hit_rate_pct.to_string(),
+            ),
+            (
+                "blob_read_local_avg_ms".to_string(),
+                local_avg_ms.to_string(),
+            ),
+            (
+                "blob_read_remote_avg_ms".to_string(),
+                remote_avg_ms.to_string(),
+            ),
+        ])
+    }
+}
+
+impl Default for BlobReadMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct StartupPrefetchSnapshot {
+    mode: Option<String>,
+    total_unique_blobs: u64,
+    target_blobs: u64,
+    target_bytes: u64,
+    url_resolved: u64,
+    url_missing: u64,
+    already_local: u64,
+    inserted: u64,
+    failures: u64,
+    duration_ms: u64,
+}
+
+pub struct PrefetchMetrics {
+    startup: StdMutex<StartupPrefetchSnapshot>,
+}
+
+impl PrefetchMetrics {
+    pub fn new() -> Self {
+        Self {
+            startup: StdMutex::new(StartupPrefetchSnapshot::default()),
+        }
+    }
+
+    pub fn reset_startup(&self) {
+        if let Ok(mut snapshot) = self.startup.lock() {
+            *snapshot = StartupPrefetchSnapshot::default();
+        }
+    }
+
+    pub fn record_startup_plan(
+        &self,
+        mode: &str,
+        total_unique_blobs: usize,
+        target_blobs: usize,
+        target_bytes: u64,
+    ) {
+        if let Ok(mut snapshot) = self.startup.lock() {
+            snapshot.mode = Some(mode.to_string());
+            snapshot.total_unique_blobs = total_unique_blobs as u64;
+            snapshot.target_blobs = target_blobs as u64;
+            snapshot.target_bytes = target_bytes;
+        }
+    }
+
+    pub fn record_startup_url_coverage(&self, resolved: usize, missing: usize) {
+        if let Ok(mut snapshot) = self.startup.lock() {
+            snapshot.url_resolved = resolved as u64;
+            snapshot.url_missing = missing as u64;
+        }
+    }
+
+    pub fn record_startup_execution(
+        &self,
+        already_local: usize,
+        inserted: usize,
+        failures: usize,
+        duration_ms: u64,
+    ) {
+        if let Ok(mut snapshot) = self.startup.lock() {
+            snapshot.already_local = already_local as u64;
+            snapshot.inserted = inserted as u64;
+            snapshot.failures = failures as u64;
+            snapshot.duration_ms = duration_ms;
+        }
+    }
+
+    pub fn metadata_hints(&self) -> BTreeMap<String, String> {
+        let Ok(snapshot) = self.startup.lock() else {
+            return BTreeMap::new();
+        };
+        if snapshot.target_blobs == 0 && snapshot.total_unique_blobs == 0 {
+            return BTreeMap::new();
+        }
+
+        let mut hints = BTreeMap::new();
+        if let Some(mode) = &snapshot.mode {
+            hints.insert("startup_prefetch_mode".to_string(), mode.clone());
+        }
+        hints.insert(
+            "startup_prefetch_total_unique_blobs".to_string(),
+            snapshot.total_unique_blobs.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_target_blobs".to_string(),
+            snapshot.target_blobs.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_target_bytes".to_string(),
+            snapshot.target_bytes.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_url_resolved".to_string(),
+            snapshot.url_resolved.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_url_missing".to_string(),
+            snapshot.url_missing.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_already_local".to_string(),
+            snapshot.already_local.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_inserted".to_string(),
+            snapshot.inserted.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_failures".to_string(),
+            snapshot.failures.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_duration_ms".to_string(),
+            snapshot.duration_ms.to_string(),
+        );
+        hints
+    }
+}
+
+impl Default for PrefetchMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 const BACKEND_BREAKER_OPEN_DURATION_MS: u64 = 8_000;
@@ -102,6 +340,7 @@ impl Default for BackendCircuitBreaker {
 
 pub const DEFAULT_BLOB_READ_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const OCI_MANIFEST_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const BLOB_READ_CACHE_DIR_ENV: &str = "BORINGCACHE_BLOB_READ_CACHE_DIR";
 const BLOB_READ_CACHE_DIR_NAME: &str = "boringcache-blob-cache";
 const BLOB_READ_SEGMENTS_DIR_NAME: &str = "segments";
 const BLOB_READ_SEGMENT_PREFIX: &str = "segment-";
@@ -215,7 +454,10 @@ pub struct BlobReadCache {
 
 impl BlobReadCache {
     pub fn new(max_bytes: u64) -> io::Result<Self> {
-        let cache_dir = std::env::temp_dir().join(BLOB_READ_CACHE_DIR_NAME);
+        let cache_dir = std::env::var_os(BLOB_READ_CACHE_DIR_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join(BLOB_READ_CACHE_DIR_NAME));
         Self::new_at(cache_dir, max_bytes)
     }
 
@@ -1333,11 +1575,16 @@ impl KvPublishedIndex {
     }
 
     pub fn set_download_urls(&mut self, urls: HashMap<String, String>) {
+        self.download_urls.clear();
+        self.merge_download_urls(urls);
+    }
+
+    pub fn merge_download_urls(&mut self, urls: HashMap<String, String>) {
         let expires_at = Instant::now() + DOWNLOAD_URL_TTL;
-        self.download_urls = urls
-            .into_iter()
-            .map(|(digest, url)| (digest, CachedUrl { url, expires_at }))
-            .collect();
+        for (digest, url) in urls {
+            self.download_urls
+                .insert(digest, CachedUrl { url, expires_at });
+        }
     }
 
     pub fn set_download_url(&mut self, digest: String, url: String) {

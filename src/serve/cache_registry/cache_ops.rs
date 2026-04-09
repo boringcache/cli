@@ -366,6 +366,22 @@ impl Aggregator {
         }
     }
 
+    pub fn merge_session_metadata_hints(&self, metadata_hints: BTreeMap<String, String>) {
+        if metadata_hints.is_empty() {
+            return;
+        }
+        self.flush_async_events();
+        let mut state = self.lock_state();
+        for (key, value) in metadata_hints {
+            state
+                .session_metadata_hints
+                .insert(key.clone(), value.clone());
+            for session in state.active_sessions.values_mut() {
+                session.metadata_hints.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
     fn lock_state(&self) -> MutexGuard<'_, AggregateState> {
         self.state
             .lock()

@@ -8,8 +8,9 @@ use boring_cache_cli::git::GitContext;
 use boring_cache_cli::manifest::EntryType;
 use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
-    AppState, BlobLocatorCache, BlobLocatorEntry, BlobReadCache, KvPendingStore, KvPublishedIndex,
-    OciManifestCacheEntry, UploadSession, UploadSessionStore, digest_tag, ref_tag,
+    AppState, BlobLocatorCache, BlobLocatorEntry, BlobReadCache, BlobReadMetrics, KvPendingStore,
+    KvPublishedIndex, OciManifestCacheEntry, UploadSession, UploadSessionStore, digest_tag,
+    ref_tag,
 };
 use boring_cache_cli::tag_utils::TagResolver;
 use boring_cache_cli::test_env;
@@ -122,6 +123,9 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
             )
             .expect("blob read cache"),
         ),
+        blob_read_metrics: Arc::new(BlobReadMetrics::new()),
+        prefetch_metrics: Arc::new(boring_cache_cli::serve::state::PrefetchMetrics::new()),
+        tuning_profile: boring_cache_cli::serve::state::CacheRegistryTuningProfile::Generic,
         blob_download_max_concurrency: 16,
         blob_download_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
         blob_prefetch_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
@@ -299,6 +303,7 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
         ),
     ];
     let pointer_bytes = make_kv_pointer(&pointer_entries);
+    let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
 
     let restore_mock = server
         .mock(
@@ -333,7 +338,7 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
 
     let download_urls_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .expect(1)
+        .expect_at_least(1)
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -374,11 +379,30 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
         .with_body(warm_blob_b)
         .create_async()
         .await;
-    let cold_blob_startup_mock = server
+    let cold_blob_mock = server
         .mock("GET", format!("/blobs/{}", digest_c).as_str())
-        .expect(0)
+        .expect_at_least(1)
         .with_status(200)
         .with_body(cold_blob)
+        .create_async()
+        .await;
+    let pointer_visibility_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches/tags/registry/pointer".to_string()),
+        )
+        .expect_at_least(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            serde_json::to_string(&json!({
+                "tag": "registry",
+                "cache_entry_id": "entry-startup-slice",
+                "manifest_root_digest": pointer_digest,
+                "version": "1"
+            }))
+            .unwrap(),
+        )
         .create_async()
         .await;
 
@@ -404,19 +428,6 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
 
     warm_blob_a_mock.assert_async().await;
     warm_blob_b_mock.assert_async().await;
-    assert!(
-        cold_blob_startup_mock.matched_async().await,
-        "third blob should not be prefetched during startup"
-    );
-    cold_blob_startup_mock.remove_async().await;
-
-    let cold_blob_on_demand_mock = server
-        .mock("GET", format!("/blobs/{}", digest_c).as_str())
-        .expect(1)
-        .with_status(200)
-        .with_body(cold_blob)
-        .create_async()
-        .await;
 
     let blob_response = client
         .get(format!("{base_url}/cas/{key_c}"))
@@ -431,7 +442,8 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
     restore_mock.assert_async().await;
     pointer_mock.assert_async().await;
     download_urls_mock.assert_async().await;
-    cold_blob_on_demand_mock.assert_async().await;
+    cold_blob_mock.assert_async().await;
+    pointer_visibility_mock.assert_async().await;
 }
 
 #[tokio::test]

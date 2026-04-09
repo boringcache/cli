@@ -24,8 +24,8 @@ use crate::error::{BoringCacheError, PendingMetadata};
 use crate::manifest::EntryType;
 use crate::observability;
 use crate::serve::state::{
-    AppState, BlobReadHandle, KV_BACKLOG_POLICY, KvFlushingSnapshot, KvReplicationWork,
-    diagnostics_enabled,
+    AppState, BlobReadHandle, CacheRegistryTuningProfile, KV_BACKLOG_POLICY, KvFlushingSnapshot,
+    KvReplicationWork, diagnostics_enabled,
 };
 use crate::upload_receipts::try_commit_blob_receipts;
 
@@ -59,12 +59,22 @@ const KV_PUT_BODY_SLOW_WARN_THRESHOLD: std::time::Duration = std::time::Duration
 const KV_RESOLVE_HIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_FETCH_POINTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_BLOB_PRELOAD_MAX_BLOBS: usize = 2_000;
+const KV_BAZEL_BLOB_PRELOAD_MAX_BLOBS: usize = 8_000;
+const KV_SCCACHE_BLOB_PRELOAD_MAX_BLOBS: usize = 16_000;
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
+const KV_BAZEL_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 const KV_BLOB_PRELOAD_MAX_BLOBS_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_BATCH_MAX";
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_MAX_BLOB_BYTES";
 const KV_STARTUP_PREFETCH_MAX_BLOBS: usize = 2_048;
+const KV_BAZEL_STARTUP_PREFETCH_MAX_BLOBS: usize = 8_192;
+const KV_SCCACHE_STARTUP_PREFETCH_MAX_BLOBS: usize = 16_384;
 const KV_STARTUP_PREFETCH_MIN_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+const KV_BAZEL_STARTUP_PREFETCH_MIN_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+const KV_BAZEL_STARTUP_PREFETCH_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+const KV_SCCACHE_STARTUP_PREFETCH_MIN_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+const KV_SCCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const KV_BAZEL_STARTUP_PREFETCH_SMALL_CAS_MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024;
 const KV_STARTUP_PREFETCH_MAX_BLOBS_ENV: &str = "BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS";
 const KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV: &str =
     "BORINGCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES";
@@ -88,8 +98,59 @@ const SERVE_PRELOAD_INDEX_OPERATION: &str = "cache_preload_index_fetch";
 const SERVE_PREFETCH_OPERATION: &str = "blob_prefetch_cycle";
 const SERVE_PRELOAD_INDEX_PATH: &str = "/serve/cache_registry/preload-index";
 const SERVE_PREFETCH_PATH: &str = "/serve/cache_registry/prefetch";
+const SERVE_BLOB_READ_OPERATION: &str = "cache_blob_read";
+const SERVE_BLOB_READ_PATH: &str = "/serve/cache_registry/blob-read";
 const LOOKUP_REFRESH_FLIGHT_KEY: &str = "lookup_refresh";
 static KV_BLOB_DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlobReadSource {
+    LocalCache,
+    RemoteFetch,
+}
+
+impl BlobReadSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalCache => "local_cache",
+            Self::RemoteFetch => "remote_fetch",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BazelStartupBlobClass {
+    ActionCache,
+    SmallCas,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+struct StartupPrefetchCandidates {
+    ordered_blobs: Vec<BlobDescriptor>,
+    bazel_action_cache_blobs: usize,
+    bazel_small_cas_blobs: usize,
+    bazel_other_blobs: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DownloadUrlPreloadStats {
+    requested: usize,
+    resolved: usize,
+    missing: usize,
+}
+
+#[derive(Debug, Clone)]
+struct StartupPrefetchTarget {
+    blob: BlobDescriptor,
+    cached_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct StartupPrefetchTargetSummary {
+    cached_url_count: usize,
+    unresolved_url_count: usize,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct KvPendingPublishHandoff {
@@ -183,6 +244,42 @@ fn emit_serve_phase_metric(
         )
         .with_workspace(workspace.map(|value| value.to_string()))
         .with_cache_entry_id(cache_entry_id.map(|value| value.to_string())),
+    );
+}
+
+fn emit_blob_read_metric(
+    state: &AppState,
+    cache_entry_id: &str,
+    source: BlobReadSource,
+    bytes: u64,
+    duration_ms: u64,
+) {
+    match source {
+        BlobReadSource::LocalCache => state.blob_read_metrics.record_local(bytes, duration_ms),
+        BlobReadSource::RemoteFetch => state.blob_read_metrics.record_remote(bytes, duration_ms),
+    }
+    observability::emit(
+        observability::ObservabilityEvent::success(
+            SERVE_METRIC_SOURCE,
+            SERVE_BLOB_READ_OPERATION,
+            "GET",
+            SERVE_BLOB_READ_PATH.to_string(),
+            200,
+            duration_ms,
+            None,
+            Some(bytes),
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_workspace(Some(state.workspace.clone()))
+        .with_cache_entry_id(Some(cache_entry_id.to_string()))
+        .with_details(Some(format!(
+            "source={} profile={}",
+            source.as_str(),
+            state.tuning_profile.as_str()
+        ))),
     );
 }
 
@@ -1623,9 +1720,9 @@ async fn do_download_blob_to_cache(
     cache_entry_id: &str,
     blob: &BlobDescriptor,
     cached_url: Option<&str>,
-) -> Result<BlobReadHandle, RegistryError> {
+) -> Result<(BlobReadHandle, BlobReadSource), RegistryError> {
     if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
-        return Ok(cache_handle);
+        return Ok((cache_handle, BlobReadSource::LocalCache));
     }
 
     if cached_url.is_none() && state.backend_breaker.is_open() {
@@ -1657,7 +1754,7 @@ async fn do_download_blob_to_cache(
         .map_err(|_| RegistryError::internal("Download semaphore closed"))?;
 
     if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
-        return Ok(cache_handle);
+        return Ok((cache_handle, BlobReadSource::LocalCache));
     }
 
     let digest_hex = crate::cas_file::sha256_hex(blob.digest.as_bytes());
@@ -1704,11 +1801,14 @@ async fn do_download_blob_to_cache(
     }
 
     if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
-        return Ok(cache_handle);
+        return Ok((cache_handle, BlobReadSource::RemoteFetch));
     }
 
     if tokio::fs::metadata(&temp_path).await.is_ok() {
-        return Ok(BlobReadHandle::from_file(temp_path, written));
+        return Ok((
+            BlobReadHandle::from_file(temp_path, written),
+            BlobReadSource::RemoteFetch,
+        ));
     }
 
     Err(RegistryError::internal(
@@ -1830,8 +1930,16 @@ async fn download_blob_to_cache(
     blob: &BlobDescriptor,
     cached_url: Option<&str>,
 ) -> Result<BlobReadHandle, RegistryError> {
+    let started_at = std::time::Instant::now();
     if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
         log::debug!("dl cache hit: {}", short_digest(&blob.digest));
+        emit_blob_read_metric(
+            state,
+            cache_entry_id,
+            BlobReadSource::LocalCache,
+            blob.size_bytes,
+            started_at.elapsed().as_millis() as u64,
+        );
         return Ok(cache_handle);
     }
 
@@ -1839,20 +1947,50 @@ async fn download_blob_to_cache(
     match begin_lookup_flight(state, flight_key.clone()) {
         LookupFlight::Leader(_dl_guard) => {
             if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
+                emit_blob_read_metric(
+                    state,
+                    cache_entry_id,
+                    BlobReadSource::LocalCache,
+                    blob.size_bytes,
+                    started_at.elapsed().as_millis() as u64,
+                );
                 return Ok(cache_handle);
             }
 
-            do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await
+            let (cache_handle, source) =
+                do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
+            emit_blob_read_metric(
+                state,
+                cache_entry_id,
+                source,
+                blob.size_bytes,
+                started_at.elapsed().as_millis() as u64,
+            );
+            Ok(cache_handle)
         }
         LookupFlight::Follower(notified) => {
             if !await_flight("dl", &flight_key, notified).await {
                 clear_lookup_flight_entry(state, &flight_key);
             }
             if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
+                emit_blob_read_metric(
+                    state,
+                    cache_entry_id,
+                    BlobReadSource::LocalCache,
+                    blob.size_bytes,
+                    started_at.elapsed().as_millis() as u64,
+                );
                 return Ok(cache_handle);
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
+                emit_blob_read_metric(
+                    state,
+                    cache_entry_id,
+                    BlobReadSource::LocalCache,
+                    blob.size_bytes,
+                    started_at.elapsed().as_millis() as u64,
+                );
                 return Ok(cache_handle);
             }
             let retry_key = format!("dlretry:{}", blob.digest);
@@ -1860,15 +1998,31 @@ async fn download_blob_to_cache(
                 LookupFlight::Leader(_retry_guard) => {
                     if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await
                     {
+                        emit_blob_read_metric(
+                            state,
+                            cache_entry_id,
+                            BlobReadSource::LocalCache,
+                            blob.size_bytes,
+                            started_at.elapsed().as_millis() as u64,
+                        );
                         return Ok(cache_handle);
                     }
-                    do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await
+                    let (cache_handle, source) =
+                        do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
+                    emit_blob_read_metric(
+                        state,
+                        cache_entry_id,
+                        source,
+                        blob.size_bytes,
+                        started_at.elapsed().as_millis() as u64,
+                    );
+                    Ok(cache_handle)
                 }
                 LookupFlight::Follower(retry_notified) => {
                     if !await_flight("dlretry", &retry_key, retry_notified).await {
                         clear_lookup_flight_entry(state, &retry_key);
                     }
-                    state
+                    let cache_handle = state
                         .blob_read_cache
                         .get_handle(&blob.digest)
                         .await
@@ -1877,7 +2031,15 @@ async fn download_blob_to_cache(
                                 "Blob download failed after retry: {}",
                                 short_digest(&blob.digest)
                             ))
-                        })
+                        })?;
+                    emit_blob_read_metric(
+                        state,
+                        cache_entry_id,
+                        BlobReadSource::LocalCache,
+                        blob.size_bytes,
+                        started_at.elapsed().as_millis() as u64,
+                    );
+                    Ok(cache_handle)
                 }
             }
         }
@@ -3186,17 +3348,17 @@ fn spawn_preload_blobs(state: &AppState, cache_entry_id: &str) {
     });
 }
 
-async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
-    let blobs = {
-        let published = state.kv_published_index.read().await;
-        published.unique_blobs()
-    };
-
+async fn preload_download_urls_for_blobs(
+    state: &AppState,
+    cache_entry_id: &str,
+    blobs: &[BlobDescriptor],
+) -> DownloadUrlPreloadStats {
     if blobs.is_empty() {
-        return;
+        return DownloadUrlPreloadStats::default();
     }
 
-    let batch_size = blobs.len() as u64;
+    let requested = blobs.len();
+    let batch_size = requested as u64;
     emit_serve_event(
         Some(&state.workspace),
         SERVE_PRELOAD_INDEX_OPERATION,
@@ -3207,7 +3369,7 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
 
     match state
         .api_client
-        .blob_download_urls_verified(&state.workspace, cache_entry_id, &blobs)
+        .blob_download_urls_verified(&state.workspace, cache_entry_id, blobs)
         .await
     {
         Ok(response) => {
@@ -3217,9 +3379,12 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
                 .map(|u| (u.digest, u.url))
                 .collect();
             let url_count = urls.len();
+            let missing_count = response.missing.len();
             let mut published = state.kv_published_index.write().await;
-            published.set_download_urls(urls);
-            eprintln!("KV index preload: resolved {url_count} download URLs");
+            published.merge_download_urls(urls);
+            eprintln!(
+                "KV index preload: resolved {url_count}/{requested} download URLs (missing={missing_count})"
+            );
             emit_serve_phase_metric(
                 Some(&state.workspace),
                 Some(cache_entry_id),
@@ -3233,8 +3398,13 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
                 Some(&state.workspace),
                 SERVE_PRELOAD_INDEX_OPERATION,
                 SERVE_PRELOAD_INDEX_PATH,
-                format!("resolve_download_urls:done resolved={url_count}"),
+                format!("resolve_download_urls:done resolved={url_count} missing={missing_count}"),
             );
+            DownloadUrlPreloadStats {
+                requested,
+                resolved: url_count,
+                missing: missing_count,
+            }
         }
         Err(e) => {
             log::warn!("KV index preload: failed to resolve download URLs: {e}");
@@ -3251,41 +3421,174 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
                 .with_workspace(Some(state.workspace.clone()))
                 .with_cache_entry_id(Some(cache_entry_id.to_string())),
             );
+            DownloadUrlPreloadStats {
+                requested,
+                resolved: 0,
+                missing: requested,
+            }
         }
     }
 }
 
-fn kv_blob_preload_max_blob_bytes() -> u64 {
-    parse_positive_u64_env(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV)
-        .unwrap_or(KV_BLOB_PRELOAD_MAX_BLOB_BYTES)
+async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
+    let blobs = {
+        let published = state.kv_published_index.read().await;
+        published.unique_blobs()
+    };
+    let _ = preload_download_urls_for_blobs(state, cache_entry_id, &blobs).await;
 }
 
-fn kv_blob_preload_max_blobs() -> usize {
-    parse_positive_usize_env(KV_BLOB_PRELOAD_MAX_BLOBS_ENV).unwrap_or(KV_BLOB_PRELOAD_MAX_BLOBS)
-}
-
-fn kv_startup_prefetch_max_blobs() -> usize {
-    parse_positive_usize_env(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV)
-        .unwrap_or(KV_STARTUP_PREFETCH_MAX_BLOBS)
-}
-
-fn kv_startup_prefetch_max_total_bytes(cache_max: u64) -> u64 {
-    parse_positive_u64_env(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV).unwrap_or_else(|| {
-        cache_max.saturating_div(4).clamp(
-            KV_STARTUP_PREFETCH_MIN_TOTAL_BYTES,
-            KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES,
-        )
+fn kv_blob_preload_max_blob_bytes(tuning_profile: CacheRegistryTuningProfile) -> u64 {
+    parse_positive_u64_env(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV).unwrap_or(match tuning_profile {
+        CacheRegistryTuningProfile::Generic => KV_BLOB_PRELOAD_MAX_BLOB_BYTES,
+        CacheRegistryTuningProfile::Bazel => KV_BAZEL_BLOB_PRELOAD_MAX_BLOB_BYTES,
+        CacheRegistryTuningProfile::Sccache => KV_BLOB_PRELOAD_MAX_BLOB_BYTES,
     })
 }
 
-fn kv_blob_prefetch_max_inflight_bytes(cache_max: u64) -> u64 {
+fn kv_blob_preload_max_blobs(tuning_profile: CacheRegistryTuningProfile) -> usize {
+    parse_positive_usize_env(KV_BLOB_PRELOAD_MAX_BLOBS_ENV).unwrap_or(match tuning_profile {
+        CacheRegistryTuningProfile::Generic => KV_BLOB_PRELOAD_MAX_BLOBS,
+        CacheRegistryTuningProfile::Bazel => KV_BAZEL_BLOB_PRELOAD_MAX_BLOBS,
+        CacheRegistryTuningProfile::Sccache => KV_SCCACHE_BLOB_PRELOAD_MAX_BLOBS,
+    })
+}
+
+fn kv_startup_prefetch_max_blobs(tuning_profile: CacheRegistryTuningProfile) -> usize {
+    parse_positive_usize_env(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV).unwrap_or(match tuning_profile {
+        CacheRegistryTuningProfile::Generic => KV_STARTUP_PREFETCH_MAX_BLOBS,
+        CacheRegistryTuningProfile::Bazel => KV_BAZEL_STARTUP_PREFETCH_MAX_BLOBS,
+        CacheRegistryTuningProfile::Sccache => KV_SCCACHE_STARTUP_PREFETCH_MAX_BLOBS,
+    })
+}
+
+fn kv_startup_prefetch_max_total_bytes(
+    cache_max: u64,
+    tuning_profile: CacheRegistryTuningProfile,
+) -> u64 {
+    parse_positive_u64_env(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV).unwrap_or_else(|| {
+        match tuning_profile {
+            CacheRegistryTuningProfile::Generic => cache_max.saturating_div(4).clamp(
+                KV_STARTUP_PREFETCH_MIN_TOTAL_BYTES,
+                KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES,
+            ),
+            CacheRegistryTuningProfile::Bazel => cache_max.saturating_div(2).clamp(
+                KV_BAZEL_STARTUP_PREFETCH_MIN_TOTAL_BYTES,
+                KV_BAZEL_STARTUP_PREFETCH_MAX_TOTAL_BYTES,
+            ),
+            CacheRegistryTuningProfile::Sccache => {
+                cache_max.saturating_mul(3).saturating_div(4).clamp(
+                    KV_SCCACHE_STARTUP_PREFETCH_MIN_TOTAL_BYTES,
+                    KV_SCCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES,
+                )
+            }
+        }
+    })
+}
+
+fn kv_blob_prefetch_max_inflight_bytes(
+    cache_max: u64,
+    tuning_profile: CacheRegistryTuningProfile,
+) -> u64 {
     if let Some(configured) = parse_positive_u64_env(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV) {
         return configured;
     }
-    // Keep defaults conservative for small nodes while still scaling on larger caches.
-    cache_max
-        .saturating_div(4)
-        .clamp(64 * 1024 * 1024, 512 * 1024 * 1024)
+    match tuning_profile {
+        CacheRegistryTuningProfile::Generic => cache_max
+            .saturating_div(4)
+            .clamp(64 * 1024 * 1024, 512 * 1024 * 1024),
+        CacheRegistryTuningProfile::Bazel => cache_max
+            .saturating_div(3)
+            .clamp(128 * 1024 * 1024, 1024 * 1024 * 1024),
+        CacheRegistryTuningProfile::Sccache => cache_max
+            .saturating_div(2)
+            .clamp(256 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+    }
+}
+
+fn bazel_startup_blob_class(scoped_key: &str, blob: &BlobDescriptor) -> BazelStartupBlobClass {
+    if scoped_key.starts_with("bazel_ac/") {
+        BazelStartupBlobClass::ActionCache
+    } else if scoped_key.starts_with("bazel_cas/")
+        && blob.size_bytes > 0
+        && blob.size_bytes <= KV_BAZEL_STARTUP_PREFETCH_SMALL_CAS_MAX_BLOB_BYTES
+    {
+        BazelStartupBlobClass::SmallCas
+    } else {
+        BazelStartupBlobClass::Other
+    }
+}
+
+fn bazel_startup_prefetch_candidates(
+    entries: &HashMap<String, BlobDescriptor>,
+    blob_order: &[BlobDescriptor],
+) -> StartupPrefetchCandidates {
+    let mut class_by_digest: HashMap<&str, BazelStartupBlobClass> =
+        HashMap::with_capacity(entries.len());
+    for (scoped_key, blob) in entries {
+        let candidate = bazel_startup_blob_class(scoped_key, blob);
+        match class_by_digest.get_mut(blob.digest.as_str()) {
+            Some(existing) if matches!(candidate, BazelStartupBlobClass::ActionCache) => {
+                *existing = candidate;
+            }
+            Some(existing)
+                if matches!(candidate, BazelStartupBlobClass::SmallCas)
+                    && matches!(existing, BazelStartupBlobClass::Other) =>
+            {
+                *existing = candidate;
+            }
+            Some(_) => {}
+            None => {
+                class_by_digest.insert(blob.digest.as_str(), candidate);
+            }
+        }
+    }
+
+    let mut action_cache_blobs = Vec::new();
+    let mut small_cas_blobs = Vec::new();
+    let mut other_blobs = Vec::new();
+    for blob in blob_order {
+        match class_by_digest
+            .get(blob.digest.as_str())
+            .copied()
+            .unwrap_or(BazelStartupBlobClass::Other)
+        {
+            BazelStartupBlobClass::ActionCache => action_cache_blobs.push(blob.clone()),
+            BazelStartupBlobClass::SmallCas => small_cas_blobs.push(blob.clone()),
+            BazelStartupBlobClass::Other => other_blobs.push(blob.clone()),
+        }
+    }
+
+    let mut ordered_blobs =
+        Vec::with_capacity(action_cache_blobs.len() + small_cas_blobs.len() + other_blobs.len());
+    ordered_blobs.extend(action_cache_blobs.iter().cloned());
+    ordered_blobs.extend(small_cas_blobs.iter().cloned());
+    ordered_blobs.extend(other_blobs.iter().cloned());
+
+    StartupPrefetchCandidates {
+        ordered_blobs,
+        bazel_action_cache_blobs: action_cache_blobs.len(),
+        bazel_small_cas_blobs: small_cas_blobs.len(),
+        bazel_other_blobs: other_blobs.len(),
+    }
+}
+
+fn startup_prefetch_candidates(
+    entries: &HashMap<String, BlobDescriptor>,
+    blob_order: &[BlobDescriptor],
+    tuning_profile: CacheRegistryTuningProfile,
+) -> StartupPrefetchCandidates {
+    match tuning_profile {
+        CacheRegistryTuningProfile::Generic | CacheRegistryTuningProfile::Sccache => {
+            StartupPrefetchCandidates {
+                ordered_blobs: blob_order.to_vec(),
+                bazel_action_cache_blobs: 0,
+                bazel_small_cas_blobs: 0,
+                bazel_other_blobs: blob_order.len(),
+            }
+        }
+        CacheRegistryTuningProfile::Bazel => bazel_startup_prefetch_candidates(entries, blob_order),
+    }
 }
 
 fn should_skip_blob_preload(used_bytes: u64, max_bytes: u64) -> bool {
@@ -3311,7 +3614,7 @@ fn select_startup_prefetch_slice(
             continue;
         }
         if blob.size_bytes > remaining_bytes {
-            break;
+            continue;
         }
         remaining_bytes = remaining_bytes.saturating_sub(blob.size_bytes);
         selected.push(blob.clone());
@@ -3320,11 +3623,54 @@ fn select_startup_prefetch_slice(
     selected
 }
 
+fn startup_prefetch_blobs(
+    ordered_blobs: &[BlobDescriptor],
+    max_blobs: usize,
+    max_total_bytes: u64,
+    whole_tag_hydration: bool,
+) -> Vec<BlobDescriptor> {
+    if whole_tag_hydration {
+        return ordered_blobs.to_vec();
+    }
+
+    select_startup_prefetch_slice(ordered_blobs, max_blobs, max_total_bytes)
+}
+
+fn build_startup_prefetch_targets<F>(
+    startup_blobs: &[BlobDescriptor],
+    mut cached_url_for_digest: F,
+) -> (Vec<StartupPrefetchTarget>, StartupPrefetchTargetSummary)
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut targets = Vec::with_capacity(startup_blobs.len());
+    let mut cached_url_count = 0usize;
+
+    for blob in startup_blobs {
+        let cached_url = cached_url_for_digest(blob.digest.as_str());
+        if cached_url.is_some() {
+            cached_url_count = cached_url_count.saturating_add(1);
+        }
+        targets.push(StartupPrefetchTarget {
+            blob: blob.clone(),
+            cached_url,
+        });
+    }
+
+    (
+        targets,
+        StartupPrefetchTargetSummary {
+            cached_url_count,
+            unresolved_url_count: startup_blobs.len().saturating_sub(cached_url_count),
+        },
+    )
+}
+
 async fn preload_single_blob(
     state: AppState,
     cache_entry_id: String,
     blob: BlobDescriptor,
-    url: String,
+    cached_url: Option<String>,
 ) -> anyhow::Result<bool> {
     if state
         .blob_read_cache
@@ -3335,16 +3681,45 @@ async fn preload_single_blob(
         return Ok(false);
     }
 
-    download_blob_to_cache(&state, &cache_entry_id, &blob, Some(&url))
-        .await
-        .map_err(|error| anyhow::anyhow!("download_blob_to_cache failed: {:?}", error))?;
+    let mut retry_delay = std::time::Duration::from_millis(250);
+    for attempt in 1..=4 {
+        match download_blob_to_cache(&state, &cache_entry_id, &blob, cached_url.as_deref()).await {
+            Ok(_) => return Ok(true),
+            Err(error)
+                if attempt < 4
+                    && matches!(
+                        error.status,
+                        StatusCode::NOT_FOUND | StatusCode::SERVICE_UNAVAILABLE
+                    ) =>
+            {
+                log::debug!(
+                    "Prefetch startup blob retry {attempt}/4 digest={} status={} after {:?}",
+                    short_digest(&blob.digest),
+                    error.status,
+                    retry_delay,
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = retry_delay.saturating_mul(2);
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "download_blob_to_cache failed for {}: {:?}",
+                    blob.digest,
+                    error
+                ));
+            }
+        }
+    }
 
-    Ok(true)
+    Err(anyhow::anyhow!(
+        "download_blob_to_cache exhausted retries for {}",
+        blob.digest
+    ))
 }
 
 pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
-    let max_blob_bytes = kv_blob_preload_max_blob_bytes();
-    let max_blobs = kv_blob_preload_max_blobs();
+    let max_blob_bytes = kv_blob_preload_max_blob_bytes(state.tuning_profile);
+    let max_blobs = kv_blob_preload_max_blobs(state.tuning_profile);
     let cache_used = state.blob_read_cache.total_bytes();
     let cache_max = state.blob_read_cache.max_bytes();
     if should_skip_blob_preload(cache_used, cache_max) {
@@ -3354,7 +3729,7 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         );
         return;
     }
-    let inflight_budget_cap = kv_blob_prefetch_max_inflight_bytes(cache_max);
+    let inflight_budget_cap = kv_blob_prefetch_max_inflight_bytes(cache_max, state.tuning_profile);
     let mut preload_budget = cache_max
         .saturating_sub(cache_used)
         .min(inflight_budget_cap);
@@ -3369,8 +3744,15 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
     }
     let mut candidates = {
         let published = state.kv_published_index.read().await;
+        let entries = published.entries_snapshot();
+        let blob_order = startup_prefetch_candidates(
+            entries.as_ref(),
+            &published.unique_blobs(),
+            state.tuning_profile,
+        )
+        .ordered_blobs;
         let mut values = Vec::new();
-        for blob in published.unique_blobs() {
+        for blob in blob_order {
             if blob.size_bytes == 0 || blob.size_bytes > max_blob_bytes {
                 continue;
             }
@@ -3434,7 +3816,7 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
                 .acquire_owned()
                 .await
                 .map_err(|error| anyhow::anyhow!("prefetch semaphore closed: {error}"))?;
-            let result = preload_single_blob(state, cache_entry_id, blob, url).await;
+            let result = preload_single_blob(state, cache_entry_id, blob, Some(url)).await;
             drop(_permit);
             result
         });
@@ -3499,6 +3881,7 @@ const KV_PREFETCH_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::
 pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
     eprintln!("Prefetch: loading index and warming startup slice before serving...");
     let started_at = std::time::Instant::now();
+    state.prefetch_metrics.reset_startup();
 
     emit_serve_event(
         Some(&state.workspace),
@@ -3521,14 +3904,90 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
                 );
             }
             clear_root_tag_misses(state);
-            eprintln!("Prefetch: {count} entries loaded, resolving download URLs...");
+            let cache_used = state.blob_read_cache.total_bytes();
+            let cache_max = state.blob_read_cache.max_bytes();
+            let startup_max_blobs = kv_startup_prefetch_max_blobs(state.tuning_profile);
+            let startup_max_total_bytes =
+                kv_startup_prefetch_max_total_bytes(cache_max, state.tuning_profile)
+                    .min(cache_max.saturating_sub(cache_used));
+            let (unique_blobs, entry_map) = {
+                let published = state.kv_published_index.read().await;
+                (published.unique_blobs(), published.entries_snapshot())
+            };
+            let startup_candidates = startup_prefetch_candidates(
+                entry_map.as_ref(),
+                &unique_blobs,
+                state.tuning_profile,
+            );
+            let total_unique_blobs = unique_blobs.len();
+            let total_unique_bytes: u64 =
+                unique_blobs.iter().map(|blob| blob.size_bytes).sum::<u64>();
+            let whole_tag_hydration = total_unique_blobs <= startup_max_blobs
+                && total_unique_bytes <= startup_max_total_bytes;
+            let startup_blobs = startup_prefetch_blobs(
+                &startup_candidates.ordered_blobs,
+                startup_max_blobs,
+                startup_max_total_bytes,
+                whole_tag_hydration,
+            );
+            let startup_target_bytes: u64 = startup_blobs
+                .iter()
+                .map(|blob| blob.size_bytes)
+                .sum::<u64>();
+            state.prefetch_metrics.record_startup_plan(
+                if whole_tag_hydration {
+                    "whole_tag"
+                } else {
+                    "startup_slice"
+                },
+                total_unique_blobs,
+                startup_blobs.len(),
+                startup_target_bytes,
+            );
 
-            preload_download_urls(state, &cache_entry_id).await;
+            if whole_tag_hydration {
+                eprintln!(
+                    "Prefetch: {count} entries loaded, hydrating whole tag locally ({} blobs, {:.1} MB)",
+                    total_unique_blobs,
+                    total_unique_bytes as f64 / (1024.0 * 1024.0),
+                );
+            } else if state.tuning_profile == CacheRegistryTuningProfile::Bazel {
+                eprintln!(
+                    "Prefetch: {count} entries loaded, Bazel startup slice prioritizes AC={} small_cas={} deferred={} under {:.1} MB budget...",
+                    startup_candidates.bazel_action_cache_blobs,
+                    startup_candidates.bazel_small_cas_blobs,
+                    startup_candidates.bazel_other_blobs,
+                    startup_max_total_bytes as f64 / (1024.0 * 1024.0),
+                );
+            } else {
+                eprintln!(
+                    "Prefetch: {count} entries loaded, resolving startup download URLs for {}/{} blobs under {:.1} MB budget...",
+                    startup_blobs.len(),
+                    total_unique_blobs,
+                    startup_max_total_bytes as f64 / (1024.0 * 1024.0),
+                );
+            }
+
+            let startup_url_stats =
+                preload_download_urls_for_blobs(state, &cache_entry_id, &startup_blobs).await;
+            eprintln!(
+                "Prefetch: startup URL coverage resolved={}/{} missing={}",
+                startup_url_stats.resolved, startup_url_stats.requested, startup_url_stats.missing,
+            );
+            state
+                .prefetch_metrics
+                .record_startup_url_coverage(startup_url_stats.resolved, startup_url_stats.missing);
 
             eprintln!("Prefetch: warming startup slice...");
             match tokio::time::timeout(
                 KV_PREFETCH_READINESS_TIMEOUT,
-                prefetch_all_blobs(state, &cache_entry_id),
+                prefetch_all_blobs(
+                    state,
+                    &cache_entry_id,
+                    total_unique_blobs,
+                    startup_max_total_bytes,
+                    &startup_blobs,
+                ),
             )
             .await
             {
@@ -3546,6 +4005,32 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
                     );
                 }
             }
+
+            let remaining_blobs = if startup_blobs.len() >= unique_blobs.len() {
+                Vec::new()
+            } else {
+                let startup_digests: HashSet<String> = startup_blobs
+                    .iter()
+                    .map(|blob| blob.digest.clone())
+                    .collect();
+                unique_blobs
+                    .into_iter()
+                    .filter(|blob| !startup_digests.contains(&blob.digest))
+                    .collect::<Vec<_>>()
+            };
+            let background_state = state.clone();
+            let background_cache_entry_id = cache_entry_id.clone();
+            tokio::spawn(async move {
+                if !remaining_blobs.is_empty() {
+                    let _ = preload_download_urls_for_blobs(
+                        &background_state,
+                        &background_cache_entry_id,
+                        &remaining_blobs,
+                    )
+                    .await;
+                }
+                preload_blobs(&background_state, &background_cache_entry_id).await;
+            });
         }
         Ok(_) => {
             {
@@ -3566,7 +4051,13 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
     }
 }
 
-async fn prefetch_all_blobs(state: &AppState, cache_entry_id: &str) {
+async fn prefetch_all_blobs(
+    state: &AppState,
+    cache_entry_id: &str,
+    total_unique_blobs: usize,
+    startup_max_total_bytes: u64,
+    startup_blobs: &[BlobDescriptor],
+) {
     let cache_used = state.blob_read_cache.total_bytes();
     let cache_max = state.blob_read_cache.max_bytes();
     if should_skip_blob_preload(cache_used, cache_max) {
@@ -3577,72 +4068,67 @@ async fn prefetch_all_blobs(state: &AppState, cache_entry_id: &str) {
         return;
     }
 
-    let startup_max_blobs = kv_startup_prefetch_max_blobs();
-    let startup_max_total_bytes =
-        kv_startup_prefetch_max_total_bytes(cache_max).min(cache_max.saturating_sub(cache_used));
-    if startup_max_total_bytes == 0 {
+    let startup_budget = startup_max_total_bytes.min(cache_max.saturating_sub(cache_used));
+    if startup_budget == 0 {
         eprintln!("Prefetch: startup slice skipped, budget is zero");
         return;
     }
 
-    let (total_unique_blobs, startup_slice) = {
+    let (startup_targets, startup_summary) = {
         let published = state.kv_published_index.read().await;
-        let unique_blobs = published.unique_blobs();
-        let total_unique_blobs = unique_blobs.len();
-        let startup_slice = select_startup_prefetch_slice(
-            &unique_blobs,
-            startup_max_blobs,
-            startup_max_total_bytes,
-        )
-        .into_iter()
-        .filter_map(|blob| {
-            published
-                .download_url(&blob.digest)
-                .map(|url| (blob, url.to_string()))
+        build_startup_prefetch_targets(startup_blobs, |digest| {
+            published.download_url(digest).map(str::to_string)
         })
-        .collect::<Vec<_>>();
-        (total_unique_blobs, startup_slice)
     };
 
-    if startup_slice.is_empty() {
+    if startup_targets.is_empty() {
         eprintln!(
             "Prefetch: startup slice selected 0/{total_unique_blobs} blobs under budget={} bytes",
-            startup_max_total_bytes
+            startup_budget
         );
         return;
     }
 
     let mut targets = Vec::new();
-    for (blob, url) in startup_slice {
+    let mut already_local = 0usize;
+    for target in startup_targets {
         if state
             .blob_read_cache
-            .get_handle(&blob.digest)
+            .get_handle(&target.blob.digest)
             .await
             .is_none()
         {
-            targets.push((blob, url));
+            targets.push(target);
+        } else {
+            already_local = already_local.saturating_add(1);
         }
     }
 
     if targets.is_empty() {
         eprintln!(
-            "Prefetch: startup slice already warm under budget={} bytes",
-            startup_max_total_bytes
+            "Prefetch: startup slice already warm under budget={} bytes (cached_urls={} unresolved_urls={} already_local={})",
+            startup_max_total_bytes,
+            startup_summary.cached_url_count,
+            startup_summary.unresolved_url_count,
+            already_local,
         );
         return;
     }
 
     let scheduled = targets.len();
-    let scheduled_bytes: u64 = targets.iter().map(|(b, _)| b.size_bytes).sum();
+    let scheduled_bytes: u64 = targets.iter().map(|target| target.blob.size_bytes).sum();
     eprintln!(
-        "Prefetch: warming startup slice {scheduled}/{total_unique_blobs} blobs ({:.1} MB)",
+        "Prefetch: warming startup slice {scheduled}/{total_unique_blobs} blobs ({:.1} MB, cached_urls={}, unresolved_urls={}, already_local={})",
         scheduled_bytes as f64 / (1024.0 * 1024.0),
+        startup_summary.cached_url_count,
+        startup_summary.unresolved_url_count,
+        already_local,
     );
 
     let prefetch_started_at = std::time::Instant::now();
     let prefetch_semaphore = state.blob_prefetch_semaphore.clone();
     let mut tasks = tokio::task::JoinSet::new();
-    for (blob, url) in targets {
+    for target in targets {
         let state = state.clone();
         let cache_entry_id = cache_entry_id.to_string();
         let prefetch_semaphore = prefetch_semaphore.clone();
@@ -3651,7 +4137,8 @@ async fn prefetch_all_blobs(state: &AppState, cache_entry_id: &str) {
                 .acquire_owned()
                 .await
                 .map_err(|error| anyhow::anyhow!("prefetch semaphore closed: {error}"))?;
-            let result = preload_single_blob(state, cache_entry_id, blob, url).await;
+            let result =
+                preload_single_blob(state, cache_entry_id, target.blob, target.cached_url).await;
             drop(_permit);
             result
         });
@@ -3694,13 +4181,17 @@ async fn prefetch_all_blobs(state: &AppState, cache_entry_id: &str) {
     } else {
         500
     };
+    let duration_ms = prefetch_started_at.elapsed().as_millis() as u64;
+    state
+        .prefetch_metrics
+        .record_startup_execution(already_local, inserted, failures, duration_ms);
     emit_serve_phase_metric(
         Some(&state.workspace),
         Some(cache_entry_id),
         SERVE_PREFETCH_OPERATION,
         SERVE_PREFETCH_PATH,
         status,
-        prefetch_started_at.elapsed().as_millis() as u64,
+        duration_ms,
         Some(scheduled as u64),
     );
 
@@ -4636,8 +5127,8 @@ mod tests {
     use crate::api::models::cache::ConfirmRequest;
     use crate::git::GitContext;
     use crate::serve::state::{
-        AppState, BackendCircuitBreaker, BlobLocatorCache, BlobReadCache, KvPendingStore,
-        KvPublishedIndex, UploadSessionStore,
+        AppState, BackendCircuitBreaker, BlobLocatorCache, BlobReadCache, BlobReadMetrics,
+        KvPendingStore, KvPublishedIndex, UploadSessionStore,
     };
     use crate::tag_utils::TagResolver;
     use crate::test_env;
@@ -4737,6 +5228,9 @@ mod tests {
                 )
                 .expect("blob read cache"),
             ),
+            blob_read_metrics: std::sync::Arc::new(BlobReadMetrics::new()),
+            prefetch_metrics: std::sync::Arc::new(crate::serve::state::PrefetchMetrics::new()),
+            tuning_profile: CacheRegistryTuningProfile::Generic,
             blob_download_max_concurrency: 16,
             blob_download_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             blob_prefetch_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
@@ -4828,6 +5322,9 @@ mod tests {
                 )
                 .expect("blob read cache"),
             ),
+            blob_read_metrics: std::sync::Arc::new(BlobReadMetrics::new()),
+            prefetch_metrics: std::sync::Arc::new(crate::serve::state::PrefetchMetrics::new()),
+            tuning_profile: CacheRegistryTuningProfile::Generic,
             blob_download_max_concurrency: 16,
             blob_download_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             blob_prefetch_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
@@ -5934,8 +6431,14 @@ mod tests {
 
         test_env::set_var(KV_BLOB_PRELOAD_MAX_BLOBS_ENV, "32");
         test_env::set_var(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV, "1048576");
-        assert_eq!(kv_blob_preload_max_blobs(), 32);
-        assert_eq!(kv_blob_preload_max_blob_bytes(), 1_048_576);
+        assert_eq!(
+            kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Generic),
+            32
+        );
+        assert_eq!(
+            kv_blob_preload_max_blob_bytes(CacheRegistryTuningProfile::Generic),
+            1_048_576
+        );
         test_env::remove_var(KV_BLOB_PRELOAD_MAX_BLOBS_ENV);
         test_env::remove_var(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV);
     }
@@ -5946,9 +6449,15 @@ mod tests {
 
         test_env::set_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV, "48");
         test_env::set_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV, "2097152");
-        assert_eq!(kv_startup_prefetch_max_blobs(), 48);
         assert_eq!(
-            kv_startup_prefetch_max_total_bytes(1024 * 1024 * 1024),
+            kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Generic),
+            48
+        );
+        assert_eq!(
+            kv_startup_prefetch_max_total_bytes(
+                1024 * 1024 * 1024,
+                CacheRegistryTuningProfile::Generic
+            ),
             2_097_152
         );
         test_env::remove_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV);
@@ -5979,12 +6488,180 @@ mod tests {
     }
 
     #[test]
+    fn startup_prefetch_slice_skips_oversized_blobs_instead_of_stopping() {
+        let blobs = vec![
+            BlobDescriptor {
+                digest: "sha256:1".to_string(),
+                size_bytes: 10,
+            },
+            BlobDescriptor {
+                digest: "sha256:oversized".to_string(),
+                size_bytes: 1_000,
+            },
+            BlobDescriptor {
+                digest: "sha256:2".to_string(),
+                size_bytes: 15,
+            },
+        ];
+
+        let selected = select_startup_prefetch_slice(&blobs, 3, 25);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].digest, "sha256:1");
+        assert_eq!(selected[1].digest, "sha256:2");
+    }
+
+    #[test]
     fn kv_blob_prefetch_max_inflight_bytes_uses_env_override() {
         let _guard = test_env::lock();
 
         test_env::set_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV, "12345");
-        assert_eq!(kv_blob_prefetch_max_inflight_bytes(1024 * 1024), 12_345);
+        assert_eq!(
+            kv_blob_prefetch_max_inflight_bytes(1024 * 1024, CacheRegistryTuningProfile::Generic),
+            12_345
+        );
         test_env::remove_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV);
+    }
+
+    #[test]
+    fn sccache_startup_prefetch_defaults_are_more_aggressive() {
+        let cache_max = 4 * 1024 * 1024 * 1024;
+        assert!(
+            kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Sccache)
+                > kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Generic)
+        );
+        assert!(
+            kv_startup_prefetch_max_total_bytes(cache_max, CacheRegistryTuningProfile::Sccache)
+                > kv_startup_prefetch_max_total_bytes(
+                    cache_max,
+                    CacheRegistryTuningProfile::Generic
+                )
+        );
+        assert!(
+            kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Sccache)
+                > kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Generic)
+        );
+        assert!(
+            kv_blob_prefetch_max_inflight_bytes(cache_max, CacheRegistryTuningProfile::Sccache)
+                > kv_blob_prefetch_max_inflight_bytes(
+                    cache_max,
+                    CacheRegistryTuningProfile::Generic
+                )
+        );
+    }
+
+    #[test]
+    fn bazel_startup_prefetch_prioritizes_action_cache_then_small_cas() {
+        let blob_order = vec![
+            BlobDescriptor {
+                digest: "sha256:large-cas".to_string(),
+                size_bytes: KV_BAZEL_STARTUP_PREFETCH_SMALL_CAS_MAX_BLOB_BYTES + 1,
+            },
+            BlobDescriptor {
+                digest: "sha256:ac".to_string(),
+                size_bytes: 128,
+            },
+            BlobDescriptor {
+                digest: "sha256:small-cas".to_string(),
+                size_bytes: 1024,
+            },
+        ];
+        let entries = HashMap::from([
+            (
+                "bazel_cas/sha256:large-cas".to_string(),
+                blob_order[0].clone(),
+            ),
+            ("bazel_ac/sha256:ac".to_string(), blob_order[1].clone()),
+            (
+                "bazel_cas/sha256:small-cas".to_string(),
+                blob_order[2].clone(),
+            ),
+        ]);
+
+        let candidates =
+            startup_prefetch_candidates(&entries, &blob_order, CacheRegistryTuningProfile::Bazel);
+
+        assert_eq!(candidates.bazel_action_cache_blobs, 1);
+        assert_eq!(candidates.bazel_small_cas_blobs, 1);
+        assert_eq!(candidates.ordered_blobs[0].digest, "sha256:ac");
+        assert_eq!(candidates.ordered_blobs[1].digest, "sha256:small-cas");
+        assert_eq!(candidates.ordered_blobs[2].digest, "sha256:large-cas");
+    }
+
+    #[test]
+    fn bazel_startup_prefetch_defaults_are_more_aggressive_than_generic() {
+        let cache_max = 4 * 1024 * 1024 * 1024;
+        assert!(
+            kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Bazel)
+                > kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Generic)
+        );
+        assert!(
+            kv_startup_prefetch_max_total_bytes(cache_max, CacheRegistryTuningProfile::Bazel)
+                > kv_startup_prefetch_max_total_bytes(
+                    cache_max,
+                    CacheRegistryTuningProfile::Generic
+                )
+        );
+        assert!(
+            kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Bazel)
+                > kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Generic)
+        );
+        assert!(
+            kv_blob_prefetch_max_inflight_bytes(cache_max, CacheRegistryTuningProfile::Bazel)
+                > kv_blob_prefetch_max_inflight_bytes(
+                    cache_max,
+                    CacheRegistryTuningProfile::Generic
+                )
+        );
+    }
+
+    #[test]
+    fn startup_prefetch_blobs_uses_whole_tag_when_it_fits() {
+        let blobs = vec![
+            BlobDescriptor {
+                digest: "sha256:1".to_string(),
+                size_bytes: 64,
+            },
+            BlobDescriptor {
+                digest: "sha256:2".to_string(),
+                size_bytes: 64,
+            },
+        ];
+
+        let selected = startup_prefetch_blobs(&blobs, 1, 64, true);
+
+        assert_eq!(selected.len(), blobs.len());
+        assert_eq!(selected[0].digest, blobs[0].digest);
+        assert_eq!(selected[1].digest, blobs[1].digest);
+    }
+
+    #[test]
+    fn startup_prefetch_targets_keep_blobs_without_preloaded_urls() {
+        let blobs = vec![
+            BlobDescriptor {
+                digest: "sha256:1".to_string(),
+                size_bytes: 64,
+            },
+            BlobDescriptor {
+                digest: "sha256:2".to_string(),
+                size_bytes: 64,
+            },
+        ];
+        let cached_urls = HashMap::from([(
+            "sha256:1".to_string(),
+            "https://example.com/blob-1".to_string(),
+        )]);
+
+        let (targets, summary) =
+            build_startup_prefetch_targets(&blobs, |digest| cached_urls.get(digest).cloned());
+
+        assert_eq!(targets.len(), 2);
+        assert_eq!(summary.cached_url_count, 1);
+        assert_eq!(summary.unresolved_url_count, 1);
+        assert_eq!(
+            targets[0].cached_url.as_deref(),
+            Some("https://example.com/blob-1")
+        );
+        assert!(targets[1].cached_url.is_none());
     }
 
     #[test]

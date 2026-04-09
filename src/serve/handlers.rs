@@ -2308,8 +2308,8 @@ mod tests {
     use crate::git::GitContext;
     use crate::platform::Platform;
     use crate::serve::state::{
-        BlobLocatorCache, BlobReadCache, KvPendingStore, KvPublishedIndex, UploadSessionStore,
-        ref_tag_for_input,
+        BlobLocatorCache, BlobReadCache, BlobReadMetrics, CacheRegistryTuningProfile,
+        KvPendingStore, KvPublishedIndex, UploadSessionStore, ref_tag_for_input,
     };
     use crate::tag_utils::TagResolver;
     use axum::body::Bytes;
@@ -2370,6 +2370,9 @@ mod tests {
                 )
                 .expect("blob read cache"),
             ),
+            blob_read_metrics: Arc::new(BlobReadMetrics::new()),
+            prefetch_metrics: Arc::new(crate::serve::state::PrefetchMetrics::new()),
+            tuning_profile: CacheRegistryTuningProfile::Generic,
             blob_download_max_concurrency: 16,
             blob_download_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
             blob_prefetch_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),

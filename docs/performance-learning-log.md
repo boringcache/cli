@@ -2,6 +2,27 @@
 
 This log captures regressions, root causes, and guardrails for cache-registry performance/correctness.
 
+## 2026-04-09 - sccache startup hydration and adapter profile split
+
+- Symptom:
+  - Warm `sccache` paths were spending too much time on remote reads even with high cache-hit rates.
+  - Startup preload resolved too many download URLs up front and warmed too little useful data before the build began.
+- Root cause:
+  - Startup prefetch selection stopped at the first blob that exceeded the remaining budget, leaving usable prefetch budget idle.
+  - Startup path resolved all download URLs before warming the startup slice, so control-plane latency was paid before useful local hydration.
+  - Generic blob-cache and prefetch defaults were too conservative for `sccache` compared with its warm-path read shape.
+- Product-side changes:
+  - Skip oversized blobs during startup selection instead of aborting the remainder of the slice.
+  - Add a `sccache` tuning profile with more aggressive blob-cache sizing, download concurrency, and prefetch concurrency.
+  - Add a `bazel` tuning profile that prioritizes `bazel_ac` and small `bazel_cas` blobs on startup instead of treating the whole tag as generic kv traffic.
+  - Resolve startup-slice download URLs first, warm that slice first, then resolve the rest in the background.
+  - Emit blob-read observability for `local_cache` vs `remote_fetch`.
+- Harness guardrails:
+  - Add `BORINGCACHE_BLOB_READ_CACHE_DIR` so restart tests can force a truly fresh local blob cache instead of silently reusing `/tmp/boringcache-blob-cache`.
+  - Fix `scripts/e2e-prefetch-readiness-test.sh` to work on local macOS shells by shortening `xargs` worker invocations and separating seed/restart blob-cache directories.
+- Guardrail:
+  - Adapter behavior is not one-size-fits-all. Use `docs/adapter-cache-profiles.md` when changing prefetch or read-path defaults.
+
 ## 2026-04-08 - Shutdown publish visibility regression (Turbo/sccache)
 
 - Symptom:

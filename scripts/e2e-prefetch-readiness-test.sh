@@ -32,6 +32,10 @@ BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
 PROXY_PID=""
 TAG=""
+SEED_BLOB_CACHE_DIR=""
+FRESH_CACHE_DIR=""
+PREFETCH_WARMING_POLLS=0
+PREFETCH_READY_POLLS=0
 
 require_save_capable_token
 
@@ -50,26 +54,38 @@ export_resolved_cli_tokens admin
 mkdir -p "$LOG_DIR"
 : >"$PROXY_LOG"
 
-http_status() {
+http_prefetch_probe() {
   local path="$1"
-  local status
-  status="$(
-    curl -sS -o /dev/null -w "%{http_code}" \
+  local response
+  response="$(
+    curl -sS -D - -o /dev/null \
       --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECS" \
       --max-time "$HTTP_REQUEST_TIMEOUT_SECS" \
       "${PROXY_URL}${path}" 2>/dev/null || true
   )"
+
+  local status state
+  status="$(printf '%s\n' "$response" | awk 'tolower($1) ~ /^http\\// { status = $2 } END { print status }')"
+  state="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-prefetch-state" { gsub("\\r", "", $2); state = tolower($2) } END { print state }')"
   if [[ -z "$status" ]]; then
     status="000"
   fi
-  printf '%s' "$status"
+  printf '%s %s' "$status" "$state"
 }
 
 wait_for_proxy_ready() {
   local waited=0
   while (( waited < PROXY_READY_TIMEOUT_SECS )); do
-    if [[ "$(http_status "/v2/")" == "200" ]]; then
+    local probe status state
+    probe="$(http_prefetch_probe "/v2/")"
+    status="${probe%% *}"
+    state="${probe#* }"
+    if [[ "$status" == "200" && "$state" == "ready" ]]; then
+      PREFETCH_READY_POLLS=$((PREFETCH_READY_POLLS + 1))
       return 0
+    fi
+    if [[ "$status" == "200" && "$state" == "warming" ]]; then
+      PREFETCH_WARMING_POLLS=$((PREFETCH_WARMING_POLLS + 1))
     fi
     if [[ -n "${PROXY_PID:-}" ]] && ! kill -0 "$PROXY_PID" >/dev/null 2>&1; then
       echo "ERROR: proxy exited before readiness"
@@ -198,12 +214,14 @@ trap cleanup EXIT
 start_proxy() {
   local proxy_tag="$1"
   local metadata_hints="${2:-}"
+  local blob_cache_dir="${3:-}"
   stop_proxy
   {
     echo
     echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${proxy_tag} hints=${metadata_hints:-none} ==="
   } >>"$PROXY_LOG"
   BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY="${SEED_CONCURRENCY}" \
+    BORINGCACHE_BLOB_READ_CACHE_DIR="${blob_cache_dir}" \
     BORINGCACHE_PROXY_METADATA_HINTS="$metadata_hints" \
     RUST_LOG="${RUST_LOG_LEVEL:-info}" \
     "$BINARY" cache-registry "$WORKSPACE" "$proxy_tag" \
@@ -223,6 +241,9 @@ echo ""
 
 RUN_ID="$(date +%s)-$$"
 TAG="${TAG_BASE}-${RUN_ID}"
+SEED_BLOB_CACHE_DIR="${TMP_ROOT}/seed-blob-cache-${RUN_ID}"
+FRESH_CACHE_DIR="${TMP_ROOT}/fresh-cache-${RUN_ID}"
+mkdir -p "$SEED_BLOB_CACHE_DIR" "$FRESH_CACHE_DIR"
 
 phase_metadata_hints() {
   local phase="$1"
@@ -230,7 +251,7 @@ phase_metadata_hints() {
 }
 
 echo "=== Phase 1: Seed ${BLOB_COUNT} blobs via proxy ==="
-start_proxy "$TAG" "$(phase_metadata_hints "prefetch-seed")"
+start_proxy "$TAG" "$(phase_metadata_hints "prefetch-seed")" "$SEED_BLOB_CACHE_DIR"
 
 DATA_DIR="${TMP_ROOT}/data-${RUN_ID}"
 mkdir -p "$DATA_DIR"
@@ -248,14 +269,19 @@ echo "  generating ${BLOB_COUNT} random blobs..."
 DIGESTS_FILE="${DATA_DIR}/digests.txt"
 : > "$DIGESTS_FILE"
 
-seq 0 $((BLOB_COUNT - 1)) | xargs -P "$SEED_CONCURRENCY" -I{} bash -c '
-  path="'"$DATA_DIR"'/blob-{}.bin"
-  dd if=/dev/urandom bs='"$BLOB_SIZE_BYTES"' count=1 2>/dev/null > "$path"
+seq 0 $((BLOB_COUNT - 1)) | xargs -P "$SEED_CONCURRENCY" -n 1 bash -c '
+  data_dir="$1"
+  blob_size="$2"
+  digests_file="$3"
+  proxy_url="$4"
+  idx="$5"
+  path="${data_dir}/blob-${idx}.bin"
+  dd if=/dev/urandom bs="${blob_size}" count=1 2>/dev/null > "$path"
   digest="$(sha256sum "$path" | awk "{print \$1}")"
-  echo "${digest}" >> "'"$DIGESTS_FILE"'"
+  echo "${digest}" >> "${digests_file}"
   curl -sS --max-time 30 -X PUT --data-binary "@${path}" -o /dev/null \
-    -w "" "'"$PROXY_URL"'/cas/${digest}"
-'
+    -w "" "${proxy_url}/cas/${digest}"
+' _ "$DATA_DIR" "$BLOB_SIZE_BYTES" "$DIGESTS_FILE" "$PROXY_URL"
 
 SEED_COUNT="$(wc -l < "$DIGESTS_FILE" | tr -d ' ')"
 echo "  seeded ${SEED_COUNT} blobs"
@@ -285,11 +311,10 @@ REMOTE_TAG_MISSES="${REMOTE_TAG_CHECK_MISSES:-0}"
 echo ""
 echo "=== Phase 2: Restart proxy on fresh disk cache, verify readiness gates on prefetch ==="
 
-FRESH_CACHE_DIR="${TMP_ROOT}/fresh-cache-${RUN_ID}"
-mkdir -p "$FRESH_CACHE_DIR"
-
+PREFETCH_WARMING_POLLS=0
+PREFETCH_READY_POLLS=0
 PREFETCH_START="$(date +%s)"
-start_proxy "$TAG" "$(phase_metadata_hints "prefetch-restart")"
+start_proxy "$TAG" "$(phase_metadata_hints "prefetch-restart")" "$FRESH_CACHE_DIR"
 PREFETCH_END="$(date +%s)"
 PREFETCH_SECS=$((PREFETCH_END - PREFETCH_START))
 echo "  proxy became ready in ${PREFETCH_SECS}s (prefetched manifest blobs)"
@@ -315,13 +340,15 @@ echo "=== Phase 3: Verify all ${SEED_COUNT} blobs served from local cache ==="
 VERIFY_FAILURES=0
 VERIFY_START="$(date +%s)"
 
-xargs -P "$VERIFY_CONCURRENCY" -I{} bash -c '
-  status="$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "'"$PROXY_URL"'/cas/{}")"
+xargs -P "$VERIFY_CONCURRENCY" -n 1 bash -c '
+  proxy_url="$1"
+  digest="$2"
+  status="$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "${proxy_url}/cas/${digest}")"
   if [[ "$status" != "200" ]]; then
-    echo "MISS: {} status=${status}" >&2
+    echo "MISS: ${digest} status=${status}" >&2
     exit 1
   fi
-' < "$DIGESTS_FILE" 2>"${DATA_DIR}/verify-errors.txt" || true
+' _ "$PROXY_URL" < "$DIGESTS_FILE" 2>"${DATA_DIR}/verify-errors.txt" || true
 
 VERIFY_END="$(date +%s)"
 VERIFY_SECS=$((VERIFY_END - VERIFY_START))
@@ -341,10 +368,9 @@ if (( VERIFY_FAILURES > BUDGET_VERIFY_FAILURES_MAX )); then
 fi
 
 echo ""
-echo "=== Phase 4: Verify /v2/ was 503 during prefetch ==="
-
-V2_503_COUNT="$(grep -c "503" "$PROXY_LOG" || true)"
-echo "  503 responses logged: ${V2_503_COUNT}"
+echo "=== Phase 4: Verify /v2/ reported warming before ready ==="
+echo "  warming polls observed: ${PREFETCH_WARMING_POLLS}"
+echo "  ready polls observed:   ${PREFETCH_READY_POLLS}"
 
 echo ""
 echo "=== Results ==="
@@ -353,6 +379,7 @@ echo "  prefetch time:   ${PREFETCH_SECS}s"
 echo "  prefetch fails:  ${PREFETCH_FAILURES}"
 echo "  remote tag hits: ${REMOTE_TAG_HITS:-0}"
 echo "  remote tag miss: ${REMOTE_TAG_MISSES:-0}"
+echo "  warming polls:   ${PREFETCH_WARMING_POLLS}"
 echo "  verify time:     ${VERIFY_SECS}s"
 echo "  verify failures: ${VERIFY_FAILURES}"
 echo ""

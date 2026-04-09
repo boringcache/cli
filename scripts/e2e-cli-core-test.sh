@@ -30,6 +30,15 @@ if ! resolve_save_capable_token >/dev/null; then
   exit 1
 fi
 
+file_mode_octal() {
+  local path="$1"
+  if stat -c '%a' "$path" >/dev/null 2>&1; then
+    stat -c '%a' "$path"
+  else
+    stat -f '%Lp' "$path"
+  fi
+}
+
 for dep in jq stat mktemp grep cmp curl pgrep script sh; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     echo "ERROR: required dependency not found: ${dep}"
@@ -104,7 +113,15 @@ dump_cli_debug_logs() {
   fi
   echo "=== End CLI core debug logs ==="
 }
-trap dump_cli_debug_logs ERR
+
+dump_cli_debug_logs_on_failure() {
+  local status="$1"
+  if [[ "$status" -ne 0 ]]; then
+    dump_cli_debug_logs
+  fi
+}
+
+trap 'dump_cli_debug_logs_on_failure "$?"' EXIT
 
 bootstrap_cli_session "${CLI}" "${WORKSPACE}" "${BORINGCACHE_API_URL}" "${CLI_LOG_DIR}/auth.log" admin
 "${CLI}" config get default_workspace > "${CLI_LOG_DIR}/config-get-default-workspace.log"
@@ -252,7 +269,16 @@ run_archive_script=$'[ "$(cat "$1/restored.txt")" = "run-warm-cache-'"${RUN_SHA}
 "${CLI}" run --no-platform --no-git --fail-on-cache-error "${WORKSPACE}" "${RUN_TAG}:${RUN_TARGET_DIR}" -- sh -ec "${run_archive_script}" _ "${RUN_TARGET_DIR}" > "${CLI_LOG_DIR}/run-archive.log"
 
 "${CLI}" restore --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}:${RUN_VERIFY_DIR}" > "${CLI_LOG_DIR}/run-verify-restore.log"
-grep -q "run-generated-${RUN_ID}" "${RUN_VERIFY_DIR}/generated.txt"
+if [[ ! -f "${RUN_VERIFY_DIR}/generated.txt" ]]; then
+  echo "run verify restore is missing generated.txt"
+  cat "${CLI_LOG_DIR}/run-verify-restore.log"
+  exit 1
+fi
+if ! grep -q "run-generated-${RUN_ID}" "${RUN_VERIFY_DIR}/generated.txt"; then
+  echo "run verify restore missing expected marker in generated.txt"
+  cat "${RUN_VERIFY_DIR}/generated.txt"
+  exit 1
+fi
 
 set +e
 "${CLI}" run --no-platform --no-git --fail-on-cache-miss "${WORKSPACE}" "${MISSING_TAG}:${CLI_LOG_DIR}/run-missing-target" -- sh -ec 'printf "unexpected-run\n" > "$1"' _ "${RUN_MISS_SENTINEL}" > "${CLI_LOG_DIR}/run-miss.log" 2>&1
@@ -346,9 +372,10 @@ if [[ ! -f "${IDENTITY_FILE}" ]]; then
   echo "setup-encryption did not create identity file"
   exit 1
 fi
-if [[ "$(stat -c '%a' "${IDENTITY_FILE}")" != "600" ]]; then
+identity_mode="$(file_mode_octal "${IDENTITY_FILE}")"
+if [[ "${identity_mode}" != "600" ]]; then
   echo "identity file permissions are not 0600"
-  stat -c '%a %n' "${IDENTITY_FILE}"
+  echo "${identity_mode} ${IDENTITY_FILE}"
   exit 1
 fi
 
