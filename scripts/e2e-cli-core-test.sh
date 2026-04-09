@@ -266,7 +266,7 @@ if [[ "${run_seed_visible}" != "1" ]]; then
 fi
 
 run_archive_script=$'[ "$(cat "$1/restored.txt")" = "run-warm-cache-'"${RUN_SHA}"'" ] || exit 27\nprintf "run-generated-%s\\n" "'"${RUN_ID}"'" > "$1/generated.txt"'
-"${CLI}" run --no-platform --no-git --fail-on-cache-error "${WORKSPACE}" "${RUN_TAG}:${RUN_TARGET_DIR}" -- sh -ec "${run_archive_script}" _ "${RUN_TARGET_DIR}" > "${CLI_LOG_DIR}/run-archive.log"
+"${CLI}" run --no-platform --no-git --force --fail-on-cache-error "${WORKSPACE}" "${RUN_TAG}:${RUN_TARGET_DIR}" -- sh -ec "${run_archive_script}" _ "${RUN_TARGET_DIR}" > "${CLI_LOG_DIR}/run-archive.log"
 
 "${CLI}" restore --no-platform --no-git "${WORKSPACE}" "${RUN_TAG}:${RUN_VERIFY_DIR}" > "${CLI_LOG_DIR}/run-verify-restore.log"
 if [[ ! -f "${RUN_VERIFY_DIR}/generated.txt" ]]; then
