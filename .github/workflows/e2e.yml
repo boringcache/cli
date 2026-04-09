@@ -456,6 +456,11 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve CLI version
+        id: cli-version
+        if: steps.gate.outputs.run == 'true'
+        run: echo "version=$(./scripts/cli-version.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Setup Rust (BoringCache)
         id: boringcache-rust
         if: steps.gate.outputs.run == 'true'
@@ -468,8 +473,7 @@ jobs:
           workspace: ${{ github.repository }}
           rust-version: ${{ steps.rust-version.outputs.version }}
           cache-tag: "rust-${{ steps.rust-version.outputs.version }}-cache-registry-bench-linux-x86_64"
-          sccache: "true"
-          sccache-mode: ${{ matrix.backend }}
+          sccache: "false"
           cache-target: "false"
 
       - name: Setup Rust (Fallback)
