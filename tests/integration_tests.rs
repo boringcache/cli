@@ -500,6 +500,8 @@ fn test_mount_command_help() {
     assert!(stdout.contains("WORKSPACE"));
     assert!(stdout.contains("TAG_PATH"));
     assert!(stdout.contains("--verbose"));
+    assert!(stdout.contains("--no-platform"));
+    assert!(stdout.contains("--no-git"));
 }
 
 #[test]

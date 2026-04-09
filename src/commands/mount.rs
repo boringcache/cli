@@ -34,6 +34,16 @@ enum RestoreAction {
     NoRemoteCache,
 }
 
+pub struct MountOptions {
+    pub no_platform: bool,
+    pub no_git: bool,
+    pub verbose: bool,
+    pub force: bool,
+    pub recipient: Option<String>,
+    pub identity: Option<String>,
+    pub require_server_signature: bool,
+}
+
 fn manifest_check_is_pending(result: &ManifestCheckResult) -> bool {
     result.pending || matches!(result.status.as_deref(), Some("pending" | "uploading"))
 }
@@ -42,15 +52,7 @@ fn manifest_check_is_ready(result: &ManifestCheckResult) -> bool {
     result.exists && !manifest_check_is_pending(result)
 }
 
-pub async fn execute(
-    workspace: String,
-    tag_path: String,
-    verbose: bool,
-    force: bool,
-    recipient: Option<String>,
-    identity: Option<String>,
-    require_server_signature: bool,
-) -> Result<()> {
+pub async fn execute(workspace: String, tag_path: String, options: MountOptions) -> Result<()> {
     let (tag, local_path) = parse_tag_path(&tag_path)?;
     let expanded_path = crate::commands::utils::expand_tilde_path(&local_path);
     let local_path = PathBuf::from(&expanded_path);
@@ -58,8 +60,12 @@ pub async fn execute(
     crate::api::parse_workspace_slug(&workspace)?;
     crate::tag_utils::validate_tag(&tag)?;
 
-    let platform = Some(crate::platform::Platform::detect()?);
-    let git_enabled = !crate::git::is_git_disabled_by_env();
+    let platform = if options.no_platform {
+        None
+    } else {
+        Some(crate::platform::Platform::detect()?)
+    };
+    let git_enabled = !options.no_git && !crate::git::is_git_disabled_by_env();
     let git_context = if git_enabled {
         crate::git::GitContext::detect_with_path(Some(&expanded_path))
     } else {
@@ -75,7 +81,7 @@ pub async fn execute(
         .context("No configuration found. Run 'boringcache auth' to authenticate.")?;
 
     let (encrypt, recipient) =
-        crate::commands::utils::resolve_encryption_config(&workspace, recipient)?;
+        crate::commands::utils::resolve_encryption_config(&workspace, options.recipient)?;
     let passphrase_cache = Arc::new(Mutex::new(crate::encryption::PassphraseCache::default()));
 
     ui::info(&format!(
@@ -89,11 +95,11 @@ pub async fn execute(
         &workspace,
         &resolved_tag,
         &local_path,
-        verbose,
-        force,
-        identity.clone(),
+        options.verbose,
+        options.force,
+        options.identity.clone(),
         passphrase_cache.clone(),
-        require_server_signature,
+        options.require_server_signature,
     )
     .await?;
 
@@ -112,7 +118,7 @@ pub async fn execute(
                 &tag,
                 &resolved_tag,
                 &local_path,
-                verbose,
+                options.verbose,
                 encrypt,
                 recipient.clone(),
             )
@@ -130,7 +136,7 @@ pub async fn execute(
                     &tag,
                     &resolved_tag,
                     &local_path,
-                    verbose,
+                    options.verbose,
                     encrypt,
                     recipient.clone(),
                 )
@@ -158,7 +164,7 @@ pub async fn execute(
         &tag,
         &resolved_tag,
         &local_path,
-        verbose,
+        options.verbose,
         shutdown,
         encrypt,
         recipient,

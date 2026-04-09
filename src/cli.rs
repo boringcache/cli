@@ -299,6 +299,15 @@ pub enum Commands {
         #[arg(help = "tag:path pair for the mount")]
         tag_path: String,
 
+        #[arg(long, help = "Disable automatic platform suffix for tags")]
+        no_platform: bool,
+
+        #[arg(
+            long,
+            help = "Disable automatic git-based tag suffixing and fallback restore logic"
+        )]
+        no_git: bool,
+
         #[arg(short, long, help = "Enable verbose output")]
         verbose: bool,
 
@@ -313,6 +322,12 @@ pub enum Commands {
 
         #[arg(long, help = "Path to Age identity file for decryption")]
         identity: Option<String>,
+
+        #[arg(
+            long,
+            help = "Require signed cache hits and fail if a returned server signature cannot be verified"
+        )]
+        require_server_signature: bool,
     },
 
     Save {

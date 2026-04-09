@@ -309,19 +309,26 @@ async fn main() -> Result<()> {
         cli::Commands::Mount {
             workspace,
             tag_path,
+            no_platform,
+            no_git,
             verbose,
             force,
             recipient,
             identity,
+            require_server_signature,
         } => {
             commands::mount::execute(
                 workspace,
                 tag_path,
-                verbose,
-                force,
-                recipient,
-                identity,
-                require_server_signature,
+                commands::mount::MountOptions {
+                    no_platform,
+                    no_git,
+                    verbose,
+                    force,
+                    recipient,
+                    identity,
+                    require_server_signature,
+                },
             )
             .await
         }
