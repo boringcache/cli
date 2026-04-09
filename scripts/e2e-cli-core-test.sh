@@ -425,7 +425,7 @@ cleanup_mount() {
 }
 trap cleanup_mount EXIT
 
-"${CLI}" mount "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_WATCH_DIR}" --identity "${IDENTITY_FILE}" --verbose > "${MOUNT_LOG}" 2>&1 &
+"${CLI}" mount --no-platform --no-git "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_WATCH_DIR}" --identity "${IDENTITY_FILE}" --verbose > "${MOUNT_LOG}" 2>&1 &
 MOUNT_PID=$!
 
 mount_ready=0
