@@ -89,7 +89,8 @@ jobs:
           push: true
           load: false
           cache-tag: base-bookworm
-          verify: none
+          verify: warn
+          verify-timeout-seconds: 30
           build-args: |
             BORINGCACHE_VERSION=${{ steps.version.outputs.cli_version }}
         env:
@@ -112,34 +113,13 @@ jobs:
           push: true
           load: false
           cache-tag: base-bookworm-build
-          verify: none
+          verify: warn
+          verify-timeout-seconds: 30
           build-args: |
             BORINGCACHE_TAG=bookworm-${{ steps.version.outputs.cli_version }}
         env:
           BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
           BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
-
-      - name: Advisory cache visibility check
-        if: steps.exists.outputs.skip != 'true'
-        env:
-          BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
-        run: |
-          set -euo pipefail
-          missing=0
-          for tag in base-bookworm base-bookworm-build; do
-            if boringcache check boringcache/cli "$tag" --exact >/dev/null 2>&1; then
-              echo "Cache tag visible: $tag"
-            else
-              echo "::warning::Cache tag not visible after publish: $tag"
-              missing=1
-            fi
-          done
-          if [[ "$missing" -eq 1 ]]; then
-            {
-              echo ""
-              echo "Cache visibility warning: one or more base-image cache tags were not visible after publish."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Summary (skipped)
         if: steps.exists.outputs.skip == 'true'
