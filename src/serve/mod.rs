@@ -24,11 +24,13 @@ use crate::api::client::ApiClient;
 use crate::observability;
 use crate::serve::state::{
     AppState, BlobLocatorCache, BlobReadCache, BlobReadMetrics, CacheRegistryTuningProfile,
-    DEFAULT_BLOB_READ_CACHE_MAX_BYTES, KV_BACKLOG_POLICY, KV_REPLICATION_WORK_QUEUE_CAPACITY,
-    KvPendingStore, KvPublishedIndex, KvReplicationWork, UploadSessionStore, diagnostics_enabled,
-    unix_time_ms_now,
+    KV_BACKLOG_POLICY, KV_REPLICATION_WORK_QUEUE_CAPACITY, KvPendingStore, KvPublishedIndex,
+    KvReplicationWork, UploadSessionStore, diagnostics_enabled, unix_time_ms_now,
 };
 use crate::tag_utils::TagResolver;
+
+#[cfg(test)]
+use crate::serve::state::DEFAULT_BLOB_READ_CACHE_MAX_BYTES;
 
 const KV_REFRESH_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const KV_REPLICATION_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -42,6 +44,7 @@ const BLOB_READ_CACHE_MAX_BYTES_ENV: &str = "BORINGCACHE_BLOB_READ_CACHE_MAX_BYT
 const TCP_LISTEN_BACKLOG_ENV: &str = "BORINGCACHE_TCP_LISTEN_BACKLOG";
 const DEFAULT_TCP_LISTEN_BACKLOG: u32 = 1024;
 const HTTP_VERSION_ENV: &str = "BORINGCACHE_HTTP_VERSION";
+const DISK_LIMITED_BLOB_READ_CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const PUBLIC_PROXY_TUNING_ENVS: &[&str] =
     &[BLOB_DOWNLOAD_CONCURRENCY_ENV, BLOB_READ_CACHE_MAX_BYTES_ENV];
 const INTERNAL_PROXY_TUNING_ENVS: &[&str] = &[
@@ -206,9 +209,11 @@ pub async fn run_server(
             prefetch_state
                 .prefetch_complete
                 .store(true, Ordering::Release);
+            prefetch_state.prefetch_complete_notify.notify_waiters();
         });
     } else {
         state.prefetch_complete.store(true, Ordering::Release);
+        state.prefetch_complete_notify.notify_waiters();
     }
 
     if force_http1() {
@@ -271,9 +276,11 @@ pub async fn start_server_background(
             prefetch_state
                 .prefetch_complete
                 .store(true, Ordering::Release);
+            prefetch_state.prefetch_complete_notify.notify_waiters();
         });
     } else {
         state.prefetch_complete.store(true, Ordering::Release);
+        state.prefetch_complete_notify.notify_waiters();
     }
 
     let router = routes::build_router(state.clone());
@@ -402,6 +409,7 @@ async fn build_server_runtime(
         oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
         backend_breaker: Arc::new(state::BackendCircuitBreaker::new()),
         prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        prefetch_complete_notify: Arc::new(tokio::sync::Notify::new()),
     };
 
     cache_registry::restore_kv_pending_publish_handoff(&state).await;
@@ -983,40 +991,8 @@ fn blob_read_cache_max_bytes(tuning_profile: CacheRegistryTuningProfile) -> u64 
     if let Some(configured) = parse_positive_u64_env(BLOB_READ_CACHE_MAX_BYTES_ENV) {
         return configured;
     }
-
-    let resources = crate::platform::resources::SystemResources::detect();
-    let is_ci = std::env::var("CI").is_ok();
-    let auto_max = match resources.memory_strategy {
-        crate::platform::resources::MemoryStrategy::Balanced => {
-            if is_ci {
-                DEFAULT_BLOB_READ_CACHE_MAX_BYTES
-            } else {
-                1024_u64 * 1024 * 1024
-            }
-        }
-        crate::platform::resources::MemoryStrategy::Aggressive => {
-            if is_ci {
-                DEFAULT_BLOB_READ_CACHE_MAX_BYTES.saturating_mul(2)
-            } else {
-                DEFAULT_BLOB_READ_CACHE_MAX_BYTES
-            }
-        }
-        crate::platform::resources::MemoryStrategy::UltraAggressive => {
-            DEFAULT_BLOB_READ_CACHE_MAX_BYTES.saturating_mul(2)
-        }
-    };
-    let auto_max = match tuning_profile {
-        CacheRegistryTuningProfile::Generic => auto_max,
-        CacheRegistryTuningProfile::Bazel if is_ci => {
-            auto_max.max(DEFAULT_BLOB_READ_CACHE_MAX_BYTES)
-        }
-        CacheRegistryTuningProfile::Bazel => auto_max,
-        CacheRegistryTuningProfile::Sccache if is_ci => {
-            auto_max.max(DEFAULT_BLOB_READ_CACHE_MAX_BYTES.saturating_mul(2))
-        }
-        CacheRegistryTuningProfile::Sccache => auto_max.max(DEFAULT_BLOB_READ_CACHE_MAX_BYTES),
-    };
-    auto_max.max(512_u64 * 1024 * 1024)
+    let _ = tuning_profile;
+    DISK_LIMITED_BLOB_READ_CACHE_MAX_BYTES
 }
 
 fn auto_transfer_concurrency() -> usize {
@@ -1082,48 +1058,21 @@ fn blob_download_concurrency(tuning_profile: CacheRegistryTuningProfile) -> (usi
     let is_ci = std::env::var("CI").is_ok();
     let mut adaptive = auto_transfer_concurrency();
 
-    let floor = match tuning_profile {
-        CacheRegistryTuningProfile::Generic => 0,
-        CacheRegistryTuningProfile::Bazel if is_ci => {
-            if resources.available_memory_gb >= 8.0 && resources.cpu_cores >= 4 {
-                12
-            } else if resources.cpu_cores >= 4 {
-                8
-            } else {
-                6
-            }
-        }
-        CacheRegistryTuningProfile::Bazel => {
-            if resources.available_memory_gb >= 8.0 && resources.cpu_cores >= 4 {
-                6
-            } else {
-                4
-            }
-        }
-        CacheRegistryTuningProfile::Sccache if is_ci => {
-            if resources.available_memory_gb >= 12.0 && resources.cpu_cores >= 4 {
-                16
-            } else if resources.available_memory_gb >= 8.0 && resources.cpu_cores >= 4 {
-                12
-            } else if resources.cpu_cores >= 4 {
-                8
-            } else {
-                6
-            }
-        }
-        CacheRegistryTuningProfile::Sccache => {
-            if resources.available_memory_gb >= 8.0 && resources.cpu_cores >= 4 {
-                8
-            } else {
-                6
-            }
-        }
+    let floor = match (is_ci, resources.available_memory_gb, resources.cpu_cores) {
+        (true, mem, cores) if mem >= 12.0 && cores >= 4 => 64,
+        (true, mem, cores) if mem >= 8.0 && cores >= 4 => 32,
+        (true, _, cores) if cores >= 4 => 16,
+        (true, _, _) => 8,
+        (false, mem, cores) if mem >= 8.0 && cores >= 4 => 16,
+        (false, _, cores) if cores >= 4 => 8,
+        (false, _, _) => 4,
     };
+    let _ = tuning_profile;
     if floor > 0 {
         adaptive = adaptive.max(floor);
     }
 
-    (adaptive.clamp(1, 32), false)
+    (adaptive.max(1), false)
 }
 
 fn blob_prefetch_concurrency(
@@ -1135,14 +1084,8 @@ fn blob_prefetch_concurrency(
         return (configured.min(max_download), true);
     }
 
-    let adaptive = match tuning_profile {
-        CacheRegistryTuningProfile::Generic => (max_download / 2).clamp(2, 16).min(max_download),
-        CacheRegistryTuningProfile::Bazel => {
-            ((max_download * 3) / 4).clamp(3, 16).min(max_download)
-        }
-        CacheRegistryTuningProfile::Sccache => max_download.clamp(4, 32).min(max_download),
-    };
-    (adaptive.max(1), false)
+    let _ = tuning_profile;
+    (max_download, false)
 }
 
 async fn flush_pending_on_shutdown(state: &AppState) {
@@ -1579,19 +1522,19 @@ mod tests {
     }
 
     #[test]
-    fn blob_prefetch_concurrency_defaults_to_half_of_downloads() {
+    fn blob_prefetch_concurrency_matches_downloads_by_default() {
         assert_eq!(
             blob_prefetch_concurrency(8, CacheRegistryTuningProfile::Generic),
-            (4, false)
+            (8, false)
         );
         assert_eq!(
             blob_prefetch_concurrency(16, CacheRegistryTuningProfile::Generic),
-            (8, false)
+            (16, false)
         );
     }
 
     #[test]
-    fn blob_prefetch_concurrency_keeps_sccache_prefetch_aggressive() {
+    fn blob_prefetch_concurrency_keeps_sccache_prefetch_at_download_rate() {
         assert_eq!(
             blob_prefetch_concurrency(8, CacheRegistryTuningProfile::Sccache),
             (8, false)
@@ -1603,14 +1546,14 @@ mod tests {
     }
 
     #[test]
-    fn blob_prefetch_concurrency_keeps_bazel_more_eager_than_generic() {
+    fn blob_prefetch_concurrency_keeps_bazel_at_download_rate() {
         assert_eq!(
             blob_prefetch_concurrency(8, CacheRegistryTuningProfile::Bazel),
-            (6, false)
+            (8, false)
         );
         assert_eq!(
             blob_prefetch_concurrency(16, CacheRegistryTuningProfile::Bazel),
-            (12, false)
+            (16, false)
         );
     }
 

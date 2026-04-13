@@ -2380,6 +2380,7 @@ mod tests {
             oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
             backend_breaker: Arc::new(crate::serve::state::BackendCircuitBreaker::new()),
             prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            prefetch_complete_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 

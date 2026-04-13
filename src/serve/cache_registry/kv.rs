@@ -65,15 +65,6 @@ const KV_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 const KV_BAZEL_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 const KV_BLOB_PRELOAD_MAX_BLOBS_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_BATCH_MAX";
 const KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_MAX_BLOB_BYTES";
-const KV_STARTUP_PREFETCH_MAX_BLOBS: usize = 2_048;
-const KV_BAZEL_STARTUP_PREFETCH_MAX_BLOBS: usize = 8_192;
-const KV_SCCACHE_STARTUP_PREFETCH_MAX_BLOBS: usize = 16_384;
-const KV_STARTUP_PREFETCH_MIN_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
-const KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
-const KV_BAZEL_STARTUP_PREFETCH_MIN_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
-const KV_BAZEL_STARTUP_PREFETCH_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
-const KV_SCCACHE_STARTUP_PREFETCH_MIN_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
-const KV_SCCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const KV_BAZEL_STARTUP_PREFETCH_SMALL_CAS_MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024;
 const KV_STARTUP_PREFETCH_MAX_BLOBS_ENV: &str = "BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS";
 const KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV: &str =
@@ -1485,6 +1476,32 @@ pub(crate) async fn get_or_head_kv_object(
     result
 }
 
+async fn await_startup_prefetch_readiness(state: &AppState) -> Result<(), RegistryError> {
+    loop {
+        if state.prefetch_complete.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        let notified = state.prefetch_complete_notify.notified();
+        if state.prefetch_complete.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        match tokio::time::timeout(KV_PREFETCH_READINESS_TIMEOUT, notified).await {
+            Ok(()) => {}
+            Err(_) => {
+                return Err(RegistryError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "Cache registry is still warming after {}s",
+                        KV_PREFETCH_READINESS_TIMEOUT.as_secs()
+                    ),
+                ));
+            }
+        }
+    }
+}
+
 async fn get_or_head_kv_object_inner(
     state: &AppState,
     namespace: KvNamespace,
@@ -1553,6 +1570,8 @@ async fn get_or_head_kv_object_inner(
             );
         }
     }
+
+    await_startup_prefetch_readiness(state).await?;
 
     if let Some((blob, cache_entry_id, cached_url)) =
         lookup_published_blob(state, &scoped_key).await
@@ -3455,35 +3474,16 @@ fn kv_blob_preload_max_blobs(tuning_profile: CacheRegistryTuningProfile) -> usiz
 }
 
 fn kv_startup_prefetch_max_blobs(tuning_profile: CacheRegistryTuningProfile) -> usize {
-    parse_positive_usize_env(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV).unwrap_or(match tuning_profile {
-        CacheRegistryTuningProfile::Generic => KV_STARTUP_PREFETCH_MAX_BLOBS,
-        CacheRegistryTuningProfile::Bazel => KV_BAZEL_STARTUP_PREFETCH_MAX_BLOBS,
-        CacheRegistryTuningProfile::Sccache => KV_SCCACHE_STARTUP_PREFETCH_MAX_BLOBS,
-    })
+    let _ = tuning_profile;
+    parse_positive_usize_env(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV).unwrap_or(usize::MAX)
 }
 
 fn kv_startup_prefetch_max_total_bytes(
     cache_max: u64,
     tuning_profile: CacheRegistryTuningProfile,
 ) -> u64 {
-    parse_positive_u64_env(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV).unwrap_or_else(|| {
-        match tuning_profile {
-            CacheRegistryTuningProfile::Generic => cache_max.saturating_div(4).clamp(
-                KV_STARTUP_PREFETCH_MIN_TOTAL_BYTES,
-                KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES,
-            ),
-            CacheRegistryTuningProfile::Bazel => cache_max.saturating_div(2).clamp(
-                KV_BAZEL_STARTUP_PREFETCH_MIN_TOTAL_BYTES,
-                KV_BAZEL_STARTUP_PREFETCH_MAX_TOTAL_BYTES,
-            ),
-            CacheRegistryTuningProfile::Sccache => {
-                cache_max.saturating_mul(3).saturating_div(4).clamp(
-                    KV_SCCACHE_STARTUP_PREFETCH_MIN_TOTAL_BYTES,
-                    KV_SCCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES,
-                )
-            }
-        }
-    })
+    let _ = tuning_profile;
+    parse_positive_u64_env(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV).unwrap_or(cache_max)
 }
 
 fn kv_blob_prefetch_max_inflight_bytes(
@@ -5265,6 +5265,7 @@ mod tests {
             oci_manifest_cache: std::sync::Arc::new(dashmap::DashMap::new()),
             backend_breaker: std::sync::Arc::new(BackendCircuitBreaker::new()),
             prefetch_complete: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            prefetch_complete_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         };
 
         (state, temp_home)
@@ -5359,6 +5360,7 @@ mod tests {
             oci_manifest_cache: std::sync::Arc::new(dashmap::DashMap::new()),
             backend_breaker: std::sync::Arc::new(BackendCircuitBreaker::new()),
             prefetch_complete: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            prefetch_complete_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         };
 
         let response = put_kv_object(
@@ -6548,18 +6550,34 @@ mod tests {
     }
 
     #[test]
-    fn sccache_startup_prefetch_defaults_are_more_aggressive() {
+    fn startup_prefetch_defaults_cover_full_tag_by_default() {
+        let _guard = test_env::lock();
+        test_env::remove_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV);
+        test_env::remove_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV);
         let cache_max = 4 * 1024 * 1024 * 1024;
-        assert!(
-            kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Sccache)
-                > kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Generic)
+        assert_eq!(
+            kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Generic),
+            usize::MAX
         );
-        assert!(
-            kv_startup_prefetch_max_total_bytes(cache_max, CacheRegistryTuningProfile::Sccache)
-                > kv_startup_prefetch_max_total_bytes(
-                    cache_max,
-                    CacheRegistryTuningProfile::Generic
-                )
+        assert_eq!(
+            kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Bazel),
+            usize::MAX
+        );
+        assert_eq!(
+            kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Sccache),
+            usize::MAX
+        );
+        assert_eq!(
+            kv_startup_prefetch_max_total_bytes(cache_max, CacheRegistryTuningProfile::Generic),
+            cache_max
+        );
+        assert_eq!(
+            kv_startup_prefetch_max_total_bytes(cache_max, CacheRegistryTuningProfile::Bazel),
+            cache_max
+        );
+        assert_eq!(
+            kv_startup_prefetch_max_total_bytes(cache_max, CacheRegistryTuningProfile::Sccache),
+            cache_max
         );
         assert!(
             kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Sccache)
@@ -6613,19 +6631,8 @@ mod tests {
     }
 
     #[test]
-    fn bazel_startup_prefetch_defaults_are_more_aggressive_than_generic() {
+    fn bazel_startup_prefetch_keeps_more_aggressive_background_preload_than_generic() {
         let cache_max = 4 * 1024 * 1024 * 1024;
-        assert!(
-            kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Bazel)
-                > kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Generic)
-        );
-        assert!(
-            kv_startup_prefetch_max_total_bytes(cache_max, CacheRegistryTuningProfile::Bazel)
-                > kv_startup_prefetch_max_total_bytes(
-                    cache_max,
-                    CacheRegistryTuningProfile::Generic
-                )
-        );
         assert!(
             kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Bazel)
                 > kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Generic)

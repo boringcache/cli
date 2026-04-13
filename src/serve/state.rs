@@ -77,6 +77,7 @@ pub struct AppState {
     pub oci_manifest_cache: Arc<DashMap<String, Arc<OciManifestCacheEntry>>>,
     pub backend_breaker: Arc<BackendCircuitBreaker>,
     pub prefetch_complete: Arc<AtomicBool>,
+    pub prefetch_complete_notify: Arc<Notify>,
 }
 
 pub struct BlobReadMetrics {
