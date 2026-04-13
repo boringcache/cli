@@ -1,3 +1,4 @@
+pub mod adapter;
 pub mod audit;
 pub mod auth;
 pub mod cas_publish;
@@ -15,6 +16,7 @@ pub mod ls;
 pub mod misses;
 pub mod mount;
 pub mod onboard;
+pub mod proxy_exec;
 pub mod restore;
 pub mod run;
 pub mod save;

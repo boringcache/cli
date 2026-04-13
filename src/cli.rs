@@ -183,6 +183,97 @@ pub struct Cli {
     pub require_server_signature: bool,
 }
 
+#[derive(Debug, Clone, clap::Args)]
+pub struct AdapterArgs {
+    #[arg(long, help = "Workspace name (org/project or user/project)")]
+    pub workspace: Option<String>,
+
+    #[arg(long, help = "Proxy cache tag")]
+    pub tag: Option<String>,
+
+    #[arg(short, long, help = "Port to bind and advertise (default: 5000)")]
+    pub port: Option<u16>,
+
+    #[arg(long, help = "Bind host for the local proxy (default: 127.0.0.1)")]
+    pub host: Option<String>,
+
+    #[arg(
+        long = "endpoint-host",
+        help = "Advertised host for wrapped clients when it differs from --host"
+    )]
+    pub endpoint_host: Option<String>,
+
+    #[arg(long, help = "Disable automatic platform suffix for cache tags")]
+    pub no_platform: bool,
+
+    #[arg(
+        long,
+        help = "Disable automatic git-based tag suffixing and fallback restore logic"
+    )]
+    pub no_git: bool,
+
+    #[arg(long, help = "Run proxy reads only and skip cache writes")]
+    pub read_only: bool,
+
+    #[arg(
+        long,
+        help = "Exit with error if cache operations encounter backend failures"
+    )]
+    pub fail_on_cache_error: bool,
+
+    #[arg(
+        long,
+        value_name = "KEY=VALUE",
+        help = "Attach low-cardinality metadata hints to proxy sessions (repeatable)"
+    )]
+    pub metadata_hint: Vec<String>,
+
+    #[arg(
+        long,
+        value_name = "ENTRY",
+        value_delimiter = ',',
+        help = "Project or built-in cache entry/entries to resolve (repeatable)"
+    )]
+    pub entry: Vec<String>,
+
+    #[arg(
+        long,
+        value_name = "PROFILE",
+        value_delimiter = ',',
+        help = "Project cache profile(s) from .boringcache.toml (repeatable)"
+    )]
+    pub profile: Vec<String>,
+
+    #[arg(long, help = "Skip restore phase for archive entries")]
+    pub skip_restore: bool,
+
+    #[arg(long, help = "Skip save phase for archive entries")]
+    pub skip_save: bool,
+
+    #[arg(long, help = "Run save phase even if command exits non-zero")]
+    pub save_on_failure: bool,
+
+    #[arg(long, help = "Docker cache export mode (default: max)")]
+    pub cache_mode: Option<String>,
+
+    #[arg(long, help = "Docker registry cache tag (default: buildcache)")]
+    pub cache_ref_tag: Option<String>,
+
+    #[arg(long, help = "Print the resolved execution plan without running")]
+    pub dry_run: bool,
+
+    #[arg(
+        short,
+        long,
+        requires = "dry_run",
+        help = "Print machine-readable dry-run output"
+    )]
+    pub json: bool,
+
+    #[arg(last = true, help = "Command to execute (after --)")]
+    pub command: Vec<String>,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     Auth {
@@ -482,6 +573,15 @@ pub enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
 
+        #[arg(
+            long = "endpoint-host",
+            help = "Advertised host for wrapped clients when it differs from --host"
+        )]
+        endpoint_host: Option<String>,
+
+        #[arg(long, help = "Run proxy reads only and skip cache writes")]
+        read_only: bool,
+
         #[arg(long, help = "Run save phase even if command exits non-zero")]
         save_on_failure: bool,
 
@@ -520,6 +620,54 @@ pub enum Commands {
             help = "Command to execute (after --)"
         )]
         command: Vec<String>,
+    },
+
+    #[command(about = "Run Turborepo against a local BoringCache proxy")]
+    Turbo {
+        #[command(flatten)]
+        args: AdapterArgs,
+    },
+
+    #[command(about = "Run Nx against a local BoringCache proxy")]
+    Nx {
+        #[command(flatten)]
+        args: AdapterArgs,
+    },
+
+    #[command(about = "Run Bazel against a local BoringCache proxy")]
+    Bazel {
+        #[command(flatten)]
+        args: AdapterArgs,
+    },
+
+    #[command(about = "Run Gradle against a local BoringCache proxy")]
+    Gradle {
+        #[command(flatten)]
+        args: AdapterArgs,
+    },
+
+    #[command(about = "Run Maven against a local BoringCache proxy")]
+    Maven {
+        #[command(flatten)]
+        args: AdapterArgs,
+    },
+
+    #[command(about = "Run sccache against a local BoringCache proxy")]
+    Sccache {
+        #[command(flatten)]
+        args: AdapterArgs,
+    },
+
+    #[command(name = "go", about = "Run Go against a local BoringCache proxy")]
+    Go {
+        #[command(flatten)]
+        args: AdapterArgs,
+    },
+
+    #[command(about = "Run docker buildx build against a local BoringCache proxy")]
+    Docker {
+        #[command(flatten)]
+        args: AdapterArgs,
     },
 
     Check {
@@ -954,6 +1102,35 @@ mod tests {
                 assert_eq!(username.as_deref(), Some("jane-doe"));
             }
             _ => panic!("expected login command"),
+        }
+    }
+
+    #[test]
+    fn test_turbo_adapter_parses_workspace_and_command() {
+        let cli = Cli::parse_from([
+            "boringcache",
+            "turbo",
+            "--workspace",
+            "my-org/my-app",
+            "--tag",
+            "turbo-main",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--",
+            "pnpm",
+            "turbo",
+            "run",
+            "build",
+        ]);
+
+        match cli.command {
+            Commands::Turbo { args } => {
+                assert_eq!(args.workspace.as_deref(), Some("my-org/my-app"));
+                assert_eq!(args.tag.as_deref(), Some("turbo-main"));
+                assert_eq!(args.endpoint_host.as_deref(), Some("host.docker.internal"));
+                assert_eq!(args.command, vec!["pnpm", "turbo", "run", "build"]);
+            }
+            _ => panic!("expected turbo command"),
         }
     }
 }

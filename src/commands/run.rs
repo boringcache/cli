@@ -1,73 +1,14 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::process::Stdio;
 
-use crate::commands::{restore, save, serve, utils};
+use crate::commands::{proxy_exec, restore, save, serve, utils};
 use crate::config::{AuthPurpose, Config};
 use crate::exit_code::ExitCodeError;
 use crate::project_config;
 use crate::ui;
 
 const EXIT_CONFIG: i32 = 78;
-const EXIT_COMMAND_NOT_FOUND: i32 = 127;
-const PROXY_AUTH_TOKEN: &str = "boringcache";
-const SCCACHE_BACKEND_ENV_VARS: &[&str] = &[
-    "SCCACHE_CONF",
-    "SCCACHE_CACHED_CONF",
-    "SCCACHE_ENDPOINT",
-    "SCCACHE_BUCKET",
-    "SCCACHE_REGION",
-    "SCCACHE_S3_KEY_PREFIX",
-    "SCCACHE_S3_USE_SSL",
-    "SCCACHE_S3_NO_CREDENTIALS",
-    "SCCACHE_S3_SERVER_SIDE_ENCRYPTION",
-    "SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE",
-    "SCCACHE_GCS_BUCKET",
-    "SCCACHE_GCS_KEY_PATH",
-    "SCCACHE_GCS_CREDENTIALS_URL",
-    "SCCACHE_AZURE_CONNECTION_STRING",
-    "SCCACHE_AZURE_BLOB_CONTAINER",
-    "SCCACHE_AZURE_KEY_PREFIX",
-    "SCCACHE_REDIS_ENDPOINT",
-    "SCCACHE_REDIS_CLUSTER_ENDPOINTS",
-    "SCCACHE_REDIS_USERNAME",
-    "SCCACHE_REDIS_PASSWORD",
-    "SCCACHE_REDIS_DB",
-    "SCCACHE_REDIS_EXPIRATION",
-    "SCCACHE_REDIS_TTL",
-    "SCCACHE_REDIS_KEY_PREFIX",
-    "SCCACHE_REDIS",
-    "SCCACHE_MEMCACHED_ENDPOINT",
-    "SCCACHE_MEMCACHED_USERNAME",
-    "SCCACHE_MEMCACHED_PASSWORD",
-    "SCCACHE_MEMCACHED_EXPIRATION",
-    "SCCACHE_MEMCACHED_KEY_PREFIX",
-    "SCCACHE_MEMCACHED",
-    "SCCACHE_GHA_CACHE_URL",
-    "SCCACHE_GHA_RUNTIME_TOKEN",
-    "SCCACHE_GHA_CACHE_TO",
-    "SCCACHE_GHA_CACHE_FROM",
-    "SCCACHE_WEBDAV_ENDPOINT",
-    "SCCACHE_WEBDAV_KEY_PREFIX",
-    "SCCACHE_WEBDAV_USERNAME",
-    "SCCACHE_WEBDAV_PASSWORD",
-    "SCCACHE_WEBDAV_TOKEN",
-    "ACTIONS_RESULTS_URL",
-    "ACTIONS_RUNTIME_TOKEN",
-];
-
-#[derive(Debug)]
-enum ChildOutcome {
-    Exited(std::process::ExitStatus),
-}
-
-#[derive(Debug)]
-struct ProxyContext {
-    endpoint_host: String,
-    port: u16,
-    cache_ref: String,
-}
 
 #[derive(Debug, Serialize)]
 struct DryRunPlan {
@@ -126,7 +67,9 @@ enum DryRunArchiveResolutionSource {
 struct DryRunProxyPlan {
     tag: String,
     host: String,
+    endpoint_host: String,
     port: u16,
+    read_only: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     metadata_hints: BTreeMap<String, String>,
 }
@@ -148,7 +91,9 @@ pub async fn execute(
     proxy: Option<String>,
     metadata_hints: Vec<String>,
     host: String,
+    endpoint_host: Option<String>,
     port: u16,
+    read_only: bool,
     save_on_failure: bool,
     skip_restore: bool,
     skip_save: bool,
@@ -241,6 +186,19 @@ pub async fn execute(
     let archive_enabled = !tag_path_pairs.is_empty();
     let proxy_enabled = proxy.is_some();
     let proxy_metadata_hints = serve::resolve_proxy_metadata_hints(&metadata_hints)?;
+    let advertised_endpoint_host = endpoint_host
+        .clone()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            if host == "0.0.0.0" {
+                "127.0.0.1".to_string()
+            } else {
+                host.clone()
+            }
+        });
+    let effective_proxy_read_only = proxy_enabled && serve::effective_proxy_read_only(read_only);
+    let effective_skip_save = skip_save || effective_proxy_read_only;
 
     if !archive_enabled && !proxy_enabled {
         anyhow::bail!(
@@ -257,7 +215,9 @@ pub async fn execute(
             let proxy_plan = proxy.as_ref().map(|tag| DryRunProxyPlan {
                 tag: tag.to_string(),
                 host: host.clone(),
+                endpoint_host: advertised_endpoint_host.clone(),
                 port,
+                read_only: effective_proxy_read_only,
                 metadata_hints: proxy_metadata_hints.clone(),
             });
             let plan = DryRunPlan {
@@ -285,10 +245,12 @@ pub async fn execute(
                 proxy.as_deref(),
                 &proxy_metadata_hints,
                 &host,
+                endpoint_host.as_deref(),
                 port,
+                effective_proxy_read_only,
                 save_on_failure,
                 skip_restore,
-                skip_save,
+                effective_skip_save,
                 fail_on_cache_error,
                 fail_on_cache_miss,
                 &command,
@@ -299,10 +261,11 @@ pub async fn execute(
 
     if Config::load_for_auth_purpose(AuthPurpose::Restore).is_err() {
         ui::info("[boringcache] No token found — running command without caching");
-        let child_outcome = spawn_command(&command, &env_vars, None).await?;
+        let child_outcome =
+            proxy_exec::spawn_command(&command, &env_vars, None, inject_proxy_env).await?;
         return match child_outcome {
-            ChildOutcome::Exited(status) => {
-                let code = status_exit_code(&status);
+            proxy_exec::ChildOutcome::Exited(status) => {
+                let code = proxy_exec::status_exit_code(&status);
                 if code == 0 {
                     Ok(())
                 } else {
@@ -333,7 +296,11 @@ pub async fn execute(
     }
 
     let mut proxy_handle: Option<serve::ProxyServerHandle> = None;
-    let mut proxy_context: Option<ProxyContext> = None;
+    let mut proxy_context: Option<proxy_exec::ProxyContext> = None;
+
+    if effective_proxy_read_only && !read_only && proxy_enabled {
+        ui::info("[boringcache] No save-capable token found — starting proxy in read-only mode");
+    }
 
     if let Some(proxy_tag) = proxy {
         let handle = serve::start_proxy_background(
@@ -343,15 +310,16 @@ pub async fn execute(
             port,
             no_platform,
             no_git,
+            endpoint_host,
             proxy_metadata_hints.clone(),
             fail_on_cache_error,
-            false,
+            effective_proxy_read_only,
         )
         .await
         .map_err(|error| ExitCodeError::with_message(EXIT_CONFIG, format!("{:#}", error)))?;
 
         let cache_ref = handle.cache_ref();
-        proxy_context = Some(ProxyContext {
+        proxy_context = Some(proxy_exec::ProxyContext {
             endpoint_host: handle.endpoint_host().to_string(),
             port: handle.port(),
             cache_ref,
@@ -359,7 +327,13 @@ pub async fn execute(
         proxy_handle = Some(handle);
     }
 
-    let child_outcome = spawn_command(&command, &env_vars, proxy_context.as_ref()).await;
+    let child_outcome = proxy_exec::spawn_command(
+        &command,
+        &env_vars,
+        proxy_context.as_ref(),
+        inject_proxy_env,
+    )
+    .await;
 
     let child_outcome = match child_outcome {
         Ok(outcome) => outcome,
@@ -370,11 +344,11 @@ pub async fn execute(
     };
 
     match child_outcome {
-        ChildOutcome::Exited(status) => {
+        proxy_exec::ChildOutcome::Exited(status) => {
             let command_succeeded = status.success();
-            let command_exit_code = status_exit_code(&status);
+            let command_exit_code = proxy_exec::status_exit_code(&status);
 
-            if archive_enabled && !skip_save && (command_succeeded || save_on_failure) {
+            if archive_enabled && !effective_skip_save && (command_succeeded || save_on_failure) {
                 let save_result = save::execute_batch_save(
                     Some(workspace),
                     tag_path_pairs,
@@ -436,51 +410,19 @@ fn validate_archive_pairs(
     Ok(())
 }
 
-async fn spawn_command(
-    command: &[String],
-    env_vars: &BTreeMap<String, String>,
-    proxy_context: Option<&ProxyContext>,
-) -> Result<ChildOutcome> {
-    if command.is_empty() {
-        return Err(anyhow!("Command is required after --"));
-    }
-
-    let prepared_command = if let Some(proxy_context) = proxy_context {
-        substitute_proxy_placeholders(command, proxy_context.port, &proxy_context.cache_ref)
-    } else {
-        command.to_vec()
-    };
-
-    let mut process = tokio::process::Command::new(&prepared_command[0]);
-    process
-        .args(&prepared_command[1..])
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    process.envs(env_vars);
-
-    if let Some(proxy_context) = proxy_context {
-        inject_proxy_env(&mut process, proxy_context);
-    }
-
-    let mut child = process
-        .spawn()
-        .map_err(|error| map_spawn_error(error, &prepared_command[0]))?;
-
-    let exit_code = wait_for_child(&mut child).await?;
-    Ok(exit_code)
-}
-
-fn inject_proxy_env(command: &mut tokio::process::Command, context: &ProxyContext) {
-    let endpoint = format!("http://{}:{}", context.endpoint_host, context.port);
-    for key in SCCACHE_BACKEND_ENV_VARS {
+fn inject_proxy_env(command: &mut tokio::process::Command, context: &proxy_exec::ProxyContext) {
+    let endpoint = context.endpoint();
+    for key in proxy_exec::SCCACHE_BACKEND_ENV_VARS {
         command.env_remove(key);
     }
     command.env("NX_SELF_HOSTED_REMOTE_CACHE_SERVER", &endpoint);
-    command.env("NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN", PROXY_AUTH_TOKEN);
+    command.env(
+        "NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN",
+        proxy_exec::PROXY_AUTH_TOKEN,
+    );
     command.env("TURBO_API", &endpoint);
-    command.env("TURBO_TOKEN", PROXY_AUTH_TOKEN);
-    command.env("TURBO_TEAM", PROXY_AUTH_TOKEN);
+    command.env("TURBO_TOKEN", proxy_exec::PROXY_AUTH_TOKEN);
+    command.env("TURBO_TEAM", proxy_exec::PROXY_AUTH_TOKEN);
     command.env(
         "GOCACHEPROG",
         format!("boringcache go-cacheprog --endpoint {}", endpoint),
@@ -489,99 +431,6 @@ fn inject_proxy_env(command: &mut tokio::process::Command, context: &ProxyContex
     command.env("SCCACHE_WEBDAV_ENDPOINT", format!("{endpoint}/"));
     command.env("BORINGCACHE_PROXY_PORT", context.port.to_string());
     command.env("BORINGCACHE_CACHE_REF", &context.cache_ref);
-}
-
-fn substitute_proxy_placeholders(command: &[String], port: u16, cache_ref: &str) -> Vec<String> {
-    let port_value = port.to_string();
-    command
-        .iter()
-        .map(|arg| {
-            arg.replace("{PORT}", &port_value)
-                .replace("{CACHE_REF}", cache_ref)
-        })
-        .collect()
-}
-
-#[cfg(unix)]
-async fn wait_for_child(child: &mut tokio::process::Child) -> Result<ChildOutcome> {
-    use tokio::signal::unix::{SignalKind, signal};
-
-    let mut sigint = signal(SignalKind::interrupt()).context("Failed to install SIGINT handler")?;
-    let mut sigterm =
-        signal(SignalKind::terminate()).context("Failed to install SIGTERM handler")?;
-
-    tokio::select! {
-        status = child.wait() => {
-            Ok(ChildOutcome::Exited(status.context("Failed to wait for command process")?))
-        }
-        _ = sigint.recv() => handle_signal(child, libc::SIGINT).await,
-        _ = sigterm.recv() => handle_signal(child, libc::SIGTERM).await,
-    }
-}
-
-#[cfg(unix)]
-async fn handle_signal(child: &mut tokio::process::Child, signal: i32) -> Result<ChildOutcome> {
-    if let Some(status) = child
-        .try_wait()
-        .context("Failed to inspect command status")?
-    {
-        return Ok(ChildOutcome::Exited(status));
-    }
-
-    if let Some(pid) = child.id() {
-        // SAFETY: `pid` comes from the live child process handle and `signal` is forwarded verbatim
-        // to the OS. Failing `kill` here is non-fatal because we still wait on the child below.
-        unsafe {
-            libc::kill(pid as i32, signal);
-        }
-    }
-
-    let status = child
-        .wait()
-        .await
-        .context("Failed to wait for command after signal")?;
-    Ok(ChildOutcome::Exited(status))
-}
-
-#[cfg(not(unix))]
-async fn wait_for_child(child: &mut tokio::process::Child) -> Result<ChildOutcome> {
-    let status = child
-        .wait()
-        .await
-        .context("Failed to wait for command process")?;
-    Ok(ChildOutcome::Exited(status))
-}
-
-fn map_spawn_error(error: std::io::Error, command: &str) -> anyhow::Error {
-    if error.kind() == std::io::ErrorKind::NotFound {
-        ExitCodeError::with_message(
-            EXIT_COMMAND_NOT_FOUND,
-            format!("Command not found: {command}"),
-        )
-        .into()
-    } else {
-        ExitCodeError::with_message(
-            EXIT_CONFIG,
-            format!("Failed to spawn command '{command}': {error}"),
-        )
-        .into()
-    }
-}
-
-fn status_exit_code(status: &std::process::ExitStatus) -> i32 {
-    if let Some(code) = status.code() {
-        return code;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(signal) = status.signal() {
-            return 128 + signal;
-        }
-    }
-
-    1
 }
 
 async fn shutdown_proxy_handle(
@@ -617,7 +466,9 @@ fn print_dry_run(
     proxy: Option<&str>,
     proxy_metadata_hints: &BTreeMap<String, String>,
     host: &str,
+    endpoint_host: Option<&str>,
     port: u16,
+    read_only: bool,
     save_on_failure: bool,
     skip_restore: bool,
     skip_save: bool,
@@ -665,11 +516,18 @@ fn print_dry_run(
             "--port".to_string(),
             port.to_string(),
         ];
+        if let Some(endpoint_host) = endpoint_host {
+            proxy_parts.push("--endpoint-host".to_string());
+            proxy_parts.push(endpoint_host.to_string());
+        }
         if no_platform {
             proxy_parts.push("--no-platform".to_string());
         }
         if no_git {
             proxy_parts.push("--no-git".to_string());
+        }
+        if read_only {
+            proxy_parts.push("--read-only".to_string());
         }
         if fail_on_cache_error {
             proxy_parts.push("--fail-on-cache-error".to_string());
@@ -718,6 +576,8 @@ fn print_dry_run(
             save_parts.push(pattern.clone());
         }
         ui::info(&format!("[boringcache]   {}", save_parts.join(" ")));
+    } else if read_only && !tag_path_pairs.is_empty() {
+        ui::info("[boringcache]   # save phase skipped in read-only mode");
     }
 
     if save_on_failure && !tag_path_pairs.is_empty() {
