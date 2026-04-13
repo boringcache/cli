@@ -58,13 +58,6 @@ const KV_PUT_BODY_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from
 const KV_PUT_BODY_SLOW_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
 const KV_RESOLVE_HIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_FETCH_POINTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const KV_BLOB_PRELOAD_MAX_BLOBS: usize = 2_000;
-const KV_BAZEL_BLOB_PRELOAD_MAX_BLOBS: usize = 8_000;
-const KV_SCCACHE_BLOB_PRELOAD_MAX_BLOBS: usize = 16_000;
-const KV_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
-const KV_BAZEL_BLOB_PRELOAD_MAX_BLOB_BYTES: u64 = 8 * 1024 * 1024;
-const KV_BLOB_PRELOAD_MAX_BLOBS_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_BATCH_MAX";
-const KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_MAX_BLOB_BYTES";
 const KV_BAZEL_STARTUP_PREFETCH_SMALL_CAS_MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024;
 const KV_STARTUP_PREFETCH_MAX_BLOBS_ENV: &str = "BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS";
 const KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV: &str =
@@ -3457,22 +3450,6 @@ async fn preload_download_urls(state: &AppState, cache_entry_id: &str) {
     let _ = preload_download_urls_for_blobs(state, cache_entry_id, &blobs).await;
 }
 
-fn kv_blob_preload_max_blob_bytes(tuning_profile: CacheRegistryTuningProfile) -> u64 {
-    parse_positive_u64_env(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV).unwrap_or(match tuning_profile {
-        CacheRegistryTuningProfile::Generic => KV_BLOB_PRELOAD_MAX_BLOB_BYTES,
-        CacheRegistryTuningProfile::Bazel => KV_BAZEL_BLOB_PRELOAD_MAX_BLOB_BYTES,
-        CacheRegistryTuningProfile::Sccache => KV_BLOB_PRELOAD_MAX_BLOB_BYTES,
-    })
-}
-
-fn kv_blob_preload_max_blobs(tuning_profile: CacheRegistryTuningProfile) -> usize {
-    parse_positive_usize_env(KV_BLOB_PRELOAD_MAX_BLOBS_ENV).unwrap_or(match tuning_profile {
-        CacheRegistryTuningProfile::Generic => KV_BLOB_PRELOAD_MAX_BLOBS,
-        CacheRegistryTuningProfile::Bazel => KV_BAZEL_BLOB_PRELOAD_MAX_BLOBS,
-        CacheRegistryTuningProfile::Sccache => KV_SCCACHE_BLOB_PRELOAD_MAX_BLOBS,
-    })
-}
-
 fn kv_startup_prefetch_max_blobs(tuning_profile: CacheRegistryTuningProfile) -> usize {
     let _ = tuning_profile;
     parse_positive_usize_env(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV).unwrap_or(usize::MAX)
@@ -3651,6 +3628,33 @@ fn should_preload_remaining_download_urls(tuning_profile: CacheRegistryTuningPro
     !matches!(tuning_profile, CacheRegistryTuningProfile::Bazel)
 }
 
+fn select_blob_preload_candidates<F>(
+    ordered_blobs: &[BlobDescriptor],
+    preload_budget: u64,
+    mut download_url_for_digest: F,
+) -> Vec<(BlobDescriptor, String)>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut remaining_budget = preload_budget;
+    let mut candidates = Vec::new();
+
+    for blob in ordered_blobs {
+        if blob.size_bytes == 0 || blob.size_bytes > remaining_budget {
+            continue;
+        }
+        if let Some(url) = download_url_for_digest(&blob.digest) {
+            candidates.push((blob.clone(), url));
+            remaining_budget = remaining_budget.saturating_sub(blob.size_bytes);
+            if remaining_budget == 0 {
+                break;
+            }
+        }
+    }
+
+    candidates
+}
+
 fn build_startup_prefetch_targets<F>(
     startup_blobs: &[BlobDescriptor],
     mut cached_url_for_digest: F,
@@ -3733,8 +3737,6 @@ async fn preload_single_blob(
 }
 
 pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
-    let max_blob_bytes = kv_blob_preload_max_blob_bytes(state.tuning_profile);
-    let max_blobs = kv_blob_preload_max_blobs(state.tuning_profile);
     let cache_used = state.blob_read_cache.total_bytes();
     let cache_max = state.blob_read_cache.max_bytes();
     if should_skip_blob_preload(cache_used, cache_max) {
@@ -3745,7 +3747,7 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         return;
     }
     let inflight_budget_cap = kv_blob_prefetch_max_inflight_bytes(cache_max, state.tuning_profile);
-    let mut preload_budget = cache_max
+    let preload_budget = cache_max
         .saturating_sub(cache_used)
         .min(inflight_budget_cap);
     if preload_budget == 0 {
@@ -3766,24 +3768,9 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
             state.tuning_profile,
         )
         .ordered_blobs;
-        let mut values = Vec::new();
-        for blob in blob_order {
-            if blob.size_bytes == 0 || blob.size_bytes > max_blob_bytes {
-                continue;
-            }
-            if blob.size_bytes > preload_budget {
-                continue;
-            }
-            if let Some(url) = published.download_url(&blob.digest) {
-                let blob_size = blob.size_bytes;
-                values.push((blob, url.to_string()));
-                preload_budget = preload_budget.saturating_sub(blob_size);
-            }
-            if values.len() >= max_blobs {
-                break;
-            }
-        }
-        values
+        select_blob_preload_candidates(&blob_order, preload_budget, |digest| {
+            published.download_url(digest).map(str::to_string)
+        })
     };
 
     if candidates.is_empty() {
@@ -3815,7 +3802,7 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         SERVE_PREFETCH_OPERATION,
         SERVE_PREFETCH_PATH,
         format!(
-            "start: scheduled={scheduled} scheduled_bytes={scheduled_bytes} max_blobs={max_blobs} max_blob_bytes={max_blob_bytes} inflight_budget_cap={inflight_budget_cap}"
+            "start: scheduled={scheduled} scheduled_bytes={scheduled_bytes} inflight_budget_cap={inflight_budget_cap}"
         ),
     );
     let prefetch_started_at = std::time::Instant::now();
@@ -6453,24 +6440,6 @@ mod tests {
     }
 
     #[test]
-    fn kv_blob_preload_limits_allow_env_overrides() {
-        let _guard = test_env::lock();
-
-        test_env::set_var(KV_BLOB_PRELOAD_MAX_BLOBS_ENV, "32");
-        test_env::set_var(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV, "1048576");
-        assert_eq!(
-            kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Generic),
-            32
-        );
-        assert_eq!(
-            kv_blob_preload_max_blob_bytes(CacheRegistryTuningProfile::Generic),
-            1_048_576
-        );
-        test_env::remove_var(KV_BLOB_PRELOAD_MAX_BLOBS_ENV);
-        test_env::remove_var(KV_BLOB_PRELOAD_MAX_BLOB_BYTES_ENV);
-    }
-
-    #[test]
     fn kv_startup_prefetch_limits_allow_env_overrides() {
         let _guard = test_env::lock();
 
@@ -6580,10 +6549,6 @@ mod tests {
             cache_max
         );
         assert!(
-            kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Sccache)
-                > kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Generic)
-        );
-        assert!(
             kv_blob_prefetch_max_inflight_bytes(cache_max, CacheRegistryTuningProfile::Sccache)
                 > kv_blob_prefetch_max_inflight_bytes(
                     cache_max,
@@ -6631,12 +6596,8 @@ mod tests {
     }
 
     #[test]
-    fn bazel_startup_prefetch_keeps_more_aggressive_background_preload_than_generic() {
+    fn bazel_background_preload_keeps_larger_inflight_budget_than_generic() {
         let cache_max = 4 * 1024 * 1024 * 1024;
-        assert!(
-            kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Bazel)
-                > kv_blob_preload_max_blobs(CacheRegistryTuningProfile::Generic)
-        );
         assert!(
             kv_blob_prefetch_max_inflight_bytes(cache_max, CacheRegistryTuningProfile::Bazel)
                 > kv_blob_prefetch_max_inflight_bytes(
@@ -6644,6 +6605,36 @@ mod tests {
                     CacheRegistryTuningProfile::Generic
                 )
         );
+    }
+
+    #[test]
+    fn background_blob_preload_candidates_fill_budget_without_count_or_blob_size_knobs() {
+        let blobs = vec![
+            BlobDescriptor {
+                digest: "sha256:1".to_string(),
+                size_bytes: 5,
+            },
+            BlobDescriptor {
+                digest: "sha256:2".to_string(),
+                size_bytes: 9,
+            },
+            BlobDescriptor {
+                digest: "sha256:3".to_string(),
+                size_bytes: 3,
+            },
+        ];
+        let urls = HashMap::from([
+            ("sha256:1".to_string(), "https://example.com/1".to_string()),
+            ("sha256:2".to_string(), "https://example.com/2".to_string()),
+            ("sha256:3".to_string(), "https://example.com/3".to_string()),
+        ]);
+
+        let selected =
+            select_blob_preload_candidates(&blobs, 8, |digest| urls.get(digest).cloned());
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].0.digest, "sha256:1");
+        assert_eq!(selected[1].0.digest, "sha256:3");
     }
 
     #[test]
