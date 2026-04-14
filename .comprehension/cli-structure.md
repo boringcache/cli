@@ -157,6 +157,11 @@ These are the next sensible follow-ons after this branch merges.
 - Split `src/serve/http/handlers.rs` into manifest, blob, and upload flows so the new `http` namespace is not still one giant entrypoint.
 - Revisit `src/api/client/mod.rs` for a third pass into request-policy, polling, and endpoint-family helpers.
 
+## Merge Checkpoint
+
+- `e5926d9` is the merge-ready checkpoint for the CLI arg namespace split and `serve/http` namespace move.
+- Keep the next pass separate and scoped to one hotspot at a time: `src/serve/http/handlers.rs`, `src/commands/workspace/onboard.rs`, `src/api/client/mod.rs`, or `src/config.rs`.
+
 ## Command Surface Review
 
 `src/commands` is now treated as the command entrypoint layer, not the shared-support layer.
