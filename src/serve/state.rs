@@ -77,6 +77,7 @@ pub struct AppState {
     pub oci_manifest_cache: Arc<DashMap<String, Arc<OciManifestCacheEntry>>>,
     pub backend_breaker: Arc<BackendCircuitBreaker>,
     pub prefetch_complete: Arc<AtomicBool>,
+    pub prefetch_complete_notify: Arc<Notify>,
 }
 
 pub struct BlobReadMetrics {
@@ -695,14 +696,19 @@ impl BlobReadCache {
                     return Ok(false);
                 }
 
-                let Some(entry) = self
-                    .append_blob_from_file(&key, src_path, source_size)
-                    .await?
-                else {
+                let entry = match self.promote_legacy_file(&key, src_path, source_size).await {
+                    Ok(Some(entry)) => Some(entry),
+                    Ok(None) => None,
+                    Err(error) if is_cross_device_rename_error(&error) => {
+                        self.append_blob_from_file(&key, src_path, source_size)
+                            .await?
+                    }
+                    Err(error) => return Err(error),
+                };
+                let Some(entry) = entry else {
                     return Ok(false);
                 };
                 self.track_storage_entry(key, entry);
-                let _ = tokio::fs::remove_file(src_path).await;
                 if let Err(error) = self.evict_over_budget().await {
                     log::warn!("Blob read cache eviction failed after promote: {error}");
                 }
@@ -773,6 +779,29 @@ impl BlobReadCache {
             offset: data_offset,
             size_bytes: copied,
         }))
+    }
+
+    async fn promote_legacy_file(
+        &self,
+        digest_hex: &str,
+        src_path: &Path,
+        size_bytes: u64,
+    ) -> io::Result<Option<BlobReadStorageEntry>> {
+        let dest_path = self.cache_dir.join(digest_hex);
+        match tokio::fs::rename(src_path, &dest_path).await {
+            Ok(()) => {
+                self.total_bytes.fetch_add(size_bytes, Ordering::AcqRel);
+                Ok(Some(BlobReadStorageEntry::LegacyFile {
+                    path: dest_path,
+                    size_bytes,
+                }))
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = tokio::fs::remove_file(src_path).await;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn prepare_segment_write(&self, data_len: u64) -> io::Result<(u64, PathBuf, u64)> {
@@ -1123,6 +1152,19 @@ impl BlobReadCache {
                 Err(observed) => current = observed,
             }
         }
+    }
+}
+
+fn is_cross_device_rename_error(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(18)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
     }
 }
 
@@ -1910,7 +1952,10 @@ mod tests {
             .expect("promote");
         assert!(promoted);
         assert!(!source_path.exists());
-        assert!(cache.get_handle(&digest).await.is_some());
+        let handle = cache.get_handle(&digest).await.expect("cache hit");
+        let expected_path = temp_dir.path().join("blob-cache").join("b".repeat(64));
+        assert_eq!(handle.offset(), 0);
+        assert_eq!(handle.path(), expected_path.as_path());
     }
 
     #[tokio::test]

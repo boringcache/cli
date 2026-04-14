@@ -4,54 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${BORINGCACHE_ENV_FILE:-${REPO_ROOT}/.boringcache.env}"
-SCCACHE_CONFLICT_ENV_VARS=(
-  SCCACHE_CONF
-  SCCACHE_CACHED_CONF
-  SCCACHE_ENDPOINT
-  SCCACHE_BUCKET
-  SCCACHE_REGION
-  SCCACHE_S3_KEY_PREFIX
-  SCCACHE_S3_USE_SSL
-  SCCACHE_S3_NO_CREDENTIALS
-  SCCACHE_S3_SERVER_SIDE_ENCRYPTION
-  SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE
-  SCCACHE_GCS_BUCKET
-  SCCACHE_GCS_KEY_PATH
-  SCCACHE_GCS_CREDENTIALS_URL
-  SCCACHE_AZURE_CONNECTION_STRING
-  SCCACHE_AZURE_BLOB_CONTAINER
-  SCCACHE_AZURE_KEY_PREFIX
-  SCCACHE_REDIS_ENDPOINT
-  SCCACHE_REDIS_CLUSTER_ENDPOINTS
-  SCCACHE_REDIS_USERNAME
-  SCCACHE_REDIS_PASSWORD
-  SCCACHE_REDIS_DB
-  SCCACHE_REDIS_EXPIRATION
-  SCCACHE_REDIS_TTL
-  SCCACHE_REDIS_KEY_PREFIX
-  SCCACHE_REDIS
-  SCCACHE_MEMCACHED_ENDPOINT
-  SCCACHE_MEMCACHED_USERNAME
-  SCCACHE_MEMCACHED_PASSWORD
-  SCCACHE_MEMCACHED_EXPIRATION
-  SCCACHE_MEMCACHED_KEY_PREFIX
-  SCCACHE_MEMCACHED
-  SCCACHE_GHA_CACHE_URL
-  SCCACHE_GHA_RUNTIME_TOKEN
-  SCCACHE_GHA_CACHE_TO
-  SCCACHE_GHA_CACHE_FROM
-  SCCACHE_WEBDAV_ENDPOINT
-  SCCACHE_WEBDAV_KEY_PREFIX
-  SCCACHE_WEBDAV_USERNAME
-  SCCACHE_WEBDAV_PASSWORD
-  SCCACHE_WEBDAV_TOKEN
-  ACTIONS_RESULTS_URL
-  ACTIONS_RUNTIME_TOKEN
-  RUSTC_WRAPPER
-  CC
-  CXX
-  SCCACHE_IDLE_TIMEOUT
-)
 RUN_FLOW_CHILD_PID=""
 RUN_FLOW_SIGNAL_STATUS=0
 
@@ -70,13 +22,6 @@ require_cmd() {
     echo "ERROR: required command not found: ${name}" >&2
     exit 1
   fi
-}
-
-clear_conflicting_sccache_env() {
-  local name
-  for name in "${SCCACHE_CONFLICT_ENV_VARS[@]}"; do
-    unset "${name}"
-  done
 }
 
 resolve_boringcache_binary() {
@@ -231,7 +176,6 @@ prepare_environment() {
   MODE="$(effective_mode)"
   if [[ "${MODE}" == "boringcache" ]]; then
     require_cmd sccache
-    clear_conflicting_sccache_env
     BORINGCACHE_BINARY="$(resolve_boringcache_binary)" || {
       echo "ERROR: boringcache binary not found. Build ./target/debug/boringcache once or set BORINGCACHE_CARGO_FLOW_BINARY." >&2
       exit 1
@@ -392,13 +336,13 @@ run_flow() {
   proxy_tag="$(build_proxy_tag "${profile}")"
   restore_target_archive_if_needed "${profile}"
 
-  run_args=(run "${WORKSPACE}" --proxy "${proxy_tag}" --no-platform --no-git --host 127.0.0.1 --port "$(proxy_port)")
+  run_args=(sccache --workspace "${WORKSPACE}" --tag "${proxy_tag}" --no-platform --no-git --host 127.0.0.1 --port "$(proxy_port)")
   case "$(target_archive_action "${profile}")" in
     restore-and-save)
-      run_args+=("$(build_target_tag "${profile}"):${CARGO_TARGET_DIR}")
+      run_args+=(--entry "$(build_target_tag "${profile}"):${CARGO_TARGET_DIR}")
       ;;
     save-only-target-present)
-      run_args+=("$(build_target_tag "${profile}"):${CARGO_TARGET_DIR}" --skip-restore)
+      run_args+=(--entry "$(build_target_tag "${profile}"):${CARGO_TARGET_DIR}" --skip-restore)
       ;;
   esac
 

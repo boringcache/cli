@@ -462,3 +462,93 @@ entries = ["bundler"]
         "stderr: {stderr}"
     );
 }
+
+#[test]
+fn test_turbo_dry_run_json_uses_adapter_config() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.turbo]
+tag = "turbo-main"
+command = ["pnpm", "turbo", "run", "build"]
+entries = ["pnpm-store"]
+metadata-hints = ["phase=warm"]
+fail-on-cache-error = true
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["turbo", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute turbo dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_eq!(parsed["adapter"], "turbo");
+    assert_eq!(parsed["workspace"], "test-org/test-workspace");
+    assert_eq!(parsed["tag"], "turbo-main");
+    assert_eq!(parsed["command"][0], "pnpm");
+    assert_eq!(parsed["env_vars"]["TURBO_API"], "http://127.0.0.1:5000");
+    assert_eq!(parsed["env_vars"]["TURBO_TOKEN"], "boringcache");
+    assert_eq!(parsed["proxy"]["metadata_hints"]["phase"], "warm");
+}
+
+#[test]
+fn test_docker_dry_run_json_injects_cache_flags() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .args([
+            "docker",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "docker-main",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--dry-run",
+            "--json",
+            "--",
+            "docker",
+            "buildx",
+            "build",
+            ".",
+        ])
+        .output()
+        .expect("Failed to execute docker dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_eq!(parsed["adapter"], "docker");
+    assert_eq!(parsed["proxy"]["endpoint_host"], "host.docker.internal");
+    let command = parsed["command"]
+        .as_array()
+        .expect("command array")
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(
+        command
+            .contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache")
+    );
+    assert!(command.contains(
+        &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max"
+    ));
+}

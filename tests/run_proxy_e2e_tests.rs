@@ -29,13 +29,13 @@ expected_sccache_endpoint="${expected_endpoint}/"
 [ "${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}" = "$expected_endpoint" ] || exit 2
 [ "${TURBO_API:-}" = "$expected_endpoint" ] || exit 3
 [ "${SCCACHE_WEBDAV_ENDPOINT:-}" = "$expected_sccache_endpoint" ] || exit 4
-[ -z "${SCCACHE_ENDPOINT:-}" ] || exit 5
-[ -z "${SCCACHE_BUCKET:-}" ] || exit 6
-[ -z "${SCCACHE_WEBDAV_USERNAME:-}" ] || exit 7
-[ -z "${SCCACHE_WEBDAV_PASSWORD:-}" ] || exit 8
-[ -z "${SCCACHE_CONF:-}" ] || exit 9
-[ -z "${SCCACHE_CACHED_CONF:-}" ] || exit 10
-[ -z "${SCCACHE_WEBDAV_TOKEN:-}" ] || exit 11
+[ "${SCCACHE_ENDPOINT:-}" = "https://wrong.example.invalid" ] || exit 5
+[ "${SCCACHE_BUCKET:-}" = "wrong-bucket" ] || exit 6
+[ "${SCCACHE_WEBDAV_USERNAME:-}" = "wrong-user" ] || exit 7
+[ "${SCCACHE_WEBDAV_PASSWORD:-}" = "wrong-password" ] || exit 8
+[ "${SCCACHE_CONF:-}" = "/tmp/wrong-sccache.conf" ] || exit 9
+[ "${SCCACHE_CACHED_CONF:-}" = "stale-config" ] || exit 10
+[ "${SCCACHE_WEBDAV_TOKEN:-}" = "wrong-token" ] || exit 11
 [ "${2:-}" = "$expected_ref" ] || exit 12
 curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 13
 "#;

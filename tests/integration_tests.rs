@@ -155,9 +155,34 @@ fn test_run_command_help() {
     assert!(stdout.contains("TAG_PATH_PAIRS") || stdout.contains("tag:path"));
     assert!(stdout.contains("--profile"));
     assert!(stdout.contains("--entry"));
+    assert!(stdout.contains("--endpoint-host"));
+    assert!(stdout.contains("--read-only"));
     assert!(stdout.contains("Supported forms:"));
     assert!(stdout.contains("boringcache run [WORKSPACE] TAG_PATHS -- COMMAND..."));
     assert!(stdout.contains("Manual TAG_PATHS are exclusive with --entry and --profile."));
+}
+
+#[test]
+fn test_turbo_command_help() {
+    let output = run_cli_command(&["turbo", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: boringcache turbo"));
+    assert!(stdout.contains("--workspace"));
+    assert!(stdout.contains("--tag"));
+    assert!(stdout.contains("--endpoint-host"));
+}
+
+#[test]
+fn test_docker_command_help() {
+    let output = run_cli_command(&["docker", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: boringcache docker"));
+    assert!(stdout.contains("--cache-mode"));
+    assert!(stdout.contains("--cache-ref-tag"));
 }
 
 #[test]

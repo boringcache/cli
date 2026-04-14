@@ -154,6 +154,26 @@ fn should_fail_on_restore_error(fail_on_cache_error: bool, require_server_signat
     fail_on_cache_error || require_server_signature
 }
 
+fn finalize_execute_batch_restore_result(
+    result: Result<()>,
+    fail_on_cache_miss: bool,
+    fail_on_cache_error: bool,
+    require_server_signature: bool,
+) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if fail_on_cache_miss
+                || should_fail_on_restore_error(fail_on_cache_error, require_server_signature)
+            {
+                return Err(err);
+            }
+            ui::warn(&format!("{:#}", err));
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +312,20 @@ mod tests {
     }
 
     #[test]
+    fn lenient_execute_batch_restore_result_warns_and_continues() {
+        let err: Error = anyhow!("boom");
+        let result = super::finalize_execute_batch_restore_result(Err(err), false, false, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn strict_execute_batch_restore_result_returns_error() {
+        let err: Error = anyhow!("boom");
+        let result = super::finalize_execute_batch_restore_result(Err(err), false, true, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn finalize_restore_outcome_errors_on_restore_failure() {
         let err: Error = anyhow!("boom");
         let result = super::finalize_restore_outcome(vec![err], Vec::new());
@@ -360,28 +394,24 @@ pub async fn execute_batch_restore(
     fail_on_cache_error: bool,
     require_server_signature: bool,
 ) -> Result<()> {
-    if let Err(err) = execute_batch_restore_inner(
-        workspace_option,
-        tag_path_pairs,
-        verbose,
-        no_platform,
-        no_git,
+    finalize_execute_batch_restore_result(
+        execute_batch_restore_inner(
+            workspace_option,
+            tag_path_pairs,
+            verbose,
+            no_platform,
+            no_git,
+            fail_on_cache_miss,
+            lookup_only,
+            identity,
+            fail_on_cache_error,
+            require_server_signature,
+        )
+        .await,
         fail_on_cache_miss,
-        lookup_only,
-        identity,
         fail_on_cache_error,
         require_server_signature,
     )
-    .await
-    {
-        if fail_on_cache_miss
-            || should_fail_on_restore_error(fail_on_cache_error, require_server_signature)
-        {
-            return Err(err);
-        }
-        ui::warn(&format!("{:#}", err));
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
