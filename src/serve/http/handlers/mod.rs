@@ -1,0 +1,1153 @@
+mod blobs;
+mod manifest;
+mod uploads;
+
+use axum::Json;
+use axum::body::Body;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::response::{IntoResponse, Response};
+use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+use self::blobs::get_blob;
+#[cfg(test)]
+use self::manifest::{
+    adaptive_blob_upload_concurrency, extract_blob_descriptors, stage_manifest_reference_uploads,
+};
+use self::manifest::{get_manifest, put_manifest};
+use self::uploads::{delete_upload, get_upload_status, patch_upload, put_upload, start_upload};
+#[cfg(test)]
+use self::uploads::{parse_put_upload_offset, parse_upload_offset};
+
+use super::error::OciError;
+use super::oci_route::{
+    OciRoute, oci_cache_op_for_route_method, oci_miss_key, oci_success_rollup_result,
+    parse_oci_path, record_oci_cache_op,
+};
+#[cfg(test)]
+use super::oci_tags::{
+    AliasBinding, alias_tags_for_manifest, scoped_restore_tags, scoped_save_tag,
+};
+#[cfg(test)]
+use crate::cas_oci;
+use crate::serve::cache_registry;
+use crate::serve::state::{AppState, diagnostics_enabled};
+#[cfg(test)]
+use crate::serve::state::{OciManifestCacheEntry, UploadSession, digest_tag};
+
+const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
+const OCI_PREFETCH_BLOB_URL_LIMIT: usize = 128;
+const OCI_BLOB_RETRIEVABILITY_VALIDATION_TTL: Duration = Duration::from_secs(10);
+const EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS: usize = 20;
+const EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS: u64 = 75;
+const EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS: usize = 3;
+const EMPTY_FINALIZE_REMOTE_RETRY_DELAY_MS: u64 = 100;
+const OCI_DEGRADED_HEADER: &str = "X-BoringCache-Cache-Degraded";
+const OCI_PREFETCH_STATE_HEADER: &str = "X-BoringCache-Prefetch-State";
+const OCI_PREFETCH_STATE_READY: &str = "ready";
+const OCI_PREFETCH_STATE_WARMING: &str = "warming";
+const PROXY_PHASE_HEADER: &str = "X-BoringCache-Proxy-Phase";
+const PROXY_PUBLISH_STATE_HEADER: &str = "X-BoringCache-Publish-State";
+const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+const OCI_BLOB_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
+const OCI_POINTER_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn oci_request_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(diagnostics_enabled)
+}
+
+#[derive(Serialize)]
+struct ProxyStatusResponse {
+    phase: &'static str,
+    publish_state: &'static str,
+    publish_settled: bool,
+    prefetch_complete: bool,
+    shutdown_requested: bool,
+    cache_entry_id: Option<String>,
+    tags_visible: bool,
+    pending_entries: usize,
+    pending_blobs: usize,
+    pending_spool_bytes: u64,
+    flush_in_progress: bool,
+    pending_publish_handoff: bool,
+}
+
+pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
+    let prefetch_complete = state
+        .prefetch_complete
+        .load(std::sync::atomic::Ordering::Acquire);
+    let shutdown_requested = state
+        .shutdown_requested
+        .load(std::sync::atomic::Ordering::Acquire);
+    let phase = if shutdown_requested {
+        "draining"
+    } else if prefetch_complete {
+        "ready"
+    } else {
+        "warming"
+    };
+
+    let (pending_entries, pending_blobs, pending_spool_bytes) = {
+        let pending = state.kv_pending.read().await;
+        (
+            pending.entry_count(),
+            pending.blob_count(),
+            pending.total_spool_bytes(),
+        )
+    };
+    let flush_in_progress = state.kv_flushing.read().await.is_some();
+    let pending_publish_handoff = cache_registry::has_kv_pending_publish_handoff(&state).await;
+    let cache_entry_id = {
+        let published = state.kv_published_index.read().await;
+        published.cache_entry_id().map(str::to_string)
+    };
+    let tags_visible = match cache_entry_id.as_deref() {
+        Some(cache_entry_id) => {
+            cache_registry::kv_publish_tags_visible(&state, cache_entry_id).await
+        }
+        None => true,
+    };
+    let publish_settled =
+        pending_entries == 0 && !flush_in_progress && !pending_publish_handoff && tags_visible;
+    let publish_state = if publish_settled {
+        "settled"
+    } else {
+        "pending"
+    };
+
+    (
+        [
+            ("Cache-Control", "no-store"),
+            (PROXY_PHASE_HEADER, phase),
+            (PROXY_PUBLISH_STATE_HEADER, publish_state),
+        ],
+        Json(ProxyStatusResponse {
+            phase,
+            publish_state,
+            publish_settled,
+            prefetch_complete,
+            shutdown_requested,
+            cache_entry_id,
+            tags_visible,
+            pending_entries,
+            pending_blobs,
+            pending_spool_bytes,
+            flush_in_progress,
+            pending_publish_handoff,
+        }),
+    )
+}
+
+pub async fn v2_base(State(state): State<AppState>) -> impl IntoResponse {
+    if !state
+        .prefetch_complete
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return (
+            StatusCode::OK,
+            [
+                ("Docker-Distribution-API-Version", "registry/2.0"),
+                (OCI_PREFETCH_STATE_HEADER, OCI_PREFETCH_STATE_WARMING),
+            ],
+            "",
+        );
+    }
+    (
+        StatusCode::OK,
+        [
+            ("Docker-Distribution-API-Version", "registry/2.0"),
+            (OCI_PREFETCH_STATE_HEADER, OCI_PREFETCH_STATE_READY),
+        ],
+        "",
+    )
+}
+
+pub async fn oci_dispatch(
+    method: Method,
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, OciError> {
+    let request_method = method.clone();
+    let request_path = format!("/v2/{path}");
+    let request_start = Instant::now();
+    if oci_request_log_enabled() {
+        eprintln!("REQUEST: {} {}", request_method, request_path);
+    }
+    let fail_on_cache_error = state.fail_on_cache_error;
+    let route = match parse_oci_path(&path) {
+        Some(route) => route,
+        None => return Err(OciError::name_unknown("not found")),
+    };
+    let maybe_cache_op = oci_cache_op_for_route_method(&route, &request_method);
+    let miss_key = oci_miss_key(&route);
+    if oci_request_log_enabled() {
+        eprintln!("OCI {} {}", request_method, request_path);
+    }
+
+    let response = match route.clone() {
+        OciRoute::Manifest { name, reference } => match method {
+            Method::GET | Method::HEAD => {
+                get_manifest(method, state.clone(), name, reference).await
+            }
+            Method::PUT => put_manifest(state.clone(), name, reference, body).await,
+            _ => Err(OciError::unsupported("method not allowed")),
+        },
+        OciRoute::Blob { name, digest } => match method {
+            Method::GET | Method::HEAD => get_blob(method, state.clone(), name, digest).await,
+            _ => Err(OciError::unsupported("method not allowed")),
+        },
+        OciRoute::BlobUploadStart { name } => match method {
+            Method::POST => start_upload(state.clone(), name, params, body).await,
+            _ => Err(OciError::unsupported("method not allowed")),
+        },
+        OciRoute::BlobUpload { name, uuid } => match method {
+            Method::GET => get_upload_status(state.clone(), name, uuid).await,
+            Method::PATCH => patch_upload(state.clone(), name, uuid, headers, body).await,
+            Method::PUT => put_upload(state.clone(), name, uuid, params, headers, body).await,
+            Method::DELETE => delete_upload(state.clone(), uuid).await,
+            _ => Err(OciError::unsupported("method not allowed")),
+        },
+    };
+
+    match response {
+        Ok(response) => {
+            let response_status = response.status();
+            if request_method != Method::GET
+                && request_method != Method::HEAD
+                && !response_status.is_success()
+            {
+                eprintln!(
+                    "OCI {} {} -> {}",
+                    request_method, request_path, response_status
+                );
+            }
+            if let Some(op) = maybe_cache_op {
+                let (result, degraded) = oci_success_rollup_result(&response, OCI_DEGRADED_HEADER);
+                let bytes = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                record_oci_cache_op(
+                    &state,
+                    op,
+                    result,
+                    degraded,
+                    bytes,
+                    request_start.elapsed().as_millis() as u64,
+                    None,
+                );
+            }
+            Ok(response)
+        }
+        Err(error) => {
+            let error_status = error.status();
+            if fail_on_cache_error || !error_status.is_server_error() {
+                eprintln!(
+                    "OCI {} {} -> {} ({})",
+                    request_method,
+                    request_path,
+                    error_status,
+                    error.message()
+                );
+                if let Some(op) = maybe_cache_op {
+                    let result = if error_status == StatusCode::NOT_FOUND
+                        && op == crate::serve::cache_registry::cache_ops::Op::Get
+                    {
+                        crate::serve::cache_registry::cache_ops::OpResult::Miss
+                    } else {
+                        crate::serve::cache_registry::cache_ops::OpResult::Error
+                    };
+                    record_oci_cache_op(
+                        &state,
+                        op,
+                        result,
+                        false,
+                        0,
+                        request_start.elapsed().as_millis() as u64,
+                        miss_key.as_deref(),
+                    );
+                }
+                return Err(error);
+            }
+            if request_method != Method::GET && request_method != Method::HEAD {
+                eprintln!(
+                    "OCI {} {} -> {} ({})",
+                    request_method,
+                    request_path,
+                    error_status,
+                    error.message()
+                );
+                if let Some(op) = maybe_cache_op {
+                    record_oci_cache_op(
+                        &state,
+                        op,
+                        crate::serve::cache_registry::cache_ops::OpResult::Error,
+                        false,
+                        0,
+                        request_start.elapsed().as_millis() as u64,
+                        None,
+                    );
+                }
+                return Err(error);
+            }
+            let warning = format!(
+                "Best-effort OCI fallback on {} {} ({})",
+                request_method, request_path, error_status
+            );
+            eprintln!("{warning}");
+            log::warn!("{warning}");
+            if let Some(op) = maybe_cache_op {
+                record_oci_cache_op(
+                    &state,
+                    op,
+                    crate::serve::cache_registry::cache_ops::OpResult::Error,
+                    true,
+                    0,
+                    request_start.elapsed().as_millis() as u64,
+                    None,
+                );
+            }
+            best_effort_oci_read_response(&route)
+        }
+    }
+}
+
+fn best_effort_oci_read_response(route: &OciRoute) -> Result<Response, OciError> {
+    match route {
+        OciRoute::Manifest { name, reference } => {
+            Err(OciError::manifest_unknown(format!("{name}:{reference}")))
+        }
+        OciRoute::Blob { name, digest } => Err(OciError::blob_unknown(format!("{name}@{digest}"))),
+        OciRoute::BlobUploadStart { .. } => Err(OciError::name_unknown("not found")),
+        OciRoute::BlobUpload { name, uuid } => {
+            Err(OciError::blob_upload_unknown(format!("{name}:{uuid}")))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::client::ApiClient;
+    use crate::git::GitContext;
+    use crate::platform::Platform;
+    use crate::serve::state::{
+        BlobLocatorCache, BlobReadCache, BlobReadMetrics, KvPendingStore, KvPublishedIndex,
+        UploadSessionStore, ref_tag_for_input,
+    };
+    use crate::tag_utils::TagResolver;
+    use axum::body::Bytes;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::sync::RwLock;
+
+    fn test_state() -> AppState {
+        let (kv_replication_work_tx, _kv_replication_work_rx) =
+            tokio::sync::mpsc::channel(crate::serve::state::KV_REPLICATION_WORK_QUEUE_CAPACITY);
+        let runtime_temp_dir = std::env::temp_dir().join(format!(
+            "boringcache-handler-runtime-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(runtime_temp_dir.join("kv-blobs")).expect("kv blob temp dir");
+        std::fs::create_dir_all(runtime_temp_dir.join("oci-uploads")).expect("oci upload temp dir");
+        AppState {
+            api_client: ApiClient::new_with_token_override(Some("test-token".to_string()))
+                .expect("api client"),
+            workspace: "boringcache/benchmarks".to_string(),
+            runtime_temp_dir: runtime_temp_dir.clone(),
+            kv_blob_temp_dir: runtime_temp_dir.join("kv-blobs"),
+            oci_upload_temp_dir: runtime_temp_dir.join("oci-uploads"),
+            read_only: false,
+            tag_resolver: TagResolver::new(None, GitContext::default(), false),
+            configured_human_tags: Vec::new(),
+            registry_root_tag: "registry".to_string(),
+            fail_on_cache_error: true,
+            kv_manifest_warm_enabled: true,
+            blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
+            upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
+            kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
+            kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
+            kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
+            kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_replication_enqueue_deferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_replication_flush_ok: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_replication_flush_conflict: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_replication_flush_error: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_replication_flush_permanent: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_replication_queue_depth: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            kv_replication_work_tx,
+            kv_next_flush_at: Arc::new(RwLock::new(None)),
+            kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
+            kv_flushing: Arc::new(RwLock::new(None)),
+            shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            kv_recent_misses: Arc::new(dashmap::DashMap::new()),
+            kv_miss_generations: Arc::new(dashmap::DashMap::new()),
+            blob_read_cache: Arc::new(
+                BlobReadCache::new_at(
+                    std::env::temp_dir().join(format!(
+                        "boringcache-handler-blob-cache-{}",
+                        uuid::Uuid::new_v4()
+                    )),
+                    2 * 1024 * 1024 * 1024,
+                )
+                .expect("blob read cache"),
+            ),
+            blob_read_metrics: Arc::new(BlobReadMetrics::new()),
+            prefetch_metrics: Arc::new(crate::serve::state::PrefetchMetrics::new()),
+            blob_download_max_concurrency: 16,
+            blob_download_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
+            blob_prefetch_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            cache_ops: Arc::new(crate::serve::cache_registry::cache_ops::Aggregator::new()),
+            oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
+            backend_breaker: Arc::new(crate::serve::state::BackendCircuitBreaker::new()),
+            prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            prefetch_complete_notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    async fn write_temp_upload_file(contents: &[u8]) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("boringcache-upload-test-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.expect("temp dir");
+        let path = dir.join("blob.bin");
+        tokio::fs::write(&path, contents).await.expect("temp file");
+        path
+    }
+
+    #[test]
+    fn parse_single_segment_manifest() {
+        match parse_oci_path("my-cache/manifests/main") {
+            Some(OciRoute::Manifest { name, reference }) => {
+                assert_eq!(name, "my-cache");
+                assert_eq!(reference, "main");
+            }
+            _ => panic!("expected Manifest"),
+        }
+    }
+
+    #[test]
+    fn parse_multi_segment_manifest() {
+        match parse_oci_path("org/cache/manifests/latest") {
+            Some(OciRoute::Manifest { name, reference }) => {
+                assert_eq!(name, "org/cache");
+                assert_eq!(reference, "latest");
+            }
+            _ => panic!("expected Manifest"),
+        }
+    }
+
+    #[test]
+    fn parse_deeply_nested_name() {
+        match parse_oci_path("a/b/c/blobs/sha256:abc") {
+            Some(OciRoute::Blob { name, digest }) => {
+                assert_eq!(name, "a/b/c");
+                assert_eq!(digest, "sha256:abc");
+            }
+            _ => panic!("expected Blob"),
+        }
+    }
+
+    #[test]
+    fn oci_success_rollup_without_degraded_header_is_hit() {
+        let response = (StatusCode::CREATED, Body::empty()).into_response();
+        let (result, degraded) = oci_success_rollup_result(&response, OCI_DEGRADED_HEADER);
+        assert_eq!(
+            result,
+            crate::serve::cache_registry::cache_ops::OpResult::Hit
+        );
+        assert!(!degraded);
+    }
+
+    #[test]
+    fn oci_success_rollup_with_degraded_header_is_error() {
+        let response = (
+            StatusCode::CREATED,
+            [(OCI_DEGRADED_HEADER, "1")],
+            Body::empty(),
+        )
+            .into_response();
+        let (result, degraded) = oci_success_rollup_result(&response, OCI_DEGRADED_HEADER);
+        assert_eq!(
+            result,
+            crate::serve::cache_registry::cache_ops::OpResult::Error
+        );
+        assert!(degraded);
+    }
+
+    #[tokio::test]
+    async fn oci_dispatch_records_blob_miss_rollup_and_missed_key() {
+        let state = test_state();
+        let result = oci_dispatch(
+            Method::GET,
+            State(state.clone()),
+            Path("cache/blobs/sha256:deadbeef".to_string()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Body::empty(),
+        )
+        .await;
+
+        let error = result.expect_err("blob should be missing");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+
+        let (rollups, missed, sessions) = state.cache_ops.drain();
+        assert!(sessions.is_empty());
+        let miss_rollup = rollups
+            .iter()
+            .find(|record| {
+                record.tool == "oci" && record.operation == "get" && record.result == "miss"
+            })
+            .expect("expected oci miss rollup");
+        assert_eq!(miss_rollup.event_count, 1);
+
+        let miss_key = missed
+            .iter()
+            .find(|record| record.tool == "oci")
+            .expect("expected oci missed key");
+        assert_eq!(miss_key.miss_count, 1);
+    }
+
+    #[tokio::test]
+    async fn put_upload_allows_local_reuse_when_finalize_payload_is_empty() {
+        let state = test_state();
+        let digest = cas_oci::prefixed_sha256_digest(b"existing payload");
+        let filled_path = write_temp_upload_file(b"existing payload").await;
+        let empty_path = write_temp_upload_file(&[]).await;
+
+        {
+            let mut sessions = state.upload_sessions.write().await;
+            sessions.create(UploadSession {
+                id: "filled-session".to_string(),
+                name: "cache".to_string(),
+                temp_path: filled_path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
+                bytes_received: 16,
+                finalized_digest: Some(digest.clone()),
+                finalized_size: Some(16),
+                created_at: Instant::now(),
+            });
+            sessions.create(UploadSession {
+                id: "empty-session".to_string(),
+                name: "cache".to_string(),
+                temp_path: empty_path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
+                bytes_received: 0,
+                finalized_digest: None,
+                finalized_size: None,
+                created_at: Instant::now(),
+            });
+        }
+
+        let mut params = HashMap::new();
+        params.insert("digest".to_string(), digest.clone());
+        let response = put_upload(
+            state.clone(),
+            "cache".to_string(),
+            "empty-session".to_string(),
+            params,
+            HeaderMap::new(),
+            Body::empty(),
+        )
+        .await
+        .expect("put upload should succeed via local reuse");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let sessions = state.upload_sessions.read().await;
+        let empty = sessions.get("empty-session").expect("empty session");
+        assert_eq!(empty.finalized_digest.as_deref(), Some(digest.as_str()));
+
+        let _ = tokio::fs::remove_file(&filled_path).await;
+        let _ = tokio::fs::remove_file(&empty_path).await;
+    }
+
+    #[tokio::test]
+    async fn start_upload_mount_returns_created_for_existing_local_digest() {
+        let state = test_state();
+        let digest = cas_oci::prefixed_sha256_digest(b"mount-existing");
+        let filled_path = write_temp_upload_file(b"mount-existing").await;
+
+        {
+            let mut sessions = state.upload_sessions.write().await;
+            sessions.create(UploadSession {
+                id: "filled-session".to_string(),
+                name: "cache".to_string(),
+                temp_path: filled_path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
+                bytes_received: 14,
+                finalized_digest: Some(digest.clone()),
+                finalized_size: Some(14),
+                created_at: Instant::now(),
+            });
+        }
+
+        let mut params = HashMap::new();
+        params.insert("mount".to_string(), digest.clone());
+        params.insert("from".to_string(), "cache".to_string());
+
+        let response = start_upload(state, "cache".to_string(), params, Body::empty())
+            .await
+            .expect("start upload mount should reuse local blob");
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let _ = tokio::fs::remove_file(&filled_path).await;
+    }
+
+    #[tokio::test]
+    async fn put_upload_retries_local_reuse_before_remote_lookup() {
+        let state = test_state();
+        let digest = cas_oci::prefixed_sha256_digest(b"delayed payload");
+        let delayed_path = write_temp_upload_file(b"delayed payload").await;
+        let empty_path = write_temp_upload_file(&[]).await;
+
+        {
+            let mut sessions = state.upload_sessions.write().await;
+            sessions.create(UploadSession {
+                id: "delayed-session".to_string(),
+                name: "cache".to_string(),
+                temp_path: delayed_path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
+                bytes_received: 0,
+                finalized_digest: None,
+                finalized_size: None,
+                created_at: Instant::now(),
+            });
+            sessions.create(UploadSession {
+                id: "empty-session".to_string(),
+                name: "cache".to_string(),
+                temp_path: empty_path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
+                bytes_received: 0,
+                finalized_digest: None,
+                finalized_size: None,
+                created_at: Instant::now(),
+            });
+        }
+
+        let state_for_finalize = state.clone();
+        let digest_for_finalize = digest.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let mut sessions = state_for_finalize.upload_sessions.write().await;
+            let session = sessions
+                .get_mut("delayed-session")
+                .expect("delayed session exists");
+            session.bytes_received = 15;
+            session.finalized_size = Some(15);
+            session.finalized_digest = Some(digest_for_finalize);
+        });
+
+        let mut params = HashMap::new();
+        params.insert("digest".to_string(), digest.clone());
+        let response = put_upload(
+            state,
+            "cache".to_string(),
+            "empty-session".to_string(),
+            params,
+            HeaderMap::new(),
+            Body::empty(),
+        )
+        .await
+        .expect("empty finalize should reuse delayed local digest");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let _ = tokio::fs::remove_file(&delayed_path).await;
+        let _ = tokio::fs::remove_file(&empty_path).await;
+    }
+
+    #[tokio::test]
+    async fn put_upload_returns_internal_error_on_body_stream_error() {
+        let state = test_state();
+        let path = write_temp_upload_file(&[]).await;
+        let digest = cas_oci::prefixed_sha256_digest(b"payload");
+
+        {
+            let mut sessions = state.upload_sessions.write().await;
+            sessions.create(UploadSession {
+                id: "stream-error-session".to_string(),
+                name: "cache".to_string(),
+                temp_path: path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
+                bytes_received: 0,
+                finalized_digest: None,
+                finalized_size: None,
+                created_at: Instant::now(),
+            });
+        }
+
+        let mut params = HashMap::new();
+        params.insert("digest".to_string(), digest);
+
+        let body = Body::from_stream(futures_util::stream::once(async {
+            let error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe");
+            Err::<Bytes, std::io::Error>(error)
+        }));
+
+        let error = put_upload(
+            state,
+            "cache".to_string(),
+            "stream-error-session".to_string(),
+            params,
+            HeaderMap::new(),
+            body,
+        )
+        .await
+        .expect_err("stream error should fail finalize");
+
+        assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(error.message().contains("body stream error"));
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[test]
+    fn parse_blob_upload_start() {
+        match parse_oci_path("my-cache/blobs/uploads/") {
+            Some(OciRoute::BlobUploadStart { name }) => {
+                assert_eq!(name, "my-cache");
+            }
+            _ => panic!("expected BlobUploadStart"),
+        }
+    }
+
+    #[test]
+    fn parse_blob_upload_start_without_trailing_slash() {
+        match parse_oci_path("my-cache/blobs/uploads") {
+            Some(OciRoute::BlobUploadStart { name }) => {
+                assert_eq!(name, "my-cache");
+            }
+            _ => panic!("expected BlobUploadStart"),
+        }
+    }
+
+    #[test]
+    fn parse_blob_upload_uuid() {
+        match parse_oci_path("my-cache/blobs/uploads/some-uuid-here") {
+            Some(OciRoute::BlobUpload { name, uuid }) => {
+                assert_eq!(name, "my-cache");
+                assert_eq!(uuid, "some-uuid-here");
+            }
+            _ => panic!("expected BlobUpload"),
+        }
+    }
+
+    #[test]
+    fn parse_blob_upload_uuid_uses_last_upload_marker() {
+        match parse_oci_path("org/blobs/uploads/cache/blobs/uploads/some-uuid-here") {
+            Some(OciRoute::BlobUpload { name, uuid }) => {
+                assert_eq!(name, "org/blobs/uploads/cache");
+                assert_eq!(uuid, "some-uuid-here");
+            }
+            _ => panic!("expected BlobUpload"),
+        }
+    }
+
+    #[test]
+    fn parse_blob_route_uses_last_blob_marker() {
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let path = format!("org/blobs/cache/blobs/{digest}");
+        match parse_oci_path(&path) {
+            Some(OciRoute::Blob {
+                name,
+                digest: parsed_digest,
+            }) => {
+                assert_eq!(name, "org/blobs/cache");
+                assert_eq!(parsed_digest, digest);
+            }
+            _ => panic!("expected Blob"),
+        }
+    }
+
+    #[test]
+    fn parse_leading_slash_stripped() {
+        match parse_oci_path("/my-cache/manifests/v1") {
+            Some(OciRoute::Manifest { name, reference }) => {
+                assert_eq!(name, "my-cache");
+                assert_eq!(reference, "v1");
+            }
+            _ => panic!("expected Manifest"),
+        }
+    }
+
+    #[test]
+    fn parse_invalid_path_returns_none() {
+        assert!(parse_oci_path("").is_none());
+        assert!(parse_oci_path("just-a-name").is_none());
+        assert!(parse_oci_path("/manifests/ref").is_none());
+    }
+
+    #[test]
+    fn parse_upload_offset_prefers_range_start() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Range", "0-1023".parse().unwrap());
+        assert_eq!(parse_upload_offset(&headers), Some(0));
+    }
+
+    #[test]
+    fn parse_put_upload_offset_uses_content_range_start() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Content-Range", "bytes 4096-8191".parse().unwrap());
+        assert_eq!(parse_put_upload_offset(&headers, 8192), 4096);
+    }
+
+    #[test]
+    fn parse_put_upload_offset_uses_range_end_for_finalize() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Range", "0-8191".parse().unwrap());
+        assert_eq!(parse_put_upload_offset(&headers, 8192), 8192);
+    }
+
+    #[test]
+    fn parse_put_upload_offset_clamps_empty_range_to_current_size() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Range", "0-0".parse().unwrap());
+        assert_eq!(parse_put_upload_offset(&headers, 0), 0);
+    }
+
+    #[test]
+    fn extract_blob_descriptors_includes_child_manifests_for_index() {
+        let index_json = serde_json::json!({
+            "schemaVersion": 2,
+            "manifests": [
+                {"digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 500, "mediaType": "application/vnd.oci.image.manifest.v1+json"},
+                {"digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size": 600, "mediaType": "application/vnd.oci.image.manifest.v1+json"}
+            ]
+        });
+        let blobs = extract_blob_descriptors(&index_json).unwrap();
+        assert_eq!(blobs.len(), 2);
+        assert_eq!(
+            blobs[0].digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(
+            blobs[1].digest,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+    }
+
+    #[test]
+    fn extract_blob_descriptors_includes_config_and_layers() {
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "config": {"digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 100},
+            "layers": [
+                {"digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size": 2000},
+                {"digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "size": 3000}
+            ]
+        });
+        let blobs = extract_blob_descriptors(&manifest_json).unwrap();
+        assert_eq!(blobs.len(), 3);
+        assert_eq!(
+            blobs[0].digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(
+            blobs[1].digest,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert_eq!(
+            blobs[2].digest,
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        );
+    }
+
+    #[test]
+    fn extract_blob_descriptors_dedupes_by_digest() {
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "config": {"digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size": 32},
+            "layers": [
+                {"digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size": 32},
+                {"digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "size": 3000}
+            ]
+        });
+
+        let blobs = extract_blob_descriptors(&manifest_json).unwrap();
+        assert_eq!(blobs.len(), 2);
+        assert_eq!(
+            blobs[0].digest,
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        );
+        assert_eq!(
+            blobs[1].digest,
+            "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        );
+    }
+
+    #[test]
+    fn extract_blob_descriptors_rejects_conflicting_sizes_for_same_digest() {
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "config": {"digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size": 32},
+            "layers": [
+                {"digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size": 64}
+            ]
+        });
+
+        let error = extract_blob_descriptors(&manifest_json).unwrap_err();
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn extract_blob_descriptors_rejects_invalid_digest_format() {
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "config": {"digest": "sha256:not-a-real-digest", "size": 32},
+            "layers": []
+        });
+
+        let error = extract_blob_descriptors(&manifest_json).unwrap_err();
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn stage_manifest_reference_uploads_seeds_child_manifest_sessions() {
+        let state = test_state();
+        let child_manifest = br#"{"schemaVersion":2,"config":{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":12},"layers":[]}"#;
+        let child_digest = cas_oci::prefixed_sha256_digest(child_manifest);
+        let child_size = child_manifest.len() as u64;
+        let child_tag = digest_tag(&child_digest);
+        state.oci_manifest_cache.insert(
+            child_tag,
+            Arc::new(OciManifestCacheEntry {
+                index_json: child_manifest.to_vec(),
+                content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                manifest_digest: child_digest.clone(),
+                cache_entry_id: "entry-1".to_string(),
+                blobs: vec![],
+                name: "cache".to_string(),
+                inserted_at: Instant::now(),
+                blob_retrievability_validated_at: std::sync::Mutex::new(None),
+                blob_retrievability_validation_lock: tokio::sync::Mutex::new(()),
+            }),
+        );
+
+        let index_json = serde_json::json!({
+            "schemaVersion": 2,
+            "manifests": [
+                {"digest": child_digest, "size": child_size, "mediaType": "application/vnd.oci.image.manifest.v1+json"}
+            ]
+        });
+        let blob_descriptors = extract_blob_descriptors(&index_json).unwrap();
+        stage_manifest_reference_uploads(&state, "cache", &blob_descriptors, &index_json)
+            .await
+            .expect("stage child manifest");
+
+        let sessions = state.upload_sessions.read().await;
+        let session = sessions
+            .find_by_name_and_digest("cache", &blob_descriptors[0].digest)
+            .expect("staged upload session");
+        assert_eq!(session.finalized_size, Some(child_size));
+        assert_eq!(
+            session.finalized_digest.as_deref(),
+            Some(blob_descriptors[0].digest.as_str())
+        );
+    }
+
+    #[test]
+    fn scoped_save_tag_applies_git_suffix() {
+        let resolver = TagResolver::new(
+            None,
+            GitContext {
+                pr_number: None,
+                branch: Some("feature/x".to_string()),
+                default_branch: Some("main".to_string()),
+                commit_sha: None,
+            },
+            true,
+        );
+
+        let tag = scoped_save_tag(&resolver, "buildkit-cache", "main").unwrap();
+        assert_eq!(
+            tag,
+            ref_tag_for_input("buildkit-cache:main-branch-feature-x")
+        );
+    }
+
+    #[test]
+    fn scoped_restore_tags_use_single_effective_tag() {
+        let resolver = TagResolver::new(
+            None,
+            GitContext {
+                pr_number: None,
+                branch: Some("feature/x".to_string()),
+                default_branch: Some("main".to_string()),
+                commit_sha: None,
+            },
+            true,
+        );
+
+        let tags = scoped_restore_tags(&resolver, "buildkit-cache", "main");
+        assert_eq!(
+            tags,
+            vec![ref_tag_for_input("buildkit-cache:main-branch-feature-x")]
+        );
+    }
+
+    #[test]
+    fn scoped_save_tag_on_default_branch_uses_base() {
+        let resolver = TagResolver::new(
+            None,
+            GitContext {
+                pr_number: None,
+                branch: Some("main".to_string()),
+                default_branch: Some("main".to_string()),
+                commit_sha: None,
+            },
+            true,
+        );
+
+        let tag = scoped_save_tag(&resolver, "buildkit-cache", "main").unwrap();
+        assert_eq!(tag, ref_tag_for_input("buildkit-cache:main"));
+    }
+
+    #[test]
+    fn scoped_save_tag_applies_platform_suffix() {
+        let resolver = TagResolver::new(
+            Some(Platform::new_for_testing(
+                "linux",
+                "x86_64",
+                Some("ubuntu"),
+                Some("22"),
+            )),
+            GitContext::default(),
+            false,
+        );
+
+        let tag = scoped_save_tag(&resolver, "buildkit-cache", "main").unwrap();
+        assert_eq!(
+            tag,
+            ref_tag_for_input("buildkit-cache:main-ubuntu-22-x86_64")
+        );
+    }
+
+    #[test]
+    fn adaptive_blob_upload_concurrency_is_bounded() {
+        assert_eq!(adaptive_blob_upload_concurrency(1), 1);
+
+        let medium = adaptive_blob_upload_concurrency(5);
+        assert!((1..=5).contains(&medium));
+
+        let larger = adaptive_blob_upload_concurrency(32);
+        assert!((1..=32).contains(&larger));
+    }
+
+    #[test]
+    fn alias_tags_include_digest_and_human_alias_when_distinct() {
+        let tags = alias_tags_for_manifest(
+            "oci_ref_primary",
+            "sha256:abc123",
+            Some("posthog-build:pr-123"),
+            &["posthog-docker-build".to_string()],
+            &[],
+        );
+        assert_eq!(
+            tags,
+            vec![
+                AliasBinding {
+                    tag: "oci_digest_abc123".to_string(),
+                    write_scope_tag: Some("posthog-build:pr-123".to_string())
+                },
+                AliasBinding {
+                    tag: "posthog-docker-build".to_string(),
+                    write_scope_tag: None
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn alias_tags_skip_primary_and_deduplicate() {
+        let tags = alias_tags_for_manifest(
+            "oci_digest_abc123",
+            "sha256:abc123",
+            Some("posthog-build:pr-123"),
+            &["oci_digest_abc123".to_string()],
+            &[],
+        );
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn alias_tags_include_multiple_human_aliases() {
+        let tags = alias_tags_for_manifest(
+            "oci_ref_primary",
+            "sha256:abc123",
+            Some("posthog-build:pr-123"),
+            &[
+                "posthog-build".to_string(),
+                "posthog-stable".to_string(),
+                "posthog-build".to_string(),
+            ],
+            &[],
+        );
+        assert_eq!(
+            tags,
+            vec![
+                AliasBinding {
+                    tag: "oci_digest_abc123".to_string(),
+                    write_scope_tag: Some("posthog-build:pr-123".to_string())
+                },
+                AliasBinding {
+                    tag: "posthog-build".to_string(),
+                    write_scope_tag: None
+                },
+                AliasBinding {
+                    tag: "posthog-stable".to_string(),
+                    write_scope_tag: None
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn alias_tags_include_additional_aliases() {
+        let tags = alias_tags_for_manifest(
+            "oci_digest_abc123",
+            "sha256:abc123",
+            Some("posthog-build:pr-123"),
+            &["posthog-build".to_string()],
+            &[
+                AliasBinding {
+                    tag: "oci_ref_latest".to_string(),
+                    write_scope_tag: Some("posthog-build:latest".to_string()),
+                },
+                AliasBinding {
+                    tag: "posthog-build".to_string(),
+                    write_scope_tag: None,
+                },
+                AliasBinding {
+                    tag: "oci_ref_latest".to_string(),
+                    write_scope_tag: Some("posthog-build:latest".to_string()),
+                },
+            ],
+        );
+        assert_eq!(
+            tags,
+            vec![
+                AliasBinding {
+                    tag: "posthog-build".to_string(),
+                    write_scope_tag: None
+                },
+                AliasBinding {
+                    tag: "oci_ref_latest".to_string(),
+                    write_scope_tag: Some("posthog-build:latest".to_string())
+                }
+            ]
+        );
+    }
+}
