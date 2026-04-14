@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
+use super::error::OciError;
 use crate::api::models::cache::SaveRequest;
-use crate::serve::error::OciError;
 use crate::serve::state::{AppState, digest_tag, ref_tag_for_input};
 use crate::tag_utils::TagResolver;
 

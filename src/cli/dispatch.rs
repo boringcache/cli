@@ -136,167 +136,111 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
     let verbose = cli.verbose;
 
     match cli.command {
-        Commands::Auth { token } => commands::auth::execute(token).await,
-        Commands::Login {
-            manual,
-            email,
-            name,
-            username,
-        } => commands::login::execute(manual, email, name, username).await,
-        Commands::Doctor { workspace, json } => commands::doctor::execute(workspace, json).await,
-        Commands::Audit {
-            root,
-            path,
-            write,
-            json,
-        } => commands::audit::execute_with_paths(root, path, write, json).await,
-        Commands::Dashboard {
-            workspace,
-            period,
-            limit,
-            tag_limit,
-            interval,
-        } => commands::dashboard::execute(workspace, period, limit, tag_limit, interval).await,
+        Commands::Auth(args) => commands::auth::execute(args.token).await,
+        Commands::Login(args) => {
+            commands::login::execute(args.manual, args.email, args.name, args.username).await
+        }
+        Commands::Doctor(args) => commands::doctor::execute(args.workspace, args.json).await,
+        Commands::Audit(args) => {
+            commands::audit::execute_with_paths(args.root, args.path, args.write, args.json).await
+        }
+        Commands::Dashboard(args) => {
+            commands::dashboard::execute(
+                args.workspace,
+                args.period,
+                args.limit,
+                args.tag_limit,
+                args.interval,
+            )
+            .await
+        }
         Commands::Token(command) => execute_token(command).await,
-        Commands::Mount {
-            workspace,
-            tag_path,
-            no_platform,
-            no_git,
-            verbose,
-            force,
-            recipient,
-            identity,
-            require_server_signature,
-        } => {
+        Commands::Mount(args) => {
             commands::mount::execute(
-                workspace,
-                tag_path,
+                args.workspace,
+                args.tag_path,
                 commands::mount::MountOptions {
-                    no_platform,
-                    no_git,
-                    verbose,
-                    force,
-                    recipient,
-                    identity,
-                    require_server_signature,
+                    no_platform: args.no_platform,
+                    no_git: args.no_git,
+                    verbose: args.verbose,
+                    force: args.force,
+                    recipient: args.recipient,
+                    identity: args.identity,
+                    require_server_signature: args.require_server_signature,
                 },
             )
             .await
         }
-        Commands::Save {
-            workspace,
-            path_tag_pairs,
-            no_platform,
-            force,
-            no_git,
-            exclude,
-            recipient,
-            fail_on_cache_error,
-        } => {
-            let tag_path_strings = split_comma_values(path_tag_pairs);
-            let effective_workspace = resolve_effective_workspace(&workspace);
+        Commands::Save(args) => {
+            let tag_path_strings = split_comma_values(args.path_tag_pairs);
+            let effective_workspace = resolve_effective_workspace(&args.workspace);
 
             commands::save::execute_batch_save(
                 effective_workspace,
                 tag_path_strings,
                 verbose,
-                no_platform,
-                no_git,
-                force,
-                exclude,
-                recipient,
-                fail_on_cache_error,
+                args.no_platform,
+                args.no_git,
+                args.force,
+                args.exclude,
+                args.recipient,
+                args.fail_on_cache_error,
             )
             .await
         }
-        Commands::Restore {
-            workspace,
-            tag_path_pairs,
-            no_platform,
-            fail_on_cache_miss,
-            lookup_only,
-            no_git,
-            identity,
-            fail_on_cache_error,
-        } => {
-            let tag_path_strings = split_comma_values(tag_path_pairs);
-            let effective_workspace = resolve_effective_workspace(&workspace);
+        Commands::Restore(args) => {
+            let tag_path_strings = split_comma_values(args.tag_path_pairs);
+            let effective_workspace = resolve_effective_workspace(&args.workspace);
 
             commands::restore::execute_batch_restore(
                 effective_workspace,
                 tag_path_strings,
                 verbose,
-                no_platform,
-                no_git,
-                fail_on_cache_miss,
-                lookup_only,
-                identity,
-                fail_on_cache_error,
+                args.no_platform,
+                args.no_git,
+                args.fail_on_cache_miss,
+                args.lookup_only,
+                args.identity,
+                args.fail_on_cache_error,
                 require_server_signature,
             )
             .await
         }
-        Commands::Run {
-            workspace_or_tag_path,
-            tag_path_pairs,
-            profile,
-            entry,
-            no_platform,
-            no_git,
-            force,
-            exclude,
-            recipient,
-            identity,
-            proxy,
-            metadata_hint,
-            host,
-            endpoint_host,
-            port,
-            read_only,
-            save_on_failure,
-            skip_restore,
-            skip_save,
-            fail_on_cache_error,
-            fail_on_cache_miss,
-            dry_run,
-            json,
-            command,
-        } => {
+        Commands::Run(args) => {
             let (effective_workspace, tag_path_strings) =
-                split_run_positionals(workspace_or_tag_path, tag_path_pairs)?;
+                split_run_positionals(args.workspace_or_tag_path, args.tag_path_pairs)?;
 
             commands::run::execute(
                 effective_workspace,
                 tag_path_strings,
-                profile,
-                entry,
+                args.profile,
+                args.entry,
                 verbose,
                 require_server_signature,
-                no_platform,
-                no_git,
-                force,
-                exclude,
-                recipient,
-                identity,
-                proxy,
-                metadata_hint,
-                host,
-                endpoint_host,
-                port,
-                read_only,
-                save_on_failure,
-                skip_restore,
-                skip_save,
-                fail_on_cache_error,
-                fail_on_cache_miss,
-                dry_run,
-                json,
-                command,
+                args.no_platform,
+                args.no_git,
+                args.force,
+                args.exclude,
+                args.recipient,
+                args.identity,
+                args.proxy,
+                args.metadata_hint,
+                args.host,
+                args.endpoint_host,
+                args.port,
+                args.read_only,
+                args.save_on_failure,
+                args.skip_restore,
+                args.skip_save,
+                args.fail_on_cache_error,
+                args.fail_on_cache_miss,
+                args.dry_run,
+                args.json,
+                args.command,
             )
             .await
         }
-        Commands::Turbo { args } => {
+        Commands::Turbo(args) => {
             execute_adapter(
                 commands::adapter::AdapterKind::Turbo,
                 args,
@@ -305,7 +249,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             )
             .await
         }
-        Commands::Nx { args } => {
+        Commands::Nx(args) => {
             execute_adapter(
                 commands::adapter::AdapterKind::Nx,
                 args,
@@ -314,7 +258,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             )
             .await
         }
-        Commands::Bazel { args } => {
+        Commands::Bazel(args) => {
             execute_adapter(
                 commands::adapter::AdapterKind::Bazel,
                 args,
@@ -323,7 +267,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             )
             .await
         }
-        Commands::Gradle { args } => {
+        Commands::Gradle(args) => {
             execute_adapter(
                 commands::adapter::AdapterKind::Gradle,
                 args,
@@ -332,7 +276,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             )
             .await
         }
-        Commands::Maven { args } => {
+        Commands::Maven(args) => {
             execute_adapter(
                 commands::adapter::AdapterKind::Maven,
                 args,
@@ -341,7 +285,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             )
             .await
         }
-        Commands::Sccache { args } => {
+        Commands::Sccache(args) => {
             execute_adapter(
                 commands::adapter::AdapterKind::Sccache,
                 args,
@@ -350,7 +294,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             )
             .await
         }
-        Commands::Go { args } => {
+        Commands::Go(args) => {
             execute_adapter(
                 commands::adapter::AdapterKind::Go,
                 args,
@@ -359,7 +303,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             )
             .await
         }
-        Commands::Docker { args } => {
+        Commands::Docker(args) => {
             execute_adapter(
                 commands::adapter::AdapterKind::Docker,
                 args,
@@ -368,45 +312,40 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             )
             .await
         }
-        Commands::Check {
-            workspace,
-            tags,
-            no_platform,
-            no_git,
-            fail_on_miss,
-            json,
-            exact,
-        } => {
-            let tag_list = split_comma_values(tags);
-            let effective_workspace = resolve_effective_workspace(&workspace);
+        Commands::Check(args) => {
+            let tag_list = split_comma_values(args.tags);
+            let effective_workspace = resolve_effective_workspace(&args.workspace);
 
             commands::check::execute(
                 effective_workspace,
                 tag_list,
                 commands::check::CheckOptions {
-                    no_platform,
-                    no_git,
-                    fail_on_miss,
-                    json_output: json,
+                    no_platform: args.no_platform,
+                    no_git: args.no_git,
+                    fail_on_miss: args.fail_on_miss,
+                    json_output: args.json,
                     require_server_signature,
-                    exact,
+                    exact: args.exact,
                 },
             )
             .await
         }
-        Commands::Delete {
-            workspace_or_tag,
-            tags,
-            no_platform,
-            no_git,
-        } => commands::delete::execute(workspace_or_tag, tags, verbose, no_platform, no_git).await,
-        Commands::Inspect {
-            workspace_or_identifier,
-            identifier,
-            json,
-        } => commands::inspect::execute(workspace_or_identifier, identifier, json).await,
-        Commands::Config { action } => {
-            let action = match action {
+        Commands::Delete(args) => {
+            commands::delete::execute(
+                args.workspace_or_tag,
+                args.tags,
+                verbose,
+                args.no_platform,
+                args.no_git,
+            )
+            .await
+        }
+        Commands::Inspect(args) => {
+            commands::inspect::execute(args.workspace_or_identifier, args.identifier, args.json)
+                .await
+        }
+        Commands::Config(args) => {
+            let action = match args.action {
                 ConfigSubcommand::Get { key, json } => {
                     commands::config::ConfigAction::Get { key, json }
                 }
@@ -418,99 +357,92 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
 
             commands::config::execute(action).await
         }
-        Commands::Ls {
-            workspace,
-            limit,
-            page,
-            json,
-        } => commands::ls::execute(workspace, Some(limit), Some(page), verbose, json).await,
-        Commands::Status {
-            workspace,
-            period,
-            limit,
-            watch,
-            interval,
-            json,
-        } => commands::status::execute(workspace, period, limit, watch, interval, json).await,
-        Commands::Sessions {
-            workspace,
-            period,
-            limit,
-            page,
-            json,
-        } => commands::sessions::execute(workspace, period, limit, page, json).await,
-        Commands::Misses {
-            workspace,
-            period,
-            limit,
-            page,
-            json,
-        } => commands::misses::execute(workspace, period, limit, page, json).await,
-        Commands::Tags {
-            workspace,
-            filter,
-            all,
-            limit,
-            page,
-            json,
-        } => commands::tags::execute(workspace, filter, all, limit, page, json).await,
-        Commands::Use { workspace, json } => {
-            commands::use_workspace::execute(workspace, json).await
-        }
-        Commands::SetupEncryption {
-            workspace,
-            identity_output,
-        } => commands::setup_encryption::execute(workspace, identity_output).await,
-        Commands::Workspaces { json } => commands::workspaces::execute(json).await,
-        Commands::Onboard {
-            path,
-            email,
-            name,
-            username,
-            apply,
-            dry_run,
-            manual,
-            json,
-        }
-        | Commands::Optimize {
-            path,
-            email,
-            name,
-            username,
-            apply,
-            dry_run,
-            manual,
-            json,
-        } => {
-            commands::onboard::execute(path, email, name, username, apply, dry_run, manual, json)
-                .await
-        }
-        Commands::Serve {
-            workspace,
-            tag,
-            port,
-            host,
-            no_platform,
-            no_git,
-            metadata_hint,
-            fail_on_cache_error,
-            read_only,
-        } => {
-            commands::serve::execute(
-                workspace,
-                tag,
-                host,
-                port,
-                no_platform,
-                no_git,
-                metadata_hint,
-                fail_on_cache_error,
-                read_only,
+        Commands::Ls(args) => {
+            commands::ls::execute(
+                args.workspace,
+                Some(args.limit),
+                Some(args.page),
+                verbose,
+                args.json,
             )
             .await
         }
-        Commands::GoCacheProg { endpoint, token } => {
-            commands::go_cacheprog::execute(endpoint, token, verbose).await
+        Commands::Status(args) => {
+            commands::status::execute(
+                args.workspace,
+                args.period,
+                args.limit,
+                args.watch,
+                args.interval,
+                args.json,
+            )
+            .await
+        }
+        Commands::Sessions(args) => {
+            commands::sessions::execute(
+                args.workspace,
+                args.period,
+                args.limit,
+                args.page,
+                args.json,
+            )
+            .await
+        }
+        Commands::Misses(args) => {
+            commands::misses::execute(
+                args.workspace,
+                args.period,
+                args.limit,
+                args.page,
+                args.json,
+            )
+            .await
+        }
+        Commands::Tags(args) => {
+            commands::tags::execute(
+                args.workspace,
+                args.filter,
+                args.all,
+                args.limit,
+                args.page,
+                args.json,
+            )
+            .await
+        }
+        Commands::Use(args) => commands::use_workspace::execute(args.workspace, args.json).await,
+        Commands::SetupEncryption(args) => {
+            commands::setup_encryption::execute(args.workspace, args.identity_output).await
+        }
+        Commands::Workspaces(args) => commands::workspaces::execute(args.json).await,
+        Commands::Onboard(args) | Commands::Optimize(args) => {
+            commands::onboard::execute(
+                args.path,
+                args.email,
+                args.name,
+                args.username,
+                args.apply,
+                args.dry_run,
+                args.manual,
+                args.json,
+            )
+            .await
+        }
+        Commands::Serve(args) => {
+            commands::serve::execute(
+                args.workspace,
+                args.tag,
+                args.host,
+                args.port,
+                args.no_platform,
+                args.no_git,
+                args.metadata_hint,
+                args.fail_on_cache_error,
+                args.read_only,
+            )
+            .await
+        }
+        Commands::GoCacheProg(args) => {
+            commands::go_cacheprog::execute(args.endpoint, args.token, verbose).await
         }
     }
 }

@@ -24,9 +24,12 @@ src/
   cli/
     adapters.rs
     auth.rs
+    cache.rs
     config.rs
     dispatch.rs
     preprocess.rs
+    proxy.rs
+    workspace.rs
   command_support/
     mod.rs
     workspace.rs
@@ -60,7 +63,13 @@ src/
     tags.rs
   serve/
     mod.rs
-    handlers.rs
+    http/
+      mod.rs
+      error.rs
+      handlers.rs
+      oci_route.rs
+      oci_tags.rs
+      routes.rs
     state/
       mod.rs
       metrics.rs
@@ -118,12 +127,12 @@ These are the main files that carry multiple concerns and should be split by nam
 
 | Path | Concern mix |
 | --- | --- |
+| `src/serve/http/handlers.rs` | OCI dispatch, manifest lookup, blob lookup, and upload flows still share one file |
 | `src/serve/cache_registry/kv/lookup.rs` | lookup, blob IO, prefetch targeting, index load |
 | `src/serve/cache_registry/kv/flush.rs` | flush orchestration, refresh, polling, alias binding |
-| `src/commands/cache/save/mod.rs` | entrypoint plus archive, OCI, and file save flows |
-| `src/commands/cache/restore/mod.rs` | entrypoint plus archive, OCI, and file restore flows |
+| `src/commands/cache/restore/mod.rs` | entrypoint plus retry policy, target prep, and download orchestration |
 | `src/commands/cache/mount/mod.rs` | initial restore, watch loop, and layout-specific sync logic |
-| `src/cli.rs` + `src/cli/{preprocess,dispatch}.rs` + `src/main.rs` | command declaration is still centralized even after token/adapter/config extractions |
+| `src/api/client/mod.rs` | request policy, retry shaping, error parsing, and client construction still meet in one root module |
 | `src/config.rs` + `src/config/{env,source}.rs` | config persistence, config model, and env-backed auth resolution still meet in one root module |
 | `src/commands/workspace/onboard.rs` | command entrypoint, prompting, repo analysis, auth handoff, and file mutation still live together |
 
@@ -131,20 +140,22 @@ These are the main files that carry multiple concerns and should be split by nam
 
 This branch handled the remaining root-level first pass without changing the public crate surface.
 
-- `src/cli.rs` now keeps the command index while `src/cli/{auth,adapters,config}.rs` hold their own supporting types.
+- `src/cli.rs` now keeps the command index while `src/cli/{auth,adapters,cache,config,proxy,workspace}.rs` hold their own supporting types.
 - `src/config.rs` now has focused `env` and `source` helpers under `src/config/`.
 - `src/request_metrics.rs` moved under `src/observability/`.
 - `src/telemetry.rs` now fronts `collector`, `model`, and `operation` modules.
 - `src/progress.rs` now fronts `model` and `render`, and `src/ui.rs` now delegates summaries to `src/ui/summary.rs`.
+- `src/serve/http/` now groups the HTTP-facing OCI router, handlers, error surface, and tag helpers away from runtime/state wiring.
 
 ## Second-Pass Notes
 
 These are the next sensible follow-ons after this branch merges.
 
-- Group the remaining command arg structs inside `src/cli.rs` by concern, likely `auth`, `cache`, `workspace`, and `proxy`.
 - Split `src/config.rs` again if write/update persistence logic keeps growing alongside the data model.
 - Decide whether `telemetry` should fold fully into `observability`, or stay a sibling namespace for operation-level metrics.
 - Revisit `src/progress.rs` and the TUI/dashboard code together if the terminal presentation layer broadens further.
+- Split `src/serve/http/handlers.rs` into manifest, blob, and upload flows so the new `http` namespace is not still one giant entrypoint.
+- Revisit `src/api/client/mod.rs` for a third pass into request-policy, polling, and endpoint-family helpers.
 
 ## Command Surface Review
 
@@ -233,8 +244,9 @@ src/
   serve/
     mod.rs
     http/
+      mod.rs
       routes.rs
-      oci_dispatch.rs
+      handlers.rs
       oci_route.rs
       oci_tags.rs
       error.rs
@@ -317,4 +329,4 @@ src/
 
 ## Notes For Current Worktree
 
-- `Cargo.toml`, `Cargo.lock`, docs, and some tests have unrelated local edits in this worktree and are intentionally left alone.
+- Worktree is expected to stay clean while this file tracks structure-only follow-ups.

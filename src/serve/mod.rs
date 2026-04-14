@@ -1,11 +1,11 @@
 pub mod cache_registry;
 pub mod cas_publish;
-pub mod error;
-pub mod handlers;
-pub(crate) mod oci_route;
-pub(crate) mod oci_tags;
-pub mod routes;
+pub mod http;
 pub mod state;
+
+pub use http::error;
+pub use http::handlers;
+pub use http::routes;
 
 use anyhow::{Context, Result};
 use axum::serve::ListenerExt;

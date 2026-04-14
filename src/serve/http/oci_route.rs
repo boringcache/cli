@@ -1,7 +1,7 @@
 use axum::http::{HeaderMap, Method};
 use axum::response::Response;
 
-use crate::serve::error::OciError;
+use super::error::OciError;
 use crate::serve::state::AppState;
 
 #[derive(Clone)]
