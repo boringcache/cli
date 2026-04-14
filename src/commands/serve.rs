@@ -2,7 +2,7 @@ use anyhow::{Result, ensure};
 use std::collections::BTreeMap;
 
 use crate::api::client::ApiClient;
-use crate::cas_oci::sha256_hex;
+use crate::config::{AuthPurpose, Config};
 use crate::git::GitContext;
 use crate::tag_utils::TagResolver;
 
@@ -37,6 +37,19 @@ impl ProxyServerHandle {
     pub async fn shutdown_and_flush(self) -> Result<()> {
         self.handle.shutdown_and_flush().await
     }
+}
+
+pub(crate) fn effective_proxy_read_only(explicit_read_only: bool) -> bool {
+    if explicit_read_only {
+        return true;
+    }
+
+    let has_save_auth = Config::load_for_auth_purpose(AuthPurpose::Save).is_ok();
+    if has_save_auth {
+        return false;
+    }
+
+    Config::load_for_auth_purpose(AuthPurpose::Restore).is_ok()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -104,6 +117,7 @@ pub async fn start_proxy_background(
     port: u16,
     no_platform: bool,
     no_git: bool,
+    endpoint_host_override: Option<String>,
     proxy_metadata_hints: BTreeMap<String, String>,
     fail_on_cache_error: bool,
     read_only: bool,
@@ -134,11 +148,16 @@ pub async fn start_proxy_background(
         resolve_registry_tag_config(&tag_resolver, &tag)?;
 
     let primary_human_tag = configured_human_tags[0].clone();
-    let endpoint_host = if host == "0.0.0.0" {
-        "127.0.0.1".to_string()
-    } else {
-        host.clone()
-    };
+    let endpoint_host = endpoint_host_override
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            if host == "0.0.0.0" {
+                "127.0.0.1".to_string()
+            } else {
+                host.clone()
+            }
+        });
 
     let handle = crate::serve::start_server_background(
         api_client,
@@ -179,17 +198,10 @@ fn resolve_registry_tag_config(
     }
     ensure!(!resolved_tags.is_empty(), "Tag must not be empty");
 
-    let registry_root_tag = internal_registry_root_tag(&resolved_tags[0]);
+    let registry_root_tag = crate::proxy::internal_registry_root_tag(&resolved_tags[0]);
     let configured_human_tags = resolved_tags;
 
     Ok((registry_root_tag, configured_human_tags))
-}
-
-pub(crate) fn internal_registry_root_tag(primary_human_tag: &str) -> String {
-    format!(
-        "bc_registry_root_v2_{}",
-        sha256_hex(primary_human_tag.as_bytes())
-    )
 }
 
 pub(crate) fn resolve_proxy_metadata_hints(
@@ -292,7 +304,10 @@ mod tests {
     fn root_tag_without_aliases() {
         let resolver = TagResolver::new(None, GitContext::default(), false);
         let (root, aliases) = resolve_registry_tag_config(&resolver, "registry-root").unwrap();
-        assert_eq!(root, internal_registry_root_tag("registry-root"));
+        assert_eq!(
+            root,
+            crate::proxy::internal_registry_root_tag("registry-root")
+        );
         assert_eq!(aliases, vec!["registry-root".to_string()]);
     }
 
@@ -305,7 +320,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(root, internal_registry_root_tag("registry-root"));
+        assert_eq!(
+            root,
+            crate::proxy::internal_registry_root_tag("registry-root")
+        );
         assert_eq!(
             aliases,
             vec![

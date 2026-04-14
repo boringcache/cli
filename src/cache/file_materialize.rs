@@ -97,7 +97,7 @@ pub(crate) async fn materialize_file_cas_entries(
     }
 
     let file_job_count = primary_jobs.len().max(link_jobs.len()).max(1);
-    let max_concurrent = crate::commands::utils::get_optimal_concurrency(file_job_count, "restore");
+    let max_concurrent = crate::command_support::get_optimal_concurrency(file_job_count, "restore");
     let semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
 
     let mut primary_tasks = Vec::with_capacity(primary_jobs.len());

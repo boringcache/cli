@@ -19,6 +19,7 @@ use tokio_util::io::ReaderStream;
 use crate::api::models::cache::{
     BlobDescriptor, CacheResolutionEntry, ConfirmRequest, SaveRequest,
 };
+use crate::cache::receipts::try_commit_blob_receipts;
 use crate::cas_transport::upload_payload;
 use crate::error::{BoringCacheError, PendingMetadata};
 use crate::manifest::EntryType;
@@ -27,7 +28,6 @@ use crate::serve::state::{
     AppState, BlobReadHandle, CacheRegistryTuningProfile, KV_BACKLOG_POLICY, KvFlushingSnapshot,
     KvReplicationWork, diagnostics_enabled,
 };
-use crate::upload_receipts::try_commit_blob_receipts;
 
 use super::error::RegistryError;
 use super::kv_publish::{BlobUploadStats, partial_blob_upload_stats, upload_blobs};

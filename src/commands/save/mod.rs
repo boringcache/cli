@@ -1,3 +1,6 @@
+//! Save command namespace.
+//! Layout-specific save flows should be split into sibling modules under this directory.
+
 use anyhow::{Context, Error, Result, anyhow};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,15 +15,15 @@ use crate::api::models::cache::{
     BlobDescriptor, ConfirmRequest, ManifestCheckRequest, ManifestCheckResult, SaveRequest,
 };
 use crate::archive::{TarArchiveInfo, create_tar_archive};
+use crate::cache::cas_publish::{self, BlobUploadSource};
+use crate::cache::receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
 use crate::ci_detection::detect_ci_environment;
-use crate::commands::cas_publish::{self, BlobUploadSource};
-use crate::commands::save_support::{
+use crate::command_support::save_support::{
     build_manifest_bytes, complete_skipped_step, conflict_message_from_error,
     format_phase_duration, format_phase_duration_ms, is_cache_pending_error,
     manifest_files_from_draft, progress_info, progress_warning, save_summary, upload_archive_file,
     upload_archive_multipart, upload_manifest,
 };
-use crate::commands::upload_receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
 use crate::manifest::diff::compute_digest_from_draft;
 use crate::manifest::{EntryType, ManifestBuilder};
 use crate::progress::{
@@ -170,15 +173,15 @@ async fn execute_batch_save_inner(
     exclude: Vec<String>,
     recipient: Option<String>,
 ) -> Result<()> {
-    let workspace = crate::commands::utils::get_workspace_name(workspace)?;
+    let workspace = crate::command_support::get_workspace_name(workspace)?;
     crate::api::parse_workspace_slug(&workspace)?;
 
     let (encrypt, recipient) =
-        crate::commands::utils::resolve_encryption_config(&workspace, recipient)?;
+        crate::command_support::resolve_encryption_config(&workspace, recipient)?;
 
-    let parsed_pairs: Vec<crate::commands::utils::SaveSpec> = tag_path_pairs
+    let parsed_pairs: Vec<crate::command_support::SaveSpec> = tag_path_pairs
         .into_iter()
-        .map(|pair| crate::commands::utils::parse_save_format(&pair).map_err(Error::from))
+        .map(|pair| crate::command_support::parse_save_format(&pair).map_err(Error::from))
         .collect::<Result<_, _>>()?;
 
     let mut skipped_paths = 0usize;
@@ -192,12 +195,12 @@ async fn execute_batch_save_inner(
 
     let mut prepared_entries: Vec<(String, String)> = Vec::new();
 
-    for crate::commands::utils::SaveSpec {
+    for crate::command_support::SaveSpec {
         tag: base_tag,
         path,
     } in parsed_pairs
     {
-        let expanded_path = crate::commands::utils::expand_tilde_path(&path);
+        let expanded_path = crate::command_support::expand_tilde_path(&path);
         let git_context = if git_enabled {
             crate::git::GitContext::detect_with_path(Some(&expanded_path))
         } else {
@@ -242,7 +245,7 @@ async fn execute_batch_save_inner(
     let mut successful_saves = 0usize;
     let mut failed_attempts = 0usize;
     let mut errors: Vec<anyhow::Error> = Vec::new();
-    let max_concurrent = crate::commands::utils::get_optimal_concurrency(total_entries, "save");
+    let max_concurrent = crate::command_support::get_optimal_concurrency(total_entries, "save");
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent.max(1)));
     let mut tasks = Vec::with_capacity(total_entries);
     let shared_api_client: Arc<OnceCell<ApiClient>> = Arc::new(OnceCell::new());
@@ -1760,7 +1763,7 @@ mod tests {
         digest_existing_cache_entry_id_from_result,
     };
     use crate::api::models::cache::ManifestCheckResult;
-    use crate::commands::save_support::{
+    use crate::command_support::save_support::{
         conflict_message_from_error, is_cache_pending_error, serialize_manifest,
     };
 

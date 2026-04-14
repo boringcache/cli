@@ -156,7 +156,7 @@ impl DashboardApp {
         interval_seconds: u64,
     ) -> Result<Self> {
         let api_client = ApiClient::for_restore()?;
-        let workspace = crate::commands::utils::resolve_workspace(
+        let workspace = crate::command_support::resolve_workspace(
             &api_client,
             workspace_option,
             "boringcache dashboard <workspace>",

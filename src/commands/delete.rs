@@ -2,13 +2,8 @@ use anyhow::{Result, anyhow};
 use std::time::Instant;
 
 use crate::api::ApiClient;
-use crate::cas_oci::sha256_hex;
 use crate::progress::{Summary, System as ProgressSystem};
 use crate::ui;
-
-pub(crate) fn proxy_internal_root_tag(human_tag: &str) -> String {
-    format!("bc_registry_root_v2_{}", sha256_hex(human_tag.as_bytes()))
-}
 
 pub async fn execute(
     workspace_or_tag: String,
@@ -19,7 +14,7 @@ pub async fn execute(
 ) -> Result<()> {
     let (workspace_option, tag_list) = parse_delete_args(workspace_or_tag, tags)?;
     let api_client = ApiClient::for_admin()?;
-    let workspace = crate::commands::utils::resolve_workspace(
+    let workspace = crate::command_support::resolve_workspace(
         &api_client,
         workspace_option,
         "boringcache rm <workspace> <tag>",
@@ -63,7 +58,7 @@ pub async fn execute(
             None,
         )?;
 
-        let proxy_root_tag = proxy_internal_root_tag(&platform_tag);
+        let proxy_root_tag = crate::proxy::internal_registry_root_tag(&platform_tag);
         let tags_to_delete = vec![platform_tag.clone(), proxy_root_tag.clone()];
 
         let delete_result = api_client.delete(&workspace, &tags_to_delete).await;
@@ -183,39 +178,23 @@ mod tests {
     #[test]
     fn proxy_root_tag_matches_serve_derivation() {
         let tag = "grpc-bazel-remote-cache-ubuntu-24-x86_64";
-        let root = proxy_internal_root_tag(tag);
+        let root = crate::proxy::internal_registry_root_tag(tag);
         assert!(root.starts_with("bc_registry_root_v2_"));
         assert_eq!(root.len(), "bc_registry_root_v2_".len() + 64);
     }
 
     #[test]
     fn proxy_root_tag_is_deterministic() {
-        let a = proxy_internal_root_tag("my-cache-tag");
-        let b = proxy_internal_root_tag("my-cache-tag");
+        let a = crate::proxy::internal_registry_root_tag("my-cache-tag");
+        let b = crate::proxy::internal_registry_root_tag("my-cache-tag");
         assert_eq!(a, b);
     }
 
     #[test]
     fn proxy_root_tag_differs_for_different_human_tags() {
-        let a = proxy_internal_root_tag("tag-a");
-        let b = proxy_internal_root_tag("tag-b");
+        let a = crate::proxy::internal_registry_root_tag("tag-a");
+        let b = crate::proxy::internal_registry_root_tag("tag-b");
         assert_ne!(a, b);
-    }
-
-    #[test]
-    fn proxy_root_tag_matches_serve_internal_root_tag() {
-        let tags = [
-            "grpc-bazel-remote-cache",
-            "sccache-rust1.94",
-            "nx-main-ubuntu-24-x86_64",
-        ];
-        for tag in tags {
-            assert_eq!(
-                proxy_internal_root_tag(tag),
-                crate::commands::serve::internal_registry_root_tag(tag),
-                "delete and serve must derive identical internal root tags for '{tag}'"
-            );
-        }
     }
 
     #[test]

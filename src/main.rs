@@ -1,5 +1,5 @@
 use anyhow::Result;
-use boring_cache_cli::{cli, commands, config, exit_code::ExitCodeError, ui};
+use boring_cache_cli::{cli, command_support, commands, config, exit_code::ExitCodeError, ui};
 use clap::{CommandFactory, Parser};
 use tracing_subscriber::EnvFilter;
 
@@ -23,6 +23,7 @@ fn long_option_requires_value(command: &str, option: &str) -> bool {
                 | "--proxy"
                 | "--metadata-hint"
                 | "--host"
+                | "--endpoint-host"
                 | "--port"
         ),
         "ls" => matches!(option, "--limit" | "--page"),
@@ -169,7 +170,7 @@ async fn main() -> Result<()> {
             };
 
             if needs_workspace_injection
-                && let Some(default_workspace) = commands::utils::configured_workspace()
+                && let Some(default_workspace) = command_support::configured_workspace()
             {
                 if command == "ls" || positional_args.is_empty() {
                     args.push(default_workspace);
@@ -407,7 +408,9 @@ async fn main() -> Result<()> {
             proxy,
             metadata_hint,
             host,
+            endpoint_host,
             port,
+            read_only,
             save_on_failure,
             skip_restore,
             skip_save,
@@ -436,7 +439,9 @@ async fn main() -> Result<()> {
                 proxy,
                 metadata_hint,
                 host,
+                endpoint_host,
                 port,
+                read_only,
                 save_on_failure,
                 skip_restore,
                 skip_save,
@@ -445,6 +450,78 @@ async fn main() -> Result<()> {
                 dry_run,
                 json,
                 command,
+            )
+            .await
+        }
+        cli::Commands::Turbo { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Turbo,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Nx { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Nx,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Bazel { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Bazel,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Gradle { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Gradle,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Maven { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Maven,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Sccache { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Sccache,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Go { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Go,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Docker { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Docker,
+                args,
+                cli.verbose,
+                require_server_signature,
             )
             .await
         }

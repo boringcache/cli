@@ -52,7 +52,7 @@ async fn execute_inner(
     tags: Vec<String>,
     options: CheckOptions,
 ) -> Result<()> {
-    let workspace = crate::commands::utils::get_workspace_name(workspace)?;
+    let workspace = crate::command_support::get_workspace_name(workspace)?;
 
     if tags.is_empty() {
         if options.json_output {
@@ -293,7 +293,7 @@ fn verify_check_signature(entry: &crate::api::CacheResolutionEntry) -> Result<()
         )
     })?;
 
-    crate::commands::signature_policy::verify_server_signature(
+    crate::signing::policy::verify_server_signature(
         signature_tag,
         root_digest,
         public_key,

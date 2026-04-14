@@ -50,7 +50,7 @@ async fn resolve_status_target(
 ) -> Result<(ApiClient, String)> {
     let api_client = ApiClient::for_restore()?;
     let workspace =
-        crate::commands::utils::resolve_workspace(&api_client, workspace_option, explicit_example)
+        crate::command_support::resolve_workspace(&api_client, workspace_option, explicit_example)
             .await?;
     Ok((api_client, workspace))
 }

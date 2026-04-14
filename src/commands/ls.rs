@@ -39,7 +39,7 @@ pub async fn execute(
     verbose: bool,
     json_output: bool,
 ) -> Result<()> {
-    let workspace = crate::commands::utils::get_workspace_name(workspace_option)?;
+    let workspace = crate::command_support::get_workspace_name(workspace_option)?;
     let start_time = Instant::now();
     let api_client = ApiClient::for_restore()?;
 

@@ -2,10 +2,10 @@ use crate::api::ApiClient;
 use crate::api::models::cache::{
     BlobDescriptor, BlobReceipt, BlobUploadUrlsResponse, ConfirmRequest, SaveRequest, SaveResponse,
 };
+use crate::cache::receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
 use crate::ci_detection::detect_ci_environment;
 use crate::progress::TransferProgress;
 use crate::telemetry::StorageMetrics;
-use crate::upload_receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
 use anyhow::{Context, Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -96,7 +96,7 @@ pub(crate) async fn upload_missing_blobs(
     }
 
     let max_concurrent =
-        crate::commands::utils::get_optimal_concurrency(upload_items.len(), "save");
+        crate::command_support::get_optimal_concurrency(upload_items.len(), "save");
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
     let transfer_client = api_client.transfer_client().clone();
     let mut tasks = Vec::with_capacity(upload_items.len());

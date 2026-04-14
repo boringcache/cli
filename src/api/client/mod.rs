@@ -1,3 +1,6 @@
+//! API client namespace.
+//! Future splits belong here: transport/http, cache, workspace, auth, and metrics.
+
 use crate::config::{AuthPurpose, Config};
 use crate::error::{BoringCacheError, ConflictMetadata, PendingMetadata};
 use crate::observability;

@@ -1,11 +1,14 @@
+//! Restore command namespace.
+//! Archive, OCI, and file layout restore flows should move into sibling modules here.
+
 #![allow(clippy::items_after_test_module)]
 
 use crate::api::{ApiClient, CacheResolutionEntry};
-use crate::commands::cas_restore::{self, BlobDownloadTarget, FetchCasPointerOutcome};
-use crate::commands::file_materialize::materialize_file_cas_entries;
-use crate::commands::signature_policy::verify_restore_signature;
-use crate::commands::utils::RestoreSpec;
+use crate::cache::cas_restore::{self, BlobDownloadTarget, FetchCasPointerOutcome};
+use crate::cache::file_materialize::materialize_file_cas_entries;
+use crate::command_support::RestoreSpec;
 use crate::progress::{ProgressSession, Summary, System as ProgressSystem, TransferProgress};
+use crate::signing::policy::verify_restore_signature;
 use crate::telemetry::StorageMetrics;
 use crate::transfer::send_transfer_request_with_retry;
 use crate::ui;
@@ -69,7 +72,7 @@ fn run_restore_preflight_checks(
         }
 
         let path = spec.path.as_deref().unwrap_or(".");
-        let expanded_path = crate::commands::utils::expand_tilde_path(path);
+        let expanded_path = crate::command_support::expand_tilde_path(path);
         let target_path = Path::new(&expanded_path);
 
         if target_path.exists() {
@@ -154,7 +157,7 @@ fn should_fail_on_restore_error(fail_on_cache_error: bool, require_server_signat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::utils::RestoreSpec;
+    use crate::command_support::RestoreSpec;
     use anyhow::anyhow;
 
     #[test]
@@ -394,7 +397,7 @@ async fn execute_batch_restore_inner(
     fail_on_cache_error: bool,
     require_server_signature: bool,
 ) -> Result<()> {
-    let workspace = crate::commands::utils::get_workspace_name(workspace_option)?;
+    let workspace = crate::command_support::get_workspace_name(workspace_option)?;
 
     if tag_path_pairs.is_empty() {
         ui::info("No tag:path pairs specified for restore");
@@ -408,7 +411,7 @@ async fn execute_batch_restore_inner(
 
     let parsed_specs: Vec<RestoreSpec> = tag_path_pairs
         .iter()
-        .map(|tag_path| crate::commands::utils::parse_restore_format(tag_path).map_err(Error::from))
+        .map(|tag_path| crate::command_support::parse_restore_format(tag_path).map_err(Error::from))
         .collect::<Result<_, _>>()?;
 
     let preflight_result = run_restore_preflight_checks(&parsed_specs, !lookup_only)?;
@@ -463,7 +466,7 @@ async fn execute_batch_restore_inner(
         let target_path = spec
             .path
             .as_deref()
-            .map(crate::commands::utils::expand_tilde_path)
+            .map(crate::command_support::expand_tilde_path)
             .unwrap_or_else(|| ".".to_string());
 
         for candidate in &candidates {
@@ -693,10 +696,10 @@ async fn execute_batch_restore_inner(
     reporter.session_complete(session_id, step_start.elapsed(), summary)?;
 
     let max_concurrent =
-        crate::commands::utils::get_optimal_concurrency(selected_hits.len(), "restore");
+        crate::command_support::get_optimal_concurrency(selected_hits.len(), "restore");
 
     if selected_hits.len() > 1 {
-        crate::commands::utils::display_concurrency_info(max_concurrent, "restore");
+        crate::command_support::display_concurrency_info(max_concurrent, "restore");
         let _ = reporter.set_inline_enabled(false);
     }
 

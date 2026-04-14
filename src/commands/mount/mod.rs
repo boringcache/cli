@@ -1,3 +1,6 @@
+//! Mount command namespace.
+//! Initial restore and sync flows should be split by layout under this directory.
+
 use anyhow::{Context, Result};
 use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
 use std::collections::HashMap;
@@ -13,12 +16,12 @@ use crate::api::models::cache::{
     BlobDescriptor, ConfirmRequest, ManifestCheckRequest, ManifestCheckResult, SaveRequest,
 };
 use crate::archive::create_tar_archive;
+use crate::cache::cas_publish::{self, BlobUploadSource};
+use crate::cache::cas_restore::{self, BlobDownloadTarget, FetchCasPointerOutcome};
+use crate::cache::file_materialize::materialize_file_cas_entries;
 use crate::ci_detection::detect_ci_environment;
-use crate::commands::cas_publish::{self, BlobUploadSource};
-use crate::commands::cas_restore::{self, BlobDownloadTarget, FetchCasPointerOutcome};
-use crate::commands::file_materialize::materialize_file_cas_entries;
-use crate::commands::signature_policy::verify_restore_signature;
 use crate::manifest::{EntryType, ManifestBuilder};
+use crate::signing::policy::verify_restore_signature;
 use crate::transfer::send_transfer_request_with_retry;
 use crate::ui;
 
@@ -69,7 +72,7 @@ fn ensure_mount_sync_won(
 
 pub async fn execute(workspace: String, tag_path: String, options: MountOptions) -> Result<()> {
     let (tag, local_path) = parse_tag_path(&tag_path)?;
-    let expanded_path = crate::commands::utils::expand_tilde_path(&local_path);
+    let expanded_path = crate::command_support::expand_tilde_path(&local_path);
     let local_path = PathBuf::from(&expanded_path);
 
     crate::api::parse_workspace_slug(&workspace)?;
@@ -96,7 +99,7 @@ pub async fn execute(workspace: String, tag_path: String, options: MountOptions)
         .context("No configuration found. Run 'boringcache auth' to authenticate.")?;
 
     let (encrypt, recipient) =
-        crate::commands::utils::resolve_encryption_config(&workspace, options.recipient)?;
+        crate::command_support::resolve_encryption_config(&workspace, options.recipient)?;
     let passphrase_cache = Arc::new(Mutex::new(crate::encryption::PassphraseCache::default()));
 
     ui::info(&format!(

@@ -145,7 +145,7 @@ pub(crate) async fn download_blob_targets(
 
     let download_items = build_download_items(download_targets, &download_plan)?;
     let max_concurrent =
-        crate::commands::utils::get_optimal_concurrency(download_items.len(), "restore");
+        crate::command_support::get_optimal_concurrency(download_items.len(), "restore");
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
     let transfer_client = api_client.transfer_client().clone();
     let mut tasks = Vec::with_capacity(download_items.len());

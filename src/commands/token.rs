@@ -28,7 +28,7 @@ pub async fn list(
     json_output: bool,
 ) -> Result<()> {
     let api_client = ApiClient::for_admin()?;
-    let workspace = crate::commands::utils::resolve_workspace(
+    let workspace = crate::command_support::resolve_workspace(
         &api_client,
         workspace_option,
         "boringcache token ls <workspace>",
@@ -56,7 +56,7 @@ pub async fn show(
     let (workspace_option, token_id) =
         parse_token_target_args("show", workspace_or_token_id, token_id)?;
     let api_client = ApiClient::for_admin()?;
-    let workspace = crate::commands::utils::resolve_workspace(
+    let workspace = crate::command_support::resolve_workspace(
         &api_client,
         workspace_option,
         "boringcache token show <workspace> <token-id>",
@@ -76,7 +76,7 @@ pub async fn show(
 
 pub async fn create(options: CreateTokenOptions) -> Result<()> {
     let api_client = ApiClient::for_admin()?;
-    let workspace = crate::commands::utils::resolve_workspace(
+    let workspace = crate::command_support::resolve_workspace(
         &api_client,
         options.workspace_option,
         "boringcache token create <workspace> --name <name>",
@@ -124,7 +124,7 @@ pub async fn create_ci(
     json_output: bool,
 ) -> Result<()> {
     let api_client = ApiClient::for_admin()?;
-    let workspace = crate::commands::utils::resolve_workspace(
+    let workspace = crate::command_support::resolve_workspace(
         &api_client,
         workspace_option,
         "boringcache token create-ci <workspace>",
@@ -168,7 +168,7 @@ pub async fn revoke(
     let (workspace_option, token_id) =
         parse_token_target_args("revoke", workspace_or_token_id, token_id)?;
     let api_client = ApiClient::for_admin()?;
-    let workspace = crate::commands::utils::resolve_workspace(
+    let workspace = crate::command_support::resolve_workspace(
         &api_client,
         workspace_option,
         "boringcache token revoke <workspace> <token-id>",
@@ -200,7 +200,7 @@ pub async fn rotate(
     let (workspace_option, token_id) =
         parse_token_target_args("rotate", workspace_or_token_id, token_id)?;
     let api_client = ApiClient::for_admin()?;
-    let workspace = crate::commands::utils::resolve_workspace(
+    let workspace = crate::command_support::resolve_workspace(
         &api_client,
         workspace_option,
         "boringcache token rotate <workspace> <token-id>",

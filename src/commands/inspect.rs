@@ -11,7 +11,7 @@ pub async fn execute(
 ) -> Result<()> {
     let (workspace_option, target) = parse_inspect_args(workspace_or_identifier, identifier)?;
     let api_client = ApiClient::for_restore()?;
-    let workspace = crate::commands::utils::resolve_workspace(
+    let workspace = crate::command_support::resolve_workspace(
         &api_client,
         workspace_option,
         "boringcache inspect <workspace> <tag|id>",

@@ -317,7 +317,7 @@ async fn collect_workspace(requested: Option<String>, restore: &PurposeProbe) ->
     let requested = requested
         .map(|workspace| workspace.trim().to_string())
         .filter(|workspace| !workspace.is_empty());
-    let configured_workspace = crate::commands::utils::configured_workspace();
+    let configured_workspace = crate::command_support::configured_workspace();
     let session_workspace = restore
         .session
         .as_ref()
