@@ -171,7 +171,7 @@ pub struct RunArgs {
 
     #[arg(
         long,
-        help = "Start cache-registry proxy with the provided tag around command execution"
+        help = "Start cache-registry proxy with the provided tag around command execution; command args may use {PORT}, {ENDPOINT}, and {CACHE_REF}"
     )]
     pub proxy: Option<String>,
 
@@ -232,7 +232,7 @@ pub struct RunArgs {
     #[arg(
         last = true,
         required_unless_present = "dry_run",
-        help = "Command to execute (after --)"
+        help = "Command to execute (after --); with --proxy, args may use {PORT}, {ENDPOINT}, and {CACHE_REF}"
     )]
     pub command: Vec<String>,
 }

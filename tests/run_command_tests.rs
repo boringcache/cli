@@ -502,7 +502,106 @@ fail-on-cache-error = true
     assert_eq!(parsed["command"][0], "pnpm");
     assert_eq!(parsed["env_vars"]["TURBO_API"], "http://127.0.0.1:5000");
     assert_eq!(parsed["env_vars"]["TURBO_TOKEN"], "boringcache");
+    assert_eq!(parsed["proxy"]["no_platform"], false);
+    assert_eq!(parsed["proxy"]["no_git"], false);
     assert_eq!(parsed["proxy"]["metadata_hints"]["phase"], "warm");
+}
+
+#[test]
+fn test_bazel_dry_run_json_substitutes_placeholders_from_adapter_config_command() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.bazel]
+tag = "bazel-cache"
+command = ["bazel", "build", "--remote_cache={ENDPOINT}", "--remote_instance_name={CACHE_REF}", "//..."]
+endpoint-host = "host.docker.internal"
+port = 6001
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["bazel", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute bazel dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_eq!(parsed["adapter"], "bazel");
+    assert_eq!(parsed["tag"], "bazel-cache");
+    assert_eq!(parsed["proxy"]["endpoint_host"], "host.docker.internal");
+    assert_eq!(parsed["proxy"]["port"], 6001);
+    assert_eq!(parsed["command"][0], "bazel");
+    assert_eq!(
+        parsed["command"][2],
+        "--remote_cache=http://host.docker.internal:6001"
+    );
+    let cache_ref_arg = parsed["command"][3]
+        .as_str()
+        .expect("cache ref arg should be a string");
+    assert!(
+        cache_ref_arg
+            .starts_with("--remote_instance_name=host.docker.internal:6001/cache:bazel-cache"),
+        "cache_ref_arg: {cache_ref_arg}"
+    );
+    assert!(
+        !cache_ref_arg.contains("{CACHE_REF}"),
+        "cache_ref_arg: {cache_ref_arg}"
+    );
+}
+
+#[test]
+fn test_turbo_dry_run_json_plans_default_tag_without_command() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .env("GITHUB_REPOSITORY", "owner/demo-app")
+        .args(["turbo", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute turbo planner command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_eq!(parsed["adapter"], "turbo");
+    assert_eq!(parsed["workspace"], "test-org/test-workspace");
+    assert_eq!(parsed["tag"], "demo-app");
+    assert_eq!(parsed["command"], serde_json::json!([]));
+    assert_eq!(parsed["proxy"]["host"], "127.0.0.1");
+    assert_eq!(parsed["proxy"]["endpoint_host"], "127.0.0.1");
+    assert_eq!(parsed["proxy"]["port"], 5000);
+    assert_eq!(parsed["proxy"]["no_platform"], false);
+    assert_eq!(parsed["proxy"]["no_git"], false);
+    assert_eq!(parsed["proxy"]["read_only"], false);
+    assert_eq!(parsed["env_vars"]["TURBO_API"], "http://127.0.0.1:5000");
+    assert_eq!(parsed["env_vars"]["TURBO_TOKEN"], "boringcache");
+    assert_eq!(parsed["env_vars"]["TURBO_TEAM"], "boringcache");
 }
 
 #[test]
@@ -537,7 +636,20 @@ fn test_docker_dry_run_json_injects_cache_flags() {
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
     assert_eq!(parsed["adapter"], "docker");
+    assert_eq!(parsed["tag"], "docker-main");
     assert_eq!(parsed["proxy"]["endpoint_host"], "host.docker.internal");
+    assert_eq!(
+        parsed["oci_cache"]["registry_ref"],
+        "host.docker.internal:5000/cache:buildcache"
+    );
+    assert_eq!(
+        parsed["oci_cache"]["cache_from"],
+        "type=registry,ref=host.docker.internal:5000/cache:buildcache"
+    );
+    assert_eq!(
+        parsed["oci_cache"]["cache_to"],
+        "type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max"
+    );
     let command = parsed["command"]
         .as_array()
         .expect("command array")
@@ -551,4 +663,41 @@ fn test_docker_dry_run_json_injects_cache_flags() {
     assert!(command.contains(
         &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max"
     ));
+}
+
+#[test]
+fn test_docker_dry_run_json_supports_embedded_ref_tag_compatibility() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .args([
+            "docker",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "docker-main:cache-main",
+            "--dry-run",
+            "--json",
+            "--",
+            "docker",
+            "buildx",
+            "build",
+            ".",
+        ])
+        .output()
+        .expect("Failed to execute docker compatibility dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_eq!(parsed["tag"], "docker-main");
+    assert_eq!(parsed["oci_cache"]["ref_tag"], "cache-main");
+    assert_eq!(
+        parsed["oci_cache"]["registry_ref"],
+        "127.0.0.1:5000/cache:cache-main"
+    );
 }

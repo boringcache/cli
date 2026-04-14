@@ -22,6 +22,24 @@ Use it when:
 - BoringCache does not have a dedicated adapter command yet
 - you still want one command to own proxy startup and shutdown
 
+Command arguments can use these placeholders:
+
+- `{PORT}` — the advertised local proxy port
+- `{ENDPOINT}` — the advertised local proxy endpoint
+- `{CACHE_REF}` — the proxy cache ref
+
+Example:
+
+```bash
+boringcache run --proxy build-cache -- \
+  my-custom-tool \
+  --cache-endpoint {ENDPOINT} \
+  --cache-ref {CACHE_REF}
+```
+
+The same placeholders also work inside `[adapters.<tool>].command` in `.boringcache.toml`.
+That is limited placeholder substitution, not general TOML templating.
+
 ## `cache-registry`
 
 `cache-registry` keeps the proxy running as a standalone local endpoint:

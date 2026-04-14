@@ -85,6 +85,9 @@ pub struct AdapterArgs {
     )]
     pub json: bool,
 
-    #[arg(last = true, help = "Command to execute (after --)")]
+    #[arg(
+        last = true,
+        help = "Command to execute (after --); if omitted, use [adapters.<tool>].command from .boringcache.toml. Proxy-backed args may use {PORT}, {ENDPOINT}, and {CACHE_REF}"
+    )]
     pub command: Vec<String>,
 }

@@ -26,7 +26,7 @@ type InjectProxyEnvFn = fn(&mut ProxyEnvSet, &proxy::ProxyContext);
 type PrepareCommandFn =
     fn(&[String], Option<&proxy::ProxyContext>, &AdapterCommandOptions) -> Result<Vec<String>>;
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AdapterKind {
     Turbo,
@@ -140,6 +140,8 @@ struct DryRunPlan {
     archive_entries: Vec<DryRunArchiveEntry>,
     env_vars: BTreeMap<String, String>,
     proxy: DryRunProxyPlan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oci_cache: Option<docker::OciCachePlan>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -182,6 +184,8 @@ struct DryRunProxyPlan {
     host: String,
     endpoint_host: String,
     port: u16,
+    no_platform: bool,
+    no_git: bool,
     read_only: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     metadata_hints: BTreeMap<String, String>,
@@ -223,15 +227,7 @@ pub async fn adapter_execute(
         DryRunWorkspaceSource::ConfiguredDefault
     };
 
-    let tag = trim_non_empty(args.tag.as_deref())
-        .map(ToOwned::to_owned)
-        .or_else(|| trim_non_empty(adapter_config.tag.as_deref()).map(ToOwned::to_owned))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Missing cache tag. Pass --tag or configure [adapters.{}].tag in .boringcache.toml.",
-                kind.toml_key()
-            )
-        })?;
+    let raw_tag = resolve_adapter_tag(kind, args.tag.as_deref(), adapter_config.tag.as_deref())?;
 
     let command = if !args.command.is_empty() {
         args.command.clone()
@@ -240,7 +236,7 @@ pub async fn adapter_execute(
     } else {
         Vec::new()
     };
-    if command.is_empty() {
+    if command.is_empty() && !args.dry_run {
         anyhow::bail!(
             "Missing command. Pass one after -- or configure [adapters.{}].command in .boringcache.toml.",
             kind.toml_key()
@@ -291,12 +287,37 @@ pub async fn adapter_execute(
         .clone()
         .or(adapter_config.cache_mode.clone())
         .unwrap_or_else(|| "max".to_string());
-    let docker_cache_ref_tag = args
-        .cache_ref_tag
-        .clone()
+    docker::validate_cache_mode(&docker_cache_mode)?;
+    let docker_plan = if kind == AdapterKind::Docker {
+        let plan = docker::resolve_docker_plan(
+            &raw_tag,
+            args.cache_ref_tag
+                .as_deref()
+                .or(adapter_config.cache_ref_tag.as_deref()),
+            &advertised_endpoint_host,
+            port,
+            &docker_cache_mode,
+            effective_read_only,
+        )?;
+        if plan.used_legacy_embedded_ref_tag {
+            ui::warn(
+                "--tag included a ref-tag suffix; prefer --cache-ref-tag for the OCI cache tag.",
+            );
+        }
+        Some(plan)
+    } else {
+        None
+    };
+    let tag = docker_plan
+        .as_ref()
+        .map(|plan| plan.proxy_tag.clone())
+        .unwrap_or(raw_tag);
+    let docker_cache_ref_tag = docker_plan
+        .as_ref()
+        .map(|plan| plan.oci_cache.ref_tag.clone())
+        .or_else(|| args.cache_ref_tag.clone())
         .or(adapter_config.cache_ref_tag.clone())
         .unwrap_or_else(|| "buildcache".to_string());
-    docker::validate_cache_mode(&docker_cache_mode)?;
     let command_options = AdapterCommandOptions {
         cache_ref_tag: docker_cache_ref_tag,
         cache_mode: docker_cache_mode,
@@ -306,7 +327,13 @@ pub async fn adapter_execute(
     let preview_context = proxy::ProxyContext {
         endpoint_host: advertised_endpoint_host.clone(),
         port,
-        cache_ref: "{CACHE_REF}".to_string(),
+        cache_ref: docker_plan
+            .as_ref()
+            .map(|plan| plan.oci_cache.registry_ref.clone())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                serve::planned_cache_ref(&tag, &advertised_endpoint_host, port, no_platform, no_git)
+            })?,
     };
     let preview_command = proxy::substitute_proxy_placeholders(
         &kind.prepare_command(&command, Some(&preview_context), &command_options)?,
@@ -360,9 +387,12 @@ pub async fn adapter_execute(
                 host: bind_host,
                 endpoint_host: advertised_endpoint_host,
                 port,
+                no_platform,
+                no_git,
                 read_only: effective_read_only,
                 metadata_hints: proxy_metadata_hints,
             },
+            oci_cache: docker_plan.map(|plan| plan.oci_cache),
         };
 
         if args.json {
@@ -498,6 +528,28 @@ pub async fn adapter_execute(
 
 fn trim_non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn resolve_adapter_tag(
+    kind: AdapterKind,
+    cli_tag: Option<&str>,
+    configured_tag: Option<&str>,
+) -> Result<String> {
+    if let Some(tag) = trim_non_empty(cli_tag)
+        .or_else(|| trim_non_empty(configured_tag))
+        .map(ToOwned::to_owned)
+    {
+        return Ok(tag);
+    }
+
+    if let Some(repo_name) = trim_non_empty(std::env::var("GITHUB_REPOSITORY").ok().as_deref())
+        .map(|value| value.rsplit('/').next().unwrap_or(value).trim())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(repo_name.to_string());
+    }
+
+    Ok(kind.display_name().to_string())
 }
 
 fn merge_entries(configured: &[String], cli: &[String]) -> Vec<String> {

@@ -45,6 +45,10 @@ tag = "build-cache"
 command = ["nx", "run-many", "--target=build"]
 ```
 
+`command` can be an argv array like the example above or a shell-style string such as `command = "nx run-many --target=build"`.
+This is not general TOML templating.
+When the adapter starts a local proxy, command arguments can use `{PORT}`, `{ENDPOINT}`, and `{CACHE_REF}`.
+
 ```bash
 boringcache nx
 ```

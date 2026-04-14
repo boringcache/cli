@@ -14,6 +14,9 @@ boringcache onboard
 
 If you want to start sign-in from the terminal by email, use `boringcache onboard --email you@example.com`. For a brand-new account, pass `--name` and `--username` too.
 
+Repo config can also keep the repeated command itself under `[adapters.<tool>]`.
+`command` accepts either an argv array or a shell-style string.
+This is not general TOML templating: proxy-backed commands only substitute `{PORT}`, `{ENDPOINT}`, and `{CACHE_REF}`.
 After that, start with the shortest command that fits the tool:
 
 ```bash

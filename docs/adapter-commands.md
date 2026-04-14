@@ -59,13 +59,27 @@ boringcache nx
 Useful adapter fields:
 
 - `tag` — cache tag for the proxy session
-- `command` — command to run when you call `boringcache <adapter>` with no args
+- `command` — command to run when you call `boringcache <adapter>` with no args; accepts an argv array or a shell-style string
 - `entries` / `profiles` — optional archive entries to restore before the tool runs
 - `metadata-hints` — low-cardinality session metadata
 - `host`, `endpoint-host`, `port` — local endpoint settings
 - `skip-restore`, `skip-save`, `save-on-failure` — archive behavior overrides
 - `cache-mode`, `cache-ref-tag` — Docker-only cache export settings
 
+`command` is repo config, not a general templating system.
+For proxy-backed commands, BoringCache only substitutes these placeholders inside command arguments:
+
+- `{PORT}` — the advertised local proxy port
+- `{ENDPOINT}` — the advertised local proxy endpoint, for example `http://127.0.0.1:5000`
+- `{CACHE_REF}` — the proxy cache ref when the wrapped tool expects a registry-style cache ref
+
+Example:
+
+```toml
+[adapters.bazel]
+tag = "bazel-cache"
+command = ["bazel", "build", "--remote_cache={ENDPOINT}", "//..."]
+```
 ## What gets wired automatically
 
 These adapters inject the tool-specific settings for you:

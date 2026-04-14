@@ -157,6 +157,9 @@ fn test_run_command_help() {
     assert!(stdout.contains("--entry"));
     assert!(stdout.contains("--endpoint-host"));
     assert!(stdout.contains("--read-only"));
+    assert!(stdout.contains("{PORT}"));
+    assert!(stdout.contains("{ENDPOINT}"));
+    assert!(stdout.contains("{CACHE_REF}"));
     assert!(stdout.contains("Supported forms:"));
     assert!(stdout.contains("boringcache run [WORKSPACE] TAG_PATHS -- COMMAND..."));
     assert!(stdout.contains("Manual TAG_PATHS are exclusive with --entry and --profile."));
@@ -172,6 +175,10 @@ fn test_turbo_command_help() {
     assert!(stdout.contains("--workspace"));
     assert!(stdout.contains("--tag"));
     assert!(stdout.contains("--endpoint-host"));
+    assert!(stdout.contains("[adapters.<tool>].command"));
+    assert!(stdout.contains("{PORT}"));
+    assert!(stdout.contains("{ENDPOINT}"));
+    assert!(stdout.contains("{CACHE_REF}"));
 }
 
 #[test]

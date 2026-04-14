@@ -39,6 +39,21 @@ impl ProxyServerHandle {
     }
 }
 
+pub(crate) fn planned_cache_ref(
+    tag: &str,
+    endpoint_host: &str,
+    port: u16,
+    no_platform: bool,
+    no_git: bool,
+) -> Result<String> {
+    let tag_resolver = build_tag_resolver(no_platform, no_git)?;
+    let (_, configured_human_tags) = resolve_registry_tag_config(&tag_resolver, tag)?;
+    Ok(format!(
+        "{}:{}/cache:{}",
+        endpoint_host, port, configured_human_tags[0]
+    ))
+}
+
 pub(crate) fn effective_proxy_read_only(explicit_read_only: bool) -> bool {
     if explicit_read_only {
         return true;
@@ -78,18 +93,7 @@ pub async fn execute(
     } else {
         ApiClient::for_save()?
     };
-    let platform = if no_platform {
-        None
-    } else {
-        Some(crate::platform::Platform::detect()?)
-    };
-    let git_enabled = !no_git && !crate::git::is_git_disabled_by_env();
-    let git_context = if git_enabled {
-        GitContext::detect()
-    } else {
-        GitContext::default()
-    };
-    let tag_resolver = TagResolver::new(platform, git_context, git_enabled);
+    let tag_resolver = build_tag_resolver(no_platform, no_git)?;
     let (registry_root_tag, configured_human_tags) =
         resolve_registry_tag_config(&tag_resolver, &tag)?;
     let proxy_metadata_hints = resolve_proxy_metadata_hints(&metadata_hints)?;
@@ -132,18 +136,7 @@ pub async fn start_proxy_background(
     } else {
         ApiClient::for_save()?
     };
-    let platform = if no_platform {
-        None
-    } else {
-        Some(crate::platform::Platform::detect()?)
-    };
-    let git_enabled = !no_git && !crate::git::is_git_disabled_by_env();
-    let git_context = if git_enabled {
-        GitContext::detect()
-    } else {
-        GitContext::default()
-    };
-    let tag_resolver = TagResolver::new(platform, git_context, git_enabled);
+    let tag_resolver = build_tag_resolver(no_platform, no_git)?;
     let (registry_root_tag, configured_human_tags) =
         resolve_registry_tag_config(&tag_resolver, &tag)?;
 
@@ -202,6 +195,21 @@ fn resolve_registry_tag_config(
     let configured_human_tags = resolved_tags;
 
     Ok((registry_root_tag, configured_human_tags))
+}
+
+fn build_tag_resolver(no_platform: bool, no_git: bool) -> Result<TagResolver> {
+    let platform = if no_platform {
+        None
+    } else {
+        Some(crate::platform::Platform::detect()?)
+    };
+    let git_enabled = !no_git && !crate::git::is_git_disabled_by_env();
+    let git_context = if git_enabled {
+        GitContext::detect()
+    } else {
+        GitContext::default()
+    };
+    Ok(TagResolver::new(platform, git_context, git_enabled))
 }
 
 pub(crate) fn resolve_proxy_metadata_hints(
