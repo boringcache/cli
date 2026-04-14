@@ -64,5 +64,5 @@ Then:
 boringcache nx
 ```
 
-If the repo already has a lot of manual `tag:path` usage, you can import that shape into repo config later with `boringcache audit --write`.
+If the repo already has a lot of manual `tag:path` usage, you can import that setup into repo config later with `boringcache audit --write`.
 That is a migration step, not the default getting-started path.

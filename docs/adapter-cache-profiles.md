@@ -42,7 +42,7 @@ If a benchmark needs lower-level overrides, treat those as engineering controls,
 
 ## Adapter matrix
 
-| Adapter | Client protocol | What the client already keeps local | Remote object shape | Best proxy strategy | Avoid |
+| Adapter | Client protocol | What the client already keeps local | Remote object format | Best proxy strategy | Avoid |
 | --- | --- | --- | --- | --- | --- |
 | `sccache` | WebDAV `MKCOL`/`GET`/`HEAD`/`PUT` | `SCCACHE_DIR` plus local server process | Many small compiler result blobs keyed by path-like keys | Keep GET/HEAD cheap, batch URL resolution, and let generic startup warming fill what fits budget | Per-hit URL resolution and low steady-state read concurrency |
 | `bazel` | Remote cache over HTTP for `ac/` and `cas/` | Local output base and local disk cache | Split `AC` metadata and `CAS` blobs; can be many objects, sometimes large | Preserve `ac/` and `cas/` correctness, keep startup selection generic, and avoid overcommitting RAM to large CAS graphs | Tool-detected hydrate-first rules or treating large CAS graphs like tiny kv objects |
@@ -58,7 +58,7 @@ If a benchmark needs lower-level overrides, treat those as engineering controls,
 - Adapters define protocol, key layout, and cache contents.
 - BoringCache owns storage, transfer, verification, and machine-safe scheduling.
 - Startup warming should stay opportunistic and budget-bound; tool detection should not grant special RAM or CPU behavior by default.
-- Query-aware or protocol-aware optimizations should come from real request shape, not adapter-name guesses.
+- Query-aware or protocol-aware optimizations should come from real request patterns, not adapter-name guesses.
 - `docker` should stay OCI-native. BuildKit already understands manifests, layers, and local content reuse.
 
 ## Local measurement plan
