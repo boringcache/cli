@@ -27,6 +27,25 @@ If you already manage the tool-specific setup yourself and only want proxy lifec
 
 ```yaml
 - run: |
+    cat > .boringcache.toml <<'EOF'
+    workspace = "my-org/my-project"
+
+    [adapters.turbo]
+    tag = "turbo-main"
+    command = ["pnpm", "turbo", "run", "build"]
+    metadata-hints = ["tool=turbo", "phase=ci"]
+    EOF
+
+- run: boringcache turbo
+  env:
+    BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
+    BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
+```
+
+You can still override a configured adapter from the workflow when needed:
+
+```yaml
+- run: |
     boringcache turbo \
       --workspace my-org/my-project \
       --tag turbo-main \

@@ -412,7 +412,7 @@ fn validate_archive_pairs(
 
 fn inject_proxy_env(command: &mut tokio::process::Command, context: &proxy_exec::ProxyContext) {
     let endpoint = context.endpoint();
-    for key in proxy_exec::SCCACHE_BACKEND_ENV_VARS {
+    for key in proxy_exec::inherited_sccache_backend_env_vars() {
         command.env_remove(key);
     }
     command.env("NX_SELF_HOSTED_REMOTE_CACHE_SERVER", &endpoint);

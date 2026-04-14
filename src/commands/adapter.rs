@@ -76,11 +76,7 @@ impl AdapterKind {
                 );
             }
             AdapterKind::Sccache => {
-                remove.extend(
-                    proxy_exec::SCCACHE_BACKEND_ENV_VARS
-                        .iter()
-                        .map(|key| (*key).to_string()),
-                );
+                remove.extend(proxy_exec::inherited_sccache_backend_env_vars());
                 set.insert("RUSTC_WRAPPER".to_string(), "sccache".to_string());
                 set.insert(
                     "SCCACHE_WEBDAV_ENDPOINT".to_string(),
@@ -253,6 +249,12 @@ pub async fn adapter_execute(
     });
     let port = args.port.or(adapter_config.port).unwrap_or(5000);
 
+    let fail_on_cache_error = adapter_config.fail_on_cache_error || args.fail_on_cache_error;
+    let skip_restore = adapter_config.skip_restore || args.skip_restore;
+    let skip_save = adapter_config.skip_save || args.skip_save;
+    let save_on_failure = adapter_config.save_on_failure || args.save_on_failure;
+    let metadata_hint_args =
+        merge_metadata_hints(&adapter_config.metadata_hints, &args.metadata_hint);
     let profile_requests = merge_profiles(&adapter_config.profiles, &args.profile);
     let entry_requests = merge_entries(&adapter_config.entries, &args.entry);
     let infer_entries = profile_requests.is_empty() && entry_requests.is_empty();
@@ -263,10 +265,10 @@ pub async fn adapter_execute(
         if infer_entries { &command } else { &[] },
     )?;
     let archive_enabled = !resolved_plan.tag_path_pairs.is_empty();
-    let proxy_metadata_hints = serve::resolve_proxy_metadata_hints(&args.metadata_hint)?;
+    let proxy_metadata_hints = serve::resolve_proxy_metadata_hints(&metadata_hint_args)?;
 
     let effective_read_only = serve::effective_proxy_read_only(configured_read_only);
-    let effective_skip_save = args.skip_save || effective_read_only;
+    let effective_skip_save = skip_save || effective_read_only;
     let docker_cache_mode = args
         .cache_mode
         .clone()
@@ -351,12 +353,7 @@ pub async fn adapter_execute(
         if args.json {
             println!("{}", serde_json::to_string_pretty(&plan)?);
         } else {
-            print_dry_run(
-                &plan,
-                effective_skip_save,
-                args.skip_restore,
-                args.save_on_failure,
-            );
+            print_dry_run(&plan, effective_skip_save, skip_restore, save_on_failure);
         }
         return Ok(());
     }
@@ -381,11 +378,11 @@ pub async fn adapter_execute(
     if effective_read_only && !configured_read_only {
         ui::info("[boringcache] No save-capable token found — running proxy in read-only mode");
     }
-    if effective_read_only && archive_enabled && !args.skip_save {
+    if effective_read_only && archive_enabled && !skip_save {
         ui::info("[boringcache] Read-only mode enabled — skipping archive save phase");
     }
 
-    if archive_enabled && !args.skip_restore {
+    if archive_enabled && !skip_restore {
         let restore_result = restore::execute_batch_restore(
             Some(workspace.clone()),
             resolved_plan.tag_path_pairs.clone(),
@@ -395,7 +392,7 @@ pub async fn adapter_execute(
             false,
             false,
             None,
-            args.fail_on_cache_error,
+            fail_on_cache_error,
             require_server_signature,
         )
         .await;
@@ -414,7 +411,7 @@ pub async fn adapter_execute(
         no_git,
         endpoint_host_override,
         proxy_metadata_hints,
-        args.fail_on_cache_error,
+        fail_on_cache_error,
         effective_read_only,
     )
     .await
@@ -445,7 +442,7 @@ pub async fn adapter_execute(
     let child_outcome = match child_outcome {
         Ok(outcome) => outcome,
         Err(error) => {
-            shutdown_proxy_handle(proxy_handle, args.fail_on_cache_error, false).await?;
+            shutdown_proxy_handle(proxy_handle, fail_on_cache_error, false).await?;
             return Err(error);
         }
     };
@@ -455,10 +452,7 @@ pub async fn adapter_execute(
             let command_succeeded = status.success();
             let command_exit_code = proxy_exec::status_exit_code(&status);
 
-            if archive_enabled
-                && !effective_skip_save
-                && (command_succeeded || args.save_on_failure)
-            {
+            if archive_enabled && !effective_skip_save && (command_succeeded || save_on_failure) {
                 let save_result = save::execute_batch_save(
                     Some(workspace),
                     resolved_plan.tag_path_pairs,
@@ -468,23 +462,22 @@ pub async fn adapter_execute(
                     false,
                     Vec::new(),
                     None,
-                    args.fail_on_cache_error,
+                    fail_on_cache_error,
                 )
                 .await;
 
                 if let Err(error) = save_result
-                    && args.fail_on_cache_error
+                    && fail_on_cache_error
                     && command_succeeded
                 {
-                    shutdown_proxy_handle(proxy_handle, args.fail_on_cache_error, false).await?;
+                    shutdown_proxy_handle(proxy_handle, fail_on_cache_error, false).await?;
                     return Err(
                         ExitCodeError::with_message(EXIT_CONFIG, format!("{:#}", error)).into(),
                     );
                 }
             }
 
-            shutdown_proxy_handle(proxy_handle, args.fail_on_cache_error, command_succeeded)
-                .await?;
+            shutdown_proxy_handle(proxy_handle, fail_on_cache_error, command_succeeded).await?;
 
             if command_exit_code == 0 {
                 Ok(())
@@ -524,6 +517,13 @@ fn merge_profiles(configured: &[String], cli: &[String]) -> Vec<String> {
         }
     }
 
+    merged
+}
+
+fn merge_metadata_hints(configured: &[String], cli: &[String]) -> Vec<String> {
+    let mut merged = Vec::new();
+    merged.extend(configured.iter().cloned());
+    merged.extend(cli.iter().cloned());
     merged
 }
 
@@ -672,8 +672,17 @@ mod tests {
             cache_ref: "127.0.0.1:5000/cache:test".to_string(),
         };
 
+        assert!(proxy_exec::should_clear_sccache_backend_env_var(
+            "SCCACHE_BUCKET"
+        ));
+        assert!(proxy_exec::should_clear_sccache_backend_env_var(
+            "SCCACHE_WEBDAV_ENDPOINT"
+        ));
+        assert!(!proxy_exec::should_clear_sccache_backend_env_var(
+            "SCCACHE_IDLE_TIMEOUT"
+        ));
+
         let plan = AdapterKind::Sccache.proxy_env_plan(&context);
-        assert!(plan.remove.iter().any(|key| key == "SCCACHE_BUCKET"));
         assert_eq!(
             plan.set.get("SCCACHE_WEBDAV_ENDPOINT"),
             Some(&"http://127.0.0.1:5000/".to_string())

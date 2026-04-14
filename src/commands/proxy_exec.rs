@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::process::Stdio;
 
 use crate::exit_code::ExitCodeError;
@@ -8,50 +9,53 @@ const EXIT_CONFIG: i32 = 78;
 const EXIT_COMMAND_NOT_FOUND: i32 = 127;
 
 pub(crate) const PROXY_AUTH_TOKEN: &str = "boringcache";
-pub(crate) const SCCACHE_BACKEND_ENV_VARS: &[&str] = &[
+
+const SCCACHE_BACKEND_ENV_PREFIXES: &[&str] = &[
+    "SCCACHE_S3_",
+    "SCCACHE_GCS_",
+    "SCCACHE_AZURE_",
+    "SCCACHE_REDIS_",
+    "SCCACHE_MEMCACHED_",
+    "SCCACHE_GHA_",
+    "SCCACHE_WEBDAV_",
+];
+
+const SCCACHE_BACKEND_ENV_EXACT: &[&str] = &[
     "SCCACHE_CONF",
     "SCCACHE_CACHED_CONF",
     "SCCACHE_ENDPOINT",
     "SCCACHE_BUCKET",
     "SCCACHE_REGION",
-    "SCCACHE_S3_KEY_PREFIX",
-    "SCCACHE_S3_USE_SSL",
-    "SCCACHE_S3_NO_CREDENTIALS",
-    "SCCACHE_S3_SERVER_SIDE_ENCRYPTION",
-    "SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE",
-    "SCCACHE_GCS_BUCKET",
-    "SCCACHE_GCS_KEY_PATH",
-    "SCCACHE_GCS_CREDENTIALS_URL",
-    "SCCACHE_AZURE_CONNECTION_STRING",
-    "SCCACHE_AZURE_BLOB_CONTAINER",
-    "SCCACHE_AZURE_KEY_PREFIX",
-    "SCCACHE_REDIS_ENDPOINT",
-    "SCCACHE_REDIS_CLUSTER_ENDPOINTS",
-    "SCCACHE_REDIS_USERNAME",
-    "SCCACHE_REDIS_PASSWORD",
-    "SCCACHE_REDIS_DB",
-    "SCCACHE_REDIS_EXPIRATION",
-    "SCCACHE_REDIS_TTL",
-    "SCCACHE_REDIS_KEY_PREFIX",
     "SCCACHE_REDIS",
-    "SCCACHE_MEMCACHED_ENDPOINT",
-    "SCCACHE_MEMCACHED_USERNAME",
-    "SCCACHE_MEMCACHED_PASSWORD",
-    "SCCACHE_MEMCACHED_EXPIRATION",
-    "SCCACHE_MEMCACHED_KEY_PREFIX",
     "SCCACHE_MEMCACHED",
-    "SCCACHE_GHA_CACHE_URL",
-    "SCCACHE_GHA_RUNTIME_TOKEN",
-    "SCCACHE_GHA_CACHE_TO",
-    "SCCACHE_GHA_CACHE_FROM",
-    "SCCACHE_WEBDAV_ENDPOINT",
-    "SCCACHE_WEBDAV_KEY_PREFIX",
-    "SCCACHE_WEBDAV_USERNAME",
-    "SCCACHE_WEBDAV_PASSWORD",
-    "SCCACHE_WEBDAV_TOKEN",
     "ACTIONS_RESULTS_URL",
     "ACTIONS_RUNTIME_TOKEN",
 ];
+
+pub(crate) fn should_clear_sccache_backend_env_var(key: &str) -> bool {
+    SCCACHE_BACKEND_ENV_EXACT.contains(&key)
+        || SCCACHE_BACKEND_ENV_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+}
+
+pub(crate) fn inherited_sccache_backend_env_vars() -> Vec<String> {
+    inherited_sccache_backend_env_vars_from(std::env::vars_os().map(|(key, _)| key))
+}
+
+fn inherited_sccache_backend_env_vars_from<I>(keys: I) -> Vec<String>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut env_vars = keys
+        .into_iter()
+        .filter_map(|key| key.into_string().ok())
+        .filter(|key| should_clear_sccache_backend_env_var(key))
+        .collect::<Vec<_>>();
+    env_vars.sort();
+    env_vars.dedup();
+    env_vars
+}
 
 #[derive(Debug)]
 pub(crate) enum ChildOutcome {
@@ -208,4 +212,43 @@ pub(crate) fn status_exit_code(status: &std::process::ExitStatus) -> i32 {
     }
 
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sccache_backend_env_matching_is_backend_focused() {
+        assert!(should_clear_sccache_backend_env_var("SCCACHE_BUCKET"));
+        assert!(should_clear_sccache_backend_env_var(
+            "SCCACHE_WEBDAV_ENDPOINT"
+        ));
+        assert!(should_clear_sccache_backend_env_var(
+            "ACTIONS_RUNTIME_TOKEN"
+        ));
+        assert!(!should_clear_sccache_backend_env_var(
+            "SCCACHE_IDLE_TIMEOUT"
+        ));
+        assert!(!should_clear_sccache_backend_env_var("SCCACHE_DIR"));
+        assert!(!should_clear_sccache_backend_env_var("RUSTC_WRAPPER"));
+    }
+
+    #[test]
+    fn inherited_sccache_backend_env_vars_filters_and_deduplicates() {
+        let env_vars = inherited_sccache_backend_env_vars_from([
+            OsString::from("SCCACHE_BUCKET"),
+            OsString::from("SCCACHE_WEBDAV_ENDPOINT"),
+            OsString::from("SCCACHE_IDLE_TIMEOUT"),
+            OsString::from("SCCACHE_BUCKET"),
+        ]);
+
+        assert_eq!(
+            env_vars,
+            vec![
+                "SCCACHE_BUCKET".to_string(),
+                "SCCACHE_WEBDAV_ENDPOINT".to_string()
+            ]
+        );
+    }
 }

@@ -475,6 +475,8 @@ workspace = "test-org/test-workspace"
 tag = "turbo-main"
 command = ["pnpm", "turbo", "run", "build"]
 entries = ["pnpm-store"]
+metadata-hints = ["phase=warm"]
+fail-on-cache-error = true
 "#,
     )
     .expect("write repo config");
@@ -500,6 +502,7 @@ entries = ["pnpm-store"]
     assert_eq!(parsed["command"][0], "pnpm");
     assert_eq!(parsed["env_vars"]["TURBO_API"], "http://127.0.0.1:5000");
     assert_eq!(parsed["env_vars"]["TURBO_TOKEN"], "boringcache");
+    assert_eq!(parsed["proxy"]["metadata_hints"]["phase"], "warm");
 }
 
 #[test]

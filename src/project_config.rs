@@ -64,10 +64,25 @@ pub struct AdapterConfig {
     pub no_git: bool,
     #[serde(default)]
     pub read_only: bool,
+    #[serde(default, rename = "fail-on-cache-error", alias = "fail_on_cache_error")]
+    pub fail_on_cache_error: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<String>,
+    #[serde(
+        default,
+        rename = "metadata-hints",
+        alias = "metadata_hints",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub metadata_hints: Vec<String>,
+    #[serde(default, rename = "skip-restore", alias = "skip_restore")]
+    pub skip_restore: bool,
+    #[serde(default, rename = "skip-save", alias = "skip_save")]
+    pub skip_save: bool,
+    #[serde(default, rename = "save-on-failure", alias = "save_on_failure")]
+    pub save_on_failure: bool,
     #[serde(rename = "cache-mode", skip_serializing_if = "Option::is_none")]
     pub cache_mode: Option<String>,
     #[serde(rename = "cache-ref-tag", skip_serializing_if = "Option::is_none")]
@@ -777,6 +792,10 @@ tag = "turbo-main"
 command = ["pnpm", "turbo", "run", "build"]
 entries = ["pnpm-store"]
 profiles = ["bundle-install"]
+metadata-hints = ["phase=warm"]
+fail-on-cache-error = true
+skip-save = true
+save-on-failure = true
 port = 5001
 endpoint-host = "host.docker.internal"
 "#,
@@ -791,6 +810,10 @@ endpoint-host = "host.docker.internal"
         assert_eq!(adapter.tag.as_deref(), Some("turbo-main"));
         assert_eq!(adapter.entries, vec!["pnpm-store"]);
         assert_eq!(adapter.profiles, vec!["bundle-install"]);
+        assert_eq!(adapter.metadata_hints, vec!["phase=warm"]);
+        assert!(adapter.fail_on_cache_error);
+        assert!(adapter.skip_save);
+        assert!(adapter.save_on_failure);
         assert_eq!(adapter.port, Some(5001));
         assert_eq!(
             adapter.endpoint_host.as_deref(),
