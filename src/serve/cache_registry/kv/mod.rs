@@ -58,12 +58,6 @@ const KV_PUT_BODY_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from
 const KV_PUT_BODY_SLOW_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
 const KV_RESOLVE_HIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_FETCH_POINTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const KV_STARTUP_PREFETCH_MAX_BLOBS_ENV: &str = "BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS";
-const KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV: &str =
-    "BORINGCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES";
-const KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV: &str =
-    "BORINGCACHE_BLOB_PREFETCH_MAX_INFLIGHT_BYTES";
-const KV_BLOB_PRELOAD_SKIP_USED_PCT: u64 = 95;
 const KV_VERSION_POLL_ACTIVE_SECS: u64 = 3;
 const KV_VERSION_POLL_IDLE_SECS: u64 = 30;
 const KV_VERSION_POLL_ACTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
@@ -99,11 +93,6 @@ impl BlobReadSource {
             Self::RemoteFetch => "remote_fetch",
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct StartupPrefetchCandidates {
-    ordered_blobs: Vec<BlobDescriptor>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -251,30 +240,6 @@ fn emit_blob_read_metric(
         .with_cache_entry_id(Some(cache_entry_id.to_string()))
         .with_details(Some(format!("source={}", source.as_str()))),
     );
-}
-
-fn parse_positive_usize_env(name: &str) -> Option<usize> {
-    let raw = std::env::var(name).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    match trimmed.parse::<usize>() {
-        Ok(value) if value > 0 => Some(value),
-        _ => None,
-    }
-}
-
-fn parse_positive_u64_env(name: &str) -> Option<u64> {
-    let raw = std::env::var(name).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    match trimmed.parse::<u64>() {
-        Ok(value) if value > 0 => Some(value),
-        _ => None,
-    }
 }
 
 fn kv_miss_generation(state: &AppState, registry_root_tag: &str) -> u64 {
@@ -1777,178 +1742,6 @@ mod tests {
     }
 
     #[test]
-    fn should_skip_blob_preload_when_cache_is_near_capacity() {
-        assert!(should_skip_blob_preload(95, 100));
-        assert!(should_skip_blob_preload(190, 200));
-        assert!(!should_skip_blob_preload(94, 100));
-    }
-
-    #[test]
-    fn should_skip_blob_preload_when_cache_capacity_is_invalid() {
-        assert!(should_skip_blob_preload(0, 0));
-        assert!(should_skip_blob_preload(10, 0));
-    }
-
-    #[test]
-    fn kv_startup_prefetch_limits_allow_env_overrides() {
-        let _guard = test_env::lock();
-
-        test_env::set_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV, "48");
-        test_env::set_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV, "2097152");
-        assert_eq!(kv_startup_prefetch_max_blobs(), 48);
-        assert_eq!(
-            kv_startup_prefetch_max_total_bytes(1024 * 1024 * 1024),
-            2_097_152
-        );
-        test_env::remove_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV);
-        test_env::remove_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV);
-    }
-
-    #[test]
-    fn startup_prefetch_slice_respects_order_and_total_budget() {
-        let blobs = vec![
-            BlobDescriptor {
-                digest: "sha256:1".to_string(),
-                size_bytes: 10,
-            },
-            BlobDescriptor {
-                digest: "sha256:2".to_string(),
-                size_bytes: 15,
-            },
-            BlobDescriptor {
-                digest: "sha256:3".to_string(),
-                size_bytes: 20,
-            },
-        ];
-
-        let selected = select_startup_prefetch_slice(&blobs, 3, 25);
-        assert_eq!(selected.len(), 2);
-        assert_eq!(selected[0].digest, "sha256:1");
-        assert_eq!(selected[1].digest, "sha256:2");
-    }
-
-    #[test]
-    fn startup_prefetch_slice_skips_oversized_blobs_instead_of_stopping() {
-        let blobs = vec![
-            BlobDescriptor {
-                digest: "sha256:1".to_string(),
-                size_bytes: 10,
-            },
-            BlobDescriptor {
-                digest: "sha256:oversized".to_string(),
-                size_bytes: 1_000,
-            },
-            BlobDescriptor {
-                digest: "sha256:2".to_string(),
-                size_bytes: 15,
-            },
-        ];
-
-        let selected = select_startup_prefetch_slice(&blobs, 3, 25);
-        assert_eq!(selected.len(), 2);
-        assert_eq!(selected[0].digest, "sha256:1");
-        assert_eq!(selected[1].digest, "sha256:2");
-    }
-
-    #[test]
-    fn kv_blob_prefetch_max_inflight_bytes_uses_env_override() {
-        let _guard = test_env::lock();
-
-        test_env::set_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV, "12345");
-        assert_eq!(kv_blob_prefetch_max_inflight_bytes(1024 * 1024), 12_345);
-        test_env::remove_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV);
-    }
-
-    #[test]
-    fn startup_prefetch_defaults_cover_full_tag_by_default() {
-        let _guard = test_env::lock();
-        test_env::remove_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV);
-        test_env::remove_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV);
-        test_env::remove_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV);
-        let cache_max = 4 * 1024 * 1024 * 1024;
-        assert_eq!(kv_startup_prefetch_max_blobs(), usize::MAX);
-        assert_eq!(kv_startup_prefetch_max_total_bytes(cache_max), cache_max);
-        assert_eq!(
-            kv_blob_prefetch_max_inflight_bytes(cache_max),
-            512 * 1024 * 1024
-        );
-    }
-
-    #[test]
-    fn startup_prefetch_candidates_preserve_blob_order() {
-        let blob_order = vec![
-            BlobDescriptor {
-                digest: "sha256:large-cas".to_string(),
-                size_bytes: 4_096,
-            },
-            BlobDescriptor {
-                digest: "sha256:ac".to_string(),
-                size_bytes: 128,
-            },
-            BlobDescriptor {
-                digest: "sha256:small-cas".to_string(),
-                size_bytes: 1024,
-            },
-        ];
-        let candidates = startup_prefetch_candidates(&blob_order);
-
-        assert_eq!(candidates.ordered_blobs.len(), 3);
-        assert_eq!(candidates.ordered_blobs[0].digest, "sha256:large-cas");
-        assert_eq!(candidates.ordered_blobs[1].digest, "sha256:ac");
-        assert_eq!(candidates.ordered_blobs[2].digest, "sha256:small-cas");
-    }
-
-    #[test]
-    fn background_blob_preload_candidates_fill_budget_without_count_or_blob_size_knobs() {
-        let blobs = vec![
-            BlobDescriptor {
-                digest: "sha256:1".to_string(),
-                size_bytes: 5,
-            },
-            BlobDescriptor {
-                digest: "sha256:2".to_string(),
-                size_bytes: 9,
-            },
-            BlobDescriptor {
-                digest: "sha256:3".to_string(),
-                size_bytes: 3,
-            },
-        ];
-        let urls = HashMap::from([
-            ("sha256:1".to_string(), "https://example.com/1".to_string()),
-            ("sha256:2".to_string(), "https://example.com/2".to_string()),
-            ("sha256:3".to_string(), "https://example.com/3".to_string()),
-        ]);
-
-        let selected =
-            select_blob_preload_candidates(&blobs, 8, |digest| urls.get(digest).cloned());
-
-        assert_eq!(selected.len(), 2);
-        assert_eq!(selected[0].0.digest, "sha256:1");
-        assert_eq!(selected[1].0.digest, "sha256:3");
-    }
-
-    #[test]
-    fn startup_prefetch_blobs_uses_whole_tag_when_it_fits() {
-        let blobs = vec![
-            BlobDescriptor {
-                digest: "sha256:1".to_string(),
-                size_bytes: 64,
-            },
-            BlobDescriptor {
-                digest: "sha256:2".to_string(),
-                size_bytes: 64,
-            },
-        ];
-
-        let selected = startup_prefetch_blobs(&blobs, 1, 64, true);
-
-        assert_eq!(selected.len(), blobs.len());
-        assert_eq!(selected[0].digest, blobs[0].digest);
-        assert_eq!(selected[1].digest, blobs[1].digest);
-    }
-
-    #[test]
     fn startup_prefetch_targets_keep_blobs_without_preloaded_urls() {
         let blobs = vec![
             BlobDescriptor {
@@ -1966,7 +1759,7 @@ mod tests {
         )]);
 
         let (targets, summary) =
-            build_startup_prefetch_targets(&blobs, |digest| cached_urls.get(digest).cloned());
+            build_prefetch_targets(&blobs, |digest| cached_urls.get(digest).cloned());
 
         assert_eq!(targets.len(), 2);
         assert_eq!(summary.cached_url_count, 1);
@@ -1979,8 +1772,8 @@ mod tests {
     }
 
     #[test]
-    fn startup_download_url_preload_stays_on_startup_slice() {
-        let startup_blobs = vec![
+    fn build_prefetch_targets_preserves_blob_order() {
+        let blobs = vec![
             BlobDescriptor {
                 digest: "sha256:1".to_string(),
                 size_bytes: 128,
@@ -1991,11 +1784,13 @@ mod tests {
             },
         ];
 
-        let selected = startup_download_url_preload_blobs(&startup_blobs);
+        let (targets, summary) = build_prefetch_targets(&blobs, |_| None);
 
-        assert_eq!(selected.len(), 2);
-        assert_eq!(selected[0].digest, "sha256:1");
-        assert_eq!(selected[1].digest, "sha256:2");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(summary.cached_url_count, 0);
+        assert_eq!(summary.unresolved_url_count, 2);
+        assert_eq!(targets[0].blob.digest, "sha256:1");
+        assert_eq!(targets[1].blob.digest, "sha256:2");
     }
 
     #[test]

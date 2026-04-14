@@ -104,7 +104,7 @@ pub(crate) async fn refresh_published_index_for_lookup(
     state: &AppState,
 ) -> Result<(), RegistryError> {
     let (entries, blob_order, cache_entry_id, _) =
-        match load_existing_index_with_fallback(state, true).await {
+        match load_existing_index_snapshot(state, true).await {
             Ok(result) => {
                 state.backend_breaker.record_success();
                 result
@@ -485,7 +485,7 @@ pub(crate) async fn load_existing_index(
     Ok((map, blob_order, cache_entry_id, manifest_root_digest))
 }
 
-pub(crate) async fn load_existing_index_with_fallback(
+pub(crate) async fn load_existing_index_snapshot(
     state: &AppState,
     retry_not_found: bool,
 ) -> Result<
@@ -497,28 +497,7 @@ pub(crate) async fn load_existing_index_with_fallback(
     ),
     RegistryError,
 > {
-    let tags = kv_root_tags(state);
-    for (idx, tag) in tags.iter().enumerate() {
-        let (entries, blob_order, cache_entry_id, manifest_root_digest) =
-            match load_existing_index(state, tag, retry_not_found).await {
-                Ok(result) => result,
-                Err(error) if is_invalid_file_pointer_error(&error) => {
-                    log::warn!(
-                        "KV root fallback: skipping tag {tag} due to invalid pointer ({})",
-                        error.message()
-                    );
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-        if cache_entry_id.is_some() || !entries.is_empty() {
-            if idx > 0 {
-                eprintln!("KV root fallback hit: loaded legacy tag {tag}");
-            }
-            return Ok((entries, blob_order, cache_entry_id, manifest_root_digest));
-        }
-    }
-    Ok((BTreeMap::new(), Vec::new(), None, None))
+    load_existing_index(state, state.registry_root_tag.trim(), retry_not_found).await
 }
 
 pub(crate) async fn resolve_hit_for_index_load(
