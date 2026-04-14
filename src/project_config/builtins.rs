@@ -76,6 +76,34 @@ pub(super) fn builtin_entry(entry_id: &str) -> Option<BuiltInEntrySpec> {
             extra_env: empty_pairs,
             default_path: DefaultPathKind::Relative(".uv-cache"),
         }),
+        "go-mod-cache" => Some(BuiltInEntrySpec {
+            default_tag: "go-mod-cache",
+            env_lookup: &["GOMODCACHE"],
+            env_export: &["GOMODCACHE"],
+            extra_env: empty_pairs,
+            default_path: DefaultPathKind::Relative(".go/pkg/mod"),
+        }),
+        "go-build-cache" => Some(BuiltInEntrySpec {
+            default_tag: "go-build-cache",
+            env_lookup: &["GOCACHE"],
+            env_export: &["GOCACHE"],
+            extra_env: empty_pairs,
+            default_path: DefaultPathKind::Relative(".go/build-cache"),
+        }),
+        "composer-cache" => Some(BuiltInEntrySpec {
+            default_tag: "composer-cache",
+            env_lookup: &["COMPOSER_CACHE_DIR"],
+            env_export: &["COMPOSER_CACHE_DIR"],
+            extra_env: empty_pairs,
+            default_path: DefaultPathKind::Relative(".composer-cache"),
+        }),
+        "vendor" => Some(BuiltInEntrySpec {
+            default_tag: "vendor",
+            env_lookup: &["COMPOSER_VENDOR_DIR"],
+            env_export: &["COMPOSER_VENDOR_DIR"],
+            extra_env: empty_pairs,
+            default_path: DefaultPathKind::Relative("vendor"),
+        }),
         _ => None,
     }
 }
@@ -125,6 +153,8 @@ pub fn canonical_entry_id(value: &str) -> String {
         "uv" => "uv-cache".to_string(),
         "yarn" => "yarn-cache".to_string(),
         "node-modules" => "node_modules".to_string(),
+        "go-mod" => "go-mod-cache".to_string(),
+        "go-build" => "go-build-cache".to_string(),
         other => other.to_string(),
     }
 }

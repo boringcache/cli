@@ -134,7 +134,7 @@ pub fn resolve_run_plan(
                 .map(|loaded| available_entries(&loaded.config))
                 .unwrap_or_else(|| String::from("(no repo entries defined)"));
             anyhow::bail!(
-                "Unknown cache entry '{}'. Built-in entries: bundler, bootsnap, mise, node_modules, npm-cache, pnpm-store, uv-cache, yarn-cache. Project entries: {}",
+                "Unknown cache entry '{}'. Built-in entries: bundler, bootsnap, composer-cache, go-build-cache, go-mod-cache, mise, node_modules, npm-cache, pnpm-store, uv-cache, vendor, yarn-cache. Project entries: {}",
                 entry_id,
                 available
             );
@@ -269,6 +269,10 @@ fn resolve_path(
             }
         }
 
+        if let Some(path) = dynamic_builtin_path(entry_id, base_dir) {
+            return Ok(path);
+        }
+
         if let Some(path) = default_path(spec.default_path, base_dir) {
             return Ok(path);
         }
@@ -289,6 +293,22 @@ fn default_path(kind: DefaultPathKind, base_dir: &Path) -> Option<PathBuf> {
         DefaultPathKind::Relative(path) => Some(base_dir.join(path)),
         DefaultPathKind::Home(path) => dirs::home_dir().map(|home| home.join(path)),
     }
+}
+
+fn dynamic_builtin_path(entry_id: &str, base_dir: &Path) -> Option<PathBuf> {
+    match canonical_entry_id(entry_id).as_str() {
+        "composer-cache" => read_composer_config_path(base_dir, "cache-dir"),
+        "vendor" => read_composer_config_path(base_dir, "vendor-dir"),
+        _ => None,
+    }
+}
+
+fn read_composer_config_path(base_dir: &Path, key: &str) -> Option<PathBuf> {
+    let composer_json = std::fs::read_to_string(base_dir.join("composer.json")).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&composer_json).ok()?;
+    let config = parsed.get("config")?.as_object()?;
+    let value = config.get(key)?.as_str()?;
+    Some(resolve_path_value(value, base_dir))
 }
 
 fn resolve_path_value(value: &str, base_dir: &Path) -> PathBuf {

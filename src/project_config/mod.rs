@@ -17,6 +17,7 @@ pub use resolve::{resolve_adapter_config, resolve_run_plan};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env;
     use tempfile::TempDir;
 
     #[test]
@@ -133,6 +134,102 @@ default_path = "/mise/installs"
         assert_eq!(
             plan.env_vars.get("MISE_INSTALLS_DIR"),
             Some(&"/mise/installs".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_go_cache_built_ins_with_default_paths_and_env_exports() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let plan = resolve_run_plan(
+            temp_dir.path(),
+            &[],
+            &[String::from("go-mod-cache"), String::from("go-build-cache")],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.tag_path_pairs,
+            vec![
+                format!(
+                    "go-mod-cache:{}",
+                    temp_dir.path().join(".go/pkg/mod").display()
+                ),
+                format!(
+                    "go-build-cache:{}",
+                    temp_dir.path().join(".go/build-cache").display()
+                ),
+            ]
+        );
+        assert_eq!(
+            plan.env_vars.get("GOMODCACHE"),
+            Some(&temp_dir.path().join(".go/pkg/mod").display().to_string())
+        );
+        assert_eq!(
+            plan.env_vars.get("GOCACHE"),
+            Some(
+                &temp_dir
+                    .path()
+                    .join(".go/build-cache")
+                    .display()
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn resolves_composer_cache_and_vendor_from_composer_json_config() {
+        let _guard = test_env::lock();
+        test_env::remove_var("COMPOSER_CACHE_DIR");
+        test_env::remove_var("COMPOSER_VENDOR_DIR");
+
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join("composer.json"),
+            r#"
+{
+  "name": "demo/app",
+  "config": {
+    "cache-dir": "var/composer-cache",
+    "vendor-dir": "deps/vendor"
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let plan = resolve_run_plan(
+            temp_dir.path(),
+            &[],
+            &[String::from("composer-cache"), String::from("vendor")],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.tag_path_pairs,
+            vec![
+                format!(
+                    "composer-cache:{}",
+                    temp_dir.path().join("var/composer-cache").display()
+                ),
+                format!("vendor:{}", temp_dir.path().join("deps/vendor").display()),
+            ]
+        );
+        assert_eq!(
+            plan.env_vars.get("COMPOSER_CACHE_DIR"),
+            Some(
+                &temp_dir
+                    .path()
+                    .join("var/composer-cache")
+                    .display()
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            plan.env_vars.get("COMPOSER_VENDOR_DIR"),
+            Some(&temp_dir.path().join("deps/vendor").display().to_string())
         );
     }
 
