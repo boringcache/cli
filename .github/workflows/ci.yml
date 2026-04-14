@@ -285,6 +285,7 @@ jobs:
               if [ "${USE_SCCACHE_PROXY}" = "1" ]; then
                 export SCCACHE_SERVER_PORT=4227
                 if [ "${{ matrix.musl }}" = "true" ]; then
+                  MUSL_RUSTFLAGS="-C target-feature=+crt-static"
                   boringcache sccache \
                     --workspace ${{ github.repository }} \
                     --tag "rust-${{ steps.rust-version.outputs.version }}-sccache-${{ matrix.name }}" \
@@ -292,7 +293,7 @@ jobs:
                     --port "${SCCACHE_SERVER_PORT}" \
                     --no-platform \
                     --no-git \
-                    -- sh -c "sccache --start-server || true; status=0; RUSTFLAGS='-C target-feature=+crt-static' BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }} || status=\$?; sccache --show-stats || true; sccache --stop-server >/dev/null 2>&1 || true; exit \$status"
+                    -- sh -c "sccache --start-server || true; status=0; env RUSTFLAGS=\"${MUSL_RUSTFLAGS}\" BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }} || status=\$?; sccache --show-stats || true; sccache --stop-server >/dev/null 2>&1 || true; exit \$status"
                 else
                   boringcache sccache \
                     --workspace ${{ github.repository }} \
