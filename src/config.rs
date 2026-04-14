@@ -9,9 +9,17 @@ use std::path::PathBuf;
 
 use crate::error::BoringCacheError;
 
+mod env;
+mod source;
+
 const CONFIG_DIR_NAME: &str = ".boringcache";
 const CONFIG_FILE_NAME: &str = "config.json";
 pub const DEFAULT_API_URL: &str = "https://api.boringcache.com";
+
+pub use env::{env_bool, env_var};
+pub use source::{api_url_source, default_workspace_source, token_source_for};
+
+use env::{env_api_token_for, purpose_missing_token_message, token_from_file};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthPurpose {
@@ -67,131 +75,6 @@ impl ValueSource {
     pub fn is_missing(&self) -> bool {
         self.kind == "missing"
     }
-}
-
-pub fn env_var(key: &str) -> Option<String> {
-    std::env::var(key).ok().and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-pub fn env_bool(key: &str) -> bool {
-    env_var(key)
-        .map(|raw| {
-            let value = raw.trim();
-            value == "1"
-                || value.eq_ignore_ascii_case("true")
-                || value.eq_ignore_ascii_case("yes")
-                || value.eq_ignore_ascii_case("on")
-        })
-        .unwrap_or(false)
-}
-
-const DOCKER_SECRET_PATH: &str = "/run/secrets/bc_token";
-
-fn token_from_file() -> Option<String> {
-    let token_file = env_var("BORINGCACHE_TOKEN_FILE").or_else(|| {
-        let path = std::path::Path::new(DOCKER_SECRET_PATH);
-        path.exists().then(|| DOCKER_SECRET_PATH.to_string())
-    })?;
-    let token = fs::read_to_string(token_file).ok()?;
-    let token = token.trim().to_string();
-
-    if token.is_empty() { None } else { Some(token) }
-}
-
-fn token_file_source_path() -> Option<String> {
-    let token_file = env_var("BORINGCACHE_TOKEN_FILE").or_else(|| {
-        let path = std::path::Path::new(DOCKER_SECRET_PATH);
-        path.exists().then(|| DOCKER_SECRET_PATH.to_string())
-    })?;
-    let token = fs::read_to_string(&token_file).ok()?;
-    (!token.trim().is_empty()).then_some(token_file)
-}
-
-fn env_api_token_for(purpose: AuthPurpose) -> Option<String> {
-    match purpose {
-        AuthPurpose::Default | AuthPurpose::Admin => {
-            env_var("BORINGCACHE_ADMIN_TOKEN").or_else(|| env_var("BORINGCACHE_API_TOKEN"))
-        }
-        AuthPurpose::Restore => env_var("BORINGCACHE_RESTORE_TOKEN")
-            .or_else(|| env_var("BORINGCACHE_SAVE_TOKEN"))
-            .or_else(|| env_var("BORINGCACHE_ADMIN_TOKEN"))
-            .or_else(|| env_var("BORINGCACHE_API_TOKEN")),
-        AuthPurpose::Save => env_var("BORINGCACHE_SAVE_TOKEN")
-            .or_else(|| env_var("BORINGCACHE_ADMIN_TOKEN"))
-            .or_else(|| env_var("BORINGCACHE_API_TOKEN")),
-    }
-}
-
-fn purpose_missing_token_message(purpose: AuthPurpose) -> String {
-    match purpose {
-        AuthPurpose::Default | AuthPurpose::Restore => {
-            "No authentication token configured. Set BORINGCACHE_RESTORE_TOKEN, \
-             BORINGCACHE_SAVE_TOKEN, BORINGCACHE_ADMIN_TOKEN, BORINGCACHE_API_TOKEN, \
-             BORINGCACHE_TOKEN_FILE, \
-             or run 'boringcache auth --token <token>'."
-                .to_string()
-        }
-        AuthPurpose::Save => {
-            if env_var("BORINGCACHE_RESTORE_TOKEN").is_some() {
-                "This command needs a save-capable token. BORINGCACHE_RESTORE_TOKEN is configured, \
-                 but save requires BORINGCACHE_SAVE_TOKEN, BORINGCACHE_ADMIN_TOKEN, \
-                 BORINGCACHE_API_TOKEN, BORINGCACHE_TOKEN_FILE, or a token saved with \
-                 'boringcache auth --token <token>'."
-                    .to_string()
-            } else {
-                "No save-capable token configured. Set BORINGCACHE_SAVE_TOKEN, \
-                 BORINGCACHE_ADMIN_TOKEN, BORINGCACHE_API_TOKEN, BORINGCACHE_TOKEN_FILE, or run \
-                 'boringcache auth --token <token>'."
-                    .to_string()
-            }
-        }
-        AuthPurpose::Admin => {
-            if env_var("BORINGCACHE_SAVE_TOKEN").is_some()
-                || env_var("BORINGCACHE_RESTORE_TOKEN").is_some()
-            {
-                "This command needs an admin-capable token. BORINGCACHE_RESTORE_TOKEN and \
-                 BORINGCACHE_SAVE_TOKEN are not enough for admin operations. Use \
-                 BORINGCACHE_ADMIN_TOKEN, BORINGCACHE_API_TOKEN, BORINGCACHE_TOKEN_FILE, or \
-                 a token saved with 'boringcache auth --token <token>'."
-                    .to_string()
-            } else {
-                "No admin-capable token configured. Use BORINGCACHE_ADMIN_TOKEN, \
-                 BORINGCACHE_API_TOKEN, BORINGCACHE_TOKEN_FILE, or run \
-                 'boringcache auth --token <token>'."
-                    .to_string()
-            }
-        }
-    }
-}
-
-fn env_token_source_for(purpose: AuthPurpose) -> Option<ValueSource> {
-    let keys = match purpose {
-        AuthPurpose::Default | AuthPurpose::Admin => {
-            &["BORINGCACHE_ADMIN_TOKEN", "BORINGCACHE_API_TOKEN"][..]
-        }
-        AuthPurpose::Restore => &[
-            "BORINGCACHE_RESTORE_TOKEN",
-            "BORINGCACHE_SAVE_TOKEN",
-            "BORINGCACHE_ADMIN_TOKEN",
-            "BORINGCACHE_API_TOKEN",
-        ][..],
-        AuthPurpose::Save => &[
-            "BORINGCACHE_SAVE_TOKEN",
-            "BORINGCACHE_ADMIN_TOKEN",
-            "BORINGCACHE_API_TOKEN",
-        ][..],
-    };
-
-    keys.iter()
-        .find(|key| env_var(key).is_some())
-        .map(|key| ValueSource::env(key))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -477,57 +360,11 @@ impl Config {
     }
 }
 
-pub fn token_source_for(purpose: AuthPurpose) -> ValueSource {
-    if let Some(source) = env_token_source_for(purpose) {
-        return source;
-    }
-
-    if let Some(path) = token_file_source_path() {
-        return ValueSource::token_file(path);
-    }
-
-    if let (Ok(config), Ok(path)) = (Config::load_from_file(), Config::config_path())
-        && !config.token.trim().is_empty()
-    {
-        return ValueSource::config_file(path.display().to_string());
-    }
-
-    ValueSource::missing()
-}
-
-pub fn api_url_source() -> ValueSource {
-    if env_var("BORINGCACHE_API_URL").is_some() {
-        return ValueSource::env("BORINGCACHE_API_URL");
-    }
-
-    if let Ok(path) = Config::config_path()
-        && path.exists()
-    {
-        return ValueSource::config_file(path.display().to_string());
-    }
-
-    ValueSource::default()
-}
-
-pub fn default_workspace_source() -> ValueSource {
-    if env_var("BORINGCACHE_DEFAULT_WORKSPACE").is_some() {
-        return ValueSource::env("BORINGCACHE_DEFAULT_WORKSPACE");
-    }
-
-    if let (Ok(config), Ok(path)) = (Config::load_from_file(), Config::config_path())
-        && config
-            .default_workspace
-            .as_deref()
-            .is_some_and(|workspace| !workspace.trim().is_empty())
-    {
-        return ValueSource::config_file(path.display().to_string());
-    }
-
-    ValueSource::missing()
-}
-
 #[cfg(test)]
 mod tests {
+    use super::env::{
+        DOCKER_SECRET_PATH, env_api_token_for, purpose_missing_token_message, token_from_file,
+    };
     use super::*;
     use crate::test_env;
     use tempfile::TempDir;

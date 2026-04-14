@@ -1,0 +1,143 @@
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RepoConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub entries: BTreeMap<String, RepoEntryConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, RepoProfileConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub adapters: BTreeMap<String, AdapterConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RepoEntryConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RepoProfileConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum AdapterCommandConfig {
+    String(String),
+    Array(Vec<String>),
+}
+
+impl AdapterCommandConfig {
+    pub fn argv(&self) -> Result<Vec<String>> {
+        match self {
+            AdapterCommandConfig::String(value) => shlex::split(value)
+                .ok_or_else(|| anyhow::anyhow!("Failed to parse adapter command string: {value}")),
+            AdapterCommandConfig::Array(argv) => Ok(argv.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AdapterConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<AdapterCommandConfig>,
+    #[serde(default)]
+    pub no_platform: bool,
+    #[serde(default)]
+    pub no_git: bool,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default, rename = "fail-on-cache-error", alias = "fail_on_cache_error")]
+    pub fail_on_cache_error: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>,
+    #[serde(
+        default,
+        rename = "metadata-hints",
+        alias = "metadata_hints",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub metadata_hints: Vec<String>,
+    #[serde(default, rename = "skip-restore", alias = "skip_restore")]
+    pub skip_restore: bool,
+    #[serde(default, rename = "skip-save", alias = "skip_save")]
+    pub skip_save: bool,
+    #[serde(default, rename = "save-on-failure", alias = "save_on_failure")]
+    pub save_on_failure: bool,
+    #[serde(rename = "cache-mode", skip_serializing_if = "Option::is_none")]
+    pub cache_mode: Option<String>,
+    #[serde(rename = "cache-ref-tag", skip_serializing_if = "Option::is_none")]
+    pub cache_ref_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(rename = "endpoint-host", skip_serializing_if = "Option::is_none")]
+    pub endpoint_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedRepoConfig {
+    pub path: PathBuf,
+    pub root: PathBuf,
+    pub config: RepoConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedAdapterConfig {
+    pub loaded_config: Option<LoadedRepoConfig>,
+    pub adapter_config: Option<AdapterConfig>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedRunPlan {
+    pub workspace: Option<String>,
+    pub repo_config_path: Option<PathBuf>,
+    pub tag_path_pairs: Vec<String>,
+    pub env_vars: BTreeMap<String, String>,
+    pub archive_entries: Vec<ResolvedRunEntryPlan>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunEntryRequestSource {
+    Profile,
+    Entry,
+    CommandInferred,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunEntryResolutionSource {
+    RepoConfig,
+    BuiltIn,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ResolvedRunEntryPlan {
+    pub requested: String,
+    pub request_source: RunEntryRequestSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    pub resolution_source: RunEntryResolutionSource,
+    pub tag: String,
+    pub path: String,
+    pub tag_path_pair: String,
+}

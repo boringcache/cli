@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use crate::api::ApiClient;
 use crate::api::models::cache::{BlobReceipt, SaveResponse};
+use crate::cache::receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
 use crate::multipart_upload::upload_via_single_url;
 use crate::serve::error::OciError;
 use crate::serve::state::UploadSessionStore;
-use crate::upload_receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
 use tokio::sync::{RwLock, Semaphore};
 
 struct TrackedBlobUploadJob {

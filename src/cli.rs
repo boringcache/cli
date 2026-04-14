@@ -1,165 +1,17 @@
 use clap::{Parser, Subcommand};
 
-#[derive(Subcommand)]
-pub enum TokenCommands {
-    #[command(name = "ls", visible_alias = "list", about = "List workspace tokens")]
-    List {
-        #[arg(help = "Workspace name (org/project or user/project)")]
-        workspace: Option<String>,
+mod adapters;
+mod auth;
+mod config;
 
-        #[arg(long, help = "Include revoked and expired tokens")]
-        all: bool,
+#[doc(hidden)]
+pub mod dispatch;
+#[doc(hidden)]
+pub mod preprocess;
 
-        #[arg(long, default_value_t = 20, help = "Number of tokens per page")]
-        limit: u32,
-
-        #[arg(long, default_value_t = 1, help = "Page number (1-based)")]
-        page: u32,
-
-        #[arg(long, help = "Print machine-readable output for CI and scripts")]
-        json: bool,
-    },
-
-    #[command(about = "Show one workspace token")]
-    Show {
-        #[arg(help = "Workspace name or token id")]
-        workspace_or_token_id: String,
-
-        #[arg(help = "Token id (omit when a default workspace is configured)")]
-        token_id: Option<String>,
-
-        #[arg(long, help = "Print machine-readable output for CI and scripts")]
-        json: bool,
-    },
-
-    #[command(about = "Create a workspace token")]
-    Create {
-        #[arg(help = "Workspace name (org/project or user/project)")]
-        workspace: Option<String>,
-
-        #[arg(long, help = "Token name")]
-        name: String,
-
-        #[arg(
-            long,
-            default_value = "save",
-            value_parser = ["restore", "save", "admin"],
-            help = "Token access level"
-        )]
-        access: String,
-
-        #[arg(
-            long = "write-tag-prefix",
-            value_name = "PREFIX",
-            help = "Allowed write tag prefix for save tokens (repeatable)"
-        )]
-        write_tag_prefixes: Vec<String>,
-
-        #[arg(
-            long,
-            value_parser = ["30d", "90d", "1y"],
-            help = "Expiration shortcut"
-        )]
-        expires_in: Option<String>,
-
-        #[arg(long, value_name = "YYYY-MM-DD", help = "Custom expiration date")]
-        expires_on: Option<String>,
-
-        #[arg(
-            long,
-            help = "Print shell export lines for the new secret",
-            conflicts_with = "json"
-        )]
-        shell: bool,
-
-        #[arg(long, help = "Print machine-readable output for CI and scripts")]
-        json: bool,
-    },
-
-    #[command(
-        name = "create-ci",
-        visible_alias = "ci",
-        about = "Create restore/save CI token pair"
-    )]
-    CreateCi {
-        #[arg(help = "Workspace name (org/project or user/project)")]
-        workspace: Option<String>,
-
-        #[arg(long, help = "Optional token name prefix")]
-        name: Option<String>,
-
-        #[arg(
-            long = "save-tag-prefix",
-            value_name = "PREFIX",
-            help = "Allowed save tag prefix for the save token (repeatable)"
-        )]
-        save_tag_prefixes: Vec<String>,
-
-        #[arg(
-            long,
-            value_parser = ["30d", "90d", "1y"],
-            help = "Expiration shortcut"
-        )]
-        expires_in: Option<String>,
-
-        #[arg(long, value_name = "YYYY-MM-DD", help = "Custom expiration date")]
-        expires_on: Option<String>,
-
-        #[arg(
-            long,
-            help = "Print shell export lines for the new secrets",
-            conflicts_with = "json"
-        )]
-        shell: bool,
-
-        #[arg(long, help = "Print machine-readable output for CI and scripts")]
-        json: bool,
-    },
-
-    #[command(about = "Revoke a workspace token")]
-    Revoke {
-        #[arg(help = "Workspace name or token id")]
-        workspace_or_token_id: String,
-
-        #[arg(help = "Token id (omit when a default workspace is configured)")]
-        token_id: Option<String>,
-
-        #[arg(long, help = "Print machine-readable output for CI and scripts")]
-        json: bool,
-    },
-
-    #[command(about = "Rotate a workspace token")]
-    Rotate {
-        #[arg(help = "Workspace name or token id")]
-        workspace_or_token_id: String,
-
-        #[arg(help = "Token id (omit when a default workspace is configured)")]
-        token_id: Option<String>,
-
-        #[arg(long, help = "Optional replacement token name")]
-        name: Option<String>,
-
-        #[arg(
-            long,
-            value_parser = ["30d", "90d", "1y"],
-            help = "Expiration shortcut"
-        )]
-        expires_in: Option<String>,
-
-        #[arg(long, value_name = "YYYY-MM-DD", help = "Custom expiration date")]
-        expires_on: Option<String>,
-
-        #[arg(
-            long,
-            help = "Print shell export lines for the replacement secret",
-            conflicts_with = "json"
-        )]
-        shell: bool,
-
-        #[arg(long, help = "Print machine-readable output for CI and scripts")]
-        json: bool,
-    },
-}
+pub use adapters::AdapterArgs;
+pub use auth::TokenCommands;
+pub use config::ConfigSubcommand;
 
 #[derive(Parser)]
 #[command(
@@ -181,97 +33,6 @@ pub struct Cli {
         help = "Require signed cache hits and fail if a returned server signature cannot be verified"
     )]
     pub require_server_signature: bool,
-}
-
-#[derive(Debug, Clone, clap::Args)]
-pub struct AdapterArgs {
-    #[arg(long, help = "Workspace name (org/project or user/project)")]
-    pub workspace: Option<String>,
-
-    #[arg(long, help = "Proxy cache tag")]
-    pub tag: Option<String>,
-
-    #[arg(short, long, help = "Port to bind and advertise (default: 5000)")]
-    pub port: Option<u16>,
-
-    #[arg(long, help = "Bind host for the local proxy (default: 127.0.0.1)")]
-    pub host: Option<String>,
-
-    #[arg(
-        long = "endpoint-host",
-        help = "Advertised host for wrapped clients when it differs from --host"
-    )]
-    pub endpoint_host: Option<String>,
-
-    #[arg(long, help = "Disable automatic platform suffix for cache tags")]
-    pub no_platform: bool,
-
-    #[arg(
-        long,
-        help = "Disable automatic git-based tag suffixing and fallback restore logic"
-    )]
-    pub no_git: bool,
-
-    #[arg(long, help = "Run proxy reads only and skip cache writes")]
-    pub read_only: bool,
-
-    #[arg(
-        long,
-        help = "Exit with error if cache operations encounter backend failures"
-    )]
-    pub fail_on_cache_error: bool,
-
-    #[arg(
-        long,
-        value_name = "KEY=VALUE",
-        help = "Attach low-cardinality metadata hints to proxy sessions (repeatable)"
-    )]
-    pub metadata_hint: Vec<String>,
-
-    #[arg(
-        long,
-        value_name = "ENTRY",
-        value_delimiter = ',',
-        help = "Project or built-in cache entry/entries to resolve (repeatable)"
-    )]
-    pub entry: Vec<String>,
-
-    #[arg(
-        long,
-        value_name = "PROFILE",
-        value_delimiter = ',',
-        help = "Project cache profile(s) from .boringcache.toml (repeatable)"
-    )]
-    pub profile: Vec<String>,
-
-    #[arg(long, help = "Skip restore phase for archive entries")]
-    pub skip_restore: bool,
-
-    #[arg(long, help = "Skip save phase for archive entries")]
-    pub skip_save: bool,
-
-    #[arg(long, help = "Run save phase even if command exits non-zero")]
-    pub save_on_failure: bool,
-
-    #[arg(long, help = "Docker cache export mode (default: max)")]
-    pub cache_mode: Option<String>,
-
-    #[arg(long, help = "Docker registry cache tag (default: buildcache)")]
-    pub cache_ref_tag: Option<String>,
-
-    #[arg(long, help = "Print the resolved execution plan without running")]
-    pub dry_run: bool,
-
-    #[arg(
-        short,
-        long,
-        requires = "dry_run",
-        help = "Print machine-readable dry-run output"
-    )]
-    pub json: bool,
-
-    #[arg(last = true, help = "Command to execute (after --)")]
-    pub command: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -1047,26 +808,6 @@ pub enum Commands {
             help = "Optional bearer token for cache-registry requests"
         )]
         token: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum ConfigSubcommand {
-    Get {
-        key: String,
-
-        #[arg(short, long, help = "Output in JSON format")]
-        json: bool,
-    },
-
-    Set {
-        key: String,
-        value: String,
-    },
-
-    List {
-        #[arg(short, long, help = "Output in JSON format")]
-        json: bool,
     },
 }
 

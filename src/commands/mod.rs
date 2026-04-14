@@ -1,34 +1,21 @@
-pub mod adapter;
-pub mod audit;
-pub mod auth;
-pub mod cas_publish;
-pub mod cas_restore;
-pub mod check;
-pub mod config;
-pub mod dashboard;
-pub mod delete;
-pub mod doctor;
-pub mod file_materialize;
-pub mod go_cacheprog;
-pub mod inspect;
-pub mod login;
-pub mod ls;
-pub mod misses;
-pub mod mount;
-pub mod onboard;
-pub mod proxy_exec;
-pub mod restore;
-pub mod run;
-pub mod save;
-pub mod save_support;
-pub mod serve;
-pub mod sessions;
-pub mod setup_encryption;
-pub mod signature_policy;
-pub mod status;
-pub mod tags;
-pub mod token;
-pub mod upload_receipts;
-pub mod use_workspace;
-pub mod utils;
-pub mod workspaces;
+#[path = "adapters/mod.rs"]
+mod adapters_group;
+#[path = "auth/mod.rs"]
+mod auth_group;
+#[path = "cache/mod.rs"]
+mod cache_group;
+#[path = "config/mod.rs"]
+mod config_group;
+#[path = "proxy/mod.rs"]
+mod proxy_group;
+#[path = "workspace/mod.rs"]
+mod workspace_group;
+
+pub use adapters_group::{command as adapter, go_cacheprog};
+pub use auth_group::{auth, login, token};
+pub use cache_group::{
+    check, delete, inspect, ls, misses, mount, restore, run, save, sessions, status, tags,
+};
+pub use config_group::{config, setup_encryption};
+pub use proxy_group::serve;
+pub use workspace_group::{audit, dashboard, doctor, onboard, use_workspace, workspaces};
