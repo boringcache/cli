@@ -62,7 +62,11 @@ src/
       kv_published_index.rs
     cache_registry/
       mod.rs
-      kv.rs
+      kv/
+        mod.rs
+        write.rs
+        lookup.rs
+        flush.rs
       kv_publish.rs
       cache_ops.rs
       bazel.rs
@@ -87,7 +91,8 @@ These are the main files that carry multiple concerns and should be split by nam
 
 | Path | Concern mix |
 | --- | --- |
-| `src/serve/cache_registry/kv.rs` | lookup, miss cache, handoff, blob IO, flush, prefetch, alias binding |
+| `src/serve/cache_registry/kv/lookup.rs` | lookup, blob IO, prefetch targeting, index load |
+| `src/serve/cache_registry/kv/flush.rs` | flush orchestration, refresh, polling, alias binding |
 | `src/commands/cache/save/mod.rs` | entrypoint plus archive, OCI, and file save flows |
 | `src/commands/cache/restore/mod.rs` | entrypoint plus archive, OCI, and file restore flows |
 | `src/commands/cache/mount/mod.rs` | initial restore, watch loop, and layout-specific sync logic |
@@ -199,12 +204,9 @@ src/
         go_cache.rs
       kv/
         mod.rs
+        write.rs
         lookup.rs
-        handoff.rs
-        blob_io.rs
         flush.rs
-        prefetch.rs
-        alias_tags.rs
     state/
       mod.rs
       metrics.rs
@@ -255,7 +257,7 @@ src/
 | `src/multipart_upload.rs` | `src/cache/multipart_upload.rs` | done |
 | `src/transfer.rs` | `src/cache/transfer.rs` | done |
 | `src/project_config.rs` | `src/project_config/{model,discover,builtins,resolve}.rs` | planned |
-| `src/serve/cache_registry/kv.rs` | `src/serve/cache_registry/kv/*.rs` | planned |
+| `src/serve/cache_registry/kv.rs` | `src/serve/cache_registry/kv/{mod,write,lookup,flush}.rs` | done |
 | `src/serve/state.rs` | `src/serve/state/*.rs` | done |
 | `src/api/client/mod.rs` | `src/api/client/{http,auth,cache,workspace,metrics}.rs` | done |
 | `src/api/models/mod.rs` | `src/api/models/*.rs` | done |
