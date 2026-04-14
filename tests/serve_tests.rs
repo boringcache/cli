@@ -26,19 +26,6 @@ use tokio::sync::{Mutex, RwLock};
 static ORIGINAL_TMPDIR: std::sync::LazyLock<Option<String>> =
     std::sync::LazyLock::new(|| std::env::var("TMPDIR").ok());
 
-struct ScopedEnvVar(&'static str);
-
-impl Drop for ScopedEnvVar {
-    fn drop(&mut self) {
-        test_env::remove_var(self.0);
-    }
-}
-
-fn set_scoped_env_var(key: &'static str, value: &str) -> ScopedEnvVar {
-    test_env::set_var(key, value);
-    ScopedEnvVar(key)
-}
-
 async fn wait_for_prefetch_state(client: &reqwest::Client, base_url: &str, expected: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -331,11 +318,9 @@ async fn test_kv_reads_wait_for_startup_prefetch_completion() {
 }
 
 #[tokio::test]
-async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
+async fn test_startup_prefetch_hydrates_full_tag_before_ready() {
     let mut server = Server::new_async().await;
     let (_state, _home, _guard) = setup(&server).await;
-    let _max_blobs_env = set_scoped_env_var("BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS", "2");
-    let _max_bytes_env = set_scoped_env_var("BORINGCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES", "10");
 
     let warm_blob_a = b"aaaaa";
     let warm_blob_b = b"bbbbb";
@@ -379,8 +364,8 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
             json!([{
                 "tag": "registry",
                 "status": "hit",
-                "cache_entry_id": "entry-startup-slice",
-                "manifest_url": format!("{}/pointers/entry-startup-slice", server.url()),
+                "cache_entry_id": "entry-full-hydration",
+                "manifest_url": format!("{}/pointers/entry-full-hydration", server.url()),
                 "manifest_root_digest": cas_file::prefixed_sha256_digest(&pointer_bytes),
                 "storage_mode": "cas",
                 "cas_layout": "file-v1",
@@ -391,7 +376,7 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
         .await;
 
     let pointer_mock = server
-        .mock("GET", "/pointers/entry-startup-slice")
+        .mock("GET", "/pointers/entry-full-hydration")
         .expect_at_least(1)
         .with_status(200)
         .with_body(pointer_bytes)
@@ -443,7 +428,7 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
         .await;
     let cold_blob_mock = server
         .mock("GET", format!("/blobs/{}", digest_c).as_str())
-        .expect_at_least(1)
+        .expect(1)
         .with_status(200)
         .with_body(cold_blob)
         .create_async()
@@ -459,7 +444,7 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
         .with_body(
             serde_json::to_string(&json!({
                 "tag": "registry",
-                "cache_entry_id": "entry-startup-slice",
+                "cache_entry_id": "entry-full-hydration",
                 "manifest_root_digest": pointer_digest,
                 "version": "1"
             }))
