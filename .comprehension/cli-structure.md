@@ -52,7 +52,14 @@ src/
   serve/
     mod.rs
     handlers.rs
-    state.rs
+    state/
+      mod.rs
+      metrics.rs
+      blob_read_cache.rs
+      blob_locator.rs
+      upload_sessions.rs
+      kv_pending.rs
+      kv_published_index.rs
     cache_registry/
       mod.rs
       kv.rs
@@ -84,7 +91,6 @@ These are the main files that carry multiple concerns and should be split by nam
 | `src/commands/cache/save/mod.rs` | entrypoint plus archive, OCI, and file save flows |
 | `src/commands/cache/restore/mod.rs` | entrypoint plus archive, OCI, and file restore flows |
 | `src/commands/cache/mount/mod.rs` | initial restore, watch loop, and layout-specific sync logic |
-| `src/serve/state.rs` | app state, blob cache, upload sessions, pending stores, publish index |
 | `src/project_config.rs` | schema, discovery, built-ins, resolution |
 | `src/cli.rs` + `src/cli/{preprocess,dispatch}.rs` + `src/main.rs` | command declaration, argv preprocessing, dispatch, and bootstrap |
 
@@ -201,7 +207,8 @@ src/
         alias_tags.rs
     state/
       mod.rs
-      blob_cache.rs
+      metrics.rs
+      blob_read_cache.rs
       blob_locator.rs
       upload_sessions.rs
       kv_pending.rs
@@ -249,7 +256,7 @@ src/
 | `src/transfer.rs` | `src/cache/transfer.rs` | done |
 | `src/project_config.rs` | `src/project_config/{model,discover,builtins,resolve}.rs` | planned |
 | `src/serve/cache_registry/kv.rs` | `src/serve/cache_registry/kv/*.rs` | planned |
-| `src/serve/state.rs` | `src/serve/state/*.rs` | planned |
+| `src/serve/state.rs` | `src/serve/state/*.rs` | done |
 | `src/api/client/mod.rs` | `src/api/client/{http,auth,cache,workspace,metrics}.rs` | done |
 | `src/api/models/mod.rs` | `src/api/models/*.rs` | done |
 
