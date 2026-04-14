@@ -254,6 +254,17 @@ jobs:
           load: "true"
           save-always: "true"
 
+      - name: Copy Docker build tools for mount
+        if: matrix.use_docker == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v boringcache >/dev/null 2>&1; then
+            cp "$(command -v boringcache)" "${RUNNER_TEMP}/boringcache-bin"
+            chmod +x "${RUNNER_TEMP}/boringcache-bin"
+            echo "BORINGCACHE_BIN_PATH=${RUNNER_TEMP}/boringcache-bin" >> "${GITHUB_ENV}"
+          fi
+
       # Docker builds for Debian/Alpine
       - name: Build in Docker container
         if: matrix.use_docker == true
@@ -267,6 +278,11 @@ jobs:
             -e BORINGCACHE_RESTORE_TOKEN=${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
             -e BORINGCACHE_SAVE_TOKEN=${{ secrets.BORINGCACHE_SAVE_TOKEN }}
           )
+          if [ -n "${BORINGCACHE_BIN_PATH:-}" ] && [ -f "${BORINGCACHE_BIN_PATH}" ]; then
+            docker_args+=(-v "${BORINGCACHE_BIN_PATH}:/usr/local/bin/boringcache:ro")
+          elif command -v boringcache >/dev/null 2>&1; then
+            docker_args+=(-v "$(command -v boringcache):/usr/local/bin/boringcache:ro")
+          fi
           if docker image inspect "boringcache-cli-release-build-${{ matrix.name }}:latest" >/dev/null 2>&1; then
             DOCKER_IMAGE="boringcache-cli-release-build-${{ matrix.name }}:latest"
           fi
