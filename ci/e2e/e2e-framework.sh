@@ -2,13 +2,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REQUIRED_DIR="${SCRIPT_DIR}/required"
+EXTENDED_DIR="${SCRIPT_DIR}/extended"
 
 resolved_rust_version() {
   if [[ -n "${RUST_VERSION:-}" ]]; then
     printf '%s\n' "${RUST_VERSION}"
     return 0
   fi
-  "${SCRIPT_DIR}/rust-version.sh"
+  "${REPO_ROOT}/scripts/rust-version.sh"
 }
 
 run_leg() {
@@ -24,18 +27,18 @@ run_leg() {
       WORKSPACE="$workspace" \
       BORINGCACHE_API_URL="${BORINGCACHE_API_URL:-https://api.boringcache.com}" \
       LOG_DIR="$log_dir" \
-      bash ./scripts/e2e-cli-integrity-test.sh
+      bash "${REQUIRED_DIR}/e2e-cli-integrity-test.sh"
       ;;
     cli-core)
       BINARY="$binary" \
       WORKSPACE="$workspace" \
       BORINGCACHE_API_URL="${BORINGCACHE_API_URL:-https://api.boringcache.com}" \
       LOG_DIR="$log_dir" \
-      bash ./scripts/e2e-cli-core-test.sh
+      bash "${REQUIRED_DIR}/e2e-cli-core-test.sh"
       ;;
     cli-contract)
       LOG_DIR="$log_dir" \
-      bash ./scripts/e2e-cli-contract-test.sh
+      bash "${EXTENDED_DIR}/e2e-cli-contract-test.sh"
       ;;
     security)
       BINARY="$binary" \
@@ -44,14 +47,14 @@ run_leg() {
       LOG_DIR="$log_dir" \
       BORINGCACHE_E2E_RESTORE_TOKEN="${BORINGCACHE_E2E_RESTORE_TOKEN:-}" \
       BORINGCACHE_E2E_SAVE_TOKEN="${BORINGCACHE_E2E_SAVE_TOKEN:-}" \
-      bash ./scripts/e2e-security-test.sh
+      bash "${REQUIRED_DIR}/e2e-security-test.sh"
       ;;
     adapters-http)
       BINARY="$binary" \
       LOG_DIR="$log_dir" \
       TAG="$tag" \
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
-      bash ./scripts/e2e-all-adapters-http-test.sh
+      bash "${REQUIRED_DIR}/e2e-all-adapters-http-test.sh"
       ;;
     dual-proxy)
       BINARY="$binary" \
@@ -64,7 +67,7 @@ run_leg() {
       BUDGET_CACHE_OPS_GET_HIT_RATE_MAX="100" \
       BUDGET_CACHE_OPS_SCCACHE_HIT_RATE_DELTA_MAX="15" \
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
-      bash ./scripts/e2e-dual-proxy-contention-test.sh
+      bash "${EXTENDED_DIR}/e2e-dual-proxy-contention-test.sh"
       ;;
     docker-buildkit)
       BINARY="$binary" \
@@ -73,7 +76,7 @@ run_leg() {
       PORT="5000" \
       LOG_DIR="$log_dir" \
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
-      bash ./scripts/e2e-docker-buildkit-registry-test.sh
+      bash "${REQUIRED_DIR}/e2e-docker-buildkit-registry-test.sh"
       ;;
     prefetch-readiness)
       BINARY="$binary" \
@@ -86,7 +89,7 @@ run_leg() {
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
       SEED_FLUSH_TIMEOUT_SECS="240" \
       LOG_DIR="$log_dir" \
-      bash ./scripts/e2e-prefetch-readiness-test.sh
+      bash "${EXTENDED_DIR}/e2e-prefetch-readiness-test.sh"
       ;;
     tool-hugo)
       BINARY="$binary" \
@@ -94,42 +97,42 @@ run_leg() {
       LOG_DIR="$log_dir" \
       PORT="5000" \
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
-      bash ./scripts/e2e-tool-hugo-test.sh
+      bash "${EXTENDED_DIR}/e2e-tool-hugo-test.sh"
       ;;
     tool-turbo)
       BINARY="$binary" \
       WORKSPACE="$workspace" \
       LOG_DIR="$log_dir" \
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
-      bash ./scripts/e2e-tool-turbo-test.sh
+      bash "${REQUIRED_DIR}/e2e-tool-turbo-test.sh"
       ;;
     tool-sccache)
       BINARY="$binary" \
       WORKSPACE="$workspace" \
       LOG_DIR="$log_dir" \
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
-      bash ./scripts/e2e-tool-sccache-test.sh
+      bash "${REQUIRED_DIR}/e2e-tool-sccache-test.sh"
       ;;
     tool-bazel)
       BINARY="$binary" \
       WORKSPACE="$workspace" \
       LOG_DIR="$log_dir" \
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
-      bash ./scripts/e2e-tool-bazel-test.sh
+      bash "${REQUIRED_DIR}/e2e-tool-bazel-test.sh"
       ;;
     tool-maven)
       BINARY="$binary" \
       WORKSPACE="$workspace" \
       LOG_DIR="$log_dir" \
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
-      bash ./scripts/e2e-tool-maven-test.sh
+      bash "${REQUIRED_DIR}/e2e-tool-maven-test.sh"
       ;;
     tool-gradle)
       BINARY="$binary" \
       WORKSPACE="$workspace" \
       LOG_DIR="$log_dir" \
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
-      bash ./scripts/e2e-tool-gradle-test.sh
+      bash "${REQUIRED_DIR}/e2e-tool-gradle-test.sh"
       ;;
     *)
       echo "ERROR: unknown e2e leg: ${leg}"
@@ -188,7 +191,7 @@ run_benchmark() {
         LOG_DIR="$log_dir" \
         SCCACHE_DIR="$sccache_dir" \
         TAG="gha-cache-registry-${backend}-${phase}-rust-$(resolved_rust_version)-${branch_slug}" \
-        bash ./scripts/e2e-sccache-test.sh
+        bash "${EXTENDED_DIR}/e2e-sccache-test.sh"
       )
       ;;
     stress)
@@ -209,7 +212,7 @@ run_benchmark() {
         LOG_DIR="$log_dir" \
         SCCACHE_DIR="$sccache_dir" \
         TAG="gha-cache-registry-${backend}-${phase}-rust-$(resolved_rust_version)-${branch_slug}" \
-        bash ./scripts/e2e-sccache-test.sh
+        bash "${EXTENDED_DIR}/e2e-sccache-test.sh"
       )
       ;;
     *)

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 RUN_HTTP_ADAPTERS="${RUN_HTTP_ADAPTERS:-1}"
 RUN_REAL_NX_TURBO_GO="${RUN_REAL_NX_TURBO_GO:-0}"
 RUN_SCCACHE_BENCH="${RUN_SCCACHE_BENCH:-0}"
@@ -32,25 +34,25 @@ echo "RUN_SCCACHE_IN_NX_GO=${RUN_SCCACHE_IN_NX_GO}"
 if [[ "$RUN_HTTP_ADAPTERS" == "1" ]]; then
   echo ""
   echo "Running HTTP adapter e2e checks..."
-  ./scripts/e2e-all-adapters-http-test.sh
+  bash "${SCRIPT_DIR}/required/e2e-all-adapters-http-test.sh"
 fi
 
 if [[ "$RUN_REAL_NX_TURBO_GO" == "1" ]]; then
   echo ""
   echo "Running real-client Nx/Turborepo/Go checks..."
-  RUN_SCCACHE="$RUN_SCCACHE_IN_NX_GO" ./scripts/e2e-nx-go-test.sh
+  RUN_SCCACHE="$RUN_SCCACHE_IN_NX_GO" bash "${SCRIPT_DIR}/e2e-nx-go-test.sh"
 fi
 
 if [[ "$RUN_SCCACHE_BENCH" == "1" ]]; then
   echo ""
   echo "Running sccache efficacy/stress benchmark..."
-  ./scripts/e2e-sccache-test.sh
+  bash "${SCRIPT_DIR}/extended/e2e-sccache-test.sh"
 fi
 
 if [[ "$RUN_DUAL_PROXY" == "1" ]]; then
   echo ""
   echo "Running dual-proxy contention test..."
-  ./scripts/e2e-dual-proxy-contention-test.sh
+  bash "${SCRIPT_DIR}/extended/e2e-dual-proxy-contention-test.sh"
 fi
 
 echo ""

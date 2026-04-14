@@ -2,9 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/e2e-helpers.sh"
+source "${SCRIPT_DIR}/../e2e-helpers.sh"
 
-CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 BINARY="${BINARY:-${CLI_REPO_ROOT}/target/debug/boringcache}"
 WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
 LOG_DIR="${LOG_DIR:-.}"
