@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/e2e-helpers.sh"
+source "${SCRIPT_DIR}/../e2e-helpers.sh"
 
 LOG_DIR="${LOG_DIR:-.}"
 
@@ -71,7 +71,7 @@ run_contract_test \
 echo "=== Phase 4: E2E harness guards ==="
 run_contract_test \
   "dual-proxy-port-validation" \
-  env VALIDATE_PORT_SELECTION_ONLY=1 bash ./scripts/e2e-dual-proxy-contention-test.sh
+  env VALIDATE_PORT_SELECTION_ONLY=1 bash "${SCRIPT_DIR}/e2e-dual-proxy-contention-test.sh"
 
 echo "--- dual-proxy-port-collision-rejected ---"
 collision_log="${CONTRACT_LOG_DIR}/dual-proxy-port-collision-rejected.log"
@@ -83,7 +83,7 @@ env \
   PROXY_PORT_VERIFY=5054 \
   SCCACHE_PORT_A=5052 \
   SCCACHE_PORT_B=5053 \
-  bash ./scripts/e2e-dual-proxy-contention-test.sh \
+  bash "${SCRIPT_DIR}/e2e-dual-proxy-contention-test.sh" \
   2>&1 | tee "${collision_log}"
 collision_status=${PIPESTATUS[0]}
 set -e

@@ -2,10 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/e2e-auth.sh"
-source "${SCRIPT_DIR}/e2e-remote-tag.sh"
+source "${SCRIPT_DIR}/../e2e-auth.sh"
+source "${SCRIPT_DIR}/../e2e-remote-tag.sh"
 
-CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 BINARY="${BINARY:-${CLI_REPO_ROOT}/target/debug/boringcache}"
 WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
 E2E_TAG_PREFIX="${E2E_TAG_PREFIX:-gha-cache-registry}"

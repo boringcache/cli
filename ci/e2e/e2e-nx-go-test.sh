@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/e2e-helpers.sh"
 
-CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-}}"
 PORT="${PORT:-5057}"
 HOST="${HOST:-127.0.0.1}"

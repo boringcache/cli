@@ -2,13 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/e2e-helpers.sh"
+CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+source "${SCRIPT_DIR}/../e2e-helpers.sh"
 
 PROXY_PORT="${PROXY_PORT:-5050}"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 TAG_BASE="${TAG:-bc-e2e-cli-sccache}"
 WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-boringcache/testing2}}"
-BINARY="${BINARY:-./target/release/boringcache}"
+BINARY="${BINARY:-${CLI_REPO_ROOT}/target/release/boringcache}"
 PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}"
 TMP_ROOT="${TMPDIR:-/tmp}/boringcache-kv-bench"
 BINARY_DIR="${TMP_ROOT}/bin"

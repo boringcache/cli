@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/e2e-helpers.sh"
+CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+source "${SCRIPT_DIR}/../e2e-helpers.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT_A="${PROXY_PORT_A:-5050}"
@@ -20,7 +21,7 @@ SCCACHE_PORT_A="${SCCACHE_PORT_A:-$((4200 + (RANDOM % 1000)))}"
 SCCACHE_PORT_B="${SCCACHE_PORT_B:-$((SCCACHE_PORT_A + 1))}"
 TAG="${TAG:-bc-e2e-cli-dual-proxy-contention}"
 WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-boringcache/testing2}}"
-BINARY="${BINARY:-./target/release/boringcache}"
+BINARY="${BINARY:-${CLI_REPO_ROOT}/target/release/boringcache}"
 TMP_ROOT="${TMPDIR:-/tmp}/boringcache-dual-proxy"
 BINARY_DIR="${TMP_ROOT}/bin"
 TMP_BINARY="${BINARY_DIR}/boringcache"

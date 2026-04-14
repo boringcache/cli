@@ -5,8 +5,9 @@ on:
     branches: ["main"]
     paths:
       - "src/**"
-      - "scripts/e2e-*.sh"
-      - "scripts/request-metrics-summary.py"
+      - "ci/e2e/**"
+      - "scripts/rust-version.sh"
+      - "scripts/cli-version.sh"
       - ".github/workflows/e2e.yml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -14,8 +15,9 @@ on:
     branches: ["main"]
     paths:
       - "src/**"
-      - "scripts/e2e-*.sh"
-      - "scripts/request-metrics-summary.py"
+      - "ci/e2e/**"
+      - "scripts/rust-version.sh"
+      - "scripts/cli-version.sh"
       - ".github/workflows/e2e.yml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -100,7 +102,7 @@ jobs:
           - leg: integrity
             label: Archive / Integrity
             artifact: archive-integrity
-            tier: quick
+            tier: required
             needs_bazel: false
             needs_docker: false
             needs_java: false
@@ -110,7 +112,7 @@ jobs:
           - leg: cli-core
             label: CLI / Core
             artifact: cli-core
-            tier: quick
+            tier: required
             needs_bazel: false
             needs_docker: false
             needs_java: false
@@ -120,7 +122,7 @@ jobs:
           - leg: cli-contract
             label: CLI / Pending and Conflict Contracts
             artifact: cli-contract-pending-conflicts
-            tier: quick
+            tier: extended
             needs_bazel: false
             needs_docker: false
             needs_java: false
@@ -130,7 +132,7 @@ jobs:
           - leg: security
             label: Security / Tokens and Poisoning
             artifact: security-tokens-poisoning
-            tier: quick
+            tier: required
             needs_bazel: false
             needs_docker: false
             needs_java: false
@@ -140,7 +142,7 @@ jobs:
           - leg: adapters-http
             label: Proxy / HTTP Adapters
             artifact: proxy-http-adapters
-            tier: quick
+            tier: required
             needs_bazel: false
             needs_docker: false
             needs_java: false
@@ -160,7 +162,7 @@ jobs:
           - leg: docker-buildkit
             label: Registry / Docker BuildKit
             artifact: registry-docker-buildkit
-            tier: quick
+            tier: required
             needs_bazel: false
             needs_docker: true
             needs_java: false
@@ -180,7 +182,7 @@ jobs:
           - leg: tool-hugo
             label: Tool / Hugo
             artifact: tool-hugo
-            tier: quick
+            tier: extended
             needs_bazel: false
             needs_docker: true
             needs_java: false
@@ -190,7 +192,7 @@ jobs:
           - leg: tool-turbo
             label: Tool / Turbo
             artifact: tool-turbo
-            tier: quick
+            tier: required
             needs_bazel: false
             needs_docker: false
             needs_java: false
@@ -200,7 +202,7 @@ jobs:
           - leg: tool-sccache
             label: Tool / sccache
             artifact: tool-sccache
-            tier: quick
+            tier: required
             needs_bazel: false
             needs_docker: false
             needs_java: false
@@ -210,7 +212,7 @@ jobs:
           - leg: tool-bazel
             label: Tool / Bazel
             artifact: tool-bazel
-            tier: quick
+            tier: required
             needs_bazel: true
             needs_docker: false
             needs_java: false
@@ -220,7 +222,7 @@ jobs:
           - leg: tool-maven
             label: Tool / Maven
             artifact: tool-maven
-            tier: quick
+            tier: required
             needs_bazel: false
             needs_docker: false
             needs_java: true
@@ -230,7 +232,7 @@ jobs:
           - leg: tool-gradle
             label: Tool / Gradle
             artifact: tool-gradle
-            tier: quick
+            tier: required
             needs_bazel: false
             needs_docker: false
             needs_java: true
@@ -257,7 +259,13 @@ jobs:
         id: gate
         run: |
           set -euo pipefail
-          if [[ "${{ matrix.leg }}" == "cli-contract" ]]; then
+          event_name="${GITHUB_EVENT_NAME}"
+          tier="${{ matrix.tier }}"
+
+          if [[ "${tier}" == "extended" ]] && [[ "${event_name}" != "workflow_dispatch" && "${event_name}" != "schedule" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping extended e2e leg on ${event_name}: ${{ matrix.label }}"
+          elif [[ "${{ matrix.leg }}" == "cli-contract" ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           elif [[ -z "${BORINGCACHE_SAVE_TOKEN:-}" ]]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -363,14 +371,14 @@ jobs:
           LOG_DIR="${GITHUB_WORKSPACE}/e2e-logs/${LEG}"
           mkdir -p "$LOG_DIR"
           BIN_PATH="${RUNNER_TEMP}/boringcache-bin/boringcache"
-          bash ./scripts/e2e-framework.sh run "$LEG" "$BIN_PATH" "$LOG_DIR" 2>&1 | tee "$LOG_DIR/run.log"
+          bash ./ci/e2e/e2e-framework.sh run "$LEG" "$BIN_PATH" "$LOG_DIR" 2>&1 | tee "$LOG_DIR/run.log"
 
       - name: Validate scenario coverage
         if: always() && steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
           LEG="${{ matrix.leg }}"
-          bash ./scripts/e2e-framework.sh validate "$LEG" "${GITHUB_WORKSPACE}/e2e-logs/${LEG}/run.log"
+          bash ./ci/e2e/e2e-framework.sh validate "$LEG" "${GITHUB_WORKSPACE}/e2e-logs/${LEG}/run.log"
 
       - name: Extract e2e metrics
         if: always() && steps.gate.outputs.run == 'true'
@@ -397,7 +405,7 @@ jobs:
 
   cache-registry-benchmark:
     name: E2E / Benchmark / Cache Registry / ${{ matrix.backend_label }} / ${{ matrix.phase_label }}
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     needs: build-cli-binary
     timeout-minutes: 90
@@ -509,13 +517,13 @@ jobs:
           LOG_DIR="${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}"
           mkdir -p "$LOG_DIR"
           BIN_PATH="${RUNNER_TEMP}/boringcache-bin/boringcache"
-          bash ./scripts/e2e-framework.sh run-benchmark "${{ matrix.backend }}" "${{ matrix.phase }}" "$BIN_PATH" "$LOG_DIR" 2>&1 | tee "$LOG_DIR/run.log"
+          bash ./ci/e2e/e2e-framework.sh run-benchmark "${{ matrix.backend }}" "${{ matrix.phase }}" "$BIN_PATH" "$LOG_DIR" 2>&1 | tee "$LOG_DIR/run.log"
 
       - name: Validate benchmark coverage
         if: always() && steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
-          bash ./scripts/e2e-framework.sh validate-benchmark "${{ matrix.backend }}" "${{ matrix.phase }}" "${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}/run.log"
+          bash ./ci/e2e/e2e-framework.sh validate-benchmark "${{ matrix.backend }}" "${{ matrix.phase }}" "${GITHUB_WORKSPACE}/benchmark-logs/${{ matrix.backend }}-${{ matrix.phase }}/run.log"
 
       - name: Extract metrics
         if: always() && steps.gate.outputs.run == 'true'
@@ -640,7 +648,7 @@ jobs:
 
           request_metrics_file="${log_dir}/${phase}/request-metrics.jsonl"
           if [[ -f "$request_metrics_file" ]]; then
-            python3 scripts/request-metrics-summary.py "$request_metrics_file" > "${log_dir}/request-metrics-summary.env"
+            python3 ci/e2e/request-metrics-summary.py "$request_metrics_file" > "${log_dir}/request-metrics-summary.env"
             source "${log_dir}/request-metrics-summary.env"
             if [[ "$phase" == "efficacy" ]]; then
               efficacy_cache_ops_hit_rate="${request_metrics_cache_ops_sccache_get_hit_rate:-0}"
@@ -749,79 +757,13 @@ jobs:
       - name: Seed CAS via proxy
         id: seed
         if: steps.gate.outputs.run == 'true'
+        env:
+          BINARY: ${{ runner.temp }}/bin/boringcache
+          WORKSPACE: ${{ github.repository }}
         run: |
           set -euo pipefail
-          source ./scripts/e2e-remote-tag.sh
-          export_resolved_cli_tokens admin
-          unset BORINGCACHE_API_TOKEN
-          CLI="${RUNNER_TEMP}/bin/boringcache"
-          chmod +x "$CLI"
-          TAG="gha-cross-runner-cas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          WORK_DIR="$(mktemp -d)"
-          PROXY_PORT=5050
-          PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
-          PROXY_LOG="${WORK_DIR}/proxy.log"
-
-          CAS_PAYLOAD="${WORK_DIR}/cas-payload.bin"
-          dd if=/dev/urandom bs=1024 count=64 2>/dev/null | base64 > "$CAS_PAYLOAD"
-          CAS_DIGEST="$(sha256sum "$CAS_PAYLOAD" | awk '{print $1}')"
-
-          AC_PAYLOAD="${WORK_DIR}/ac-payload.bin"
-          printf 'cross-runner-ac-%s-%s\n' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" > "$AC_PAYLOAD"
-          AC_DIGEST="$(sha256sum "$AC_PAYLOAD" | awk '{print $1}')"
-
-          RUST_LOG=info "$CLI" cache-registry "${{ github.repository }}" "$TAG" \
-            --host 127.0.0.1 --port "$PROXY_PORT" --no-platform --no-git \
-            >>"$PROXY_LOG" 2>&1 &
-          PROXY_PID=$!
-
-          for i in $(seq 1 30); do
-            if curl -fsS --max-time 2 "${PROXY_URL}/v2/" >/dev/null 2>&1; then
-              break
-            fi
-            if ! kill -0 "$PROXY_PID" 2>/dev/null; then
-              echo "ERROR: proxy exited during startup"
-              cat "$PROXY_LOG"
-              exit 1
-            fi
-            sleep 1
-          done
-
-          echo "Proxy ready, writing CAS + AC blobs..."
-          curl -fsS --max-time 30 -X PUT --data-binary "@${CAS_PAYLOAD}" -o /dev/null -w "CAS PUT: %{http_code}\n" "${PROXY_URL}/cas/${CAS_DIGEST}"
-          curl -fsS --max-time 30 -X PUT --data-binary "@${AC_PAYLOAD}" -o /dev/null -w "AC PUT: %{http_code}\n" "${PROXY_URL}/ac/${AC_DIGEST}"
-
-          echo "Verifying blobs readable on same proxy..."
-          curl -fsS --max-time 30 -o "${WORK_DIR}/cas-verify.bin" "${PROXY_URL}/cas/${CAS_DIGEST}"
-          if ! cmp -s "$CAS_PAYLOAD" "${WORK_DIR}/cas-verify.bin"; then
-            echo "ERROR: CAS blob readback mismatch on seed runner"
-            exit 1
-          fi
-          curl -fsS --max-time 30 -o "${WORK_DIR}/ac-verify.bin" "${PROXY_URL}/ac/${AC_DIGEST}"
-          if ! cmp -s "$AC_PAYLOAD" "${WORK_DIR}/ac-verify.bin"; then
-            echo "ERROR: AC blob readback mismatch on seed runner"
-            exit 1
-          fi
-
-          echo "Flushing proxy (graceful shutdown)..."
-          kill "$PROXY_PID"
-          wait "$PROXY_PID" 2>/dev/null || true
-
-          echo "Waiting for published remote tag before handing off to fresh runner..."
-          verify_remote_tag_visible \
-            "$CLI" \
-            "${{ github.repository }}" \
-            "$TAG" \
-            "${WORK_DIR}/publish-check" \
-            1 \
-            "${REMOTE_TAG_VERIFY_ATTEMPTS}" \
-            "${REMOTE_TAG_VERIFY_SLEEP_SECS}" \
-            "$PROXY_LOG"
-
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "cas_digest=${CAS_DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "ac_digest=${AC_DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "Seed complete: tag=${TAG} cas=${CAS_DIGEST} ac=${AC_DIGEST}"
+          chmod +x "${BINARY}"
+          bash ./ci/e2e/required/e2e-cross-runner-seed.sh
 
   cross-runner-verify:
     name: E2E / Cache Registry / Cross-Runner Verify
@@ -830,6 +772,9 @@ jobs:
     if: needs.cross-runner-seed.outputs.tag != ''
     timeout-minutes: 10
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
       - name: Download CLI binary
         uses: actions/download-artifact@v8
         with:
@@ -837,70 +782,16 @@ jobs:
           path: ${{ runner.temp }}/bin
 
       - name: Verify CAS on fresh runner via proxy
+        env:
+          BINARY: ${{ runner.temp }}/bin/boringcache
+          WORKSPACE: ${{ github.repository }}
+          TAG: ${{ needs.cross-runner-seed.outputs.tag }}
+          CAS_DIGEST: ${{ needs.cross-runner-seed.outputs.cas_digest }}
+          AC_DIGEST: ${{ needs.cross-runner-seed.outputs.ac_digest }}
         run: |
           set -euo pipefail
-          unset BORINGCACHE_API_TOKEN
-          CLI="${RUNNER_TEMP}/bin/boringcache"
-          chmod +x "$CLI"
-          TAG="${{ needs.cross-runner-seed.outputs.tag }}"
-          CAS_DIGEST="${{ needs.cross-runner-seed.outputs.cas_digest }}"
-          AC_DIGEST="${{ needs.cross-runner-seed.outputs.ac_digest }}"
-          WORK_DIR="$(mktemp -d)"
-          PROXY_PORT=5050
-          PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
-          PROXY_LOG="${WORK_DIR}/proxy.log"
-
-          RUST_LOG=info "$CLI" cache-registry "${{ github.repository }}" "$TAG" \
-            --read-only \
-            --host 127.0.0.1 --port "$PROXY_PORT" --no-platform --no-git \
-            >>"$PROXY_LOG" 2>&1 &
-          PROXY_PID=$!
-
-          for i in $(seq 1 30); do
-            if curl -fsS --max-time 2 "${PROXY_URL}/v2/" >/dev/null 2>&1; then
-              break
-            fi
-            if ! kill -0 "$PROXY_PID" 2>/dev/null; then
-              echo "ERROR: proxy exited during startup"
-              cat "$PROXY_LOG"
-              exit 1
-            fi
-            sleep 1
-          done
-
-          echo "Proxy ready on fresh runner, verifying CAS blobs..."
-          CAS_STATUS="$(curl -sS --max-time 30 -o "${WORK_DIR}/cas-restored.bin" -w "%{http_code}" "${PROXY_URL}/cas/${CAS_DIGEST}")"
-          if [[ "$CAS_STATUS" != "200" ]]; then
-            echo "ERROR: CAS GET returned ${CAS_STATUS} (expected 200)"
-            tail -n 60 "$PROXY_LOG"
-            kill "$PROXY_PID" 2>/dev/null || true
-            exit 1
-          fi
-          CAS_ACTUAL="$(sha256sum "${WORK_DIR}/cas-restored.bin" | awk '{print $1}')"
-          if [[ "$CAS_ACTUAL" != "$CAS_DIGEST" ]]; then
-            echo "ERROR: CAS content mismatch (expected=${CAS_DIGEST} actual=${CAS_ACTUAL})"
-            kill "$PROXY_PID" 2>/dev/null || true
-            exit 1
-          fi
-          echo "CAS blob verified: digest matches"
-
-          AC_STATUS="$(curl -sS --max-time 30 -o "${WORK_DIR}/ac-restored.bin" -w "%{http_code}" "${PROXY_URL}/ac/${AC_DIGEST}")"
-          if [[ "$AC_STATUS" != "200" ]]; then
-            echo "ERROR: AC GET returned ${AC_STATUS} (expected 200)"
-            tail -n 60 "$PROXY_LOG"
-            kill "$PROXY_PID" 2>/dev/null || true
-            exit 1
-          fi
-          AC_ACTUAL="$(sha256sum "${WORK_DIR}/ac-restored.bin" | awk '{print $1}')"
-          if [[ "$AC_ACTUAL" != "$AC_DIGEST" ]]; then
-            echo "ERROR: AC content mismatch (expected=${AC_DIGEST} actual=${AC_ACTUAL})"
-            kill "$PROXY_PID" 2>/dev/null || true
-            exit 1
-          fi
-          echo "AC blob verified: digest matches"
-
-          echo "Cross-runner CAS persistence verified"
-          kill "$PROXY_PID" 2>/dev/null || true
+          chmod +x "${BINARY}"
+          bash ./ci/e2e/required/e2e-cross-runner-verify.sh
 
       - name: Cleanup
         if: always()

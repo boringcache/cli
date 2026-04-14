@@ -19,7 +19,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Emit blob-read observability for `local_cache` vs `remote_fetch`.
 - Harness guardrails:
   - Add `BORINGCACHE_BLOB_READ_CACHE_DIR` so restart tests can force a truly fresh local blob cache instead of silently reusing `/tmp/boringcache-blob-cache`.
-  - Fix `scripts/e2e-prefetch-readiness-test.sh` to work on local macOS shells by shortening `xargs` worker invocations and separating seed/restart blob-cache directories.
+  - Fix `ci/e2e/extended/e2e-prefetch-readiness-test.sh` to work on local macOS shells by shortening `xargs` worker invocations and separating seed/restart blob-cache directories.
 - Guardrail:
   - Adapter behavior is not one-size-fits-all. Use `docs/adapter-cache-profiles.md` when changing prefetch or read-path defaults.
 

@@ -2,13 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/e2e-remote-tag.sh"
+CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+source "${SCRIPT_DIR}/../e2e-remote-tag.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-5059}"
 WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-boringcache/testing2}}"
 TAG_BASE="${TAG:-bc-e2e-prefetch-readiness}"
-BINARY="${BINARY:-./target/release/boringcache}"
+BINARY="${BINARY:-${CLI_REPO_ROOT}/target/release/boringcache}"
 TMP_ROOT="${TMPDIR:-/tmp}/boringcache-prefetch-e2e"
 LOG_DIR="${LOG_DIR:-${TMP_ROOT}/logs}"
 PROXY_LOG="${LOG_DIR}/proxy.log"

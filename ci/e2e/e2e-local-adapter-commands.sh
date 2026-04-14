@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLI_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CLI_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 REPO_ROOT="$(cd "${CLI_DIR}/.." && pwd)"
 WEB_DIR="${WEB_DIR:-${REPO_ROOT}/web}"
 BINARY="${BINARY:-${CLI_DIR}/target/debug/boringcache}"

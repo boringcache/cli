@@ -4,7 +4,7 @@ This note records how each cache-registry adapter behaves, what the client alrea
 
 It is based on:
 
-- Local harnesses in `scripts/e2e-tool-*.sh` and `scripts/e2e-docker-buildkit-registry-test.sh`
+- Local harnesses in `ci/e2e/required/e2e-tool-*.sh` and `ci/e2e/required/e2e-docker-buildkit-registry-test.sh`
 - Local mock-backed route checks via `cargo test --manifest-path Cargo.toml round_trip -- --nocapture`
 - Official docs:
   - sccache WebDAV: <https://github.com/mozilla/sccache/blob/main/docs/Webdav.md>
@@ -80,14 +80,14 @@ If a benchmark needs lower-level overrides, treat those as engineering controls,
 
 When credentials are available, run the per-adapter harnesses and capture:
 
-- `scripts/e2e-tool-sccache-test.sh`
-- `scripts/e2e-tool-bazel-test.sh`
-- `scripts/e2e-tool-gradle-test.sh`
-- `scripts/e2e-tool-maven-test.sh`
-- `scripts/e2e-tool-turbo-test.sh`
-- `scripts/e2e-docker-buildkit-registry-test.sh`
+- `ci/e2e/required/e2e-tool-sccache-test.sh`
+- `ci/e2e/required/e2e-tool-bazel-test.sh`
+- `ci/e2e/required/e2e-tool-gradle-test.sh`
+- `ci/e2e/required/e2e-tool-maven-test.sh`
+- `ci/e2e/required/e2e-tool-turbo-test.sh`
+- `ci/e2e/required/e2e-docker-buildkit-registry-test.sh`
 
-After each run, summarize `cache-registry-request-metrics.jsonl` with `scripts/request-metrics-summary.py` and compare:
+After each run, summarize `cache-registry-request-metrics.jsonl` with `ci/e2e/request-metrics-summary.py` and compare:
 
 - local blob-read hit ratio
 - local vs remote bytes served
