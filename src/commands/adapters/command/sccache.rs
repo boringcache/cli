@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::{AdapterRunner, passthrough_command};
-use crate::commands::proxy_exec;
+use crate::proxy;
 
 pub(super) const RUNNER: AdapterRunner = AdapterRunner {
     name: "sccache",
@@ -9,7 +9,7 @@ pub(super) const RUNNER: AdapterRunner = AdapterRunner {
     prepare_command: passthrough_command,
 };
 
-fn inject_proxy_env(set: &mut BTreeMap<String, String>, context: &proxy_exec::ProxyContext) {
+fn inject_proxy_env(set: &mut BTreeMap<String, String>, context: &proxy::ProxyContext) {
     let endpoint = context.endpoint();
     set.insert("RUSTC_WRAPPER".to_string(), "sccache".to_string());
     set.insert(
@@ -25,7 +25,7 @@ mod tests {
 
     #[test]
     fn sccache_env_plan_sets_webdav_backend() {
-        let context = proxy_exec::ProxyContext {
+        let context = proxy::ProxyContext {
             endpoint_host: "127.0.0.1".to_string(),
             port: 5000,
             cache_ref: "127.0.0.1:5000/cache:test".to_string(),

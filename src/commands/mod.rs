@@ -11,7 +11,7 @@ mod proxy_group;
 #[path = "workspace/mod.rs"]
 mod workspace_group;
 
-pub use adapters_group::{adapter, go_cacheprog};
+pub use adapters_group::{command as adapter, go_cacheprog};
 pub use auth_group::{auth, login, token};
 pub use cache_group::{
     check, delete, inspect, ls, misses, mount, restore, run, save, sessions, status, tags,

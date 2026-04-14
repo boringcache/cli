@@ -3,11 +3,12 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cli::AdapterArgs;
-use crate::commands::{proxy_exec, restore, save, serve, utils};
+use crate::commands::{restore, save, serve};
 use crate::config::{AuthPurpose, Config};
 use crate::exit_code::ExitCodeError;
 use crate::project_config;
 use crate::ui;
+use crate::{command_support, proxy};
 
 mod bazel;
 mod docker;
@@ -21,9 +22,9 @@ mod turbo;
 const EXIT_CONFIG: i32 = 78;
 
 type ProxyEnvSet = BTreeMap<String, String>;
-type InjectProxyEnvFn = fn(&mut ProxyEnvSet, &proxy_exec::ProxyContext);
+type InjectProxyEnvFn = fn(&mut ProxyEnvSet, &proxy::ProxyContext);
 type PrepareCommandFn =
-    fn(&[String], Option<&proxy_exec::ProxyContext>, &AdapterCommandOptions) -> Result<Vec<String>>;
+    fn(&[String], Option<&proxy::ProxyContext>, &AdapterCommandOptions) -> Result<Vec<String>>;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -57,7 +58,7 @@ struct AdapterCommandOptions {
 }
 
 impl AdapterRunner {
-    fn proxy_env_plan(&self, context: &proxy_exec::ProxyContext) -> ProxyEnvPlan {
+    fn proxy_env_plan(&self, context: &proxy::ProxyContext) -> ProxyEnvPlan {
         let mut set = BTreeMap::new();
         set.insert(
             "BORINGCACHE_PROXY_PORT".to_string(),
@@ -81,14 +82,14 @@ impl AdapterKind {
         runner_for(self).name
     }
 
-    fn proxy_env_plan(self, context: &proxy_exec::ProxyContext) -> ProxyEnvPlan {
+    fn proxy_env_plan(self, context: &proxy::ProxyContext) -> ProxyEnvPlan {
         runner_for(self).proxy_env_plan(context)
     }
 
     fn inject_proxy_env(
         self,
         command: &mut tokio::process::Command,
-        context: &proxy_exec::ProxyContext,
+        context: &proxy::ProxyContext,
     ) {
         command.envs(self.proxy_env_plan(context).set);
     }
@@ -96,7 +97,7 @@ impl AdapterKind {
     fn prepare_command(
         self,
         command: &[String],
-        proxy_context: Option<&proxy_exec::ProxyContext>,
+        proxy_context: Option<&proxy::ProxyContext>,
         options: &AdapterCommandOptions,
     ) -> Result<Vec<String>> {
         (runner_for(self).prepare_command)(command, proxy_context, options)
@@ -116,11 +117,11 @@ fn runner_for(kind: AdapterKind) -> &'static AdapterRunner {
     }
 }
 
-fn no_extra_proxy_env(_: &mut ProxyEnvSet, _: &proxy_exec::ProxyContext) {}
+fn no_extra_proxy_env(_: &mut ProxyEnvSet, _: &proxy::ProxyContext) {}
 
 fn passthrough_command(
     command: &[String],
-    _: Option<&proxy_exec::ProxyContext>,
+    _: Option<&proxy::ProxyContext>,
     _: &AdapterCommandOptions,
 ) -> Result<Vec<String>> {
     Ok(command.to_vec())
@@ -210,7 +211,7 @@ pub async fn adapter_execute(
         .and_then(|loaded| trim_non_empty(loaded.config.workspace.as_deref()))
         .map(ToOwned::to_owned);
     let explicit_workspace = trim_non_empty(args.workspace.as_deref()).map(ToOwned::to_owned);
-    let workspace = utils::get_workspace_name_with_fallback(
+    let workspace = command_support::get_workspace_name_with_fallback(
         explicit_workspace.clone(),
         project_workspace.clone(),
     )?;
@@ -302,12 +303,12 @@ pub async fn adapter_execute(
         read_only: effective_read_only,
     };
 
-    let preview_context = proxy_exec::ProxyContext {
+    let preview_context = proxy::ProxyContext {
         endpoint_host: advertised_endpoint_host.clone(),
         port,
         cache_ref: "{CACHE_REF}".to_string(),
     };
-    let preview_command = proxy_exec::substitute_proxy_placeholders(
+    let preview_command = proxy::substitute_proxy_placeholders(
         &kind.prepare_command(&command, Some(&preview_context), &command_options)?,
         &preview_context,
     );
@@ -376,10 +377,10 @@ pub async fn adapter_execute(
     if !has_restore_auth {
         ui::info("[boringcache] No token found — running command without caching");
         let child_outcome =
-            proxy_exec::spawn_command(&command, &resolved_plan.env_vars, None, |_, _| {}).await?;
+            proxy::spawn_command(&command, &resolved_plan.env_vars, None, |_, _| {}).await?;
         return match child_outcome {
-            proxy_exec::ChildOutcome::Exited(status) => {
-                let code = proxy_exec::status_exit_code(&status);
+            proxy::ChildOutcome::Exited(status) => {
+                let code = proxy::status_exit_code(&status);
                 if code == 0 {
                     Ok(())
                 } else {
@@ -431,14 +432,14 @@ pub async fn adapter_execute(
     .await
     .map_err(|error| ExitCodeError::with_message(EXIT_CONFIG, format!("{:#}", error)))?;
 
-    let proxy_context = proxy_exec::ProxyContext {
+    let proxy_context = proxy::ProxyContext {
         endpoint_host: proxy_handle.endpoint_host().to_string(),
         port: proxy_handle.port(),
         cache_ref: proxy_handle.cache_ref(),
     };
     let command_to_run = kind.prepare_command(&command, Some(&proxy_context), &command_options)?;
 
-    let child_outcome = proxy_exec::spawn_command(
+    let child_outcome = proxy::spawn_command(
         &command_to_run,
         &resolved_plan.env_vars,
         Some(&proxy_context),
@@ -455,9 +456,9 @@ pub async fn adapter_execute(
     };
 
     match child_outcome {
-        proxy_exec::ChildOutcome::Exited(status) => {
+        proxy::ChildOutcome::Exited(status) => {
             let command_succeeded = status.success();
-            let command_exit_code = proxy_exec::status_exit_code(&status);
+            let command_exit_code = proxy::status_exit_code(&status);
 
             if archive_enabled && !effective_skip_save && (command_succeeded || save_on_failure) {
                 let save_result = save::execute_batch_save(

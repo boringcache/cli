@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::{AdapterCommandOptions, AdapterRunner, no_extra_proxy_env};
-use crate::commands::proxy_exec;
+use crate::proxy;
 
 pub(super) const RUNNER: AdapterRunner = AdapterRunner {
     name: "docker",
@@ -19,7 +19,7 @@ pub(super) fn validate_cache_mode(value: &str) -> Result<()> {
 
 fn prepare_command(
     command: &[String],
-    proxy_context: Option<&proxy_exec::ProxyContext>,
+    proxy_context: Option<&proxy::ProxyContext>,
     options: &AdapterCommandOptions,
 ) -> Result<Vec<String>> {
     inject_docker_cache_flags(
@@ -33,7 +33,7 @@ fn prepare_command(
 
 fn inject_docker_cache_flags(
     command: &[String],
-    proxy_context: Option<&proxy_exec::ProxyContext>,
+    proxy_context: Option<&proxy::ProxyContext>,
     cache_ref_tag: &str,
     cache_mode: &str,
     read_only: bool,
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn docker_cache_flags_insert_before_context() {
-        let context = proxy_exec::ProxyContext {
+        let context = proxy::ProxyContext {
             endpoint_host: "host.docker.internal".to_string(),
             port: 5000,
             cache_ref: "{CACHE_REF}".to_string(),
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn docker_cache_flags_are_read_only_when_requested() {
-        let context = proxy_exec::ProxyContext {
+        let context = proxy::ProxyContext {
             endpoint_host: "127.0.0.1".to_string(),
             port: 5000,
             cache_ref: "{CACHE_REF}".to_string(),
