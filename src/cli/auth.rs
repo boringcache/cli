@@ -1,4 +1,36 @@
-use clap::Subcommand;
+use clap::{Args, Subcommand};
+
+#[derive(Debug, Clone, Args)]
+pub struct AuthArgs {
+    #[arg(short, long)]
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct LoginArgs {
+    #[arg(
+        long,
+        help = "Print the approval URL and wait without trying to open a local browser"
+    )]
+    pub manual: bool,
+
+    #[arg(long, help = "Start sign-in by email for this CLI session")]
+    pub email: Option<String>,
+
+    #[arg(
+        long,
+        requires = "email",
+        help = "Display name to use if this email needs a new account"
+    )]
+    pub name: Option<String>,
+
+    #[arg(
+        long,
+        requires = "email",
+        help = "Username to use if this email needs a new account"
+    )]
+    pub username: Option<String>,
+}
 
 #[derive(Subcommand)]
 pub enum TokenCommands {
