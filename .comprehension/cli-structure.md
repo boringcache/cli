@@ -7,7 +7,13 @@ This file is the current map of `src/` and the target organization plan for futu
 ```text
 src/
   api/
-    client/mod.rs
+    client/
+      mod.rs
+      http.rs
+      auth.rs
+      cache.rs
+      workspace.rs
+      metrics.rs
     models/mod.rs
   cache/
     mod.rs
@@ -22,18 +28,23 @@ src/
     concurrency.rs
     save_support.rs
   commands/
-    save/mod.rs
-    restore/mod.rs
-    mount/mod.rs
-    serve.rs
-    run.rs
-    adapter.rs
-    token.rs
-    status.rs
-    doctor.rs
-    dashboard.rs
-    onboard.rs
-    ...
+    adapters/
+      command/
+        mod.rs
+        bazel.rs
+        docker.rs
+        go.rs
+        gradle.rs
+        maven.rs
+        nx.rs
+        sccache.rs
+        turbo.rs
+      go_cacheprog.rs
+    auth/
+    cache/
+    config/
+    proxy/
+    workspace/
   proxy/
     mod.rs
     exec.rs
@@ -70,7 +81,6 @@ These are the main files that carry multiple concerns and should be split by nam
 | Path | Concern mix |
 | --- | --- |
 | `src/serve/cache_registry/kv.rs` | lookup, miss cache, handoff, blob IO, flush, prefetch, alias binding |
-| `src/api/client/mod.rs` | HTTP transport, retries, auth/session flows, cache APIs, workspace APIs, metrics |
 | `src/commands/cache/save/mod.rs` | entrypoint plus archive, OCI, and file save flows |
 | `src/commands/cache/restore/mod.rs` | entrypoint plus archive, OCI, and file restore flows |
 | `src/commands/cache/mount/mod.rs` | initial restore, watch loop, and layout-specific sync logic |
@@ -130,12 +140,20 @@ src/
       inspect.rs
       ls.rs
       tags.rs
-    proxy/
-      serve/
-      run.rs
-      adapter.rs
-      proxy_exec.rs
+    adapters/
+      command/
+        mod.rs
+        bazel.rs
+        docker.rs
+        go.rs
+        gradle.rs
+        maven.rs
+        nx.rs
+        sccache.rs
+        turbo.rs
       go_cacheprog.rs
+    proxy/
+      serve.rs
     workspace/
       status.rs
       sessions.rs
@@ -211,6 +229,7 @@ src/
 | `src/commands/restore/mod.rs` | `src/commands/restore/{archive,file,oci}.rs` | done |
 | `src/commands/mount/mod.rs` | `src/commands/mount/{archive,cas,file,oci}.rs` | done |
 | `src/commands/*.rs` | `src/commands/{auth,cache,config,proxy,workspace,adapters}/...` | done |
+| `src/commands/adapter/*.rs` | `src/commands/adapters/command/*.rs` | done |
 | `src/main.rs` | `src/cli/{preprocess,dispatch}.rs` | done |
 | `src/commands/cas_publish.rs` | `src/cache/cas_publish.rs` | done |
 | `src/commands/cas_restore.rs` | `src/cache/cas_restore.rs` | done |
@@ -231,13 +250,13 @@ src/
 | `src/project_config.rs` | `src/project_config/{model,discover,builtins,resolve}.rs` | planned |
 | `src/serve/cache_registry/kv.rs` | `src/serve/cache_registry/kv/*.rs` | planned |
 | `src/serve/state.rs` | `src/serve/state/*.rs` | planned |
-| `src/api/client/mod.rs` | `src/api/client/{http,auth,cache,workspace,metrics}.rs` | planned |
+| `src/api/client/mod.rs` | `src/api/client/{http,auth,cache,workspace,metrics}.rs` | done |
 | `src/api/models/mod.rs` | `src/api/models/*.rs` | done |
 
 ## Recommended Refactor Order
 
-1. Split `api/client` by domain method groups.
-2. Split `serve/cache_registry/kv` and `serve/state`.
+1. Split `serve/cache_registry/kv` and `serve/state`.
+2. Split `project_config` into `model`, `discover`, `builtins`, and `resolve`.
 3. Review whether adapter-specific CLI surface should move from the flat `Commands` enum into generated/help-grouped sections while keeping command names stable.
 
 ## Notes For Current Worktree
