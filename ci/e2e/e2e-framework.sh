@@ -78,6 +78,19 @@ run_leg() {
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
       bash "${REQUIRED_DIR}/e2e-docker-buildkit-registry-test.sh"
       ;;
+    prefetch-smoke)
+      BINARY="$binary" \
+      WORKSPACE="$workspace" \
+      TAG="gha-prefetch-smoke-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}" \
+      BLOB_COUNT="256" \
+      BLOB_SIZE_BYTES="1024" \
+      SEED_CONCURRENCY="32" \
+      VERIFY_CONCURRENCY="32" \
+      BUDGET_REMOTE_TAG_HITS_MIN="1" \
+      SEED_FLUSH_TIMEOUT_SECS="120" \
+      LOG_DIR="$log_dir" \
+      bash "${EXTENDED_DIR}/e2e-prefetch-readiness-test.sh"
+      ;;
     prefetch-readiness)
       BINARY="$binary" \
       WORKSPACE="$workspace" \
@@ -290,7 +303,7 @@ EOF
 Docker buildkit registry e2e passed
 EOF
       ;;
-    prefetch-readiness)
+    prefetch-smoke|prefetch-readiness)
       cat <<'EOF'
 === Phase 1: Seed
 === Phase 1b: Verify published remote tag resolves ===

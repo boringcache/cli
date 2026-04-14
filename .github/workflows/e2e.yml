@@ -169,6 +169,16 @@ jobs:
             needs_node: false
             needs_rust: false
             needs_sccache: false
+          - leg: prefetch-smoke
+            label: Registry / Prefetch Smoke
+            artifact: registry-prefetch-smoke
+            tier: required
+            needs_bazel: false
+            needs_docker: false
+            needs_java: false
+            needs_node: false
+            needs_rust: false
+            needs_sccache: false
           - leg: prefetch-readiness
             label: Registry / Prefetch Readiness
             artifact: registry-prefetch-readiness
