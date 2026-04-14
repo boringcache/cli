@@ -446,45 +446,35 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         return;
     }
 
-    let mut live_hit: Option<(String, CacheResolutionEntry)> = None;
-    for candidate_tag in kv_root_tags(state) {
-        match resolve_hit_for_index_load(state, &candidate_tag, true).await {
-            Ok(hit) => {
-                if candidate_tag != state.registry_root_tag.trim() {
-                    eprintln!("KV root fallback hit: refreshing from legacy tag {candidate_tag}");
-                }
-                live_hit = Some((candidate_tag, hit));
-                break;
-            }
-            Err(error) if error.status == StatusCode::NOT_FOUND => {}
-            Err(error) => {
-                log::warn!("KV index refresh failed during resolve: {error:?}");
+    let tag = state.registry_root_tag.trim().to_string();
+    let hit = match resolve_hit_for_index_load(state, &tag, true).await {
+        Ok(hit) => hit,
+        Err(error) if error.status == StatusCode::NOT_FOUND => {
+            let had_entries = {
+                let published = state.kv_published_index.read().await;
+                published.entry_count() > 0
+            };
+            if had_entries {
+                let mut published = state.kv_published_index.write().await;
+                published.touch_refresh();
+                clear_root_tag_misses(state);
+                eprintln!("KV index refresh: preserving in-memory index (no backend index)");
                 return;
             }
-        }
-    }
-
-    let Some((tag, hit)) = live_hit else {
-        let had_entries = {
-            let published = state.kv_published_index.read().await;
-            published.entry_count() > 0
-        };
-        if had_entries {
-            let mut published = state.kv_published_index.write().await;
-            published.touch_refresh();
+            {
+                let mut published = state.kv_published_index.write().await;
+                published.set_empty();
+            }
             clear_root_tag_misses(state);
-            eprintln!("KV index refresh: preserving in-memory index (no backend index)");
+            if had_entries {
+                eprintln!("KV index refresh: cleared stale entries (no backend index)");
+            }
             return;
         }
-        {
-            let mut published = state.kv_published_index.write().await;
-            published.set_empty();
+        Err(error) => {
+            log::warn!("KV index refresh failed during resolve: {error:?}");
+            return;
         }
-        clear_root_tag_misses(state);
-        if had_entries {
-            eprintln!("KV index refresh: cleared stale entries (no backend index)");
-        }
-        return;
     };
 
     let cache_entry_id = match hit.cache_entry_id.clone() {
@@ -616,26 +606,14 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
         return;
     }
 
-    let mut live_hit: Option<(String, CacheResolutionEntry)> = None;
-    for candidate_tag in kv_root_tags(state) {
-        match resolve_hit_for_index_load(state, &candidate_tag, true).await {
-            Ok(hit) => {
-                if candidate_tag != state.registry_root_tag.trim() {
-                    eprintln!("KV root fallback hit: refreshing from legacy tag {candidate_tag}");
-                }
-                live_hit = Some((candidate_tag, hit));
-                break;
-            }
-            Err(error) if error.status == StatusCode::NOT_FOUND => {}
-            Err(error) => {
-                log::warn!("KV version-triggered refresh failed during resolve: {error:?}");
-                return;
-            }
+    let tag = state.registry_root_tag.trim().to_string();
+    let hit = match resolve_hit_for_index_load(state, &tag, true).await {
+        Ok(hit) => hit,
+        Err(error) if error.status == StatusCode::NOT_FOUND => return,
+        Err(error) => {
+            log::warn!("KV version-triggered refresh failed during resolve: {error:?}");
+            return;
         }
-    }
-
-    let Some((tag, hit)) = live_hit else {
-        return;
     };
 
     let cache_entry_id = match hit.cache_entry_id.clone() {
@@ -960,7 +938,7 @@ pub(crate) async fn do_flush(
     };
 
     let (backend_entries, backend_blob_order) =
-        match load_existing_index_with_fallback(state, false).await {
+        match load_existing_index_snapshot(state, false).await {
             Ok((existing, blob_order, _, _)) => (existing, blob_order),
             Err(e) => {
                 log::warn!("KV flush: failed to load existing index: {e:?}");

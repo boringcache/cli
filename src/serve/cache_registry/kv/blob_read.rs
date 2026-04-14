@@ -32,6 +32,22 @@ pub(crate) async fn serve_local_blob(
     Ok((StatusCode::OK, headers, Body::from_stream(stream)).into_response())
 }
 
+fn emit_blob_read_elapsed_metric(
+    state: &AppState,
+    cache_entry_id: &str,
+    source: BlobReadSource,
+    blob: &BlobDescriptor,
+    started_at: std::time::Instant,
+) {
+    emit_blob_read_metric(
+        state,
+        cache_entry_id,
+        source,
+        blob.size_bytes,
+        started_at.elapsed().as_millis() as u64,
+    );
+}
+
 pub(crate) async fn resolve_blob_url(
     state: &AppState,
     cache_entry_id: &str,
@@ -289,114 +305,64 @@ pub(crate) async fn download_blob_to_cache(
     let started_at = std::time::Instant::now();
     if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
         log::debug!("dl cache hit: {}", short_digest(&blob.digest));
-        emit_blob_read_metric(
+        emit_blob_read_elapsed_metric(
             state,
             cache_entry_id,
             BlobReadSource::LocalCache,
-            blob.size_bytes,
-            started_at.elapsed().as_millis() as u64,
+            blob,
+            started_at,
         );
         return Ok(cache_handle);
     }
 
     let flight_key = format!("dl:{}", blob.digest);
-    match begin_lookup_flight(state, flight_key.clone()) {
-        LookupFlight::Leader(_dl_guard) => {
-            if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
-                emit_blob_read_metric(
-                    state,
-                    cache_entry_id,
-                    BlobReadSource::LocalCache,
-                    blob.size_bytes,
-                    started_at.elapsed().as_millis() as u64,
-                );
-                return Ok(cache_handle);
-            }
-
-            let (cache_handle, source) =
-                do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
-            emit_blob_read_metric(
-                state,
-                cache_entry_id,
-                source,
-                blob.size_bytes,
-                started_at.elapsed().as_millis() as u64,
-            );
-            Ok(cache_handle)
-        }
-        LookupFlight::Follower(notified) => {
-            if !await_flight("dl", &flight_key, notified).await {
-                clear_lookup_flight_entry(state, &flight_key);
-            }
-            if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
-                emit_blob_read_metric(
-                    state,
-                    cache_entry_id,
-                    BlobReadSource::LocalCache,
-                    blob.size_bytes,
-                    started_at.elapsed().as_millis() as u64,
-                );
-                return Ok(cache_handle);
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
-                emit_blob_read_metric(
-                    state,
-                    cache_entry_id,
-                    BlobReadSource::LocalCache,
-                    blob.size_bytes,
-                    started_at.elapsed().as_millis() as u64,
-                );
-                return Ok(cache_handle);
-            }
-            let retry_key = format!("dlretry:{}", blob.digest);
-            match begin_lookup_flight(state, retry_key.clone()) {
-                LookupFlight::Leader(_retry_guard) => {
-                    if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await
-                    {
-                        emit_blob_read_metric(
-                            state,
-                            cache_entry_id,
-                            BlobReadSource::LocalCache,
-                            blob.size_bytes,
-                            started_at.elapsed().as_millis() as u64,
-                        );
-                        return Ok(cache_handle);
-                    }
-                    let (cache_handle, source) =
-                        do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
-                    emit_blob_read_metric(
-                        state,
-                        cache_entry_id,
-                        source,
-                        blob.size_bytes,
-                        started_at.elapsed().as_millis() as u64,
-                    );
-                    Ok(cache_handle)
-                }
-                LookupFlight::Follower(retry_notified) => {
-                    if !await_flight("dlretry", &retry_key, retry_notified).await {
-                        clear_lookup_flight_entry(state, &retry_key);
-                    }
-                    let cache_handle = state
-                        .blob_read_cache
-                        .get_handle(&blob.digest)
-                        .await
-                        .ok_or_else(|| {
-                            RegistryError::internal(format!(
-                                "Blob download failed after retry: {}",
-                                short_digest(&blob.digest)
-                            ))
-                        })?;
-                    emit_blob_read_metric(
+    let mut attempted_takeover = false;
+    loop {
+        match begin_lookup_flight(state, flight_key.clone()) {
+            LookupFlight::Leader(_dl_guard) => {
+                if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
+                    emit_blob_read_elapsed_metric(
                         state,
                         cache_entry_id,
                         BlobReadSource::LocalCache,
-                        blob.size_bytes,
-                        started_at.elapsed().as_millis() as u64,
+                        blob,
+                        started_at,
                     );
-                    Ok(cache_handle)
+                    return Ok(cache_handle);
                 }
+
+                let (cache_handle, source) =
+                    do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
+                emit_blob_read_elapsed_metric(state, cache_entry_id, source, blob, started_at);
+                return Ok(cache_handle);
+            }
+            LookupFlight::Follower(notified) => {
+                let flight_completed = await_flight("dl", &flight_key, notified).await;
+                if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
+                    emit_blob_read_elapsed_metric(
+                        state,
+                        cache_entry_id,
+                        BlobReadSource::LocalCache,
+                        blob,
+                        started_at,
+                    );
+                    return Ok(cache_handle);
+                }
+
+                if attempted_takeover {
+                    let reason = if flight_completed {
+                        "completed without a cached blob"
+                    } else {
+                        "timed out waiting for the download owner"
+                    };
+                    return Err(RegistryError::internal(format!(
+                        "Blob download {reason}: {}",
+                        short_digest(&blob.digest)
+                    )));
+                }
+
+                clear_lookup_flight_entry(state, &flight_key);
+                attempted_takeover = true;
             }
         }
     }
