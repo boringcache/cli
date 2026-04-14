@@ -240,8 +240,7 @@ jobs:
             "$DOCKER_IMAGE" \
             sh -c '
               set -eu
-              PROXY_PID=""
-              SCCACHE_PROXY_CONFIGURED=0
+              USE_SCCACHE_PROXY=0
 
               # Install build dependencies based on container type
               if [ -f /etc/alpine-release ]; then
@@ -259,7 +258,7 @@ jobs:
                 export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
               fi
 
-              # Install sccache + start proxy for compilation caching
+              # Install sccache so boringcache can wire it when available.
               BORINGCACHE_VERSION="$(boringcache --version 2>/dev/null || true)"
               if [ -n "${BORINGCACHE_VERSION}" ]; then
                 echo "container boringcache: ${BORINGCACHE_VERSION}"
@@ -273,35 +272,7 @@ jobs:
                 fi
                 if command -v sccache >/dev/null 2>&1; then
                   sccache --version
-
-                  SCCACHE_PORT=4227
-                  for var in SCCACHE_ENDPOINT SCCACHE_BUCKET SCCACHE_REGION SCCACHE_S3_KEY_PREFIX SCCACHE_S3_USE_SSL SCCACHE_S3_NO_CREDENTIALS SCCACHE_S3_SERVER_SIDE_ENCRYPTION SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE SCCACHE_GCS_BUCKET SCCACHE_GCS_KEY_PATH SCCACHE_GCS_CREDENTIALS_URL SCCACHE_AZURE_CONNECTION_STRING SCCACHE_AZURE_BLOB_CONTAINER SCCACHE_REDIS SCCACHE_MEMCACHED SCCACHE_WEBDAV_ENDPOINT SCCACHE_WEBDAV_USERNAME SCCACHE_WEBDAV_PASSWORD; do
-                    unset "$var"
-                  done
-                  boringcache cache-registry ${{ github.repository }} "rust-${{ steps.rust-version.outputs.version }}-sccache-${{ matrix.name }}" \
-                    --host 127.0.0.1 --port "$SCCACHE_PORT" --no-platform --no-git &
-                  PROXY_PID=$!
-                  PROXY_READY=0
-                  PROXY_READY_ATTEMPTS=180
-                  for _ in $(seq 1 "${PROXY_READY_ATTEMPTS}"); do
-                    if curl -fsS --max-time 1 "http://127.0.0.1:${SCCACHE_PORT}/v2/" >/dev/null 2>&1; then
-                      PROXY_READY=1
-                      break
-                    fi
-                    sleep 0.5
-                  done
-                  if [ "${PROXY_READY}" = "1" ]; then
-                    export SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:${SCCACHE_PORT}/"
-                    export RUSTC_WRAPPER=sccache
-                    SCCACHE_PROXY_CONFIGURED=1
-                    echo "sccache proxy configured: endpoint=$SCCACHE_WEBDAV_ENDPOINT"
-                    sccache --start-server || true
-                  else
-                    echo "sccache proxy not ready after $((PROXY_READY_ATTEMPTS / 2))s; continuing without remote cache backend"
-                    kill "${PROXY_PID}" >/dev/null 2>&1 || true
-                    wait "${PROXY_PID}" >/dev/null 2>&1 || true
-                    PROXY_PID=""
-                  fi
+                  USE_SCCACHE_PROXY=1
                 fi
               else
                 echo "::warning::Container boringcache CLI is unavailable; skipping proxy-backed sccache."
@@ -311,8 +282,28 @@ jobs:
               rustup target add ${{ matrix.target }}
 
               # Build with appropriate flags.
-              # Docker layer caching is handled by boringcache/one above.
-              if [ "${{ matrix.musl }}" = "true" ]; then
+              if [ "${USE_SCCACHE_PROXY}" = "1" ]; then
+                export SCCACHE_SERVER_PORT=4227
+                if [ "${{ matrix.musl }}" = "true" ]; then
+                  boringcache sccache \
+                    --workspace ${{ github.repository }} \
+                    --tag "rust-${{ steps.rust-version.outputs.version }}-sccache-${{ matrix.name }}" \
+                    --host 127.0.0.1 \
+                    --port "${SCCACHE_SERVER_PORT}" \
+                    --no-platform \
+                    --no-git \
+                    -- sh -c "sccache --start-server || true; status=0; RUSTFLAGS='-C target-feature=+crt-static' BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }} || status=\$?; sccache --show-stats || true; sccache --stop-server >/dev/null 2>&1 || true; exit \$status"
+                else
+                  boringcache sccache \
+                    --workspace ${{ github.repository }} \
+                    --tag "rust-${{ steps.rust-version.outputs.version }}-sccache-${{ matrix.name }}" \
+                    --host 127.0.0.1 \
+                    --port "${SCCACHE_SERVER_PORT}" \
+                    --no-platform \
+                    --no-git \
+                    -- sh -c "sccache --start-server || true; status=0; BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }} || status=\$?; sccache --show-stats || true; sccache --stop-server >/dev/null 2>&1 || true; exit \$status"
+                fi
+              elif [ "${{ matrix.musl }}" = "true" ]; then
                 RUSTFLAGS="-C target-feature=+crt-static" BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
               else
                 BORINGCACHE_CARGO_FLOW_MODE=plain ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
@@ -321,26 +312,6 @@ jobs:
               # Copy binary
               cp target/${{ matrix.target }}/release/boringcache /workspace/${{ matrix.binary_name }}
               chmod +x /workspace/${{ matrix.binary_name }}
-
-              if command -v sccache >/dev/null 2>&1; then
-                echo "=== sccache stats ==="
-                SCCACHE_STATS_OUTPUT="$(sccache --show-stats 2>&1 || true)"
-                if [ -n "${SCCACHE_STATS_OUTPUT}" ]; then
-                  printf "%s\n" "${SCCACHE_STATS_OUTPUT}"
-                  if [ "${SCCACHE_PROXY_CONFIGURED}" = "1" ] && ! printf "%s\n" "${SCCACHE_STATS_OUTPUT}" | grep -q "Compile requests"; then
-                    echo "::warning::Container sccache did not emit compile counters; remote hit rate is unknown."
-                  fi
-                elif [ "${SCCACHE_PROXY_CONFIGURED}" = "1" ]; then
-                  echo "::warning::Container sccache stats were empty after a proxy-backed build."
-                else
-                  echo "::notice::Container sccache was not configured for this build."
-                fi
-                sccache --stop-server >/dev/null 2>&1 || true
-              fi
-              if [ -n "${PROXY_PID}" ]; then
-                kill "${PROXY_PID}" >/dev/null 2>&1 || true
-                wait "${PROXY_PID}" >/dev/null 2>&1 || true
-              fi
             '
 
       # Native builds for Ubuntu/macOS/Windows

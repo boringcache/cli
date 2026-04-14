@@ -9,7 +9,21 @@ use crate::exit_code::ExitCodeError;
 use crate::project_config;
 use crate::ui;
 
+mod bazel;
+mod docker;
+mod go;
+mod gradle;
+mod maven;
+mod nx;
+mod sccache;
+mod turbo;
+
 const EXIT_CONFIG: i32 = 78;
+
+type ProxyEnvSet = BTreeMap<String, String>;
+type InjectProxyEnvFn = fn(&mut ProxyEnvSet, &proxy_exec::ProxyContext);
+type PrepareCommandFn =
+    fn(&[String], Option<&proxy_exec::ProxyContext>, &AdapterCommandOptions) -> Result<Vec<String>>;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -24,28 +38,27 @@ pub enum AdapterKind {
     Docker,
 }
 
-impl AdapterKind {
-    pub fn toml_key(self) -> &'static str {
-        match self {
-            AdapterKind::Turbo => "turbo",
-            AdapterKind::Nx => "nx",
-            AdapterKind::Bazel => "bazel",
-            AdapterKind::Gradle => "gradle",
-            AdapterKind::Maven => "maven",
-            AdapterKind::Sccache => "sccache",
-            AdapterKind::Go => "go",
-            AdapterKind::Docker => "docker",
-        }
-    }
+struct AdapterRunner {
+    name: &'static str,
+    inject_proxy_env: InjectProxyEnvFn,
+    prepare_command: PrepareCommandFn,
+}
 
-    fn display_name(self) -> &'static str {
-        self.toml_key()
-    }
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ProxyEnvPlan {
+    set: ProxyEnvSet,
+}
 
-    fn proxy_env_plan(self, context: &proxy_exec::ProxyContext) -> ProxyEnvPlan {
+#[derive(Debug, Clone)]
+struct AdapterCommandOptions {
+    cache_ref_tag: String,
+    cache_mode: String,
+    read_only: bool,
+}
+
+impl AdapterRunner {
+    fn proxy_env_plan(&self, context: &proxy_exec::ProxyContext) -> ProxyEnvPlan {
         let mut set = BTreeMap::new();
-        let endpoint = context.endpoint();
-
         set.insert(
             "BORINGCACHE_PROXY_PORT".to_string(),
             context.port.to_string(),
@@ -54,44 +67,22 @@ impl AdapterKind {
             "BORINGCACHE_CACHE_REF".to_string(),
             context.cache_ref.clone(),
         );
-
-        match self {
-            AdapterKind::Turbo => {
-                set.insert("TURBO_API".to_string(), endpoint);
-                set.insert(
-                    "TURBO_TOKEN".to_string(),
-                    proxy_exec::PROXY_AUTH_TOKEN.to_string(),
-                );
-                set.insert(
-                    "TURBO_TEAM".to_string(),
-                    proxy_exec::PROXY_AUTH_TOKEN.to_string(),
-                );
-            }
-            AdapterKind::Nx => {
-                set.insert("NX_SELF_HOSTED_REMOTE_CACHE_SERVER".to_string(), endpoint);
-                set.insert(
-                    "NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN".to_string(),
-                    proxy_exec::PROXY_AUTH_TOKEN.to_string(),
-                );
-            }
-            AdapterKind::Sccache => {
-                set.insert("RUSTC_WRAPPER".to_string(), "sccache".to_string());
-                set.insert(
-                    "SCCACHE_WEBDAV_ENDPOINT".to_string(),
-                    format!("{endpoint}/"),
-                );
-            }
-            AdapterKind::Go => {
-                set.insert(
-                    "GOCACHEPROG".to_string(),
-                    format!("boringcache go-cacheprog --endpoint {endpoint}"),
-                );
-            }
-            AdapterKind::Bazel | AdapterKind::Gradle | AdapterKind::Maven | AdapterKind::Docker => {
-            }
-        }
-
+        (self.inject_proxy_env)(&mut set, context);
         ProxyEnvPlan { set }
+    }
+}
+
+impl AdapterKind {
+    pub fn toml_key(self) -> &'static str {
+        runner_for(self).name
+    }
+
+    fn display_name(self) -> &'static str {
+        runner_for(self).name
+    }
+
+    fn proxy_env_plan(self, context: &proxy_exec::ProxyContext) -> ProxyEnvPlan {
+        runner_for(self).proxy_env_plan(context)
     }
 
     fn inject_proxy_env(
@@ -99,14 +90,40 @@ impl AdapterKind {
         command: &mut tokio::process::Command,
         context: &proxy_exec::ProxyContext,
     ) {
-        let plan = self.proxy_env_plan(context);
-        command.envs(plan.set);
+        command.envs(self.proxy_env_plan(context).set);
+    }
+
+    fn prepare_command(
+        self,
+        command: &[String],
+        proxy_context: Option<&proxy_exec::ProxyContext>,
+        options: &AdapterCommandOptions,
+    ) -> Result<Vec<String>> {
+        (runner_for(self).prepare_command)(command, proxy_context, options)
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
-struct ProxyEnvPlan {
-    set: BTreeMap<String, String>,
+fn runner_for(kind: AdapterKind) -> &'static AdapterRunner {
+    match kind {
+        AdapterKind::Turbo => &turbo::RUNNER,
+        AdapterKind::Nx => &nx::RUNNER,
+        AdapterKind::Bazel => &bazel::RUNNER,
+        AdapterKind::Gradle => &gradle::RUNNER,
+        AdapterKind::Maven => &maven::RUNNER,
+        AdapterKind::Sccache => &sccache::RUNNER,
+        AdapterKind::Go => &go::RUNNER,
+        AdapterKind::Docker => &docker::RUNNER,
+    }
+}
+
+fn no_extra_proxy_env(_: &mut ProxyEnvSet, _: &proxy_exec::ProxyContext) {}
+
+fn passthrough_command(
+    command: &[String],
+    _: Option<&proxy_exec::ProxyContext>,
+    _: &AdapterCommandOptions,
+) -> Result<Vec<String>> {
+    Ok(command.to_vec())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -208,7 +225,12 @@ pub async fn adapter_execute(
     let tag = trim_non_empty(args.tag.as_deref())
         .map(ToOwned::to_owned)
         .or_else(|| trim_non_empty(adapter_config.tag.as_deref()).map(ToOwned::to_owned))
-        .ok_or_else(|| anyhow::anyhow!("Missing cache tag. Pass --tag or configure [adapters.{}].tag in .boringcache.toml.", kind.toml_key()))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing cache tag. Pass --tag or configure [adapters.{}].tag in .boringcache.toml.",
+                kind.toml_key()
+            )
+        })?;
 
     let command = if !args.command.is_empty() {
         args.command.clone()
@@ -273,7 +295,12 @@ pub async fn adapter_execute(
         .clone()
         .or(adapter_config.cache_ref_tag.clone())
         .unwrap_or_else(|| "buildcache".to_string());
-    validate_docker_cache_mode(&docker_cache_mode)?;
+    docker::validate_cache_mode(&docker_cache_mode)?;
+    let command_options = AdapterCommandOptions {
+        cache_ref_tag: docker_cache_ref_tag,
+        cache_mode: docker_cache_mode,
+        read_only: effective_read_only,
+    };
 
     let preview_context = proxy_exec::ProxyContext {
         endpoint_host: advertised_endpoint_host.clone(),
@@ -281,14 +308,7 @@ pub async fn adapter_execute(
         cache_ref: "{CACHE_REF}".to_string(),
     };
     let preview_command = proxy_exec::substitute_proxy_placeholders(
-        &prepare_command_for_execution(
-            kind,
-            &command,
-            Some(&preview_context),
-            &docker_cache_ref_tag,
-            &docker_cache_mode,
-            effective_read_only,
-        )?,
+        &kind.prepare_command(&command, Some(&preview_context), &command_options)?,
         &preview_context,
     );
     let mut preview_env_vars = resolved_plan.env_vars.clone();
@@ -416,14 +436,7 @@ pub async fn adapter_execute(
         port: proxy_handle.port(),
         cache_ref: proxy_handle.cache_ref(),
     };
-    let command_to_run = prepare_command_for_execution(
-        kind,
-        &command,
-        Some(&proxy_context),
-        &docker_cache_ref_tag,
-        &docker_cache_mode,
-        effective_read_only,
-    )?;
+    let command_to_run = kind.prepare_command(&command, Some(&proxy_context), &command_options)?;
 
     let child_outcome = proxy_exec::spawn_command(
         &command_to_run,
@@ -521,80 +534,6 @@ fn merge_metadata_hints(configured: &[String], cli: &[String]) -> Vec<String> {
     merged
 }
 
-fn validate_docker_cache_mode(value: &str) -> Result<()> {
-    if matches!(value, "max" | "min") {
-        Ok(())
-    } else {
-        anyhow::bail!("Invalid --cache-mode '{value}'. Expected 'max' or 'min'.");
-    }
-}
-
-fn prepare_command_for_execution(
-    kind: AdapterKind,
-    command: &[String],
-    proxy_context: Option<&proxy_exec::ProxyContext>,
-    cache_ref_tag: &str,
-    cache_mode: &str,
-    read_only: bool,
-) -> Result<Vec<String>> {
-    match kind {
-        AdapterKind::Docker => {
-            inject_docker_cache_flags(command, proxy_context, cache_ref_tag, cache_mode, read_only)
-        }
-        _ => Ok(command.to_vec()),
-    }
-}
-
-fn inject_docker_cache_flags(
-    command: &[String],
-    proxy_context: Option<&proxy_exec::ProxyContext>,
-    cache_ref_tag: &str,
-    cache_mode: &str,
-    read_only: bool,
-) -> Result<Vec<String>> {
-    if proxy_context.is_none() {
-        return Ok(command.to_vec());
-    }
-
-    if command.len() < 4
-        || command[0] != "docker"
-        || command[1] != "buildx"
-        || command[2] != "build"
-    {
-        anyhow::bail!(
-            "`boringcache docker` expects `docker buildx build ...`. Pass the docker buildx command after --."
-        );
-    }
-
-    if command
-        .iter()
-        .any(|arg| arg == "--cache-from" || arg.starts_with("--cache-from="))
-        || command
-            .iter()
-            .any(|arg| arg == "--cache-to" || arg.starts_with("--cache-to="))
-    {
-        anyhow::bail!(
-            "Do not pass --cache-from/--cache-to to `boringcache docker`; use --cache-ref-tag and --cache-mode instead."
-        );
-    }
-
-    let context = proxy_context.expect("checked above");
-    let registry_ref = format!(
-        "type=registry,ref={}:{}/cache:{}",
-        context.endpoint_host, context.port, cache_ref_tag
-    );
-    let mut prepared = command.to_vec();
-    let insert_at = prepared.len() - 1;
-    prepared.insert(insert_at, format!("--cache-from={registry_ref}"));
-    if !read_only {
-        prepared.insert(
-            insert_at + 1,
-            format!("--cache-to={registry_ref},mode={cache_mode}"),
-        );
-    }
-    Ok(prepared)
-}
-
 async fn shutdown_proxy_handle(
     proxy_handle: serve::ProxyServerHandle,
     fail_on_cache_error: bool,
@@ -651,88 +590,5 @@ fn print_dry_run(plan: &DryRunPlan, skip_save: bool, skip_restore: bool, save_on
 
     if save_on_failure && !plan.archive_entries.is_empty() && !skip_save {
         ui::info("[boringcache]   # save phase enabled for non-zero command exits");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sccache_env_plan_sets_webdav_backend() {
-        let context = proxy_exec::ProxyContext {
-            endpoint_host: "127.0.0.1".to_string(),
-            port: 5000,
-            cache_ref: "127.0.0.1:5000/cache:test".to_string(),
-        };
-
-        let plan = AdapterKind::Sccache.proxy_env_plan(&context);
-        assert_eq!(
-            plan.set.get("SCCACHE_WEBDAV_ENDPOINT"),
-            Some(&"http://127.0.0.1:5000/".to_string())
-        );
-        assert_eq!(plan.set.get("RUSTC_WRAPPER"), Some(&"sccache".to_string()));
-    }
-
-    #[test]
-    fn docker_cache_flags_insert_before_context() {
-        let context = proxy_exec::ProxyContext {
-            endpoint_host: "host.docker.internal".to_string(),
-            port: 5000,
-            cache_ref: "{CACHE_REF}".to_string(),
-        };
-
-        let command = inject_docker_cache_flags(
-            &[
-                "docker".to_string(),
-                "buildx".to_string(),
-                "build".to_string(),
-                "-t".to_string(),
-                "ghcr.io/acme/app:latest".to_string(),
-                "--push".to_string(),
-                ".".to_string(),
-            ],
-            Some(&context),
-            "buildcache",
-            "max",
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(command.last().map(String::as_str), Some("."));
-        assert!(command.iter().any(|arg| arg
-            == "--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache"));
-        assert!(command.iter().any(|arg| arg
-            == "--cache-to=type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max"));
-    }
-
-    #[test]
-    fn docker_cache_flags_are_read_only_when_requested() {
-        let context = proxy_exec::ProxyContext {
-            endpoint_host: "127.0.0.1".to_string(),
-            port: 5000,
-            cache_ref: "{CACHE_REF}".to_string(),
-        };
-
-        let command = inject_docker_cache_flags(
-            &[
-                "docker".to_string(),
-                "buildx".to_string(),
-                "build".to_string(),
-                ".".to_string(),
-            ],
-            Some(&context),
-            "buildcache",
-            "max",
-            true,
-        )
-        .unwrap();
-
-        assert!(
-            command
-                .iter()
-                .any(|arg| arg == "--cache-from=type=registry,ref=127.0.0.1:5000/cache:buildcache")
-        );
-        assert!(!command.iter().any(|arg| arg.starts_with("--cache-to=")));
     }
 }
