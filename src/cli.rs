@@ -1,5 +1,10 @@
 use clap::{Parser, Subcommand};
 
+#[doc(hidden)]
+pub mod dispatch;
+#[doc(hidden)]
+pub mod preprocess;
+
 #[derive(Subcommand)]
 pub enum TokenCommands {
     #[command(name = "ls", visible_alias = "list", about = "List workspace tokens")]

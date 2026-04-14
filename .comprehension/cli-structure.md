@@ -71,12 +71,12 @@ These are the main files that carry multiple concerns and should be split by nam
 | --- | --- |
 | `src/serve/cache_registry/kv.rs` | lookup, miss cache, handoff, blob IO, flush, prefetch, alias binding |
 | `src/api/client/mod.rs` | HTTP transport, retries, auth/session flows, cache APIs, workspace APIs, metrics |
-| `src/commands/save/mod.rs` | entrypoint plus archive, OCI, and file save flows |
-| `src/commands/restore/mod.rs` | entrypoint plus archive, OCI, and file restore flows |
-| `src/commands/mount/mod.rs` | initial restore, watch loop, and layout-specific sync logic |
+| `src/commands/cache/save/mod.rs` | entrypoint plus archive, OCI, and file save flows |
+| `src/commands/cache/restore/mod.rs` | entrypoint plus archive, OCI, and file restore flows |
+| `src/commands/cache/mount/mod.rs` | initial restore, watch loop, and layout-specific sync logic |
 | `src/serve/state.rs` | app state, blob cache, upload sessions, pending stores, publish index |
 | `src/project_config.rs` | schema, discovery, built-ins, resolution |
-| `src/cli.rs` + `src/main.rs` | command declaration, argv preprocessing, and dispatch |
+| `src/cli.rs` + `src/cli/{preprocess,dispatch}.rs` + `src/main.rs` | command declaration, argv preprocessing, dispatch, and bootstrap |
 
 ## Command Surface Review
 
@@ -210,6 +210,8 @@ src/
 | `src/commands/save/mod.rs` | `src/commands/save/{archive,cas,file,oci}.rs` | done |
 | `src/commands/restore/mod.rs` | `src/commands/restore/{archive,file,oci}.rs` | done |
 | `src/commands/mount/mod.rs` | `src/commands/mount/{archive,cas,file,oci}.rs` | done |
+| `src/commands/*.rs` | `src/commands/{auth,cache,config,proxy,workspace,adapters}/...` | done |
+| `src/main.rs` | `src/cli/{preprocess,dispatch}.rs` | done |
 | `src/commands/cas_publish.rs` | `src/cache/cas_publish.rs` | done |
 | `src/commands/cas_restore.rs` | `src/cache/cas_restore.rs` | done |
 | `src/commands/file_materialize.rs` | `src/cache/file_materialize.rs` | done |
@@ -236,9 +238,8 @@ src/
 
 1. Split `api/client` by domain method groups.
 2. Split `serve/cache_registry/kv` and `serve/state`.
-3. Re-group `commands/` into `cache`, `proxy`, `workspace`, `auth`, and `config` after the current in-flight command edits settle.
+3. Review whether adapter-specific CLI surface should move from the flat `Commands` enum into generated/help-grouped sections while keeping command names stable.
 
 ## Notes For Current Worktree
 
-- `src/cli.rs`, `src/main.rs`, `src/commands/mod.rs`, `src/commands/run.rs`, `src/commands/serve.rs`, and `src/project_config.rs` already have local changes in this worktree.
-- The first pass intentionally avoids reorganizing those files so structure work does not trample in-flight edits.
+- `Cargo.toml`, `Cargo.lock`, docs, and some tests have unrelated local edits in this worktree and are intentionally left alone.
