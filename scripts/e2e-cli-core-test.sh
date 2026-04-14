@@ -319,13 +319,23 @@ EOF
 chmod +x "${RUN_ARCHIVE_SCRIPT}"
 "${CLI}" run "${E2E_TAG_SCOPE_FLAGS[@]}" --force --fail-on-cache-error "${WORKSPACE}" "${RUN_TAG}:${RUN_TARGET_DIR}" -- sh "${RUN_ARCHIVE_SCRIPT}" "${RUN_TARGET_DIR}" > "${CLI_LOG_DIR}/run-archive.log"
 
-"${CLI}" restore "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${RUN_TAG}:${RUN_VERIFY_DIR}" > "${CLI_LOG_DIR}/run-verify-restore.log"
-if [[ ! -f "${RUN_VERIFY_DIR}/generated.txt" ]]; then
-  echo "run verify restore is missing generated.txt"
-  cat "${CLI_LOG_DIR}/run-verify-restore.log"
-  exit 1
-fi
-if ! grep -q "run-generated-${RUN_ID}" "${RUN_VERIFY_DIR}/generated.txt"; then
+run_verify_visible=0
+for _ in $(seq 1 15); do
+  rm -rf "${RUN_VERIFY_DIR}"
+  if "${CLI}" restore "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${RUN_TAG}:${RUN_VERIFY_DIR}" > "${CLI_LOG_DIR}/run-verify-restore.log" 2>&1 \
+    && [[ -f "${RUN_VERIFY_DIR}/generated.txt" ]] \
+    && grep -q "run-generated-${RUN_ID}" "${RUN_VERIFY_DIR}/generated.txt"; then
+    run_verify_visible=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${run_verify_visible}" != "1" ]]; then
+  if [[ ! -f "${RUN_VERIFY_DIR}/generated.txt" ]]; then
+    echo "run verify restore is missing generated.txt"
+    cat "${CLI_LOG_DIR}/run-verify-restore.log"
+    exit 1
+  fi
   echo "run verify restore missing expected marker in generated.txt"
   cat "${RUN_VERIFY_DIR}/generated.txt"
   exit 1

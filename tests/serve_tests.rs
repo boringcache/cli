@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use boring_cache_cli::api::client::ApiClient;
+use boring_cache_cli::api::models::cache::BlobDescriptor;
 use boring_cache_cli::cas_file;
 use boring_cache_cli::cas_oci;
 use boring_cache_cli::git::GitContext;
@@ -133,6 +134,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
         backend_breaker: Arc::new(boring_cache_cli::serve::state::BackendCircuitBreaker::new()),
         prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        prefetch_complete_notify: Arc::new(tokio::sync::Notify::new()),
     };
 
     (state, temp_home, guard)
@@ -266,6 +268,67 @@ async fn test_v2_returns_200_with_warming_header_before_prefetch_complete() {
             .unwrap(),
         "warming"
     );
+}
+
+#[tokio::test]
+async fn test_kv_reads_wait_for_startup_prefetch_completion() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    state
+        .prefetch_complete
+        .store(false, std::sync::atomic::Ordering::Release);
+
+    let payload = b"warm-local-payload";
+    let digest = cas_oci::prefixed_sha256_digest(payload);
+    state
+        .blob_read_cache
+        .insert(&digest, payload)
+        .await
+        .expect("blob cache insert");
+    {
+        let mut published = state.kv_published_index.write().await;
+        published.update(
+            std::collections::HashMap::from([(
+                "gradle/cache-key-1".to_string(),
+                BlobDescriptor {
+                    digest: digest.clone(),
+                    size_bytes: payload.len() as u64,
+                },
+            )]),
+            vec![BlobDescriptor {
+                digest: digest.clone(),
+                size_bytes: payload.len() as u64,
+            }],
+            "entry-prefetched".to_string(),
+        );
+    }
+
+    let app = build_router(state.clone());
+    let request_task = tokio::spawn(async move {
+        tower::ServiceExt::oneshot(
+            app,
+            Request::builder()
+                .uri("/foo/cache/cache-key-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("request")
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !request_task.is_finished(),
+        "KV GET should wait while startup prefetch is still warming"
+    );
+
+    state
+        .prefetch_complete
+        .store(true, std::sync::atomic::Ordering::Release);
+    state.prefetch_complete_notify.notify_waiters();
+
+    let response = request_task.await.expect("join");
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
