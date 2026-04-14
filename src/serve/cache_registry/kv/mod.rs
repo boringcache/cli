@@ -470,12 +470,18 @@ impl KvNamespace {
     }
 }
 
+mod blob_read;
 mod flush;
+mod index;
 mod lookup;
+mod prefetch;
 mod write;
 
+pub(crate) use blob_read::*;
 pub(crate) use flush::*;
+pub(crate) use index::*;
 pub(crate) use lookup::*;
+pub(crate) use prefetch::*;
 pub(crate) use write::*;
 
 #[cfg(test)]
