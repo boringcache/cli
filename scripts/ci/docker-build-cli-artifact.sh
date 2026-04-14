@@ -88,15 +88,47 @@ install_sccache_if_needed() {
   fi
 }
 
+has_boringcache_sccache() {
+  has_cmd boringcache || return 1
+  boringcache sccache --help >/dev/null 2>&1
+}
+
+bootstrap_boringcache_binary() {
+  bootstrap_target_dir="/tmp/boringcache-bootstrap-target"
+  binary_path="${bootstrap_target_dir}/debug/boringcache"
+
+  log "bootstrapping current boringcache CLI for adapter build"
+  if ! cargo build --locked --target-dir "$bootstrap_target_dir" --bin boringcache >/dev/null; then
+    log "::warning::failed to build bootstrap boringcache binary"
+    return 1
+  fi
+
+  if [ -x "$binary_path" ]; then
+    printf '%s\n' "$binary_path"
+    return 0
+  fi
+
+  return 1
+}
+
 run_release_build() {
   flow_mode="plain"
   boringcache_binary=""
 
   if has_cmd sccache; then
     sccache --version >&2 || true
-    if has_cmd boringcache; then
+    if has_boringcache_sccache; then
       boringcache_binary="$(command -v boringcache)"
       log "using preinstalled boringcache CLI at ${boringcache_binary}"
+      flow_mode="boringcache"
+    elif has_cmd boringcache; then
+      log "::warning::preinstalled boringcache CLI lacks sccache support; bootstrapping current checkout"
+      if boringcache_binary="$(bootstrap_boringcache_binary)"; then
+        flow_mode="boringcache"
+      else
+        log "::warning::released boringcache CLI unavailable; building without proxy-backed sccache"
+      fi
+    elif boringcache_binary="$(bootstrap_boringcache_binary)"; then
       flow_mode="boringcache"
     else
       log "::warning::released boringcache CLI unavailable; building without proxy-backed sccache"
