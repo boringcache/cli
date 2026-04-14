@@ -7,7 +7,7 @@ The pattern is simple:
 1. run `boringcache onboard`
 2. put repeated setup in `.boringcache.toml`
 3. use `boringcache <tool>`
-4. drop to `cache-registry` only when the tool already owns its remote-cache config
+4. drop to `cache-registry` only when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive
 
 ## Docker / BuildKit
 

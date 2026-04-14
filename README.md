@@ -20,24 +20,23 @@ This is not general TOML templating: proxy-backed commands only substitute `{POR
 After that, start with the shortest command that fits the tool:
 
 ```bash
-# Archive mode
+# Archive mode (run/save/restore)
 boringcache run -- bundle install
 
-# Adapter commands
-boringcache nx
+# Docker adapter from repo config
+boringcache docker
+
+# Same adapter without repo config
 boringcache docker --tag docker-cache -- docker buildx build .
 
-# Fallback for unsupported or custom tools
-boringcache run --proxy build-cache -- my-custom-tool build
-
-# Long-lived local endpoint
+# Long-lived local proxy
 boringcache cache-registry my-org/app registry-cache --port 5000
 ```
 
-Use `run` when you are caching directories.
+Use archive mode commands (`run`, `save`, and `restore`) when you are caching explicit directories.
 Use adapter commands when the build tool already speaks a remote-cache protocol and BoringCache has a dedicated wrapper for it.
-Use `run --proxy` only when you need that same proxy lifecycle for a tool without a dedicated adapter yet.
-Use `cache-registry` when the tool already has a checked-in remote-cache config or another process should keep the endpoint alive.
+Use `cache-registry` when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive.
+When `.boringcache.toml` stores the Docker command, `boringcache docker` is the short form. Use the longer version when you want to pass the Docker command inline.
 
 If you are wiring GitHub Actions, use [`boringcache/one@v1`](https://github.com/boringcache/one) after onboard so CI can reuse the same repo config and trust model.
 

@@ -1,44 +1,9 @@
 # Proxy mode
 
-This page covers the lower-level proxy paths.
+This page covers the lower-level local endpoint path for supported native remote-cache tools.
 
 Most teams should read [Adapter commands](adapter-commands.md) first.
-Use this page when you need one of these two cases:
-
-1. `run --proxy` for an unsupported or custom tool
-2. `cache-registry` for a long-lived local endpoint
-
-## `run --proxy`
-
-`run --proxy` starts the same local proxy used by adapter commands, but leaves the tool-specific wiring to you.
-
-```bash
-boringcache run --proxy build-cache -- my-custom-tool build
-```
-
-Use it when:
-
-- the tool speaks its own remote-cache protocol
-- BoringCache does not have a dedicated adapter command yet
-- you still want one command to own proxy startup and shutdown
-
-Command arguments can use these placeholders:
-
-- `{PORT}` — the advertised local proxy port
-- `{ENDPOINT}` — the advertised local proxy endpoint
-- `{CACHE_REF}` — the proxy cache ref
-
-Example:
-
-```bash
-boringcache run --proxy build-cache -- \
-  my-custom-tool \
-  --cache-endpoint {ENDPOINT} \
-  --cache-ref {CACHE_REF}
-```
-
-The same placeholders also work inside `[adapters.<tool>].command` in `.boringcache.toml`.
-That is limited placeholder substitution, not general TOML templating.
+Use this page when the repo already has a checked-in local endpoint setup or another process should connect to the same local endpoint.
 
 ## `cache-registry`
 
@@ -50,7 +15,7 @@ boringcache cache-registry my-org/app registry-cache --port 5000
 
 Use it when:
 
-- the repo already has tool-specific remote-cache config checked in
+- the repo already has a checked-in local endpoint setup
 - another process should connect to the proxy
 - you want to point several commands at the same local endpoint
 

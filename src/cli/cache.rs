@@ -141,6 +141,47 @@ pub struct RunArgs {
     pub entry: Vec<String>,
 
     #[arg(
+        long = "archive-path",
+        hide = true,
+        value_name = "PATH",
+        help = "Internal integration flag: plan a path-derived archive entry (repeatable)"
+    )]
+    pub archive_path: Vec<String>,
+
+    #[arg(
+        long = "archive-tag-prefix",
+        hide = true,
+        value_name = "PREFIX",
+        help = "Internal integration flag: primary prefix for path-derived archive tags"
+    )]
+    pub archive_tag_prefix: Option<String>,
+
+    #[arg(
+        long = "archive-restore-prefix",
+        hide = true,
+        value_name = "PREFIX",
+        value_delimiter = ',',
+        help = "Internal integration flag: fallback prefix for path-derived archive tags (repeatable)"
+    )]
+    pub archive_restore_prefix: Vec<String>,
+
+    #[arg(
+        long = "cache-tag",
+        hide = true,
+        value_name = "TAG",
+        help = "Internal integration flag: prefix planned archive tags"
+    )]
+    pub cache_tag: Option<String>,
+
+    #[arg(
+        long = "tool-tag-suffix",
+        hide = true,
+        value_name = "SUFFIX",
+        help = "Internal integration flag: append a tool/version suffix to planned archive tags"
+    )]
+    pub tool_tag_suffix: Option<String>,
+
+    #[arg(
         long,
         alias = "cross-os",
         help = "Disable automatic platform suffix for tags"

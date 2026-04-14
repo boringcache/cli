@@ -22,21 +22,21 @@ Supported adapter commands today:
 ## Common commands
 
 ```bash
-# Archive mode
+# Archive mode (run/save/restore)
 boringcache run -- bundle install
 
-# Adapter command from repo config
-boringcache nx
+# Docker adapter from repo config
+boringcache docker
 
-# One-off adapter command
+# Same adapter without repo config
 boringcache docker --tag docker-cache -- docker buildx build .
 
-# Fallback for unsupported or custom tools
-boringcache run --proxy build-cache -- my-custom-tool build
-
-# Long-lived local endpoint
+# Long-lived local proxy
 boringcache cache-registry my-org/app registry-cache --port 5000
 ```
+
+Archive mode commands (`run`, `save`, and `restore`) are for explicit directory caches. Adapter commands are for supported remote-cache tools. Use `cache-registry` when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive.
+When `.boringcache.toml` stores the Docker command, `boringcache docker` is the short form. Use the longer version when you want to pass the Docker command inline.
 
 ## Repo config
 
@@ -45,15 +45,15 @@ Put repeated adapter setup in `.boringcache.toml`:
 ```toml
 workspace = "my-org/my-project"
 
-[adapters.nx]
-tag = "build-cache"
-command = ["nx", "run-many", "--target=build"]
+[adapters.docker]
+tag = "docker-cache"
+command = ["docker", "buildx", "build", "."]
 ```
 
 Then:
 
 ```bash
-boringcache nx
+boringcache docker
 ```
 
 Useful adapter fields:
