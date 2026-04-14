@@ -30,7 +30,7 @@ LOG_DIR="${LOG_DIR:-${TMP_ROOT}/logs-${RUN_ID}}"
 CARGO_CMD="${CARGO_CMD:-cargo build --release --locked}"
 RUST_LOG_LEVEL="${RUST_LOG_LEVEL:-info}"
 SETTLE_SECS="${SETTLE_SECS:-10}"
-SHUTDOWN_WAIT="${SHUTDOWN_WAIT:-210}"
+SHUTDOWN_WAIT="${SHUTDOWN_WAIT:-0}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-0}"
 BUILD_HEARTBEAT_SECS="${BUILD_HEARTBEAT_SECS:-30}"
 BUILD_CLEANUP_WAIT_SECS="${BUILD_CLEANUP_WAIT_SECS:-20}"
@@ -116,7 +116,7 @@ require_port "PROXY_PORT_VERIFY" "$PROXY_PORT_VERIFY"
 require_port "SCCACHE_PORT_A" "$SCCACHE_PORT_A"
 require_port "SCCACHE_PORT_B" "$SCCACHE_PORT_B"
 require_positive "SETTLE_SECS" "$SETTLE_SECS"
-require_positive "SHUTDOWN_WAIT" "$SHUTDOWN_WAIT"
+require_numeric "SHUTDOWN_WAIT" "$SHUTDOWN_WAIT"
 require_numeric "BUILD_TIMEOUT_SECS" "$BUILD_TIMEOUT_SECS"
 require_positive "BUILD_HEARTBEAT_SECS" "$BUILD_HEARTBEAT_SECS"
 require_positive "BUILD_CLEANUP_WAIT_SECS" "$BUILD_CLEANUP_WAIT_SECS"
@@ -198,6 +198,10 @@ stop_pid_tree() {
     return 0
   fi
   signal_pid_tree "$pid" TERM
+  if (( wait_secs == 0 )); then
+    wait "$pid" >/dev/null 2>&1 || true
+    return 0
+  fi
   deadline=$((SECONDS + wait_secs))
   while kill -0 "$pid" >/dev/null 2>&1; do
     if (( SECONDS >= deadline )); then
