@@ -1,4 +1,11 @@
+pub mod adapter;
+pub mod archive;
+pub mod cas_file;
+pub mod cas_oci;
 pub mod cas_publish;
 pub mod cas_restore;
 pub mod file_materialize;
+pub(crate) mod multipart_upload;
 pub mod receipts;
+pub(crate) mod transfer;
+pub(crate) mod transport;

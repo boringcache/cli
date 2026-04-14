@@ -216,26 +216,25 @@ src/
 | `src/signing.rs` | `src/signing/mod.rs` | done |
 | `src/commands/utils.rs` | `src/command_support/{workspace,specs,concurrency}.rs` | done |
 | `src/commands/save_support.rs` | `src/command_support/save_support.rs` | done |
-| `src/archive.rs` | `src/cache/archive.rs` | planned |
-| `src/cache_adapter.rs` | `src/cache/adapter.rs` | planned |
-| `src/cas_file.rs` | `src/cache/cas_file.rs` | planned |
-| `src/cas_oci.rs` | `src/cache/cas_oci.rs` | planned |
-| `src/cas_transport.rs` | `src/cache/transport.rs` | planned |
-| `src/multipart_upload.rs` | `src/cache/multipart_upload.rs` | planned |
+| `src/archive.rs` | `src/cache/archive.rs` | done |
+| `src/cache_adapter.rs` | `src/cache/adapter.rs` | done |
+| `src/cas_file.rs` | `src/cache/cas_file.rs` | done |
+| `src/cas_oci.rs` | `src/cache/cas_oci.rs` | done |
+| `src/cas_transport.rs` | `src/cache/transport.rs` | done |
+| `src/multipart_upload.rs` | `src/cache/multipart_upload.rs` | done |
+| `src/transfer.rs` | `src/cache/transfer.rs` | done |
 | `src/project_config.rs` | `src/project_config/{model,discover,builtins,resolve}.rs` | planned |
 | `src/serve/cache_registry/kv.rs` | `src/serve/cache_registry/kv/*.rs` | planned |
 | `src/serve/state.rs` | `src/serve/state/*.rs` | planned |
 | `src/api/client/mod.rs` | `src/api/client/{http,auth,cache,workspace,metrics}.rs` | planned |
-| `src/api/models/mod.rs` | `src/api/models/*.rs` | planned |
+| `src/api/models/mod.rs` | `src/api/models/*.rs` | done |
 
 ## Recommended Refactor Order
 
-1. Split `api/models` into one file per submodule.
-2. Move the remaining root cache transport files under `src/cache/`.
-3. Split `save`, `restore`, and `mount` by layout flow.
-4. Split `api/client` by domain method groups.
-5. Split `serve/cache_registry/kv` and `serve/state`.
-6. Re-group `commands/` into `cache`, `proxy`, `workspace`, `auth`, and `config` after the current in-flight command edits settle.
+1. Split `save`, `restore`, and `mount` by layout flow.
+2. Split `api/client` by domain method groups.
+3. Split `serve/cache_registry/kv` and `serve/state`.
+4. Re-group `commands/` into `cache`, `proxy`, `workspace`, `auth`, and `config` after the current in-flight command edits settle.
 
 ## Notes For Current Worktree
 
