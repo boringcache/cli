@@ -1,20 +1,17 @@
 # CLI docs
 
-The CLI README is the entrypoint.
+Start with `boringcache onboard`, then use:
 
-If you are new to BoringCache, start here:
+- `run` for archive caching
+- adapter commands for native remote-cache tools
+- `cache-registry` for a long-lived local endpoint
+- `run --proxy` as the fallback for unsupported or custom tools
+
+Guides:
 
 - [Quick start](quick-start.md)
 - [Onboard](onboard.md)
 - [Archive mode](archive-mode.md)
 - [Proxy mode](proxy-mode.md)
 - [GitHub Actions](github-actions.md)
-
-If you are working on the CLI repo itself:
-
 - [Development](development.md)
-- [Adapter cache profiles](adapter-cache-profiles.md)
-- [Performance learning log](performance-learning-log.md)
-- [Installation setup](../INSTALLATION.md)
-
-The website docs live at [boringcache.com/docs](https://boringcache.com/docs).
