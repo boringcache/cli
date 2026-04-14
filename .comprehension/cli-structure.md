@@ -21,12 +21,21 @@ src/
     cas_restore.rs
     file_materialize.rs
     receipts.rs
+  cli/
+    adapters.rs
+    auth.rs
+    config.rs
+    dispatch.rs
+    preprocess.rs
   command_support/
     mod.rs
     workspace.rs
     specs.rs
     concurrency.rs
     save_support.rs
+  config/
+    env.rs
+    source.rs
   commands/
     adapters/
       command/
@@ -77,9 +86,15 @@ src/
       turborepo.rs
       go_cache.rs
   manifest/
+  observability/
+    mod.rs
+    request_metrics.rs
   optimize/
   platform/
   progress/
+    common.rs
+    model.rs
+    render.rs
   project_config/
     mod.rs
     model.rs
@@ -89,6 +104,12 @@ src/
   signing/
     mod.rs
     policy.rs
+  telemetry/
+    collector.rs
+    model.rs
+    operation.rs
+  ui/
+    summary.rs
 ```
 
 ## Current Hotspots
@@ -102,16 +123,28 @@ These are the main files that carry multiple concerns and should be split by nam
 | `src/commands/cache/save/mod.rs` | entrypoint plus archive, OCI, and file save flows |
 | `src/commands/cache/restore/mod.rs` | entrypoint plus archive, OCI, and file restore flows |
 | `src/commands/cache/mount/mod.rs` | initial restore, watch loop, and layout-specific sync logic |
-| `src/cli.rs` + `src/cli/{preprocess,dispatch}.rs` + `src/main.rs` | command declaration, argv preprocessing, dispatch, and bootstrap |
+| `src/cli.rs` + `src/cli/{preprocess,dispatch}.rs` + `src/main.rs` | command declaration is still centralized even after token/adapter/config extractions |
+| `src/config.rs` + `src/config/{env,source}.rs` | config persistence, config model, and env-backed auth resolution still meet in one root module |
+| `src/commands/workspace/onboard.rs` | command entrypoint, prompting, repo analysis, auth handoff, and file mutation still live together |
 
-## First-Pass Notes
+## First-Pass Status
 
-These are the next root-level candidates to revisit after this branch merges. They do not need to move in this first pass.
+This branch handled the remaining root-level first pass without changing the public crate surface.
 
-- `src/cli.rs` is still the biggest single command-declaration surface.
-- `src/config.rs` likely wants a `config/` namespace if auth, token, and workspace config concerns keep growing.
-- `src/telemetry.rs` and `src/request_metrics.rs` likely belong under a shared `observability/` namespace in a second pass.
-- `src/progress.rs` and `src/ui.rs` may want a tighter presentation namespace if the terminal UX keeps expanding.
+- `src/cli.rs` now keeps the command index while `src/cli/{auth,adapters,config}.rs` hold their own supporting types.
+- `src/config.rs` now has focused `env` and `source` helpers under `src/config/`.
+- `src/request_metrics.rs` moved under `src/observability/`.
+- `src/telemetry.rs` now fronts `collector`, `model`, and `operation` modules.
+- `src/progress.rs` now fronts `model` and `render`, and `src/ui.rs` now delegates summaries to `src/ui/summary.rs`.
+
+## Second-Pass Notes
+
+These are the next sensible follow-ons after this branch merges.
+
+- Group the remaining command arg structs inside `src/cli.rs` by concern, likely `auth`, `cache`, `workspace`, and `proxy`.
+- Split `src/config.rs` again if write/update persistence logic keeps growing alongside the data model.
+- Decide whether `telemetry` should fold fully into `observability`, or stay a sibling namespace for operation-level metrics.
+- Revisit `src/progress.rs` and the TUI/dashboard code together if the terminal presentation layer broadens further.
 
 ## Command Surface Review
 

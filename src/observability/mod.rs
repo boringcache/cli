@@ -1,3 +1,5 @@
+mod request_metrics;
+
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
@@ -302,7 +304,7 @@ fn run_worker(
 }
 
 fn dispatch_event(event: &ObservabilityEvent, human_log_enabled: bool) {
-    crate::request_metrics::sink_event(event);
+    request_metrics::sink_event(event);
     if human_log_enabled {
         emit_human_log(event);
     }

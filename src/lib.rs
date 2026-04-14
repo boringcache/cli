@@ -20,7 +20,6 @@ pub mod progress;
 pub mod project_config;
 #[doc(hidden)]
 pub mod proxy;
-pub(crate) mod request_metrics;
 pub(crate) mod retry_resume;
 pub mod serve;
 pub mod signing;
