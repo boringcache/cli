@@ -22,50 +22,6 @@ WORKSPACE=""
 TOKEN=""
 declare -a PASSED_TOOLS=()
 declare -a SKIPPED_TOOLS=()
-declare -a SCCACHE_CONFLICT_ENV_VARS=(
-  SCCACHE_CONF
-  SCCACHE_CACHED_CONF
-  SCCACHE_ENDPOINT
-  SCCACHE_BUCKET
-  SCCACHE_REGION
-  SCCACHE_S3_KEY_PREFIX
-  SCCACHE_S3_USE_SSL
-  SCCACHE_S3_NO_CREDENTIALS
-  SCCACHE_S3_SERVER_SIDE_ENCRYPTION
-  SCCACHE_S3_ENABLE_VIRTUAL_HOST_STYLE
-  SCCACHE_GCS_BUCKET
-  SCCACHE_GCS_KEY_PATH
-  SCCACHE_GCS_CREDENTIALS_URL
-  SCCACHE_AZURE_CONNECTION_STRING
-  SCCACHE_AZURE_BLOB_CONTAINER
-  SCCACHE_AZURE_KEY_PREFIX
-  SCCACHE_REDIS_ENDPOINT
-  SCCACHE_REDIS_CLUSTER_ENDPOINTS
-  SCCACHE_REDIS_USERNAME
-  SCCACHE_REDIS_PASSWORD
-  SCCACHE_REDIS_DB
-  SCCACHE_REDIS_EXPIRATION
-  SCCACHE_REDIS_TTL
-  SCCACHE_REDIS_KEY_PREFIX
-  SCCACHE_REDIS
-  SCCACHE_MEMCACHED_ENDPOINT
-  SCCACHE_MEMCACHED_USERNAME
-  SCCACHE_MEMCACHED_PASSWORD
-  SCCACHE_MEMCACHED_EXPIRATION
-  SCCACHE_MEMCACHED_KEY_PREFIX
-  SCCACHE_MEMCACHED
-  SCCACHE_GHA_CACHE_URL
-  SCCACHE_GHA_RUNTIME_TOKEN
-  SCCACHE_GHA_CACHE_TO
-  SCCACHE_GHA_CACHE_FROM
-  SCCACHE_WEBDAV_ENDPOINT
-  SCCACHE_WEBDAV_KEY_PREFIX
-  SCCACHE_WEBDAV_USERNAME
-  SCCACHE_WEBDAV_PASSWORD
-  SCCACHE_WEBDAV_TOKEN
-  ACTIONS_RESULTS_URL
-  ACTIONS_RUNTIME_TOKEN
-)
 
 note() {
   printf '==> %s\n' "$1"
@@ -131,15 +87,6 @@ on_exit() {
   exit "${status}"
 }
 trap on_exit EXIT
-
-run_with_clean_sccache_env() {
-  local -a env_cmd=(env)
-  local name
-  for name in "${SCCACHE_CONFLICT_ENV_VARS[@]}"; do
-    env_cmd+=("-u" "$name")
-  done
-  "${env_cmd[@]}" "$@"
-}
 
 metric_summary() {
   local metrics_file="$1"
@@ -813,21 +760,20 @@ pub fn compute(n: u64) -> u64 {
 EOF
 
   note "sccache adapter E2E"
-  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${sccache_server_port}" sccache --stop-server >/dev/null 2>&1 || true
+  SCCACHE_SERVER_PORT="${sccache_server_port}" sccache --stop-server >/dev/null 2>&1 || true
   rm -rf "${target_dir}" "${sccache_dir_a}" "${sccache_dir_b}"
   mkdir -p "${sccache_dir_a}" "${sccache_dir_b}"
 
   # Let the wrapper start the sccache server so it inherits the adapter's WebDAV env.
   (
     cd "${tool_dir}"
-    run_with_clean_sccache_env \
-      "SCCACHE_SERVER_PORT=${sccache_server_port}" \
-      "SCCACHE_DIR=${sccache_dir_a}" \
-      CARGO_INCREMENTAL=0 \
-      "CARGO_TARGET_DIR=${target_dir}" \
-      BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
-      BORINGCACHE_OBSERVABILITY_JSONL_PATH="${metrics_file}" \
-        "${BINARY}" sccache \
+    SCCACHE_SERVER_PORT="${sccache_server_port}" \
+    SCCACHE_DIR="${sccache_dir_a}" \
+    CARGO_INCREMENTAL=0 \
+    CARGO_TARGET_DIR="${target_dir}" \
+    BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
+    BORINGCACHE_OBSERVABILITY_JSONL_PATH="${metrics_file}" \
+      "${BINARY}" sccache \
           --workspace "${WORKSPACE}" \
           --tag "${tag}" \
           --port 5315 \
@@ -836,21 +782,20 @@ EOF
           -- cargo build --release \
       > "${cold_log}" 2>&1
   )
-  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${sccache_server_port}" sccache --show-stats > "${cold_stats}" 2>&1
-  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${sccache_server_port}" sccache --stop-server >/dev/null 2>&1 || true
+  SCCACHE_SERVER_PORT="${sccache_server_port}" sccache --show-stats > "${cold_stats}" 2>&1
+  SCCACHE_SERVER_PORT="${sccache_server_port}" sccache --stop-server >/dev/null 2>&1 || true
   wait_for_tag_visibility "${tag}"
 
   rm -rf "${target_dir}"
   (
     cd "${tool_dir}"
-    run_with_clean_sccache_env \
-      "SCCACHE_SERVER_PORT=${sccache_server_port}" \
-      "SCCACHE_DIR=${sccache_dir_b}" \
-      CARGO_INCREMENTAL=0 \
-      "CARGO_TARGET_DIR=${target_dir}" \
-      BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
-      BORINGCACHE_OBSERVABILITY_JSONL_PATH="${metrics_file}" \
-        "${BINARY}" sccache \
+    SCCACHE_SERVER_PORT="${sccache_server_port}" \
+    SCCACHE_DIR="${sccache_dir_b}" \
+    CARGO_INCREMENTAL=0 \
+    CARGO_TARGET_DIR="${target_dir}" \
+    BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
+    BORINGCACHE_OBSERVABILITY_JSONL_PATH="${metrics_file}" \
+      "${BINARY}" sccache \
           --workspace "${WORKSPACE}" \
           --tag "${tag}" \
           --port 5315 \
@@ -859,8 +804,8 @@ EOF
           -- cargo build --release \
       > "${warm_log}" 2>&1
   )
-  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${sccache_server_port}" sccache --show-stats > "${warm_stats}" 2>&1
-  run_with_clean_sccache_env "SCCACHE_SERVER_PORT=${sccache_server_port}" sccache --stop-server >/dev/null 2>&1 || true
+  SCCACHE_SERVER_PORT="${sccache_server_port}" sccache --show-stats > "${warm_stats}" 2>&1
+  SCCACHE_SERVER_PORT="${sccache_server_port}" sccache --stop-server >/dev/null 2>&1 || true
 
   warm_hits="$(
     awk '/^Cache hits/ {

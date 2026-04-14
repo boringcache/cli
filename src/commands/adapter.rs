@@ -44,7 +44,6 @@ impl AdapterKind {
 
     fn proxy_env_plan(self, context: &proxy_exec::ProxyContext) -> ProxyEnvPlan {
         let mut set = BTreeMap::new();
-        let mut remove = Vec::new();
         let endpoint = context.endpoint();
 
         set.insert(
@@ -76,7 +75,6 @@ impl AdapterKind {
                 );
             }
             AdapterKind::Sccache => {
-                remove.extend(proxy_exec::inherited_sccache_backend_env_vars());
                 set.insert("RUSTC_WRAPPER".to_string(), "sccache".to_string());
                 set.insert(
                     "SCCACHE_WEBDAV_ENDPOINT".to_string(),
@@ -93,7 +91,7 @@ impl AdapterKind {
             }
         }
 
-        ProxyEnvPlan { set, remove }
+        ProxyEnvPlan { set }
     }
 
     fn inject_proxy_env(
@@ -102,9 +100,6 @@ impl AdapterKind {
         context: &proxy_exec::ProxyContext,
     ) {
         let plan = self.proxy_env_plan(context);
-        for key in plan.remove {
-            command.env_remove(key);
-        }
         command.envs(plan.set);
     }
 }
@@ -112,7 +107,6 @@ impl AdapterKind {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ProxyEnvPlan {
     set: BTreeMap<String, String>,
-    remove: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -665,22 +659,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sccache_env_plan_removes_backend_vars() {
+    fn sccache_env_plan_sets_webdav_backend() {
         let context = proxy_exec::ProxyContext {
             endpoint_host: "127.0.0.1".to_string(),
             port: 5000,
             cache_ref: "127.0.0.1:5000/cache:test".to_string(),
         };
-
-        assert!(proxy_exec::should_clear_sccache_backend_env_var(
-            "SCCACHE_BUCKET"
-        ));
-        assert!(proxy_exec::should_clear_sccache_backend_env_var(
-            "SCCACHE_WEBDAV_ENDPOINT"
-        ));
-        assert!(!proxy_exec::should_clear_sccache_backend_env_var(
-            "SCCACHE_IDLE_TIMEOUT"
-        ));
 
         let plan = AdapterKind::Sccache.proxy_env_plan(&context);
         assert_eq!(
