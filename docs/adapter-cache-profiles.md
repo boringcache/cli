@@ -33,7 +33,6 @@ Keep the normal operator surface small:
   - blob read cache size override
   - prefetch batch sizes
   - download-url batch sizes
-  - raw prefetch concurrency overrides
 
 The intent is that one machine governor and one generic startup path pick the right defaults for almost every workload.
 If a benchmark needs lower-level overrides, treat those as engineering controls, not product defaults.

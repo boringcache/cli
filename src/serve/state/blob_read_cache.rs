@@ -23,8 +23,6 @@ pub struct OciManifestCacheEntry {
     pub blobs: Vec<BlobDescriptor>,
     pub name: String,
     pub inserted_at: Instant,
-    pub blob_retrievability_validated_at: StdMutex<Option<Instant>>,
-    pub blob_retrievability_validation_lock: Mutex<()>,
 }
 
 struct BlobReadInFlightGuard {
