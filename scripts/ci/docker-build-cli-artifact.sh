@@ -131,7 +131,8 @@ run_release_build() {
     export BORINGCACHE_CARGO_WORKSPACE="$WORKSPACE"
     export BORINGCACHE_CARGO_PROXY_TAG="$CACHE_TAG"
     export BORINGCACHE_CARGO_PROXY_PORT="${BORINGCACHE_CARGO_PROXY_PORT:-4227}"
-    export SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT:-4227}"
+    # The sccache daemon speaks its own protocol; keep it off the proxy port.
+    export SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT:-4228}"
   else
     export BORINGCACHE_CARGO_FLOW_MODE="plain"
   fi
