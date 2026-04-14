@@ -11,7 +11,8 @@ LOG_DIR="${LOG_DIR:-.}"
 PROXY_PORT="${PROXY_PORT:-5058}"
 RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
-SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT:-$((4200 + (RANDOM % 2000)))}"
+SCCACHE_PORT_SEED="${SCCACHE_PORT_SEED:-$((4200 + (RANDOM % 2000)))}"
+SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT:-}"
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
 require_save_capable_token
@@ -37,6 +38,20 @@ mkdir -p "${SCCACHE_LOG_DIR}"
 
 TAG="$(e2e_tag "tool-sccache")"
 PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
+if [[ -z "${SCCACHE_SERVER_PORT}" ]]; then
+  SCCACHE_SERVER_PORT="$(next_available_sccache_port "${SCCACHE_PORT_SEED}" "${PROXY_PORT}")"
+elif ! [[ "${SCCACHE_SERVER_PORT}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: SCCACHE_SERVER_PORT must be a positive integer"
+  exit 1
+elif [[ "${SCCACHE_SERVER_PORT}" == "${PROXY_PORT}" ]]; then
+  echo "ERROR: SCCACHE_SERVER_PORT (${SCCACHE_SERVER_PORT}) must differ from PROXY_PORT (${PROXY_PORT})"
+  exit 1
+fi
+
+if (( SCCACHE_SERVER_PORT > 65535 )); then
+  echo "ERROR: SCCACHE_SERVER_PORT must be <= 65535"
+  exit 1
+fi
 
 setup_e2e_traps "${BINARY}" "${WORKSPACE}"
 register_tag_for_cleanup "${TAG}"
@@ -86,9 +101,30 @@ stop_sccache_server() {
 }
 register_cleanup_callback stop_sccache_server
 
+start_sccache_server() {
+  local sccache_dir="$1"
+  local sccache_control_log="${SCCACHE_LOG_DIR}/sccache-control.log"
+  local sccache_error_log="${SCCACHE_LOG_DIR}/sccache-${SCCACHE_SERVER_PORT}.log"
+  touch "${sccache_control_log}" "${sccache_error_log}"
+  run_with_clean_sccache_env \
+    "SCCACHE_DIR=${sccache_dir}" \
+    "SCCACHE_WEBDAV_ENDPOINT=${PROXY_URL}/" \
+    "SCCACHE_SERVER_PORT=${SCCACHE_SERVER_PORT}" \
+    "SCCACHE_ERROR_LOG=${sccache_error_log}" \
+    SCCACHE_LOG=info \
+    sccache --start-server >> "${sccache_control_log}" 2>&1
+  run_with_clean_sccache_env \
+    "SCCACHE_DIR=${sccache_dir}" \
+    "SCCACHE_SERVER_PORT=${SCCACHE_SERVER_PORT}" \
+    "SCCACHE_ERROR_LOG=${sccache_error_log}" \
+    sccache --zero-stats >> "${sccache_control_log}" 2>&1
+}
+
 export BORINGCACHE_PROXY_METADATA_HINTS="project=e2e-tool-sccache,tool=sccache"
 start_proxy "${BINARY}" "${WORKSPACE}" "${TAG}" "${PROXY_PORT}" "${SCCACHE_LOG_DIR}/proxy.log"
 wait_for_proxy "${PROXY_PORT}"
+echo "Proxy port: ${PROXY_PORT}"
+echo "sccache server port: ${SCCACHE_SERVER_PORT}"
 
 echo "=== Phase 1: Cold Rust build (seed sccache via proxy) ==="
 TARGET_DIR="${SCCACHE_LOG_DIR}/target-shared"
@@ -98,6 +134,7 @@ COLD_LOG="${SCCACHE_LOG_DIR}/cold-build.log"
 stop_sccache_server
 rm -rf "${TARGET_DIR}"
 mkdir -p "${COLD_SCCACHE_DIR}"
+start_sccache_server "${COLD_SCCACHE_DIR}"
 
 COLD_START="$(date +%s)"
 (
@@ -106,6 +143,7 @@ COLD_START="$(date +%s)"
     "SCCACHE_DIR=${COLD_SCCACHE_DIR}" \
     "SCCACHE_WEBDAV_ENDPOINT=${PROXY_URL}/" \
     "SCCACHE_SERVER_PORT=${SCCACHE_SERVER_PORT}" \
+    "SCCACHE_ERROR_LOG=${SCCACHE_LOG_DIR}/sccache-${SCCACHE_SERVER_PORT}.log" \
     SCCACHE_LOG=info \
     RUSTC_WRAPPER=sccache \
     CARGO_INCREMENTAL=0 \
@@ -131,6 +169,7 @@ WARM_LOG="${SCCACHE_LOG_DIR}/warm-build.log"
 stop_sccache_server
 rm -rf "${TARGET_DIR}"
 mkdir -p "${WARM_SCCACHE_DIR}"
+start_sccache_server "${WARM_SCCACHE_DIR}"
 
 WARM_START="$(date +%s)"
 (
@@ -139,6 +178,7 @@ WARM_START="$(date +%s)"
     "SCCACHE_DIR=${WARM_SCCACHE_DIR}" \
     "SCCACHE_WEBDAV_ENDPOINT=${PROXY_URL}/" \
     "SCCACHE_SERVER_PORT=${SCCACHE_SERVER_PORT}" \
+    "SCCACHE_ERROR_LOG=${SCCACHE_LOG_DIR}/sccache-${SCCACHE_SERVER_PORT}.log" \
     SCCACHE_LOG=info \
     RUSTC_WRAPPER=sccache \
     CARGO_INCREMENTAL=0 \

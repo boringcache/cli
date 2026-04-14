@@ -146,6 +146,32 @@ port_listener_details() {
   fi
 }
 
+next_available_sccache_port() {
+  local candidate="$1"
+  local reserved_port="${2:-}"
+  local limit="${3:-256}"
+  local listeners
+  while (( limit > 0 )); do
+    if (( candidate > 65535 )); then
+      candidate=10240
+    fi
+    if [[ -n "$reserved_port" && "$candidate" == "$reserved_port" ]]; then
+      candidate=$((candidate + 1))
+      limit=$((limit - 1))
+      continue
+    fi
+    listeners="$(port_listener_pids "$candidate")"
+    if [[ -z "$listeners" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+    candidate=$((candidate + 1))
+    limit=$((limit - 1))
+  done
+  echo "ERROR: unable to find a free sccache server port" >&2
+  exit 1
+}
+
 reclaim_stale_proxy_port() {
   local port="${1:-${PROXY_PORT:-5050}}"
   local listener_pids pid cmd

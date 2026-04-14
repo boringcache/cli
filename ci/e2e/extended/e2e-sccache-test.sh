@@ -39,10 +39,11 @@ BUILD_FAILURE_TAIL_LINES="${BUILD_FAILURE_TAIL_LINES:-60}"
 BUILD_WARN_SECS="${BUILD_WARN_SECS:-120}"
 BUILD_STALL_WARN_SECS="${BUILD_STALL_WARN_SECS:-90}"
 PROXY_READY_WARN_SECS="${PROXY_READY_WARN_SECS:-15}"
-SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT:-$((4200 + (RANDOM % 2000)))}"
+SCCACHE_PORT_SEED="${SCCACHE_PORT_SEED:-$((4200 + (RANDOM % 2000)))}"
+SCCACHE_SERVER_PORT="${SCCACHE_SERVER_PORT:-}"
 SCCACHE_DIR="${SCCACHE_DIR:-${TMP_ROOT}/sccache-${RUN_ID}}"
 EFFICACY_WARM_SCCACHE_DIR="${EFFICACY_WARM_SCCACHE_DIR:-${SCCACHE_DIR}-warm}"
-STRESS_SCCACHE_PORT_BASE="${STRESS_SCCACHE_PORT_BASE:-$((SCCACHE_SERVER_PORT + 100))}"
+STRESS_SCCACHE_PORT_BASE="${STRESS_SCCACHE_PORT_BASE:-}"
 STRESS_SCCACHE_ISOLATION="${STRESS_SCCACHE_ISOLATION:-0}"
 STRESS_PREWARM_TARGET_DIR="${STRESS_PREWARM_TARGET_DIR:-${TARGET_ROOT}/stress-prewarm-stable}"
 PORT_RECLAIM_WAIT_SECS="${PORT_RECLAIM_WAIT_SECS:-15}"
@@ -140,17 +141,17 @@ if ! [[ "$PROXY_READY_WARN_SECS" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-if ! [[ "$SCCACHE_SERVER_PORT" =~ ^[1-9][0-9]*$ ]]; then
+if [[ -n "$SCCACHE_SERVER_PORT" ]] && ! [[ "$SCCACHE_SERVER_PORT" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: SCCACHE_SERVER_PORT must be a positive integer"
   exit 1
 fi
 
-if ! [[ "$STRESS_SCCACHE_PORT_BASE" =~ ^[1-9][0-9]*$ ]]; then
+if [[ -n "$STRESS_SCCACHE_PORT_BASE" ]] && ! [[ "$STRESS_SCCACHE_PORT_BASE" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: STRESS_SCCACHE_PORT_BASE must be a positive integer"
   exit 1
 fi
 
-if (( STRESS_SCCACHE_PORT_BASE > 65535 )); then
+if [[ -n "$STRESS_SCCACHE_PORT_BASE" ]] && (( STRESS_SCCACHE_PORT_BASE > 65535 )); then
   echo "ERROR: STRESS_SCCACHE_PORT_BASE must be <= 65535"
   exit 1
 fi
@@ -469,11 +470,17 @@ port_listener_details() {
 
 next_available_sccache_port() {
   local candidate="$1"
+  local reserved_port="${2:-}"
   local limit=256
   local listeners
   while (( limit > 0 )); do
     if (( candidate > 65535 )); then
       candidate=10240
+    fi
+    if [[ -n "$reserved_port" && "$candidate" == "$reserved_port" ]]; then
+      candidate=$((candidate + 1))
+      limit=$((limit - 1))
+      continue
     fi
     listeners="$(port_listener_pids "$candidate")"
     if [[ -z "$listeners" ]]; then
@@ -491,6 +498,27 @@ sccache_error_log_path() {
   local sccache_port="$1"
   echo "${LOG_DIR}/sccache-${sccache_port}.log"
 }
+
+if [[ -z "$SCCACHE_SERVER_PORT" ]]; then
+  SCCACHE_SERVER_PORT="$(next_available_sccache_port "$SCCACHE_PORT_SEED" "$PROXY_PORT")"
+elif [[ "$SCCACHE_SERVER_PORT" == "$PROXY_PORT" ]]; then
+  echo "ERROR: SCCACHE_SERVER_PORT (${SCCACHE_SERVER_PORT}) must differ from PROXY_PORT (${PROXY_PORT})"
+  exit 1
+fi
+
+if (( SCCACHE_SERVER_PORT > 65535 )); then
+  echo "ERROR: SCCACHE_SERVER_PORT must be <= 65535"
+  exit 1
+fi
+
+if [[ -z "$STRESS_SCCACHE_PORT_BASE" ]]; then
+  STRESS_SCCACHE_PORT_BASE="$((SCCACHE_SERVER_PORT + 100))"
+fi
+
+if (( STRESS_SCCACHE_PORT_BASE > 65535 )); then
+  echo "ERROR: STRESS_SCCACHE_PORT_BASE must be <= 65535"
+  exit 1
+fi
 
 proxy_request_metrics_path() {
   local log_file="$1"
