@@ -23,6 +23,40 @@ Example:
 
 If you are migrating an existing workflow and do not have repo config yet, raw `entries` and `actions/cache`-compatible `path` / `key` / `restore-keys` inputs still work.
 
+If you already manage the tool-specific setup yourself and only want proxy lifecycle plus adapter env injection, the CLI now also supports direct adapter commands:
+
+```yaml
+- run: |
+    cat > .boringcache.toml <<'EOF'
+    workspace = "my-org/my-project"
+
+    [adapters.turbo]
+    tag = "turbo-main"
+    command = ["pnpm", "turbo", "run", "build"]
+    metadata-hints = ["tool=turbo", "phase=ci"]
+    EOF
+
+- run: boringcache turbo
+  env:
+    BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
+    BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
+```
+
+You can still override a configured adapter from the workflow when needed:
+
+```yaml
+- run: |
+    boringcache turbo \
+      --workspace my-org/my-project \
+      --tag turbo-main \
+      -- pnpm turbo run build
+  env:
+    BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
+    BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
+```
+
+Use `boringcache/one@v1` when you want the action to keep owning tool setup such as Bazel rc files, Maven or Gradle cache config, buildx setup, or container networking.
+
 Keep the trust model simple:
 
 - every job gets `BORINGCACHE_RESTORE_TOKEN`

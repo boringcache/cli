@@ -13,6 +13,8 @@ pub struct RepoConfig {
     pub entries: BTreeMap<String, RepoEntryConfig>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, RepoProfileConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub adapters: BTreeMap<String, AdapterConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -33,11 +35,77 @@ pub struct RepoProfileConfig {
     pub entries: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum AdapterCommandConfig {
+    String(String),
+    Array(Vec<String>),
+}
+
+impl AdapterCommandConfig {
+    pub fn argv(&self) -> Result<Vec<String>> {
+        match self {
+            AdapterCommandConfig::String(value) => shlex::split(value)
+                .ok_or_else(|| anyhow::anyhow!("Failed to parse adapter command string: {value}")),
+            AdapterCommandConfig::Array(argv) => Ok(argv.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AdapterConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<AdapterCommandConfig>,
+    #[serde(default)]
+    pub no_platform: bool,
+    #[serde(default)]
+    pub no_git: bool,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default, rename = "fail-on-cache-error", alias = "fail_on_cache_error")]
+    pub fail_on_cache_error: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>,
+    #[serde(
+        default,
+        rename = "metadata-hints",
+        alias = "metadata_hints",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub metadata_hints: Vec<String>,
+    #[serde(default, rename = "skip-restore", alias = "skip_restore")]
+    pub skip_restore: bool,
+    #[serde(default, rename = "skip-save", alias = "skip_save")]
+    pub skip_save: bool,
+    #[serde(default, rename = "save-on-failure", alias = "save_on_failure")]
+    pub save_on_failure: bool,
+    #[serde(rename = "cache-mode", skip_serializing_if = "Option::is_none")]
+    pub cache_mode: Option<String>,
+    #[serde(rename = "cache-ref-tag", skip_serializing_if = "Option::is_none")]
+    pub cache_ref_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(rename = "endpoint-host", skip_serializing_if = "Option::is_none")]
+    pub endpoint_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
 #[derive(Debug, Clone)]
 pub struct LoadedRepoConfig {
     pub path: PathBuf,
     pub root: PathBuf,
     pub config: RepoConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedAdapterConfig {
+    pub loaded_config: Option<LoadedRepoConfig>,
+    pub adapter_config: Option<AdapterConfig>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -113,6 +181,22 @@ pub fn discover(start_dir: &Path) -> Result<Option<LoadedRepoConfig>> {
     }
 
     Ok(None)
+}
+
+pub fn resolve_adapter_config(
+    start_dir: &Path,
+    adapter_name: &str,
+) -> Result<ResolvedAdapterConfig> {
+    let loaded_config = discover(start_dir)?;
+    let adapter_config = loaded_config
+        .as_ref()
+        .and_then(|loaded| find_adapter(&loaded.config, adapter_name))
+        .cloned();
+
+    Ok(ResolvedAdapterConfig {
+        loaded_config,
+        adapter_config,
+    })
 }
 
 pub fn resolve_run_plan(
@@ -500,6 +584,15 @@ fn find_profile<'a>(config: &'a RepoConfig, profile_name: &str) -> Option<&'a Re
         .map(|(_, value)| value)
 }
 
+fn find_adapter<'a>(config: &'a RepoConfig, adapter_name: &str) -> Option<&'a AdapterConfig> {
+    let normalized = normalize_key(adapter_name);
+    config
+        .adapters
+        .iter()
+        .find(|(key, _)| normalize_key(key) == normalized)
+        .map(|(_, value)| value)
+}
+
 fn available_profiles(config: &RepoConfig) -> String {
     let mut names = config
         .profiles
@@ -684,5 +777,83 @@ default_path = "/mise/installs"
             plan.env_vars.get("MISE_INSTALLS_DIR"),
             Some(&"/mise/installs".to_string())
         );
+    }
+
+    #[test]
+    fn parses_adapter_config_with_command_array() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join(".boringcache.toml"),
+            r#"
+workspace = "org/workspace"
+
+[adapters.turbo]
+tag = "turbo-main"
+command = ["pnpm", "turbo", "run", "build"]
+entries = ["pnpm-store"]
+profiles = ["bundle-install"]
+metadata-hints = ["phase=warm"]
+fail-on-cache-error = true
+skip-save = true
+save-on-failure = true
+port = 5001
+endpoint-host = "host.docker.internal"
+"#,
+        )
+        .unwrap();
+
+        let resolved = resolve_adapter_config(temp_dir.path(), "turbo").unwrap();
+        let loaded = resolved.loaded_config.unwrap();
+        let adapter = resolved.adapter_config.unwrap();
+
+        assert_eq!(loaded.config.workspace.as_deref(), Some("org/workspace"));
+        assert_eq!(adapter.tag.as_deref(), Some("turbo-main"));
+        assert_eq!(adapter.entries, vec!["pnpm-store"]);
+        assert_eq!(adapter.profiles, vec!["bundle-install"]);
+        assert_eq!(adapter.metadata_hints, vec!["phase=warm"]);
+        assert!(adapter.fail_on_cache_error);
+        assert!(adapter.skip_save);
+        assert!(adapter.save_on_failure);
+        assert_eq!(adapter.port, Some(5001));
+        assert_eq!(
+            adapter.endpoint_host.as_deref(),
+            Some("host.docker.internal")
+        );
+        assert_eq!(
+            adapter.command.unwrap().argv().unwrap(),
+            vec!["pnpm", "turbo", "run", "build"]
+        );
+    }
+
+    #[test]
+    fn parses_adapter_command_string_with_shlex() {
+        let command = AdapterCommandConfig::String(
+            r#"sh -c 'pnpm install --frozen-lockfile && pnpm turbo run build'"#.to_string(),
+        );
+
+        assert_eq!(
+            command.argv().unwrap(),
+            vec![
+                "sh",
+                "-c",
+                "pnpm install --frozen-lockfile && pnpm turbo run build"
+            ]
+        );
+    }
+
+    #[test]
+    fn adapter_resolution_preserves_loaded_config_when_adapter_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join(".boringcache.toml"),
+            r#"
+workspace = "org/workspace"
+"#,
+        )
+        .unwrap();
+
+        let resolved = resolve_adapter_config(temp_dir.path(), "turbo").unwrap();
+        assert!(resolved.loaded_config.is_some());
+        assert!(resolved.adapter_config.is_none());
     }
 }

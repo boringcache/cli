@@ -23,6 +23,7 @@ fn long_option_requires_value(command: &str, option: &str) -> bool {
                 | "--proxy"
                 | "--metadata-hint"
                 | "--host"
+                | "--endpoint-host"
                 | "--port"
         ),
         "ls" => matches!(option, "--limit" | "--page"),
@@ -407,7 +408,9 @@ async fn main() -> Result<()> {
             proxy,
             metadata_hint,
             host,
+            endpoint_host,
             port,
+            read_only,
             save_on_failure,
             skip_restore,
             skip_save,
@@ -436,7 +439,9 @@ async fn main() -> Result<()> {
                 proxy,
                 metadata_hint,
                 host,
+                endpoint_host,
                 port,
+                read_only,
                 save_on_failure,
                 skip_restore,
                 skip_save,
@@ -445,6 +450,78 @@ async fn main() -> Result<()> {
                 dry_run,
                 json,
                 command,
+            )
+            .await
+        }
+        cli::Commands::Turbo { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Turbo,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Nx { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Nx,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Bazel { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Bazel,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Gradle { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Gradle,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Maven { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Maven,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Sccache { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Sccache,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Go { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Go,
+                args,
+                cli.verbose,
+                require_server_signature,
+            )
+            .await
+        }
+        cli::Commands::Docker { args } => {
+            commands::adapter::adapter_execute(
+                commands::adapter::AdapterKind::Docker,
+                args,
+                cli.verbose,
+                require_server_signature,
             )
             .await
         }
