@@ -146,7 +146,7 @@ pub(crate) async fn refresh_published_index_for_lookup(
             published.set_empty();
         }
     }
-    clear_root_tag_misses(state);
+    clear_tag_misses(state, &state.registry_root_tag);
 
     Ok(())
 }
@@ -327,11 +327,10 @@ pub(crate) fn build_index_pointer(
         entries: pointer_entries,
         blobs: blobs
             .iter()
-            .enumerate()
-            .map(|(sequence, blob)| crate::cas_file::FilePointerBlob {
+            .map(|blob| crate::cas_file::FilePointerBlob {
                 digest: blob.digest.clone(),
                 size_bytes: blob.size_bytes,
-                sequence: Some(sequence as u64),
+                sequence: None,
             })
             .collect(),
     };
@@ -389,7 +388,6 @@ pub(crate) fn pointer_blob_order(
 pub(crate) fn merge_blob_order(
     merged_entries: &BTreeMap<String, BlobDescriptor>,
     base_blob_order: &[BlobDescriptor],
-    pending_blob_sequences: &HashMap<String, u64>,
 ) -> Vec<BlobDescriptor> {
     let mut size_by_digest = BTreeMap::new();
     for blob in merged_entries.values() {
@@ -402,23 +400,6 @@ pub(crate) fn merge_blob_order(
     let mut seen = HashSet::new();
     for blob in base_blob_order {
         let digest = blob.digest.clone();
-        let Some(size_bytes) = size_by_digest.get(&digest) else {
-            continue;
-        };
-        if seen.insert(digest.clone()) {
-            ordered.push(BlobDescriptor {
-                digest,
-                size_bytes: *size_bytes,
-            });
-        }
-    }
-
-    let mut pending_digests: Vec<(u64, String)> = pending_blob_sequences
-        .iter()
-        .map(|(digest, sequence)| (*sequence, digest.clone()))
-        .collect();
-    pending_digests.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-    for (_, digest) in pending_digests {
         let Some(size_bytes) = size_by_digest.get(&digest) else {
             continue;
         };

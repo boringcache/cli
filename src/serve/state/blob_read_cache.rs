@@ -1,6 +1,5 @@
 use super::*;
 
-pub const DEFAULT_BLOB_READ_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const OCI_MANIFEST_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 const BLOB_READ_CACHE_DIR_ENV: &str = "BORINGCACHE_BLOB_READ_CACHE_DIR";
 const BLOB_READ_CACHE_DIR_NAME: &str = "boringcache-blob-cache";

@@ -178,10 +178,13 @@ pub(crate) async fn resolve_download_url(
     cache_entry_id: &str,
     blob: &BlobDescriptor,
 ) -> Result<String, RegistryError> {
-    let download_urls = match state
-        .api_client
-        .blob_download_urls_verified(&state.workspace, cache_entry_id, std::slice::from_ref(blob))
-        .await
+    let download_url = match crate::serve::blob_download_urls::resolve_verified_blob_download_url(
+        state,
+        cache_entry_id,
+        blob,
+        KV_BLOB_URL_RESOLVE_TIMEOUT,
+    )
+    .await
     {
         Ok(urls) => {
             state.backend_breaker.record_success();
@@ -195,22 +198,13 @@ pub(crate) async fn resolve_download_url(
         }
     };
 
-    if download_urls
-        .missing
-        .iter()
-        .any(|digest| digest == &blob.digest)
-    {
-        return Err(RegistryError::not_found(
-            "Cache object is missing blob data",
-        ));
+    if let Some(url) = download_url {
+        return Ok(url);
     }
 
-    download_urls
-        .download_urls
-        .iter()
-        .find(|item| item.digest == blob.digest)
-        .map(|item| item.url.clone())
-        .ok_or_else(|| RegistryError::internal("Missing blob download URL in API response"))
+    Err(RegistryError::not_found(
+        "Cache object is missing blob data",
+    ))
 }
 
 pub(crate) async fn serve_backend_blob(
@@ -296,7 +290,7 @@ pub(crate) fn cleanup_expired_kv_misses(state: &AppState) {
         .retain(|_, expires_at| *expires_at > now);
 }
 
-pub(crate) fn kv_root_tags_from_values(
+pub(crate) fn kv_visibility_tags_from_values(
     registry_root_tag: &str,
     configured_human_tags: &[String],
 ) -> Vec<String> {
@@ -310,15 +304,15 @@ pub(crate) fn kv_root_tags_from_values(
     tags
 }
 
-pub(crate) fn kv_root_tags(state: &AppState) -> Vec<String> {
-    kv_root_tags_from_values(&state.registry_root_tag, &state.configured_human_tags)
+pub(crate) fn kv_visibility_tags(state: &AppState) -> Vec<String> {
+    kv_visibility_tags_from_values(&state.registry_root_tag, &state.configured_human_tags)
 }
 
 pub(crate) fn kv_alias_tags_from_values(
     registry_root_tag: &str,
     configured_human_tags: &[String],
 ) -> Vec<String> {
-    kv_root_tags_from_values(registry_root_tag, configured_human_tags)
+    kv_visibility_tags_from_values(registry_root_tag, configured_human_tags)
         .into_iter()
         .skip(1)
         .collect()
@@ -334,12 +328,6 @@ pub(crate) fn kv_primary_write_scope_tag(state: &AppState) -> Option<String> {
         .first()
         .map(|tag| tag.trim().to_string())
         .filter(|tag| !tag.is_empty())
-}
-
-pub(crate) fn clear_root_tag_misses(state: &AppState) {
-    for tag in kv_root_tags(state) {
-        clear_tag_misses(state, &tag);
-    }
 }
 
 pub(crate) fn kv_pending_publish_handoff_path(state: &AppState) -> PathBuf {
@@ -442,7 +430,6 @@ pub(crate) async fn persist_kv_pending_publish_handoff(
     pending: PendingPublishHandoffPersist<'_>,
 ) {
     let pending_blob_paths = pending.pending_blob_paths.cloned().unwrap_or_default();
-    let pending_blob_sequences = pending.pending_blob_sequences.cloned().unwrap_or_default();
     let download_urls = {
         let published = state.kv_published_index.read().await;
         if published.cache_entry_id() == Some(cache_entry_id) {
@@ -473,7 +460,6 @@ pub(crate) async fn persist_kv_pending_publish_handoff(
         root_pending: pending.root_pending.cloned(),
         pending_alias_tags: pending.pending_alias_tags,
         pending_blob_paths,
-        pending_blob_sequences,
     };
 
     let path = kv_pending_publish_handoff_path(state);
@@ -532,7 +518,7 @@ pub(crate) async fn kv_publish_tags_visible(
     state: &AppState,
     expected_cache_entry_id: &str,
 ) -> bool {
-    for tag in kv_root_tags(state) {
+    for tag in kv_visibility_tags(state) {
         let visible = match state
             .api_client
             .tag_pointer(&state.workspace, &tag, None)
@@ -643,11 +629,7 @@ pub(crate) async fn restore_kv_pending_publish_handoff(state: &AppState) {
     if !handoff.pending_blob_paths.is_empty() {
         let restored_cleanup_paths = {
             let mut pending = state.kv_pending.write().await;
-            pending.restore(
-                handoff.entries.clone(),
-                handoff.pending_blob_paths.clone(),
-                handoff.pending_blob_sequences.clone(),
-            )
+            pending.restore(handoff.entries.clone(), handoff.pending_blob_paths.clone())
         };
         cleanup_paths(restored_cleanup_paths).await;
         let _ = enqueue_replication_flush_hint(state, true, false);
@@ -677,7 +659,7 @@ pub(crate) async fn restore_kv_pending_publish_handoff(state: &AppState) {
                 std::time::Duration::from_millis(snapshot_age_ms),
             );
         }
-        clear_root_tag_misses(state);
+        clear_tag_misses(state, &state.registry_root_tag);
         eprintln!(
             "KV startup: restored pending publish handoff cache_entry_id={} entries={}",
             handoff.cache_entry_id,

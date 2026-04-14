@@ -84,11 +84,10 @@ pub(super) async fn put_manifest(
         oci_layout_base64: STANDARD.encode(br#"{"imageLayoutVersion":"1.0.0"}"#),
         blobs: blob_descriptors
             .iter()
-            .enumerate()
-            .map(|(sequence, b)| cas_oci::OciPointerBlob {
+            .map(|b| cas_oci::OciPointerBlob {
                 digest: b.digest.clone(),
                 size_bytes: b.size_bytes,
-                sequence: Some(sequence as u64),
+                sequence: None,
             })
             .collect(),
     };
@@ -794,36 +793,16 @@ async fn resolve_manifest_blob_download_urls(
     cache_entry_id: &str,
     blob_descriptors: &[BlobDescriptor],
 ) -> Result<HashMap<String, String>, String> {
-    let response = tokio::time::timeout(
+    let resolved = crate::serve::blob_download_urls::resolve_verified_blob_download_urls(
+        state,
+        cache_entry_id,
+        blob_descriptors,
         OCI_API_CALL_TIMEOUT,
-        state.api_client.blob_download_urls_verified(
-            &state.workspace,
-            cache_entry_id,
-            blob_descriptors,
-        ),
     )
     .await
-    .map_err(|_| {
-        format!(
-            "timed out resolving blob URLs after {}s",
-            OCI_API_CALL_TIMEOUT.as_secs()
-        )
-    })?
-    .map_err(|e| format!("blob_download_urls failed: {e}"))?;
-
-    let mut urls = HashMap::with_capacity(response.download_urls.len());
-    for entry in response.download_urls {
-        urls.insert(entry.digest, entry.url);
-    }
-
-    let mut missing = response.missing;
-    for blob in blob_descriptors {
-        if !urls.contains_key(blob.digest.as_str()) {
-            missing.push(blob.digest.clone());
-        }
-    }
-    missing.sort();
-    missing.dedup();
+    .map_err(|error| format!("blob_download_urls failed: {error}"))?;
+    let urls = resolved.urls;
+    let missing = resolved.missing;
     if !missing.is_empty() {
         let sample = missing.into_iter().take(3).collect::<Vec<_>>().join(", ");
         return Err(format!("download URLs missing for blobs: {sample}"));

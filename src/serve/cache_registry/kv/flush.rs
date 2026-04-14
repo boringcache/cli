@@ -308,7 +308,7 @@ pub(crate) async fn flush_kv_index_with_mode(
 ) -> FlushResult {
     let guard = state.kv_flush_lock.lock().await;
 
-    let (pending_entries, pending_blob_paths, pending_blob_sequences) = {
+    let (pending_entries, pending_blob_paths) = {
         let mut pending = state.kv_pending.write().await;
         if pending.is_empty() {
             return FlushResult::Ok;
@@ -333,15 +333,7 @@ pub(crate) async fn flush_kv_index_with_mode(
 
     let entry_count = pending_entries.len();
 
-    let result = match do_flush(
-        state,
-        &pending_entries,
-        &pending_blob_paths,
-        &pending_blob_sequences,
-        flush_mode,
-    )
-    .await
-    {
+    let result = match do_flush(state, &pending_entries, &pending_blob_paths, flush_mode).await {
         Ok((merged_entries, merged_blob_order, cache_entry_id)) => {
             {
                 let mut published = state.kv_published_index.write().await;
@@ -355,7 +347,7 @@ pub(crate) async fn flush_kv_index_with_mode(
                 let mut flushing = state.kv_flushing.write().await;
                 *flushing = None;
             }
-            clear_root_tag_misses(state);
+            clear_tag_misses(state, &state.registry_root_tag);
 
             let promoted =
                 promote_pending_blobs_to_read_cache(state, &pending_entries, &pending_blob_paths)
@@ -375,8 +367,7 @@ pub(crate) async fn flush_kv_index_with_mode(
         Err(FlushError::Conflict(msg)) => {
             eprintln!("KV batch flush: skipped — tag conflict ({msg})");
             let mut pending = state.kv_pending.write().await;
-            let paths_to_cleanup =
-                pending.restore(pending_entries, pending_blob_paths, pending_blob_sequences);
+            let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
             drop(pending);
             cleanup_paths(paths_to_cleanup).await;
             let (base_ms, jitter_ms) = conflict_backoff_window(&msg);
@@ -398,7 +389,6 @@ pub(crate) async fn flush_kv_index_with_mode(
                         root_pending: None,
                         pending_alias_tags: false,
                         pending_blob_paths: Some(&pending_blob_paths),
-                        pending_blob_sequences: Some(&pending_blob_sequences),
                     },
                 )
                 .await;
@@ -409,8 +399,7 @@ pub(crate) async fn flush_kv_index_with_mode(
                 FlushResult::Deferred
             } else {
                 let mut pending = state.kv_pending.write().await;
-                let paths_to_cleanup =
-                    pending.restore(pending_entries, pending_blob_paths, pending_blob_sequences);
+                let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
                 drop(pending);
                 cleanup_paths(paths_to_cleanup).await;
                 let (base_ms, jitter_ms) = transient_backoff_window(&msg);
@@ -457,7 +446,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             if had_entries {
                 let mut published = state.kv_published_index.write().await;
                 published.touch_refresh();
-                clear_root_tag_misses(state);
+                clear_tag_misses(state, &state.registry_root_tag);
                 eprintln!("KV index refresh: preserving in-memory index (no backend index)");
                 return;
             }
@@ -465,7 +454,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
                 let mut published = state.kv_published_index.write().await;
                 published.set_empty();
             }
-            clear_root_tag_misses(state);
+            clear_tag_misses(state, &state.registry_root_tag);
             if had_entries {
                 eprintln!("KV index refresh: cleared stale entries (no backend index)");
             }
@@ -553,7 +542,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
     {
         let mut published = state.kv_published_index.write().await;
         published.touch_refresh();
-        clear_root_tag_misses(state);
+        clear_tag_misses(state, &state.registry_root_tag);
         eprintln!(
             "KV index refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
             entry_map.len(),
@@ -572,7 +561,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         if had_entries {
             let mut published = state.kv_published_index.write().await;
             published.touch_refresh();
-            clear_root_tag_misses(state);
+            clear_tag_misses(state, &state.registry_root_tag);
             eprintln!("KV index refresh: preserving in-memory index (empty pointer)");
             return;
         }
@@ -580,7 +569,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             let mut published = state.kv_published_index.write().await;
             published.set_empty();
         }
-        clear_root_tag_misses(state);
+        clear_tag_misses(state, &state.registry_root_tag);
         if had_entries {
             eprintln!("KV index refresh: cleared stale entries (empty pointer)");
         }
@@ -592,7 +581,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         let mut published = state.kv_published_index.write().await;
         published.update(entries, blob_order, cache_entry_id.clone());
     }
-    clear_root_tag_misses(state);
+    clear_tag_misses(state, &state.registry_root_tag);
     eprintln!("KV index refresh: {count} entries loaded");
     preload_download_urls(state, &cache_entry_id).await;
     spawn_preload_blobs(state, &cache_entry_id);
@@ -692,7 +681,7 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
     {
         let mut published = state.kv_published_index.write().await;
         published.touch_refresh();
-        clear_root_tag_misses(state);
+        clear_tag_misses(state, &state.registry_root_tag);
         eprintln!(
             "KV version-triggered refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
             entry_map.len(),
@@ -711,14 +700,14 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
         if had_entries {
             let mut published = state.kv_published_index.write().await;
             published.touch_refresh();
-            clear_root_tag_misses(state);
+            clear_tag_misses(state, &state.registry_root_tag);
             return;
         }
         {
             let mut published = state.kv_published_index.write().await;
             published.set_empty();
         }
-        clear_root_tag_misses(state);
+        clear_tag_misses(state, &state.registry_root_tag);
         return;
     }
 
@@ -727,7 +716,7 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
         let mut published = state.kv_published_index.write().await;
         published.update(entries, blob_order, cache_entry_id.clone());
     }
-    clear_root_tag_misses(state);
+    clear_tag_misses(state, &state.registry_root_tag);
     eprintln!("KV version-triggered refresh: {count} entries loaded (no blob prefetch)");
 }
 
@@ -919,7 +908,6 @@ pub(crate) async fn do_flush(
     state: &AppState,
     pending_entries: &BTreeMap<String, BlobDescriptor>,
     pending_blob_paths: &HashMap<String, PathBuf>,
-    pending_blob_sequences: &HashMap<String, u64>,
     flush_mode: FlushMode,
 ) -> Result<
     (
@@ -955,14 +943,9 @@ pub(crate) async fn do_flush(
     let (
         filtered_pending_entries,
         filtered_pending_blob_paths,
-        filtered_pending_blob_sequences,
         missing_pending_digests,
         missing_pending_entries,
-    ) = filter_pending_entries_with_local_blobs(
-        pending_entries,
-        pending_blob_paths,
-        pending_blob_sequences,
-    );
+    ) = filter_pending_entries_with_local_blobs(pending_entries, pending_blob_paths);
     if let FlushBaseSelection::PublishedFallback {
         backend_entry_count,
         published_entry_count,
@@ -991,8 +974,7 @@ pub(crate) async fn do_flush(
             .iter()
             .map(|(k, v)| (k.clone(), v.clone())),
     );
-    let merged_blob_order =
-        merge_blob_order(&entries, &base_blob_order, &filtered_pending_blob_sequences);
+    let merged_blob_order = merge_blob_order(&entries, &base_blob_order);
     let total_count = entries.len();
     eprintln!(
         "KV flush: merging {existing_count} existing + {} pending = {total_count} total entries",
@@ -1159,7 +1141,6 @@ pub(crate) async fn do_flush(
                 root_pending: kv_confirm_pending_metadata(&confirm_outcome),
                 pending_alias_tags: pending_alias_count > 0,
                 pending_blob_paths: None,
-                pending_blob_sequences: None,
             },
         )
         .await;
@@ -1321,7 +1302,6 @@ pub(crate) async fn do_flush(
             root_pending: kv_confirm_pending_metadata(&confirm_outcome),
             pending_alias_tags: pending_alias_count > 0,
             pending_blob_paths: None,
-            pending_blob_sequences: None,
         },
     )
     .await;
@@ -1377,7 +1357,6 @@ pub(crate) async fn do_flush(
 type FilteredPendingEntries = (
     BTreeMap<String, BlobDescriptor>,
     HashMap<String, PathBuf>,
-    HashMap<String, u64>,
     Vec<String>,
     usize,
 );
@@ -1385,11 +1364,9 @@ type FilteredPendingEntries = (
 pub(crate) fn filter_pending_entries_with_local_blobs(
     pending_entries: &BTreeMap<String, BlobDescriptor>,
     pending_blob_paths: &HashMap<String, PathBuf>,
-    pending_blob_sequences: &HashMap<String, u64>,
 ) -> FilteredPendingEntries {
     let mut missing_digests = HashSet::new();
     let mut filtered_blob_paths = HashMap::new();
-    let mut filtered_blob_sequences = HashMap::new();
 
     for blob in pending_entries.values() {
         if missing_digests.contains(&blob.digest) || filtered_blob_paths.contains_key(&blob.digest)
@@ -1405,9 +1382,6 @@ pub(crate) fn filter_pending_entries_with_local_blobs(
         match std::fs::metadata(path) {
             Ok(metadata) if metadata.is_file() => {
                 filtered_blob_paths.insert(blob.digest.clone(), path.clone());
-                if let Some(sequence) = pending_blob_sequences.get(&blob.digest) {
-                    filtered_blob_sequences.insert(blob.digest.clone(), *sequence);
-                }
             }
             Ok(_) => {
                 missing_digests.insert(blob.digest.clone());
@@ -1431,7 +1405,6 @@ pub(crate) fn filter_pending_entries_with_local_blobs(
     (
         filtered_entries,
         filtered_blob_paths,
-        filtered_blob_sequences,
         missing_digests.into_iter().collect(),
         missing_entry_count,
     )

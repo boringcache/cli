@@ -41,17 +41,16 @@ pub(crate) async fn preload_download_urls_for_blobs(
     );
     let started_at = std::time::Instant::now();
 
-    match state
-        .api_client
-        .blob_download_urls_verified(&state.workspace, cache_entry_id, blobs)
-        .await
+    match crate::serve::blob_download_urls::resolve_verified_blob_download_urls(
+        state,
+        cache_entry_id,
+        blobs,
+        KV_BLOB_URL_RESOLVE_TIMEOUT,
+    )
+    .await
     {
         Ok(response) => {
-            let urls: HashMap<String, String> = response
-                .download_urls
-                .into_iter()
-                .map(|u| (u.digest, u.url))
-                .collect();
+            let urls = response.urls;
             let url_count = urls.len();
             let missing_count = response.missing.len();
             let mut published = state.kv_published_index.write().await;
@@ -339,7 +338,7 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
                     cache_entry_id.clone(),
                 );
             }
-            clear_root_tag_misses(state);
+            clear_tag_misses(state, &state.registry_root_tag);
             let unique_blobs = {
                 let published = state.kv_published_index.read().await;
                 published.unique_blobs()

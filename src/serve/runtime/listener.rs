@@ -21,15 +21,13 @@ use crate::tag_utils::TagResolver;
 
 const BLOB_DOWNLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY";
 const CACHE_PREFETCH_CONCURRENCY_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_CONCURRENCY";
-const BLOB_READ_CACHE_MAX_BYTES_ENV: &str = "BORINGCACHE_BLOB_READ_CACHE_MAX_BYTES";
 const TCP_LISTEN_BACKLOG_ENV: &str = "BORINGCACHE_TCP_LISTEN_BACKLOG";
 const DEFAULT_TCP_LISTEN_BACKLOG: u32 = 1024;
 const HTTP_VERSION_ENV: &str = "BORINGCACHE_HTTP_VERSION";
-const DISK_LIMITED_BLOB_READ_CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const BLOB_READ_CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const PUBLIC_PROXY_TUNING_ENVS: &[&str] = &[BLOB_DOWNLOAD_CONCURRENCY_ENV];
 const INTERNAL_PROXY_TUNING_ENVS: &[&str] = &[
     CACHE_PREFETCH_CONCURRENCY_ENV,
-    BLOB_READ_CACHE_MAX_BYTES_ENV,
     "BORINGCACHE_CACHE_CHECK_BATCH_MAX",
     "BORINGCACHE_CACHE_CHECK_BATCH_CONCURRENCY",
     "BORINGCACHE_CACHE_URL_BATCH_MAX",
@@ -53,7 +51,7 @@ pub(super) async fn build_server_runtime(
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<(AppState, TcpListener, mpsc::Receiver<KvReplicationWork>)> {
-    let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
+    let blob_read_cache = Arc::new(BlobReadCache::new(BLOB_READ_CACHE_MAX_BYTES)?);
     let blob_read_metrics = Arc::new(BlobReadMetrics::new());
     let prefetch_metrics = Arc::new(state::PrefetchMetrics::new());
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
@@ -275,13 +273,6 @@ fn new_runtime_temp_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn blob_read_cache_max_bytes() -> u64 {
-    if let Some(configured) = parse_positive_u64_env(BLOB_READ_CACHE_MAX_BYTES_ENV) {
-        return configured;
-    }
-    DISK_LIMITED_BLOB_READ_CACHE_MAX_BYTES
-}
-
 fn auto_transfer_concurrency() -> usize {
     let resources = crate::platform::resources::SystemResources::detect();
     let is_ci = std::env::var("CI").is_ok();
@@ -307,18 +298,6 @@ fn parse_positive_u32_env(name: &str) -> Option<u32> {
         return None;
     }
     match trimmed.parse::<u32>() {
-        Ok(value) if value > 0 => Some(value),
-        _ => None,
-    }
-}
-
-fn parse_positive_u64_env(name: &str) -> Option<u64> {
-    let raw = std::env::var(name).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    match trimmed.parse::<u64>() {
         Ok(value) if value > 0 => Some(value),
         _ => None,
     }
@@ -447,19 +426,8 @@ mod tests {
     }
 
     #[test]
-    fn blob_read_cache_max_bytes_honors_env_override() {
-        let _guard = test_env::lock();
-        test_env::set_var(BLOB_READ_CACHE_MAX_BYTES_ENV, "3145728");
-        assert_eq!(blob_read_cache_max_bytes(), 3_145_728);
-        test_env::remove_var(BLOB_READ_CACHE_MAX_BYTES_ENV);
-    }
-
-    #[test]
-    fn blob_read_cache_max_bytes_uses_generic_default_without_override() {
-        let _guard = test_env::lock();
-        test_env::remove_var(BLOB_READ_CACHE_MAX_BYTES_ENV);
-        let max = blob_read_cache_max_bytes();
-        assert_eq!(max, DISK_LIMITED_BLOB_READ_CACHE_MAX_BYTES);
+    fn blob_read_cache_max_bytes_is_fixed() {
+        assert_eq!(BLOB_READ_CACHE_MAX_BYTES, 64 * 1024 * 1024 * 1024);
     }
 
     #[test]

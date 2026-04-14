@@ -128,14 +128,12 @@ pub(crate) struct KvPendingPublishHandoff {
     root_pending: Option<PendingMetadata>,
     pending_alias_tags: bool,
     pending_blob_paths: HashMap<String, PathBuf>,
-    pending_blob_sequences: HashMap<String, u64>,
 }
 
 pub(crate) struct PendingPublishHandoffPersist<'a> {
     root_pending: Option<&'a PendingMetadata>,
     pending_alias_tags: bool,
     pending_blob_paths: Option<&'a HashMap<String, PathBuf>>,
-    pending_blob_sequences: Option<&'a HashMap<String, u64>>,
 }
 
 fn kv_trace_enabled() -> bool {
@@ -1248,7 +1246,6 @@ mod tests {
                 root_pending: Some(&pending),
                 pending_alias_tags: false,
                 pending_blob_paths: None,
-                pending_blob_sequences: None,
             },
         )
         .await;
@@ -1296,7 +1293,6 @@ mod tests {
                 root_pending: Some(&pending),
                 pending_alias_tags: false,
                 pending_blob_paths: None,
-                pending_blob_sequences: None,
             },
         )
         .await;
@@ -1348,7 +1344,6 @@ mod tests {
             .await
             .expect("write pending blob");
         let pending_blob_paths = HashMap::from([(digest.clone(), blob_path.clone())]);
-        let pending_blob_sequences = HashMap::from([(digest.clone(), 7u64)]);
 
         persist_kv_pending_publish_handoff(
             &state,
@@ -1359,7 +1354,6 @@ mod tests {
                 root_pending: None,
                 pending_alias_tags: false,
                 pending_blob_paths: Some(&pending_blob_paths),
-                pending_blob_sequences: Some(&pending_blob_sequences),
             },
         )
         .await;
@@ -1522,9 +1516,11 @@ mod tests {
     }
 
     #[test]
-    fn kv_root_tags_include_legacy_human_root_when_distinct() {
-        let tags =
-            kv_root_tags_from_values("bc_registry_root_v2_abc", &[String::from("grpc-bazel")]);
+    fn kv_visibility_tags_include_legacy_human_root_when_distinct() {
+        let tags = kv_visibility_tags_from_values(
+            "bc_registry_root_v2_abc",
+            &[String::from("grpc-bazel")],
+        );
         assert_eq!(
             tags,
             vec![
@@ -1535,20 +1531,20 @@ mod tests {
     }
 
     #[test]
-    fn kv_root_tags_skip_empty_or_duplicate_legacy_root() {
-        let duplicate = kv_root_tags_from_values(
+    fn kv_visibility_tags_skip_empty_or_duplicate_legacy_root() {
+        let duplicate = kv_visibility_tags_from_values(
             "grpc-bazel",
             &[String::from("grpc-bazel"), String::from(" ")],
         );
         assert_eq!(duplicate, vec!["grpc-bazel".to_string()]);
 
-        let empty = kv_root_tags_from_values("grpc-bazel", &[String::from(" ")]);
+        let empty = kv_visibility_tags_from_values("grpc-bazel", &[String::from(" ")]);
         assert_eq!(empty, vec!["grpc-bazel".to_string()]);
     }
 
     #[test]
-    fn kv_root_tags_include_all_distinct_human_aliases() {
-        let tags = kv_root_tags_from_values(
+    fn kv_visibility_tags_include_all_distinct_human_aliases() {
+        let tags = kv_visibility_tags_from_values(
             "bc_registry_root_v2_abc",
             &[
                 String::from("alias-a"),
