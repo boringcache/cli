@@ -207,6 +207,9 @@ src/
 | `src/commands/save.rs` | `src/commands/save/mod.rs` | done |
 | `src/commands/restore.rs` | `src/commands/restore/mod.rs` | done |
 | `src/commands/mount.rs` | `src/commands/mount/mod.rs` | done |
+| `src/commands/save/mod.rs` | `src/commands/save/{archive,cas,file,oci}.rs` | done |
+| `src/commands/restore/mod.rs` | `src/commands/restore/{archive,file,oci}.rs` | planned |
+| `src/commands/mount/mod.rs` | `src/commands/mount/{archive,cas,file,oci}.rs` | planned |
 | `src/commands/cas_publish.rs` | `src/cache/cas_publish.rs` | done |
 | `src/commands/cas_restore.rs` | `src/cache/cas_restore.rs` | done |
 | `src/commands/file_materialize.rs` | `src/cache/file_materialize.rs` | done |
@@ -231,7 +234,7 @@ src/
 
 ## Recommended Refactor Order
 
-1. Split `save`, `restore`, and `mount` by layout flow.
+1. Split `restore` and `mount` by layout flow.
 2. Split `api/client` by domain method groups.
 3. Split `serve/cache_registry/kv` and `serve/state`.
 4. Re-group `commands/` into `cache`, `proxy`, `workspace`, `auth`, and `config` after the current in-flight command edits settle.
