@@ -120,26 +120,7 @@ trap cleanup EXIT
   --no-git \
   --fail-on-cache-error >"${PROXY_LOG}" 2>&1 &
 SERVE_PID=$!
-
-READY=0
-for _ in $(seq 1 80); do
-  if curl -fsS --max-time 1 "http://${HOST}:${PORT}/v2/" >/dev/null 2>&1; then
-    READY=1
-    break
-  fi
-  if ! kill -0 "${SERVE_PID}" >/dev/null 2>&1; then
-    echo "cache-registry exited before readiness"
-    cat "${PROXY_LOG}"
-    exit 1
-  fi
-  sleep 0.25
-done
-
-if [[ "${READY}" != "1" ]]; then
-  echo "timed out waiting for cache-registry readiness"
-  cat "${PROXY_LOG}"
-  exit 1
-fi
+PROXY_HOST="${HOST}" wait_for_proxy "${PORT}" "${SERVE_PID}" "${PROXY_LOG}"
 
 echo "==> Nx real project remote-cache checks"
 NX_BIN_REAL="$(realpath_py "$(command -v nx)")"

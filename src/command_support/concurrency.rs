@@ -4,22 +4,25 @@ const SAVE_MAX_CONCURRENCY_ENV: &str = "BORINGCACHE_SAVE_MAX_CONCURRENCY";
 const RESTORE_MAX_CONCURRENCY_ENV: &str = "BORINGCACHE_RESTORE_MAX_CONCURRENCY";
 
 pub fn get_optimal_concurrency(operation_count: usize, operation_type: &str) -> usize {
-    let cpu_count = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let resources = crate::platform::resources::SystemResources::detect();
+    let is_ci = std::env::var("CI").is_ok();
 
     let base_concurrency = match operation_type {
-        "save" => std::cmp::max(4, cpu_count),
-        "restore" => std::cmp::max(4, cpu_count),
+        "save" => {
+            let cpu_count = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
+            std::cmp::max(4, cpu_count)
+        }
+        "restore" => resources.recommended_download_concurrency(is_ci),
         _ => 4,
     };
 
-    let platform_adjusted = if cfg!(target_os = "macos") {
-        base_concurrency + 2
-    } else if cfg!(target_os = "windows") {
-        std::cmp::max(2, base_concurrency - 1)
-    } else {
-        base_concurrency
+    let platform_adjusted = match operation_type {
+        "restore" => base_concurrency,
+        _ if cfg!(target_os = "macos") => base_concurrency + 2,
+        _ if cfg!(target_os = "windows") => std::cmp::max(2, base_concurrency - 1),
+        _ => base_concurrency,
     };
 
     let hard_cap = match operation_type {

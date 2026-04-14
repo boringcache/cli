@@ -17,6 +17,7 @@ LOG_DIR="${LOG_DIR:-${TMP_ROOT}/logs-${RUN_ID}}"
 TMP_BINARY="${BINARY_DIR}/boringcache-${RUN_ID}"
 PROXY_LOG="${LOG_DIR}/proxy.log"
 PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}"
+PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
 SETTLE_SECS="${SETTLE_SECS:-5}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
@@ -245,8 +246,25 @@ start_proxy() {
   sleep 2
 }
 
+proxy_status_probe() {
+  local response status phase publish_state
+  response="$(
+    curl -sS -D - -o /dev/null \
+      --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECS" \
+      --max-time "$HTTP_REQUEST_TIMEOUT_SECS" \
+      "${PROXY_URL}${PROXY_STATUS_PATH}" 2>/dev/null || true
+  )"
+  status="$(printf '%s\n' "$response" | awk 'tolower($1) ~ /^http\// { status = $2 } END { print status }')"
+  phase="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-proxy-phase" { gsub("\\r", "", $2); phase = tolower($2) } END { print phase }')"
+  publish_state="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-publish-state" { gsub("\\r", "", $2); publish = tolower($2) } END { print publish }')"
+  if [[ -z "$status" ]]; then
+    status="000"
+  fi
+  printf '%s %s %s' "$status" "${phase:-unknown}" "${publish_state:-unknown}"
+}
+
 ensure_proxy_ready() {
-  local attempts start_ts next_warn now waited latest_line
+  local attempts start_ts next_warn now waited probe status phase publish_state
   attempts="$((PROXY_READY_TIMEOUT_SECS / PROXY_READY_POLL_SECS))"
   if (( attempts < 1 )); then
     attempts=1
@@ -254,18 +272,15 @@ ensure_proxy_ready() {
   start_ts="$(date +%s)"
   next_warn=$((start_ts + PROXY_READY_WARN_SECS))
   for _ in $(seq 1 "$attempts"); do
-    if curl -fsS --max-time 2 "${PROXY_URL}/v2/" >/dev/null; then
+    probe="$(proxy_status_probe)"
+    read -r status phase publish_state <<<"$probe"
+    if [[ "$status" == "200" && "$phase" == "ready" ]]; then
       return 0
     fi
     now="$(date +%s)"
     if (( now >= next_warn )); then
       waited="$((now - start_ts))"
-      latest_line="$(awk 'NF { line=$0 } END { print line }' "$PROXY_LOG" 2>/dev/null || true)"
-      if [[ -n "$latest_line" ]]; then
-        echo "WARNING: proxy readiness still waiting after ${waited}s | ${latest_line}" | tee -a "$PROXY_LOG"
-      else
-        echo "WARNING: proxy readiness still waiting after ${waited}s" | tee -a "$PROXY_LOG"
-      fi
+      echo "WARNING: proxy readiness still waiting after ${waited}s (phase=${phase:-unknown} publish=${publish_state:-unknown})" | tee -a "$PROXY_LOG"
       next_warn=$((now + PROXY_READY_WARN_SECS))
     fi
     if [[ -n "${PROXY_PID:-}" ]] && ! kill -0 "$PROXY_PID" >/dev/null 2>&1; then

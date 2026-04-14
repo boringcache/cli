@@ -7,6 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::task::JoinSet;
 
 #[derive(Debug)]
 pub(crate) enum CasPointer {
@@ -124,65 +125,46 @@ pub(crate) async fn download_blob_targets(
         .cache_entry_id
         .as_deref()
         .ok_or_else(|| anyhow!("Missing cache_entry_id for CAS restore"))?;
-    let blobs: Vec<BlobDescriptor> = download_targets
-        .iter()
-        .map(|target| BlobDescriptor {
-            digest: target.digest.clone(),
-            size_bytes: target.size_bytes,
-        })
-        .collect();
-    let download_plan = api_client
-        .blob_download_urls_verified(workspace, cache_entry_id, &blobs)
-        .await
-        .context("Failed to request CAS blob download URLs")?;
-
-    if !download_plan.missing.is_empty() {
-        anyhow::bail!(
-            "Server reported missing blobs for CAS restore: {}",
-            download_plan.missing.join(", ")
-        );
-    }
-
-    let download_items = build_download_items(download_targets, &download_plan)?;
     let max_concurrent =
-        crate::command_support::get_optimal_concurrency(download_items.len(), "restore");
+        crate::command_support::get_optimal_concurrency(download_targets.len(), "restore");
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
     let transfer_client = api_client.transfer_client().clone();
-    let mut tasks = Vec::with_capacity(download_items.len());
+    let mut outcome = BlobDownloadOutcome::default();
+    let mut tasks = JoinSet::new();
+    let batch_max = crate::api::client::blob_url_batch_max();
 
-    for download_target in download_items {
-        let semaphore = semaphore.clone();
-        let progress = progress.clone();
-        let transfer_client = transfer_client.clone();
-        let task = tokio::spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .map_err(|error| anyhow!("Restore blob download semaphore closed: {error}"))?;
-            let result = crate::cas_transport::download_blob_file(
-                &transfer_client,
-                &download_target.url,
-                &download_target.path,
-                Some(&progress),
-                download_target.size_bytes,
+    for batch in download_targets.chunks(batch_max) {
+        let blobs = batch_blob_descriptors(batch);
+        let download_plan = api_client
+            .blob_download_urls_verified(workspace, cache_entry_id, &blobs)
+            .await
+            .context("Failed to request CAS blob download URLs")?;
+
+        if !download_plan.missing.is_empty() {
+            anyhow::bail!(
+                "Server reported missing blobs for CAS restore: {}",
+                download_plan.missing.join(", ")
+            );
+        }
+
+        let download_items = build_download_items(batch, &download_plan)?;
+        for download_item in download_items {
+            spawn_download_task(
+                &mut tasks,
+                download_item,
+                semaphore.clone(),
+                progress.clone(),
+                transfer_client.clone(),
                 writer_capacity,
-                Some(&download_target.digest),
-            )
-            .await;
-            drop(_permit);
-            result
-        });
-        tasks.push(task);
+            );
+            if tasks.len() >= max_concurrent {
+                drain_download_task(&mut tasks, &mut outcome).await?;
+            }
+        }
     }
 
-    let mut outcome = BlobDownloadOutcome::default();
-    for task in tasks {
-        let (bytes_downloaded, storage_metrics) =
-            task.await.context("Blob download task panicked")??;
-        outcome.bytes_downloaded += bytes_downloaded;
-        if outcome.storage_metrics.region.is_none() {
-            outcome.storage_metrics = storage_metrics;
-        }
+    while !tasks.is_empty() {
+        drain_download_task(&mut tasks, &mut outcome).await?;
     }
 
     Ok(outcome)
@@ -194,6 +176,60 @@ struct BlobDownloadItem {
     url: String,
     path: PathBuf,
     size_bytes: u64,
+}
+
+fn batch_blob_descriptors(download_targets: &[BlobDownloadTarget]) -> Vec<BlobDescriptor> {
+    download_targets
+        .iter()
+        .map(|target| BlobDescriptor {
+            digest: target.digest.clone(),
+            size_bytes: target.size_bytes,
+        })
+        .collect()
+}
+
+fn spawn_download_task(
+    tasks: &mut JoinSet<Result<(u64, StorageMetrics)>>,
+    download_target: BlobDownloadItem,
+    semaphore: Arc<tokio::sync::Semaphore>,
+    progress: TransferProgress,
+    transfer_client: reqwest::Client,
+    writer_capacity: usize,
+) {
+    tasks.spawn(async move {
+        let _permit = semaphore
+            .acquire_owned()
+            .await
+            .map_err(|error| anyhow!("Restore blob download semaphore closed: {error}"))?;
+        let result = crate::cas_transport::download_blob_file(
+            &transfer_client,
+            &download_target.url,
+            &download_target.path,
+            Some(&progress),
+            download_target.size_bytes,
+            writer_capacity,
+            Some(&download_target.digest),
+        )
+        .await;
+        drop(_permit);
+        result
+    });
+}
+
+async fn drain_download_task(
+    tasks: &mut JoinSet<Result<(u64, StorageMetrics)>>,
+    outcome: &mut BlobDownloadOutcome,
+) -> Result<()> {
+    let Some(task_result) = tasks.join_next().await else {
+        return Ok(());
+    };
+    let (bytes_downloaded, storage_metrics) =
+        task_result.context("Blob download task panicked")??;
+    outcome.bytes_downloaded += bytes_downloaded;
+    if outcome.storage_metrics.region.is_none() {
+        outcome.storage_metrics = storage_metrics;
+    }
+    Ok(())
 }
 
 fn build_download_items(
@@ -273,6 +309,30 @@ mod tests {
                 .to_string()
                 .contains("Server did not provide download URL")
         );
+    }
+
+    #[test]
+    fn batch_blob_descriptors_preserve_digest_and_size() {
+        let targets = vec![
+            BlobDownloadTarget {
+                digest: "sha256:abc".to_string(),
+                path: PathBuf::from("/tmp/blob-a"),
+                size_bytes: 42,
+            },
+            BlobDownloadTarget {
+                digest: "sha256:def".to_string(),
+                path: PathBuf::from("/tmp/blob-b"),
+                size_bytes: 84,
+            },
+        ];
+
+        let blobs = batch_blob_descriptors(&targets);
+
+        assert_eq!(blobs.len(), 2);
+        assert_eq!(blobs[0].digest, "sha256:abc");
+        assert_eq!(blobs[0].size_bytes, 42);
+        assert_eq!(blobs[1].digest, "sha256:def");
+        assert_eq!(blobs[1].size_bytes, 84);
     }
 
     #[test]

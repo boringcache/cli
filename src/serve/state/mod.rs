@@ -29,23 +29,6 @@ pub fn diagnostics_enabled() -> bool {
     log::log_enabled!(log::Level::Debug)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheRegistryTuningProfile {
-    Generic,
-    Bazel,
-    Sccache,
-}
-
-impl CacheRegistryTuningProfile {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Generic => "generic",
-            Self::Bazel => "bazel",
-            Self::Sccache => "sccache",
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct AppState {
     pub api_client: ApiClient,
@@ -83,7 +66,6 @@ pub struct AppState {
     pub blob_read_cache: Arc<BlobReadCache>,
     pub blob_read_metrics: Arc<BlobReadMetrics>,
     pub prefetch_metrics: Arc<PrefetchMetrics>,
-    pub tuning_profile: CacheRegistryTuningProfile,
     pub blob_download_max_concurrency: usize,
     pub blob_download_semaphore: Arc<tokio::sync::Semaphore>,
     pub blob_prefetch_semaphore: Arc<tokio::sync::Semaphore>,
@@ -364,6 +346,53 @@ mod tests {
         assert!(index.cache_entry_id().is_none());
         assert!(!index.is_complete());
         assert!(index.last_refresh_at().is_none());
+    }
+
+    #[test]
+    fn kv_published_index_restores_download_urls_with_remaining_ttl() {
+        let mut entries = HashMap::new();
+        let digest = format!("sha256:{}", "a".repeat(64));
+        entries.insert(
+            "ac/key".to_string(),
+            BlobDescriptor {
+                digest: digest.clone(),
+                size_bytes: 1,
+            },
+        );
+
+        let mut index = KvPublishedIndex::default();
+        index.update(
+            entries.clone(),
+            entries.values().cloned().collect(),
+            "cache-entry".to_string(),
+        );
+        index.set_download_url(digest.clone(), "https://example.com/blob".to_string());
+        let snapshot = index.snapshot_download_urls();
+        assert_eq!(
+            snapshot.get(&digest).map(String::as_str),
+            Some("https://example.com/blob")
+        );
+
+        let mut restored = KvPublishedIndex::default();
+        restored.update(
+            entries.clone(),
+            entries.values().cloned().collect(),
+            "cache-entry".to_string(),
+        );
+        restored.restore_download_urls(snapshot.clone(), std::time::Duration::from_secs(30));
+        assert_eq!(
+            restored.download_url(&digest),
+            Some("https://example.com/blob")
+        );
+
+        let mut expired = KvPublishedIndex::default();
+        expired.update(
+            entries.clone(),
+            entries.values().cloned().collect(),
+            "cache-entry".to_string(),
+        );
+        expired.restore_download_urls(snapshot, DOWNLOAD_URL_TTL);
+        assert!(expired.download_url(&digest).is_none());
     }
 
     #[tokio::test]

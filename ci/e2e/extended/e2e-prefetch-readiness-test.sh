@@ -14,14 +14,13 @@ TMP_ROOT="${TMPDIR:-/tmp}/boringcache-prefetch-e2e"
 LOG_DIR="${LOG_DIR:-${TMP_ROOT}/logs}"
 PROXY_LOG="${LOG_DIR}/proxy.log"
 PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}"
+PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-300}"
 PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-210}"
 PROXY_SHUTDOWN_WAIT_MIN_SECS=210
 HTTP_CONNECT_TIMEOUT_SECS="${HTTP_CONNECT_TIMEOUT_SECS:-5}"
 HTTP_REQUEST_TIMEOUT_SECS="${HTTP_REQUEST_TIMEOUT_SECS:-30}"
-SETTLE_SECS="${SETTLE_SECS:-5}"
 SEED_FLUSH_TIMEOUT_SECS="${SEED_FLUSH_TIMEOUT_SECS:-180}"
-SEED_FLUSH_STALL_TIMEOUT_SECS="${SEED_FLUSH_STALL_TIMEOUT_SECS:-60}"
 
 BLOB_COUNT="${BLOB_COUNT:-20000}"
 BLOB_SIZE_BYTES="${BLOB_SIZE_BYTES:-4096}"
@@ -55,37 +54,36 @@ export_resolved_cli_tokens admin
 mkdir -p "$LOG_DIR"
 : >"$PROXY_LOG"
 
-http_prefetch_probe() {
-  local path="$1"
+http_proxy_status_probe() {
   local response
   response="$(
     curl -sS -D - -o /dev/null \
       --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECS" \
       --max-time "$HTTP_REQUEST_TIMEOUT_SECS" \
-      "${PROXY_URL}${path}" 2>/dev/null || true
+      "${PROXY_URL}${PROXY_STATUS_PATH}" 2>/dev/null || true
   )"
 
-  local status state
+  local status phase publish_state
   status="$(printf '%s\n' "$response" | awk 'tolower($1) ~ /^http\// { status = $2 } END { print status }')"
-  state="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-prefetch-state" { gsub("\\r", "", $2); state = tolower($2) } END { print state }')"
+  phase="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-proxy-phase" { gsub("\\r", "", $2); phase = tolower($2) } END { print phase }')"
+  publish_state="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-publish-state" { gsub("\\r", "", $2); publish = tolower($2) } END { print publish }')"
   if [[ -z "$status" ]]; then
     status="000"
   fi
-  printf '%s %s' "$status" "$state"
+  printf '%s %s %s' "$status" "$phase" "$publish_state"
 }
 
 wait_for_proxy_ready() {
   local waited=0
   while (( waited < PROXY_READY_TIMEOUT_SECS )); do
-    local probe status state
-    probe="$(http_prefetch_probe "/v2/")"
-    status="${probe%% *}"
-    state="${probe#* }"
-    if [[ "$status" == "200" && "$state" == "ready" ]]; then
+    local probe status phase publish_state
+    probe="$(http_proxy_status_probe)"
+    read -r status phase publish_state <<<"$probe"
+    if [[ "$status" == "200" && "$phase" == "ready" ]]; then
       PREFETCH_READY_POLLS=$((PREFETCH_READY_POLLS + 1))
       return 0
     fi
-    if [[ "$status" == "200" && "$state" == "warming" ]]; then
+    if [[ "$status" == "200" && "$phase" == "warming" ]]; then
       PREFETCH_WARMING_POLLS=$((PREFETCH_WARMING_POLLS + 1))
     fi
     if [[ -n "${PROXY_PID:-}" ]] && ! kill -0 "$PROXY_PID" >/dev/null 2>&1; then
@@ -96,7 +94,7 @@ wait_for_proxy_ready() {
     sleep 1
     waited=$((waited + 1))
     if (( waited % 10 == 0 )); then
-      echo "  waiting for proxy readiness... (${waited}s)"
+      echo "  waiting for proxy readiness... (phase=${phase:-unknown}, publish=${publish_state:-unknown}, ${waited}s)"
     fi
   done
 
@@ -105,87 +103,32 @@ wait_for_proxy_ready() {
   exit 1
 }
 
-flushed_entry_count() {
-  awk '
-    /KV batch: flushed [0-9]+ new entries/ {
-      sum += $4
-    }
-    END {
-      print sum + 0
-    }
-  ' "$PROXY_LOG"
-}
-
-latest_blob_upload_progress() {
-  awk '
-    /KV blob upload progress:/ {
-      uploaded = ""
-      total = ""
-      for (i = 1; i <= NF; i++) {
-        if ($i ~ /^uploaded=/) {
-          value = $i
-          sub(/^uploaded=/, "", value)
-          split(value, parts, "/")
-          uploaded = parts[1]
-          total = parts[2]
-        }
-      }
-    }
-    END {
-      if (uploaded != "" && total != "") {
-        printf "%s/%s", uploaded, total
-      }
-    }
-  ' "$PROXY_LOG"
-}
-
-wait_for_seed_flush() {
-  local target="$1"
+wait_for_publish_settled() {
   local waited=0
-  local last_flushed=0
-  local stalled_for=0
 
   while (( waited < SEED_FLUSH_TIMEOUT_SECS )); do
-    local flushed
-    flushed="$(flushed_entry_count)"
-    if [[ "$flushed" =~ ^[0-9]+$ ]] && (( flushed >= target )); then
-      echo "  published flush progress reached ${flushed}/${target} entries"
+    local probe status phase publish_state
+    probe="$(http_proxy_status_probe)"
+    read -r status phase publish_state <<<"$probe"
+    if [[ "$status" == "200" && "$publish_state" == "settled" ]]; then
+      echo "  proxy reports publish settled"
       return 0
     fi
 
     if [[ -n "${PROXY_PID:-}" ]] && ! kill -0 "$PROXY_PID" >/dev/null 2>&1; then
-      echo "ERROR: proxy exited before seed flush completed"
+      echo "ERROR: proxy exited before publish settled"
       tail -n 200 "$PROXY_LOG" || true
       exit 1
-    fi
-
-    if [[ "$flushed" =~ ^[0-9]+$ ]] && (( flushed > last_flushed )); then
-      last_flushed="$flushed"
-      stalled_for=0
-    else
-      stalled_for=$((stalled_for + 2))
-      if (( stalled_for >= SEED_FLUSH_STALL_TIMEOUT_SECS )) && \
-        grep -Eq 'KV batch flush failed:|tag conflict|Cache upload in progress' "$PROXY_LOG"; then
-        echo "ERROR: seed flush stalled at ${flushed:-0}/${target} entries for ${stalled_for}s after backend flush errors/conflicts"
-        tail -n 200 "$PROXY_LOG" || true
-        exit 1
-      fi
     fi
 
     sleep 2
     waited=$((waited + 2))
     if (( waited % 10 == 0 )); then
-      local upload_progress=""
-      upload_progress="$(latest_blob_upload_progress)"
-      if [[ -n "$upload_progress" ]]; then
-        echo "  waiting for seed flush progress... (${flushed:-0}/${target} entries published, uploads ${upload_progress}, ${waited}s)"
-      else
-        echo "  waiting for seed flush progress... (${flushed:-0}/${target} entries, ${waited}s)"
-      fi
+      echo "  waiting for publish settled... (phase=${phase:-unknown}, publish=${publish_state:-unknown}, ${waited}s)"
     fi
   done
 
-  echo "ERROR: timed out waiting for seed flush progress (${SEED_FLUSH_TIMEOUT_SECS}s)"
+  echo "ERROR: timed out waiting for publish settled (${SEED_FLUSH_TIMEOUT_SECS}s)"
   tail -n 200 "$PROXY_LOG" || true
   exit 1
 }
@@ -292,10 +235,8 @@ if (( SEED_COUNT < BLOB_COUNT )); then
   exit 1
 fi
 
-echo "  waiting for writes to settle (${SETTLE_SECS}s)..."
-sleep "$SETTLE_SECS"
-echo "  waiting for published index flush..."
-wait_for_seed_flush "$BLOB_COUNT"
+echo "  waiting for proxy publish-settled state..."
+wait_for_publish_settled
 
 echo "  flushing proxy..."
 stop_proxy
@@ -369,7 +310,7 @@ if (( VERIFY_FAILURES > BUDGET_VERIFY_FAILURES_MAX )); then
 fi
 
 echo ""
-echo "=== Phase 4: Verify /v2/ reported warming before ready ==="
+echo "=== Phase 4: Verify proxy status reported warming before ready ==="
 echo "  warming polls observed: ${PREFETCH_WARMING_POLLS}"
 echo "  ready polls observed:   ${PREFETCH_READY_POLLS}"
 

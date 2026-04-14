@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
@@ -103,8 +103,7 @@ pub(crate) async fn download_blob_file(
     .await
 }
 
-#[cfg(test)]
-async fn verify_blob_digest(file_path: &Path, expected_digest: &str) -> Result<()> {
+async fn verify_downloaded_blob(file_path: &Path, expected_digest: &str) -> Result<()> {
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncReadExt;
 
@@ -140,6 +139,11 @@ async fn verify_blob_digest(file_path: &Path, expected_digest: &str) -> Result<(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+async fn verify_blob_digest(file_path: &Path, expected_digest: &str) -> Result<()> {
+    verify_downloaded_blob(file_path, expected_digest).await
 }
 
 async fn download_sequential(
@@ -242,7 +246,7 @@ async fn download_parallel(
             progress,
             total_size,
             download_buffer_size(),
-            None,
+            expected_digest,
         )
         .await;
     }
@@ -277,9 +281,11 @@ async fn download_parallel(
 
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let (digest_tx, digest_task) = if expected_digest.is_some() {
-        let (tx, rx) = mpsc::channel::<(u64, axum::body::Bytes)>(concurrency * 16);
-        let task = tokio::spawn(hash_parallel_download_stream(rx, total_size));
-        (Some(tx), Some(task))
+        let (tx, rx) = mpsc::channel::<(u64, axum::body::Bytes)>(concurrency * 4);
+        (
+            Some(tx),
+            Some(tokio::spawn(discard_parallel_download_stream(rx))),
+        )
     } else {
         (None, None)
     };
@@ -355,58 +361,24 @@ async fn download_parallel(
     }
 
     if let (Some(task), Some(expected_digest)) = (digest_task, expected_digest) {
-        let actual = task.await.context("Parallel digest task panicked")??;
-        let expected = expected_digest
-            .strip_prefix("sha256:")
-            .unwrap_or(expected_digest);
-        if actual != expected {
-            anyhow::bail!(
-                "Blob integrity check failed for {}: expected sha256:{}, got sha256:{}",
-                file_path.display(),
-                expected,
-                actual,
-            );
-        }
+        task.await.context("Parallel digest task panicked")??;
+        verify_downloaded_blob(file_path, expected_digest).await?;
     }
 
     Ok((total_downloaded, first_storage_metrics.unwrap_or_default()))
 }
 
-async fn hash_parallel_download_stream(
+async fn discard_parallel_download_stream(
     mut receiver: mpsc::Receiver<(u64, axum::body::Bytes)>,
-    expected_size: u64,
-) -> Result<String> {
-    use sha2::{Digest, Sha256};
-
-    let mut hasher = Sha256::new();
-    let mut next_offset = 0u64;
-    let mut pending: BTreeMap<u64, axum::body::Bytes> = BTreeMap::new();
-
+) -> Result<()> {
     loop {
         let next_chunk = receiver.recv().await;
-        let Some((offset, chunk)) = next_chunk else {
+        let Some((_offset, _chunk)) = next_chunk else {
             break;
         };
-        pending.insert(offset, chunk);
-        loop {
-            let next_pending = pending.remove(&next_offset);
-            let Some(chunk) = next_pending else {
-                break;
-            };
-            hasher.update(&chunk);
-            next_offset = next_offset.saturating_add(chunk.len() as u64);
-        }
     }
 
-    if next_offset != expected_size {
-        anyhow::bail!(
-            "Parallel digest stream incomplete: expected {}, got {}",
-            expected_size,
-            next_offset
-        );
-    }
-
-    Ok(hex::encode(hasher.finalize()))
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -499,29 +471,9 @@ pub(crate) async fn download_range(
 }
 
 pub(crate) fn calculate_download_concurrency() -> usize {
-    use crate::platform::resources::{DiskType, MemoryStrategy, SystemResources};
-
-    let resources = SystemResources::detect();
+    let resources = crate::platform::resources::SystemResources::detect();
     let is_ci = std::env::var("CI").is_ok();
-
-    let base: usize = match resources.memory_strategy {
-        MemoryStrategy::Balanced => 3,
-        MemoryStrategy::Aggressive => 6,
-        MemoryStrategy::UltraAggressive => 12,
-    };
-
-    let disk_adjusted: usize = match resources.disk_type {
-        DiskType::NvmeSsd => base + 2,
-        DiskType::SataSsd => base,
-    };
-
-    let cpu_scaled = disk_adjusted.min(resources.cpu_cores);
-
-    if is_ci {
-        cpu_scaled.clamp(2, 6)
-    } else {
-        cpu_scaled.clamp(4, 16)
-    }
+    resources.recommended_download_concurrency(is_ci)
 }
 
 pub(crate) fn download_buffer_size() -> usize {

@@ -1,9 +1,11 @@
+use axum::Json;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -22,6 +24,7 @@ use super::oci_tags::{
 use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
 use crate::cas_transport::upload_payload;
+use crate::serve::cache_registry;
 use crate::serve::state::{
     AppState, BlobLocatorEntry, BlobReadHandle, OCI_MANIFEST_CACHE_TTL, OciManifestCacheEntry,
     UploadSession, diagnostics_enabled, digest_tag,
@@ -38,6 +41,8 @@ const OCI_DEGRADED_HEADER: &str = "X-BoringCache-Cache-Degraded";
 const OCI_PREFETCH_STATE_HEADER: &str = "X-BoringCache-Prefetch-State";
 const OCI_PREFETCH_STATE_READY: &str = "ready";
 const OCI_PREFETCH_STATE_WARMING: &str = "warming";
+const PROXY_PHASE_HEADER: &str = "X-BoringCache-Proxy-Phase";
+const PROXY_PUBLISH_STATE_HEADER: &str = "X-BoringCache-Publish-State";
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_BLOB_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_POINTER_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -53,6 +58,88 @@ enum EmptyFinalizeReuse {
     Local,
     Remote,
     Missing,
+}
+
+#[derive(Serialize)]
+struct ProxyStatusResponse {
+    phase: &'static str,
+    publish_state: &'static str,
+    publish_settled: bool,
+    prefetch_complete: bool,
+    shutdown_requested: bool,
+    cache_entry_id: Option<String>,
+    tags_visible: bool,
+    pending_entries: usize,
+    pending_blobs: usize,
+    pending_spool_bytes: u64,
+    flush_in_progress: bool,
+    pending_publish_handoff: bool,
+}
+
+pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
+    let prefetch_complete = state
+        .prefetch_complete
+        .load(std::sync::atomic::Ordering::Acquire);
+    let shutdown_requested = state
+        .shutdown_requested
+        .load(std::sync::atomic::Ordering::Acquire);
+    let phase = if shutdown_requested {
+        "draining"
+    } else if prefetch_complete {
+        "ready"
+    } else {
+        "warming"
+    };
+
+    let (pending_entries, pending_blobs, pending_spool_bytes) = {
+        let pending = state.kv_pending.read().await;
+        (
+            pending.entry_count(),
+            pending.blob_count(),
+            pending.total_spool_bytes(),
+        )
+    };
+    let flush_in_progress = state.kv_flushing.read().await.is_some();
+    let pending_publish_handoff = cache_registry::has_kv_pending_publish_handoff(&state).await;
+    let cache_entry_id = {
+        let published = state.kv_published_index.read().await;
+        published.cache_entry_id().map(str::to_string)
+    };
+    let tags_visible = match cache_entry_id.as_deref() {
+        Some(cache_entry_id) => {
+            cache_registry::kv_publish_tags_visible(&state, cache_entry_id).await
+        }
+        None => true,
+    };
+    let publish_settled =
+        pending_entries == 0 && !flush_in_progress && !pending_publish_handoff && tags_visible;
+    let publish_state = if publish_settled {
+        "settled"
+    } else {
+        "pending"
+    };
+
+    (
+        [
+            ("Cache-Control", "no-store"),
+            (PROXY_PHASE_HEADER, phase),
+            (PROXY_PUBLISH_STATE_HEADER, publish_state),
+        ],
+        Json(ProxyStatusResponse {
+            phase,
+            publish_state,
+            publish_settled,
+            prefetch_complete,
+            shutdown_requested,
+            cache_entry_id,
+            tags_visible,
+            pending_entries,
+            pending_blobs,
+            pending_spool_bytes,
+            flush_in_progress,
+            pending_publish_handoff,
+        }),
+    )
 }
 
 pub async fn v2_base(State(state): State<AppState>) -> impl IntoResponse {
@@ -2308,8 +2395,8 @@ mod tests {
     use crate::git::GitContext;
     use crate::platform::Platform;
     use crate::serve::state::{
-        BlobLocatorCache, BlobReadCache, BlobReadMetrics, CacheRegistryTuningProfile,
-        KvPendingStore, KvPublishedIndex, UploadSessionStore, ref_tag_for_input,
+        BlobLocatorCache, BlobReadCache, BlobReadMetrics, KvPendingStore, KvPublishedIndex,
+        UploadSessionStore, ref_tag_for_input,
     };
     use crate::tag_utils::TagResolver;
     use axum::body::Bytes;
@@ -2372,7 +2459,6 @@ mod tests {
             ),
             blob_read_metrics: Arc::new(BlobReadMetrics::new()),
             prefetch_metrics: Arc::new(crate::serve::state::PrefetchMetrics::new()),
-            tuning_profile: CacheRegistryTuningProfile::Generic,
             blob_download_max_concurrency: 16,
             blob_download_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
             blob_prefetch_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),

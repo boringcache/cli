@@ -6,6 +6,7 @@ source "${SCRIPT_DIR}/e2e-remote-tag.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-}"
+PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_READY_POLL_SECS="${PROXY_READY_POLL_SECS:-1}"
 PROXY_READY_WARN_SECS="${PROXY_READY_WARN_SECS:-15}"
@@ -212,9 +213,38 @@ start_proxy() {
   _HELPER_PROXY_PID=$!
 }
 
-wait_for_proxy() {
+proxy_status_probe() {
   local port="${1:-${PROXY_PORT:-5050}}"
+  local response status phase publish_state
+  response="$(
+    curl -sS -D - -o /dev/null \
+      --max-time 2 \
+      "http://${PROXY_HOST}:${port}${PROXY_STATUS_PATH}" 2>/dev/null || true
+  )"
+  status="$(printf '%s\n' "$response" | awk 'tolower($1) ~ /^http\// { status = $2 } END { print status }')"
+  phase="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-proxy-phase" { gsub("\\r", "", $2); phase = tolower($2) } END { print phase }')"
+  publish_state="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-publish-state" { gsub("\\r", "", $2); publish = tolower($2) } END { print publish }')"
+  if [[ -z "$status" ]]; then
+    status="000"
+  fi
+  printf '%s %s %s' "$status" "${phase:-unknown}" "${publish_state:-unknown}"
+}
+
+proxy_status_ok() {
+  local port="${1:-${PROXY_PORT:-5050}}"
+  local probe status phase publish_state
+  probe="$(proxy_status_probe "$port")"
+  read -r status phase publish_state <<<"$probe"
+  [[ "$status" == "200" ]]
+}
+
+wait_for_proxy_phase() {
+  local expected_phase="$1"
+  local port="${2:-${PROXY_PORT:-5050}}"
+  local pid="${3:-${_HELPER_PROXY_PID:-}}"
+  local log_file="${4:-${_HELPER_PROXY_LOG:-/dev/null}}"
   local attempts start_ts next_warn now waited
+  local probe status phase publish_state
   attempts="$((PROXY_READY_TIMEOUT_SECS / PROXY_READY_POLL_SECS))"
   if (( attempts < 1 )); then
     attempts=1
@@ -222,24 +252,69 @@ wait_for_proxy() {
   start_ts="$(date +%s)"
   next_warn=$((start_ts + PROXY_READY_WARN_SECS))
   for _ in $(seq 1 "$attempts"); do
-    if curl -fsS --max-time 2 "http://${PROXY_HOST}:${port}/v2/" >/dev/null 2>&1; then
+    probe="$(proxy_status_probe "$port")"
+    read -r status phase publish_state <<<"$probe"
+    if [[ "$status" == "200" && "$phase" == "$expected_phase" ]]; then
       return 0
     fi
     now="$(date +%s)"
     if (( now >= next_warn )); then
       waited="$((now - start_ts))"
-      echo "WARNING: proxy readiness still waiting after ${waited}s"
+      echo "WARNING: proxy phase still waiting after ${waited}s (want=${expected_phase} phase=${phase:-unknown} publish=${publish_state:-unknown})"
       next_warn=$((now + PROXY_READY_WARN_SECS))
     fi
-    if [[ -n "${_HELPER_PROXY_PID:-}" ]] && ! kill -0 "$_HELPER_PROXY_PID" >/dev/null 2>&1; then
+    if [[ -n "${pid:-}" ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
       echo "ERROR: proxy exited before readiness"
-      tail -n 80 "${_HELPER_PROXY_LOG:-/dev/null}" || true
+      tail -n 80 "${log_file}" || true
       exit 1
     fi
     sleep "$PROXY_READY_POLL_SECS"
   done
-  echo "ERROR: proxy failed to become ready within ${PROXY_READY_TIMEOUT_SECS}s"
-  tail -n 80 "${_HELPER_PROXY_LOG:-/dev/null}" || true
+  echo "ERROR: proxy failed to reach phase ${expected_phase} within ${PROXY_READY_TIMEOUT_SECS}s"
+  tail -n 80 "${log_file}" || true
+  exit 1
+}
+
+wait_for_proxy() {
+  local port="${1:-${PROXY_PORT:-5050}}"
+  local pid="${2:-${_HELPER_PROXY_PID:-}}"
+  local log_file="${3:-${_HELPER_PROXY_LOG:-/dev/null}}"
+  wait_for_proxy_phase "ready" "$port" "$pid" "$log_file"
+}
+
+wait_for_proxy_publish_settled() {
+  local port="${1:-${PROXY_PORT:-5050}}"
+  local pid="${2:-${_HELPER_PROXY_PID:-}}"
+  local log_file="${3:-${_HELPER_PROXY_LOG:-/dev/null}}"
+  local attempts start_ts next_warn now waited
+  local probe status phase publish_state
+  attempts="$((PROXY_READY_TIMEOUT_SECS / PROXY_READY_POLL_SECS))"
+  if (( attempts < 1 )); then
+    attempts=1
+  fi
+  start_ts="$(date +%s)"
+  next_warn=$((start_ts + PROXY_READY_WARN_SECS))
+  for _ in $(seq 1 "$attempts"); do
+    probe="$(proxy_status_probe "$port")"
+    read -r status phase publish_state <<<"$probe"
+    if [[ "$status" == "200" && "$publish_state" == "settled" ]]; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now >= next_warn )); then
+      waited="$((now - start_ts))"
+      echo "WARNING: proxy publish still waiting after ${waited}s (phase=${phase:-unknown} publish=${publish_state:-unknown})"
+      next_warn=$((now + PROXY_READY_WARN_SECS))
+    fi
+    if [[ -n "${pid:-}" ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
+      echo "ERROR: proxy exited before publish settled"
+      tail -n 80 "${log_file}" || true
+      exit 1
+    fi
+    sleep "$PROXY_READY_POLL_SECS"
+  done
+  echo "ERROR: proxy publish did not settle within ${PROXY_READY_TIMEOUT_SECS}s"
+  tail -n 80 "${log_file}" || true
   exit 1
 }
 

@@ -9,9 +9,9 @@ AC_DIGEST="${AC_DIGEST:?AC_DIGEST is required}"
 PROXY_PORT="${PROXY_PORT:-5050}"
 WORK_DIR="$(mktemp -d)"
 PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
+PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
 PROXY_LOG="${WORK_DIR}/proxy.log"
 PROXY_PID=""
-PROXY_READY=0
 
 cleanup() {
   set +e
@@ -22,6 +22,42 @@ cleanup() {
   rm -rf "${WORK_DIR}"
 }
 trap cleanup EXIT
+
+proxy_status_probe() {
+  local response status phase publish_state
+  response="$(
+    curl -sS -D - -o /dev/null \
+      --max-time 2 \
+      "${PROXY_URL}${PROXY_STATUS_PATH}" 2>/dev/null || true
+  )"
+  status="$(printf '%s\n' "$response" | awk 'tolower($1) ~ /^http\// { status = $2 } END { print status }')"
+  phase="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-proxy-phase" { gsub("\\r", "", $2); phase = tolower($2) } END { print phase }')"
+  publish_state="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-publish-state" { gsub("\\r", "", $2); publish = tolower($2) } END { print publish }')"
+  if [[ -z "$status" ]]; then
+    status="000"
+  fi
+  printf '%s %s %s' "$status" "${phase:-unknown}" "${publish_state:-unknown}"
+}
+
+wait_for_proxy_ready() {
+  local probe status phase publish_state
+  for _ in $(seq 1 30); do
+    probe="$(proxy_status_probe)"
+    read -r status phase publish_state <<<"$probe"
+    if [[ "$status" == "200" && "$phase" == "ready" ]]; then
+      return 0
+    fi
+    if ! kill -0 "${PROXY_PID}" 2>/dev/null; then
+      echo "ERROR: proxy exited during startup"
+      cat "${PROXY_LOG}"
+      exit 1
+    fi
+    sleep 1
+  done
+  echo "ERROR: proxy did not become ready"
+  cat "${PROXY_LOG}"
+  exit 1
+}
 
 for dep in cmp curl sha256sum; do
   if ! command -v "${dep}" >/dev/null 2>&1; then
@@ -45,25 +81,7 @@ RUST_LOG=info "${BINARY}" cache-registry "${WORKSPACE}" "${TAG}" \
   --no-git \
   >>"${PROXY_LOG}" 2>&1 &
 PROXY_PID=$!
-
-for _ in $(seq 1 30); do
-  if curl -fsS --max-time 2 "${PROXY_URL}/v2/" >/dev/null 2>&1; then
-    PROXY_READY=1
-    break
-  fi
-  if ! kill -0 "${PROXY_PID}" 2>/dev/null; then
-    echo "ERROR: proxy exited during startup"
-    cat "${PROXY_LOG}"
-    exit 1
-  fi
-  sleep 1
-done
-
-if [[ "${PROXY_READY}" != "1" ]]; then
-  echo "ERROR: proxy did not become ready"
-  cat "${PROXY_LOG}"
-  exit 1
-fi
+wait_for_proxy_ready
 
 echo "Proxy ready on fresh runner, verifying CAS blobs..."
 CAS_STATUS="$(curl -sS --max-time 30 -o "${WORK_DIR}/cas-restored.bin" -w "%{http_code}" "${PROXY_URL}/cas/${CAS_DIGEST}")"

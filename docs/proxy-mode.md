@@ -69,9 +69,15 @@ Use `--endpoint-host host.docker.internal` when the wrapped client must reach th
 
 Adapter commands accept CLI overrides such as `--workspace`, `--tag`, `--endpoint-host`, `--cache-mode`, or `--cache-ref-tag`, but the normal path is to keep repeated adapter settings in `.boringcache.toml`.
 
+## Proxy status
+
+The proxy exposes `/_boringcache/status` for operator and harness visibility.
+It reports lifecycle phase (`warming`, `ready`, `draining`) and whether publish is settled for fresh readers.
+Use this endpoint for readiness, drain, and publish-settlement checks. `/v2/` remains the OCI protocol base path.
+
 ## Expert tuning
 
-Most users should rely on the adapter profile and host-resource auto tuning.
+Most users should rely on the automatic machine governor and the default proxy behavior.
 
 The intended expert overrides are:
 
@@ -79,4 +85,4 @@ The intended expert overrides are:
 - `BORINGCACHE_BLOB_READ_CACHE_MAX_BYTES` to grow or shrink the local blob cache
 
 Other proxy env vars that control prefetch batches, URL batch sizes, startup slice limits, or inflight byte budgets are internal/debug controls.
-They are useful for benchmarking and incident response, but they are not the normal operator surface and may change as the profiles improve.
+They are useful for benchmarking and incident response, but they are not the normal operator surface and may change as the generic scheduler improves.

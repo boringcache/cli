@@ -10,6 +10,7 @@ const MAX_OCI_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .route("/_boringcache/status", get(handlers::proxy_status))
         .route("/v2/", get(handlers::v2_base))
         .route("/v2/{*path}", any(handlers::oci_dispatch))
         .route("/", any(cache_registry::dispatch_root))

@@ -532,39 +532,7 @@ start_proxy() {
 
 ensure_proxy_ready() {
   local log_file="$1"
-  local start_ts now waited next_warn latest_line
-  local attempts
-  attempts="$((PROXY_READY_TIMEOUT_SECS / PROXY_READY_POLL_SECS))"
-  if (( attempts < 1 )); then
-    attempts=1
-  fi
-  start_ts="$(date +%s)"
-  next_warn=$((start_ts + PROXY_READY_WARN_SECS))
-  for _ in $(seq 1 "$attempts"); do
-    if curl -fsS --max-time 2 "${PROXY_URL}/v2/" >/dev/null; then
-      return 0
-    fi
-    now="$(date +%s)"
-    if (( now >= next_warn )); then
-      waited="$((now - start_ts))"
-      latest_line="$(awk 'NF { line=$0 } END { print line }' "$log_file" 2>/dev/null || true)"
-      if [[ -n "$latest_line" ]]; then
-        echo "WARNING: proxy readiness still waiting after ${waited}s | ${latest_line}" | tee -a "$log_file"
-      else
-        echo "WARNING: proxy readiness still waiting after ${waited}s" | tee -a "$log_file"
-      fi
-      next_warn=$((now + PROXY_READY_WARN_SECS))
-    fi
-    if [[ -n "${PROXY_PID:-}" ]] && ! kill -0 "$PROXY_PID" >/dev/null 2>&1; then
-      echo "ERROR: proxy exited before readiness check completed"
-      tail -n 120 "$log_file" || true
-      exit 1
-    fi
-    sleep "$PROXY_READY_POLL_SECS"
-  done
-  echo "ERROR: proxy failed to become ready within ${PROXY_READY_TIMEOUT_SECS}s"
-  tail -n 120 "$log_file" || true
-  exit 1
+  wait_for_proxy "${PROXY_PORT}" "${PROXY_PID:-}" "$log_file"
 }
 
 reset_sccache() {
@@ -699,8 +667,8 @@ run_build() {
       else
         echo "WARNING: ${label} has no new log output for ${BUILD_STALL_WARN_SECS}s" | tee -a "$log_file"
       fi
-      if [[ "$USE_PROXY" == "1" ]] && ! curl -fsS --max-time 2 "${PROXY_URL}/v2/" >/dev/null; then
-        echo "WARNING: ${label} proxy health check failed (${PROXY_URL}/v2/)" | tee -a "$log_file"
+      if [[ "$USE_PROXY" == "1" ]] && ! proxy_status_ok "${PROXY_PORT}"; then
+        echo "WARNING: ${label} proxy health check failed (${PROXY_URL}${PROXY_STATUS_PATH})" | tee -a "$log_file"
       fi
       next_stall_warn_at=$((now + BUILD_STALL_WARN_SECS))
     fi

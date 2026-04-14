@@ -658,6 +658,7 @@ impl ApiClient {
             grace: shutdown_pending_publish_grace(),
         };
         let mut pending_started_at: Option<Instant> = None;
+        let mut transient_publish_errors = 0u32;
 
         let response: TagPointer = loop {
             let publish_result = self
@@ -671,9 +672,28 @@ impl ApiClient {
             match publish_result {
                 Ok(response) => break response,
                 Err(error) => {
+                    if pending_metadata_from_error(&error).is_none() {
+                        if started_at.elapsed() < PENDING_PUBLISH_POLL_TIMEOUT
+                            && should_retry_confirm_publish_error(&error)
+                        {
+                            transient_publish_errors = transient_publish_errors.saturating_add(1);
+                            let delay =
+                                confirm_publish_error_delay(&error, transient_publish_errors);
+                            log::warn!(
+                                "Confirm publish transient error for tag={tag}: {error}; retrying in {:.1}s (consecutive_errors={})",
+                                delay.as_secs_f32(),
+                                transient_publish_errors
+                            );
+                            sleep(delay).await;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+
                     let Some(metadata) = pending_metadata_from_error(&error).cloned() else {
                         return Err(error);
                     };
+                    transient_publish_errors = 0;
                     let pending_started_at = *pending_started_at.get_or_insert_with(Instant::now);
 
                     if shutdown_pending_policy

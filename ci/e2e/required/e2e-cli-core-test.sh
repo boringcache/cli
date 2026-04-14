@@ -365,7 +365,7 @@ endpoint="${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}"
 [ "${TURBO_API:-}" = "${endpoint}" ] || exit 32
 expected_ref="127.0.0.1:$1/cache:$2"
 [ "$3" = "${expected_ref}" ] || exit 33
-curl -fsS --max-time 2 "${endpoint}/v2/" >/dev/null || exit 34
+curl -fsS --max-time 2 "${endpoint}/_boringcache/status" >/dev/null || exit 34
 EOF
 chmod +x "${RUN_PROXY_SCRIPT}"
 "${CLI}" run "${WORKSPACE}" --proxy "${RUN_PROXY_TAG}" "${E2E_TAG_SCOPE_FLAGS[@]}" --host 127.0.0.1 --port 0 -- sh "${RUN_PROXY_SCRIPT}" "{PORT}" "${RUN_PROXY_TAG}" "{CACHE_REF}" > "${CLI_LOG_DIR}/run-proxy.log"

@@ -1354,124 +1354,28 @@ pub(crate) async fn preload_download_urls(state: &AppState, cache_entry_id: &str
     let _ = preload_download_urls_for_blobs(state, cache_entry_id, &blobs).await;
 }
 
-pub(crate) fn kv_startup_prefetch_max_blobs(tuning_profile: CacheRegistryTuningProfile) -> usize {
-    let _ = tuning_profile;
+pub(crate) fn kv_startup_prefetch_max_blobs() -> usize {
     parse_positive_usize_env(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV).unwrap_or(usize::MAX)
 }
 
-pub(crate) fn kv_startup_prefetch_max_total_bytes(
-    cache_max: u64,
-    tuning_profile: CacheRegistryTuningProfile,
-) -> u64 {
-    let _ = tuning_profile;
+pub(crate) fn kv_startup_prefetch_max_total_bytes(cache_max: u64) -> u64 {
     parse_positive_u64_env(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV).unwrap_or(cache_max)
 }
 
-pub(crate) fn kv_blob_prefetch_max_inflight_bytes(
-    cache_max: u64,
-    tuning_profile: CacheRegistryTuningProfile,
-) -> u64 {
+pub(crate) fn kv_blob_prefetch_max_inflight_bytes(cache_max: u64) -> u64 {
     if let Some(configured) = parse_positive_u64_env(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV) {
         return configured;
     }
-    match tuning_profile {
-        CacheRegistryTuningProfile::Generic => cache_max
-            .saturating_div(4)
-            .clamp(64 * 1024 * 1024, 512 * 1024 * 1024),
-        CacheRegistryTuningProfile::Bazel => cache_max
-            .saturating_div(3)
-            .clamp(128 * 1024 * 1024, 1024 * 1024 * 1024),
-        CacheRegistryTuningProfile::Sccache => cache_max
-            .saturating_div(2)
-            .clamp(256 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
-    }
-}
-
-pub(crate) fn bazel_startup_blob_class(
-    scoped_key: &str,
-    blob: &BlobDescriptor,
-) -> BazelStartupBlobClass {
-    if scoped_key.starts_with("bazel_ac/") {
-        BazelStartupBlobClass::ActionCache
-    } else if scoped_key.starts_with("bazel_cas/")
-        && blob.size_bytes > 0
-        && blob.size_bytes <= KV_BAZEL_STARTUP_PREFETCH_SMALL_CAS_MAX_BLOB_BYTES
-    {
-        BazelStartupBlobClass::SmallCas
-    } else {
-        BazelStartupBlobClass::Other
-    }
-}
-
-pub(crate) fn bazel_startup_prefetch_candidates(
-    entries: &HashMap<String, BlobDescriptor>,
-    blob_order: &[BlobDescriptor],
-) -> StartupPrefetchCandidates {
-    let mut class_by_digest: HashMap<&str, BazelStartupBlobClass> =
-        HashMap::with_capacity(entries.len());
-    for (scoped_key, blob) in entries {
-        let candidate = bazel_startup_blob_class(scoped_key, blob);
-        match class_by_digest.get_mut(blob.digest.as_str()) {
-            Some(existing) if matches!(candidate, BazelStartupBlobClass::ActionCache) => {
-                *existing = candidate;
-            }
-            Some(existing)
-                if matches!(candidate, BazelStartupBlobClass::SmallCas)
-                    && matches!(existing, BazelStartupBlobClass::Other) =>
-            {
-                *existing = candidate;
-            }
-            Some(_) => {}
-            None => {
-                class_by_digest.insert(blob.digest.as_str(), candidate);
-            }
-        }
-    }
-
-    let mut action_cache_blobs = Vec::new();
-    let mut small_cas_blobs = Vec::new();
-    let mut other_blobs = Vec::new();
-    for blob in blob_order {
-        match class_by_digest
-            .get(blob.digest.as_str())
-            .copied()
-            .unwrap_or(BazelStartupBlobClass::Other)
-        {
-            BazelStartupBlobClass::ActionCache => action_cache_blobs.push(blob.clone()),
-            BazelStartupBlobClass::SmallCas => small_cas_blobs.push(blob.clone()),
-            BazelStartupBlobClass::Other => other_blobs.push(blob.clone()),
-        }
-    }
-
-    let mut ordered_blobs =
-        Vec::with_capacity(action_cache_blobs.len() + small_cas_blobs.len() + other_blobs.len());
-    ordered_blobs.extend(action_cache_blobs.iter().cloned());
-    ordered_blobs.extend(small_cas_blobs.iter().cloned());
-    ordered_blobs.extend(other_blobs.iter().cloned());
-
-    StartupPrefetchCandidates {
-        ordered_blobs,
-        bazel_action_cache_blobs: action_cache_blobs.len(),
-        bazel_small_cas_blobs: small_cas_blobs.len(),
-        bazel_other_blobs: other_blobs.len(),
-    }
+    cache_max
+        .saturating_div(4)
+        .clamp(64 * 1024 * 1024, 512 * 1024 * 1024)
 }
 
 pub(crate) fn startup_prefetch_candidates(
-    entries: &HashMap<String, BlobDescriptor>,
     blob_order: &[BlobDescriptor],
-    tuning_profile: CacheRegistryTuningProfile,
 ) -> StartupPrefetchCandidates {
-    match tuning_profile {
-        CacheRegistryTuningProfile::Generic | CacheRegistryTuningProfile::Sccache => {
-            StartupPrefetchCandidates {
-                ordered_blobs: blob_order.to_vec(),
-                bazel_action_cache_blobs: 0,
-                bazel_small_cas_blobs: 0,
-                bazel_other_blobs: blob_order.len(),
-            }
-        }
-        CacheRegistryTuningProfile::Bazel => bazel_startup_prefetch_candidates(entries, blob_order),
+    StartupPrefetchCandidates {
+        ordered_blobs: blob_order.to_vec(),
     }
 }
 
@@ -1520,21 +1424,10 @@ pub(crate) fn startup_prefetch_blobs(
     select_startup_prefetch_slice(ordered_blobs, max_blobs, max_total_bytes)
 }
 
-pub(crate) fn startup_download_url_preload_blobs<'a>(
-    unique_blobs: &'a [BlobDescriptor],
-    startup_blobs: &'a [BlobDescriptor],
-    tuning_profile: CacheRegistryTuningProfile,
-) -> &'a [BlobDescriptor] {
-    match tuning_profile {
-        CacheRegistryTuningProfile::Bazel => unique_blobs,
-        CacheRegistryTuningProfile::Generic | CacheRegistryTuningProfile::Sccache => startup_blobs,
-    }
-}
-
-pub(crate) fn should_preload_remaining_download_urls(
-    tuning_profile: CacheRegistryTuningProfile,
-) -> bool {
-    !matches!(tuning_profile, CacheRegistryTuningProfile::Bazel)
+pub(crate) fn startup_download_url_preload_blobs(
+    startup_blobs: &[BlobDescriptor],
+) -> &[BlobDescriptor] {
+    startup_blobs
 }
 
 pub(crate) fn select_blob_preload_candidates<F>(
@@ -1655,7 +1548,7 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         );
         return;
     }
-    let inflight_budget_cap = kv_blob_prefetch_max_inflight_bytes(cache_max, state.tuning_profile);
+    let inflight_budget_cap = kv_blob_prefetch_max_inflight_bytes(cache_max);
     let preload_budget = cache_max
         .saturating_sub(cache_used)
         .min(inflight_budget_cap);
@@ -1670,13 +1563,7 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
     }
     let mut candidates = {
         let published = state.kv_published_index.read().await;
-        let entries = published.entries_snapshot();
-        let blob_order = startup_prefetch_candidates(
-            entries.as_ref(),
-            &published.unique_blobs(),
-            state.tuning_profile,
-        )
-        .ordered_blobs;
+        let blob_order = startup_prefetch_candidates(&published.unique_blobs()).ordered_blobs;
         select_blob_preload_candidates(&blob_order, preload_budget, |digest| {
             published.download_url(digest).map(str::to_string)
         })
@@ -1817,19 +1704,14 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
             clear_root_tag_misses(state);
             let cache_used = state.blob_read_cache.total_bytes();
             let cache_max = state.blob_read_cache.max_bytes();
-            let startup_max_blobs = kv_startup_prefetch_max_blobs(state.tuning_profile);
-            let startup_max_total_bytes =
-                kv_startup_prefetch_max_total_bytes(cache_max, state.tuning_profile)
-                    .min(cache_max.saturating_sub(cache_used));
-            let (unique_blobs, entry_map) = {
+            let startup_max_blobs = kv_startup_prefetch_max_blobs();
+            let startup_max_total_bytes = kv_startup_prefetch_max_total_bytes(cache_max)
+                .min(cache_max.saturating_sub(cache_used));
+            let unique_blobs = {
                 let published = state.kv_published_index.read().await;
-                (published.unique_blobs(), published.entries_snapshot())
+                published.unique_blobs()
             };
-            let startup_candidates = startup_prefetch_candidates(
-                entry_map.as_ref(),
-                &unique_blobs,
-                state.tuning_profile,
-            );
+            let startup_candidates = startup_prefetch_candidates(&unique_blobs);
             let total_unique_blobs = unique_blobs.len();
             let total_unique_bytes: u64 =
                 unique_blobs.iter().map(|blob| blob.size_bytes).sum::<u64>();
@@ -1841,11 +1723,7 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
                 startup_max_total_bytes,
                 whole_tag_hydration,
             );
-            let startup_url_preload_blobs = startup_download_url_preload_blobs(
-                &unique_blobs,
-                &startup_blobs,
-                state.tuning_profile,
-            );
+            let startup_url_preload_blobs = startup_download_url_preload_blobs(&startup_blobs);
             let startup_target_bytes: u64 = startup_blobs
                 .iter()
                 .map(|blob| blob.size_bytes)
@@ -1866,16 +1744,6 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
                     "Prefetch: {count} entries loaded, hydrating whole tag locally ({} blobs, {:.1} MB)",
                     total_unique_blobs,
                     total_unique_bytes as f64 / (1024.0 * 1024.0),
-                );
-            } else if state.tuning_profile == CacheRegistryTuningProfile::Bazel {
-                eprintln!(
-                    "Prefetch: {count} entries loaded, Bazel startup slice prioritizes AC={} small_cas={} deferred={} under {:.1} MB budget and resolves {}/{} download URLs before serving...",
-                    startup_candidates.bazel_action_cache_blobs,
-                    startup_candidates.bazel_small_cas_blobs,
-                    startup_candidates.bazel_other_blobs,
-                    startup_max_total_bytes as f64 / (1024.0 * 1024.0),
-                    startup_url_preload_blobs.len(),
-                    total_unique_blobs,
                 );
             } else {
                 eprintln!(
@@ -1937,12 +1805,10 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
                     .filter(|blob| !startup_digests.contains(&blob.digest))
                     .collect::<Vec<_>>()
             };
-            let preload_remaining_download_urls =
-                should_preload_remaining_download_urls(state.tuning_profile);
             let background_state = state.clone();
             let background_cache_entry_id = cache_entry_id.clone();
             tokio::spawn(async move {
-                if preload_remaining_download_urls && !remaining_blobs.is_empty() {
+                if !remaining_blobs.is_empty() {
                     let _ = preload_download_urls_for_blobs(
                         &background_state,
                         &background_cache_entry_id,

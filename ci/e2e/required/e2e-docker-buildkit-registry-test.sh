@@ -11,6 +11,7 @@ WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
 E2E_TAG_PREFIX="${E2E_TAG_PREFIX:-gha-cache-registry}"
 PORT="${PORT:-5000}"
 LOG_DIR="${LOG_DIR:-.}"
+PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-0}"
 BUILD_HEARTBEAT_SECS="${BUILD_HEARTBEAT_SECS:-30}"
 BUILD_CLEANUP_WAIT_SECS="${BUILD_CLEANUP_WAIT_SECS:-20}"
@@ -174,11 +175,27 @@ cleanup() {
 trap cleanup EXIT
 trap handle_interrupt INT TERM
 
+proxy_status_probe() {
+  local response status phase publish_state
+  response="$(
+    curl -sS -D - -o /dev/null \
+      --max-time 2 \
+      "http://127.0.0.1:${PORT}${PROXY_STATUS_PATH}" 2>/dev/null || true
+  )"
+  status="$(printf '%s\n' "$response" | awk 'tolower($1) ~ /^http\// { status = $2 } END { print status }')"
+  phase="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-proxy-phase" { gsub("\\r", "", $2); phase = tolower($2) } END { print phase }')"
+  publish_state="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-publish-state" { gsub("\\r", "", $2); publish = tolower($2) } END { print publish }')"
+  if [[ -z "$status" ]]; then
+    status="000"
+  fi
+  printf '%s %s %s' "$status" "${phase:-unknown}" "${publish_state:-unknown}"
+}
+
 start_proxy() {
   local log_file="$1"
   local metadata_hints="${2:-}"
   local readiness_reference="${3:-}"
-  local attempts start_ts next_warn now waited latest_line
+  local attempts start_ts next_warn now waited probe status phase publish_state
   stop_proxy
   LOG_FILES+=("${log_file}")
   BORINGCACHE_PROXY_METADATA_HINTS="${metadata_hints}" \
@@ -198,23 +215,26 @@ start_proxy() {
   start_ts="$(date +%s)"
   next_warn=$((start_ts + PROXY_READY_WARN_SECS))
   for _ in $(seq 1 "$attempts"); do
-    if [[ -n "$readiness_reference" ]]; then
-      if manifest_reference_is_readable "$readiness_reference"; then
+    probe="$(proxy_status_probe)"
+    read -r status phase publish_state <<<"$probe"
+    if [[ "$status" == "200" && "$phase" == "ready" ]]; then
+      if [[ -n "$readiness_reference" ]]; then
+        if manifest_reference_is_readable "$readiness_reference"; then
+          ready=1
+          break
+        fi
+      else
         ready=1
         break
       fi
-    elif curl -fsS --max-time 1 "http://127.0.0.1:${PORT}/v2/" >/dev/null 2>&1; then
-      ready=1
-      break
     fi
     now="$(date +%s)"
     if (( now >= next_warn )); then
       waited="$((now - start_ts))"
-      latest_line="$(awk 'NF { line=$0 } END { print line }' "$log_file" 2>/dev/null || true)"
-      if [[ -n "$latest_line" ]]; then
-        echo "WARNING: docker-registry readiness still waiting after ${waited}s | ${latest_line}"
+      if [[ -n "$readiness_reference" ]]; then
+        echo "WARNING: docker-registry readiness still waiting after ${waited}s (phase=${phase:-unknown} publish=${publish_state:-unknown} ref=${readiness_reference})"
       else
-        echo "WARNING: docker-registry readiness still waiting after ${waited}s"
+        echo "WARNING: docker-registry readiness still waiting after ${waited}s (phase=${phase:-unknown} publish=${publish_state:-unknown})"
       fi
       next_warn=$((now + PROXY_READY_WARN_SECS))
     fi

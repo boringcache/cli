@@ -315,6 +315,10 @@ fn pending_publish_poll_error_delay(
         .min(PENDING_PUBLISH_POLL_MAX_INTERVAL)
 }
 
+fn confirm_publish_error_delay(error: &anyhow::Error, consecutive_errors: u32) -> Duration {
+    pending_publish_poll_error_delay(Some(1), error, consecutive_errors)
+}
+
 fn should_retry_pending_publish_poll_error(error: &anyhow::Error) -> bool {
     if crate::error::is_connection_error(error) {
         return true;
@@ -322,6 +326,25 @@ fn should_retry_pending_publish_poll_error(error: &anyhow::Error) -> bool {
 
     let lower = format!("{error:#}").to_lowercase();
     is_rate_limit_error(error)
+        || lower.contains("503")
+        || lower.contains("service unavailable")
+        || lower.contains("504")
+        || lower.contains("gateway timeout")
+        || lower.contains("request timeout")
+        || lower.contains("timed out")
+}
+
+fn should_retry_confirm_publish_error(error: &anyhow::Error) -> bool {
+    if crate::error::is_connection_error(error) {
+        return true;
+    }
+
+    let lower = format!("{error:#}").to_lowercase();
+    is_rate_limit_error(error)
+        || lower.contains("500")
+        || lower.contains("server error")
+        || lower.contains("502")
+        || lower.contains("bad gateway")
         || lower.contains("503")
         || lower.contains("service unavailable")
         || lower.contains("504")
@@ -492,7 +515,7 @@ fn blob_check_batch_max() -> usize {
     parse_usize_env(BLOB_CHECK_BATCH_MAX_ENV).unwrap_or(BLOB_CHECK_BATCH_MAX)
 }
 
-fn blob_url_batch_max() -> usize {
+pub(crate) fn blob_url_batch_max() -> usize {
     parse_usize_env(BLOB_URL_BATCH_MAX_ENV)
         .map(|value| value.min(BLOB_URL_BATCH_MAX))
         .unwrap_or(BLOB_URL_BATCH_MAX)
@@ -1227,6 +1250,34 @@ mod tests {
 
         let permanent = anyhow::anyhow!("Server returned 403 Forbidden");
         assert!(!should_retry_pending_publish_poll_error(&permanent));
+    }
+
+    #[test]
+    fn test_should_retry_confirm_publish_error_detects_transient_statuses() {
+        let internal =
+            anyhow::anyhow!("confirm failed: Server error (500). Please try again later.");
+        assert!(should_retry_confirm_publish_error(&internal));
+
+        let throttled =
+            anyhow::anyhow!("Rate limit exceeded (429 Too Many Requests). Please try again later.");
+        assert!(should_retry_confirm_publish_error(&throttled));
+
+        let permanent = anyhow::anyhow!("Server returned 403 Forbidden");
+        assert!(!should_retry_confirm_publish_error(&permanent));
+    }
+
+    #[test]
+    fn test_confirm_publish_error_delay_backs_off_from_base_interval() {
+        let internal = anyhow::anyhow!("confirm failed: Server error (500)");
+        assert_eq!(
+            confirm_publish_error_delay(&internal, 1),
+            Duration::from_secs(1)
+        );
+        let throttled = anyhow::anyhow!("429 Too Many Requests");
+        assert_eq!(
+            confirm_publish_error_delay(&throttled, 1),
+            Duration::from_secs(2)
+        );
     }
 
     #[test]

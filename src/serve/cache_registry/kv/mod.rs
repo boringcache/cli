@@ -25,8 +25,8 @@ use crate::error::{BoringCacheError, PendingMetadata};
 use crate::manifest::EntryType;
 use crate::observability;
 use crate::serve::state::{
-    AppState, BlobReadHandle, CacheRegistryTuningProfile, KV_BACKLOG_POLICY, KvFlushingSnapshot,
-    KvReplicationWork, diagnostics_enabled,
+    AppState, BlobReadHandle, KV_BACKLOG_POLICY, KvFlushingSnapshot, KvReplicationWork,
+    diagnostics_enabled,
 };
 
 use super::error::RegistryError;
@@ -58,7 +58,6 @@ const KV_PUT_BODY_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from
 const KV_PUT_BODY_SLOW_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
 const KV_RESOLVE_HIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_FETCH_POINTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const KV_BAZEL_STARTUP_PREFETCH_SMALL_CAS_MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024;
 const KV_STARTUP_PREFETCH_MAX_BLOBS_ENV: &str = "BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS";
 const KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV: &str =
     "BORINGCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES";
@@ -102,19 +101,9 @@ impl BlobReadSource {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BazelStartupBlobClass {
-    ActionCache,
-    SmallCas,
-    Other,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct StartupPrefetchCandidates {
     ordered_blobs: Vec<BlobDescriptor>,
-    bazel_action_cache_blobs: usize,
-    bazel_small_cas_blobs: usize,
-    bazel_other_blobs: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -146,6 +135,7 @@ pub(crate) struct KvPendingPublishHandoff {
     cache_entry_id: String,
     entries: BTreeMap<String, BlobDescriptor>,
     blob_order: Vec<BlobDescriptor>,
+    download_urls: HashMap<String, String>,
     root_pending: Option<PendingMetadata>,
     pending_alias_tags: bool,
     pending_blob_paths: HashMap<String, PathBuf>,
@@ -259,11 +249,7 @@ fn emit_blob_read_metric(
         )
         .with_workspace(Some(state.workspace.clone()))
         .with_cache_entry_id(Some(cache_entry_id.to_string()))
-        .with_details(Some(format!(
-            "source={} profile={}",
-            source.as_str(),
-            state.tuning_profile.as_str()
-        ))),
+        .with_details(Some(format!("source={}", source.as_str()))),
     );
 }
 
@@ -602,7 +588,6 @@ mod tests {
             ),
             blob_read_metrics: std::sync::Arc::new(BlobReadMetrics::new()),
             prefetch_metrics: std::sync::Arc::new(crate::serve::state::PrefetchMetrics::new()),
-            tuning_profile: CacheRegistryTuningProfile::Generic,
             blob_download_max_concurrency: 16,
             blob_download_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             blob_prefetch_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
@@ -697,7 +682,6 @@ mod tests {
             ),
             blob_read_metrics: std::sync::Arc::new(BlobReadMetrics::new()),
             prefetch_metrics: std::sync::Arc::new(crate::serve::state::PrefetchMetrics::new()),
-            tuning_profile: CacheRegistryTuningProfile::Generic,
             blob_download_max_concurrency: 16,
             blob_download_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
             blob_prefetch_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
@@ -1805,15 +1789,9 @@ mod tests {
 
         test_env::set_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV, "48");
         test_env::set_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV, "2097152");
+        assert_eq!(kv_startup_prefetch_max_blobs(), 48);
         assert_eq!(
-            kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Generic),
-            48
-        );
-        assert_eq!(
-            kv_startup_prefetch_max_total_bytes(
-                1024 * 1024 * 1024,
-                CacheRegistryTuningProfile::Generic
-            ),
+            kv_startup_prefetch_max_total_bytes(1024 * 1024 * 1024),
             2_097_152
         );
         test_env::remove_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV);
@@ -1871,10 +1849,7 @@ mod tests {
         let _guard = test_env::lock();
 
         test_env::set_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV, "12345");
-        assert_eq!(
-            kv_blob_prefetch_max_inflight_bytes(1024 * 1024, CacheRegistryTuningProfile::Generic),
-            12_345
-        );
+        assert_eq!(kv_blob_prefetch_max_inflight_bytes(1024 * 1024), 12_345);
         test_env::remove_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV);
     }
 
@@ -1883,46 +1858,22 @@ mod tests {
         let _guard = test_env::lock();
         test_env::remove_var(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV);
         test_env::remove_var(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV);
+        test_env::remove_var(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV);
         let cache_max = 4 * 1024 * 1024 * 1024;
+        assert_eq!(kv_startup_prefetch_max_blobs(), usize::MAX);
+        assert_eq!(kv_startup_prefetch_max_total_bytes(cache_max), cache_max);
         assert_eq!(
-            kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Generic),
-            usize::MAX
-        );
-        assert_eq!(
-            kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Bazel),
-            usize::MAX
-        );
-        assert_eq!(
-            kv_startup_prefetch_max_blobs(CacheRegistryTuningProfile::Sccache),
-            usize::MAX
-        );
-        assert_eq!(
-            kv_startup_prefetch_max_total_bytes(cache_max, CacheRegistryTuningProfile::Generic),
-            cache_max
-        );
-        assert_eq!(
-            kv_startup_prefetch_max_total_bytes(cache_max, CacheRegistryTuningProfile::Bazel),
-            cache_max
-        );
-        assert_eq!(
-            kv_startup_prefetch_max_total_bytes(cache_max, CacheRegistryTuningProfile::Sccache),
-            cache_max
-        );
-        assert!(
-            kv_blob_prefetch_max_inflight_bytes(cache_max, CacheRegistryTuningProfile::Sccache)
-                > kv_blob_prefetch_max_inflight_bytes(
-                    cache_max,
-                    CacheRegistryTuningProfile::Generic
-                )
+            kv_blob_prefetch_max_inflight_bytes(cache_max),
+            512 * 1024 * 1024
         );
     }
 
     #[test]
-    fn bazel_startup_prefetch_prioritizes_action_cache_then_small_cas() {
+    fn startup_prefetch_candidates_preserve_blob_order() {
         let blob_order = vec![
             BlobDescriptor {
                 digest: "sha256:large-cas".to_string(),
-                size_bytes: KV_BAZEL_STARTUP_PREFETCH_SMALL_CAS_MAX_BLOB_BYTES + 1,
+                size_bytes: 4_096,
             },
             BlobDescriptor {
                 digest: "sha256:ac".to_string(),
@@ -1933,38 +1884,12 @@ mod tests {
                 size_bytes: 1024,
             },
         ];
-        let entries = HashMap::from([
-            (
-                "bazel_cas/sha256:large-cas".to_string(),
-                blob_order[0].clone(),
-            ),
-            ("bazel_ac/sha256:ac".to_string(), blob_order[1].clone()),
-            (
-                "bazel_cas/sha256:small-cas".to_string(),
-                blob_order[2].clone(),
-            ),
-        ]);
+        let candidates = startup_prefetch_candidates(&blob_order);
 
-        let candidates =
-            startup_prefetch_candidates(&entries, &blob_order, CacheRegistryTuningProfile::Bazel);
-
-        assert_eq!(candidates.bazel_action_cache_blobs, 1);
-        assert_eq!(candidates.bazel_small_cas_blobs, 1);
-        assert_eq!(candidates.ordered_blobs[0].digest, "sha256:ac");
-        assert_eq!(candidates.ordered_blobs[1].digest, "sha256:small-cas");
-        assert_eq!(candidates.ordered_blobs[2].digest, "sha256:large-cas");
-    }
-
-    #[test]
-    fn bazel_background_preload_keeps_larger_inflight_budget_than_generic() {
-        let cache_max = 4 * 1024 * 1024 * 1024;
-        assert!(
-            kv_blob_prefetch_max_inflight_bytes(cache_max, CacheRegistryTuningProfile::Bazel)
-                > kv_blob_prefetch_max_inflight_bytes(
-                    cache_max,
-                    CacheRegistryTuningProfile::Generic
-                )
-        );
+        assert_eq!(candidates.ordered_blobs.len(), 3);
+        assert_eq!(candidates.ordered_blobs[0].digest, "sha256:large-cas");
+        assert_eq!(candidates.ordered_blobs[1].digest, "sha256:ac");
+        assert_eq!(candidates.ordered_blobs[2].digest, "sha256:small-cas");
     }
 
     #[test]
@@ -2048,8 +1973,8 @@ mod tests {
     }
 
     #[test]
-    fn bazel_startup_download_url_preload_covers_full_tag() {
-        let unique_blobs = vec![
+    fn startup_download_url_preload_stays_on_startup_slice() {
+        let startup_blobs = vec![
             BlobDescriptor {
                 digest: "sha256:1".to_string(),
                 size_bytes: 128,
@@ -2059,41 +1984,12 @@ mod tests {
                 size_bytes: 256,
             },
         ];
-        let startup_blobs = vec![unique_blobs[0].clone()];
 
-        let selected = startup_download_url_preload_blobs(
-            &unique_blobs,
-            &startup_blobs,
-            CacheRegistryTuningProfile::Bazel,
-        );
+        let selected = startup_download_url_preload_blobs(&startup_blobs);
 
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].digest, "sha256:1");
         assert_eq!(selected[1].digest, "sha256:2");
-    }
-
-    #[test]
-    fn generic_startup_download_url_preload_stays_on_startup_slice() {
-        let unique_blobs = vec![
-            BlobDescriptor {
-                digest: "sha256:1".to_string(),
-                size_bytes: 128,
-            },
-            BlobDescriptor {
-                digest: "sha256:2".to_string(),
-                size_bytes: 256,
-            },
-        ];
-        let startup_blobs = vec![unique_blobs[0].clone()];
-
-        let selected = startup_download_url_preload_blobs(
-            &unique_blobs,
-            &startup_blobs,
-            CacheRegistryTuningProfile::Generic,
-        );
-
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].digest, "sha256:1");
     }
 
     #[test]

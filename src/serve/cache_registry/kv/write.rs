@@ -430,6 +430,10 @@ pub(crate) async fn clear_kv_pending_publish_handoff(state: &AppState) {
     }
 }
 
+pub(crate) async fn has_kv_pending_publish_handoff(state: &AppState) -> bool {
+    read_kv_pending_publish_handoff(state).await.is_some()
+}
+
 pub(crate) async fn persist_kv_pending_publish_handoff(
     state: &AppState,
     entries: &BTreeMap<String, BlobDescriptor>,
@@ -439,6 +443,14 @@ pub(crate) async fn persist_kv_pending_publish_handoff(
 ) {
     let pending_blob_paths = pending.pending_blob_paths.cloned().unwrap_or_default();
     let pending_blob_sequences = pending.pending_blob_sequences.cloned().unwrap_or_default();
+    let download_urls = {
+        let published = state.kv_published_index.read().await;
+        if published.cache_entry_id() == Some(cache_entry_id) {
+            published.snapshot_download_urls()
+        } else {
+            HashMap::new()
+        }
+    };
 
     if pending.root_pending.is_none()
         && !pending.pending_alias_tags
@@ -457,6 +469,7 @@ pub(crate) async fn persist_kv_pending_publish_handoff(
         cache_entry_id: cache_entry_id.to_string(),
         entries: entries.clone(),
         blob_order: blob_order.to_vec(),
+        download_urls,
         root_pending: pending.root_pending.cloned(),
         pending_alias_tags: pending.pending_alias_tags,
         pending_blob_paths,
@@ -656,6 +669,12 @@ pub(crate) async fn restore_kv_pending_publish_handoff(state: &AppState) {
                     .collect(),
                 handoff.blob_order.clone(),
                 handoff.cache_entry_id.clone(),
+            );
+            let snapshot_age_ms = crate::serve::state::unix_time_ms_now()
+                .saturating_sub(handoff.persisted_at_unix_ms);
+            published.restore_download_urls(
+                handoff.download_urls.clone(),
+                std::time::Duration::from_millis(snapshot_age_ms),
             );
         }
         clear_root_tag_misses(state);

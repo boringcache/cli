@@ -104,6 +104,31 @@ impl KvPublishedIndex {
             .insert(digest, CachedUrl { url, expires_at });
     }
 
+    pub fn snapshot_download_urls(&self) -> HashMap<String, String> {
+        let now = Instant::now();
+        self.download_urls
+            .iter()
+            .filter(|(_, cached)| cached.expires_at > now)
+            .map(|(digest, cached)| (digest.clone(), cached.url.clone()))
+            .collect()
+    }
+
+    pub fn restore_download_urls(
+        &mut self,
+        urls: HashMap<String, String>,
+        snapshot_age: std::time::Duration,
+    ) {
+        if urls.is_empty() || snapshot_age >= DOWNLOAD_URL_TTL {
+            return;
+        }
+        let remaining_ttl = DOWNLOAD_URL_TTL.saturating_sub(snapshot_age);
+        let expires_at = Instant::now() + remaining_ttl;
+        for (digest, url) in urls {
+            self.download_urls
+                .insert(digest, CachedUrl { url, expires_at });
+        }
+    }
+
     pub fn get(&self, scoped_key: &str) -> Option<(&BlobDescriptor, &str)> {
         let blob = self.entries.get(scoped_key)?;
         let cache_entry_id = self.cache_entry_id.as_deref()?;

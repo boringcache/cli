@@ -37,7 +37,7 @@ expected_sccache_endpoint="${expected_endpoint}/"
 [ "${SCCACHE_CACHED_CONF:-}" = "stale-config" ] || exit 10
 [ "${SCCACHE_WEBDAV_TOKEN:-}" = "wrong-token" ] || exit 11
 [ "${2:-}" = "$expected_ref" ] || exit 12
-curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 13
+curl -fsS --max-time 2 "$expected_endpoint/_boringcache/status" >/dev/null || exit 13
 "#;
 
     let output = Command::new(cli_binary())
@@ -128,7 +128,7 @@ fn test_run_combined_archive_and_proxy_mode_executes_child() {
     std::fs::create_dir_all(&cache_dir).expect("create cache dir");
     let script = r#"expected_endpoint="http://127.0.0.1:$1"
 [ "${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}" = "$expected_endpoint" ] || exit 2
-curl -fsS --max-time 2 "$expected_endpoint/v2/" >/dev/null || exit 3
+curl -fsS --max-time 2 "$expected_endpoint/_boringcache/status" >/dev/null || exit 3
 "#;
 
     let pair = format!("deps:{}", cache_dir.display());

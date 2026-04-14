@@ -126,7 +126,6 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         ),
         blob_read_metrics: Arc::new(BlobReadMetrics::new()),
         prefetch_metrics: Arc::new(boring_cache_cli::serve::state::PrefetchMetrics::new()),
-        tuning_profile: boring_cache_cli::serve::state::CacheRegistryTuningProfile::Generic,
         blob_download_max_concurrency: 16,
         blob_download_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
         blob_prefetch_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
@@ -537,6 +536,166 @@ async fn test_v2_base_returns_200() {
             .unwrap(),
         "ready"
     );
+}
+
+#[tokio::test]
+async fn test_proxy_status_reports_warming_phase() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    state
+        .prefetch_complete
+        .store(false, std::sync::atomic::Ordering::Release);
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri("/_boringcache/status")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("X-BoringCache-Proxy-Phase")
+            .and_then(|value| value.to_str().ok()),
+        Some("warming")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("X-BoringCache-Publish-State")
+            .and_then(|value| value.to_str().ok()),
+        Some("settled")
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status["phase"], "warming");
+    assert_eq!(status["publish_state"], "settled");
+    assert_eq!(status["publish_settled"], true);
+    assert_eq!(status["pending_entries"], 0);
+    assert_eq!(status["flush_in_progress"], false);
+}
+
+#[tokio::test]
+async fn test_proxy_status_reports_pending_publish_when_entries_buffered() {
+    let server = Server::new_async().await;
+    let (state, home, _guard) = setup(&server).await;
+    let temp_path = home.path().join("pending-blob.bin");
+    tokio::fs::write(&temp_path, b"pending-bytes")
+        .await
+        .expect("write pending blob");
+    {
+        let mut pending = state.kv_pending.write().await;
+        pending.insert(
+            "cas/example".to_string(),
+            BlobDescriptor {
+                digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+                size_bytes: 13,
+            },
+            temp_path,
+        );
+    }
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri("/_boringcache/status")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("X-BoringCache-Proxy-Phase")
+            .and_then(|value| value.to_str().ok()),
+        Some("ready")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("X-BoringCache-Publish-State")
+            .and_then(|value| value.to_str().ok()),
+        Some("pending")
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status["phase"], "ready");
+    assert_eq!(status["publish_settled"], false);
+    assert_eq!(status["pending_entries"], 1);
+    assert_eq!(status["pending_blobs"], 1);
+}
+
+#[tokio::test]
+async fn test_proxy_status_reports_draining_until_tags_are_visible() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    state
+        .shutdown_requested
+        .store(true, std::sync::atomic::Ordering::Release);
+    {
+        let mut published = state.kv_published_index.write().await;
+        published.update(
+            std::collections::HashMap::new(),
+            Vec::new(),
+            "entry-123".to_string(),
+        );
+    }
+
+    let _pointer_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches/tags/registry/pointer".to_string()),
+        )
+        .with_status(404)
+        .create_async()
+        .await;
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri("/_boringcache/status")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("X-BoringCache-Proxy-Phase")
+            .and_then(|value| value.to_str().ok()),
+        Some("draining")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("X-BoringCache-Publish-State")
+            .and_then(|value| value.to_str().ok()),
+        Some("pending")
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status["phase"], "draining");
+    assert_eq!(status["cache_entry_id"], "entry-123");
+    assert_eq!(status["tags_visible"], false);
+    assert_eq!(status["publish_settled"], false);
 }
 
 #[tokio::test]

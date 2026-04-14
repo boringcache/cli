@@ -631,26 +631,7 @@ ensure_proxy_ready() {
   local port="$1"
   local log_file="$2"
   local pid_var="$3"
-  local url="http://${PROXY_HOST}:${port}/v2/"
-  local attempts
-  attempts="$((PROXY_READY_TIMEOUT_SECS / PROXY_READY_POLL_SECS))"
-  if (( attempts < 1 )); then
-    attempts=1
-  fi
-  for _ in $(seq 1 "$attempts"); do
-    if curl -fsS "$url" >/dev/null 2>&1; then
-      return 0
-    fi
-    if [[ -n "${!pid_var:-}" ]] && ! kill -0 "${!pid_var}" >/dev/null 2>&1; then
-      echo "ERROR: proxy ${port} exited before readiness check completed"
-      tail -n 120 "$log_file" || true
-      exit 1
-    fi
-    sleep "$PROXY_READY_POLL_SECS"
-  done
-  echo "ERROR: proxy on port ${port} failed to start within ${PROXY_READY_TIMEOUT_SECS}s"
-  tail -n 120 "$log_file" || true
-  exit 1
+  wait_for_proxy "$port" "${!pid_var:-}" "$log_file"
 }
 
 stop_proxy_graceful() {
