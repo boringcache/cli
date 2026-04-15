@@ -52,7 +52,7 @@ These are the biggest orchestration files and usually the first places to revisi
 | `src/commands/workspace/dashboard.rs` | 1353 lines | TUI orchestration, rendering, polling, status composition |
 | `src/commands/cache/restore/mod.rs` | 1376 lines | restore preflight, retries, transfer and verification |
 | `src/commands/cache/run.rs` | 1023 lines | `run` planning, proxy integration, dry-run JSON, save/restore orchestration |
-| `src/config.rs` | 750 lines | token/env/config resolution and persistence |
+| `src/encryption/mod.rs` + `src/encryption/**` | 365 lines across focused modules | lifecycle encryption, identity handling, passphrase flow |
 
 ## What is clearly first-class vs thinner
 

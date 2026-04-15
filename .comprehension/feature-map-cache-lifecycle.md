@@ -6,7 +6,7 @@ This file covers the archive/CAS lifecycle and the read/admin/reporting commands
 
 - `save`, `restore`, `mount`, and `run` are the lifecycle center.
 - `project_config/**` only becomes relevant for `run` and adapter planning.
-- `manifest/**`, `cache/**`, `encryption.rs`, and `signing/policy.rs` are lifecycle plumbing, not general workspace/reporting plumbing.
+- `manifest/**`, `cache/**`, `encryption/**`, and `signing/policy.rs` are lifecycle plumbing, not general workspace/reporting plumbing.
 
 ## Feature map
 
@@ -32,7 +32,7 @@ This file covers the archive/CAS lifecycle and the read/admin/reporting commands
 | --- | --- | --- |
 | `src/cache/**` | `save`, `restore`, `mount` | Archive/CAS transport, publish/restore helpers, file materialization |
 | `src/manifest/**` | `save`, `restore`, `mount`, `run` | Manifest build, digesting, compression, apply/diff helpers |
-| `src/encryption.rs` | `save`, `restore`, `mount`, `run`, `setup-encryption` | Age encryption, identity handling, passphrase flow |
+| `src/encryption/{mod,crypto,identity,passphrase,errors}.rs` | `save`, `restore`, `mount`, `run`, `setup-encryption` | Age encryption, identity handling, passphrase flow |
 | `src/signing/policy.rs` | `restore`, `mount`, `check` | Server signature verification policy; warn-only unless strict mode is enabled |
 | `src/project_config/**` | `run` and adapters only | `.boringcache.toml` discovery, built-in entry inference, profile resolution |
 
