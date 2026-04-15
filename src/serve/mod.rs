@@ -1,3 +1,4 @@
+pub(crate) mod blob_download_urls;
 pub mod cache_registry;
 pub mod cas_publish;
 pub mod http;

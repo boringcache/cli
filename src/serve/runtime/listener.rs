@@ -20,24 +20,10 @@ use crate::serve::state::{
 use crate::tag_utils::TagResolver;
 
 const BLOB_DOWNLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY";
-const CACHE_PREFETCH_CONCURRENCY_ENV: &str = "BORINGCACHE_CACHE_PREFETCH_CONCURRENCY";
-const BLOB_READ_CACHE_MAX_BYTES_ENV: &str = "BORINGCACHE_BLOB_READ_CACHE_MAX_BYTES";
 const TCP_LISTEN_BACKLOG_ENV: &str = "BORINGCACHE_TCP_LISTEN_BACKLOG";
 const DEFAULT_TCP_LISTEN_BACKLOG: u32 = 1024;
 const HTTP_VERSION_ENV: &str = "BORINGCACHE_HTTP_VERSION";
-const DISK_LIMITED_BLOB_READ_CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-const PUBLIC_PROXY_TUNING_ENVS: &[&str] =
-    &[BLOB_DOWNLOAD_CONCURRENCY_ENV, BLOB_READ_CACHE_MAX_BYTES_ENV];
-const INTERNAL_PROXY_TUNING_ENVS: &[&str] = &[
-    CACHE_PREFETCH_CONCURRENCY_ENV,
-    "BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS",
-    "BORINGCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES",
-    "BORINGCACHE_BLOB_PREFETCH_MAX_INFLIGHT_BYTES",
-    "BORINGCACHE_CACHE_CHECK_BATCH_MAX",
-    "BORINGCACHE_CACHE_CHECK_BATCH_CONCURRENCY",
-    "BORINGCACHE_CACHE_URL_BATCH_MAX",
-    "BORINGCACHE_CACHE_URL_BATCH_CONCURRENCY",
-];
+const BLOB_READ_CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const H2_INITIAL_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 const H2_INITIAL_CONNECTION_WINDOW: u32 = 32 * 1024 * 1024;
 const H2_MAX_CONCURRENT_STREAMS: u32 = 1024;
@@ -57,11 +43,11 @@ pub(super) async fn build_server_runtime(
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<(AppState, TcpListener, mpsc::Receiver<KvReplicationWork>)> {
-    let blob_read_cache = Arc::new(BlobReadCache::new(blob_read_cache_max_bytes())?);
+    let blob_read_cache = Arc::new(BlobReadCache::new(BLOB_READ_CACHE_MAX_BYTES)?);
     let blob_read_metrics = Arc::new(BlobReadMetrics::new());
     let prefetch_metrics = Arc::new(state::PrefetchMetrics::new());
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
-    let (pf_concurrency, pf_from_env) = blob_prefetch_concurrency(dl_concurrency);
+    let pf_concurrency = dl_concurrency;
     let (kv_replication_work_tx, kv_replication_work_rx) =
         mpsc::channel(KV_REPLICATION_WORK_QUEUE_CAPACITY);
     let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
@@ -92,7 +78,6 @@ pub(super) async fn build_server_runtime(
         configured_human_tags,
         registry_root_tag,
         fail_on_cache_error,
-        kv_manifest_warm_enabled: startup_warm,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -127,7 +112,7 @@ pub(super) async fn build_server_runtime(
         ),
         oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
         backend_breaker: Arc::new(state::BackendCircuitBreaker::new()),
-        prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(!startup_warm)),
         prefetch_complete_notify: Arc::new(tokio::sync::Notify::new()),
     };
 
@@ -200,43 +185,26 @@ pub(super) async fn build_server_runtime(
         state.blob_read_cache.max_bytes()
     );
     let src = |from_env: bool| if from_env { "env" } else { "auto" };
-    let pf_label = if pf_concurrency == 0 {
-        format!("disabled ({})", src(pf_from_env))
-    } else {
-        format!("{pf_concurrency} max ({})", src(pf_from_env))
-    };
     eprintln!(
-        "  Blob Download Concurrency: {dl_concurrency} max ({}), prefetch: {pf_label}",
+        "  Blob Download Concurrency: {dl_concurrency} max ({}), prefetch: linked",
         src(dl_from_env)
     );
-    let expert_overrides = configured_env_overrides(PUBLIC_PROXY_TUNING_ENVS);
-    if expert_overrides.is_empty() {
+    if !dl_from_env {
         eprintln!("  Expert Tuning Overrides: none");
     } else {
-        eprintln!("  Expert Tuning Overrides: {}", expert_overrides.join(", "));
-    }
-    let internal_overrides = configured_env_overrides(INTERNAL_PROXY_TUNING_ENVS);
-    if !internal_overrides.is_empty() {
-        eprintln!(
-            "  Internal Debug Overrides: {}",
-            internal_overrides.join(", ")
-        );
+        eprintln!("  Expert Tuning Overrides: {BLOB_DOWNLOAD_CONCURRENCY_ENV}");
     }
     eprintln!("  Replication queue: {KV_REPLICATION_WORK_QUEUE_CAPACITY} (bounded)");
     eprintln!(
         "  Startup mode: {}",
-        if state.kv_manifest_warm_enabled {
-            "warm"
-        } else {
-            "on-demand"
-        }
+        if startup_warm { "warm" } else { "on-demand" }
     );
     eprintln!(
-        "  Manifest warm: {}",
-        if state.kv_manifest_warm_enabled {
-            "enabled"
+        "  Full-tag hydration: {}",
+        if startup_warm {
+            "before ready"
         } else {
-            "disabled"
+            "background"
         }
     );
     eprintln!("  KV backlog policy: {KV_BACKLOG_POLICY}");
@@ -287,13 +255,6 @@ fn new_runtime_temp_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn blob_read_cache_max_bytes() -> u64 {
-    if let Some(configured) = parse_positive_u64_env(BLOB_READ_CACHE_MAX_BYTES_ENV) {
-        return configured;
-    }
-    DISK_LIMITED_BLOB_READ_CACHE_MAX_BYTES
-}
-
 fn auto_transfer_concurrency() -> usize {
     let resources = crate::platform::resources::SystemResources::detect();
     let is_ci = std::env::var("CI").is_ok();
@@ -324,26 +285,6 @@ fn parse_positive_u32_env(name: &str) -> Option<u32> {
     }
 }
 
-fn parse_positive_u64_env(name: &str) -> Option<u64> {
-    let raw = std::env::var(name).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    match trimmed.parse::<u64>() {
-        Ok(value) if value > 0 => Some(value),
-        _ => None,
-    }
-}
-
-fn configured_env_overrides(names: &[&'static str]) -> Vec<&'static str> {
-    names
-        .iter()
-        .copied()
-        .filter(|name| std::env::var_os(name).is_some())
-        .collect()
-}
-
 fn tcp_listen_backlog() -> u32 {
     parse_positive_u32_env(TCP_LISTEN_BACKLOG_ENV).unwrap_or(DEFAULT_TCP_LISTEN_BACKLOG)
 }
@@ -354,15 +295,6 @@ fn blob_download_concurrency() -> (usize, bool) {
     }
 
     (auto_transfer_concurrency().max(1), false)
-}
-
-fn blob_prefetch_concurrency(download_concurrency: usize) -> (usize, bool) {
-    let max_download = download_concurrency.max(1);
-    if let Some(configured) = parse_positive_usize_env(CACHE_PREFETCH_CONCURRENCY_ENV) {
-        return (configured.min(max_download), true);
-    }
-
-    (max_download, false)
 }
 
 fn force_http1() -> bool {
@@ -459,32 +391,15 @@ mod tests {
     }
 
     #[test]
-    fn blob_read_cache_max_bytes_honors_env_override() {
-        let _guard = test_env::lock();
-        test_env::set_var(BLOB_READ_CACHE_MAX_BYTES_ENV, "3145728");
-        assert_eq!(blob_read_cache_max_bytes(), 3_145_728);
-        test_env::remove_var(BLOB_READ_CACHE_MAX_BYTES_ENV);
+    fn blob_read_cache_max_bytes_is_fixed() {
+        assert_eq!(BLOB_READ_CACHE_MAX_BYTES, 64 * 1024 * 1024 * 1024);
     }
 
     #[test]
-    fn blob_read_cache_max_bytes_uses_generic_default_without_override() {
+    fn blob_download_concurrency_honors_env_override() {
         let _guard = test_env::lock();
-        test_env::remove_var(BLOB_READ_CACHE_MAX_BYTES_ENV);
-        let max = blob_read_cache_max_bytes();
-        assert_eq!(max, DISK_LIMITED_BLOB_READ_CACHE_MAX_BYTES);
-    }
-
-    #[test]
-    fn blob_prefetch_concurrency_matches_downloads_by_default() {
-        assert_eq!(blob_prefetch_concurrency(8), (8, false));
-        assert_eq!(blob_prefetch_concurrency(16), (16, false));
-    }
-
-    #[test]
-    fn blob_prefetch_concurrency_honors_env_override() {
-        let _guard = test_env::lock();
-        test_env::set_var(CACHE_PREFETCH_CONCURRENCY_ENV, "3");
-        assert_eq!(blob_prefetch_concurrency(8), (3, true));
-        test_env::remove_var(CACHE_PREFETCH_CONCURRENCY_ENV);
+        test_env::set_var(BLOB_DOWNLOAD_CONCURRENCY_ENV, "3");
+        assert_eq!(blob_download_concurrency(), (3, true));
+        test_env::remove_var(BLOB_DOWNLOAD_CONCURRENCY_ENV);
     }
 }

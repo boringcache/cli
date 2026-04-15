@@ -63,4 +63,3 @@ Most users should rely on the default proxy behavior.
 The intended expert overrides are:
 
 - `BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY` to cap read/download parallelism
-- `BORINGCACHE_BLOB_READ_CACHE_MAX_BYTES` to grow or shrink the local blob cache

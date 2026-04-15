@@ -104,7 +104,7 @@ pub(crate) async fn refresh_published_index_for_lookup(
     state: &AppState,
 ) -> Result<(), RegistryError> {
     let (entries, blob_order, cache_entry_id, _) =
-        match load_existing_index_with_fallback(state, true).await {
+        match load_existing_index_snapshot(state, true).await {
             Ok(result) => {
                 state.backend_breaker.record_success();
                 result
@@ -146,7 +146,7 @@ pub(crate) async fn refresh_published_index_for_lookup(
             published.set_empty();
         }
     }
-    clear_root_tag_misses(state);
+    clear_tag_misses(state, &state.registry_root_tag);
 
     Ok(())
 }
@@ -327,11 +327,10 @@ pub(crate) fn build_index_pointer(
         entries: pointer_entries,
         blobs: blobs
             .iter()
-            .enumerate()
-            .map(|(sequence, blob)| crate::cas_file::FilePointerBlob {
+            .map(|blob| crate::cas_file::FilePointerBlob {
                 digest: blob.digest.clone(),
                 size_bytes: blob.size_bytes,
-                sequence: Some(sequence as u64),
+                sequence: None,
             })
             .collect(),
     };
@@ -389,7 +388,6 @@ pub(crate) fn pointer_blob_order(
 pub(crate) fn merge_blob_order(
     merged_entries: &BTreeMap<String, BlobDescriptor>,
     base_blob_order: &[BlobDescriptor],
-    pending_blob_sequences: &HashMap<String, u64>,
 ) -> Vec<BlobDescriptor> {
     let mut size_by_digest = BTreeMap::new();
     for blob in merged_entries.values() {
@@ -402,23 +400,6 @@ pub(crate) fn merge_blob_order(
     let mut seen = HashSet::new();
     for blob in base_blob_order {
         let digest = blob.digest.clone();
-        let Some(size_bytes) = size_by_digest.get(&digest) else {
-            continue;
-        };
-        if seen.insert(digest.clone()) {
-            ordered.push(BlobDescriptor {
-                digest,
-                size_bytes: *size_bytes,
-            });
-        }
-    }
-
-    let mut pending_digests: Vec<(u64, String)> = pending_blob_sequences
-        .iter()
-        .map(|(digest, sequence)| (*sequence, digest.clone()))
-        .collect();
-    pending_digests.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-    for (_, digest) in pending_digests {
         let Some(size_bytes) = size_by_digest.get(&digest) else {
             continue;
         };
@@ -485,7 +466,7 @@ pub(crate) async fn load_existing_index(
     Ok((map, blob_order, cache_entry_id, manifest_root_digest))
 }
 
-pub(crate) async fn load_existing_index_with_fallback(
+pub(crate) async fn load_existing_index_snapshot(
     state: &AppState,
     retry_not_found: bool,
 ) -> Result<
@@ -497,28 +478,7 @@ pub(crate) async fn load_existing_index_with_fallback(
     ),
     RegistryError,
 > {
-    let tags = kv_root_tags(state);
-    for (idx, tag) in tags.iter().enumerate() {
-        let (entries, blob_order, cache_entry_id, manifest_root_digest) =
-            match load_existing_index(state, tag, retry_not_found).await {
-                Ok(result) => result,
-                Err(error) if is_invalid_file_pointer_error(&error) => {
-                    log::warn!(
-                        "KV root fallback: skipping tag {tag} due to invalid pointer ({})",
-                        error.message()
-                    );
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-        if cache_entry_id.is_some() || !entries.is_empty() {
-            if idx > 0 {
-                eprintln!("KV root fallback hit: loaded legacy tag {tag}");
-            }
-            return Ok((entries, blob_order, cache_entry_id, manifest_root_digest));
-        }
-    }
-    Ok((BTreeMap::new(), Vec::new(), None, None))
+    load_existing_index(state, state.registry_root_tag.trim(), retry_not_found).await
 }
 
 pub(crate) async fn resolve_hit_for_index_load(

@@ -39,8 +39,6 @@ use crate::serve::state::{AppState, diagnostics_enabled};
 use crate::serve::state::{OciManifestCacheEntry, UploadSession, digest_tag};
 
 const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
-const OCI_PREFETCH_BLOB_URL_LIMIT: usize = 128;
-const OCI_BLOB_RETRIEVABILITY_VALIDATION_TTL: Duration = Duration::from_secs(10);
 const EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS: usize = 20;
 const EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS: u64 = 75;
 const EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS: usize = 3;
@@ -52,7 +50,6 @@ const OCI_PREFETCH_STATE_WARMING: &str = "warming";
 const PROXY_PHASE_HEADER: &str = "X-BoringCache-Proxy-Phase";
 const PROXY_PUBLISH_STATE_HEADER: &str = "X-BoringCache-Publish-State";
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
-const OCI_BLOB_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_POINTER_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -372,7 +369,6 @@ mod tests {
             configured_human_tags: Vec::new(),
             registry_root_tag: "registry".to_string(),
             fail_on_cache_error: true,
-            kv_manifest_warm_enabled: true,
             blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
             upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
             kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -931,8 +927,6 @@ mod tests {
                 blobs: vec![],
                 name: "cache".to_string(),
                 inserted_at: Instant::now(),
-                blob_retrievability_validated_at: std::sync::Mutex::new(None),
-                blob_retrievability_validation_lock: tokio::sync::Mutex::new(()),
             }),
         );
 

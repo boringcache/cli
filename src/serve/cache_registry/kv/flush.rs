@@ -308,7 +308,7 @@ pub(crate) async fn flush_kv_index_with_mode(
 ) -> FlushResult {
     let guard = state.kv_flush_lock.lock().await;
 
-    let (pending_entries, pending_blob_paths, pending_blob_sequences) = {
+    let (pending_entries, pending_blob_paths) = {
         let mut pending = state.kv_pending.write().await;
         if pending.is_empty() {
             return FlushResult::Ok;
@@ -333,15 +333,7 @@ pub(crate) async fn flush_kv_index_with_mode(
 
     let entry_count = pending_entries.len();
 
-    let result = match do_flush(
-        state,
-        &pending_entries,
-        &pending_blob_paths,
-        &pending_blob_sequences,
-        flush_mode,
-    )
-    .await
-    {
+    let result = match do_flush(state, &pending_entries, &pending_blob_paths, flush_mode).await {
         Ok((merged_entries, merged_blob_order, cache_entry_id)) => {
             {
                 let mut published = state.kv_published_index.write().await;
@@ -355,7 +347,7 @@ pub(crate) async fn flush_kv_index_with_mode(
                 let mut flushing = state.kv_flushing.write().await;
                 *flushing = None;
             }
-            clear_root_tag_misses(state);
+            clear_tag_misses(state, &state.registry_root_tag);
 
             let promoted =
                 promote_pending_blobs_to_read_cache(state, &pending_entries, &pending_blob_paths)
@@ -375,8 +367,7 @@ pub(crate) async fn flush_kv_index_with_mode(
         Err(FlushError::Conflict(msg)) => {
             eprintln!("KV batch flush: skipped — tag conflict ({msg})");
             let mut pending = state.kv_pending.write().await;
-            let paths_to_cleanup =
-                pending.restore(pending_entries, pending_blob_paths, pending_blob_sequences);
+            let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
             drop(pending);
             cleanup_paths(paths_to_cleanup).await;
             let (base_ms, jitter_ms) = conflict_backoff_window(&msg);
@@ -398,7 +389,6 @@ pub(crate) async fn flush_kv_index_with_mode(
                         root_pending: None,
                         pending_alias_tags: false,
                         pending_blob_paths: Some(&pending_blob_paths),
-                        pending_blob_sequences: Some(&pending_blob_sequences),
                     },
                 )
                 .await;
@@ -409,8 +399,7 @@ pub(crate) async fn flush_kv_index_with_mode(
                 FlushResult::Deferred
             } else {
                 let mut pending = state.kv_pending.write().await;
-                let paths_to_cleanup =
-                    pending.restore(pending_entries, pending_blob_paths, pending_blob_sequences);
+                let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
                 drop(pending);
                 cleanup_paths(paths_to_cleanup).await;
                 let (base_ms, jitter_ms) = transient_backoff_window(&msg);
@@ -438,510 +427,10 @@ pub(crate) fn should_clear_flushing_after_flush(result: &FlushResult) -> bool {
     !matches!(result, FlushResult::Ok)
 }
 
-pub(crate) async fn refresh_kv_index(state: &AppState) {
-    if state.kv_flush_scheduled.load(Ordering::Acquire) {
-        return;
-    }
-    if state.kv_flushing.read().await.is_some() {
-        return;
-    }
-
-    let mut live_hit: Option<(String, CacheResolutionEntry)> = None;
-    for candidate_tag in kv_root_tags(state) {
-        match resolve_hit_for_index_load(state, &candidate_tag, true).await {
-            Ok(hit) => {
-                if candidate_tag != state.registry_root_tag.trim() {
-                    eprintln!("KV root fallback hit: refreshing from legacy tag {candidate_tag}");
-                }
-                live_hit = Some((candidate_tag, hit));
-                break;
-            }
-            Err(error) if error.status == StatusCode::NOT_FOUND => {}
-            Err(error) => {
-                log::warn!("KV index refresh failed during resolve: {error:?}");
-                return;
-            }
-        }
-    }
-
-    let Some((tag, hit)) = live_hit else {
-        let had_entries = {
-            let published = state.kv_published_index.read().await;
-            published.entry_count() > 0
-        };
-        if had_entries {
-            let mut published = state.kv_published_index.write().await;
-            published.touch_refresh();
-            clear_root_tag_misses(state);
-            eprintln!("KV index refresh: preserving in-memory index (no backend index)");
-            return;
-        }
-        {
-            let mut published = state.kv_published_index.write().await;
-            published.set_empty();
-        }
-        clear_root_tag_misses(state);
-        if had_entries {
-            eprintln!("KV index refresh: cleared stale entries (no backend index)");
-        }
-        return;
-    };
-
-    let cache_entry_id = match hit.cache_entry_id.clone() {
-        Some(id) => id,
-        None => {
-            log::warn!("KV index refresh: live hit missing cache_entry_id");
-            return;
-        }
-    };
-    let manifest_root_digest = hit
-        .manifest_root_digest
-        .clone()
-        .or(hit.manifest_digest.clone());
-    let should_fence = {
-        let published = state.kv_published_index.read().await;
-        if published
-            .cache_entry_id()
-            .is_some_and(|current| current == cache_entry_id.as_str())
-        {
-            drop(published);
-            let mut published = state.kv_published_index.write().await;
-            published.touch_refresh();
-            return;
-        }
-        published
-            .cache_entry_id()
-            .is_some_and(|current| current != cache_entry_id.as_str())
-    };
-    if should_fence
-        && !refresh_fence_allows_update(
-            state,
-            &tag,
-            &cache_entry_id,
-            manifest_root_digest.as_deref(),
-        )
-        .await
-    {
-        return;
-    }
-
-    let pointer = match fetch_pointer(state, &hit).await {
-        Ok(pointer) => pointer,
-        Err(error) => {
-            log::warn!("KV index refresh failed to fetch pointer: {error:?}");
-            return;
-        }
-    };
-
-    let mut entries = HashMap::new();
-    for entry in &pointer.entries {
-        if !matches!(entry.entry_type, EntryType::File) {
-            continue;
-        }
-        if let Some(digest) = &entry.digest {
-            entries.insert(
-                entry.path.clone(),
-                BlobDescriptor {
-                    digest: digest.clone(),
-                    size_bytes: entry.size_bytes,
-                },
-            );
-        }
-    }
-    let entry_map: BTreeMap<String, BlobDescriptor> = entries
-        .iter()
-        .map(|(key, blob)| (key.clone(), blob.clone()))
-        .collect();
-    let blob_order = pointer_blob_order(&pointer, &entry_map);
-
-    let (published_entries, published_entry_count) = {
-        let published = state.kv_published_index.read().await;
-        (published.entries_snapshot(), published.entry_count())
-    };
-    let gap_counts = count_published_gaps_in_backend(&entry_map, published_entries.as_ref());
-    if published_entry_count > 0 && (gap_counts.missing_keys > 0 || gap_counts.mismatched_keys > 0)
-    {
-        let mut published = state.kv_published_index.write().await;
-        published.touch_refresh();
-        clear_root_tag_misses(state);
-        eprintln!(
-            "KV index refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
-            entry_map.len(),
-            published_entry_count,
-            gap_counts.missing_keys,
-            gap_counts.mismatched_keys
-        );
-        return;
-    }
-
-    if entries.is_empty() {
-        let had_entries = {
-            let published = state.kv_published_index.read().await;
-            published.entry_count() > 0
-        };
-        if had_entries {
-            let mut published = state.kv_published_index.write().await;
-            published.touch_refresh();
-            clear_root_tag_misses(state);
-            eprintln!("KV index refresh: preserving in-memory index (empty pointer)");
-            return;
-        }
-        {
-            let mut published = state.kv_published_index.write().await;
-            published.set_empty();
-        }
-        clear_root_tag_misses(state);
-        if had_entries {
-            eprintln!("KV index refresh: cleared stale entries (empty pointer)");
-        }
-        return;
-    }
-
-    let count = entries.len();
-    {
-        let mut published = state.kv_published_index.write().await;
-        published.update(entries, blob_order, cache_entry_id.clone());
-    }
-    clear_root_tag_misses(state);
-    eprintln!("KV index refresh: {count} entries loaded");
-    preload_download_urls(state, &cache_entry_id).await;
-    spawn_preload_blobs(state, &cache_entry_id);
-}
-
-pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
-    if state.kv_flush_scheduled.load(Ordering::Acquire) {
-        return;
-    }
-    if state.kv_flushing.read().await.is_some() {
-        return;
-    }
-
-    let mut live_hit: Option<(String, CacheResolutionEntry)> = None;
-    for candidate_tag in kv_root_tags(state) {
-        match resolve_hit_for_index_load(state, &candidate_tag, true).await {
-            Ok(hit) => {
-                if candidate_tag != state.registry_root_tag.trim() {
-                    eprintln!("KV root fallback hit: refreshing from legacy tag {candidate_tag}");
-                }
-                live_hit = Some((candidate_tag, hit));
-                break;
-            }
-            Err(error) if error.status == StatusCode::NOT_FOUND => {}
-            Err(error) => {
-                log::warn!("KV version-triggered refresh failed during resolve: {error:?}");
-                return;
-            }
-        }
-    }
-
-    let Some((tag, hit)) = live_hit else {
-        return;
-    };
-
-    let cache_entry_id = match hit.cache_entry_id.clone() {
-        Some(id) => id,
-        None => {
-            log::warn!("KV version-triggered refresh: live hit missing cache_entry_id");
-            return;
-        }
-    };
-    let manifest_root_digest = hit
-        .manifest_root_digest
-        .clone()
-        .or(hit.manifest_digest.clone());
-    let should_fence = {
-        let published = state.kv_published_index.read().await;
-        if published
-            .cache_entry_id()
-            .is_some_and(|current| current == cache_entry_id.as_str())
-        {
-            drop(published);
-            let mut published = state.kv_published_index.write().await;
-            published.touch_refresh();
-            return;
-        }
-        published
-            .cache_entry_id()
-            .is_some_and(|current| current != cache_entry_id.as_str())
-    };
-    if should_fence
-        && !refresh_fence_allows_update(
-            state,
-            &tag,
-            &cache_entry_id,
-            manifest_root_digest.as_deref(),
-        )
-        .await
-    {
-        return;
-    }
-
-    let pointer = match fetch_pointer(state, &hit).await {
-        Ok(pointer) => pointer,
-        Err(error) => {
-            log::warn!("KV version-triggered refresh failed to fetch pointer: {error:?}");
-            return;
-        }
-    };
-
-    let mut entries = HashMap::new();
-    for entry in &pointer.entries {
-        if !matches!(entry.entry_type, EntryType::File) {
-            continue;
-        }
-        if let Some(digest) = &entry.digest {
-            entries.insert(
-                entry.path.clone(),
-                BlobDescriptor {
-                    digest: digest.clone(),
-                    size_bytes: entry.size_bytes,
-                },
-            );
-        }
-    }
-    let entry_map: BTreeMap<String, BlobDescriptor> = entries
-        .iter()
-        .map(|(key, blob)| (key.clone(), blob.clone()))
-        .collect();
-    let blob_order = pointer_blob_order(&pointer, &entry_map);
-
-    let (published_entries, published_entry_count) = {
-        let published = state.kv_published_index.read().await;
-        (published.entries_snapshot(), published.entry_count())
-    };
-    let gap_counts = count_published_gaps_in_backend(&entry_map, published_entries.as_ref());
-    if published_entry_count > 0 && (gap_counts.missing_keys > 0 || gap_counts.mismatched_keys > 0)
-    {
-        let mut published = state.kv_published_index.write().await;
-        published.touch_refresh();
-        clear_root_tag_misses(state);
-        eprintln!(
-            "KV version-triggered refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
-            entry_map.len(),
-            published_entry_count,
-            gap_counts.missing_keys,
-            gap_counts.mismatched_keys
-        );
-        return;
-    }
-
-    if entries.is_empty() {
-        let had_entries = {
-            let published = state.kv_published_index.read().await;
-            published.entry_count() > 0
-        };
-        if had_entries {
-            let mut published = state.kv_published_index.write().await;
-            published.touch_refresh();
-            clear_root_tag_misses(state);
-            return;
-        }
-        {
-            let mut published = state.kv_published_index.write().await;
-            published.set_empty();
-        }
-        clear_root_tag_misses(state);
-        return;
-    }
-
-    let count = entries.len();
-    {
-        let mut published = state.kv_published_index.write().await;
-        published.update(entries, blob_order, cache_entry_id.clone());
-    }
-    clear_root_tag_misses(state);
-    eprintln!("KV version-triggered refresh: {count} entries loaded (no blob prefetch)");
-}
-
-pub(crate) async fn poll_tag_version_loop(state: &AppState) {
-    let mut last_etag: Option<String> = None;
-    let mut last_cache_entry_id: Option<String> = {
-        let published = state.kv_published_index.read().await;
-        published.cache_entry_id().map(|s| s.to_string())
-    };
-    let mut polls: u64 = 0;
-    let mut changes: u64 = 0;
-    let mut refreshes: u64 = 0;
-    let mut skipped_refreshes: u64 = 0;
-    let refreshing = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let last_refresh_completed_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-    loop {
-        let is_active = is_proxy_active(state);
-        let base_ms = if is_active {
-            KV_VERSION_POLL_ACTIVE_SECS * 1000
-        } else {
-            KV_VERSION_POLL_IDLE_SECS * 1000
-        };
-        let jitter = rand::thread_rng().gen_range(0..=KV_VERSION_POLL_JITTER_MS * 2);
-        let sleep_ms = base_ms.saturating_sub(KV_VERSION_POLL_JITTER_MS) + jitter;
-        tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
-
-        if refreshing.load(Ordering::Acquire) {
-            continue;
-        }
-
-        let primary_tag = state.registry_root_tag.trim().to_string();
-        let poll_result = tokio::time::timeout(
-            KV_VERSION_POLL_TIMEOUT,
-            state
-                .api_client
-                .tag_pointer(&state.workspace, &primary_tag, last_etag.as_deref()),
-        )
-        .await;
-
-        polls += 1;
-
-        let poll_result = match poll_result {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => {
-                log::warn!("Tag version poll failed: {error}");
-                last_etag = None;
-                continue;
-            }
-            Err(_) => {
-                log::warn!("Tag version poll timed out");
-                continue;
-            }
-        };
-
-        use crate::api::client::TagPointerPollResult;
-        match poll_result {
-            TagPointerPollResult::NotModified => {}
-            TagPointerPollResult::NotFound => {
-                last_etag = None;
-            }
-            TagPointerPollResult::Changed { pointer, etag } => {
-                last_etag = etag;
-
-                let new_cache_entry_id = pointer.cache_entry_id.as_deref();
-                let changed = match (&last_cache_entry_id, new_cache_entry_id) {
-                    (Some(old), Some(new)) => old != new,
-                    (None, Some(_)) => true,
-                    _ => false,
-                };
-
-                if changed {
-                    changes += 1;
-                    let new_id = new_cache_entry_id.unwrap().to_string();
-                    last_cache_entry_id = Some(new_id.clone());
-
-                    let now_ms = crate::serve::state::unix_time_ms_now();
-                    let last_ms = last_refresh_completed_ms.load(Ordering::Acquire);
-                    let cooldown_ms = KV_VERSION_REFRESH_COOLDOWN.as_millis() as u64;
-                    if last_ms > 0 && now_ms.saturating_sub(last_ms) < cooldown_ms {
-                        skipped_refreshes += 1;
-                        eprintln!(
-                            "Tag version changed: {} (poll={} changes={} mode={} refresh=cooldown skipped={})",
-                            &new_id[..8.min(new_id.len())],
-                            polls,
-                            changes,
-                            if is_active { "active" } else { "idle" },
-                            skipped_refreshes,
-                        );
-                        continue;
-                    }
-
-                    eprintln!(
-                        "Tag version changed: {} (poll={} changes={} mode={})",
-                        &new_id[..8.min(new_id.len())],
-                        polls,
-                        changes,
-                        if is_active { "active" } else { "idle" }
-                    );
-
-                    let refresh_state = state.clone();
-                    let refresh_flag = refreshing.clone();
-                    let refresh_completed = last_refresh_completed_ms.clone();
-                    refresh_flag.store(true, Ordering::Release);
-                    refreshes += 1;
-                    let refresh_count = refreshes;
-                    tokio::spawn(async move {
-                        let started = std::time::Instant::now();
-                        refresh_kv_index_keys_only(&refresh_state).await;
-                        let duration_ms = started.elapsed().as_millis();
-                        let completed_ms = crate::serve::state::unix_time_ms_now();
-                        refresh_completed.store(completed_ms, Ordering::Release);
-                        eprintln!(
-                            "Tag version refresh complete: {}ms (refreshes={})",
-                            duration_ms, refresh_count
-                        );
-                        refresh_flag.store(false, Ordering::Release);
-                    });
-                }
-            }
-        }
-    }
-}
-
-pub(crate) async fn refresh_fence_allows_update(
-    state: &AppState,
-    tag: &str,
-    expected_cache_entry_id: &str,
-    expected_manifest_root_digest: Option<&str>,
-) -> bool {
-    let live_hit = match resolve_hit(state, tag).await {
-        Ok(hit) => hit,
-        Err(error) if error.status == StatusCode::NOT_FOUND => {
-            tokio::time::sleep(KV_RESOLVE_NOT_FOUND_RETRY_DELAY).await;
-            match resolve_hit(state, tag).await {
-                Ok(hit) => hit,
-                Err(error) => {
-                    log::warn!(
-                        "KV index refresh fence: live resolve failed (skipping update): {}",
-                        error.status
-                    );
-                    return false;
-                }
-            }
-        }
-        Err(error) => {
-            log::warn!(
-                "KV index refresh fence: live resolve failed (skipping update): {}",
-                error.status
-            );
-            return false;
-        }
-    };
-
-    let live_cache_entry_id = match live_hit.cache_entry_id.as_deref() {
-        Some(id) => id,
-        None => {
-            log::warn!("KV index refresh fence: live hit missing cache_entry_id");
-            return false;
-        }
-    };
-    if live_cache_entry_id != expected_cache_entry_id {
-        eprintln!(
-            "KV index refresh fence: skipping stale update (expected entry {}, live entry {})",
-            expected_cache_entry_id, live_cache_entry_id
-        );
-        return false;
-    }
-
-    if let (Some(expected_digest), Some(live_digest)) = (
-        expected_manifest_root_digest,
-        live_hit
-            .manifest_root_digest
-            .as_deref()
-            .or(live_hit.manifest_digest.as_deref()),
-    ) && expected_digest != live_digest
-    {
-        eprintln!(
-            "KV index refresh fence: skipping stale update (expected digest {}, live digest {})",
-            expected_digest, live_digest
-        );
-        return false;
-    }
-
-    true
-}
-
 pub(crate) async fn do_flush(
     state: &AppState,
     pending_entries: &BTreeMap<String, BlobDescriptor>,
     pending_blob_paths: &HashMap<String, PathBuf>,
-    pending_blob_sequences: &HashMap<String, u64>,
     flush_mode: FlushMode,
 ) -> Result<
     (
@@ -960,7 +449,7 @@ pub(crate) async fn do_flush(
     };
 
     let (backend_entries, backend_blob_order) =
-        match load_existing_index_with_fallback(state, false).await {
+        match load_existing_index_snapshot(state, false).await {
             Ok((existing, blob_order, _, _)) => (existing, blob_order),
             Err(e) => {
                 log::warn!("KV flush: failed to load existing index: {e:?}");
@@ -977,14 +466,9 @@ pub(crate) async fn do_flush(
     let (
         filtered_pending_entries,
         filtered_pending_blob_paths,
-        filtered_pending_blob_sequences,
         missing_pending_digests,
         missing_pending_entries,
-    ) = filter_pending_entries_with_local_blobs(
-        pending_entries,
-        pending_blob_paths,
-        pending_blob_sequences,
-    );
+    ) = filter_pending_entries_with_local_blobs(pending_entries, pending_blob_paths);
     if let FlushBaseSelection::PublishedFallback {
         backend_entry_count,
         published_entry_count,
@@ -1013,8 +497,7 @@ pub(crate) async fn do_flush(
             .iter()
             .map(|(k, v)| (k.clone(), v.clone())),
     );
-    let merged_blob_order =
-        merge_blob_order(&entries, &base_blob_order, &filtered_pending_blob_sequences);
+    let merged_blob_order = merge_blob_order(&entries, &base_blob_order);
     let total_count = entries.len();
     eprintln!(
         "KV flush: merging {existing_count} existing + {} pending = {total_count} total entries",
@@ -1181,7 +664,6 @@ pub(crate) async fn do_flush(
                 root_pending: kv_confirm_pending_metadata(&confirm_outcome),
                 pending_alias_tags: pending_alias_count > 0,
                 pending_blob_paths: None,
-                pending_blob_sequences: None,
             },
         )
         .await;
@@ -1343,7 +825,6 @@ pub(crate) async fn do_flush(
             root_pending: kv_confirm_pending_metadata(&confirm_outcome),
             pending_alias_tags: pending_alias_count > 0,
             pending_blob_paths: None,
-            pending_blob_sequences: None,
         },
     )
     .await;
@@ -1399,7 +880,6 @@ pub(crate) async fn do_flush(
 type FilteredPendingEntries = (
     BTreeMap<String, BlobDescriptor>,
     HashMap<String, PathBuf>,
-    HashMap<String, u64>,
     Vec<String>,
     usize,
 );
@@ -1407,11 +887,9 @@ type FilteredPendingEntries = (
 pub(crate) fn filter_pending_entries_with_local_blobs(
     pending_entries: &BTreeMap<String, BlobDescriptor>,
     pending_blob_paths: &HashMap<String, PathBuf>,
-    pending_blob_sequences: &HashMap<String, u64>,
 ) -> FilteredPendingEntries {
     let mut missing_digests = HashSet::new();
     let mut filtered_blob_paths = HashMap::new();
-    let mut filtered_blob_sequences = HashMap::new();
 
     for blob in pending_entries.values() {
         if missing_digests.contains(&blob.digest) || filtered_blob_paths.contains_key(&blob.digest)
@@ -1427,9 +905,6 @@ pub(crate) fn filter_pending_entries_with_local_blobs(
         match std::fs::metadata(path) {
             Ok(metadata) if metadata.is_file() => {
                 filtered_blob_paths.insert(blob.digest.clone(), path.clone());
-                if let Some(sequence) = pending_blob_sequences.get(&blob.digest) {
-                    filtered_blob_sequences.insert(blob.digest.clone(), *sequence);
-                }
             }
             Ok(_) => {
                 missing_digests.insert(blob.digest.clone());
@@ -1453,7 +928,6 @@ pub(crate) fn filter_pending_entries_with_local_blobs(
     (
         filtered_entries,
         filtered_blob_paths,
-        filtered_blob_sequences,
         missing_digests.into_iter().collect(),
         missing_entry_count,
     )

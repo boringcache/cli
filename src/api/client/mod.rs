@@ -25,10 +25,6 @@ use tokio::time::sleep;
 
 const BLOB_CHECK_BATCH_MAX: usize = 10_000;
 const BLOB_URL_BATCH_MAX: usize = 2_000;
-const BLOB_CHECK_BATCH_MAX_ENV: &str = "BORINGCACHE_CACHE_CHECK_BATCH_MAX";
-const BLOB_URL_BATCH_MAX_ENV: &str = "BORINGCACHE_CACHE_URL_BATCH_MAX";
-const BLOB_CHECK_BATCH_CONCURRENCY_ENV: &str = "BORINGCACHE_CACHE_CHECK_BATCH_CONCURRENCY";
-const BLOB_URL_BATCH_CONCURRENCY_ENV: &str = "BORINGCACHE_CACHE_URL_BATCH_CONCURRENCY";
 const BLOB_METRIC_ENDPOINT_OPERATION_CHECK: &str = "cache_blobs_check";
 const BLOB_METRIC_ENDPOINT_OPERATION_UPLOAD_URLS: &str = "cache_blobs_upload_urls";
 const BLOB_METRIC_ENDPOINT_OPERATION_DOWNLOAD_URLS: &str = "cache_blobs_download_urls";
@@ -472,19 +468,6 @@ fn dedupe_strings(values: Vec<String>) -> Vec<String> {
     deduped
 }
 
-fn parse_usize_env(name: &str) -> Option<usize> {
-    let raw = std::env::var(name).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    match trimmed.parse::<usize>() {
-        Ok(value) if value > 0 => Some(value),
-        Ok(_) => None,
-        Err(_) => None,
-    }
-}
-
 fn confirm_publish_request_timeout() -> Duration {
     let seconds = std::env::var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV)
         .ok()
@@ -512,31 +495,25 @@ fn transfer_connect_timeout() -> Duration {
 }
 
 fn blob_check_batch_max() -> usize {
-    parse_usize_env(BLOB_CHECK_BATCH_MAX_ENV).unwrap_or(BLOB_CHECK_BATCH_MAX)
+    BLOB_CHECK_BATCH_MAX
 }
 
 pub(crate) fn blob_url_batch_max() -> usize {
-    parse_usize_env(BLOB_URL_BATCH_MAX_ENV)
-        .map(|value| value.min(BLOB_URL_BATCH_MAX))
-        .unwrap_or(BLOB_URL_BATCH_MAX)
+    BLOB_URL_BATCH_MAX
 }
 
 fn blob_check_batch_concurrency(chunk_count: usize) -> usize {
     if chunk_count == 0 {
         return 1;
     }
-    parse_usize_env(BLOB_CHECK_BATCH_CONCURRENCY_ENV)
-        .unwrap_or_else(|| api_batch_concurrency(chunk_count))
-        .clamp(1, chunk_count)
+    api_batch_concurrency(chunk_count).clamp(1, chunk_count)
 }
 
 fn blob_url_batch_concurrency(chunk_count: usize) -> usize {
     if chunk_count == 0 {
         return 1;
     }
-    parse_usize_env(BLOB_URL_BATCH_CONCURRENCY_ENV)
-        .unwrap_or_else(|| api_batch_concurrency(chunk_count))
-        .clamp(1, chunk_count)
+    api_batch_concurrency(chunk_count).clamp(1, chunk_count)
 }
 
 fn normalize_optional_token(token: Option<String>) -> Option<String> {
@@ -764,50 +741,24 @@ mod tests {
     }
 
     #[test]
-    fn test_blob_check_batch_max_env_override() {
-        let _guard = test_env::lock();
-
-        test_env::set_var(BLOB_CHECK_BATCH_MAX_ENV, "7");
-        assert_eq!(blob_check_batch_max(), 7);
-        test_env::remove_var(BLOB_CHECK_BATCH_MAX_ENV);
+    fn test_blob_batch_maxes_use_fixed_defaults() {
         assert_eq!(blob_check_batch_max(), BLOB_CHECK_BATCH_MAX);
-    }
-
-    #[test]
-    fn test_blob_url_batch_max_env_override() {
-        let _guard = test_env::lock();
-
-        test_env::set_var(BLOB_URL_BATCH_MAX_ENV, "9");
-        assert_eq!(blob_url_batch_max(), 9);
-        test_env::remove_var(BLOB_URL_BATCH_MAX_ENV);
         assert_eq!(blob_url_batch_max(), BLOB_URL_BATCH_MAX);
     }
 
     #[test]
-    fn test_blob_url_batch_max_env_override_caps_to_api_limit() {
-        let _guard = test_env::lock();
-
-        test_env::set_var(BLOB_URL_BATCH_MAX_ENV, "4000");
-        assert_eq!(blob_url_batch_max(), BLOB_URL_BATCH_MAX);
-        test_env::remove_var(BLOB_URL_BATCH_MAX_ENV);
-    }
-
-    #[test]
-    fn test_blob_check_batch_concurrency_env_override() {
-        let _guard = test_env::lock();
-
-        test_env::set_var(BLOB_CHECK_BATCH_CONCURRENCY_ENV, "16");
-        assert_eq!(blob_check_batch_concurrency(4), 4);
-        test_env::remove_var(BLOB_CHECK_BATCH_CONCURRENCY_ENV);
-    }
-
-    #[test]
-    fn test_blob_url_batch_concurrency_env_override() {
-        let _guard = test_env::lock();
-
-        test_env::set_var(BLOB_URL_BATCH_CONCURRENCY_ENV, "3");
-        assert_eq!(blob_url_batch_concurrency(10), 3);
-        test_env::remove_var(BLOB_URL_BATCH_CONCURRENCY_ENV);
+    fn test_blob_batch_concurrency_uses_machine_governor() {
+        assert_eq!(blob_check_batch_concurrency(0), 1);
+        assert_eq!(blob_url_batch_concurrency(0), 1);
+        assert_eq!(blob_check_batch_concurrency(1), 1);
+        assert_eq!(
+            blob_check_batch_concurrency(10),
+            api_batch_concurrency(10).clamp(1, 10)
+        );
+        assert_eq!(
+            blob_url_batch_concurrency(10),
+            api_batch_concurrency(10).clamp(1, 10)
+        );
     }
 
     #[test]
