@@ -38,15 +38,21 @@ src/
     receipts.rs
     transfer.rs
     transport.rs
-  ci_detection.rs
-  cli.rs
+  ci_detection/
+    mod.rs
+    context.rs
+    detect.rs
+    tests.rs
   cli/
+    mod.rs
+    app.rs
     adapters.rs
     auth.rs
     cache.rs
     config.rs
     dispatch.rs
     preprocess.rs
+    tests.rs
     proxy.rs
     workspace.rs
   command_support/
@@ -55,10 +61,13 @@ src/
     save_support.rs
     specs.rs
     workspace.rs
-  config.rs
   config/
+    mod.rs
     env.rs
+    model.rs
     source.rs
+    store.rs
+    tests.rs
   commands/
     mod.rs
     adapters/
@@ -122,8 +131,19 @@ src/
       onboard.rs
       use_workspace.rs
       workspaces.rs
-  encryption.rs
-  error.rs
+  encryption/
+    mod.rs
+    crypto.rs
+    errors.rs
+    identity.rs
+    passphrase.rs
+    tests.rs
+  error/
+    mod.rs
+    classify.rs
+    convert.rs
+    kinds.rs
+    tests.rs
   exit_code.rs
   git.rs
   lib.rs
@@ -152,11 +172,14 @@ src/
     container.rs
     detection.rs
     resources.rs
-  progress.rs
   progress/
     common.rs
+    mod.rs
     model.rs
     render.rs
+    reporter.rs
+    system.rs
+    tests.rs
   project_config/
     mod.rs
     builtins.rs
@@ -167,7 +190,11 @@ src/
     mod.rs
     command.rs
     tags.rs
-  retry_resume.rs
+  retry_resume/
+    mod.rs
+    config.rs
+    policy.rs
+    tests.rs
   serve/
     mod.rs
     cas_publish.rs
@@ -242,14 +269,14 @@ These are the main files that still carry multiple concerns and should be split 
 | `src/serve/cache_registry/kv/flush.rs` | flush scheduling, refresh, publish polling, and shutdown handoff still share one file |
 | `src/commands/workspace/onboard.rs` | repo scan, optimize requests, diff/review, auth handoff, and file mutation still live together |
 | `src/commands/workspace/dashboard.rs` | terminal lifecycle, input handling, API fetch orchestration, view-model formatting, and layout/render helpers still live together |
-| `src/config.rs` | config model, file persistence, and env-backed auth resolution still meet in one root module |
+| `src/api/client/mod.rs` | client construction, capability discovery, error parsing, publish polling, batching policy, and large in-module tests still meet in one root module |
 
 ## Current Namespace Status
 
 Most of the root-level namespace split is in place now, so the remaining work is mostly within already-established folders.
 
 - `src/lib.rs` is the crate front door for module wiring and exports, and `src/main.rs` remains the thin binary entrypoint.
-- `src/cli.rs` plus `src/cli/` own Clap args and command indexing only.
+- `src/cli/mod.rs` plus `src/cli/` own Clap args and command indexing only.
 - `src/commands/` is the command entrypoint layer, grouped by `auth`, `cache`, `config`, `proxy`, `workspace`, and `adapters`.
 - `src/cache/`, `src/proxy/`, `src/signing/`, and `src/command_support/` carry reusable workflow code that should stay out of command entrypoints.
 - `src/api/models/` is already split by response family, so future API work should prefer adding files there instead of growing `mod.rs`.
@@ -257,7 +284,7 @@ Most of the root-level namespace split is in place now, so the remaining work is
 - `src/serve/runtime/`, `src/serve/http/`, `src/serve/cache_registry/`, and `src/serve/state/` are the durable runtime namespaces; the next work is to keep their remaining hot files thin.
 - `src/serve/http/handlers/` now owns the split OCI manifest, blob, and upload flows, while `handlers/mod.rs` still carries shared dispatch and proxy-status orchestration.
 - `src/serve/cache_registry/kv/` now has separate `blob_read.rs`, `prefetch.rs`, and `index.rs` helpers, while `kv/mod.rs` still carries shared KV policy, lookup-flight coordination, and pending-publish handoff types.
-- `src/telemetry.rs` and `src/progress.rs` are front modules over their submodules, and `src/observability/` remains the request/event metrics namespace.
+- `src/telemetry.rs` remains a thin front module, while `src/progress/mod.rs` fronts the progress namespace and `src/observability/` remains the request/event metrics namespace.
 - `src/ui.rs` is the front module for `src/ui/`, and `src/test_env.rs` remains a dedicated test-only support module.
 
 ## Next Structural Targets
@@ -269,7 +296,7 @@ These are the next sensible follow-ons from the current tree.
 - Revisit `src/api/client/mod.rs` for capability discovery, publish/pending polling, and error parsing helpers.
 - Revisit `src/commands/workspace/onboard.rs` for scan, diff/review, auth handoff, and apply helpers.
 - Revisit `src/commands/workspace/dashboard.rs` for terminal lifecycle, fetch orchestration, formatting, and render helpers.
-- Revisit `src/config.rs` for a cleaner split between config model, file persistence, and auth/env resolution.
+- Revisit `src/api/client/mod.rs` for capability discovery, publish/pending polling, and error parsing helpers.
 
 ## Command Surface Review
 
@@ -394,7 +421,13 @@ src/
 | `src/api/client/mod.rs` | `src/api/client/{error,pending,publish}.rs` | next |
 | `src/commands/workspace/onboard.rs` | `src/commands/workspace/onboard/{mod,scan,review,apply,auth}.rs` or sibling helpers | next |
 | `src/commands/workspace/dashboard.rs` | `src/commands/workspace/dashboard/{mod,app,input,render,format}.rs` or sibling helpers | later |
-| `src/config.rs` | `src/config/{mod,model,persist}.rs` | next |
+| `src/config.rs` | `src/config/{mod,model,store}.rs` | done |
+| `src/progress.rs` | `src/progress/{mod,reporter,system}.rs` | done |
+| `src/retry_resume.rs` | `src/retry_resume/{mod,config,policy}.rs` | done |
+| `src/error.rs` | `src/error/{mod,kinds,classify,convert}.rs` | done |
+| `src/ci_detection.rs` | `src/ci_detection/{mod,context,detect}.rs` | done |
+| `src/encryption.rs` | `src/encryption/{mod,crypto,identity,passphrase,errors}.rs` | done |
+| `src/cli.rs` | `src/cli/{mod,app,tests}.rs` | done |
 | `src/serve/cache_registry/{bazel,gradle,maven,nx,sccache,turborepo,go_cache}.rs` | `src/serve/cache_registry/tool_routes/*.rs` | later |
 
 ## Recommended Refactor Order
@@ -403,7 +436,7 @@ src/
 2. Trim `src/serve/cache_registry/kv/mod.rs` once the flush boundaries are explicit, so shared KV policy and handoff helpers stop accumulating there.
 3. Revisit `src/api/client/mod.rs` once the serve-side boundaries are stable.
 4. Revisit `src/commands/workspace/onboard.rs`, then `src/commands/workspace/dashboard.rs`, as the remaining mixed-role command hotspots.
-5. Split `src/config.rs` last unless config persistence expands again sooner.
+5. Revisit `src/commands/workspace/dashboard.rs` after the serve/API hotspots unless a command-surface refactor becomes urgent.
 
 ## Notes For Current Worktree
 

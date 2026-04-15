@@ -23,7 +23,8 @@ Owner: entry/routing layer (`support-primary`)
 
 - `src/main.rs`
 - `src/lib.rs`
-- `src/cli.rs`
+- `src/cli/mod.rs`
+- `src/cli/app.rs`
 - `src/cli/adapters.rs`
 - `src/cli/auth.rs`
 - `src/cli/cache.rs`
@@ -31,6 +32,7 @@ Owner: entry/routing layer (`support-primary`)
 - `src/cli/dispatch.rs`
 - `src/cli/preprocess.rs`
 - `src/cli/proxy.rs`
+- `src/cli/tests.rs`
 - `src/cli/workspace.rs`
 - `src/commands/mod.rs`
 - `src/commands/auth/mod.rs`
@@ -137,12 +139,20 @@ Owner: cache lifecycle support (`support-primary`)
 - `src/manifest/diff.rs`
 - `src/manifest/io.rs`
 - `src/manifest/model.rs`
-- `src/encryption.rs`
+- `src/encryption/mod.rs`
+- `src/encryption/crypto.rs`
+- `src/encryption/errors.rs`
+- `src/encryption/identity.rs`
+- `src/encryption/passphrase.rs`
+- `src/encryption/tests.rs`
 - `src/signing/mod.rs`
 - `src/signing/policy.rs`
 - `src/git.rs`
 - `src/tag_utils.rs`
-- `src/ci_detection.rs`
+- `src/ci_detection/mod.rs`
+- `src/ci_detection/context.rs`
+- `src/ci_detection/detect.rs`
+- `src/ci_detection/tests.rs`
 
 Notes:
 
@@ -177,9 +187,12 @@ Notes:
 
 Owner: shared command support (`support-primary` unless noted otherwise)
 
-- `src/config.rs`
+- `src/config/mod.rs`
+- `src/config/model.rs`
+- `src/config/store.rs`
 - `src/config/env.rs`
 - `src/config/source.rs`
+- `src/config/tests.rs`
 - `src/command_support/mod.rs`
 - `src/command_support/concurrency.rs`
 - `src/command_support/save_support.rs`
@@ -202,10 +215,13 @@ Owner: shared command support (`support-primary` unless noted otherwise)
 - `src/optimize/rules_github_actions.rs`
 - `src/optimize/rules_gitlab_ci.rs`
 - `src/optimize/transform.rs`
-- `src/progress.rs`
+- `src/progress/mod.rs`
 - `src/progress/common.rs`
 - `src/progress/model.rs`
 - `src/progress/render.rs`
+- `src/progress/reporter.rs`
+- `src/progress/system.rs`
+- `src/progress/tests.rs`
 - `src/ui.rs`
 - `src/ui/summary.rs`
 
@@ -277,15 +293,22 @@ Owner: cross-cutting support (`support-primary` with some `dormant-or-underused`
 - `src/telemetry.rs`
 - `src/telemetry/model.rs`
 - `src/telemetry/operation.rs`
-- `src/retry_resume.rs`
-- `src/error.rs`
+- `src/retry_resume/mod.rs`
+- `src/retry_resume/config.rs`
+- `src/retry_resume/policy.rs`
+- `src/retry_resume/tests.rs`
+- `src/error/mod.rs`
+- `src/error/classify.rs`
+- `src/error/convert.rs`
+- `src/error/kinds.rs`
+- `src/error/tests.rs`
 - `src/exit_code.rs`
 - `src/types.rs`
 - `src/test_env.rs`
 
 Notes:
 
-- retry logic in `src/retry_resume.rs` is active and used by the HTTP client
+- retry logic in `src/retry_resume/{mod,config,policy}.rs` is active and used by the HTTP client
 - `test_env.rs` is test-only infrastructure and intentionally not part of runtime features
 
 ## Rust test files
@@ -392,7 +415,7 @@ Owner: repo operations support (`support-primary`)
 After this file was added, the remaining ambiguity is not "what file exists" but "how active is it":
 
 - telemetry collector path
-- retry behavior in `src/retry_resume.rs`
+- retry behavior in `src/retry_resume/{mod,config,policy}.rs`
 - some optimize helpers marked `allow(dead_code)`
 - some API model fields kept for schema compatibility
 

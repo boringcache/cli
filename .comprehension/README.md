@@ -15,7 +15,7 @@ Use it in this order:
 
 ## Status legend
 
-- `public-primary`: direct user-facing feature wired from `src/cli.rs`
+- `public-primary`: direct user-facing feature wired from the `src/cli/` module tree
 - `support-primary`: not a command by itself, but on hot paths for public features
 - `internal-only`: compiled and used, but not exposed as a direct CLI feature
 - `legacy-visible-alias`: still reachable from the CLI, but mainly compatibility naming

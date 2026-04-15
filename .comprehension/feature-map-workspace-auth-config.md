@@ -23,9 +23,9 @@ This file covers the account/workspace/setup surface.
 | List accessible workspaces | `workspaces [--json]` | `public-primary` | `src/commands/workspace/workspaces.rs` | `ApiClient::list_workspaces`, `Config::load`, `progress::format_bytes` | `tests/integration_tests.rs`, `tests/cli_workflow_tests.rs`, `README.md`, `docs/onboard.md` | One of the better-covered workspace commands |
 | Onboard project and account | `onboard [path] [--email ...] [--name ...] [--username ...] [--apply] [--dry-run] [--manual] [--json]` | `public-primary` | `src/commands/workspace/onboard.rs` | `ApiClient` CLI-connect and optimize calls, `Config`, `audit`, `project_config`, `optimize`, `ui` | `tests/onboard_command_tests.rs`, `tests/cli_workflow_tests.rs`, `README.md`, `docs/onboard.md`, `docs/github-actions.md` | This is the setup funnel and one of the biggest orchestration files |
 | Audit repo cache config | `audit [root] [--path PATH]... [--write] [--json]` | `public-primary` | `src/commands/workspace/audit.rs` | `project_config::{discover,normalize_profile_name,canonical_entry_id}`, `parse_save_format`, `jwalk`, `ui` | `tests/audit_command_tests.rs`, `docs/onboard.md` | Migration/discovery helper for `.boringcache.toml` |
-| Config get/set/list | `config get|set|list` with `--json` on get/list | `public-primary`, `lightly-used` | `src/commands/config/config.rs` | `Config::load`, `Config::load_for_write`, `Config::update`, env helpers | help coverage in `tests/integration_tests.rs`, behavior unit tests in `src/config.rs` | Mostly a thin shell over `Config` |
+| Config get/set/list | `config get|set|list` with `--json` on get/list | `public-primary`, `lightly-used` | `src/commands/config/config.rs` | `Config::load`, `Config::load_for_write`, `Config::update`, env helpers | help coverage in `tests/integration_tests.rs`, behavior unit tests in `src/config/tests.rs` | Mostly a thin shell over `Config` |
 | Setup workspace encryption | `setup-encryption [workspace] [--identity-output PATH]` | `public-primary`, `lightly-used` | `src/commands/config/setup_encryption.rs` | `Config`, `encryption::{generate_keypair,save_identity,load_identity,identity_to_recipient}`, `ui` | indirect encrypted-flow coverage in `tests/cli_workflow_tests.rs` | Real setup path, but not deeply covered as a command surface |
-| Config and env/source plumbing | no direct entrypoint | `internal-only` | `src/config.rs`, `src/config/env.rs`, `src/config/source.rs` | `AuthPurpose`, `ValueSource`, env token lookup, config file persistence | unit tests in `src/config.rs`, `.boringcache.env.example`, `docs/github-actions.md` | This is the real source-of-truth plumbing for token, workspace, API URL, and encryption defaults |
+| Config and env/source plumbing | no direct entrypoint | `internal-only` | `src/config/mod.rs`, `src/config/model.rs`, `src/config/store.rs`, `src/config/env.rs`, `src/config/source.rs` | `AuthPurpose`, `ValueSource`, env token lookup, config file persistence | unit tests in `src/config/tests.rs`, `.boringcache.env.example`, `docs/github-actions.md` | This is the real source-of-truth plumbing for token, workspace, API URL, and encryption defaults |
 
 ## Shared workspace hub
 
@@ -33,7 +33,7 @@ These are not separate features, but they are central enough to call out:
 
 | Hub | Why it matters |
 | --- | --- |
-| `src/config.rs` | merges env, token file, config file, default workspace, and workspace encryption |
+| `src/config/{mod,model,store,env,source}.rs` | merges env, token file, config file, default workspace, and workspace encryption |
 | `src/command_support/workspace.rs` | shared workspace resolution path used by doctor, use, workspaces, token, dashboard, setup-encryption, and onboarding |
 | `src/api/client/workspace.rs` and related models | workspace/session/token/optimize server calls |
 

@@ -1,26 +1,11 @@
 use clap::{Parser, Subcommand};
 
-mod adapters;
-mod auth;
-mod cache;
-mod config;
-mod proxy;
-mod workspace;
-
-#[doc(hidden)]
-pub mod dispatch;
-#[doc(hidden)]
-pub mod preprocess;
-
-pub use adapters::AdapterArgs;
-pub use auth::{AuthArgs, LoginArgs, TokenCommands};
-pub use cache::{
-    CheckArgs, DeleteArgs, InspectArgs, LsArgs, MissesArgs, MountArgs, RestoreArgs, RunArgs,
-    SaveArgs, SessionsArgs, StatusArgs, TagsArgs,
+use super::{
+    AdapterArgs, AuditArgs, AuthArgs, CacheRegistryArgs, CheckArgs, ConfigArgs, DashboardArgs,
+    DeleteArgs, DoctorArgs, GoCacheProgArgs, InspectArgs, LoginArgs, LsArgs, MissesArgs, MountArgs,
+    OnboardArgs, RestoreArgs, RunArgs, SaveArgs, SessionsArgs, SetupEncryptionArgs, StatusArgs,
+    TagsArgs, TokenCommands, UseArgs, WorkspacesArgs,
 };
-pub use config::{ConfigArgs, ConfigSubcommand, SetupEncryptionArgs};
-pub use proxy::{CacheRegistryArgs, GoCacheProgArgs};
-pub use workspace::{AuditArgs, DashboardArgs, DoctorArgs, OnboardArgs, UseArgs, WorkspacesArgs};
 
 #[derive(Parser)]
 #[command(
@@ -146,64 +131,4 @@ pub enum Commands {
         about = "Run a GOCACHEPROG adapter that reads/writes through a BoringCache cache-registry endpoint"
     )]
     GoCacheProg(GoCacheProgArgs),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Cli, Commands};
-    use clap::Parser;
-
-    #[test]
-    fn test_login_parses_email_signup_flags() {
-        let cli = Cli::parse_from([
-            "boringcache",
-            "login",
-            "--manual",
-            "--email",
-            "jane@example.com",
-            "--name",
-            "Jane Doe",
-            "--username",
-            "jane-doe",
-        ]);
-
-        match cli.command {
-            Commands::Login(args) => {
-                assert!(args.manual);
-                assert_eq!(args.email.as_deref(), Some("jane@example.com"));
-                assert_eq!(args.name.as_deref(), Some("Jane Doe"));
-                assert_eq!(args.username.as_deref(), Some("jane-doe"));
-            }
-            _ => panic!("expected login command"),
-        }
-    }
-
-    #[test]
-    fn test_turbo_adapter_parses_workspace_and_command() {
-        let cli = Cli::parse_from([
-            "boringcache",
-            "turbo",
-            "--workspace",
-            "my-org/my-app",
-            "--tag",
-            "turbo-main",
-            "--endpoint-host",
-            "host.docker.internal",
-            "--",
-            "pnpm",
-            "turbo",
-            "run",
-            "build",
-        ]);
-
-        match cli.command {
-            Commands::Turbo(args) => {
-                assert_eq!(args.workspace.as_deref(), Some("my-org/my-app"));
-                assert_eq!(args.tag.as_deref(), Some("turbo-main"));
-                assert_eq!(args.endpoint_host.as_deref(), Some("host.docker.internal"));
-                assert_eq!(args.command, vec!["pnpm", "turbo", "run", "build"]);
-            }
-            _ => panic!("expected turbo command"),
-        }
-    }
 }
