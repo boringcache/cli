@@ -40,7 +40,7 @@ pub async fn list(
         .await?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        crate::json_output::print(&response)?;
         return Ok(());
     }
 
@@ -66,7 +66,7 @@ pub async fn show(
     let response = api_client.workspace_token(&workspace, &token_id).await?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        crate::json_output::print(&response)?;
         return Ok(());
     }
 
@@ -101,7 +101,7 @@ pub async fn create(options: CreateTokenOptions) -> Result<()> {
         .await?;
 
     if options.json_output {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        crate::json_output::print(&response)?;
         return Ok(());
     }
 
@@ -147,7 +147,7 @@ pub async fn create_ci(
         .await?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        crate::json_output::print(&response)?;
         return Ok(());
     }
 
@@ -180,7 +180,7 @@ pub async fn revoke(
         .await?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        crate::json_output::print(&response)?;
         return Ok(());
     }
 
@@ -223,7 +223,7 @@ pub async fn rotate(
         .await?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        crate::json_output::print(&response)?;
         return Ok(());
     }
 
@@ -577,7 +577,8 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::api::models::workspace::{
-        WorkspacePagination, WorkspaceSummaryContext, WorkspaceTokensFilter,
+        WorkspaceApiToken, WorkspaceIssuedToken, WorkspacePagination, WorkspaceSummaryContext,
+        WorkspaceTokenPairResponse, WorkspaceTokenResponse, WorkspaceTokensFilter,
         WorkspaceTokensResponse,
     };
 
@@ -629,5 +630,122 @@ mod tests {
             next_page_command(&response),
             "boringcache token list org/testing --page 3 --limit 20 --all"
         );
+    }
+
+    #[test]
+    fn token_list_json_contract_adds_schema_version() {
+        let response = WorkspaceTokensResponse {
+            workspace: WorkspaceSummaryContext {
+                name: "testing".to_string(),
+                slug: "org/testing".to_string(),
+            },
+            filter: WorkspaceTokensFilter {
+                include_inactive: false,
+            },
+            pagination: WorkspacePagination {
+                limit: 20,
+                offset: 0,
+                total: 1,
+                returned: 1,
+                has_more: false,
+            },
+            tokens: vec![WorkspaceApiToken {
+                id: "tok_1".to_string(),
+                name: "ci".to_string(),
+                access_level: "save".to_string(),
+                scope_type: "workspace".to_string(),
+                state: "active".to_string(),
+                active: true,
+                created_at: "2026-04-15T00:00:00Z".to_string(),
+                expires_at: None,
+                expires_in_days: None,
+                last_used_at: None,
+                write_tag_prefixes: vec!["deps".to_string()],
+            }],
+        };
+
+        let value = crate::json_output::to_value(&response).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["workspace"]["slug"], "org/testing");
+        assert_eq!(value["tokens"][0]["id"], "tok_1");
+    }
+
+    #[test]
+    fn token_detail_json_contract_adds_schema_version() {
+        let token = WorkspaceApiToken {
+            id: "tok_1".to_string(),
+            name: "ci".to_string(),
+            access_level: "save".to_string(),
+            scope_type: "workspace".to_string(),
+            state: "active".to_string(),
+            active: true,
+            created_at: "2026-04-15T00:00:00Z".to_string(),
+            expires_at: None,
+            expires_in_days: None,
+            last_used_at: None,
+            write_tag_prefixes: vec!["deps".to_string()],
+        };
+        let response = WorkspaceTokenResponse {
+            workspace: WorkspaceSummaryContext {
+                name: "testing".to_string(),
+                slug: "org/testing".to_string(),
+            },
+            token,
+            value: Some("secret".to_string()),
+            rotated_from: None,
+        };
+
+        let value = crate::json_output::to_value(&response).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["workspace"]["slug"], "org/testing");
+        assert_eq!(value["value"], "secret");
+    }
+
+    #[test]
+    fn token_pair_json_contract_adds_schema_version() {
+        let response = WorkspaceTokenPairResponse {
+            workspace: WorkspaceSummaryContext {
+                name: "testing".to_string(),
+                slug: "org/testing".to_string(),
+            },
+            restore: WorkspaceIssuedToken {
+                token: WorkspaceApiToken {
+                    id: "tok_restore".to_string(),
+                    name: "restore".to_string(),
+                    access_level: "restore".to_string(),
+                    scope_type: "workspace".to_string(),
+                    state: "active".to_string(),
+                    active: true,
+                    created_at: "2026-04-15T00:00:00Z".to_string(),
+                    expires_at: None,
+                    expires_in_days: None,
+                    last_used_at: None,
+                    write_tag_prefixes: Vec::new(),
+                },
+                value: "restore-secret".to_string(),
+            },
+            save: WorkspaceIssuedToken {
+                token: WorkspaceApiToken {
+                    id: "tok_save".to_string(),
+                    name: "save".to_string(),
+                    access_level: "save".to_string(),
+                    scope_type: "workspace".to_string(),
+                    state: "active".to_string(),
+                    active: true,
+                    created_at: "2026-04-15T00:00:00Z".to_string(),
+                    expires_at: None,
+                    expires_in_days: None,
+                    last_used_at: None,
+                    write_tag_prefixes: vec!["deps".to_string()],
+                },
+                value: "save-secret".to_string(),
+            },
+        };
+
+        let value = crate::json_output::to_value(&response).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["workspace"]["slug"], "org/testing");
+        assert_eq!(value["restore"]["token"]["access_level"], "restore");
+        assert_eq!(value["save"]["token"]["access_level"], "save");
     }
 }

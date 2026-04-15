@@ -21,7 +21,7 @@ pub async fn execute(
         .await?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        crate::json_output::print(&response)?;
         return Ok(());
     }
 
@@ -102,4 +102,68 @@ fn showing_range(pagination: &crate::api::models::workspace::WorkspacePagination
         pagination.offset + pagination.returned,
         pagination.total
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::models::workspace::{
+        WorkspaceMissesResponse, WorkspacePagination, WorkspaceStatusCacheHealth,
+        WorkspaceStatusMissedKey, WorkspaceStatusPeriod, WorkspaceStatusWorkspace,
+    };
+    use serde_json::Value;
+
+    #[test]
+    fn misses_json_contract_adds_schema_version() {
+        let response = WorkspaceMissesResponse {
+            workspace: WorkspaceStatusWorkspace {
+                id: Value::String("ws_1".to_string()),
+                name: "Demo".to_string(),
+                slug: "org/demo".to_string(),
+                description: None,
+                provisioned: true,
+                created_at: "2026-04-15T00:00:00Z".to_string(),
+                updated_at: "2026-04-15T00:00:00Z".to_string(),
+            },
+            period: WorkspaceStatusPeriod {
+                key: "24h".to_string(),
+                started_at: "2026-04-14T00:00:00Z".to_string(),
+                ended_at: "2026-04-15T00:00:00Z".to_string(),
+            },
+            generated_at: "2026-04-15T00:00:00Z".to_string(),
+            cache_health: WorkspaceStatusCacheHealth {
+                warm_hit_rate: 0.8,
+                cold_misses: 1,
+                recurring_misses: 2,
+                cold_pct: 0.33,
+                recurring_pct: 0.67,
+                session_miss_total: 3,
+                normal_misses: 3,
+                degraded_misses: 0,
+                total_misses: 3,
+                degraded_pct: 0.0,
+                excluded_seed_misses: 0,
+                excluded_seed_sessions: 0,
+            },
+            pagination: WorkspacePagination {
+                limit: 20,
+                offset: 0,
+                total: 1,
+                returned: 1,
+                has_more: false,
+            },
+            missed_keys: vec![WorkspaceStatusMissedKey {
+                key_hash: "abc123".to_string(),
+                tool: "turbo".to_string(),
+                miss_count: 3,
+                last_seen_at: Some("2026-04-15T00:00:00Z".to_string()),
+                sampled_key_prefix: Some("deps-".to_string()),
+                miss_state: "recurring".to_string(),
+            }],
+        };
+
+        let value = crate::json_output::to_value(&response).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["workspace"]["slug"], "org/demo");
+        assert_eq!(value["missed_keys"][0]["miss_state"], "recurring");
+    }
 }

@@ -25,7 +25,7 @@ pub async fn execute(
         .workspace_status(&workspace, &period, limit)
         .await?;
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&status)?);
+        crate::json_output::print(&status)?;
         return Ok(());
     }
 
@@ -439,6 +439,148 @@ pub(crate) fn truncate(value: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::models::workspace::{
+        WorkspaceStatusCacheHealth, WorkspaceStatusCacheSummary, WorkspaceStatusInventory,
+        WorkspaceStatusMissedKey, WorkspaceStatusOperations, WorkspaceStatusPeriod,
+        WorkspaceStatusResponse, WorkspaceStatusRuntimeSummary, WorkspaceStatusSavings,
+        WorkspaceStatusSession, WorkspaceStatusSessionError, WorkspaceStatusSessionHealth,
+        WorkspaceStatusSessionMissedKey, WorkspaceStatusTool, WorkspaceStatusWorkspace,
+    };
+    use serde_json::Value;
+
+    fn sample_status_response() -> WorkspaceStatusResponse {
+        WorkspaceStatusResponse {
+            workspace: WorkspaceStatusWorkspace {
+                id: Value::String("ws_1".to_string()),
+                name: "Demo".to_string(),
+                slug: "org/demo".to_string(),
+                description: Some("workspace".to_string()),
+                provisioned: true,
+                created_at: "2026-04-15T00:00:00Z".to_string(),
+                updated_at: "2026-04-15T00:00:00Z".to_string(),
+            },
+            period: WorkspaceStatusPeriod {
+                key: "7d".to_string(),
+                started_at: "2026-04-08T00:00:00Z".to_string(),
+                ended_at: "2026-04-15T00:00:00Z".to_string(),
+            },
+            generated_at: "2026-04-15T00:00:00Z".to_string(),
+            inventory: WorkspaceStatusInventory {
+                tagged_entries_count: 4,
+                tagged_storage_bytes: 1024,
+                tagged_hits: 10,
+                version_count: 2,
+                orphaned_entries_count: 0,
+                orphaned_storage_bytes: 0,
+                dedup_unique_bytes: 800,
+                dedup_logical_bytes: 1200,
+                dedup_savings_bytes: 400,
+                dedup_ratio: 0.33,
+            },
+            operations: WorkspaceStatusOperations {
+                cache: WorkspaceStatusCacheSummary {
+                    total_requests: 12,
+                    total_hits: 9,
+                    lookup_requests: 12,
+                    hit_rate: 0.75,
+                    bytes_total: 4096,
+                    avg_latency_ms: 12.5,
+                    degraded_count: 0,
+                },
+                runtime: WorkspaceStatusRuntimeSummary {
+                    total_queries: 12,
+                    error_count: 0,
+                    error_rate: 0.0,
+                    avg_latency_ms: 10.0,
+                    degraded_count: 0,
+                },
+                cache_health: WorkspaceStatusCacheHealth {
+                    warm_hit_rate: 0.9,
+                    cold_misses: 1,
+                    recurring_misses: 2,
+                    cold_pct: 0.33,
+                    recurring_pct: 0.67,
+                    session_miss_total: 3,
+                    normal_misses: 3,
+                    degraded_misses: 0,
+                    total_misses: 3,
+                    degraded_pct: 0.0,
+                    excluded_seed_misses: 0,
+                    excluded_seed_sessions: 0,
+                },
+                session_health: WorkspaceStatusSessionHealth {
+                    total_sessions: 1,
+                    healthy_sessions: 1,
+                    error_sessions: 0,
+                    degraded_sessions: 0,
+                    avg_hit_rate: 0.75,
+                    avg_duration_ms: 4000.0,
+                },
+            },
+            savings: WorkspaceStatusSavings {
+                cache_hits: 9,
+                bytes_served: 2048,
+                bytes_written: 1024,
+                cli_restores: 2,
+                cli_restore_bytes: 2048,
+                cli_compression_saved: 512,
+                cli_avg_restore_ms: 120.0,
+                dedup_unique_bytes: 800,
+                dedup_logical_bytes: 1200,
+                dedup_savings_bytes: 400,
+                dedup_ratio: 0.33,
+            },
+            tools: vec![WorkspaceStatusTool {
+                tool: "turbo".to_string(),
+                total: 12,
+                hits: 9,
+                misses: 3,
+                lookup_total: 12,
+                hit_rate: 0.75,
+                warm_hit_rate: 0.9,
+                recurring_misses: 2,
+                new_key_misses: 1,
+                bytes_total: 2048,
+                avg_latency_ms: 12.5,
+                degraded: 0,
+            }],
+            sessions: vec![WorkspaceStatusSession {
+                session_id: "sess_1".to_string(),
+                tool: "turbo".to_string(),
+                project_hint: Some("demo".to_string()),
+                phase_hint: Some("build".to_string()),
+                metadata_hints: std::collections::BTreeMap::from([(
+                    "lane".to_string(),
+                    "ci".to_string(),
+                )]),
+                hit_rate: 0.75,
+                hit_count: 9,
+                miss_count: 3,
+                error_count: 0,
+                error_details: vec![WorkspaceStatusSessionError {
+                    operation: "get".to_string(),
+                    count: 0,
+                }],
+                duration_seconds: Some(4.0),
+                bytes_read: 1024,
+                bytes_written: 512,
+                created_at: "2026-04-15T00:00:00Z".to_string(),
+                missed_keys: vec![WorkspaceStatusSessionMissedKey {
+                    key_hash: "abc123".to_string(),
+                    miss_count: 3,
+                    sampled_key_prefix: Some("deps-".to_string()),
+                }],
+            }],
+            missed_keys: vec![WorkspaceStatusMissedKey {
+                key_hash: "abc123".to_string(),
+                tool: "turbo".to_string(),
+                miss_count: 3,
+                last_seen_at: Some("2026-04-15T00:00:00Z".to_string()),
+                sampled_key_prefix: Some("deps-".to_string()),
+                miss_state: "recurring".to_string(),
+            }],
+        }
+    }
 
     #[test]
     fn format_duration_seconds_formats_ranges() {
@@ -451,5 +593,13 @@ mod tests {
     fn truncate_shortens_long_values() {
         assert_eq!(truncate("abcdefghij", 6), "abc...");
         assert_eq!(truncate("short", 10), "short");
+    }
+
+    #[test]
+    fn status_json_contract_adds_schema_version() {
+        let value = crate::json_output::to_value(&sample_status_response()).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["workspace"]["slug"], "org/demo");
+        assert_eq!(value["tools"][0]["tool"], "turbo");
     }
 }

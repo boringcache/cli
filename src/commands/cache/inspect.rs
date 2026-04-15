@@ -26,7 +26,7 @@ pub async fn execute(
         })?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&inspection)?);
+        crate::json_output::print(&inspection)?;
         return Ok(());
     }
 
@@ -262,6 +262,10 @@ fn parse_inspect_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::models::cache::{
+        CacheInspectEntry, CacheInspectIdentifier, CacheInspectPerformance, CacheInspectResponse,
+        CacheInspectTag, CacheInspectVersions, CacheInspectWorkspace,
+    };
 
     #[test]
     fn parse_inspect_args_accepts_default_workspace_mode() {
@@ -286,5 +290,79 @@ mod tests {
     fn parse_inspect_args_rejects_workspace_without_target() {
         let error = parse_inspect_args("boringcache/rails".to_string(), None).unwrap_err();
         assert!(error.to_string().contains("Inspect target is missing"));
+    }
+
+    #[test]
+    fn inspect_json_contract_adds_schema_version() {
+        let inspection = CacheInspectResponse {
+            workspace: CacheInspectWorkspace {
+                name: "Demo".to_string(),
+                slug: "org/demo".to_string(),
+            },
+            identifier: CacheInspectIdentifier {
+                query: "ruby-deps".to_string(),
+                matched_by: "tag".to_string(),
+            },
+            entry: CacheInspectEntry {
+                id: "entry-1".to_string(),
+                primary_tag: Some("ruby-deps".to_string()),
+                status: "ready".to_string(),
+                manifest_root_digest: "sha256:abc".to_string(),
+                manifest_digest: Some("sha256:def".to_string()),
+                manifest_format_version: Some(2),
+                storage_mode: "archive".to_string(),
+                stored_size_bytes: 1024,
+                uncompressed_size: Some(2048),
+                compressed_size: Some(1024),
+                archive_size: Some(1024),
+                file_count: Some(12),
+                compression_algorithm: Some("zstd".to_string()),
+                blob_count: None,
+                blob_total_size_bytes: None,
+                cas_layout: None,
+                storage_verified: true,
+                hit_count: 8,
+                created_at: "2026-04-15T00:00:00Z".to_string(),
+                uploaded_at: Some("2026-04-15T00:00:00Z".to_string()),
+                last_accessed_at: Some("2026-04-15T00:00:00Z".to_string()),
+                expires_at: None,
+                encrypted: false,
+                encryption_algorithm: None,
+                encryption_recipient_hint: None,
+                server_signed: true,
+                server_signed_at: Some("2026-04-15T00:00:00Z".to_string()),
+            },
+            tags: vec![CacheInspectTag {
+                name: "ruby-deps".to_string(),
+                primary: true,
+                system: false,
+                created_at: "2026-04-15T00:00:00Z".to_string(),
+                updated_at: "2026-04-15T00:00:00Z".to_string(),
+            }],
+            versions: Some(CacheInspectVersions {
+                tag: "ruby-deps".to_string(),
+                version_count: 2,
+                max_versions: 5,
+                current: true,
+                total_storage_bytes: 4096,
+            }),
+            performance: Some(CacheInspectPerformance {
+                total_operations: 10,
+                saves: 2,
+                restores: 8,
+                avg_restore_ms: 120.0,
+                avg_save_ms: 240.0,
+                errors: 0,
+                avg_download_speed: 100.0,
+                avg_upload_speed: 50.0,
+                last_operation: Some("2026-04-15T00:00:00Z".to_string()),
+                error_rate: 0.0,
+            }),
+        };
+
+        let value = crate::json_output::to_value(&inspection).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["workspace"]["slug"], "org/demo");
+        assert_eq!(value["entry"]["id"], "entry-1");
     }
 }

@@ -63,7 +63,7 @@ async fn execute_inner(
                 misses: 0,
                 results: vec![],
             };
-            println!("{}", serde_json::to_string_pretty(&summary)?);
+            crate::json_output::print(&summary)?;
         } else {
             ui::info("No tags specified to check");
         }
@@ -92,7 +92,7 @@ async fn execute_inner(
                 misses: 0,
                 results: vec![],
             };
-            println!("{}", serde_json::to_string_pretty(&summary)?);
+            crate::json_output::print(&summary)?;
         } else {
             ui::warn("No valid tags to check");
         }
@@ -217,7 +217,7 @@ async fn execute_inner(
             misses,
             results: check_results,
         };
-        println!("{}", serde_json::to_string_pretty(&summary)?);
+        crate::json_output::print(&summary)?;
     } else {
         ui::blank_line();
         for result in &check_results {
@@ -306,4 +306,40 @@ fn verify_check_signature(entry: &crate::api::CacheResolutionEntry) -> Result<()
             error
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_json_contract_adds_schema_version() {
+        let summary = CheckSummary {
+            workspace: "org/demo".to_string(),
+            total: 2,
+            hits: 1,
+            misses: 1,
+            results: vec![
+                CheckResult {
+                    tag: "deps-main".to_string(),
+                    requested_tag: "deps".to_string(),
+                    status: "hit".to_string(),
+                    size: Some(1024),
+                    compressed_size: Some(512),
+                },
+                CheckResult {
+                    tag: "deps-fallback".to_string(),
+                    requested_tag: "deps-fallback".to_string(),
+                    status: "miss".to_string(),
+                    size: None,
+                    compressed_size: None,
+                },
+            ],
+        };
+
+        let value = crate::json_output::to_value(&summary).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["workspace"], "org/demo");
+        assert_eq!(value["results"][0]["status"], "hit");
+    }
 }

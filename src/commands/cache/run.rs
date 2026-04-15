@@ -76,6 +76,7 @@ struct DryRunProxyPlan {
     endpoint_host: String,
     port: u16,
     read_only: bool,
+    startup_mode: String,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     metadata_hints: BTreeMap<String, String>,
 }
@@ -162,6 +163,7 @@ pub async fn execute(
     identity: Option<String>,
     proxy: Option<String>,
     metadata_hints: Vec<String>,
+    startup_warm: bool,
     host: String,
     endpoint_host: Option<String>,
     port: u16,
@@ -379,6 +381,7 @@ pub async fn execute(
                 endpoint_host: advertised_endpoint_host.clone(),
                 port,
                 read_only: effective_proxy_read_only,
+                startup_mode: cache_registry::proxy_startup_mode(startup_warm).to_string(),
                 metadata_hints: proxy_metadata_hints.clone(),
             });
             let plan = DryRunPlan {
@@ -406,6 +409,7 @@ pub async fn execute(
                 identity.as_deref(),
                 proxy.as_deref(),
                 &proxy_metadata_hints,
+                startup_warm,
                 &host,
                 endpoint_host.as_deref(),
                 port,
@@ -474,6 +478,7 @@ pub async fn execute(
             no_git,
             endpoint_host,
             proxy_metadata_hints.clone(),
+            startup_warm,
             fail_on_cache_error,
             effective_proxy_read_only,
         )
@@ -624,6 +629,7 @@ fn print_dry_run(
     identity: Option<&str>,
     proxy: Option<&str>,
     proxy_metadata_hints: &BTreeMap<String, String>,
+    startup_warm: bool,
     host: &str,
     endpoint_host: Option<&str>,
     port: u16,
@@ -675,6 +681,9 @@ fn print_dry_run(
             "--port".to_string(),
             port.to_string(),
         ];
+        if !startup_warm {
+            proxy_parts.push("--on-demand".to_string());
+        }
         if let Some(endpoint_host) = endpoint_host {
             proxy_parts.push("--endpoint-host".to_string());
             proxy_parts.push(endpoint_host.to_string());
@@ -696,6 +705,10 @@ fn print_dry_run(
             proxy_parts.push(format!("{key}={value}"));
         }
         ui::info(&format!("[boringcache]   {}", proxy_parts.join(" ")));
+        ui::info(&format!(
+            "[boringcache]   # proxy startup mode: {}",
+            cache_registry::proxy_startup_mode(startup_warm)
+        ));
     }
 
     for (key, value) in env_vars {
@@ -745,8 +758,7 @@ fn print_dry_run(
 }
 
 fn print_dry_run_json(plan: DryRunPlan) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(&plan)?);
-    Ok(())
+    crate::json_output::print(&plan)
 }
 
 fn prefix_archive_tag(tag: &str, prefix: Option<&str>) -> String {

@@ -172,7 +172,7 @@ pub async fn execute(workspace: Option<String>, json_output: bool) -> Result<()>
     let report = finalize_report(report);
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::json_output::print(&report)?;
         if report.ok {
             return Ok(());
         }
@@ -716,5 +716,123 @@ mod tests {
         assert_eq!(check.status, DoctorStatus::Warn);
         assert!(!check.ready);
         assert_eq!(check.summary, "blocked");
+    }
+
+    #[test]
+    fn doctor_json_contract_adds_schema_version() {
+        let report = finalize_report(DoctorReport {
+            ok: true,
+            failure_count: 0,
+            warning_count: 0,
+            api: ApiReport {
+                configured_url: "https://api.example.test".to_string(),
+                source: ValueSource {
+                    kind: "env".to_string(),
+                    detail: Some("BORINGCACHE_API_URL".to_string()),
+                },
+                v1_url: "https://api.example.test/v1".to_string(),
+                v2_url: "https://api.example.test/v2".to_string(),
+            },
+            workspace: WorkspaceReport {
+                status: DoctorStatus::Ok,
+                requested: Some("org/demo".to_string()),
+                resolved: Some("org/demo".to_string()),
+                source: ValueSource {
+                    kind: "env".to_string(),
+                    detail: Some("BORINGCACHE_DEFAULT_WORKSPACE".to_string()),
+                },
+                accessible_total: Some(1),
+                accessible_sample: vec!["org/demo".to_string()],
+                summary: "Ready".to_string(),
+                error: None,
+            },
+            auth: AuthReport {
+                restore: PurposeCheck {
+                    status: DoctorStatus::Ok,
+                    usable: true,
+                    source: ValueSource {
+                        kind: "env".to_string(),
+                        detail: Some("BORINGCACHE_RESTORE_TOKEN".to_string()),
+                    },
+                    configured: true,
+                    actual_access_level: Some("restore".to_string()),
+                    scope_type: Some("workspace".to_string()),
+                    workspace_slug: Some("org/demo".to_string()),
+                    organization_slug: Some("org".to_string()),
+                    write_tag_prefixes: Vec::new(),
+                    summary: "restore ready".to_string(),
+                    error: None,
+                },
+                save: PurposeCheck {
+                    status: DoctorStatus::Ok,
+                    usable: true,
+                    source: ValueSource {
+                        kind: "env".to_string(),
+                        detail: Some("BORINGCACHE_SAVE_TOKEN".to_string()),
+                    },
+                    configured: true,
+                    actual_access_level: Some("save".to_string()),
+                    scope_type: Some("workspace".to_string()),
+                    workspace_slug: Some("org/demo".to_string()),
+                    organization_slug: Some("org".to_string()),
+                    write_tag_prefixes: vec!["deps".to_string()],
+                    summary: "save ready".to_string(),
+                    error: None,
+                },
+                admin: PurposeCheck {
+                    status: DoctorStatus::Warn,
+                    usable: false,
+                    source: ValueSource {
+                        kind: "missing".to_string(),
+                        detail: None,
+                    },
+                    configured: false,
+                    actual_access_level: None,
+                    scope_type: None,
+                    workspace_slug: None,
+                    organization_slug: None,
+                    write_tag_prefixes: Vec::new(),
+                    summary: "admin missing".to_string(),
+                    error: None,
+                },
+            },
+            commands: CommandReport {
+                status: CommandCheck {
+                    status: DoctorStatus::Ok,
+                    ready: true,
+                    summary: "ready".to_string(),
+                },
+                inspect: CommandCheck {
+                    status: DoctorStatus::Ok,
+                    ready: true,
+                    summary: "ready".to_string(),
+                },
+                save: CommandCheck {
+                    status: DoctorStatus::Ok,
+                    ready: true,
+                    summary: "ready".to_string(),
+                },
+                rm: CommandCheck {
+                    status: DoctorStatus::Warn,
+                    ready: false,
+                    summary: "blocked".to_string(),
+                },
+                use_command: CommandCheck {
+                    status: DoctorStatus::Ok,
+                    ready: true,
+                    summary: "ready".to_string(),
+                },
+                workspaces: CommandCheck {
+                    status: DoctorStatus::Ok,
+                    ready: true,
+                    summary: "ready".to_string(),
+                },
+            },
+        });
+
+        let value = crate::json_output::to_value(&report).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["workspace"]["resolved"], "org/demo");
+        assert_eq!(value["commands"]["save"]["ready"], true);
     }
 }

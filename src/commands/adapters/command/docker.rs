@@ -23,9 +23,7 @@ pub(super) struct OciCachePlan {
 
 #[derive(Debug, Clone)]
 pub(super) struct ResolvedDockerPlan {
-    pub proxy_tag: String,
     pub oci_cache: OciCachePlan,
-    pub used_legacy_embedded_ref_tag: bool,
 }
 
 pub(super) fn validate_cache_mode(value: &str) -> Result<()> {
@@ -53,37 +51,14 @@ pub(super) fn resolve_docker_plan(
             "Unsupported --tag '{tag_input}'. Use a human-readable cache tag, not a digest reference."
         );
     }
+    if tag_input.contains(':') {
+        anyhow::bail!(
+            "Unsupported --tag '{tag_input}'. Use --tag for the proxy cache tag and --cache-ref-tag for the OCI cache tag."
+        );
+    }
 
     let explicit_ref_tag = trim_non_empty(explicit_cache_ref_tag);
-    let (proxy_tag, ref_tag, used_legacy_embedded_ref_tag) = if let Some(separator) =
-        tag_input.rfind(':')
-    {
-        let proxy_tag = tag_input[..separator].trim();
-        let embedded_ref_tag = tag_input[separator + 1..].trim();
-        if proxy_tag.is_empty() || embedded_ref_tag.is_empty() {
-            anyhow::bail!(
-                "Unsupported --tag '{tag_input}'. Expected a cache tag or cache-tag:ref-tag."
-            );
-        }
-        if let Some(value) = explicit_ref_tag
-            && value != DEFAULT_CACHE_REF_TAG
-        {
-            anyhow::bail!(
-                "--tag must not include a ref-tag suffix when --cache-ref-tag is also set. Use --tag for the proxy tag and --cache-ref-tag for the OCI tag."
-            );
-        }
-        (
-            proxy_tag.to_string(),
-            validate_cache_ref_tag(embedded_ref_tag)?,
-            true,
-        )
-    } else {
-        (
-            tag_input.to_string(),
-            validate_cache_ref_tag(explicit_ref_tag.unwrap_or(DEFAULT_CACHE_REF_TAG))?,
-            false,
-        )
-    };
+    let ref_tag = validate_cache_ref_tag(explicit_ref_tag.unwrap_or(DEFAULT_CACHE_REF_TAG))?;
 
     let registry_ref = format!("{endpoint_host}:{port}/cache:{ref_tag}");
     let cache_from = format!("type=registry,ref={registry_ref}");
@@ -94,14 +69,12 @@ pub(super) fn resolve_docker_plan(
     };
 
     Ok(ResolvedDockerPlan {
-        proxy_tag,
         oci_cache: OciCachePlan {
             registry_ref,
             cache_from,
             cache_to,
             ref_tag,
         },
-        used_legacy_embedded_ref_tag,
     })
 }
 
@@ -262,8 +235,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_docker_plan_uses_embedded_ref_tag_for_compatibility() {
-        let plan = resolve_docker_plan(
+    fn resolve_docker_plan_rejects_embedded_ref_tag_syntax() {
+        let error = resolve_docker_plan(
             "docker-main:cache-main",
             None,
             "127.0.0.1",
@@ -271,17 +244,10 @@ mod tests {
             "max",
             false,
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(plan.proxy_tag, "docker-main");
-        assert_eq!(
-            plan.oci_cache.registry_ref,
-            "127.0.0.1:5000/cache:cache-main"
-        );
-        assert_eq!(
-            plan.oci_cache.cache_to.as_deref(),
-            Some("type=registry,ref=127.0.0.1:5000/cache:cache-main,mode=max")
-        );
-        assert!(plan.used_legacy_embedded_ref_tag);
+        assert!(error.to_string().contains(
+            "Use --tag for the proxy cache tag and --cache-ref-tag for the OCI cache tag"
+        ));
     }
 }

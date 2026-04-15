@@ -12,7 +12,7 @@ pub use model::{
     RepoProfileConfig, ResolvedAdapterConfig, ResolvedRunEntryPlan, ResolvedRunPlan,
     RunEntryRequestSource, RunEntryResolutionSource,
 };
-pub use resolve::{resolve_adapter_config, resolve_run_plan};
+pub use resolve::{prefer_cli_list, prefer_cli_scalar, resolve_adapter_config, resolve_run_plan};
 
 #[cfg(test)]
 mod tests {
@@ -323,5 +323,32 @@ workspace = "org/workspace"
         let resolved = resolve_adapter_config(temp_dir.path(), "turbo").unwrap();
         assert!(resolved.loaded_config.is_some());
         assert!(resolved.adapter_config.is_none());
+    }
+
+    #[test]
+    fn prefer_cli_scalar_uses_cli_value_when_present() {
+        assert_eq!(
+            prefer_cli_scalar(Some("configured".to_string()), Some("cli".to_string())),
+            Some("cli".to_string())
+        );
+        assert_eq!(
+            prefer_cli_scalar(Some("configured".to_string()), None),
+            Some("configured".to_string())
+        );
+    }
+
+    #[test]
+    fn prefer_cli_list_replaces_configured_values_when_cli_values_exist() {
+        let configured = vec!["bundler".to_string(), "pnpm-store".to_string()];
+        let cli = vec!["node-modules".to_string(), "bundler".to_string()];
+
+        assert_eq!(
+            prefer_cli_list(&configured, &cli, canonical_entry_id),
+            vec!["node_modules".to_string(), "bundler".to_string()]
+        );
+        assert_eq!(
+            prefer_cli_list(&configured, &[], canonical_entry_id),
+            vec!["bundler".to_string(), "pnpm-store".to_string()]
+        );
     }
 }
