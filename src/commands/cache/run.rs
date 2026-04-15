@@ -792,7 +792,7 @@ fn archive_platform_suffix(no_platform: bool) -> Result<String> {
 
     Ok(format!(
         "-{}",
-        crate::platform::Platform::detect()?.to_tag_suffix()
+        crate::platform::Platform::detect()?.to_archive_tag_suffix()
     ))
 }
 

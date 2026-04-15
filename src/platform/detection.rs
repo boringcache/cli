@@ -72,47 +72,23 @@ impl Platform {
     }
 
     #[inline]
-    pub fn append_legacy_to_tag(&self, tag: &str) -> String {
-        if Self::has_platform_suffix(tag) {
-            tag.to_string()
-        } else {
-            format!("{}-{}", tag, self.legacy_tag_suffix())
+    pub fn to_archive_tag_suffix(&self) -> &'static str {
+        match (self.os.as_str(), self.arch.as_str()) {
+            ("macos", "arm64") => "darwin-arm64",
+            ("macos", _) => "darwin-amd64",
+            ("windows", "arm64") => "windows-arm64",
+            ("windows", _) => "windows-amd64",
+            (_, "arm64") => "linux-arm64",
+            _ => "linux-amd64",
         }
     }
 
     #[inline]
     pub fn has_platform_suffix(tag: &str) -> bool {
-        const KNOWN_SUFFIXES: &[&str] = &[
-            "-linux-amd64",
-            "-linux-arm64",
-            "-linux-arm32",
-            "-linux-x86",
-            "-linux-musl-amd64",
-            "-linux-musl-arm64",
-            "-linux-musl-arm32",
-            "-linux-musl-x86",
-            "-macos-amd64",
-            "-macos-arm64",
-            "-macos-arm32",
-            "-macos-x86",
-            "-windows-amd64",
-            "-windows-arm64",
-            "-windows-arm32",
-            "-windows-x86",
-            "-darwin-amd64",
-            "-darwin-arm64",
-            "-darwin-arm32",
-            "-darwin-x86",
-        ];
-        if KNOWN_SUFFIXES.iter().any(|suffix| tag.ends_with(suffix)) {
+        if let Some(last_part) = tag.rsplit('-').next()
+            && matches!(last_part, "x86_64" | "arm64" | "arm32" | "x86")
+        {
             return true;
-        }
-
-        let Some(last_part) = tag.rsplit('-').next() else {
-            return false;
-        };
-        if !matches!(last_part, "amd64" | "x86_64" | "arm64" | "arm32" | "x86") {
-            return false;
         }
 
         let tag_bytes = tag.as_bytes();
@@ -123,15 +99,19 @@ impl Platform {
             b"-arch-",
             b"-macos-",
             b"-windows-",
-            b"-darwin-",
             b"-linux-",
         ];
 
-        PATTERNS.iter().any(|pattern| {
-            tag_bytes
+        for pattern in PATTERNS {
+            if tag_bytes
                 .windows(pattern.len())
                 .any(|window| window == *pattern)
-        })
+            {
+                return true;
+            }
+        }
+
+        false
     }
 
     #[inline]
@@ -141,17 +121,8 @@ impl Platform {
             .clone()
     }
 
-    #[inline]
-    pub fn legacy_tag_suffix(&self) -> String {
-        self.compute_legacy_tag_suffix()
-    }
-
     fn compute_tag_suffix(&self) -> String {
-        self.compute_legacy_tag_suffix()
-    }
-
-    fn compute_legacy_tag_suffix(&self) -> String {
-        let arch = self.legacy_tag_arch();
+        let arch = &self.arch;
 
         match self.os.as_str() {
             "linux" => match (&self.distro, &self.version) {
@@ -183,14 +154,6 @@ impl Platform {
                 }
             }
             _ => format!("{}-unknown-{}", self.os, arch),
-        }
-    }
-
-    fn legacy_tag_arch(&self) -> &str {
-        match self.arch.as_str() {
-            "aarch64" => "arm64",
-            "arm" => "arm32",
-            other => other,
         }
     }
 
@@ -436,18 +399,6 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_tag_suffix_generation() {
-        let platform = Platform {
-            os: "linux".to_string(),
-            arch: "x86_64".to_string(),
-            distro: Some("ubuntu".to_string()),
-            version: Some("22".to_string()),
-            tag_suffix_cache: std::sync::OnceLock::new(),
-        };
-        assert_eq!(platform.legacy_tag_suffix(), "ubuntu-22-x86_64");
-    }
-
-    #[test]
     fn test_macos_uses_major_version_family_suffix() {
         let platform = Platform {
             os: "macos".to_string(),
@@ -491,11 +442,21 @@ mod tests {
         };
 
         assert_eq!(platform.to_tag_suffix(), "alpine-3-x86_64");
-        assert_eq!(platform.legacy_tag_suffix(), "alpine-3-x86_64");
     }
 
     #[test]
-    fn test_legacy_platform_suffix_is_still_detected() {
+    fn test_archive_tag_suffix_generation() {
+        let macos_arm = Platform::new_for_testing("macos", "arm64", Some("darwin"), Some("15"));
+        let windows_x64 = Platform::new_for_testing("windows", "x86_64", None, Some("11"));
+        let linux_x64 = Platform::new_for_testing("linux", "x86_64", Some("ubuntu"), Some("22"));
+
+        assert_eq!(macos_arm.to_archive_tag_suffix(), "darwin-arm64");
+        assert_eq!(windows_x64.to_archive_tag_suffix(), "windows-amd64");
+        assert_eq!(linux_x64.to_archive_tag_suffix(), "linux-amd64");
+    }
+
+    #[test]
+    fn test_platform_suffix_detection() {
         assert!(Platform::has_platform_suffix("ruby-3.3.4-ubuntu-22-x86_64"));
         assert!(Platform::has_platform_suffix("ruby-3.3.4-darwin-arm64"));
     }

@@ -473,7 +473,7 @@ fn no_git_context_single_candidate() {
 }
 
 #[test]
-fn explicit_platform_suffix_skips_migration_candidates() {
+fn explicit_platform_suffix_skips_duplicate_candidates() {
     let resolver = TagResolver::new(Some(make_platform()), GitContext::default(), true);
 
     let candidates = resolver.restore_tag_candidates("gems-ubuntu-22-x86_64");
@@ -481,7 +481,7 @@ fn explicit_platform_suffix_skips_migration_candidates() {
 }
 
 #[test]
-fn macos_restore_candidates_include_versioned_legacy_suffix() {
+fn macos_restore_candidates_use_versioned_suffix() {
     let resolver = TagResolver::new(
         Some(Platform::new_for_testing(
             "macos",

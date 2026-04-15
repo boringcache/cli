@@ -36,10 +36,15 @@ impl TagResolver {
     pub fn restore_tag_candidates(&self, base_tag: &str) -> Vec<String> {
         let mut candidates = Vec::new();
 
-        self.push_platform_candidates(&mut candidates, &self.tag_with_git_for_save(base_tag));
+        if let Ok(tag) = self.effective_save_tag(base_tag) {
+            candidates.push(tag);
+        }
 
         if self.git_enabled && !self.is_on_default_branch() {
-            self.push_platform_candidates(&mut candidates, base_tag);
+            self.push_candidate(
+                &mut candidates,
+                apply_platform_to_tag_with_instance(base_tag, self.platform.as_ref()),
+            );
         }
 
         if candidates.is_empty() {
@@ -65,19 +70,6 @@ impl TagResolver {
             format!("{base_tag}{suffix}")
         } else {
             base_tag.to_string()
-        }
-    }
-
-    fn push_platform_candidates(&self, candidates: &mut Vec<String>, tag: &str) {
-        self.push_candidate(
-            candidates,
-            apply_platform_to_tag_with_instance(tag, self.platform.as_ref()),
-        );
-
-        if let Some(platform) = self.platform.as_ref()
-            && !Platform::has_platform_suffix(tag)
-        {
-            self.push_candidate(candidates, platform.append_legacy_to_tag(tag));
         }
     }
 
