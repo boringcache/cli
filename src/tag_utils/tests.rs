@@ -20,10 +20,6 @@ fn make_platform() -> Platform {
 }
 
 fn family_tag(tag: &str) -> String {
-    format!("{tag}-linux-amd64")
-}
-
-fn legacy_tag(tag: &str) -> String {
     format!("{tag}-ubuntu-22-x86_64")
 }
 
@@ -111,12 +107,7 @@ fn restore_candidates_with_fallback_to_default_branch() {
     let candidates = resolver.restore_tag_candidates("gems");
     assert_eq!(
         candidates,
-        vec![
-            family_tag("gems-branch-feature-x"),
-            legacy_tag("gems-branch-feature-x"),
-            family_tag("gems"),
-            legacy_tag("gems"),
-        ]
+        vec![family_tag("gems-branch-feature-x"), family_tag("gems"),]
     );
 }
 
@@ -156,12 +147,7 @@ fn branch_restore_falls_back_to_default_branch() {
     let candidates = resolver.restore_tag_candidates("gems");
     assert_eq!(
         candidates,
-        vec![
-            family_tag("gems-branch-feature-login"),
-            legacy_tag("gems-branch-feature-login"),
-            family_tag("gems"),
-            legacy_tag("gems"),
-        ]
+        vec![family_tag("gems-branch-feature-login"), family_tag("gems"),]
     );
 }
 
@@ -195,12 +181,7 @@ fn commit_slug_used_when_branch_missing() {
     let candidates = resolver.restore_tag_candidates("gems");
     assert_eq!(
         candidates,
-        vec![
-            family_tag("gems-sha-abcdef123456"),
-            legacy_tag("gems-sha-abcdef123456"),
-            family_tag("gems"),
-            legacy_tag("gems"),
-        ]
+        vec![family_tag("gems-sha-abcdef123456"), family_tag("gems"),]
     );
 }
 
@@ -240,12 +221,7 @@ fn feature_branch_with_non_main_default_branch() {
     let candidates = resolver.restore_tag_candidates("gems");
     assert_eq!(
         candidates,
-        vec![
-            family_tag("gems-branch-feature-x"),
-            legacy_tag("gems-branch-feature-x"),
-            family_tag("gems"),
-            legacy_tag("gems"),
-        ]
+        vec![family_tag("gems-branch-feature-x"), family_tag("gems"),]
     );
 }
 
@@ -263,7 +239,7 @@ fn default_branch_no_fallback_needed() {
     );
 
     let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec![family_tag("gems"), legacy_tag("gems")]);
+    assert_eq!(candidates, vec![family_tag("gems")]);
 }
 
 #[test]
@@ -280,7 +256,7 @@ fn fallback_not_duplicated_when_on_default_branch() {
     );
 
     let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec![family_tag("gems"), legacy_tag("gems")]);
+    assert_eq!(candidates, vec![family_tag("gems")]);
 }
 
 #[test]
@@ -320,11 +296,9 @@ fn long_tag_resolves_with_suffixes() {
     );
 
     let candidates = resolver.restore_tag_candidates(&base_tag);
-    assert_eq!(candidates.len(), 4);
+    assert_eq!(candidates.len(), 2);
     assert!(candidates[0].contains("-branch-feature-x"));
-    assert!(candidates[1].contains("-branch-feature-x"));
-    assert!(!candidates[2].contains("-branch-"));
-    assert!(!candidates[3].contains("-branch-"));
+    assert!(!candidates[1].contains("-branch-"));
 }
 
 #[test]
@@ -341,11 +315,9 @@ fn fallback_order_branch_first_then_default() {
     );
 
     let candidates = resolver.restore_tag_candidates("deps");
-    assert_eq!(candidates.len(), 4);
+    assert_eq!(candidates.len(), 2);
     assert!(candidates[0].contains("-branch-feature-checkout"));
-    assert!(candidates[1].contains("-branch-feature-checkout"));
-    assert!(!candidates[2].contains("-branch-"));
-    assert!(!candidates[3].contains("-branch-"));
+    assert!(!candidates[1].contains("-branch-"));
 }
 
 #[test]
@@ -378,10 +350,8 @@ fn multiple_feature_branches_each_fallback_to_same_default() {
     let candidates_b = resolver_b.restore_tag_candidates("gems");
 
     assert_ne!(candidates_a[0], candidates_b[0]);
-    assert_eq!(candidates_a[2], candidates_b[2]);
-    assert_eq!(candidates_a[3], candidates_b[3]);
-    assert_eq!(candidates_a[2], family_tag("gems"));
-    assert_eq!(candidates_a[3], legacy_tag("gems"));
+    assert_eq!(candidates_a[1], candidates_b[1]);
+    assert_eq!(candidates_a[1], family_tag("gems"));
 }
 
 #[test]
@@ -398,10 +368,7 @@ fn explicit_channel_tag_no_fallback() {
     );
 
     let candidates = resolver.restore_tag_candidates("gems-main");
-    assert_eq!(
-        candidates,
-        vec![family_tag("gems-main"), legacy_tag("gems-main")]
-    );
+    assert_eq!(candidates, vec![family_tag("gems-main")]);
 }
 
 #[test]
@@ -418,7 +385,7 @@ fn git_disabled_no_fallback() {
     );
 
     let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec![family_tag("gems"), legacy_tag("gems")]);
+    assert_eq!(candidates, vec![family_tag("gems")]);
 }
 
 #[test]
@@ -437,12 +404,7 @@ fn pr_branch_falls_back_to_default() {
     let candidates = resolver.restore_tag_candidates("gems");
     assert_eq!(
         candidates,
-        vec![
-            family_tag("gems-branch-feature-pr-123"),
-            legacy_tag("gems-branch-feature-pr-123"),
-            family_tag("gems"),
-            legacy_tag("gems"),
-        ]
+        vec![family_tag("gems-branch-feature-pr-123"), family_tag("gems"),]
     );
 }
 
@@ -460,10 +422,9 @@ fn deeply_nested_branch_falls_back() {
     );
 
     let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates.len(), 4);
+    assert_eq!(candidates.len(), 2);
     assert!(candidates[0].contains("-branch-feature-team-project-task-123"));
-    assert_eq!(candidates[2], family_tag("gems"));
-    assert_eq!(candidates[3], legacy_tag("gems"));
+    assert_eq!(candidates[1], family_tag("gems"));
 }
 
 #[test]
@@ -480,7 +441,7 @@ fn master_as_default_branch() {
     );
 
     let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec![family_tag("gems"), legacy_tag("gems")]);
+    assert_eq!(candidates, vec![family_tag("gems")]);
 }
 
 #[test]
@@ -499,12 +460,7 @@ fn feature_off_master_falls_back() {
     let candidates = resolver.restore_tag_candidates("gems");
     assert_eq!(
         candidates,
-        vec![
-            family_tag("gems-branch-hotfix-urgent"),
-            legacy_tag("gems-branch-hotfix-urgent"),
-            family_tag("gems"),
-            legacy_tag("gems"),
-        ]
+        vec![family_tag("gems-branch-hotfix-urgent"), family_tag("gems"),]
     );
 }
 
@@ -513,7 +469,7 @@ fn no_git_context_single_candidate() {
     let resolver = TagResolver::new(Some(make_platform()), GitContext::default(), true);
 
     let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec![family_tag("gems"), legacy_tag("gems")]);
+    assert_eq!(candidates, vec![family_tag("gems")]);
 }
 
 #[test]

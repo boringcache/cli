@@ -147,24 +147,7 @@ impl Platform {
     }
 
     fn compute_tag_suffix(&self) -> String {
-        match self.os.as_str() {
-            "linux" => {
-                if self.uses_musl_family() {
-                    format!("linux-musl-{}", self.tag_arch())
-                } else {
-                    format!("linux-{}", self.tag_arch())
-                }
-            }
-            "macos" => {
-                if let Some(version) = &self.version {
-                    format!("macos-{version}-{}", self.tag_arch())
-                } else {
-                    format!("macos-unknown-{}", self.tag_arch())
-                }
-            }
-            "windows" => format!("windows-{}", self.tag_arch()),
-            _ => format!("{}-{}", self.os, self.tag_arch()),
-        }
+        self.compute_legacy_tag_suffix()
     }
 
     fn compute_legacy_tag_suffix(&self) -> String {
@@ -203,26 +186,12 @@ impl Platform {
         }
     }
 
-    fn tag_arch(&self) -> &str {
-        match self.arch.as_str() {
-            "x86_64" => "amd64",
-            "aarch64" | "arm64" => "arm64",
-            "arm" | "arm32" => "arm32",
-            "x86" => "x86",
-            other => other,
-        }
-    }
-
     fn legacy_tag_arch(&self) -> &str {
         match self.arch.as_str() {
             "aarch64" => "arm64",
             "arm" => "arm32",
             other => other,
         }
-    }
-
-    fn uses_musl_family(&self) -> bool {
-        matches!(self.distro.as_deref(), Some("alpine"))
     }
 
     fn detect_os() -> String {
@@ -463,7 +432,7 @@ mod tests {
             version: Some("22".to_string()),
             tag_suffix_cache: std::sync::OnceLock::new(),
         };
-        assert_eq!(platform.to_tag_suffix(), "linux-amd64");
+        assert_eq!(platform.to_tag_suffix(), "ubuntu-22-x86_64");
     }
 
     #[test]
@@ -502,12 +471,12 @@ mod tests {
 
         assert_eq!(
             platform.append_to_tag("ruby-3.3.4"),
-            "ruby-3.3.4-linux-amd64"
+            "ruby-3.3.4-ubuntu-22-x86_64"
         );
 
         assert_eq!(
-            platform.append_to_tag("ruby-3.3.4-linux-amd64"),
-            "ruby-3.3.4-linux-amd64"
+            platform.append_to_tag("ruby-3.3.4-ubuntu-22-x86_64"),
+            "ruby-3.3.4-ubuntu-22-x86_64"
         );
     }
 
@@ -521,7 +490,7 @@ mod tests {
             tag_suffix_cache: std::sync::OnceLock::new(),
         };
 
-        assert_eq!(platform.to_tag_suffix(), "linux-musl-amd64");
+        assert_eq!(platform.to_tag_suffix(), "alpine-3-x86_64");
         assert_eq!(platform.legacy_tag_suffix(), "alpine-3-x86_64");
     }
 

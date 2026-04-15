@@ -304,8 +304,8 @@ mod tests {
         let tags = visibility_tags_from_values(
             "bc_registry_root_v2_123",
             &[
-                "mode-docker-linux-amd64".to_string(),
-                "mode-docker-linux-amd64".to_string(),
+                "mode-docker-ubuntu-24-x86_64".to_string(),
+                "mode-docker-ubuntu-24-x86_64".to_string(),
                 "digest-sha256-abc".to_string(),
                 "".to_string(),
             ],
@@ -315,7 +315,7 @@ mod tests {
             tags,
             vec![
                 "bc_registry_root_v2_123".to_string(),
-                "mode-docker-linux-amd64".to_string(),
+                "mode-docker-ubuntu-24-x86_64".to_string(),
                 "digest-sha256-abc".to_string(),
             ]
         );
