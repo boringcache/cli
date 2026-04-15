@@ -1023,10 +1023,7 @@ mod tests {
         );
 
         let tag = scoped_save_tag(&resolver, "buildkit-cache", "main").unwrap();
-        assert_eq!(
-            tag,
-            ref_tag_for_input("buildkit-cache:main-ubuntu-22-x86_64")
-        );
+        assert_eq!(tag, ref_tag_for_input("buildkit-cache:main-linux-amd64"));
     }
 
     #[test]

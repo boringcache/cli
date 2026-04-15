@@ -51,7 +51,7 @@ mod tests {
     #[test]
     fn test_restore_result_deserializes_hit() {
         let json = r#"{
-            "tag": "ruby-3.4.4-darwin-arm64",
+            "tag": "ruby-3.4.4-macos-15-arm64",
             "status": "hit",
             "cache_entry_id": "11111111-2222-3333-4444-555555555555",
             "manifest_root_digest": "blake3:abc123",

@@ -9,7 +9,7 @@ mod request_validation {
     #[test]
     fn test_save_request_serializes_correctly() {
         let request = SaveRequest {
-            tag: "ruby-3.4.4-darwin-arm64".to_string(),
+            tag: "ruby-3.4.4-macos-15-arm64".to_string(),
             write_scope_tag: None,
             manifest_root_digest: "a".repeat(64),
             compression_algorithm: "zstd".to_string(),

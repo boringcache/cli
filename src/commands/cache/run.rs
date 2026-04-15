@@ -785,32 +785,28 @@ fn scope_tag_suffix(tag: &str, suffix: Option<&str>) -> String {
     format!("{tag}-{suffix}")
 }
 
-fn archive_platform_suffix(no_platform: bool) -> &'static str {
+fn archive_platform_suffix(no_platform: bool) -> Result<String> {
     if no_platform {
-        return "";
+        return Ok(String::new());
     }
 
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "-darwin-arm64",
-        ("macos", _) => "-darwin-amd64",
-        ("windows", "aarch64") => "-windows-arm64",
-        ("windows", _) => "-windows-amd64",
-        (_, "aarch64") => "-linux-arm64",
-        _ => "-linux-amd64",
-    }
+    Ok(format!(
+        "-{}",
+        crate::platform::Platform::detect()?.to_tag_suffix()
+    ))
 }
 
-fn apply_archive_platform_suffix(prefix: &str, no_platform: bool) -> String {
+fn apply_archive_platform_suffix(prefix: &str, no_platform: bool) -> Result<String> {
     let trimmed = prefix.trim();
     if trimmed.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
-    let suffix = archive_platform_suffix(no_platform);
-    if suffix.is_empty() || trimmed.ends_with(suffix) {
-        trimmed.to_string()
+    let suffix = archive_platform_suffix(no_platform)?;
+    if suffix.is_empty() || trimmed.ends_with(&suffix) {
+        Ok(trimmed.to_string())
     } else {
-        format!("{trimmed}{suffix}")
+        Ok(format!("{trimmed}{suffix}"))
     }
 }
 
@@ -929,7 +925,7 @@ fn plan_archive_paths(
         anyhow::bail!("At least one --archive-path value is required.");
     }
 
-    let primary_prefix = apply_archive_platform_suffix(archive_tag_prefix, no_platform);
+    let primary_prefix = apply_archive_platform_suffix(archive_tag_prefix, no_platform)?;
     if primary_prefix.is_empty() {
         anyhow::bail!("--archive-tag-prefix must not be empty.");
     }
@@ -939,6 +935,8 @@ fn plan_archive_paths(
     let restore_candidates = archive_restore_prefixes
         .iter()
         .map(|prefix| apply_archive_platform_suffix(prefix, no_platform))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .filter(|prefix| !prefix.is_empty())
         .map(|prefix| DryRunArchiveRestoreCandidate {
             tag_prefix: prefix.clone(),

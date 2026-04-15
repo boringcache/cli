@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn proxy_root_tag_matches_serve_derivation() {
-        let tag = "grpc-bazel-remote-cache-ubuntu-24-x86_64";
+        let tag = "grpc-bazel-remote-cache-linux-amd64";
         let root = crate::proxy::internal_registry_root_tag(tag);
         assert!(root.starts_with("bc_registry_root_v2_"));
         assert_eq!(root.len(), "bc_registry_root_v2_".len() + 64);
