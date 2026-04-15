@@ -1,4 +1,5 @@
 use super::*;
+use crate::observability;
 
 pub(crate) const KV_PREFETCH_READINESS_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(300);
@@ -111,6 +112,115 @@ pub(crate) async fn preload_download_urls(state: &AppState, cache_entry_id: &str
     let _ = preload_download_urls_for_blobs(state, cache_entry_id, &blobs).await;
 }
 
+#[cfg(test)]
+pub(crate) fn kv_startup_prefetch_max_blobs() -> usize {
+    parse_positive_usize_env(KV_STARTUP_PREFETCH_MAX_BLOBS_ENV).unwrap_or(usize::MAX)
+}
+
+#[cfg(test)]
+pub(crate) fn kv_startup_prefetch_max_total_bytes(cache_max: u64) -> u64 {
+    parse_positive_u64_env(KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV).unwrap_or(cache_max)
+}
+
+#[cfg(test)]
+pub(crate) fn kv_blob_prefetch_max_inflight_bytes(cache_max: u64) -> u64 {
+    if let Some(configured) = parse_positive_u64_env(KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV) {
+        return configured;
+    }
+    cache_max
+        .saturating_div(4)
+        .clamp(64 * 1024 * 1024, 512 * 1024 * 1024)
+}
+
+#[cfg(test)]
+pub(crate) fn startup_prefetch_candidates(
+    blob_order: &[BlobDescriptor],
+) -> StartupPrefetchCandidates {
+    StartupPrefetchCandidates {
+        ordered_blobs: blob_order.to_vec(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn should_skip_blob_preload(used_bytes: u64, max_bytes: u64) -> bool {
+    if max_bytes == 0 {
+        return true;
+    }
+    used_bytes.saturating_mul(100) >= max_bytes.saturating_mul(KV_BLOB_PRELOAD_SKIP_USED_PCT)
+}
+
+#[cfg(test)]
+pub(crate) fn select_startup_prefetch_slice(
+    blobs: &[BlobDescriptor],
+    max_blobs: usize,
+    max_total_bytes: u64,
+) -> Vec<BlobDescriptor> {
+    let mut selected = Vec::new();
+    let mut remaining_bytes = max_total_bytes;
+
+    for blob in blobs {
+        if selected.len() >= max_blobs {
+            break;
+        }
+        if blob.size_bytes == 0 || blob.size_bytes > remaining_bytes {
+            continue;
+        }
+        remaining_bytes = remaining_bytes.saturating_sub(blob.size_bytes);
+        selected.push(blob.clone());
+    }
+
+    selected
+}
+
+#[cfg(test)]
+pub(crate) fn startup_prefetch_blobs(
+    ordered_blobs: &[BlobDescriptor],
+    max_blobs: usize,
+    max_total_bytes: u64,
+    whole_tag_hydration: bool,
+) -> Vec<BlobDescriptor> {
+    if whole_tag_hydration {
+        return ordered_blobs.to_vec();
+    }
+
+    select_startup_prefetch_slice(ordered_blobs, max_blobs, max_total_bytes)
+}
+
+#[cfg(test)]
+pub(crate) fn startup_download_url_preload_blobs(
+    startup_blobs: &[BlobDescriptor],
+) -> &[BlobDescriptor] {
+    startup_blobs
+}
+
+#[cfg(test)]
+pub(crate) fn select_blob_preload_candidates<F>(
+    ordered_blobs: &[BlobDescriptor],
+    preload_budget: u64,
+    mut download_url_for_digest: F,
+) -> Vec<(BlobDescriptor, String)>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut remaining_budget = preload_budget;
+    let mut candidates = Vec::new();
+
+    for blob in ordered_blobs {
+        if blob.size_bytes == 0 || blob.size_bytes > remaining_budget {
+            continue;
+        }
+        if let Some(url) = download_url_for_digest(&blob.digest) {
+            candidates.push((blob.clone(), url));
+            remaining_budget = remaining_budget.saturating_sub(blob.size_bytes);
+            if remaining_budget == 0 {
+                break;
+            }
+        }
+    }
+
+    candidates
+}
+
 pub(crate) fn build_prefetch_targets<F>(
     blobs: &[BlobDescriptor],
     mut cached_url_for_digest: F,
@@ -139,6 +249,17 @@ where
             unresolved_url_count: blobs.len().saturating_sub(cached_url_count),
         },
     )
+}
+
+#[cfg(test)]
+pub(crate) fn build_startup_prefetch_targets<F>(
+    startup_blobs: &[BlobDescriptor],
+    cached_url_for_digest: F,
+) -> (Vec<StartupPrefetchTarget>, StartupPrefetchTargetSummary)
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    build_prefetch_targets(startup_blobs, cached_url_for_digest)
 }
 
 pub(crate) async fn preload_single_blob(
