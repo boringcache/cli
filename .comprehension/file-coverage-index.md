@@ -257,20 +257,15 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/serve/cache_registry/turborepo.rs`
 - `src/serve/cache_registry/kv/mod.rs`
 - `src/serve/cache_registry/kv/blob_read.rs`
-- `src/serve/cache_registry/kv/flight.rs`
 - `src/serve/cache_registry/kv/flush.rs`
-- `src/serve/cache_registry/kv/handoff.rs`
 - `src/serve/cache_registry/kv/index.rs`
-- `src/serve/cache_registry/kv/instrumentation.rs`
 - `src/serve/cache_registry/kv/lookup.rs`
-- `src/serve/cache_registry/kv/policy.rs`
 - `src/serve/cache_registry/kv/prefetch.rs`
-- `src/serve/cache_registry/kv/refresh.rs`
 - `src/serve/cache_registry/kv/write.rs`
 
 Notes:
 
-- the KV section reflects the current workspace shape, including the active split into `flight.rs`, `refresh.rs`, `policy.rs`, `handoff.rs`, and `instrumentation.rs`
+- the KV section reflects the current workspace shape, with flush/publish orchestration still concentrated in `flush.rs`
 - `serve/cas_publish.rs` is shared by manifest publish handlers and KV flush publishing
 
 ## Cross-cutting diagnostics, error handling, and test support
@@ -280,7 +275,6 @@ Owner: cross-cutting support (`support-primary` with some `dormant-or-underused`
 - `src/observability/mod.rs`
 - `src/observability/request_metrics.rs`
 - `src/telemetry.rs`
-- `src/telemetry/collector.rs`
 - `src/telemetry/model.rs`
 - `src/telemetry/operation.rs`
 - `src/retry_resume.rs`
@@ -398,7 +392,7 @@ Owner: repo operations support (`support-primary`)
 After this file was added, the remaining ambiguity is not "what file exists" but "how active is it":
 
 - telemetry collector path
-- retry resume data structures
+- retry behavior in `src/retry_resume.rs`
 - some optimize helpers marked `allow(dead_code)`
 - some API model fields kept for schema compatibility
 

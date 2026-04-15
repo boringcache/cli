@@ -496,7 +496,7 @@ jobs:
             --notes "## BoringCache CLI Release ${{ steps.get_tag.outputs.tag }}
 
           ### What's New
-          - \`run\` command: transactional cache wrapper (restore → exec → save) with signal handling and correct exit codes
+          - \`run\` command: transactional cache wrapper (restore → command → save) with signal handling and correct exit codes
           - Maven cache-registry adapter support
           - \`BORINGCACHE_TOKEN_FILE\` env var: read API token from a file path (useful in Docker builds with secret mounts)
           - \`delete\` now also purges proxy/cache-registry internal data for the deleted tag

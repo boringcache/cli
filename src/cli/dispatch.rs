@@ -432,7 +432,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             )
             .await
         }
-        Commands::Serve(args) => {
+        Commands::CacheRegistry(args) => {
             commands::cache_registry::execute(
                 args.workspace,
                 args.tag,

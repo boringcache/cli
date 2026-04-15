@@ -36,13 +36,4 @@ When a feature changes:
 
 ## Scope note
 
-This map is based on the current workspace state, not only on committed files.
-
-At the time of writing, the proxy KV internals are in motion in the worktree:
-
-- `src/serve/cache_registry/kv/mod.rs`
-- `src/serve/cache_registry/kv/flush.rs`
-- `src/serve/cache_registry/kv/refresh.rs`
-- `src/serve/cache_registry/kv/flight.rs`
-
-That refactor is reflected in the proxy/adapters map as the current shape.
+This map should track the current workspace shape. Update it when module boundaries move or command names change.

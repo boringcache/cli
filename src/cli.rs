@@ -19,7 +19,7 @@ pub use cache::{
     SaveArgs, SessionsArgs, StatusArgs, TagsArgs,
 };
 pub use config::{ConfigArgs, ConfigSubcommand, SetupEncryptionArgs};
-pub use proxy::{GoCacheProgArgs, ServeArgs};
+pub use proxy::{CacheRegistryArgs, GoCacheProgArgs};
 pub use workspace::{AuditArgs, DashboardArgs, DoctorArgs, OnboardArgs, UseArgs, WorkspacesArgs};
 
 #[derive(Parser)]
@@ -139,7 +139,7 @@ pub enum Commands {
         name = "cache-registry",
         about = "Run a local cache registry proxy backed by BoringCache (OCI + Bazel + Gradle + Maven + Nx + Turborepo + sccache + Go)"
     )]
-    Serve(ServeArgs),
+    CacheRegistry(CacheRegistryArgs),
 
     #[command(
         name = "go-cacheprog",

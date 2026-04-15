@@ -60,7 +60,7 @@ What it did find instead:
 
 - real public commands with thin docs/tests: `mount`, `doctor`, `dashboard`, `use`, `config`, `setup-encryption`, `inspect`, `sessions`, `misses`, `tags`, `go-cacheprog`
 - the remaining compatibility entrypoint is `delete` for `rm`
-- support code that is compiled but not strongly exercised from visible command paths: telemetry collector pieces and resume helpers
+- weakly connected support code is now mostly the explicit `allow(dead_code)` optimize helpers and schema-compat DTO fields listed above; retry plumbing is active and the old telemetry collector path is gone
 
 ## Practical maintenance guidance
 

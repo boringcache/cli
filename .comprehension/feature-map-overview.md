@@ -5,7 +5,7 @@ This is the shortest whole-system view of the CLI.
 ## Entry flow
 
 1. `src/main.rs` sets panic/logging behavior, preprocesses args, and parses Clap.
-2. `src/cli/preprocess.rs` injects default-workspace shorthand and compatibility parsing.
+2. `src/cli/preprocess.rs` injects default-workspace shorthand before Clap parsing.
 3. `src/cli/dispatch.rs` routes every command into `src/commands/**`.
 4. `src/commands/**` owns command orchestration.
 5. Shared execution logic lives in:
@@ -22,7 +22,7 @@ This is the shortest whole-system view of the CLI.
 | Cache lifecycle | `save`, `restore`, `mount`, `run`, plus cache inspection/reporting commands | `feature-map-cache-lifecycle.md` |
 | Proxy and adapters | `cache-registry`, tool adapters, `go-cacheprog`, serve runtime | `feature-map-proxy-and-adapters.md` |
 | Workspace, auth, config | `auth`, `login`, `token`, `doctor`, `dashboard`, `use`, `workspaces`, `onboard`, `audit`, `config`, `setup-encryption` | `feature-map-workspace-auth-config.md` |
-| Cross-cutting support | API client, command plumbing, observability, telemetry, retry/resume, platform, progress/UI, reachability notes | `support-and-reachability.md` |
+| Cross-cutting support | API client, command plumbing, observability, telemetry, retry, platform, progress/UI, reachability notes | `support-and-reachability.md` |
 
 ## Public command inventory
 

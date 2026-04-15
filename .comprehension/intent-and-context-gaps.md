@@ -74,8 +74,8 @@ These are decisions or strong direction already provided and should be treated a
 
 - Duplicate compatibility surfaces should be reviewed aggressively and removed when they are not serving a clear user need.
 - User-visible behavior should stay unsurprising and focused on cache workflows rather than exposing unnecessary internal helpers.
-- Dormant scaffolding such as unused telemetry/resume code is a cleanup target.
-- The canonical CLI surface is now `run`, `dashboard`, `inspect`, `status`, `token list`, `token create-ci`, `--no-platform`, `.boringcache.toml`, and `cache-registry`; the older aliases were removed.
+- Dormant scaffolding and compatibility-heavy leftovers are cleanup targets.
+- The canonical naming cleanup kept `run`, `dashboard`, `inspect`, `status`, `cache-registry`, `--no-platform`, `.boringcache.toml`, and the token subcommand names `list` and `create-ci`; the broader token admin surface still includes `show`, `create`, `revoke`, and `rotate`.
 
 ## Remaining gaps after that review
 
@@ -92,7 +92,8 @@ These matter most because they affect docs, naming, maintenance, and what stays 
      - direct adapter commands still exist for Docker, Turbo, Nx, Bazel, Gradle, Maven, sccache, and Go
    - Implemented cleanup:
      - removed `serve`, `docker-registry`, `exec`, `tui`, `show`, `overview`, `token ls`, `token ci`, `--cross-os`, and hidden `optimize`
-     - kept `run`, `dashboard`, `inspect`, `status`, `token list`, `token create-ci`, `--no-platform`, `.boringcache.toml`, and `cache-registry`
+     - kept `run`, `dashboard`, `inspect`, `status`, `cache-registry`, `--no-platform`, `.boringcache.toml`, and the canonical token subcommand names `list` and `create-ci`
+     - retained the broader token admin surface: `show`, `create`, `revoke`, and `rotate`
    - Remaining compatibility question:
      - legacy release asset aliases such as distro-specific binary names
 
@@ -235,7 +236,7 @@ If you only want to finish the remaining open questions, these seven decisions c
 3. For adapter config, should CLI always fully override config, or should some list-like settings continue to merge?
 4. Should Docker compatibility input `--tag proxy-tag:ref-tag` be retired in favor of `--cache-ref-tag`?
 5. Which legacy release asset aliases still need a migration window?
-6. Which dormant code is safe to remove now: telemetry collector, resume helpers, compatibility-heavy adapter inputs, and release-name aliases?
+6. Which compatibility-heavy adapter inputs or release-name aliases are still worth keeping?
 7. Should `go-cacheprog` stay explicitly documented as a direct command or be treated as secondary plumbing behind the `go` adapter?
 
 ## Suggested working assumptions until you answer

@@ -1,7 +1,7 @@
 use clap::Args;
 
 #[derive(Debug, Clone, Args)]
-pub struct ServeArgs {
+pub struct CacheRegistryArgs {
     #[arg(help = "Workspace name (org/project or user/project)")]
     pub workspace: String,
 

@@ -108,7 +108,7 @@ src/
       setup_encryption.rs
     proxy/
       mod.rs
-      serve.rs
+      cache_registry.rs
     workspace/
       mod.rs
       audit.rs
@@ -141,7 +141,7 @@ src/
     resolve.rs
   proxy/
     mod.rs
-    exec.rs
+    command.rs
     tags.rs
   serve/
     mod.rs
@@ -195,7 +195,6 @@ src/
     mod.rs
     policy.rs
   telemetry/
-    collector.rs
     model.rs
     operation.rs
   ui/
@@ -242,8 +241,8 @@ These are the next sensible follow-ons from the current tree.
 - Auth/config entrypoints: `auth`, `login`, `token`, `config`, `setup_encryption`
 - Cache entrypoints: `check`, `delete`, `inspect`, `ls`, `misses`, `mount`, `restore`, `run`, `save`, `sessions`, `status`, `tags`
 - Workspace entrypoints: `audit`, `dashboard`, `doctor`, `onboard`, `use_workspace`, `workspaces`
-- Proxy/adapter entrypoints: `serve`, `go_cacheprog`, and `adapters/command/*`
-- Shared support moved out of `src/commands`: `cache/{cas_publish,cas_restore,file_materialize,receipts,transport}.rs`, `proxy/{exec,tags}.rs`, `signing/policy.rs`, `command_support/{workspace,specs,concurrency,save_support}.rs`
+- Proxy/adapter entrypoints: `cache_registry`, `go_cacheprog`, and `adapters/command/*`
+- Shared support moved out of `src/commands`: `cache/{cas_publish,cas_restore,file_materialize,receipts,transport}.rs`, `proxy/{command,tags}.rs`, `signing/policy.rs`, `command_support/{workspace,specs,concurrency,save_support}.rs`
 
 That means `src/commands` is now closer to controllers, and the main mixed-role command module left is `src/commands/workspace/onboard.rs`.
 
@@ -353,7 +352,7 @@ src/
 | `src/serve/mod.rs` | `src/serve/runtime/{mod,listener,maintenance,shutdown}.rs` | done |
 | `src/serve/http/handlers.rs` | `src/serve/http/handlers/{mod,manifest,blobs,uploads}.rs` | done |
 | `src/serve/cache_registry/kv/lookup.rs` | `src/serve/cache_registry/kv/{lookup,blob_read,prefetch,index}.rs` | done |
-| `src/serve/cache_registry/kv/flush.rs` | `src/serve/cache_registry/kv/{flush,refresh,handoff}.rs` | next |
+| `src/serve/cache_registry/kv/flush.rs` | smaller helper modules under `src/serve/cache_registry/kv/` | next |
 | `src/api/client/mod.rs` | `src/api/client/{error,pending,publish}.rs` | next |
 | `src/commands/workspace/onboard.rs` | `src/commands/workspace/onboard/{mod,scan,review,apply,auth}.rs` or sibling helpers | next |
 | `src/config.rs` | `src/config/{mod,model,persist}.rs` | next |
