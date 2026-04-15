@@ -29,7 +29,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
 - Product-side changes:
   - Hydrate the full active tag by default during startup and continue best-effort in the background if readiness times out.
   - Remove startup selection budgets and background inflight byte budgets from cache-registry hydration.
-  - Treat `BORINGCACHE_BLOB_READ_CACHE_MAX_BYTES` and blob-cache eviction as the authoritative disk safety boundary.
+  - Treat the fixed blob-read-cache ceiling and blob-cache eviction as the authoritative disk safety boundary.
 - Guardrail:
   - For disk-backed cache-registry paths, warm selection should not invent a second capacity policy. If we add a RAM cache later, memory budgets belong there instead.
 

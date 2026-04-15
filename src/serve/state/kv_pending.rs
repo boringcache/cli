@@ -46,14 +46,12 @@ pub struct KvPendingStore {
     blob_refs: HashMap<String, BlobRef>,
     total_spool_bytes: u64,
     oldest_entry_unix_ms: Option<u64>,
-    next_blob_sequence: u64,
 }
 
 struct BlobRef {
     path: PathBuf,
     size_bytes: u64,
     refcount: u32,
-    first_seen_sequence: u64,
 }
 
 impl KvPendingStore {
@@ -88,15 +86,12 @@ impl KvPendingStore {
                     );
                 }
                 self.total_spool_bytes += blob.size_bytes;
-                let sequence = self.next_blob_sequence;
-                self.next_blob_sequence = self.next_blob_sequence.saturating_add(1);
                 self.blob_refs.insert(
                     blob.digest.clone(),
                     BlobRef {
                         path: temp_path,
                         size_bytes: blob.size_bytes,
                         refcount: 1,
-                        first_seen_sequence: sequence,
                     },
                 );
                 None
@@ -133,30 +128,21 @@ impl KvPendingStore {
         self.blob_refs.get(digest).map(|b| &b.path)
     }
 
-    pub fn take_all(
-        &mut self,
-    ) -> (
-        BTreeMap<String, BlobDescriptor>,
-        HashMap<String, PathBuf>,
-        HashMap<String, u64>,
-    ) {
+    pub fn take_all(&mut self) -> (BTreeMap<String, BlobDescriptor>, HashMap<String, PathBuf>) {
         let entries = std::mem::take(&mut self.entries);
         let mut blob_paths = HashMap::new();
-        let mut blob_sequences = HashMap::new();
         for (digest, bref) in self.blob_refs.drain() {
-            blob_sequences.insert(digest.clone(), bref.first_seen_sequence);
             blob_paths.insert(digest, bref.path);
         }
         self.total_spool_bytes = 0;
         self.oldest_entry_unix_ms = None;
-        (entries, blob_paths, blob_sequences)
+        (entries, blob_paths)
     }
 
     pub fn restore(
         &mut self,
         entries: BTreeMap<String, BlobDescriptor>,
         blob_paths: HashMap<String, PathBuf>,
-        blob_sequences: HashMap<String, u64>,
     ) -> Vec<PathBuf> {
         let was_empty = self.entries.is_empty();
         let mut cleanup_paths = Vec::new();
@@ -188,15 +174,6 @@ impl KvPendingStore {
                                 path: path.clone(),
                                 size_bytes: size,
                                 refcount: *count,
-                                first_seen_sequence: blob_sequences
-                                    .get(digest)
-                                    .copied()
-                                    .unwrap_or_else(|| {
-                                        let sequence = self.next_blob_sequence;
-                                        self.next_blob_sequence =
-                                            self.next_blob_sequence.saturating_add(1);
-                                        sequence
-                                    }),
                             },
                         );
                     }
@@ -211,14 +188,6 @@ impl KvPendingStore {
         }
         if was_empty && !self.entries.is_empty() {
             self.oldest_entry_unix_ms = Some(unix_time_ms_now());
-        }
-        if let Some(max_sequence) = self
-            .blob_refs
-            .values()
-            .map(|bref| bref.first_seen_sequence)
-            .max()
-        {
-            self.next_blob_sequence = self.next_blob_sequence.max(max_sequence.saturating_add(1));
         }
         cleanup_paths
     }

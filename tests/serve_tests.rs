@@ -82,7 +82,6 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         configured_human_tags: Vec::new(),
         registry_root_tag: "registry".to_string(),
         fail_on_cache_error: true,
-        kv_manifest_warm_enabled: true,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -237,7 +236,7 @@ async fn test_v2_returns_200_with_warming_header_before_prefetch_complete() {
     state
         .prefetch_complete
         .store(false, std::sync::atomic::Ordering::Release);
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     let response = tower::ServiceExt::oneshot(
         app,
@@ -497,7 +496,7 @@ async fn test_startup_prefetch_hydrates_full_tag_before_ready() {
 async fn test_v2_base_returns_200() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     let response = tower::ServiceExt::oneshot(
         app,
@@ -530,7 +529,7 @@ async fn test_proxy_status_reports_warming_phase() {
     state
         .prefetch_complete
         .store(false, std::sync::atomic::Ordering::Release);
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     let response = tower::ServiceExt::oneshot(
         app,
@@ -587,7 +586,7 @@ async fn test_proxy_status_reports_pending_publish_when_entries_buffered() {
             temp_path,
         );
     }
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     let response = tower::ServiceExt::oneshot(
         app,
@@ -648,7 +647,7 @@ async fn test_proxy_status_reports_draining_until_tags_are_visible() {
         .create_async()
         .await;
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let response = tower::ServiceExt::oneshot(
         app,
         Request::builder()
@@ -687,7 +686,7 @@ async fn test_proxy_status_reports_draining_until_tags_are_visible() {
 async fn test_nonexistent_route_returns_404() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     let response = tower::ServiceExt::oneshot(
         app,
@@ -706,7 +705,7 @@ async fn test_nonexistent_route_returns_404() {
 async fn test_unknown_put_route_returns_created() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     let response = tower::ServiceExt::oneshot(
         app,
@@ -761,7 +760,7 @@ async fn test_manifest_hit_returns_decoded_index_json() {
         .create_async()
         .await;
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let response = tower::ServiceExt::oneshot(
         app,
         Request::builder()
@@ -793,7 +792,7 @@ async fn test_manifest_hit_returns_decoded_index_json() {
 }
 
 #[tokio::test]
-async fn test_manifest_degrades_to_miss_when_pointer_blobs_missing_in_best_effort() {
+async fn test_manifest_serves_even_when_prefetch_batch_reports_missing_blobs() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.fail_on_cache_error = false;
@@ -831,25 +830,29 @@ async fn test_manifest_degrades_to_miss_when_pointer_blobs_missing_in_best_effor
         .create_async()
         .await;
 
-    let _check_blobs_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+    let batch_request = json!({
+        "cache_entry_id": "entry-123",
+        "verify_storage": true,
+        "blobs": [
+            {"digest": blob_digest, "size_bytes": 5000}
+        ]
+    });
+    let _download_urls_batch_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Json(batch_request))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
-                "results": [
-                    {
-                        "digest": blob_digest,
-                        "exists": false
-                    }
-                ]
+                "download_urls": [],
+                "missing": [blob_digest]
             })
             .to_string(),
         )
         .create_async()
         .await;
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let response = tower::ServiceExt::oneshot(
         app,
         Request::builder()
@@ -860,14 +863,46 @@ async fn test_manifest_degrades_to_miss_when_pointer_blobs_missing_in_best_effor
     .await
     .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(parsed["errors"][0]["code"], "MANIFEST_UNKNOWN");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let single_request = json!({
+        "cache_entry_id": "entry-123",
+        "verify_storage": true,
+        "blobs": [
+            {"digest": blob_digest, "size_bytes": 5000}
+        ]
+    });
+    let _download_urls_single_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Json(single_request))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [],
+                "missing": [blob_digest]
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let blob_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri(format!("/v2/my-cache/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(blob_response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn test_manifest_degrades_to_miss_when_storage_blob_is_unreadable_in_best_effort() {
+async fn test_manifest_serves_without_blob_storage_preflight_in_best_effort() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.fail_on_cache_error = false;
@@ -907,23 +942,6 @@ async fn test_manifest_degrades_to_miss_when_storage_blob_is_unreadable_in_best_
         .create_async()
         .await;
 
-    let _check_blobs_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
-        .match_body(Matcher::Any)
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "results": [{
-                    "digest": blob_digest,
-                    "exists": true
-                }]
-            })
-            .to_string(),
-        )
-        .create_async()
-        .await;
-
     let _download_urls_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
         .match_body(Matcher::PartialJson(json!({
@@ -941,19 +959,11 @@ async fn test_manifest_degrades_to_miss_when_storage_blob_is_unreadable_in_best_
             })
             .to_string(),
         )
-        .expect(2)
+        .expect(1)
         .create_async()
         .await;
 
-    let _blob_mock = server
-        .mock("GET", format!("/blobs/{}", blob_digest).as_str())
-        .with_status(404)
-        .with_body("missing")
-        .expect(2)
-        .create_async()
-        .await;
-
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let response = tower::ServiceExt::oneshot(
         app,
         Request::builder()
@@ -964,15 +974,18 @@ async fn test_manifest_degrades_to_miss_when_storage_blob_is_unreadable_in_best_
     .await
     .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(parsed["errors"][0]["code"], "MANIFEST_UNKNOWN");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let locator = state.blob_locator.read().await;
+    let cached = locator.get("my-cache", blob_digest).expect("locator entry");
+    let expected_url = format!("{}/blobs/{}", server.url(), blob_digest);
+    assert_eq!(cached.cache_entry_id, "entry-storage-miss");
+    assert_eq!(cached.download_url.as_deref(), Some(expected_url.as_str()));
 }
 
 #[tokio::test]
-async fn test_cached_manifest_hit_revalidates_blob_retrievability_in_best_effort() {
-    let mut server = Server::new_async().await;
+async fn test_cached_manifest_hit_returns_without_revalidation_in_best_effort() {
+    let server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.fail_on_cache_error = false;
 
@@ -993,8 +1006,6 @@ async fn test_cached_manifest_hit_revalidates_blob_retrievability_in_best_effort
         }],
         name: "cached".to_string(),
         inserted_at: Instant::now(),
-        blob_retrievability_validated_at: std::sync::Mutex::new(None),
-        blob_retrievability_validation_lock: Mutex::new(()),
     });
     state
         .oci_manifest_cache
@@ -1002,52 +1013,6 @@ async fn test_cached_manifest_hit_revalidates_blob_retrievability_in_best_effort
     state
         .oci_manifest_cache
         .insert(digest_tag(&manifest_digest), cached);
-
-    let _check_blobs_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
-        .match_body(Matcher::Any)
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "results": [{
-                    "digest": blob_digest,
-                    "exists": true
-                }]
-            })
-            .to_string(),
-        )
-        .create_async()
-        .await;
-
-    let _download_urls_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::PartialJson(json!({
-            "verify_storage": true
-        })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "download_urls": [{
-                    "digest": blob_digest,
-                    "url": format!("{}/blobs/{}", server.url(), blob_digest),
-                }],
-                "missing": [],
-            })
-            .to_string(),
-        )
-        .expect(2)
-        .create_async()
-        .await;
-
-    let _blob_mock = server
-        .mock("GET", format!("/blobs/{}", blob_digest).as_str())
-        .with_status(404)
-        .with_body("missing")
-        .expect(2)
-        .create_async()
-        .await;
 
     let app = build_router(state.clone());
     let response = tower::ServiceExt::oneshot(
@@ -1060,18 +1025,18 @@ async fn test_cached_manifest_hit_revalidates_blob_retrievability_in_best_effort
     .await
     .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert!(state.oci_manifest_cache.get(&tag).is_none());
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(state.oci_manifest_cache.get(&tag).is_some());
     assert!(
         state
             .oci_manifest_cache
             .get(&digest_tag(&manifest_digest))
-            .is_none()
+            .is_some()
     );
 }
 
 #[tokio::test]
-async fn test_recently_validated_cached_manifest_skips_revalidation_and_keeps_locator_urls() {
+async fn test_cached_manifest_hit_keeps_locator_urls() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.fail_on_cache_error = false;
@@ -1093,8 +1058,6 @@ async fn test_recently_validated_cached_manifest_skips_revalidation_and_keeps_lo
         }],
         name: "cached-fast".to_string(),
         inserted_at: Instant::now(),
-        blob_retrievability_validated_at: std::sync::Mutex::new(Some(Instant::now())),
-        blob_retrievability_validation_lock: Mutex::new(()),
     });
     state
         .oci_manifest_cache
@@ -1153,7 +1116,7 @@ async fn test_recently_validated_cached_manifest_skips_revalidation_and_keeps_lo
 }
 
 #[tokio::test]
-async fn test_manifest_refreshes_stale_blob_urls_before_returning_manifest() {
+async fn test_blob_get_refreshes_stale_locator_url_after_manifest_return() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.fail_on_cache_error = false;
@@ -1206,23 +1169,6 @@ async fn test_manifest_refreshes_stale_blob_urls_before_returning_manifest() {
         .mock("GET", "/pointers/entry-refresh")
         .with_status(200)
         .with_body(pointer_bytes)
-        .create_async()
-        .await;
-
-    let _check_blobs_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
-        .match_body(Matcher::Any)
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "results": [
-                    {"digest": blob_a, "exists": true},
-                    {"digest": blob_b, "exists": true}
-                ]
-            })
-            .to_string(),
-        )
         .create_async()
         .await;
 
@@ -1282,14 +1228,6 @@ async fn test_manifest_refreshes_stale_blob_urls_before_returning_manifest() {
         .mock("GET", format!("/blobs/fresh/{}", blob_a).as_str())
         .with_status(200)
         .with_body("fresh-a")
-        .expect(2)
-        .create_async()
-        .await;
-
-    let _good_blob_mock = server
-        .mock("GET", format!("/blobs/good/{}", blob_b).as_str())
-        .with_status(200)
-        .with_body("good-b")
         .expect(1)
         .create_async()
         .await;

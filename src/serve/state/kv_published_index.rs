@@ -28,9 +28,8 @@ impl KvPublishedIndex {
         let cache_entry_changed = self.cache_entry_id.as_deref() != Some(cache_entry_id.as_str());
         let active_digests: HashSet<String> =
             entries.values().map(|blob| blob.digest.clone()).collect();
-        let normalized_blob_order = Self::normalize_blob_order(&entries, blob_order);
         self.entries = Arc::new(entries);
-        self.blob_order = Arc::new(normalized_blob_order);
+        self.blob_order = Arc::new(blob_order);
         self.cache_entry_id = Some(cache_entry_id);
         if cache_entry_changed {
             self.download_urls.clear();
@@ -169,41 +168,6 @@ impl KvPublishedIndex {
 
     pub fn entries_snapshot(&self) -> Arc<HashMap<String, BlobDescriptor>> {
         self.entries.clone()
-    }
-
-    fn normalize_blob_order(
-        entries: &HashMap<String, BlobDescriptor>,
-        requested_order: Vec<BlobDescriptor>,
-    ) -> Vec<BlobDescriptor> {
-        let mut by_digest = BTreeMap::new();
-        for blob in entries.values() {
-            by_digest
-                .entry(blob.digest.clone())
-                .or_insert(blob.size_bytes);
-        }
-
-        let mut ordered = Vec::with_capacity(by_digest.len());
-        let mut seen = HashSet::new();
-        for blob in requested_order {
-            let digest = blob.digest.clone();
-            let Some(size_bytes) = by_digest.get(&digest) else {
-                continue;
-            };
-            if seen.insert(digest.clone()) {
-                ordered.push(BlobDescriptor {
-                    digest,
-                    size_bytes: *size_bytes,
-                });
-            }
-        }
-
-        for (digest, size_bytes) in by_digest {
-            if seen.insert(digest.clone()) {
-                ordered.push(BlobDescriptor { digest, size_bytes });
-            }
-        }
-
-        ordered
     }
 }
 

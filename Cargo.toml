@@ -39,9 +39,6 @@ reqwest = { version = "0.13", features = ["json", "stream", "rustls-no-provider"
 # Rustls with ring crypto provider (avoids aws-lc-sys glibc cross-compilation issues)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
-# Certificate roots for TLS verification
-webpki-roots = "1.0"
-
 # Serialization - core features only
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", default-features = false }
@@ -105,7 +102,6 @@ chrono = { version = "0.4", features = ["clock", "serde"], default-features = fa
 jwalk = "0.8"
 tempfile = "3.24"
 pathdiff = "0.2"
-notify = "8.2"
 notify-debouncer-mini = "0.7"
 ctrlc = "3.5"
 

@@ -183,29 +183,15 @@ pub(super) async fn resolve_oci_download_url(
     name: &str,
     digest: &str,
 ) -> Result<String, OciError> {
-    let download_response = tokio::time::timeout(
+    let url = crate::serve::blob_download_urls::resolve_verified_blob_download_url(
+        state,
+        cache_entry_id,
+        blob_desc,
         OCI_API_CALL_TIMEOUT,
-        state.api_client.blob_download_urls_verified(
-            &state.workspace,
-            cache_entry_id,
-            std::slice::from_ref(blob_desc),
-        ),
     )
     .await
-    .map_err(|_| {
-        OciError::internal(format!(
-            "Timed out resolving blob URL after {}s",
-            OCI_API_CALL_TIMEOUT.as_secs()
-        ))
-    })?
-    .map_err(|e| OciError::internal(format!("Failed to get blob download URL: {e}")))?;
-
-    let url = download_response
-        .download_urls
-        .first()
-        .ok_or_else(|| OciError::blob_unknown(format!("No download URL for {digest}")))?
-        .url
-        .clone();
+    .map_err(|error| OciError::internal(format!("Failed to get blob download URL: {error}")))?
+    .ok_or_else(|| OciError::blob_unknown(format!("No download URL for {digest}")))?;
     {
         let mut locator = state.blob_locator.write().await;
         if let Some(entry) = locator.get_mut(name, digest) {
