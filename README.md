@@ -35,7 +35,7 @@ boringcache cache-registry my-org/app registry-cache --port 5000
 
 Use archive mode commands (`run`, `save`, and `restore`) when you are caching explicit directories.
 Use adapter commands when the build tool already speaks a remote-cache protocol and BoringCache has a dedicated wrapper for it.
-Use `cache-registry` when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive.
+Use `cache-registry` when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive. `cache-registry` is the proxy. `run --proxy` and adapter commands temporarily start that same proxy for one command.
 When `.boringcache.toml` stores the Docker command, `boringcache docker` is the short form. Use the longer version when you want to pass the Docker command inline.
 
 If you are wiring GitHub Actions, use [`boringcache/one@v1`](https://github.com/boringcache/one) after onboard so CI can reuse the same repo config and trust model.

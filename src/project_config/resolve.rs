@@ -12,6 +12,28 @@ use super::model::{
     ResolvedRunEntryPlan, ResolvedRunPlan, RunEntryRequestSource, RunEntryResolutionSource,
 };
 
+pub fn prefer_cli_scalar<T>(configured: Option<T>, cli: Option<T>) -> Option<T> {
+    cli.or(configured)
+}
+
+pub fn prefer_cli_list<F>(configured: &[String], cli: &[String], normalize: F) -> Vec<String>
+where
+    F: Fn(&str) -> String,
+{
+    let source = if cli.is_empty() { configured } else { cli };
+    let mut values = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for value in source {
+        let normalized = normalize(value);
+        if !normalized.is_empty() && seen.insert(normalized.clone()) {
+            values.push(normalized);
+        }
+    }
+
+    values
+}
+
 pub fn resolve_adapter_config(
     start_dir: &Path,
     adapter_name: &str,

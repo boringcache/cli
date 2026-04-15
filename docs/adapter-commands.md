@@ -37,6 +37,12 @@ boringcache cache-registry my-org/app registry-cache --port 5000
 
 Archive mode commands (`run`, `save`, and `restore`) are for explicit directory caches. Adapter commands are for supported remote-cache tools. Use `cache-registry` when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive.
 When `.boringcache.toml` stores the Docker command, `boringcache docker` is the short form. Use the longer version when you want to pass the Docker command inline.
+Proxy-backed adapter commands start in warm mode by default. Use `--on-demand` when a proxy-backed command should skip startup warming and serve colder first reads.
+
+The product split is:
+
+- `cache-registry` is the proxy
+- adapter commands temporarily start that proxy for one tool invocation and wire the tool to it
 
 ## Repo config
 
@@ -128,5 +134,15 @@ Docker also supports:
 
 - `--cache-mode`
 - `--cache-ref-tag`
+
+Override precedence:
+
+| Input kind | Rule |
+| --- | --- |
+| Scalars | CLI value wins when provided |
+| Lists | CLI list replaces repo config |
+| Metadata hints | repo config and CLI merge; CLI wins on duplicate keys |
+
+For Docker, `--tag` is always the proxy cache tag. Use `--cache-ref-tag` for the OCI cache tag.
 
 Use [Tool guides](tool-guides.md) for per-tool examples and local endpoint setup.

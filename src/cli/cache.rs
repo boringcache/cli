@@ -47,11 +47,7 @@ pub struct SaveArgs {
     #[arg(help = "One or more tag:path pairs (comma-separated)")]
     pub path_tag_pairs: String,
 
-    #[arg(
-        long,
-        alias = "cross-os",
-        help = "Disable automatic platform suffix for tags"
-    )]
+    #[arg(long, help = "Disable automatic platform suffix for tags")]
     pub no_platform: bool,
 
     #[arg(long, help = "Force save even if cache entry already exists on server")]
@@ -181,11 +177,7 @@ pub struct RunArgs {
     )]
     pub tool_tag_suffix: Option<String>,
 
-    #[arg(
-        long,
-        alias = "cross-os",
-        help = "Disable automatic platform suffix for tags"
-    )]
+    #[arg(long, help = "Disable automatic platform suffix for tags")]
     pub no_platform: bool,
 
     #[arg(
@@ -222,6 +214,9 @@ pub struct RunArgs {
         help = "Attach low-cardinality metadata hints to proxy sessions (repeatable; also reads BORINGCACHE_PROXY_METADATA_HINTS)"
     )]
     pub metadata_hint: Vec<String>,
+
+    #[arg(long, help = "Skip startup warming and serve cache reads on demand")]
+    pub on_demand: bool,
 
     #[arg(short, long, default_value = "5000")]
     pub port: u16,

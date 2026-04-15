@@ -21,6 +21,10 @@ pub struct ServeHandle {
 }
 
 impl ServeHandle {
+    pub fn is_finished(&self) -> bool {
+        self.server_task.is_finished()
+    }
+
     pub async fn shutdown_and_flush(mut self) -> Result<()> {
         self.shutdown_requested.store(true, Ordering::Release);
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
@@ -44,6 +48,7 @@ pub async fn run_server(
     configured_human_tags: Vec<String>,
     registry_root_tag: String,
     proxy_metadata_hints: BTreeMap<String, String>,
+    startup_warm: bool,
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<()> {
@@ -56,6 +61,7 @@ pub async fn run_server(
         configured_human_tags,
         registry_root_tag,
         proxy_metadata_hints,
+        startup_warm,
         fail_on_cache_error,
         read_only,
     )
@@ -89,6 +95,7 @@ pub async fn start_server_background(
     configured_human_tags: Vec<String>,
     registry_root_tag: String,
     proxy_metadata_hints: BTreeMap<String, String>,
+    startup_warm: bool,
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<ServeHandle> {
@@ -101,6 +108,7 @@ pub async fn start_server_background(
         configured_human_tags,
         registry_root_tag,
         proxy_metadata_hints,
+        startup_warm,
         fail_on_cache_error,
         read_only,
     )

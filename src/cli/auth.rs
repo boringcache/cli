@@ -34,7 +34,7 @@ pub struct LoginArgs {
 
 #[derive(Subcommand)]
 pub enum TokenCommands {
-    #[command(name = "ls", visible_alias = "list", about = "List workspace tokens")]
+    #[command(name = "list", about = "List workspace tokens")]
     List {
         #[arg(help = "Workspace name (org/project or user/project)")]
         workspace: Option<String>,
@@ -108,11 +108,7 @@ pub enum TokenCommands {
         json: bool,
     },
 
-    #[command(
-        name = "create-ci",
-        visible_alias = "ci",
-        about = "Create restore/save CI token pair"
-    )]
+    #[command(name = "create-ci", about = "Create restore/save CI token pair")]
     CreateCi {
         #[arg(help = "Workspace name (org/project or user/project)")]
         workspace: Option<String>,

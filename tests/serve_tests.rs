@@ -215,6 +215,7 @@ async fn test_startup_manifest_warm_runs_by_default() {
         "registry".to_string(),
         BTreeMap::new(),
         true,
+        true,
         false,
     )
     .await
@@ -461,6 +462,7 @@ async fn test_startup_prefetch_hydrates_full_tag_before_ready() {
         Vec::new(),
         "registry".to_string(),
         BTreeMap::new(),
+        true,
         true,
         false,
     )

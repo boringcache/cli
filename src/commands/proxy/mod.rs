@@ -1,1 +1,1 @@
-pub mod serve;
+pub mod cache_registry;

@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::commands::{restore, save, serve};
+use crate::commands::{cache_registry, restore, save};
 use crate::config::{AuthPurpose, Config};
 use crate::exit_code::ExitCodeError;
 use crate::project_config;
@@ -76,6 +76,7 @@ struct DryRunProxyPlan {
     endpoint_host: String,
     port: u16,
     read_only: bool,
+    startup_mode: String,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     metadata_hints: BTreeMap<String, String>,
 }
@@ -162,6 +163,7 @@ pub async fn execute(
     identity: Option<String>,
     proxy: Option<String>,
     metadata_hints: Vec<String>,
+    startup_warm: bool,
     host: String,
     endpoint_host: Option<String>,
     port: u16,
@@ -345,7 +347,7 @@ pub async fn execute(
         .unwrap_or_default();
     let archive_enabled = !tag_path_pairs.is_empty();
     let proxy_enabled = proxy.is_some();
-    let proxy_metadata_hints = serve::resolve_proxy_metadata_hints(&metadata_hints)?;
+    let proxy_metadata_hints = cache_registry::resolve_proxy_metadata_hints(&metadata_hints)?;
     let advertised_endpoint_host = endpoint_host
         .clone()
         .map(|value| value.trim().to_string())
@@ -357,7 +359,8 @@ pub async fn execute(
                 host.clone()
             }
         });
-    let effective_proxy_read_only = proxy_enabled && serve::effective_proxy_read_only(read_only);
+    let effective_proxy_read_only =
+        proxy_enabled && cache_registry::effective_proxy_read_only(read_only);
     let effective_skip_save = skip_save || effective_proxy_read_only;
 
     if !(archive_enabled || proxy_enabled || dry_run && json_output) {
@@ -378,6 +381,7 @@ pub async fn execute(
                 endpoint_host: advertised_endpoint_host.clone(),
                 port,
                 read_only: effective_proxy_read_only,
+                startup_mode: cache_registry::proxy_startup_mode(startup_warm).to_string(),
                 metadata_hints: proxy_metadata_hints.clone(),
             });
             let plan = DryRunPlan {
@@ -405,6 +409,7 @@ pub async fn execute(
                 identity.as_deref(),
                 proxy.as_deref(),
                 &proxy_metadata_hints,
+                startup_warm,
                 &host,
                 endpoint_host.as_deref(),
                 port,
@@ -456,7 +461,7 @@ pub async fn execute(
         }
     }
 
-    let mut proxy_handle: Option<serve::ProxyServerHandle> = None;
+    let mut proxy_handle: Option<cache_registry::ProxyServerHandle> = None;
     let mut proxy_context: Option<proxy::ProxyContext> = None;
 
     if effective_proxy_read_only && !read_only && proxy_enabled {
@@ -464,7 +469,7 @@ pub async fn execute(
     }
 
     if let Some(proxy_tag) = proxy {
-        let handle = serve::start_proxy_background(
+        let handle = cache_registry::start_proxy_background(
             workspace.clone(),
             proxy_tag,
             host,
@@ -473,6 +478,7 @@ pub async fn execute(
             no_git,
             endpoint_host,
             proxy_metadata_hints.clone(),
+            startup_warm,
             fail_on_cache_error,
             effective_proxy_read_only,
         )
@@ -592,7 +598,7 @@ fn inject_proxy_env(command: &mut tokio::process::Command, context: &proxy::Prox
 }
 
 async fn shutdown_proxy_handle(
-    proxy_handle: Option<serve::ProxyServerHandle>,
+    proxy_handle: Option<cache_registry::ProxyServerHandle>,
     fail_on_cache_error: bool,
     allow_override: bool,
 ) -> Result<()> {
@@ -623,6 +629,7 @@ fn print_dry_run(
     identity: Option<&str>,
     proxy: Option<&str>,
     proxy_metadata_hints: &BTreeMap<String, String>,
+    startup_warm: bool,
     host: &str,
     endpoint_host: Option<&str>,
     port: u16,
@@ -666,7 +673,7 @@ fn print_dry_run(
     if let Some(proxy_tag) = proxy {
         let mut proxy_parts = vec![
             "boringcache".to_string(),
-            "serve".to_string(),
+            "cache-registry".to_string(),
             workspace.to_string(),
             proxy_tag.to_string(),
             "--host".to_string(),
@@ -674,6 +681,9 @@ fn print_dry_run(
             "--port".to_string(),
             port.to_string(),
         ];
+        if !startup_warm {
+            proxy_parts.push("--on-demand".to_string());
+        }
         if let Some(endpoint_host) = endpoint_host {
             proxy_parts.push("--endpoint-host".to_string());
             proxy_parts.push(endpoint_host.to_string());
@@ -695,6 +705,10 @@ fn print_dry_run(
             proxy_parts.push(format!("{key}={value}"));
         }
         ui::info(&format!("[boringcache]   {}", proxy_parts.join(" ")));
+        ui::info(&format!(
+            "[boringcache]   # proxy startup mode: {}",
+            cache_registry::proxy_startup_mode(startup_warm)
+        ));
     }
 
     for (key, value) in env_vars {
@@ -744,8 +758,7 @@ fn print_dry_run(
 }
 
 fn print_dry_run_json(plan: DryRunPlan) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(&plan)?);
-    Ok(())
+    crate::json_output::print(&plan)
 }
 
 fn prefix_archive_tag(tag: &str, prefix: Option<&str>) -> String {

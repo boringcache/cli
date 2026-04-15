@@ -1,12 +1,16 @@
-use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 
 fn cli_binary() -> PathBuf {
-    option_env!("CARGO_BIN_EXE_boringcache")
+    std::env::var_os("CARGO_BIN_EXE_boringcache")
         .map(PathBuf::from)
-        .unwrap_or_else(|| env::current_dir().unwrap().join("target/debug/boringcache"))
+        .or_else(|| option_env!("CARGO_BIN_EXE_boringcache").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap()
+                .join("target/debug/boringcache")
+        })
 }
 const DUMMY_API_URL: &str = "http://127.0.0.1:65535";
 
@@ -204,12 +208,12 @@ fn test_audit_command_help() {
 }
 
 #[test]
-fn test_exec_alias_help() {
+fn test_exec_alias_is_rejected() {
     let output = run_cli_command(&["exec", "--help"]);
 
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Usage: boringcache run"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrecognized") || stderr.contains("unknown"));
 }
 
 #[test]
@@ -221,6 +225,33 @@ fn test_workspaces_command_help() {
     assert!(stdout.contains("Usage: boringcache workspaces"));
     assert!(stdout.contains("--json"));
     assert!(stdout.contains("Output in JSON format"));
+}
+
+#[test]
+fn test_tui_alias_is_rejected() {
+    let output = run_cli_command(&["tui", "--help"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrecognized") || stderr.contains("unknown"));
+}
+
+#[test]
+fn test_show_alias_is_rejected() {
+    let output = run_cli_command(&["show", "--help"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrecognized") || stderr.contains("unknown"));
+}
+
+#[test]
+fn test_overview_alias_is_rejected() {
+    let output = run_cli_command(&["overview", "--help"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrecognized") || stderr.contains("unknown"));
 }
 
 #[test]
@@ -254,36 +285,78 @@ fn test_config_list_json_flag_help() {
 }
 
 #[test]
-fn test_docker_registry_alias_help() {
+fn test_docker_registry_alias_is_rejected() {
     let output = run_cli_command(&["docker-registry", "--help"]);
 
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Usage: boringcache docker-registry"));
-    assert!(stdout.contains("cache registry proxy"));
-    assert!(stdout.contains("--fail-on-cache-error"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrecognized") || stderr.contains("unknown"));
 }
 
 #[test]
-fn test_serve_compat_alias_help() {
+fn test_serve_alias_is_rejected() {
     let output = run_cli_command(&["serve", "--help"]);
 
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Usage: boringcache docker-registry"));
-    assert!(stdout.contains("cache registry proxy"));
-    assert!(stdout.contains("--fail-on-cache-error"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrecognized") || stderr.contains("unknown"));
 }
 
 #[test]
-fn test_cache_registry_alias_help() {
+fn test_cache_registry_help() {
     let output = run_cli_command(&["cache-registry", "--help"]);
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Usage: boringcache docker-registry"));
+    assert!(stdout.contains("Usage: boringcache cache-registry"));
     assert!(stdout.contains("cache registry proxy"));
     assert!(stdout.contains("--fail-on-cache-error"));
+}
+
+#[test]
+fn test_token_list_help() {
+    let output = run_cli_command(&["token", "list", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: boringcache token list"));
+}
+
+#[test]
+fn test_token_ls_alias_is_rejected() {
+    let output = run_cli_command(&["token", "ls", "--help"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrecognized") || stderr.contains("unknown"));
+}
+
+#[test]
+fn test_token_create_ci_help() {
+    let output = run_cli_command(&["token", "create-ci", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: boringcache token create-ci"));
+}
+
+#[test]
+fn test_token_ci_alias_is_rejected() {
+    let output = run_cli_command(&["token", "ci", "--help"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrecognized") || stderr.contains("unknown"));
+}
+
+#[test]
+fn test_save_help_does_not_show_cross_os_alias() {
+    let output = run_cli_command(&["save", "--help"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("--cross-os"));
+    assert!(stdout.contains("--no-platform"));
 }
 
 #[test]
@@ -302,6 +375,15 @@ fn test_invalid_command() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error") || stderr.contains("invalid"));
+}
+
+#[test]
+fn test_optimize_alias_is_rejected() {
+    let output = run_cli_command(&["optimize", "--help"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrecognized") || stderr.contains("unknown"));
 }
 
 #[test]

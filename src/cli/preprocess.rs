@@ -2,7 +2,7 @@ fn long_option_requires_value(command: &str, option: &str) -> bool {
     match command {
         "save" => matches!(option, "--exclude" | "--recipient"),
         "restore" => matches!(option, "--identity"),
-        "run" | "exec" => matches!(
+        "run" => matches!(
             option,
             "--exclude"
                 | "--recipient"
@@ -14,17 +14,14 @@ fn long_option_requires_value(command: &str, option: &str) -> bool {
                 | "--port"
         ),
         "ls" => matches!(option, "--limit" | "--page"),
-        "serve" | "docker-registry" | "cache-registry" => {
-            matches!(option, "--host" | "--port" | "--metadata-hint")
-        }
+        "cache-registry" => matches!(option, "--host" | "--port" | "--metadata-hint"),
         _ => false,
     }
 }
 
 fn short_option_requires_value(command: &str, option: &str) -> bool {
     match command {
-        "run" | "exec" => option == "-p" || (option.starts_with("-p") && option.len() > 2),
-        "serve" | "docker-registry" | "cache-registry" => {
+        "run" | "cache-registry" => {
             option == "-p" || (option.starts_with("-p") && option.len() > 2)
         }
         _ => false,
@@ -84,14 +81,7 @@ pub fn prepare_args(mut args: Vec<String>) -> Vec<String> {
     let command = &args[1];
     if !matches!(
         command.as_str(),
-        "save"
-            | "restore"
-            | "delete"
-            | "check"
-            | "ls"
-            | "serve"
-            | "docker-registry"
-            | "cache-registry"
+        "save" | "restore" | "delete" | "check" | "ls" | "cache-registry"
     ) {
         return args;
     }
@@ -101,7 +91,7 @@ pub fn prepare_args(mut args: Vec<String>) -> Vec<String> {
         "ls" => positional_args.is_empty(),
         "save" | "restore" => positional_args.len() == 1 && positional_args[0].1.contains(':'),
         "delete" | "check" => positional_args.len() == 1 && !positional_args[0].1.contains('/'),
-        "serve" | "docker-registry" | "cache-registry" => positional_args
+        "cache-registry" => positional_args
             .first()
             .map(|(_, arg)| !arg.contains('/'))
             .unwrap_or(false),

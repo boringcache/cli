@@ -57,6 +57,12 @@ You can still override a configured adapter from the workflow when needed:
 
 Use `boringcache/one@v1` when you want the action to keep owning tool setup such as Bazel rc files, Maven or Gradle cache config, buildx setup, or container networking.
 
+Keep the proxy story simple in CI too:
+
+- `cache-registry` is the long-lived proxy when a workflow or service needs to keep one around
+- adapter commands and `run --proxy` temporarily start that same proxy for one command
+- both paths should use `/_boringcache/status` when an external waiter needs lifecycle state
+
 Keep the trust model simple:
 
 - every job gets `BORINGCACHE_RESTORE_TOKEN`

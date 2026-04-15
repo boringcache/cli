@@ -23,7 +23,7 @@ pub async fn execute(
         .await?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        crate::json_output::print(&response)?;
         return Ok(());
     }
 
@@ -200,5 +200,44 @@ mod tests {
         };
 
         assert_eq!(showing_range(&pagination), "0 of 20");
+    }
+
+    #[test]
+    fn tags_json_contract_adds_schema_version() {
+        let response = WorkspaceTagsResponse {
+            workspace: WorkspaceSummaryContext {
+                name: "testing".to_string(),
+                slug: "org/testing".to_string(),
+            },
+            filter: WorkspaceTagsFilter {
+                query: Some("ruby".to_string()),
+                include_system: false,
+            },
+            pagination: WorkspacePagination {
+                limit: 20,
+                offset: 0,
+                total: 1,
+                returned: 1,
+                has_more: false,
+            },
+            tags: vec![WorkspaceTagFeedItem {
+                name: "ruby-current".to_string(),
+                primary: true,
+                system: false,
+                primary_tag: "ruby-current".to_string(),
+                cache_entry_id: "entry-1".to_string(),
+                manifest_root_digest: "sha256:abc".to_string(),
+                storage_mode: "archive".to_string(),
+                stored_size_bytes: 1024,
+                hit_count: 3,
+                uploaded_at: None,
+                last_accessed_at: None,
+            }],
+        };
+
+        let value = crate::json_output::to_value(&response).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["workspace"]["slug"], "org/testing");
+        assert_eq!(value["tags"][0]["name"], "ruby-current");
     }
 }

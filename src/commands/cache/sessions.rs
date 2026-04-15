@@ -21,7 +21,7 @@ pub async fn execute(
         .await?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        crate::json_output::print(&response)?;
         return Ok(());
     }
 
@@ -138,4 +138,79 @@ fn showing_range(pagination: &crate::api::models::workspace::WorkspacePagination
         pagination.offset + pagination.returned,
         pagination.total
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::models::workspace::{
+        WorkspacePagination, WorkspaceSessionsResponse, WorkspaceStatusPeriod,
+        WorkspaceStatusSession, WorkspaceStatusSessionError, WorkspaceStatusSessionHealth,
+        WorkspaceStatusSessionMissedKey, WorkspaceStatusWorkspace,
+    };
+    use serde_json::Value;
+
+    #[test]
+    fn sessions_json_contract_adds_schema_version() {
+        let response = WorkspaceSessionsResponse {
+            workspace: WorkspaceStatusWorkspace {
+                id: Value::String("ws_1".to_string()),
+                name: "Demo".to_string(),
+                slug: "org/demo".to_string(),
+                description: None,
+                provisioned: true,
+                created_at: "2026-04-15T00:00:00Z".to_string(),
+                updated_at: "2026-04-15T00:00:00Z".to_string(),
+            },
+            period: WorkspaceStatusPeriod {
+                key: "24h".to_string(),
+                started_at: "2026-04-14T00:00:00Z".to_string(),
+                ended_at: "2026-04-15T00:00:00Z".to_string(),
+            },
+            generated_at: "2026-04-15T00:00:00Z".to_string(),
+            session_health: WorkspaceStatusSessionHealth {
+                total_sessions: 1,
+                healthy_sessions: 1,
+                error_sessions: 0,
+                degraded_sessions: 0,
+                avg_hit_rate: 0.8,
+                avg_duration_ms: 3000.0,
+            },
+            pagination: WorkspacePagination {
+                limit: 20,
+                offset: 0,
+                total: 1,
+                returned: 1,
+                has_more: false,
+            },
+            sessions: vec![WorkspaceStatusSession {
+                session_id: "sess_1".to_string(),
+                tool: "turbo".to_string(),
+                project_hint: Some("demo".to_string()),
+                phase_hint: Some("build".to_string()),
+                metadata_hints: std::collections::BTreeMap::new(),
+                hit_rate: 0.8,
+                hit_count: 8,
+                miss_count: 2,
+                error_count: 0,
+                error_details: vec![WorkspaceStatusSessionError {
+                    operation: "get".to_string(),
+                    count: 0,
+                }],
+                duration_seconds: Some(3.0),
+                bytes_read: 512,
+                bytes_written: 256,
+                created_at: "2026-04-15T00:00:00Z".to_string(),
+                missed_keys: vec![WorkspaceStatusSessionMissedKey {
+                    key_hash: "abc123".to_string(),
+                    miss_count: 2,
+                    sampled_key_prefix: Some("deps-".to_string()),
+                }],
+            }],
+        };
+
+        let value = crate::json_output::to_value(&response).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["workspace"]["slug"], "org/demo");
+        assert_eq!(value["sessions"][0]["tool"], "turbo");
+    }
 }

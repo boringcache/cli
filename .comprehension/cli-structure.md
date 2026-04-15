@@ -113,7 +113,7 @@ src/
       setup_encryption.rs
     proxy/
       mod.rs
-      serve.rs
+      cache_registry.rs
     workspace/
       mod.rs
       audit.rs
@@ -165,7 +165,7 @@ src/
     resolve.rs
   proxy/
     mod.rs
-    exec.rs
+    command.rs
     tags.rs
   retry_resume.rs
   serve/
@@ -222,7 +222,6 @@ src/
   tag_utils.rs
   telemetry.rs
   telemetry/
-    collector.rs
     model.rs
     operation.rs
   test_env.rs
@@ -279,8 +278,8 @@ These are the next sensible follow-ons from the current tree.
 - Auth/config entrypoints: `auth`, `login`, `token`, `config`, `setup_encryption`
 - Cache entrypoints: `check`, `delete`, `inspect`, `ls`, `misses`, `mount`, `restore`, `run`, `save`, `sessions`, `status`, `tags`
 - Workspace entrypoints: `audit`, `dashboard`, `doctor`, `onboard`, `use_workspace`, `workspaces`
-- Proxy/adapter entrypoints: `serve`, `go_cacheprog`, and `adapters/command/*`
-- Shared support moved out of `src/commands`: `cache/{cas_publish,cas_restore,file_materialize,receipts,transport}.rs`, `proxy/{exec,tags}.rs`, `signing/policy.rs`, `command_support/{workspace,specs,concurrency,save_support}.rs`
+- Proxy/adapter entrypoints: `cache_registry`, `go_cacheprog`, and `adapters/command/*`
+- Shared support moved out of `src/commands`: `cache/{cas_publish,cas_restore,file_materialize,receipts,transport}.rs`, `proxy/{command,tags}.rs`, `signing/policy.rs`, `command_support/{workspace,specs,concurrency,save_support}.rs`
 
 That means `src/commands` is now closer to controllers, and the clearest mixed-role command hotspots left are `src/commands/workspace/onboard.rs` and `src/commands/workspace/dashboard.rs`.
 

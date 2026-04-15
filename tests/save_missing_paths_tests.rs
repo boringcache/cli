@@ -7,8 +7,9 @@ use tempfile::TempDir;
 const DUMMY_API_URL: &str = "http://127.0.0.1:65535";
 
 fn cli_binary() -> PathBuf {
-    option_env!("CARGO_BIN_EXE_boringcache")
+    std::env::var_os("CARGO_BIN_EXE_boringcache")
         .map(PathBuf::from)
+        .or_else(|| option_env!("CARGO_BIN_EXE_boringcache").map(PathBuf::from))
         .unwrap_or_else(|| {
             std::env::current_dir()
                 .unwrap()

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::{LoadedRepoConfig, RepoConfig};
 
-const PROJECT_CONFIG_FILE_NAMES: &[&str] = &[".boringcache.toml", "boringcache.toml"];
+const PROJECT_CONFIG_FILE_NAMES: &[&str] = &[".boringcache.toml"];
 
 pub fn discover(start_dir: &Path) -> Result<Option<LoadedRepoConfig>> {
     for directory in start_dir.ancestors() {

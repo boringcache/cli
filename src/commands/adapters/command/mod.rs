@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::cli::AdapterArgs;
-use crate::commands::{restore, save, serve};
+use crate::commands::{cache_registry, restore, save};
 use crate::config::{AuthPurpose, Config};
 use crate::exit_code::ExitCodeError;
 use crate::project_config;
@@ -187,6 +187,7 @@ struct DryRunProxyPlan {
     no_platform: bool,
     no_git: bool,
     read_only: bool,
+    startup_mode: String,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     metadata_hints: BTreeMap<String, String>,
 }
@@ -246,13 +247,15 @@ pub async fn adapter_execute(
     let no_platform = adapter_config.no_platform || args.no_platform;
     let no_git = adapter_config.no_git || args.no_git;
     let configured_read_only = adapter_config.read_only || args.read_only;
-    let bind_host = trim_non_empty(args.host.as_deref())
-        .map(ToOwned::to_owned)
-        .or_else(|| trim_non_empty(adapter_config.host.as_deref()).map(ToOwned::to_owned))
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let endpoint_host_override = trim_non_empty(args.endpoint_host.as_deref())
-        .map(ToOwned::to_owned)
-        .or_else(|| trim_non_empty(adapter_config.endpoint_host.as_deref()).map(ToOwned::to_owned));
+    let bind_host = project_config::prefer_cli_scalar(
+        trim_non_empty(adapter_config.host.as_deref()).map(ToOwned::to_owned),
+        trim_non_empty(args.host.as_deref()).map(ToOwned::to_owned),
+    )
+    .unwrap_or_else(|| "127.0.0.1".to_string());
+    let endpoint_host_override = project_config::prefer_cli_scalar(
+        trim_non_empty(adapter_config.endpoint_host.as_deref()).map(ToOwned::to_owned),
+        trim_non_empty(args.endpoint_host.as_deref()).map(ToOwned::to_owned),
+    );
     let advertised_endpoint_host = endpoint_host_override.clone().unwrap_or_else(|| {
         if bind_host == "0.0.0.0" {
             "127.0.0.1".to_string()
@@ -278,45 +281,43 @@ pub async fn adapter_execute(
         if infer_entries { &command } else { &[] },
     )?;
     let archive_enabled = !resolved_plan.tag_path_pairs.is_empty();
-    let proxy_metadata_hints = serve::resolve_proxy_metadata_hints(&metadata_hint_args)?;
+    let proxy_metadata_hints = cache_registry::resolve_proxy_metadata_hints(&metadata_hint_args)?;
+    let startup_warm = !args.on_demand;
 
-    let effective_read_only = serve::effective_proxy_read_only(configured_read_only);
+    let effective_read_only = cache_registry::effective_proxy_read_only(configured_read_only);
     let effective_skip_save = skip_save || effective_read_only;
-    let docker_cache_mode = args
-        .cache_mode
-        .clone()
-        .or(adapter_config.cache_mode.clone())
-        .unwrap_or_else(|| "max".to_string());
+    let docker_cache_mode = project_config::prefer_cli_scalar(
+        adapter_config.cache_mode.clone(),
+        args.cache_mode.clone(),
+    )
+    .unwrap_or_else(|| "max".to_string());
     docker::validate_cache_mode(&docker_cache_mode)?;
     let docker_plan = if kind == AdapterKind::Docker {
         let plan = docker::resolve_docker_plan(
             &raw_tag,
-            args.cache_ref_tag
-                .as_deref()
-                .or(adapter_config.cache_ref_tag.as_deref()),
+            project_config::prefer_cli_scalar(
+                adapter_config.cache_ref_tag.as_deref(),
+                args.cache_ref_tag.as_deref(),
+            ),
             &advertised_endpoint_host,
             port,
             &docker_cache_mode,
             effective_read_only,
         )?;
-        if plan.used_legacy_embedded_ref_tag {
-            ui::warn(
-                "--tag included a ref-tag suffix; prefer --cache-ref-tag for the OCI cache tag.",
-            );
-        }
         Some(plan)
     } else {
         None
     };
-    let tag = docker_plan
-        .as_ref()
-        .map(|plan| plan.proxy_tag.clone())
-        .unwrap_or(raw_tag);
+    let tag = raw_tag.clone();
     let docker_cache_ref_tag = docker_plan
         .as_ref()
         .map(|plan| plan.oci_cache.ref_tag.clone())
-        .or_else(|| args.cache_ref_tag.clone())
-        .or(adapter_config.cache_ref_tag.clone())
+        .or_else(|| {
+            project_config::prefer_cli_scalar(
+                adapter_config.cache_ref_tag.clone(),
+                args.cache_ref_tag.clone(),
+            )
+        })
         .unwrap_or_else(|| "buildcache".to_string());
     let command_options = AdapterCommandOptions {
         cache_ref_tag: docker_cache_ref_tag,
@@ -332,7 +333,13 @@ pub async fn adapter_execute(
             .map(|plan| plan.oci_cache.registry_ref.clone())
             .map(Ok)
             .unwrap_or_else(|| {
-                serve::planned_cache_ref(&tag, &advertised_endpoint_host, port, no_platform, no_git)
+                cache_registry::planned_cache_ref(
+                    &tag,
+                    &advertised_endpoint_host,
+                    port,
+                    no_platform,
+                    no_git,
+                )
             })?,
     };
     let preview_command = proxy::substitute_proxy_placeholders(
@@ -390,13 +397,14 @@ pub async fn adapter_execute(
                 no_platform,
                 no_git,
                 read_only: effective_read_only,
+                startup_mode: cache_registry::proxy_startup_mode(startup_warm).to_string(),
                 metadata_hints: proxy_metadata_hints,
             },
             oci_cache: docker_plan.map(|plan| plan.oci_cache),
         };
 
         if args.json {
-            println!("{}", serde_json::to_string_pretty(&plan)?);
+            crate::json_output::print(&plan)?;
         } else {
             print_dry_run(&plan, effective_skip_save, skip_restore, save_on_failure);
         }
@@ -447,7 +455,7 @@ pub async fn adapter_execute(
         }
     }
 
-    let proxy_handle = serve::start_proxy_background(
+    let proxy_handle = cache_registry::start_proxy_background(
         workspace.clone(),
         tag,
         bind_host,
@@ -456,6 +464,7 @@ pub async fn adapter_execute(
         no_git,
         endpoint_host_override,
         proxy_metadata_hints,
+        startup_warm,
         fail_on_cache_error,
         effective_read_only,
     )
@@ -535,10 +544,10 @@ fn resolve_adapter_tag(
     cli_tag: Option<&str>,
     configured_tag: Option<&str>,
 ) -> Result<String> {
-    if let Some(tag) = trim_non_empty(cli_tag)
-        .or_else(|| trim_non_empty(configured_tag))
-        .map(ToOwned::to_owned)
-    {
+    if let Some(tag) = project_config::prefer_cli_scalar(
+        trim_non_empty(configured_tag).map(ToOwned::to_owned),
+        trim_non_empty(cli_tag).map(ToOwned::to_owned),
+    ) {
         return Ok(tag);
     }
 
@@ -553,31 +562,11 @@ fn resolve_adapter_tag(
 }
 
 fn merge_entries(configured: &[String], cli: &[String]) -> Vec<String> {
-    let mut merged = Vec::new();
-    let mut seen = BTreeSet::new();
-
-    for value in configured.iter().chain(cli.iter()) {
-        let normalized = project_config::canonical_entry_id(value);
-        if !normalized.is_empty() && seen.insert(normalized.clone()) {
-            merged.push(normalized);
-        }
-    }
-
-    merged
+    project_config::prefer_cli_list(configured, cli, project_config::canonical_entry_id)
 }
 
 fn merge_profiles(configured: &[String], cli: &[String]) -> Vec<String> {
-    let mut merged = Vec::new();
-    let mut seen = BTreeSet::new();
-
-    for value in configured.iter().chain(cli.iter()) {
-        let normalized = project_config::normalize_profile_name(value);
-        if !normalized.is_empty() && seen.insert(normalized.clone()) {
-            merged.push(normalized);
-        }
-    }
-
-    merged
+    project_config::prefer_cli_list(configured, cli, project_config::normalize_profile_name)
 }
 
 fn merge_metadata_hints(configured: &[String], cli: &[String]) -> Vec<String> {
@@ -588,7 +577,7 @@ fn merge_metadata_hints(configured: &[String], cli: &[String]) -> Vec<String> {
 }
 
 async fn shutdown_proxy_handle(
-    proxy_handle: serve::ProxyServerHandle,
+    proxy_handle: cache_registry::ProxyServerHandle,
     fail_on_cache_error: bool,
     allow_override: bool,
 ) -> Result<()> {
@@ -608,10 +597,11 @@ fn print_dry_run(plan: &DryRunPlan, skip_save: bool, skip_restore: bool, save_on
         plan.adapter.display_name()
     ));
     ui::info(&format!(
-        "[boringcache]   proxy {}:{} (bind {}, read-only: {})",
+        "[boringcache]   proxy {}:{} (bind {}, mode: {}, read-only: {})",
         plan.proxy.endpoint_host,
         plan.proxy.port,
         plan.proxy.host,
+        plan.proxy.startup_mode,
         if plan.proxy.read_only { "yes" } else { "no" }
     ));
 
@@ -643,5 +633,56 @@ fn print_dry_run(plan: &DryRunPlan, skip_save: bool, skip_restore: bool, save_on
 
     if save_on_failure && !plan.archive_entries.is_empty() && !skip_save {
         ui::info("[boringcache]   # save phase enabled for non-zero command exits");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_entries_prefers_cli_list_when_present() {
+        let configured = vec!["bundler".to_string(), "pnpm-store".to_string()];
+        let cli = vec!["node-modules".to_string(), "bundler".to_string()];
+
+        assert_eq!(
+            merge_entries(&configured, &cli),
+            vec!["node_modules".to_string(), "bundler".to_string()]
+        );
+        assert_eq!(
+            merge_entries(&configured, &[]),
+            vec!["bundler".to_string(), "pnpm-store".to_string()]
+        );
+    }
+
+    #[test]
+    fn merge_profiles_prefers_cli_list_when_present() {
+        let configured = vec!["bundle-install".to_string(), "warm".to_string()];
+        let cli = vec!["release".to_string(), "bundle_install".to_string()];
+
+        assert_eq!(
+            merge_profiles(&configured, &cli),
+            vec!["release".to_string(), "bundle-install".to_string()]
+        );
+        assert_eq!(
+            merge_profiles(&configured, &[]),
+            vec!["bundle-install".to_string(), "warm".to_string()]
+        );
+    }
+
+    #[test]
+    fn merge_metadata_hints_keeps_configured_order_and_appends_cli_values() {
+        let configured = vec!["phase=warm".to_string(), "tool=turbo".to_string()];
+        let cli = vec!["phase=ready".to_string(), "lane=ci".to_string()];
+
+        assert_eq!(
+            merge_metadata_hints(&configured, &cli),
+            vec![
+                "phase=warm".to_string(),
+                "tool=turbo".to_string(),
+                "phase=ready".to_string(),
+                "lane=ci".to_string()
+            ]
+        );
     }
 }

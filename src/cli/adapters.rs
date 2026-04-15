@@ -43,6 +43,9 @@ pub struct AdapterArgs {
     )]
     pub metadata_hint: Vec<String>,
 
+    #[arg(long, help = "Skip startup warming and serve cache reads on demand")]
+    pub on_demand: bool,
+
     #[arg(
         long,
         value_name = "ENTRY",

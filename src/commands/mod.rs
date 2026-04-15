@@ -17,5 +17,5 @@ pub use cache_group::{
     check, delete, inspect, ls, misses, mount, restore, run, save, sessions, status, tags,
 };
 pub use config_group::{config, setup_encryption};
-pub use proxy_group::serve;
+pub use proxy_group::cache_registry;
 pub use workspace_group::{audit, dashboard, doctor, onboard, use_workspace, workspaces};

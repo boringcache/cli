@@ -1,5 +1,4 @@
 use serde_json::Value;
-use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
@@ -7,9 +6,14 @@ use tempfile::TempDir;
 const DUMMY_API_URL: &str = "http://127.0.0.1:65535";
 
 fn cli_binary() -> PathBuf {
-    option_env!("CARGO_BIN_EXE_boringcache")
+    std::env::var_os("CARGO_BIN_EXE_boringcache")
         .map(PathBuf::from)
-        .unwrap_or_else(|| env::current_dir().unwrap().join("target/debug/boringcache"))
+        .or_else(|| option_env!("CARGO_BIN_EXE_boringcache").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap()
+                .join("target/debug/boringcache")
+        })
 }
 
 fn apply_test_env(cmd: &mut Command) -> &mut Command {
@@ -21,6 +25,10 @@ fn apply_test_env(cmd: &mut Command) -> &mut Command {
         .env_remove("BORINGCACHE_RESTORE_TOKEN")
         .env_remove("BORINGCACHE_SAVE_TOKEN");
     cmd
+}
+
+fn assert_schema_version(parsed: &Value) {
+    assert_eq!(parsed["schema_version"], 1);
 }
 
 #[test]
@@ -234,6 +242,7 @@ fn test_run_dry_run_json_resolves_builtin_entry_without_command() {
     );
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
     let canonical_temp_dir = temp_dir
         .path()
         .canonicalize()
@@ -304,6 +313,7 @@ entries = ["bundler"]
     );
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
     let canonical_temp_dir = temp_dir
         .path()
         .canonicalize()
@@ -376,6 +386,7 @@ workspace = "test-org/test-workspace"
     );
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
     assert_eq!(parsed["workspace"], "test-org/test-workspace");
     assert_eq!(parsed["workspace_source"], "repo-config");
     let repo_config_path = parsed["repo_config_path"]
@@ -390,6 +401,36 @@ workspace = "test-org/test-workspace"
     assert!(parsed.get("archive_entries").is_none());
     assert_eq!(parsed["env_vars"], serde_json::json!({}));
     assert!(parsed.get("proxy").is_none());
+}
+
+#[test]
+fn test_run_dry_run_json_reports_proxy_startup_mode() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .args([
+            "run",
+            "test-org/test-workspace",
+            "--proxy",
+            "tool-cache",
+            "--on-demand",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("Failed to execute proxy-only json dry-run command");
+
+    assert!(
+        output.status.success(),
+        "JSON dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(parsed["workspace"], "test-org/test-workspace");
+    assert_eq!(parsed["proxy"]["tag"], "tool-cache");
+    assert_eq!(parsed["proxy"]["startup_mode"], "on-demand");
 }
 
 #[test]
@@ -414,6 +455,7 @@ fn test_run_dry_run_json_marks_manual_pairs_as_manual() {
     );
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
     assert_eq!(parsed["workspace"], "test-org/test-workspace");
     assert_eq!(parsed["workspace_source"], "explicit");
     assert_eq!(
@@ -458,6 +500,7 @@ fn test_run_dry_run_json_applies_hidden_tag_decoration_flags() {
     );
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
     assert_eq!(
         parsed["tag_path_pairs"],
         serde_json::json!(["web-bundler-ruby-4.0.1:vendor/bundle"])
@@ -504,6 +547,7 @@ fn test_run_dry_run_json_plans_archive_paths_and_restore_prefixes() {
     );
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
     let canonical_temp_dir = temp_dir
         .path()
         .canonicalize()
@@ -608,6 +652,7 @@ fn test_run_dry_run_json_applies_cache_tag_and_tool_suffix_to_planned_entries() 
     );
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
     let expected_pair = "web-node-modules-node-22.4.1-ruby-3.3.6:node_modules";
 
     assert_eq!(parsed["tag_path_pairs"], serde_json::json!([expected_pair]));
@@ -646,6 +691,7 @@ fn test_run_dry_run_json_applies_cache_tag_and_tool_suffix_to_manual_pairs() {
     );
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
     assert_eq!(
         parsed["tag_path_pairs"],
         serde_json::json!(["web-bundler-ruby-4.0.1:vendor/bundle"])
@@ -740,6 +786,7 @@ fail-on-cache-error = true
     );
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
     assert_eq!(parsed["adapter"], "turbo");
     assert_eq!(parsed["workspace"], "test-org/test-workspace");
     assert_eq!(parsed["tag"], "turbo-main");
@@ -748,7 +795,91 @@ fail-on-cache-error = true
     assert_eq!(parsed["env_vars"]["TURBO_TOKEN"], "boringcache");
     assert_eq!(parsed["proxy"]["no_platform"], false);
     assert_eq!(parsed["proxy"]["no_git"], false);
+    assert_eq!(parsed["proxy"]["startup_mode"], "warm");
     assert_eq!(parsed["proxy"]["metadata_hints"]["phase"], "warm");
+}
+
+#[test]
+fn test_turbo_dry_run_json_reports_on_demand_proxy_mode() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .args([
+            "turbo",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "turbo-main",
+            "--on-demand",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("Failed to execute turbo on-demand dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(parsed["adapter"], "turbo");
+    assert_eq!(parsed["proxy"]["startup_mode"], "on-demand");
+}
+
+#[test]
+fn test_adapter_dry_run_json_replaces_configured_entry_list_and_merges_metadata_hints() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.turbo]
+tag = "turbo-main"
+command = ["pnpm", "turbo", "run", "build"]
+entries = ["pnpm-store"]
+metadata-hints = ["phase=warm", "tool=turbo"]
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args([
+            "turbo",
+            "--entry",
+            "bundler",
+            "--metadata-hint",
+            "phase=ready",
+            "--metadata-hint",
+            "lane=ci",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("Failed to execute turbo dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    let entries = parsed["archive_entries"]
+        .as_array()
+        .expect("archive_entries should be an array");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["requested"], "bundler");
+    assert_eq!(parsed["proxy"]["metadata_hints"]["phase"], "ready");
+    assert_eq!(parsed["proxy"]["metadata_hints"]["tool"], "turbo");
+    assert_eq!(parsed["proxy"]["metadata_hints"]["lane"], "ci");
 }
 
 #[test]
@@ -783,6 +914,7 @@ port = 6001
     );
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
     assert_eq!(parsed["adapter"], "bazel");
     assert_eq!(parsed["tag"], "bazel-cache");
     assert_eq!(parsed["proxy"]["endpoint_host"], "host.docker.internal");
@@ -833,6 +965,7 @@ workspace = "test-org/test-workspace"
     );
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
     assert_eq!(parsed["adapter"], "turbo");
     assert_eq!(parsed["workspace"], "test-org/test-workspace");
     assert_eq!(parsed["tag"], "demo-app");
@@ -879,6 +1012,7 @@ fn test_docker_dry_run_json_injects_cache_flags() {
     );
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
     assert_eq!(parsed["adapter"], "docker");
     assert_eq!(parsed["tag"], "docker-main");
     assert_eq!(parsed["proxy"]["endpoint_host"], "host.docker.internal");
@@ -910,7 +1044,7 @@ fn test_docker_dry_run_json_injects_cache_flags() {
 }
 
 #[test]
-fn test_docker_dry_run_json_supports_embedded_ref_tag_compatibility() {
+fn test_docker_dry_run_rejects_embedded_ref_tag_syntax() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);
     let output = command
@@ -929,19 +1063,19 @@ fn test_docker_dry_run_json_supports_embedded_ref_tag_compatibility() {
             ".",
         ])
         .output()
-        .expect("Failed to execute docker compatibility dry-run command");
+        .expect("Failed to execute docker dry-run command");
 
     assert!(
-        output.status.success(),
-        "Dry-run should succeed, stderr: {}",
+        !output.status.success(),
+        "Dry-run should fail, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
-    assert_eq!(parsed["tag"], "docker-main");
-    assert_eq!(parsed["oci_cache"]["ref_tag"], "cache-main");
-    assert_eq!(
-        parsed["oci_cache"]["registry_ref"],
-        "127.0.0.1:5000/cache:cache-main"
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "Use --tag for the proxy cache tag and --cache-ref-tag for the OCI cache tag"
+        ),
+        "stderr: {stderr}"
     );
 }

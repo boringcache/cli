@@ -230,6 +230,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
                 args.identity,
                 args.proxy,
                 args.metadata_hint,
+                !args.on_demand,
                 args.host,
                 args.endpoint_host,
                 args.port,
@@ -419,7 +420,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             commands::setup_encryption::execute(args.workspace, args.identity_output).await
         }
         Commands::Workspaces(args) => commands::workspaces::execute(args.json).await,
-        Commands::Onboard(args) | Commands::Optimize(args) => {
+        Commands::Onboard(args) => {
             commands::onboard::execute(
                 args.path,
                 args.email,
@@ -432,8 +433,8 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             )
             .await
         }
-        Commands::Serve(args) => {
-            commands::serve::execute(
+        Commands::CacheRegistry(args) => {
+            commands::cache_registry::execute(
                 args.workspace,
                 args.tag,
                 args.host,
@@ -441,6 +442,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
                 args.no_platform,
                 args.no_git,
                 args.metadata_hint,
+                !args.on_demand,
                 args.fail_on_cache_error,
                 args.read_only,
             )

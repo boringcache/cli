@@ -39,6 +39,7 @@ pub(super) async fn build_server_runtime(
     configured_human_tags: Vec<String>,
     registry_root_tag: String,
     proxy_metadata_hints: BTreeMap<String, String>,
+    startup_warm: bool,
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<(AppState, TcpListener, mpsc::Receiver<KvReplicationWork>)> {
@@ -111,7 +112,7 @@ pub(super) async fn build_server_runtime(
         ),
         oci_manifest_cache: Arc::new(dashmap::DashMap::new()),
         backend_breaker: Arc::new(state::BackendCircuitBreaker::new()),
-        prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(!startup_warm)),
         prefetch_complete_notify: Arc::new(tokio::sync::Notify::new()),
     };
 
@@ -194,7 +195,18 @@ pub(super) async fn build_server_runtime(
         eprintln!("  Expert Tuning Overrides: {BLOB_DOWNLOAD_CONCURRENCY_ENV}");
     }
     eprintln!("  Replication queue: {KV_REPLICATION_WORK_QUEUE_CAPACITY} (bounded)");
-    eprintln!("  Manifest warm: enabled (auto)");
+    eprintln!(
+        "  Startup mode: {}",
+        if startup_warm { "warm" } else { "on-demand" }
+    );
+    eprintln!(
+        "  Full-tag hydration: {}",
+        if startup_warm {
+            "before ready"
+        } else {
+            "background"
+        }
+    );
     eprintln!("  KV backlog policy: {KV_BACKLOG_POLICY}");
     eprintln!(
         "  TCP listen backlog: {listen_backlog} ({})",

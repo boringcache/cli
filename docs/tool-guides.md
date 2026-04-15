@@ -9,6 +9,10 @@ The pattern is simple:
 3. use `boringcache <tool>`
 4. drop to `cache-registry` only when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive
 
+`cache-registry` is the proxy.
+`boringcache <tool>` and `boringcache run --proxy` temporarily start that same proxy for one command, wait for `ready`, then hand traffic to the wrapped tool.
+`cache-registry` itself is warm by default. Use `--on-demand` only for advanced shared-proxy setups that prefer immediate startup over warmed first reads.
+
 ## Docker / BuildKit
 
 ```toml
@@ -229,9 +233,9 @@ command = ["go", "build", "./..."]
 boringcache go
 ```
 
-The adapter sets `GOCACHEPROG` automatically for Go 1.24+.
+Use `boringcache go` for normal Go cache integration. The adapter sets `GOCACHEPROG` automatically for Go 1.24+.
 
-For a long-lived endpoint:
+Advanced: manual `GOCACHEPROG` wiring for a long-lived endpoint:
 
 ```bash
 boringcache cache-registry my-org/app registry-cache --port 5000

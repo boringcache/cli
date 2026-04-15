@@ -1,7 +1,7 @@
 use clap::Args;
 
 #[derive(Debug, Clone, Args)]
-pub struct ServeArgs {
+pub struct CacheRegistryArgs {
     #[arg(help = "Workspace name (org/project or user/project)")]
     pub workspace: String,
 
@@ -28,6 +28,9 @@ pub struct ServeArgs {
         help = "Attach low-cardinality metadata hints to proxy sessions (repeatable; also reads BORINGCACHE_PROXY_METADATA_HINTS)"
     )]
     pub metadata_hint: Vec<String>,
+
+    #[arg(long, help = "Skip startup warming and serve cache reads on demand")]
+    pub on_demand: bool,
 
     #[arg(
         long,
