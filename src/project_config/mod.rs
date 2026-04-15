@@ -193,6 +193,46 @@ default_path = "/mise/installs"
     }
 
     #[test]
+    fn resolves_rust_cache_built_ins_with_default_paths_and_env_exports() {
+        let _guard = test_env::lock();
+        let temp_dir = TempDir::new().unwrap();
+        let cargo_home = temp_dir.path().join("cargo-home");
+        let sccache_dir = temp_dir.path().join("sccache-cache");
+
+        test_env::set_var("CARGO_HOME", cargo_home.as_os_str());
+        test_env::set_var("SCCACHE_DIR", sccache_dir.as_os_str());
+
+        let plan = resolve_run_plan(
+            temp_dir.path(),
+            &[],
+            &[
+                String::from("cargo-registry"),
+                String::from("cargo-git"),
+                String::from("cargo-bin"),
+                String::from("target"),
+                String::from("sccache-dir"),
+            ],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.tag_path_pairs,
+            vec![
+                format!("cargo-registry:{}", cargo_home.join("registry").display()),
+                format!("cargo-git:{}", cargo_home.join("git").display()),
+                format!("cargo-bin:{}", cargo_home.join("bin").display()),
+                format!("target:{}", temp_dir.path().join("target").display()),
+                format!("sccache:{}", sccache_dir.display()),
+            ]
+        );
+        assert_eq!(
+            plan.env_vars.get("SCCACHE_DIR"),
+            Some(&sccache_dir.display().to_string())
+        );
+    }
+
+    #[test]
     fn resolves_composer_cache_and_vendor_from_composer_json_config() {
         let _guard = test_env::lock();
         test_env::remove_var("COMPOSER_CACHE_DIR");

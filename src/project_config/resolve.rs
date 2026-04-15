@@ -156,7 +156,7 @@ pub fn resolve_run_plan(
                 .map(|loaded| available_entries(&loaded.config))
                 .unwrap_or_else(|| String::from("(no repo entries defined)"));
             anyhow::bail!(
-                "Unknown cache entry '{}'. Built-in entries: bundler, bootsnap, composer-cache, go-build-cache, go-mod-cache, mise, node_modules, npm-cache, pnpm-store, uv-cache, vendor, yarn-cache. Project entries: {}",
+                "Unknown cache entry '{}'. Built-in entries: bootsnap, bundler, cargo-bin, cargo-git, cargo-registry, composer-cache, go-build-cache, go-mod-cache, mise, node_modules, npm-cache, pnpm-store, sccache-dir, target, uv-cache, vendor, yarn-cache. Project entries: {}",
                 entry_id,
                 available
             );
@@ -319,6 +319,12 @@ fn default_path(kind: DefaultPathKind, base_dir: &Path) -> Option<PathBuf> {
 
 fn dynamic_builtin_path(entry_id: &str, base_dir: &Path) -> Option<PathBuf> {
     match canonical_entry_id(entry_id).as_str() {
+        "cargo-registry" => crate::config::env_var("CARGO_HOME")
+            .map(|value| resolve_path_value(&value, base_dir).join("registry")),
+        "cargo-git" => crate::config::env_var("CARGO_HOME")
+            .map(|value| resolve_path_value(&value, base_dir).join("git")),
+        "cargo-bin" => crate::config::env_var("CARGO_HOME")
+            .map(|value| resolve_path_value(&value, base_dir).join("bin")),
         "composer-cache" => read_composer_config_path(base_dir, "cache-dir"),
         "vendor" => read_composer_config_path(base_dir, "vendor-dir"),
         _ => None,

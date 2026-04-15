@@ -97,6 +97,41 @@ pub(super) fn builtin_entry(entry_id: &str) -> Option<BuiltInEntrySpec> {
             extra_env: empty_pairs,
             default_path: DefaultPathKind::Relative(".composer-cache"),
         }),
+        "cargo-registry" => Some(BuiltInEntrySpec {
+            default_tag: "cargo-registry",
+            env_lookup: empty_env,
+            env_export: empty_env,
+            extra_env: empty_pairs,
+            default_path: DefaultPathKind::Home(".cargo/registry"),
+        }),
+        "cargo-git" => Some(BuiltInEntrySpec {
+            default_tag: "cargo-git",
+            env_lookup: empty_env,
+            env_export: empty_env,
+            extra_env: empty_pairs,
+            default_path: DefaultPathKind::Home(".cargo/git"),
+        }),
+        "cargo-bin" => Some(BuiltInEntrySpec {
+            default_tag: "cargo-bin",
+            env_lookup: empty_env,
+            env_export: empty_env,
+            extra_env: empty_pairs,
+            default_path: DefaultPathKind::Home(".cargo/bin"),
+        }),
+        "target" => Some(BuiltInEntrySpec {
+            default_tag: "target",
+            env_lookup: empty_env,
+            env_export: empty_env,
+            extra_env: empty_pairs,
+            default_path: DefaultPathKind::Relative("target"),
+        }),
+        "sccache-dir" => Some(BuiltInEntrySpec {
+            default_tag: "sccache",
+            env_lookup: &["SCCACHE_DIR"],
+            env_export: &["SCCACHE_DIR"],
+            extra_env: empty_pairs,
+            default_path: DefaultPathKind::Home(".cache/sccache"),
+        }),
         "vendor" => Some(BuiltInEntrySpec {
             default_tag: "vendor",
             env_lookup: &["COMPOSER_VENDOR_DIR"],
@@ -155,6 +190,8 @@ pub fn canonical_entry_id(value: &str) -> String {
         "node-modules" => "node_modules".to_string(),
         "go-mod" => "go-mod-cache".to_string(),
         "go-build" => "go-build-cache".to_string(),
+        "sccache" => "sccache-dir".to_string(),
+        "target-dir" => "target".to_string(),
         other => other.to_string(),
     }
 }
