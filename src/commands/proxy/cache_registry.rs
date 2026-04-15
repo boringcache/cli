@@ -1,5 +1,6 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::api::client::ApiClient;
@@ -12,14 +13,15 @@ const PROXY_METADATA_HINTS_ENV: &str = "BORINGCACHE_PROXY_METADATA_HINTS";
 const MAX_PROXY_METADATA_HINTS: usize = 8;
 const MAX_PROXY_METADATA_HINT_KEY_BYTES: usize = 32;
 const MAX_PROXY_METADATA_HINT_VALUE_BYTES: usize = 64;
+#[cfg(test)]
 const PROXY_STATUS_PATH: &str = "/_boringcache/status";
+#[cfg(test)]
 const PROXY_PHASE_HEADER: &str = "X-BoringCache-Proxy-Phase";
-const PROXY_PUBLISH_STATE_HEADER: &str = "X-BoringCache-Publish-State";
+#[cfg(test)]
 const PROXY_READY_PHASE: &str = "ready";
 const PROXY_READY_TIMEOUT: Duration = Duration::from_secs(300);
 const PROXY_READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PROXY_READY_WARN_INTERVAL: Duration = Duration::from_secs(15);
-const PROXY_STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct ProxyServerHandle {
     handle: crate::serve::ServeHandle,
@@ -48,76 +50,46 @@ impl ProxyServerHandle {
         self.handle.shutdown_and_flush().await
     }
 
-    async fn wait_until_ready(&self, probe_host: &str) -> Result<()> {
-        let client = reqwest::Client::builder()
-            .timeout(PROXY_STATUS_REQUEST_TIMEOUT)
-            .build()
-            .context("Failed to build cache-registry readiness client")?;
-        let status_url = proxy_status_url(probe_host, self.port);
+    async fn wait_until_ready(&self) -> Result<()> {
         let started_at = tokio::time::Instant::now();
         let deadline = started_at + PROXY_READY_TIMEOUT;
         let mut next_warn_at = started_at + PROXY_READY_WARN_INTERVAL;
-        let mut last_observation = "status=000 phase=unknown publish=unknown".to_string();
 
         loop {
-            if self.handle.is_finished() {
-                anyhow::bail!("Cache registry exited before readiness");
+            if self.handle.is_ready() {
+                return Ok(());
             }
 
-            match fetch_proxy_status(&client, &status_url).await {
-                Ok(status) => {
-                    last_observation = status.summary();
-                    if status.is_ready() {
-                        return Ok(());
-                    }
-                }
-                Err(error) if error.is_timeout() => {
-                    last_observation =
-                        "status=000 phase=unknown publish=unknown timeout".to_string();
-                }
-                Err(_) => {}
+            if self.handle.is_finished() {
+                anyhow::bail!("Cache registry exited before readiness");
             }
 
             let now = tokio::time::Instant::now();
             if now >= deadline {
                 anyhow::bail!(
-                    "Timed out waiting for cache-registry readiness after {}s ({last_observation})",
+                    "Timed out waiting for cache-registry readiness after {}s",
                     PROXY_READY_TIMEOUT.as_secs()
                 );
             }
 
             if now >= next_warn_at {
                 ui::info(&format!(
-                    "[boringcache] Waiting for cache-registry readiness... ({}s, {last_observation})",
+                    "[boringcache] Waiting for cache-registry readiness... ({}s)",
                     started_at.elapsed().as_secs()
                 ));
                 next_warn_at += PROXY_READY_WARN_INTERVAL;
             }
 
-            tokio::time::sleep(PROXY_READY_POLL_INTERVAL).await;
+            let notified = self.handle.ready_notification();
+            if self.handle.is_ready() {
+                return Ok(());
+            }
+
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(PROXY_READY_POLL_INTERVAL) => {}
+            }
         }
-    }
-}
-
-#[derive(Debug)]
-struct ProxyStatusProbe {
-    status: reqwest::StatusCode,
-    phase: Option<String>,
-    publish_state: Option<String>,
-}
-
-impl ProxyStatusProbe {
-    fn is_ready(&self) -> bool {
-        self.status == reqwest::StatusCode::OK && self.phase.as_deref() == Some(PROXY_READY_PHASE)
-    }
-
-    fn summary(&self) -> String {
-        format!(
-            "status={} phase={} publish={}",
-            self.status.as_u16(),
-            self.phase.as_deref().unwrap_or("unknown"),
-            self.publish_state.as_deref().unwrap_or("unknown")
-        )
     }
 }
 
@@ -163,6 +135,7 @@ pub async fn execute(
     no_git: bool,
     metadata_hints: Vec<String>,
     startup_warm: bool,
+    ready_file: Option<String>,
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<()> {
@@ -197,6 +170,7 @@ pub async fn execute(
         startup_warm,
         fail_on_cache_error,
         read_only,
+        ready_file.map(PathBuf::from),
     )
     .await
 }
@@ -229,7 +203,6 @@ pub async fn start_proxy_background(
     let (registry_root_tag, configured_human_tags) =
         resolve_registry_tag_config(&tag_resolver, &tag)?;
 
-    let readiness_host = proxy_probe_host(&host);
     let primary_human_tag = configured_human_tags[0].clone();
     let endpoint_host = endpoint_host_override
         .map(|value| value.trim().to_string())
@@ -264,7 +237,7 @@ pub async fn start_proxy_background(
         primary_human_tag,
     };
 
-    if let Err(error) = proxy_handle.wait_until_ready(&readiness_host).await {
+    if let Err(error) = proxy_handle.wait_until_ready().await {
         return match proxy_handle.shutdown_and_flush().await {
             Ok(()) => Err(error),
             Err(shutdown_error) => Err(error.context(format!(
@@ -314,14 +287,7 @@ fn build_tag_resolver(no_platform: bool, no_git: bool) -> Result<TagResolver> {
     Ok(TagResolver::new(platform, git_context, git_enabled))
 }
 
-fn proxy_probe_host(host: &str) -> String {
-    match host {
-        "0.0.0.0" => "127.0.0.1".to_string(),
-        "::" | "[::]" => "::1".to_string(),
-        _ => host.to_string(),
-    }
-}
-
+#[cfg(test)]
 fn proxy_status_url(host: &str, port: u16) -> String {
     let authority = if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]")
@@ -329,29 +295,6 @@ fn proxy_status_url(host: &str, port: u16) -> String {
         host.to_string()
     };
     format!("http://{authority}:{port}{PROXY_STATUS_PATH}")
-}
-
-async fn fetch_proxy_status(
-    client: &reqwest::Client,
-    status_url: &str,
-) -> std::result::Result<ProxyStatusProbe, reqwest::Error> {
-    let response = client.get(status_url).send().await?;
-    let phase = response
-        .headers()
-        .get(PROXY_PHASE_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
-    let publish_state = response
-        .headers()
-        .get(PROXY_PUBLISH_STATE_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
-
-    Ok(ProxyStatusProbe {
-        status: response.status(),
-        phase,
-        publish_state,
-    })
 }
 
 pub(crate) fn resolve_proxy_metadata_hints(

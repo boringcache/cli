@@ -35,6 +35,7 @@ CACHE_TAG_ALIAS="${CACHE_TAG}-alias"
 CACHE_REF_ALIAS="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG_ALIAS}"
 REGISTRY_ROOT_TAG="${E2E_TAG_PREFIX}-docker-buildkit-registry-${RUN_ID}-${RUN_ATTEMPT}"
 SERVE_PID=""
+PROXY_READY_FILE=""
 INTERRUPTED="0"
 declare -a LOG_FILES=()
 declare -a ACTIVE_BUILD_PIDS=()
@@ -159,6 +160,8 @@ stop_proxy() {
     stop_pid_tree "${SERVE_PID}" "cache-registry proxy" "$PROXY_SHUTDOWN_WAIT_SECS"
   fi
   SERVE_PID=""
+  rm -f "${PROXY_READY_FILE:-}" >/dev/null 2>&1 || true
+  PROXY_READY_FILE=""
 }
 
 cleanup() {
@@ -195,13 +198,16 @@ start_proxy() {
   local log_file="$1"
   local metadata_hints="${2:-}"
   local readiness_reference="${3:-}"
-  local attempts start_ts next_warn now waited probe status phase publish_state
+  local attempts start_ts next_warn now waited
   stop_proxy
   LOG_FILES+=("${log_file}")
+  PROXY_READY_FILE="$(mktemp "${LOG_DIR}/cache-registry-ready.XXXXXX")"
+  rm -f "${PROXY_READY_FILE}"
   BORINGCACHE_PROXY_METADATA_HINTS="${metadata_hints}" \
   "${BINARY}" cache-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" \
     --host 127.0.0.1 \
     --port "${PORT}" \
+    --ready-file "${PROXY_READY_FILE}" \
     --no-platform \
     --no-git \
     --fail-on-cache-error > "${log_file}" 2>&1 &
@@ -215,9 +221,7 @@ start_proxy() {
   start_ts="$(date +%s)"
   next_warn=$((start_ts + PROXY_READY_WARN_SECS))
   for _ in $(seq 1 "$attempts"); do
-    probe="$(proxy_status_probe)"
-    read -r status phase publish_state <<<"$probe"
-    if [[ "$status" == "200" && "$phase" == "ready" ]]; then
+    if [[ -f "${PROXY_READY_FILE}" ]]; then
       if [[ -n "$readiness_reference" ]]; then
         if manifest_reference_is_readable "$readiness_reference"; then
           ready=1
@@ -232,9 +236,9 @@ start_proxy() {
     if (( now >= next_warn )); then
       waited="$((now - start_ts))"
       if [[ -n "$readiness_reference" ]]; then
-        echo "WARNING: cache-registry readiness still waiting after ${waited}s (phase=${phase:-unknown} publish=${publish_state:-unknown} ref=${readiness_reference})"
+        echo "WARNING: cache-registry readiness still waiting after ${waited}s (marker=${PROXY_READY_FILE} ref=${readiness_reference})"
       else
-        echo "WARNING: cache-registry readiness still waiting after ${waited}s (phase=${phase:-unknown} publish=${publish_state:-unknown})"
+        echo "WARNING: cache-registry readiness still waiting after ${waited}s (marker=${PROXY_READY_FILE})"
       fi
       next_warn=$((now + PROXY_READY_WARN_SECS))
     fi

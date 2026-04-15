@@ -14,7 +14,12 @@ fn long_option_requires_value(command: &str, option: &str) -> bool {
                 | "--port"
         ),
         "ls" => matches!(option, "--limit" | "--page"),
-        "cache-registry" => matches!(option, "--host" | "--port" | "--metadata-hint"),
+        "cache-registry" => {
+            matches!(
+                option,
+                "--host" | "--port" | "--metadata-hint" | "--ready-file"
+            )
+        }
         _ => false,
     }
 }

@@ -311,6 +311,7 @@ fn test_cache_registry_help() {
     assert!(stdout.contains("Usage: boringcache cache-registry"));
     assert!(stdout.contains("cache registry proxy"));
     assert!(stdout.contains("--fail-on-cache-error"));
+    assert!(!stdout.contains("--ready-file"));
 }
 
 #[test]

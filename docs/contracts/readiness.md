@@ -10,7 +10,7 @@ Product shape:
 
 - Canonical probe: `/_boringcache/status`
 - Route wiring: `src/serve/http/routes.rs`
-- CLI-managed waiter: `src/commands/proxy/cache_registry.rs`
+- CLI-managed readiness: `src/serve/runtime/mod.rs` and `src/commands/proxy/cache_registry.rs`
 - State computation: `src/serve/http/handlers/mod.rs`
 
 `/v2/` is protocol surface only. Do not use `/v2/`, fixed sleeps, or log scraping to decide when the proxy is ready or when publish has settled.
@@ -48,7 +48,7 @@ JSON body fields:
 - `ready`: startup warming has completed and shutdown has not started
 - `draining`: shutdown has started and the proxy may still be flushing or waiting for tag visibility
 
-Internal waiters and CI should treat `phase=ready` as the readiness gate.
+`phase=ready` is the HTTP readiness gate for external lifecycle inspection.
 
 ## Publish settlement
 
@@ -66,7 +66,9 @@ The current implementation computes that from all of these being true:
 ## Caller guidance
 
 - `cache-registry` is the standalone proxy surface that exposes this endpoint directly
-- `boringcache <tool>` and `boringcache run --proxy` must wait on this endpoint because they temporarily start that same proxy
-- standalone CI and E2E waiters must wait on this endpoint
-- docs and examples should point here for readiness and drain checks
+- users do not need a separate readiness command; warm startup is built into the default proxy behavior
+- `boringcache <tool>` and `boringcache run --proxy` wait internally before they start the wrapped tool
+- detached BoringCache orchestrators that spawn `cache-registry` should consume the CLI-owned readiness handoff instead of reimplementing local HTTP polling or log scraping
+- `/_boringcache/status` remains the machine-readable HTTP surface for diagnostics, explicit lifecycle assertions, and publish-settlement checks
+- docs and examples should point here for HTTP readiness and drain checks when an external observer actually needs that state
 - `/v2/` may still answer requests before startup warming finishes; that does not make it the readiness contract

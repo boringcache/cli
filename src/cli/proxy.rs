@@ -34,6 +34,14 @@ pub struct CacheRegistryArgs {
 
     #[arg(
         long,
+        hide = true,
+        value_name = "PATH",
+        help = "Internal: write a marker file when startup readiness is reached"
+    )]
+    pub ready_file: Option<String>,
+
+    #[arg(
+        long,
         help = "Return strict backend/cache errors instead of best-effort cache responses"
     )]
     pub fail_on_cache_error: bool,

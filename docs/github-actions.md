@@ -60,8 +60,9 @@ Use `boringcache/one@v1` when you want the action to keep owning tool setup such
 Keep the proxy story simple in CI too:
 
 - `cache-registry` is the long-lived proxy when a workflow or service needs to keep one around
-- adapter commands and `run --proxy` temporarily start that same proxy for one command
-- both paths should use `/_boringcache/status` when an external waiter needs lifecycle state
+- adapter commands and `run --proxy` temporarily start that same proxy for one command and wait internally
+- if a detached helper needs to spawn `cache-registry` and continue only after startup readiness, it should consume the CLI-owned readiness handoff instead of reimplementing local HTTP polling
+- use `/_boringcache/status` for diagnostics, explicit lifecycle assertions, and publish-settlement checks
 
 Keep the trust model simple:
 
