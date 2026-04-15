@@ -1,4 +1,5 @@
 use super::*;
+use crate::observability;
 
 pub(crate) const KV_PREFETCH_READINESS_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(300);

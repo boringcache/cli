@@ -5,12 +5,10 @@ use futures_util::StreamExt;
 use futures_util::future::join_all;
 use rand::Rng;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc::error::TrySendError;
@@ -23,10 +21,8 @@ use crate::cache::receipts::try_commit_blob_receipts;
 use crate::cas_transport::upload_payload;
 use crate::error::{BoringCacheError, PendingMetadata};
 use crate::manifest::EntryType;
-use crate::observability;
 use crate::serve::state::{
     AppState, BlobReadHandle, KV_BACKLOG_POLICY, KvFlushingSnapshot, KvReplicationWork,
-    diagnostics_enabled,
 };
 
 use super::error::RegistryError;
@@ -70,19 +66,6 @@ const KV_VERSION_POLL_ACTIVE_WINDOW: std::time::Duration = std::time::Duration::
 const KV_VERSION_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const KV_VERSION_POLL_JITTER_MS: u64 = 500;
 const KV_VERSION_REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
-const KV_PENDING_PUBLISH_HANDOFF_DIR: &str = "kv-pending-publish";
-const KV_PENDING_PUBLISH_HANDOFF_VERSION: u32 = 2;
-const KV_PENDING_PUBLISH_HANDOFF_MAX_AGE: std::time::Duration =
-    std::time::Duration::from_secs(30 * 60);
-const KV_PENDING_PUBLISH_HANDOFF_RECONCILE_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(10 * 60);
-const SERVE_METRIC_SOURCE: &str = "serve";
-const SERVE_PRELOAD_INDEX_OPERATION: &str = "cache_preload_index_fetch";
-const SERVE_PREFETCH_OPERATION: &str = "blob_prefetch_cycle";
-const SERVE_PRELOAD_INDEX_PATH: &str = "/serve/cache_registry/preload-index";
-const SERVE_PREFETCH_PATH: &str = "/serve/cache_registry/prefetch";
-const SERVE_BLOB_READ_OPERATION: &str = "cache_blob_read";
-const SERVE_BLOB_READ_PATH: &str = "/serve/cache_registry/blob-read";
 const LOOKUP_REFRESH_FLIGHT_KEY: &str = "lookup_refresh";
 static KV_BLOB_DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -123,304 +106,6 @@ pub(crate) struct StartupPrefetchTarget {
 pub(crate) struct StartupPrefetchTargetSummary {
     cached_url_count: usize,
     unresolved_url_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct KvPendingPublishHandoff {
-    version: u32,
-    persisted_at_unix_ms: u64,
-    workspace: String,
-    registry_root_tag: String,
-    configured_human_tags: Vec<String>,
-    cache_entry_id: String,
-    entries: BTreeMap<String, BlobDescriptor>,
-    blob_order: Vec<BlobDescriptor>,
-    download_urls: HashMap<String, String>,
-    root_pending: Option<PendingMetadata>,
-    pending_alias_tags: bool,
-    pending_blob_paths: HashMap<String, PathBuf>,
-    pending_blob_sequences: HashMap<String, u64>,
-}
-
-pub(crate) struct PendingPublishHandoffPersist<'a> {
-    root_pending: Option<&'a PendingMetadata>,
-    pending_alias_tags: bool,
-    pending_blob_paths: Option<&'a HashMap<String, PathBuf>>,
-    pending_blob_sequences: Option<&'a HashMap<String, u64>>,
-}
-
-fn kv_trace_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(diagnostics_enabled)
-}
-
-fn kv_trace(namespace: KvNamespace, scoped_key: &str, stage: &str) {
-    if !kv_trace_enabled() || !matches!(namespace, KvNamespace::Sccache) {
-        return;
-    }
-    let truncated = scoped_key.get(..96).unwrap_or(scoped_key);
-    eprintln!("KV TRACE stage={stage} key={truncated}");
-}
-
-fn is_proxy_active(state: &AppState) -> bool {
-    let now_ms = crate::serve::state::unix_time_ms_now();
-    let window_ms = KV_VERSION_POLL_ACTIVE_WINDOW.as_millis() as u64;
-
-    let last_put_ms = state.kv_last_put.load(Ordering::Acquire);
-    if last_put_ms > 0 && now_ms.saturating_sub(last_put_ms) < window_ms {
-        return true;
-    }
-
-    !state.kv_recent_misses.is_empty()
-}
-
-fn emit_serve_event(
-    workspace: Option<&str>,
-    operation: &'static str,
-    path: &'static str,
-    details: String,
-) {
-    observability::emit(
-        observability::ObservabilityEvent::event(
-            SERVE_METRIC_SOURCE,
-            operation,
-            "EVENT",
-            path.to_string(),
-            details,
-        )
-        .with_workspace(workspace.map(|value| value.to_string())),
-    );
-}
-
-fn emit_serve_phase_metric(
-    workspace: Option<&str>,
-    cache_entry_id: Option<&str>,
-    operation: &'static str,
-    path: &'static str,
-    status: u16,
-    duration_ms: u64,
-    batch_size: Option<u64>,
-) {
-    observability::emit(
-        observability::ObservabilityEvent::success(
-            SERVE_METRIC_SOURCE,
-            operation,
-            "PHASE",
-            path.to_string(),
-            status,
-            duration_ms,
-            None,
-            None,
-            None,
-            None,
-            batch_size,
-            None,
-        )
-        .with_workspace(workspace.map(|value| value.to_string()))
-        .with_cache_entry_id(cache_entry_id.map(|value| value.to_string())),
-    );
-}
-
-fn emit_blob_read_metric(
-    state: &AppState,
-    cache_entry_id: &str,
-    source: BlobReadSource,
-    bytes: u64,
-    duration_ms: u64,
-) {
-    match source {
-        BlobReadSource::LocalCache => state.blob_read_metrics.record_local(bytes, duration_ms),
-        BlobReadSource::RemoteFetch => state.blob_read_metrics.record_remote(bytes, duration_ms),
-    }
-    observability::emit(
-        observability::ObservabilityEvent::success(
-            SERVE_METRIC_SOURCE,
-            SERVE_BLOB_READ_OPERATION,
-            "GET",
-            SERVE_BLOB_READ_PATH.to_string(),
-            200,
-            duration_ms,
-            None,
-            Some(bytes),
-            None,
-            None,
-            None,
-            None,
-        )
-        .with_workspace(Some(state.workspace.clone()))
-        .with_cache_entry_id(Some(cache_entry_id.to_string()))
-        .with_details(Some(format!("source={}", source.as_str()))),
-    );
-}
-
-fn parse_positive_usize_env(name: &str) -> Option<usize> {
-    let raw = std::env::var(name).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    match trimmed.parse::<usize>() {
-        Ok(value) if value > 0 => Some(value),
-        _ => None,
-    }
-}
-
-fn parse_positive_u64_env(name: &str) -> Option<u64> {
-    let raw = std::env::var(name).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    match trimmed.parse::<u64>() {
-        Ok(value) if value > 0 => Some(value),
-        _ => None,
-    }
-}
-
-fn kv_miss_generation(state: &AppState, registry_root_tag: &str) -> u64 {
-    state
-        .kv_miss_generations
-        .get(registry_root_tag.trim())
-        .map(|entry| *entry.value())
-        .unwrap_or(0)
-}
-
-fn kv_miss_cache_key(state: &AppState, registry_root_tag: &str, scoped_key: &str) -> String {
-    format!(
-        "{}\u{0}{}\u{0}{}",
-        registry_root_tag.trim(),
-        kv_miss_generation(state, registry_root_tag),
-        scoped_key
-    )
-}
-
-fn use_kv_miss_cache(namespace: KvNamespace) -> bool {
-    !matches!(namespace, KvNamespace::Sccache)
-}
-
-fn lookup_flight_key_for_sizes(scoped_keys: &[String]) -> String {
-    let mut sorted = scoped_keys.to_vec();
-    sorted.sort();
-    let digest = crate::cas_file::sha256_hex(sorted.join("\0").as_bytes());
-    format!("sizes:{digest}")
-}
-
-struct LookupFlightGuard {
-    key: String,
-    notify: Arc<tokio::sync::Notify>,
-    inflight: Arc<dashmap::DashMap<String, Arc<tokio::sync::Notify>>>,
-}
-
-impl Drop for LookupFlightGuard {
-    fn drop(&mut self) {
-        self.inflight.remove(&self.key);
-        self.notify.notify_waiters();
-    }
-}
-
-enum LookupFlight {
-    Leader(LookupFlightGuard),
-    Follower(std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>),
-}
-
-const FLIGHT_WAIT_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(1);
-const FLIGHT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-
-async fn await_flight(
-    kind: &str,
-    key: &str,
-    notified: std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>,
-) -> bool {
-    let started = std::time::Instant::now();
-    match tokio::time::timeout(FLIGHT_WAIT_TIMEOUT, notified).await {
-        Ok(()) => {
-            let elapsed = started.elapsed();
-            if elapsed >= FLIGHT_WAIT_WARN_THRESHOLD {
-                log::warn!(
-                    "flight follower waited {}ms: kind={} key={}",
-                    elapsed.as_millis(),
-                    kind,
-                    &key[..key.len().min(24)],
-                );
-            }
-            true
-        }
-        Err(_) => {
-            log::warn!(
-                "flight follower timed out after {}ms: kind={} key={}",
-                started.elapsed().as_millis(),
-                kind,
-                &key[..key.len().min(24)],
-            );
-            false
-        }
-    }
-}
-
-fn begin_lookup_flight(state: &AppState, key: String) -> LookupFlight {
-    match state.kv_lookup_inflight.entry(key.clone()) {
-        dashmap::mapref::entry::Entry::Occupied(existing) => {
-            let mut notified = Box::pin(existing.get().clone().notified_owned());
-            notified.as_mut().enable();
-            LookupFlight::Follower(notified)
-        }
-        dashmap::mapref::entry::Entry::Vacant(entry) => {
-            let notify = Arc::new(tokio::sync::Notify::new());
-            entry.insert(notify.clone());
-            LookupFlight::Leader(LookupFlightGuard {
-                key,
-                notify,
-                inflight: state.kv_lookup_inflight.clone(),
-            })
-        }
-    }
-}
-
-fn clear_lookup_flight_entry(state: &AppState, key: &str) {
-    state.kv_lookup_inflight.remove(key);
-}
-
-fn conflict_backoff_window(message: &str) -> (u64, u64) {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("another cache upload is in progress")
-        || lower.contains("cache upload in progress")
-    {
-        (
-            KV_CONFLICT_IN_PROGRESS_BACKOFF_MS,
-            KV_CONFLICT_IN_PROGRESS_JITTER_MS,
-        )
-    } else {
-        (KV_CONFLICT_BACKOFF_MS, KV_CONFLICT_JITTER_MS)
-    }
-}
-
-fn transient_backoff_window(message: &str) -> (u64, u64) {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("save_entry failed")
-        || lower.contains("blob upload failed")
-        || lower.contains("confirm failed")
-    {
-        (
-            KV_TRANSIENT_WRITE_PATH_BACKOFF_MS,
-            KV_TRANSIENT_WRITE_PATH_JITTER_MS,
-        )
-    } else {
-        (KV_TRANSIENT_BACKOFF_MS, KV_TRANSIENT_JITTER_MS)
-    }
-}
-
-fn is_blob_verification_pending_message(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("not yet verified in storage") || lower.contains("retry after upload completes")
-}
-
-fn kv_confirm_verification_retry_delay(attempt: u32) -> std::time::Duration {
-    let exponent = attempt.saturating_sub(1).min(6);
-    let multiplier = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
-    let delay_ms = KV_CONFIRM_VERIFICATION_RETRY_BASE_MS
-        .saturating_mul(multiplier)
-        .min(KV_CONFIRM_VERIFICATION_RETRY_MAX_MS);
-    std::time::Duration::from_millis(delay_ms)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -471,17 +156,27 @@ impl KvNamespace {
 }
 
 mod blob_read;
+mod flight;
 mod flush;
+mod handoff;
 mod index;
+mod instrumentation;
 mod lookup;
+mod policy;
 mod prefetch;
+mod refresh;
 mod write;
 
 pub(crate) use blob_read::*;
+pub(crate) use flight::*;
 pub(crate) use flush::*;
+pub(crate) use handoff::*;
 pub(crate) use index::*;
+pub(crate) use instrumentation::*;
 pub(crate) use lookup::*;
+pub(crate) use policy::*;
 pub(crate) use prefetch::*;
+pub(crate) use refresh::*;
 pub(crate) use write::*;
 
 #[cfg(test)]
