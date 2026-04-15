@@ -111,7 +111,7 @@ Owner: proxy/adapter family (`public-primary`)
 
 Notes:
 
-- `cache-registry` is the canonical standalone proxy command
+- `cache-registry` is the canonical standalone proxy command; wrapper paths like adapter commands and `run --proxy` temporarily start that same proxy for one command
 - `go-cacheprog` is a real helper surface but thinner than the main adapter framework
 
 ## Cache lifecycle support libraries

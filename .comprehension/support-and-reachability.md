@@ -58,7 +58,9 @@ The scan did not find a user-facing command that looks abandoned outright.
 
 What it did find instead:
 
-- real public commands with thin docs/tests: `mount`, `doctor`, `dashboard`, `use`, `config`, `setup-encryption`, `inspect`, `sessions`, `misses`, `tags`, `go-cacheprog`
+- real public commands with thin docs/tests: `mount`, `doctor`, `dashboard`, `use`, `config`, `setup-encryption`, `inspect`, `sessions`, `misses`, `tags`
+- the proxy surface is intentionally split between `cache-registry` as the standalone proxy and wrapper paths like `run --proxy` or adapter commands that temporarily start it
+- supported advanced helper command with thinner docs/tests: `go-cacheprog`
 - the remaining compatibility entrypoint is `delete` for `rm`
 - weakly connected support code is now mostly the explicit `allow(dead_code)` optimize helpers and schema-compat DTO fields listed above; retry plumbing is active and the old telemetry collector path is gone
 

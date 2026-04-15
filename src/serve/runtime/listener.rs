@@ -53,6 +53,7 @@ pub(super) async fn build_server_runtime(
     configured_human_tags: Vec<String>,
     registry_root_tag: String,
     proxy_metadata_hints: BTreeMap<String, String>,
+    startup_warm: bool,
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<(AppState, TcpListener, mpsc::Receiver<KvReplicationWork>)> {
@@ -91,7 +92,7 @@ pub(super) async fn build_server_runtime(
         configured_human_tags,
         registry_root_tag,
         fail_on_cache_error,
-        kv_manifest_warm_enabled: true,
+        kv_manifest_warm_enabled: startup_warm,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -223,7 +224,15 @@ pub(super) async fn build_server_runtime(
     }
     eprintln!("  Replication queue: {KV_REPLICATION_WORK_QUEUE_CAPACITY} (bounded)");
     eprintln!(
-        "  Manifest warm: {} (auto)",
+        "  Startup mode: {}",
+        if state.kv_manifest_warm_enabled {
+            "warm"
+        } else {
+            "on-demand"
+        }
+    );
+    eprintln!(
+        "  Manifest warm: {}",
         if state.kv_manifest_warm_enabled {
             "enabled"
         } else {

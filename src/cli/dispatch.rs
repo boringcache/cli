@@ -230,6 +230,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
                 args.identity,
                 args.proxy,
                 args.metadata_hint,
+                !args.on_demand,
                 args.host,
                 args.endpoint_host,
                 args.port,
@@ -441,6 +442,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
                 args.no_platform,
                 args.no_git,
                 args.metadata_hint,
+                !args.on_demand,
                 args.fail_on_cache_error,
                 args.read_only,
             )

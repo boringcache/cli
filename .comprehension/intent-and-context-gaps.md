@@ -31,8 +31,10 @@ These do not need more product input unless you want to change direction.
 ### Proxy and adapter split
 
 - adapter commands are the preferred path for supported remote-cache tools
-- `cache-registry` is the lower-level long-lived endpoint path
+- `cache-registry` is the proxy, and the lower-level long-lived endpoint path, with warm startup as the default user experience
+- `run --proxy` temporarily starts that same proxy for one command
 - `/_boringcache/status` is the operator/harness lifecycle endpoint, not the cache protocol surface
+- `docs/contracts/readiness.md` is the canonical readiness-contract writeup for automation
 - Bazel, Gradle, and Maven are intentionally thinner wrappers today
 - Docker, Turbo, Nx, sccache, and Go own more automatic tool wiring
 
@@ -48,7 +50,8 @@ These are decisions or strong direction already provided and should be treated a
 
 ### Product surface
 
-- `mount`, `dashboard`, `doctor`, `setup-encryption`, and `go-cacheprog` are intended as real core commands, not hidden support-only tooling.
+- `mount`, `dashboard`, `doctor`, and `setup-encryption` are intended as real core commands.
+- `go-cacheprog` stays supported, but as an advanced helper behind the `go` adapter and manual proxy setups rather than as a headline command.
 - `status`, `sessions`, `misses`, and `tags` are intended as first-class operational surfaces.
 - The CLI is meant to complement the web UI and TUI, not replace them.
 
@@ -56,6 +59,7 @@ These are decisions or strong direction already provided and should be treated a
 
 - JSON outputs and dry-run plan outputs are intended to be stable contracts because CI and automation rely on them.
 - Proxy/runtime readiness is intended to be a machine-consumable contract for CI and automation.
+- Warm startup is the default proxy lifecycle contract; on-demand startup is an explicit expert override.
 
 ### Auth and failure policy
 
@@ -99,7 +103,8 @@ These matter most because they affect docs, naming, maintenance, and what stays 
 
 2. First-class vs advanced surfaces
    - Resolved direction:
-     - `mount`, `dashboard`, `doctor`, `setup-encryption`, and `go-cacheprog` are real product commands
+     - `mount`, `dashboard`, `doctor`, and `setup-encryption` are real product commands
+     - `go-cacheprog` stays supported as secondary plumbing behind `go` and manual proxy setups
      - `status`, `sessions`, `misses`, and `tags` are all first-class operational surfaces
    - Remaining documentation question:
      - how strongly to present each one in docs and onboarding versus keeping some as secondary but supported tools
@@ -140,15 +145,11 @@ These matter most because they affect docs, naming, maintenance, and what stays 
 
 5. Canonical readiness and runtime-state probe
    - Resolved direction:
-     - readiness/runtime state is intended as a stable machine contract for CI
-   - There are still two probe surfaces with different semantics today:
-     - `/v2/` exposes prefetch readiness through headers
-     - `/_boringcache/status` exposes runtime phase and publish-settlement state
-   - Decide which one external callers should use for:
-     - "proxy has started"
-     - "proxy is ready for traffic"
-     - "publish has settled and tags are visible"
-   - Also decide whether backend/cache errors may intentionally degrade into cache misses on read paths, or whether tooling should be able to distinguish infrastructure failure from an expected miss.
+     - `/_boringcache/status` is the canonical machine probe for startup, readiness, drain, and publish settlement
+     - `/v2/` is protocol surface only
+     - the current contract is written down in `docs/contracts/readiness.md`
+   - Remaining decision:
+     - whether backend/cache errors may intentionally degrade into cache misses on read paths, or whether tooling should be able to distinguish infrastructure failure from an expected miss
 
 ## P2: Format and support-strategy decisions
 
@@ -190,8 +191,7 @@ These matter for future refactors and cleanup.
      - merge rules for config vs CLI entries/profiles/metadata
      - baked-in defaults like Docker `cache_mode=max` and `cache_ref_tag=buildcache`
    - Remaining decision:
-     - whether list-like inputs should merge or whether CLI should fully override config in all cases
-     - whether Docker compatibility input `--tag proxy-tag:ref-tag` should be kept or retired in favor of `--cache-ref-tag`
+     - whether any additional list-like inputs should be additive beyond the current metadata-hint merge rule
 
 10. Thin-adapter strategy
    - Resolved direction:
@@ -205,10 +205,8 @@ These are not blocking for users, but they matter for maintenance clarity.
    - Current direction:
      - review and remove duplicate compatibility surfaces aggressively
    - Surfaces currently in scope:
-     - Docker `--tag proxy-tag:ref-tag` compatibility input
      - legacy release asset names
    - Remaining decisions:
-     - whether Docker `--tag proxy-tag:ref-tag` should be removed now
      - whether legacy release asset aliases still need a migration window
 
 12. Dormant or weakly connected code
@@ -223,28 +221,27 @@ These are not blocking for users, but they matter for maintenance clarity.
 13. User-visible vs internal helper surfaces
    - Direction from review:
      - avoid surprising users and keep the product focused on cache workflows
-   - Remaining decisions:
-     - whether `go-cacheprog` should stay explicitly documented as a direct command or be treated as secondary plumbing behind the `go` adapter
+   - Resolved direction:
+     - `go-cacheprog` should be treated as secondary plumbing behind the `go` adapter and manual `GOCACHEPROG` setups, not as a headline workflow
+   - Remaining decision:
      - whether proxy-root deletion during `delete` should remain a documented guarantee or just an implementation detail of "delete removes associated cache data"
 
 ## Highest-value remaining answers
 
-If you only want to finish the remaining open questions, these seven decisions cover most of the uncertainty:
+If you only want to finish the remaining open questions, these four decisions cover most of the uncertainty:
 
-1. Which readiness probe is canonical for automation: `/v2/`, `/_boringcache/status`, or both with distinct meanings?
-2. Should built-in repo-config aliases/env exports/path precedence/inference be treated as stable product contract or careful convenience behavior?
-3. For adapter config, should CLI always fully override config, or should some list-like settings continue to merge?
-4. Should Docker compatibility input `--tag proxy-tag:ref-tag` be retired in favor of `--cache-ref-tag`?
-5. Which legacy release asset aliases still need a migration window?
-6. Which compatibility-heavy adapter inputs or release-name aliases are still worth keeping?
-7. Should `go-cacheprog` stay explicitly documented as a direct command or be treated as secondary plumbing behind the `go` adapter?
+1. Should built-in repo-config aliases/env exports/path precedence/inference be treated as stable product contract or careful convenience behavior?
+2. For adapter config, should any list-like settings stay additive beyond explicit metadata-hint merge behavior?
+3. Which legacy release asset aliases still need a migration window?
+4. Which compatibility-heavy adapter inputs or release-name aliases are still worth keeping?
 
 ## Suggested working assumptions until you answer
 
 These are the least risky assumptions for ongoing maintenance:
 
 - keep `onboard`, `run`, adapters, and workspace selection as the main product surface
-- treat `mount`, `dashboard`, `doctor`, `setup-encryption`, and `go-cacheprog` as supported core surfaces
+- treat `mount`, `dashboard`, `doctor`, and `setup-encryption` as supported core surfaces
+- treat `go-cacheprog` as a supported advanced helper for manual `GOCACHEPROG` wiring, not a headline workflow
 - treat `--json` outputs and dry-run plans as stable contracts
 - treat `.boringcache.toml` as the only supported repo-config filename
 - treat built-in entry aliases, env exports, and inference as active behavior that should be changed cautiously until the product contract is written down

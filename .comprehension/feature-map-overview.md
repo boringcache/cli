@@ -20,7 +20,7 @@ This is the shortest whole-system view of the CLI.
 | Family | What lives here | Primary docs |
 | --- | --- | --- |
 | Cache lifecycle | `save`, `restore`, `mount`, `run`, plus cache inspection/reporting commands | `feature-map-cache-lifecycle.md` |
-| Proxy and adapters | `cache-registry`, tool adapters, `go-cacheprog`, serve runtime | `feature-map-proxy-and-adapters.md` |
+| Proxy and adapters | `cache-registry`, tool adapters, serve runtime, advanced helper wiring | `feature-map-proxy-and-adapters.md` |
 | Workspace, auth, config | `auth`, `login`, `token`, `doctor`, `dashboard`, `use`, `workspaces`, `onboard`, `audit`, `config`, `setup-encryption` | `feature-map-workspace-auth-config.md` |
 | Cross-cutting support | API client, command plumbing, observability, telemetry, retry, platform, progress/UI, reachability notes | `support-and-reachability.md` |
 
@@ -29,7 +29,7 @@ This is the shortest whole-system view of the CLI.
 | Group | Commands | Notes |
 | --- | --- | --- |
 | Cache lifecycle | `save`, `restore`, `mount`, `run`, `check`, `rm`, `inspect`, `ls`, `status`, `sessions`, `misses`, `tags` | `run` is the highest-level lifecycle wrapper; `mount` is specialized and thinner on docs |
-| Adapters and proxy | `cache-registry`, `turbo`, `nx`, `bazel`, `gradle`, `maven`, `sccache`, `go`, `docker`, `go-cacheprog` | `cache-registry` is the only raw proxy command |
+| Adapters and proxy | `cache-registry`, `turbo`, `nx`, `bazel`, `gradle`, `maven`, `sccache`, `go`, `docker`, `go-cacheprog` | `cache-registry` is the proxy; adapters temporarily start that proxy for one tool run; `go-cacheprog` is a supported advanced helper for manual Go wiring |
 | Workspace and account | `auth`, `login`, `token`, `doctor`, `audit`, `dashboard`, `use`, `config`, `setup-encryption`, `workspaces`, `onboard` | `onboard` is the setup funnel |
 
 ## Hidden and legacy surfaces
@@ -77,7 +77,7 @@ These are the biggest orchestration files and usually the first places to revisi
 - `sessions`
 - `misses`
 - `tags`
-- `go-cacheprog`
+- `go-cacheprog` as an advanced helper for manual `GOCACHEPROG` setups
 
 ### Present but intentionally hidden or weakly connected
 

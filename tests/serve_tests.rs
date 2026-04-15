@@ -229,6 +229,7 @@ async fn test_startup_manifest_warm_runs_by_default() {
         "registry".to_string(),
         BTreeMap::new(),
         true,
+        true,
         false,
     )
     .await
@@ -477,6 +478,7 @@ async fn test_startup_prefetch_warms_bounded_slice_and_leaves_tail_on_demand() {
         Vec::new(),
         "registry".to_string(),
         BTreeMap::new(),
+        true,
         true,
         false,
     )

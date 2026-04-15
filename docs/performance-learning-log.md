@@ -2,6 +2,18 @@
 
 This log captures regressions, root causes, and guardrails for cache-registry performance/correctness.
 
+## 2026-04-15 - warm-first proxy startup
+
+- Product direction:
+  - `cache-registry` is the warm-first standalone proxy surface.
+  - `boringcache <tool>` and `boringcache run --proxy` temporarily start that same proxy for one command and inherit the same warm-first startup behavior.
+  - `--on-demand` is the explicit expert override when a caller wants immediate startup instead of startup warming.
+- Guardrail:
+  - Keep warm as the default user path. Treat on-demand as an advanced escape hatch, not the main story.
+- Contract:
+  - `/_boringcache/status` remains the machine-readable lifecycle contract underneath both modes.
+  - `docs/contracts/readiness.md` is the written contract for readiness and publish-settlement semantics.
+
 ## 2026-04-14 - first-class proxy lifecycle status
 
 - Symptom:

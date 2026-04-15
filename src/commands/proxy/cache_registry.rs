@@ -149,6 +149,10 @@ pub(crate) fn effective_proxy_read_only(explicit_read_only: bool) -> bool {
     Config::load_for_auth_purpose(AuthPurpose::Restore).is_ok()
 }
 
+pub(crate) fn proxy_startup_mode(startup_warm: bool) -> &'static str {
+    if startup_warm { "warm" } else { "on-demand" }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
     workspace: String,
@@ -158,6 +162,7 @@ pub async fn execute(
     no_platform: bool,
     no_git: bool,
     metadata_hints: Vec<String>,
+    startup_warm: bool,
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<()> {
@@ -189,6 +194,7 @@ pub async fn execute(
         configured_human_tags,
         registry_root_tag,
         proxy_metadata_hints,
+        startup_warm,
         fail_on_cache_error,
         read_only,
     )
@@ -205,6 +211,7 @@ pub async fn start_proxy_background(
     no_git: bool,
     endpoint_host_override: Option<String>,
     proxy_metadata_hints: BTreeMap<String, String>,
+    startup_warm: bool,
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<ProxyServerHandle> {
@@ -244,6 +251,7 @@ pub async fn start_proxy_background(
         configured_human_tags,
         registry_root_tag,
         proxy_metadata_hints,
+        startup_warm,
         fail_on_cache_error,
         read_only,
     )
@@ -549,6 +557,7 @@ mod tests {
             Some("builder.internal.invalid".to_string()),
             BTreeMap::new(),
             true,
+            true,
             false,
         ));
 
@@ -576,6 +585,57 @@ mod tests {
             Some(PROXY_READY_PHASE)
         );
         assert_eq!(proxy_handle.endpoint_host(), "builder.internal.invalid");
+
+        proxy_handle
+            .shutdown_and_flush()
+            .await
+            .expect("shutdown proxy");
+        let _ = shutdown_api.send(());
+    }
+
+    #[tokio::test]
+    async fn start_proxy_background_on_demand_returns_without_waiting_for_warmup() {
+        let _guard = test_env::lock();
+        let home = tempfile::tempdir().expect("temp home");
+        let (api_url, shutdown_api) = start_delayed_cache_api(Duration::from_secs(5)).await;
+        let _home_var = set_scoped_env_var("HOME", home.path().to_string_lossy().as_ref());
+        let _api_url_var = set_scoped_env_var("BORINGCACHE_API_URL", &api_url);
+        let _save_token_var = set_scoped_env_var("BORINGCACHE_SAVE_TOKEN", "test-save-token");
+        test_env::remove_var("BORINGCACHE_API_TOKEN");
+        test_env::remove_var("BORINGCACHE_TOKEN_FILE");
+
+        let start_task = tokio::spawn(start_proxy_background(
+            "org/repo".to_string(),
+            "registry-root".to_string(),
+            "127.0.0.1".to_string(),
+            0,
+            true,
+            true,
+            None,
+            BTreeMap::new(),
+            false,
+            true,
+            false,
+        ));
+
+        let proxy_handle = tokio::time::timeout(Duration::from_secs(1), start_task)
+            .await
+            .expect("on-demand proxy start should not wait for delayed warmup")
+            .expect("join proxy start task")
+            .expect("start proxy");
+
+        let response = reqwest::Client::new()
+            .get(proxy_status_url("127.0.0.1", proxy_handle.port()))
+            .send()
+            .await
+            .expect("fetch proxy status");
+        assert_eq!(
+            response
+                .headers()
+                .get(PROXY_PHASE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(PROXY_READY_PHASE)
+        );
 
         proxy_handle
             .shutdown_and_flush()

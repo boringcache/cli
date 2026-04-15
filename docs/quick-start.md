@@ -29,7 +29,7 @@ boringcache cache-registry my-org/app registry-cache --port 5000
 
 Use archive mode commands (`run`, `save`, and `restore`) when you want to cache an explicit directory such as `vendor/bundle`, `node_modules`, or `dist`.
 Use adapter commands when the build tool already knows how to talk to a remote cache and BoringCache has a dedicated wrapper for it.
-Use `cache-registry` when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive.
+Use `cache-registry` when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive. `cache-registry` is the proxy. `run --proxy` and adapter commands temporarily start that proxy for one command.
 When `.boringcache.toml` stores the Docker command, `boringcache docker` is the short form. Use the longer version when you want to pass the Docker command inline.
 
 For repeated remote-cache commands, put the adapter setup in `.boringcache.toml` and keep the invocation short:

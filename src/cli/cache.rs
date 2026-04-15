@@ -215,6 +215,9 @@ pub struct RunArgs {
     )]
     pub metadata_hint: Vec<String>,
 
+    #[arg(long, help = "Skip startup warming and serve cache reads on demand")]
+    pub on_demand: bool,
+
     #[arg(short, long, default_value = "5000")]
     pub port: u16,
 

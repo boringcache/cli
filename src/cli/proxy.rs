@@ -29,6 +29,9 @@ pub struct CacheRegistryArgs {
     )]
     pub metadata_hint: Vec<String>,
 
+    #[arg(long, help = "Skip startup warming and serve cache reads on demand")]
+    pub on_demand: bool,
+
     #[arg(
         long,
         help = "Return strict backend/cache errors instead of best-effort cache responses"

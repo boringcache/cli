@@ -2,6 +2,12 @@
 
 This is the canonical machine and automation contract for the local cache proxy.
 
+Product shape:
+
+- `cache-registry` is the proxy
+- `run --proxy` temporarily starts that proxy for one command
+- adapter commands do the same for supported remote-cache tools
+
 - Canonical probe: `/_boringcache/status`
 - Route wiring: `src/serve/http/routes.rs`
 - CLI-managed waiter: `src/commands/proxy/cache_registry.rs`
@@ -59,7 +65,8 @@ The current implementation computes that from all of these being true:
 
 ## Caller guidance
 
-- `boringcache <tool>` and `boringcache run --proxy` must wait on this endpoint
+- `cache-registry` is the standalone proxy surface that exposes this endpoint directly
+- `boringcache <tool>` and `boringcache run --proxy` must wait on this endpoint because they temporarily start that same proxy
 - standalone CI and E2E waiters must wait on this endpoint
 - docs and examples should point here for readiness and drain checks
 - `/v2/` may still answer requests before startup warming finishes; that does not make it the readiness contract
