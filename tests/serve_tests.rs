@@ -82,7 +82,6 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         configured_human_tags: Vec::new(),
         registry_root_tag: "registry".to_string(),
         fail_on_cache_error: true,
-        kv_manifest_warm_enabled: true,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),

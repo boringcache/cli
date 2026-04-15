@@ -494,19 +494,18 @@ async fn resolve_manifest(
         })
         .collect();
 
-    let prefetched_urls =
-        if prefetch_blob_urls && pointer.blobs.len() <= super::OCI_PREFETCH_BLOB_URL_LIMIT {
-            prefetch_manifest_blob_download_urls(
-                state,
-                cache_entry_id,
-                name,
-                reference,
-                &blob_descriptors,
-            )
-            .await
-        } else {
-            HashMap::new()
-        };
+    let prefetched_urls = if prefetch_blob_urls {
+        prefetch_manifest_blob_download_urls(
+            state,
+            cache_entry_id,
+            name,
+            reference,
+            &blob_descriptors,
+        )
+        .await
+    } else {
+        HashMap::new()
+    };
 
     cache_blob_locator_entries(
         state,

@@ -77,7 +77,6 @@ pub(super) async fn build_server_runtime(
         configured_human_tags,
         registry_root_tag,
         fail_on_cache_error,
-        kv_manifest_warm_enabled: true,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -195,14 +194,7 @@ pub(super) async fn build_server_runtime(
         eprintln!("  Expert Tuning Overrides: {BLOB_DOWNLOAD_CONCURRENCY_ENV}");
     }
     eprintln!("  Replication queue: {KV_REPLICATION_WORK_QUEUE_CAPACITY} (bounded)");
-    eprintln!(
-        "  Manifest warm: {} (auto)",
-        if state.kv_manifest_warm_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
+    eprintln!("  Manifest warm: enabled (auto)");
     eprintln!("  KV backlog policy: {KV_BACKLOG_POLICY}");
     eprintln!(
         "  TCP listen backlog: {listen_backlog} ({})",

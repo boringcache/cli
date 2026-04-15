@@ -39,7 +39,6 @@ use crate::serve::state::{AppState, diagnostics_enabled};
 use crate::serve::state::{OciManifestCacheEntry, UploadSession, digest_tag};
 
 const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
-const OCI_PREFETCH_BLOB_URL_LIMIT: usize = 128;
 const EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS: usize = 20;
 const EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS: u64 = 75;
 const EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS: usize = 3;
@@ -370,7 +369,6 @@ mod tests {
             configured_human_tags: Vec::new(),
             registry_root_tag: "registry".to_string(),
             fail_on_cache_error: true,
-            kv_manifest_warm_enabled: true,
             blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
             upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
             kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
