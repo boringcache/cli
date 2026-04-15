@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(crate) fn parse_positive_usize_env(name: &str) -> Option<usize> {
     let raw = std::env::var(name).ok()?;
     let trimmed = raw.trim();
@@ -12,6 +13,7 @@ pub(crate) fn parse_positive_usize_env(name: &str) -> Option<usize> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn parse_positive_u64_env(name: &str) -> Option<u64> {
     let raw = std::env::var(name).ok()?;
     let trimmed = raw.trim();

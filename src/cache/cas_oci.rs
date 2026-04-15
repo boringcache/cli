@@ -146,11 +146,10 @@ pub fn build_pointer(scan: &OciLayoutScan) -> Result<Vec<u8>> {
         blobs: scan
             .blobs
             .iter()
-            .enumerate()
-            .map(|(sequence, blob)| OciPointerBlob {
+            .map(|blob| OciPointerBlob {
                 digest: blob.digest.clone(),
                 size_bytes: blob.size_bytes,
-                sequence: Some(sequence as u64),
+                sequence: None,
             })
             .collect(),
     };
@@ -403,7 +402,7 @@ mod tests {
         assert_eq!(pointer.format_version, FORMAT_VERSION);
         assert_eq!(pointer.adapter, ADAPTER);
         assert_eq!(pointer.blobs.len(), 1);
-        assert_eq!(pointer.blobs[0].sequence, Some(0));
+        assert_eq!(pointer.blobs[0].sequence, None);
     }
 
     #[test]

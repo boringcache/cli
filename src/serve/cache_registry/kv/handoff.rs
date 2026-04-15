@@ -22,12 +22,10 @@ pub(crate) struct KvPendingPublishHandoff {
     pub(crate) root_pending: Option<PendingMetadata>,
     pub(crate) pending_alias_tags: bool,
     pub(crate) pending_blob_paths: HashMap<String, PathBuf>,
-    pub(crate) pending_blob_sequences: HashMap<String, u64>,
 }
 
 pub(crate) struct PendingPublishHandoffPersist<'a> {
     pub(crate) root_pending: Option<&'a PendingMetadata>,
     pub(crate) pending_alias_tags: bool,
     pub(crate) pending_blob_paths: Option<&'a HashMap<String, PathBuf>>,
-    pub(crate) pending_blob_sequences: Option<&'a HashMap<String, u64>>,
 }

@@ -54,11 +54,15 @@ const KV_PUT_BODY_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from
 const KV_PUT_BODY_SLOW_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
 const KV_RESOLVE_HIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_FETCH_POINTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
 const KV_STARTUP_PREFETCH_MAX_BLOBS_ENV: &str = "BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS";
+#[cfg(test)]
 const KV_STARTUP_PREFETCH_MAX_TOTAL_BYTES_ENV: &str =
     "BORINGCACHE_STARTUP_PREFETCH_MAX_TOTAL_BYTES";
+#[cfg(test)]
 const KV_BLOB_PREFETCH_MAX_INFLIGHT_BYTES_ENV: &str =
     "BORINGCACHE_BLOB_PREFETCH_MAX_INFLIGHT_BYTES";
+#[cfg(test)]
 const KV_BLOB_PRELOAD_SKIP_USED_PCT: u64 = 95;
 const KV_VERSION_POLL_ACTIVE_SECS: u64 = 3;
 const KV_VERSION_POLL_IDLE_SECS: u64 = 30;
@@ -84,6 +88,7 @@ impl BlobReadSource {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct StartupPrefetchCandidates {
     ordered_blobs: Vec<BlobDescriptor>,
@@ -252,7 +257,6 @@ mod tests {
             configured_human_tags: Vec::new(),
             registry_root_tag: "registry".to_string(),
             fail_on_cache_error: true,
-            kv_manifest_warm_enabled: true,
             blob_locator: std::sync::Arc::new(RwLock::new(BlobLocatorCache::default())),
             upload_sessions: std::sync::Arc::new(RwLock::new(UploadSessionStore::default())),
             kv_pending: std::sync::Arc::new(RwLock::new(KvPendingStore::default())),
@@ -346,7 +350,6 @@ mod tests {
             configured_human_tags: Vec::new(),
             registry_root_tag: "registry".to_string(),
             fail_on_cache_error: true,
-            kv_manifest_warm_enabled: true,
             blob_locator: std::sync::Arc::new(RwLock::new(BlobLocatorCache::default())),
             upload_sessions: std::sync::Arc::new(RwLock::new(UploadSessionStore::default())),
             kv_pending: std::sync::Arc::new(RwLock::new(KvPendingStore::default())),
@@ -978,7 +981,6 @@ mod tests {
                 root_pending: Some(&pending),
                 pending_alias_tags: false,
                 pending_blob_paths: None,
-                pending_blob_sequences: None,
             },
         )
         .await;
@@ -1026,7 +1028,6 @@ mod tests {
                 root_pending: Some(&pending),
                 pending_alias_tags: false,
                 pending_blob_paths: None,
-                pending_blob_sequences: None,
             },
         )
         .await;
@@ -1078,7 +1079,6 @@ mod tests {
             .await
             .expect("write pending blob");
         let pending_blob_paths = HashMap::from([(digest.clone(), blob_path.clone())]);
-        let pending_blob_sequences = HashMap::from([(digest.clone(), 7u64)]);
 
         persist_kv_pending_publish_handoff(
             &state,
@@ -1089,7 +1089,6 @@ mod tests {
                 root_pending: None,
                 pending_alias_tags: false,
                 pending_blob_paths: Some(&pending_blob_paths),
-                pending_blob_sequences: Some(&pending_blob_sequences),
             },
         )
         .await;
@@ -1249,51 +1248,6 @@ mod tests {
         let selected_blob = selected.get("k1").expect("expected selected key");
         assert_eq!(selected_blob.digest, "sha256:222");
         assert_eq!(selected_blob.size_bytes, 20);
-    }
-
-    #[test]
-    fn kv_root_tags_include_legacy_human_root_when_distinct() {
-        let tags =
-            kv_root_tags_from_values("bc_registry_root_v2_abc", &[String::from("grpc-bazel")]);
-        assert_eq!(
-            tags,
-            vec![
-                "bc_registry_root_v2_abc".to_string(),
-                "grpc-bazel".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn kv_root_tags_skip_empty_or_duplicate_legacy_root() {
-        let duplicate = kv_root_tags_from_values(
-            "grpc-bazel",
-            &[String::from("grpc-bazel"), String::from(" ")],
-        );
-        assert_eq!(duplicate, vec!["grpc-bazel".to_string()]);
-
-        let empty = kv_root_tags_from_values("grpc-bazel", &[String::from(" ")]);
-        assert_eq!(empty, vec!["grpc-bazel".to_string()]);
-    }
-
-    #[test]
-    fn kv_root_tags_include_all_distinct_human_aliases() {
-        let tags = kv_root_tags_from_values(
-            "bc_registry_root_v2_abc",
-            &[
-                String::from("alias-a"),
-                String::from("alias-b"),
-                String::from("alias-a"),
-            ],
-        );
-        assert_eq!(
-            tags,
-            vec![
-                "bc_registry_root_v2_abc".to_string(),
-                "alias-a".to_string(),
-                "alias-b".to_string()
-            ]
-        );
     }
 
     #[test]

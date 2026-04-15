@@ -18,6 +18,21 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
 - Guardrail:
   - `/v2/` is the protocol surface. `/_boringcache/status` is the operator and harness lifecycle surface.
 
+## 2026-04-14 - full-tag hydration as the disk-cache contract
+
+- Symptom:
+  - Startup warming still behaved like a slice-based scheduler even though the product direction had moved to cache-first hydration.
+  - Hidden startup and background byte budgets made the proxy look simple in small cases but degrade into partial warming under pressure.
+- Root cause:
+  - Prefetch kept separate startup blob/byte limits and a background inflight byte cap.
+  - The blob read cache already had its own size ceiling and eviction path, so the extra prefetch budgets were policy duplication.
+- Product-side changes:
+  - Hydrate the full active tag by default during startup and continue best-effort in the background if readiness times out.
+  - Remove startup selection budgets and background inflight byte budgets from cache-registry hydration.
+  - Treat the fixed blob-read-cache ceiling and blob-cache eviction as the authoritative disk safety boundary.
+- Guardrail:
+  - For disk-backed cache-registry paths, warm selection should not invent a second capacity policy. If we add a RAM cache later, memory budgets belong there instead.
+
 ## 2026-04-09 - startup hydration and generic machine governor
 
 - Symptom:

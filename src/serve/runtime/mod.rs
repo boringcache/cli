@@ -142,17 +142,12 @@ pub async fn start_server_background(
 }
 
 fn spawn_startup_prefetch(state: &AppState) {
-    if state.kv_manifest_warm_enabled {
-        let prefetch_state = state.clone();
-        tokio::spawn(async move {
-            crate::serve::cache_registry::prefetch_manifest_blobs(&prefetch_state).await;
-            prefetch_state
-                .prefetch_complete
-                .store(true, Ordering::Release);
-            prefetch_state.prefetch_complete_notify.notify_waiters();
-        });
-    } else {
-        state.prefetch_complete.store(true, Ordering::Release);
-        state.prefetch_complete_notify.notify_waiters();
-    }
+    let prefetch_state = state.clone();
+    tokio::spawn(async move {
+        crate::serve::cache_registry::prefetch_manifest_blobs(&prefetch_state).await;
+        prefetch_state
+            .prefetch_complete
+            .store(true, Ordering::Release);
+        prefetch_state.prefetch_complete_notify.notify_waiters();
+    });
 }

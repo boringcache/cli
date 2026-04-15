@@ -18,9 +18,9 @@ It is based on:
 
 ## Current proxy changes
 
-- Startup prefetch no longer stops on the first oversized blob.
+- Startup warming hydrates the full active tag by default.
 - Blob-read cache sizing and restore/prefetch concurrency now come from one automatic machine governor.
-- Startup warming now resolves URLs for the startup slice first, warms that slice first, and resolves the rest in the background.
+- Startup warming now resolves URLs for the full active tag first, hydrates that tag first, and lets the blob read cache evict over budget.
 - Read-path metrics now record `local_cache` vs `remote_fetch`, so we can measure hit ratio and latency instead of guessing.
 
 ## Tuning surface
@@ -29,13 +29,7 @@ Keep the normal operator surface small:
 
 - Public expert knobs:
   - `BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY`
-  - `BORINGCACHE_BLOB_READ_CACHE_MAX_BYTES`
-- Internal/debug knobs:
-  - startup slice blob and byte caps
-  - prefetch batch sizes
-  - download-url batch sizes
-  - inflight byte budgets
-  - raw prefetch concurrency overrides
+- Internal batching stays fixed in code.
 
 The intent is that one machine governor and one generic startup path pick the right defaults for almost every workload.
 If a benchmark needs lower-level overrides, treat those as engineering controls, not product defaults.
@@ -44,8 +38,8 @@ If a benchmark needs lower-level overrides, treat those as engineering controls,
 
 | Adapter | Client protocol | What the client already keeps local | Remote object format | Best proxy strategy | Avoid |
 | --- | --- | --- | --- | --- | --- |
-| `sccache` | WebDAV `MKCOL`/`GET`/`HEAD`/`PUT` | `SCCACHE_DIR` plus local server process | Many small compiler result blobs keyed by path-like keys | Keep GET/HEAD cheap, batch URL resolution, and let generic startup warming fill what fits budget | Per-hit URL resolution and low steady-state read concurrency |
-| `bazel` | Remote cache over HTTP for `ac/` and `cas/` | Local output base and local disk cache | Split `AC` metadata and `CAS` blobs; can be many objects, sometimes large | Preserve `ac/` and `cas/` correctness, keep startup selection generic, and avoid overcommitting RAM to large CAS graphs | Tool-detected hydrate-first rules or treating large CAS graphs like tiny kv objects |
+| `sccache` | WebDAV `MKCOL`/`GET`/`HEAD`/`PUT` | `SCCACHE_DIR` plus local server process | Many small compiler result blobs keyed by path-like keys | Keep GET/HEAD cheap, batch URL resolution, and hydrate the active tag into disk cache by default | Per-hit URL resolution and low steady-state read concurrency |
+| `bazel` | Remote cache over HTTP for `ac/` and `cas/` | Local output base and local disk cache | Split `AC` metadata and `CAS` blobs; can be many objects, sometimes large | Preserve `ac/` and `cas/` correctness, hydrate the active tag generically, and let disk-cache eviction enforce capacity | Tool-detected hydrate-first rules or treating large CAS graphs like tiny kv objects |
 | `gradle` | Remote HTTP build cache | Local build cache directory; Gradle stores remote hits locally after fetch | One cache object per cacheable task output | Keep GET/PUT path cheap, batch nothing unnecessary, rely on local cache after first restore | Heavy startup hydration by default |
 | `maven` | Maven build-cache HTTP or DAV remote | Local Maven repo and local build-cache extension state | Keyed module/project-state artifacts, often many small modules | Keep metadata cheap, preserve portability checks, and rely on local reuse after restore | Ignoring portability/config mismatches or assuming cross-env reuse is always safe |
 | `turborepo` | Remote cache API: `GET`/`HEAD`/`PUT`/`POST` | `.turbo/cache` on local disk | One artifact archive per task hash plus query/events calls | Keep query and artifact fetch cheap; warm opportunistically from observed cache state, not tool guesses | Full-tag hydration by default for large monorepos |
@@ -57,7 +51,7 @@ If a benchmark needs lower-level overrides, treat those as engineering controls,
 
 - Adapters define protocol, key layout, and cache contents.
 - BoringCache owns storage, transfer, verification, and machine-safe scheduling.
-- Startup warming should stay opportunistic and budget-bound; tool detection should not grant special RAM or CPU behavior by default.
+- Startup warming should hydrate the full active tag by default on disk-backed cache-registry paths. Capacity control belongs in the blob read cache size and eviction policy, not a separate startup selection budget.
 - Query-aware or protocol-aware optimizations should come from real request patterns, not adapter-name guesses.
 - `docker` should stay OCI-native. BuildKit already understands manifests, layers, and local content reuse.
 
@@ -84,7 +78,7 @@ For restart-path measurements, force a distinct local blob-cache directory with 
 
 ## Immediate next tuning targets
 
-1. Validate that generic startup warming shifts a meaningful share of reads from `remote_fetch` to `local_cache`.
-2. Measure object-size distributions and read locality before changing startup ordering.
+1. Validate that full-tag startup hydration shifts a meaningful share of reads from `remote_fetch` to `local_cache`.
+2. Measure object-size distributions and read locality before changing hydration ordering.
 3. Add request-shaped warming only where real protocol traffic proves it helps.
 4. Inspect OCI blob and manifest fetch counts before changing any registry behavior.

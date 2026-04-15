@@ -41,7 +41,6 @@ pub struct AppState {
     pub configured_human_tags: Vec<String>,
     pub registry_root_tag: String,
     pub fail_on_cache_error: bool,
-    pub kv_manifest_warm_enabled: bool,
     pub blob_locator: Arc<RwLock<BlobLocatorCache>>,
     pub upload_sessions: Arc<RwLock<UploadSessionStore>>,
     pub kv_pending: Arc<RwLock<KvPendingStore>>,
