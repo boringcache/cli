@@ -1,7 +1,7 @@
-pub mod exec;
+pub mod command;
 pub mod tags;
 
-pub(crate) use exec::{
+pub(crate) use command::{
     ChildOutcome, PROXY_AUTH_TOKEN, ProxyContext, spawn_command, status_exit_code,
     substitute_proxy_placeholders,
 };

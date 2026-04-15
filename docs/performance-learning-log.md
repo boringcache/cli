@@ -18,6 +18,17 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
 - Guardrail:
   - `/v2/` is the protocol surface. `/_boringcache/status` is the operator and harness lifecycle surface.
 
+## 2026-04-15 - CLI-managed proxy readiness waits
+
+- Symptom:
+  - `boringcache <tool>` and `boringcache run --proxy` could start the wrapped command while the proxy still reported `warming`.
+  - Downstream callers added their own readiness waits on top of the CLI-managed lifecycle.
+- Product-side changes:
+  - Make CLI-managed background proxy startup poll `/_boringcache/status` until `phase=ready`.
+  - Probe readiness through the local bind host, not the child-facing endpoint override, so container-facing hostnames do not break local startup waits.
+- Guardrail:
+  - CLI-managed proxy lifecycle should consume the same `/_boringcache/status` contract that external harnesses use.
+
 ## 2026-04-09 - startup hydration and generic machine governor
 
 - Symptom:

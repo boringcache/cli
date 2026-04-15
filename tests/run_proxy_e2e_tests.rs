@@ -1,6 +1,5 @@
 #![cfg(unix)]
 
-use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
@@ -8,9 +7,14 @@ use tempfile::TempDir;
 const DUMMY_API_URL: &str = "http://127.0.0.1:65535";
 
 fn cli_binary() -> PathBuf {
-    option_env!("CARGO_BIN_EXE_boringcache")
+    std::env::var_os("CARGO_BIN_EXE_boringcache")
         .map(PathBuf::from)
-        .unwrap_or_else(|| env::current_dir().unwrap().join("target/debug/boringcache"))
+        .or_else(|| option_env!("CARGO_BIN_EXE_boringcache").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap()
+                .join("target/debug/boringcache")
+        })
 }
 
 fn free_port() -> u16 {
@@ -37,7 +41,9 @@ expected_sccache_endpoint="${expected_endpoint}/"
 [ "${SCCACHE_CACHED_CONF:-}" = "stale-config" ] || exit 10
 [ "${SCCACHE_WEBDAV_TOKEN:-}" = "wrong-token" ] || exit 11
 [ "${2:-}" = "$expected_ref" ] || exit 12
-curl -fsS --max-time 2 "$expected_endpoint/_boringcache/status" >/dev/null || exit 13
+status_headers="$(curl -fsS -D - -o /dev/null --max-time 2 "$expected_endpoint/_boringcache/status")" || exit 13
+phase="$(printf '%s\n' "$status_headers" | awk -F': ' 'tolower($1) == "x-boringcache-proxy-phase" { gsub("\\r", "", $2); print tolower($2); exit }')"
+[ "$phase" = "ready" ] || exit 14
 "#;
 
     let output = Command::new(cli_binary())
@@ -128,7 +134,9 @@ fn test_run_combined_archive_and_proxy_mode_executes_child() {
     std::fs::create_dir_all(&cache_dir).expect("create cache dir");
     let script = r#"expected_endpoint="http://127.0.0.1:$1"
 [ "${NX_SELF_HOSTED_REMOTE_CACHE_SERVER:-}" = "$expected_endpoint" ] || exit 2
-curl -fsS --max-time 2 "$expected_endpoint/_boringcache/status" >/dev/null || exit 3
+status_headers="$(curl -fsS -D - -o /dev/null --max-time 2 "$expected_endpoint/_boringcache/status")" || exit 3
+phase="$(printf '%s\n' "$status_headers" | awk -F': ' 'tolower($1) == "x-boringcache-proxy-phase" { gsub("\\r", "", $2); print tolower($2); exit }')"
+[ "$phase" = "ready" ] || exit 4
 "#;
 
     let pair = format!("deps:{}", cache_dir.display());

@@ -38,6 +38,8 @@ Use `--endpoint-host host.docker.internal` when the wrapped client must reach th
 
 The proxy exposes `/_boringcache/status` for readiness and drain checks.
 It reports lifecycle phase (`warming`, `ready`, `draining`) and whether publish is settled for fresh readers.
+CLI-managed proxy paths wait for `phase=ready` before they start the wrapped tool.
+Long-lived external setups should poll this endpoint directly.
 
 ## Expert tuning
 

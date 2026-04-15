@@ -57,10 +57,7 @@ pub enum Commands {
     #[command(about = "Audit repo cache tag usage and suggest .boringcache.toml entries")]
     Audit(AuditArgs),
 
-    #[command(
-        about = "Open a full-screen workspace dashboard",
-        visible_alias = "tui"
-    )]
+    #[command(about = "Open a full-screen workspace dashboard")]
     Dashboard(DashboardArgs),
 
     #[command(subcommand, about = "Manage workspace tokens")]
@@ -74,7 +71,6 @@ pub enum Commands {
 
     #[command(
         name = "run",
-        visible_alias = "exec",
         about = "Wrap restore -> command -> save in one invocation",
         after_help = "Supported forms:\n  boringcache run [WORKSPACE] TAG_PATHS -- COMMAND...\n  boringcache run [WORKSPACE] --entry ENTRY[,ENTRY] -- COMMAND...\n  boringcache run [WORKSPACE] --profile PROFILE[,PROFILE] -- COMMAND...\n  boringcache run [WORKSPACE] -- COMMAND...\n\nManual TAG_PATHS are exclusive with --entry and --profile."
     )]
@@ -109,18 +105,12 @@ pub enum Commands {
     #[command(name = "rm", visible_alias = "delete", about = "Delete cache tags")]
     Delete(DeleteArgs),
 
-    #[command(
-        about = "Inspect a cache entry by tag or cache entry id",
-        visible_alias = "show"
-    )]
+    #[command(about = "Inspect a cache entry by tag or cache entry id")]
     Inspect(InspectArgs),
 
     Ls(LsArgs),
 
-    #[command(
-        about = "Show workspace status, cache health, and operator insights",
-        visible_alias = "overview"
-    )]
+    #[command(about = "Show workspace status, cache health, and operator insights")]
     Status(StatusArgs),
 
     #[command(about = "Show recent cache sessions and execution context")]
@@ -145,13 +135,9 @@ pub enum Commands {
     #[command(about = "Set up BoringCache for this project")]
     Onboard(OnboardArgs),
 
-    #[command(name = "optimize", hide = true, about = "Legacy alias for onboard")]
-    Optimize(OnboardArgs),
-
     #[command(
-        name = "docker-registry",
-        about = "Run a local cache registry proxy backed by BoringCache (OCI + Bazel + Gradle + Maven + Nx + Turborepo + sccache + Go)",
-        visible_aliases = ["serve", "cache-registry"]
+        name = "cache-registry",
+        about = "Run a local cache registry proxy backed by BoringCache (OCI + Bazel + Gradle + Maven + Nx + Turborepo + sccache + Go)"
     )]
     Serve(ServeArgs),
 

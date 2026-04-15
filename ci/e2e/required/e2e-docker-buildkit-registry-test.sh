@@ -156,7 +156,7 @@ handle_interrupt() {
 
 stop_proxy() {
   if [[ -n "${SERVE_PID:-}" ]]; then
-    stop_pid_tree "${SERVE_PID}" "docker-registry proxy" "$PROXY_SHUTDOWN_WAIT_SECS"
+    stop_pid_tree "${SERVE_PID}" "cache-registry proxy" "$PROXY_SHUTDOWN_WAIT_SECS"
   fi
   SERVE_PID=""
 }
@@ -199,7 +199,7 @@ start_proxy() {
   stop_proxy
   LOG_FILES+=("${log_file}")
   BORINGCACHE_PROXY_METADATA_HINTS="${metadata_hints}" \
-  "${BINARY}" docker-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" \
+  "${BINARY}" cache-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" \
     --host 127.0.0.1 \
     --port "${PORT}" \
     --no-platform \
@@ -232,14 +232,14 @@ start_proxy() {
     if (( now >= next_warn )); then
       waited="$((now - start_ts))"
       if [[ -n "$readiness_reference" ]]; then
-        echo "WARNING: docker-registry readiness still waiting after ${waited}s (phase=${phase:-unknown} publish=${publish_state:-unknown} ref=${readiness_reference})"
+        echo "WARNING: cache-registry readiness still waiting after ${waited}s (phase=${phase:-unknown} publish=${publish_state:-unknown} ref=${readiness_reference})"
       else
-        echo "WARNING: docker-registry readiness still waiting after ${waited}s (phase=${phase:-unknown} publish=${publish_state:-unknown})"
+        echo "WARNING: cache-registry readiness still waiting after ${waited}s (phase=${phase:-unknown} publish=${publish_state:-unknown})"
       fi
       next_warn=$((now + PROXY_READY_WARN_SECS))
     fi
     if ! kill -0 "${SERVE_PID}" >/dev/null 2>&1; then
-      echo "docker-registry exited before readiness"
+      echo "cache-registry exited before readiness"
       cat "${log_file}"
       exit 1
     fi
@@ -247,7 +247,7 @@ start_proxy() {
   done
 
   if [[ "${ready}" != "1" ]]; then
-    echo "timed out waiting for docker-registry readiness"
+    echo "timed out waiting for cache-registry readiness"
     cat "${log_file}"
     exit 1
   fi

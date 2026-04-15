@@ -419,7 +419,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             commands::setup_encryption::execute(args.workspace, args.identity_output).await
         }
         Commands::Workspaces(args) => commands::workspaces::execute(args.json).await,
-        Commands::Onboard(args) | Commands::Optimize(args) => {
+        Commands::Onboard(args) => {
             commands::onboard::execute(
                 args.path,
                 args.email,
@@ -433,7 +433,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             .await
         }
         Commands::Serve(args) => {
-            commands::serve::execute(
+            commands::cache_registry::execute(
                 args.workspace,
                 args.tag,
                 args.host,

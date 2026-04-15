@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cli::AdapterArgs;
-use crate::commands::{restore, save, serve};
+use crate::commands::{cache_registry, restore, save};
 use crate::config::{AuthPurpose, Config};
 use crate::exit_code::ExitCodeError;
 use crate::project_config;
@@ -278,9 +278,9 @@ pub async fn adapter_execute(
         if infer_entries { &command } else { &[] },
     )?;
     let archive_enabled = !resolved_plan.tag_path_pairs.is_empty();
-    let proxy_metadata_hints = serve::resolve_proxy_metadata_hints(&metadata_hint_args)?;
+    let proxy_metadata_hints = cache_registry::resolve_proxy_metadata_hints(&metadata_hint_args)?;
 
-    let effective_read_only = serve::effective_proxy_read_only(configured_read_only);
+    let effective_read_only = cache_registry::effective_proxy_read_only(configured_read_only);
     let effective_skip_save = skip_save || effective_read_only;
     let docker_cache_mode = args
         .cache_mode
@@ -332,7 +332,13 @@ pub async fn adapter_execute(
             .map(|plan| plan.oci_cache.registry_ref.clone())
             .map(Ok)
             .unwrap_or_else(|| {
-                serve::planned_cache_ref(&tag, &advertised_endpoint_host, port, no_platform, no_git)
+                cache_registry::planned_cache_ref(
+                    &tag,
+                    &advertised_endpoint_host,
+                    port,
+                    no_platform,
+                    no_git,
+                )
             })?,
     };
     let preview_command = proxy::substitute_proxy_placeholders(
@@ -447,7 +453,7 @@ pub async fn adapter_execute(
         }
     }
 
-    let proxy_handle = serve::start_proxy_background(
+    let proxy_handle = cache_registry::start_proxy_background(
         workspace.clone(),
         tag,
         bind_host,
@@ -588,7 +594,7 @@ fn merge_metadata_hints(configured: &[String], cli: &[String]) -> Vec<String> {
 }
 
 async fn shutdown_proxy_handle(
-    proxy_handle: serve::ProxyServerHandle,
+    proxy_handle: cache_registry::ProxyServerHandle,
     fail_on_cache_error: bool,
     allow_override: bool,
 ) -> Result<()> {

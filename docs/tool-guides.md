@@ -9,6 +9,8 @@ The pattern is simple:
 3. use `boringcache <tool>`
 4. drop to `cache-registry` only when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive
 
+`boringcache <tool>` and `boringcache run --proxy` wait for the local proxy to report `ready` before the wrapped command starts.
+
 ## Docker / BuildKit
 
 ```toml

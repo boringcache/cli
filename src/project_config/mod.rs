@@ -43,6 +43,20 @@ tag = "bundler-gems"
     }
 
     #[test]
+    fn ignores_bare_boringcache_toml() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join("boringcache.toml"),
+            r#"
+workspace = "org/workspace"
+"#,
+        )
+        .unwrap();
+
+        assert!(discover(temp_dir.path()).unwrap().is_none());
+    }
+
+    #[test]
     fn resolves_profile_entries_with_built_in_defaults() {
         let temp_dir = TempDir::new().unwrap();
         std::fs::write(

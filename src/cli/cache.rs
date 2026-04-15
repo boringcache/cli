@@ -47,11 +47,7 @@ pub struct SaveArgs {
     #[arg(help = "One or more tag:path pairs (comma-separated)")]
     pub path_tag_pairs: String,
 
-    #[arg(
-        long,
-        alias = "cross-os",
-        help = "Disable automatic platform suffix for tags"
-    )]
+    #[arg(long, help = "Disable automatic platform suffix for tags")]
     pub no_platform: bool,
 
     #[arg(long, help = "Force save even if cache entry already exists on server")]
@@ -181,11 +177,7 @@ pub struct RunArgs {
     )]
     pub tool_tag_suffix: Option<String>,
 
-    #[arg(
-        long,
-        alias = "cross-os",
-        help = "Disable automatic platform suffix for tags"
-    )]
+    #[arg(long, help = "Disable automatic platform suffix for tags")]
     pub no_platform: bool,
 
     #[arg(

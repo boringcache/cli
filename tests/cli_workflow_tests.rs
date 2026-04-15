@@ -11,9 +11,14 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 fn cli_binary() -> PathBuf {
-    option_env!("CARGO_BIN_EXE_boringcache")
+    std::env::var_os("CARGO_BIN_EXE_boringcache")
         .map(PathBuf::from)
-        .unwrap_or_else(|| env::current_dir().unwrap().join("target/debug/boringcache"))
+        .or_else(|| option_env!("CARGO_BIN_EXE_boringcache").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap()
+                .join("target/debug/boringcache")
+        })
 }
 
 fn networking_available() -> bool {

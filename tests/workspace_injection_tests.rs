@@ -1,12 +1,16 @@
-use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 
 fn cli_binary() -> PathBuf {
-    option_env!("CARGO_BIN_EXE_boringcache")
+    std::env::var_os("CARGO_BIN_EXE_boringcache")
         .map(PathBuf::from)
-        .unwrap_or_else(|| env::current_dir().unwrap().join("target/debug/boringcache"))
+        .or_else(|| option_env!("CARGO_BIN_EXE_boringcache").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap()
+                .join("target/debug/boringcache")
+        })
 }
 
 const DUMMY_API_URL: &str = "http://127.0.0.1:65535";
@@ -288,33 +292,6 @@ fn test_run_with_default_workspace_and_command_separator() {
 }
 
 #[test]
-fn test_exec_alias_with_default_workspace_and_command_separator() {
-    let cli = cli_binary();
-    let cli = cli.to_str().expect("CLI path must be valid UTF-8");
-    let output = run_cli_with_default_workspace(&[
-        "exec",
-        "--skip-restore",
-        "--skip-save",
-        "test-tag:/tmp/test",
-        "--",
-        cli,
-        "--version",
-    ]);
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("required arguments were not provided")
-            && !stderr.contains("<WORKSPACE>")
-            && !stderr.contains("<TAG_PATH_PAIRS>")
-    );
-    assert!(
-        output.status.success(),
-        "Expected exec alias to execute child successfully, stderr: {}",
-        stderr
-    );
-}
-
-#[test]
 fn test_run_with_value_option_before_tag_path_injects_workspace() {
     let cli = cli_binary();
     let cli = cli.to_str().expect("CLI path must be valid UTF-8");
@@ -515,7 +492,7 @@ fn test_delete_with_workspace_format_tag() {
 }
 
 #[test]
-fn test_serve_with_default_workspace_and_tag() {
+fn test_cache_registry_with_default_workspace_and_tag() {
     let output = run_cli_with_default_workspace(&["cache-registry", "registry-cache"]);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -529,7 +506,7 @@ fn test_serve_with_default_workspace_and_tag() {
 }
 
 #[test]
-fn test_serve_with_default_workspace_and_tag_with_options() {
+fn test_cache_registry_with_default_workspace_and_tag_with_options() {
     let output = run_cli_with_default_workspace(&[
         "cache-registry",
         "registry-cache",
@@ -550,7 +527,7 @@ fn test_serve_with_default_workspace_and_tag_with_options() {
 }
 
 #[test]
-fn test_serve_with_options_before_tag_injects_workspace() {
+fn test_cache_registry_with_options_before_tag_injects_workspace() {
     let output = run_cli_with_default_workspace(&[
         "cache-registry",
         "--host",
@@ -571,7 +548,7 @@ fn test_serve_with_options_before_tag_injects_workspace() {
 }
 
 #[test]
-fn test_serve_without_default_workspace_requires_workspace_and_tag() {
+fn test_cache_registry_without_default_workspace_requires_workspace_and_tag() {
     let output = run_cli_without_default_workspace(&["cache-registry", "registry-cache"]);
 
     let stderr = String::from_utf8_lossy(&output.stderr);

@@ -1,15 +1,25 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use crate::api::client::ApiClient;
 use crate::config::{AuthPurpose, Config};
 use crate::git::GitContext;
 use crate::tag_utils::TagResolver;
+use crate::ui;
 
 const PROXY_METADATA_HINTS_ENV: &str = "BORINGCACHE_PROXY_METADATA_HINTS";
 const MAX_PROXY_METADATA_HINTS: usize = 8;
 const MAX_PROXY_METADATA_HINT_KEY_BYTES: usize = 32;
 const MAX_PROXY_METADATA_HINT_VALUE_BYTES: usize = 64;
+const PROXY_STATUS_PATH: &str = "/_boringcache/status";
+const PROXY_PHASE_HEADER: &str = "X-BoringCache-Proxy-Phase";
+const PROXY_PUBLISH_STATE_HEADER: &str = "X-BoringCache-Publish-State";
+const PROXY_READY_PHASE: &str = "ready";
+const PROXY_READY_TIMEOUT: Duration = Duration::from_secs(300);
+const PROXY_READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const PROXY_READY_WARN_INTERVAL: Duration = Duration::from_secs(15);
+const PROXY_STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct ProxyServerHandle {
     handle: crate::serve::ServeHandle,
@@ -36,6 +46,78 @@ impl ProxyServerHandle {
 
     pub async fn shutdown_and_flush(self) -> Result<()> {
         self.handle.shutdown_and_flush().await
+    }
+
+    async fn wait_until_ready(&self, probe_host: &str) -> Result<()> {
+        let client = reqwest::Client::builder()
+            .timeout(PROXY_STATUS_REQUEST_TIMEOUT)
+            .build()
+            .context("Failed to build cache-registry readiness client")?;
+        let status_url = proxy_status_url(probe_host, self.port);
+        let started_at = tokio::time::Instant::now();
+        let deadline = started_at + PROXY_READY_TIMEOUT;
+        let mut next_warn_at = started_at + PROXY_READY_WARN_INTERVAL;
+        let mut last_observation = "status=000 phase=unknown publish=unknown".to_string();
+
+        loop {
+            if self.handle.is_finished() {
+                anyhow::bail!("Cache registry exited before readiness");
+            }
+
+            match fetch_proxy_status(&client, &status_url).await {
+                Ok(status) => {
+                    last_observation = status.summary();
+                    if status.is_ready() {
+                        return Ok(());
+                    }
+                }
+                Err(error) if error.is_timeout() => {
+                    last_observation =
+                        "status=000 phase=unknown publish=unknown timeout".to_string();
+                }
+                Err(_) => {}
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                anyhow::bail!(
+                    "Timed out waiting for cache-registry readiness after {}s ({last_observation})",
+                    PROXY_READY_TIMEOUT.as_secs()
+                );
+            }
+
+            if now >= next_warn_at {
+                ui::info(&format!(
+                    "[boringcache] Waiting for cache-registry readiness... ({}s, {last_observation})",
+                    started_at.elapsed().as_secs()
+                ));
+                next_warn_at += PROXY_READY_WARN_INTERVAL;
+            }
+
+            tokio::time::sleep(PROXY_READY_POLL_INTERVAL).await;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ProxyStatusProbe {
+    status: reqwest::StatusCode,
+    phase: Option<String>,
+    publish_state: Option<String>,
+}
+
+impl ProxyStatusProbe {
+    fn is_ready(&self) -> bool {
+        self.status == reqwest::StatusCode::OK && self.phase.as_deref() == Some(PROXY_READY_PHASE)
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "status={} phase={} publish={}",
+            self.status.as_u16(),
+            self.phase.as_deref().unwrap_or("unknown"),
+            self.publish_state.as_deref().unwrap_or("unknown")
+        )
     }
 }
 
@@ -140,6 +222,7 @@ pub async fn start_proxy_background(
     let (registry_root_tag, configured_human_tags) =
         resolve_registry_tag_config(&tag_resolver, &tag)?;
 
+    let readiness_host = proxy_probe_host(&host);
     let primary_human_tag = configured_human_tags[0].clone();
     let endpoint_host = endpoint_host_override
         .map(|value| value.trim().to_string())
@@ -166,12 +249,23 @@ pub async fn start_proxy_background(
     )
     .await?;
 
-    Ok(ProxyServerHandle {
+    let proxy_handle = ProxyServerHandle {
         port: handle.port,
         handle,
         endpoint_host,
         primary_human_tag,
-    })
+    };
+
+    if let Err(error) = proxy_handle.wait_until_ready(&readiness_host).await {
+        return match proxy_handle.shutdown_and_flush().await {
+            Ok(()) => Err(error),
+            Err(shutdown_error) => Err(error.context(format!(
+                "Failed to stop cache-registry after readiness failure: {shutdown_error:#}"
+            ))),
+        };
+    }
+
+    Ok(proxy_handle)
 }
 
 fn resolve_registry_tag_config(
@@ -210,6 +304,46 @@ fn build_tag_resolver(no_platform: bool, no_git: bool) -> Result<TagResolver> {
         GitContext::default()
     };
     Ok(TagResolver::new(platform, git_context, git_enabled))
+}
+
+fn proxy_probe_host(host: &str) -> String {
+    match host {
+        "0.0.0.0" => "127.0.0.1".to_string(),
+        "::" | "[::]" => "::1".to_string(),
+        _ => host.to_string(),
+    }
+}
+
+fn proxy_status_url(host: &str, port: u16) -> String {
+    let authority = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    format!("http://{authority}:{port}{PROXY_STATUS_PATH}")
+}
+
+async fn fetch_proxy_status(
+    client: &reqwest::Client,
+    status_url: &str,
+) -> std::result::Result<ProxyStatusProbe, reqwest::Error> {
+    let response = client.get(status_url).send().await?;
+    let phase = response
+        .headers()
+        .get(PROXY_PHASE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let publish_state = response
+        .headers()
+        .get(PROXY_PUBLISH_STATE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+
+    Ok(ProxyStatusProbe {
+        status: response.status(),
+        phase,
+        publish_state,
+    })
 }
 
 pub(crate) fn resolve_proxy_metadata_hints(
@@ -306,7 +440,11 @@ fn normalize_proxy_metadata_hint_value(raw_value: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::test_env;
+    use axum::Json;
+    use axum::Router;
+    use axum::routing::get;
     use std::collections::BTreeMap;
+    use tokio::sync::oneshot;
 
     #[test]
     fn root_tag_without_aliases() {
@@ -388,5 +526,101 @@ mod tests {
                 .to_string()
                 .contains("Invalid proxy metadata hint key")
         );
+    }
+
+    #[tokio::test]
+    async fn start_proxy_background_waits_for_ready_before_returning() {
+        let _guard = test_env::lock();
+        let home = tempfile::tempdir().expect("temp home");
+        let (api_url, shutdown_api) = start_delayed_cache_api(Duration::from_millis(400)).await;
+        let _home_var = set_scoped_env_var("HOME", home.path().to_string_lossy().as_ref());
+        let _api_url_var = set_scoped_env_var("BORINGCACHE_API_URL", &api_url);
+        let _save_token_var = set_scoped_env_var("BORINGCACHE_SAVE_TOKEN", "test-save-token");
+        test_env::remove_var("BORINGCACHE_API_TOKEN");
+        test_env::remove_var("BORINGCACHE_TOKEN_FILE");
+
+        let start_task = tokio::spawn(start_proxy_background(
+            "org/repo".to_string(),
+            "registry-root".to_string(),
+            "127.0.0.1".to_string(),
+            0,
+            true,
+            true,
+            Some("builder.internal.invalid".to_string()),
+            BTreeMap::new(),
+            true,
+            false,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !start_task.is_finished(),
+            "background proxy start should wait while warming"
+        );
+
+        let proxy_handle = start_task
+            .await
+            .expect("join proxy start task")
+            .expect("start proxy");
+
+        let response = reqwest::Client::new()
+            .get(proxy_status_url("127.0.0.1", proxy_handle.port()))
+            .send()
+            .await
+            .expect("fetch proxy status");
+        assert_eq!(
+            response
+                .headers()
+                .get(PROXY_PHASE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(PROXY_READY_PHASE)
+        );
+        assert_eq!(proxy_handle.endpoint_host(), "builder.internal.invalid");
+
+        proxy_handle
+            .shutdown_and_flush()
+            .await
+            .expect("shutdown proxy");
+        let _ = shutdown_api.send(());
+    }
+
+    struct ScopedEnvVar(&'static str);
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            test_env::remove_var(self.0);
+        }
+    }
+
+    fn set_scoped_env_var(key: &'static str, value: &str) -> ScopedEnvVar {
+        test_env::set_var(key, value);
+        ScopedEnvVar(key)
+    }
+
+    async fn start_delayed_cache_api(delay: Duration) -> (String, oneshot::Sender<()>) {
+        let app = Router::new().route(
+            "/v2/workspaces/{org}/{repo}/caches",
+            get({
+                move || async move {
+                    tokio::time::sleep(delay).await;
+                    Json(Vec::<serde_json::Value>::new())
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind delayed api");
+        let address = listener.local_addr().expect("delayed api addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve delayed api");
+        });
+
+        (format!("http://{address}"), shutdown_tx)
     }
 }

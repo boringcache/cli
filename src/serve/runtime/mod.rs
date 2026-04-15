@@ -21,6 +21,10 @@ pub struct ServeHandle {
 }
 
 impl ServeHandle {
+    pub fn is_finished(&self) -> bool {
+        self.server_task.is_finished()
+    }
+
     pub async fn shutdown_and_flush(mut self) -> Result<()> {
         self.shutdown_requested.store(true, Ordering::Release);
         if let Some(shutdown_tx) = self.shutdown_tx.take() {

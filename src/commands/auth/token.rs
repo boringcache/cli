@@ -31,7 +31,7 @@ pub async fn list(
     let workspace = crate::command_support::resolve_workspace(
         &api_client,
         workspace_option,
-        "boringcache token ls <workspace>",
+        "boringcache token list <workspace>",
     )
     .await?;
     let offset = (page.saturating_sub(1)).saturating_mul(limit);
@@ -533,7 +533,7 @@ fn next_page_command(response: &WorkspaceTokensResponse) -> String {
     let mut parts = vec![
         "boringcache".to_string(),
         "token".to_string(),
-        "ls".to_string(),
+        "list".to_string(),
         response.workspace.slug.clone(),
         format!(
             "--page {}",
@@ -627,7 +627,7 @@ mod tests {
 
         assert_eq!(
             next_page_command(&response),
-            "boringcache token ls org/testing --page 3 --limit 20 --all"
+            "boringcache token list org/testing --page 3 --limit 20 --all"
         );
     }
 }
