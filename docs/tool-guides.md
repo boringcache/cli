@@ -10,7 +10,7 @@ The pattern is simple:
 4. drop to `cache-registry` only when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive
 
 `cache-registry` is the proxy.
-`boringcache <tool>` and `boringcache run --proxy` temporarily start that same proxy for one command, wait for `ready`, then hand traffic to the wrapped tool.
+`boringcache <tool>` and `boringcache run --proxy` temporarily start that same proxy for one command, wait until it is ready, then hand traffic to the wrapped tool.
 `cache-registry` itself is warm by default. Use `--on-demand` only for advanced shared-proxy setups that prefer immediate startup over warmed first reads.
 
 ## Docker / BuildKit

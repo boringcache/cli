@@ -31,6 +31,7 @@ AUTH_BEARER="${ADAPTER_AUTH_BEARER:-adapter-e2e-token}"
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 
 PROXY_PID=""
+PROXY_READY_FILE=""
 INTERRUPTED="0"
 PORT_TOOL=""
 
@@ -182,6 +183,8 @@ stop_proxy() {
     stop_pid_tree "$PROXY_PID" "proxy" "$PROXY_SHUTDOWN_WAIT_SECS"
     PROXY_PID=""
   fi
+  rm -f "${PROXY_READY_FILE:-}" >/dev/null 2>&1 || true
+  PROXY_READY_FILE=""
 }
 
 handle_interrupt() {
@@ -231,6 +234,8 @@ start_proxy() {
   local metadata_hints="${2:-}"
   stop_proxy
   reclaim_stale_proxy_port
+  PROXY_READY_FILE="$(mktemp "${LOG_DIR}/cache-registry-ready.XXXXXX")"
+  rm -f "${PROXY_READY_FILE}"
   {
     echo ""
     echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} hints=${metadata_hints:-none} ==="
@@ -240,10 +245,10 @@ start_proxy() {
     "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
     --host "$PROXY_HOST" \
     --port "$PROXY_PORT" \
+    --ready-file "$PROXY_READY_FILE" \
     --no-platform \
     --no-git >>"$PROXY_LOG" 2>&1 &
   PROXY_PID=$!
-  sleep 2
 }
 
 proxy_status_probe() {
@@ -264,7 +269,7 @@ proxy_status_probe() {
 }
 
 ensure_proxy_ready() {
-  local attempts start_ts next_warn now waited probe status phase publish_state
+  local attempts start_ts next_warn now waited
   attempts="$((PROXY_READY_TIMEOUT_SECS / PROXY_READY_POLL_SECS))"
   if (( attempts < 1 )); then
     attempts=1
@@ -272,15 +277,13 @@ ensure_proxy_ready() {
   start_ts="$(date +%s)"
   next_warn=$((start_ts + PROXY_READY_WARN_SECS))
   for _ in $(seq 1 "$attempts"); do
-    probe="$(proxy_status_probe)"
-    read -r status phase publish_state <<<"$probe"
-    if [[ "$status" == "200" && "$phase" == "ready" ]]; then
+    if [[ -f "${PROXY_READY_FILE}" ]]; then
       return 0
     fi
     now="$(date +%s)"
     if (( now >= next_warn )); then
       waited="$((now - start_ts))"
-      echo "WARNING: proxy readiness still waiting after ${waited}s (phase=${phase:-unknown} publish=${publish_state:-unknown})" | tee -a "$PROXY_LOG"
+      echo "WARNING: proxy readiness marker still waiting after ${waited}s (${PROXY_READY_FILE})" | tee -a "$PROXY_LOG"
       next_warn=$((now + PROXY_READY_WARN_SECS))
     fi
     if [[ -n "${PROXY_PID:-}" ]] && ! kill -0 "$PROXY_PID" >/dev/null 2>&1; then

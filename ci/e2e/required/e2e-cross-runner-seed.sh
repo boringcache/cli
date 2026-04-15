@@ -12,6 +12,7 @@ PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
 PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
 PROXY_LOG="${WORK_DIR}/proxy.log"
 PROXY_PID=""
+PROXY_READY_FILE="${WORK_DIR}/proxy.ready"
 
 cleanup() {
   set +e
@@ -40,11 +41,8 @@ proxy_status_probe() {
 }
 
 wait_for_proxy_ready() {
-  local probe status phase publish_state
   for _ in $(seq 1 30); do
-    probe="$(proxy_status_probe)"
-    read -r status phase publish_state <<<"$probe"
-    if [[ "$status" == "200" && "$phase" == "ready" ]]; then
+    if [[ -f "${PROXY_READY_FILE}" ]]; then
       return 0
     fi
     if ! kill -0 "${PROXY_PID}" 2>/dev/null; then
@@ -87,6 +85,7 @@ AC_DIGEST="$(sha256sum "${AC_PAYLOAD}" | awk '{print $1}')"
 RUST_LOG=info "${BINARY}" cache-registry "${WORKSPACE}" "${TAG}" \
   --host 127.0.0.1 \
   --port "${PROXY_PORT}" \
+  --ready-file "${PROXY_READY_FILE}" \
   --no-platform \
   --no-git \
   >>"${PROXY_LOG}" 2>&1 &

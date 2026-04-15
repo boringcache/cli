@@ -36,10 +36,10 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - `boringcache <tool>` and `boringcache run --proxy` could start the wrapped command while the proxy still reported `warming`.
   - Downstream callers added their own readiness waits on top of the CLI-managed lifecycle.
 - Product-side changes:
-  - Make CLI-managed background proxy startup poll `/_boringcache/status` until `phase=ready`.
-  - Probe readiness through the local bind host, not the child-facing endpoint override, so container-facing hostnames do not break local startup waits.
+  - Make CLI-managed background proxy startup wait on the shared in-process readiness state instead of reimplementing local HTTP polling.
+  - Add a hidden ready-file handoff so detached orchestrators can block on the same readiness signal without scraping logs or duplicating `/_boringcache/status` polling.
 - Guardrail:
-  - CLI-managed proxy lifecycle should consume the same `/_boringcache/status` contract that external harnesses use.
+  - Keep one readiness model. User-facing CLI flows stay warm-by-default, detached internal orchestrators consume the CLI-owned readiness signal, and `/_boringcache/status` remains the HTTP lifecycle and publish-settlement surface.
 
 ## 2026-04-14 - full-tag hydration as the disk-cache contract
 

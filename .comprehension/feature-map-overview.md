@@ -38,6 +38,7 @@ This is the shortest whole-system view of the CLI.
 | --- | --- | --- |
 | `delete` | visible alias for `rm` | `legacy-visible-alias` |
 | `run --archive-path`, `--archive-tag-prefix`, `--archive-restore-prefix`, `--cache-tag`, `--tool-tag-suffix` | planner-only dry-run surface | `hidden-internal` |
+| `cache-registry --ready-file PATH` | detached orchestration readiness handoff | `hidden-internal` |
 
 ## Current hotspots
 

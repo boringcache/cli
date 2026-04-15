@@ -34,6 +34,7 @@ These do not need more product input unless you want to change direction.
 - `cache-registry` is the proxy, and the lower-level long-lived endpoint path, with warm startup as the default user experience
 - `run --proxy` temporarily starts that same proxy for one command
 - `/_boringcache/status` is the operator/harness lifecycle endpoint, not the cache protocol surface
+- detached internal orchestrators consume a CLI-owned ready-file handoff instead of reimplementing local startup polling
 - `docs/contracts/readiness.md` is the canonical readiness-contract writeup for automation
 - Bazel, Gradle, and Maven are intentionally thinner wrappers today
 - Docker, Turbo, Nx, sccache, and Go own more automatic tool wiring
@@ -59,6 +60,7 @@ These are decisions or strong direction already provided and should be treated a
 
 - JSON outputs and dry-run plan outputs are intended to be stable contracts because CI and automation rely on them.
 - Proxy/runtime readiness is intended to be a machine-consumable contract for CI and automation.
+- CLI-owned readiness handoff is the intended startup contract for detached internal orchestrators.
 - Warm startup is the default proxy lifecycle contract; on-demand startup is an explicit expert override.
 
 ### Auth and failure policy
@@ -145,7 +147,8 @@ These matter most because they affect docs, naming, maintenance, and what stays 
 
 5. Canonical readiness and runtime-state probe
    - Resolved direction:
-     - `/_boringcache/status` is the canonical machine probe for startup, readiness, drain, and publish settlement
+     - `/_boringcache/status` is the canonical HTTP probe for external lifecycle inspection, drain, and publish settlement
+     - detached internal orchestrators should use the CLI-owned readiness handoff rather than reimplementing local startup polling
      - `/v2/` is protocol surface only
      - the current contract is written down in `docs/contracts/readiness.md`
    - Remaining decision:

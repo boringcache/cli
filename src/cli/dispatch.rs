@@ -443,6 +443,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
                 args.no_git,
                 args.metadata_hint,
                 !args.on_demand,
+                args.ready_file,
                 args.fail_on_cache_error,
                 args.read_only,
             )

@@ -4,9 +4,10 @@ mod shutdown;
 
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 
 use crate::api::client::ApiClient;
 use crate::serve::http::routes;
@@ -17,12 +18,22 @@ pub struct ServeHandle {
     shutdown_tx: Option<oneshot::Sender<()>>,
     server_task: tokio::task::JoinHandle<Result<()>>,
     shutdown_requested: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+    ready_notify: Arc<Notify>,
     pub port: u16,
 }
 
 impl ServeHandle {
     pub fn is_finished(&self) -> bool {
         self.server_task.is_finished()
+    }
+
+    pub(crate) fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn ready_notification(&self) -> tokio::sync::futures::Notified<'_> {
+        self.ready_notify.notified()
     }
 
     pub async fn shutdown_and_flush(mut self) -> Result<()> {
@@ -51,6 +62,7 @@ pub async fn run_server(
     startup_warm: bool,
     fail_on_cache_error: bool,
     read_only: bool,
+    ready_file: Option<PathBuf>,
 ) -> Result<()> {
     let (state, listener, replication_rx) = listener::build_server_runtime(
         api_client,
@@ -69,6 +81,11 @@ pub async fn run_server(
 
     maintenance::spawn_maintenance_tasks(&state, replication_rx);
     spawn_startup_prefetch(&state);
+    spawn_ready_file_marker(
+        state.prefetch_complete.clone(),
+        state.prefetch_complete_notify.clone(),
+        ready_file,
+    );
 
     let router = routes::build_router(state.clone());
     listener::serve_router(
@@ -145,6 +162,8 @@ pub async fn start_server_background(
         shutdown_tx: Some(shutdown_tx),
         server_task,
         shutdown_requested: shutdown_handle_flag,
+        ready: state.prefetch_complete.clone(),
+        ready_notify: state.prefetch_complete_notify.clone(),
         port: bound_port,
     })
 }
@@ -158,4 +177,99 @@ fn spawn_startup_prefetch(state: &AppState) {
             .store(true, Ordering::Release);
         prefetch_state.prefetch_complete_notify.notify_waiters();
     });
+}
+
+fn spawn_ready_file_marker(
+    ready: Arc<AtomicBool>,
+    ready_notify: Arc<Notify>,
+    ready_file: Option<PathBuf>,
+) {
+    let Some(ready_file) = ready_file else {
+        return;
+    };
+
+    tokio::spawn(async move {
+        if let Some(parent) = ready_file.parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(error) = tokio::fs::create_dir_all(parent).await
+        {
+            eprintln!(
+                "Failed to create cache-registry ready-file directory {}: {error:#}",
+                parent.display()
+            );
+            return;
+        }
+
+        match tokio::fs::remove_file(&ready_file).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                eprintln!(
+                    "Failed to clear cache-registry ready-file {}: {error:#}",
+                    ready_file.display()
+                );
+                return;
+            }
+        }
+
+        if !ready.load(Ordering::Acquire) {
+            let notified = ready_notify.notified();
+            if !ready.load(Ordering::Acquire) {
+                notified.await;
+            }
+        }
+
+        if let Err(error) = tokio::fs::write(&ready_file, b"ready\n").await {
+            eprintln!(
+                "Failed to write cache-registry ready-file {}: {error:#}",
+                ready_file.display()
+            );
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ready_file_marker_waits_for_readiness() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let ready_file = temp_dir.path().join("proxy-ready");
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_notify = Arc::new(Notify::new());
+
+        spawn_ready_file_marker(
+            ready.clone(),
+            ready_notify.clone(),
+            Some(ready_file.clone()),
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            tokio::fs::metadata(&ready_file).await.is_err(),
+            "ready marker should not be written before readiness"
+        );
+
+        ready.store(true, Ordering::Release);
+        ready_notify.notify_waiters();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if tokio::fs::metadata(&ready_file).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("ready marker should be written");
+
+        assert_eq!(
+            tokio::fs::read_to_string(&ready_file)
+                .await
+                .expect("read ready marker"),
+            "ready\n"
+        );
+    }
 }

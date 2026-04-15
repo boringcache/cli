@@ -548,6 +548,28 @@ fn test_cache_registry_with_options_before_tag_injects_workspace() {
 }
 
 #[test]
+fn test_cache_registry_with_ready_file_before_tag_injects_workspace() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let ready_file = temp_dir.path().join("proxy.ready");
+    let ready_file = ready_file.to_string_lossy().into_owned();
+    let output = run_cli_with_default_workspace(&[
+        "cache-registry",
+        "--ready-file",
+        &ready_file,
+        "registry-cache",
+    ]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("required arguments were not provided")
+            && !stderr.contains("<WORKSPACE>")
+            && !stderr.contains("<TAG>"),
+        "Expected workspace injection for cache-registry with hidden ready-file, got: {}",
+        stderr
+    );
+}
+
+#[test]
 fn test_cache_registry_without_default_workspace_requires_workspace_and_tag() {
     let output = run_cli_without_default_workspace(&["cache-registry", "registry-cache"]);
 

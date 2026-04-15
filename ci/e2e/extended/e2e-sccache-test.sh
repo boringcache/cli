@@ -225,6 +225,7 @@ EFFICACY_TAG="${EFFICACY_TAG:-${TAG_BASE}-stable${TAG_SUFFIX}}"
 STRESS_TAG="${STRESS_TAG:-${TAG_BASE}-stress${TAG_SUFFIX}}"
 
 PROXY_PID=""
+PROXY_READY_FILE=""
 INTERRUPTED="0"
 declare -a ACTIVE_BUILD_PIDS=()
 declare -a SCCACHE_INSTANCES=()
@@ -347,6 +348,8 @@ stop_proxy() {
     stop_pid_tree "$PROXY_PID" "proxy" "$PROXY_SHUTDOWN_WAIT_SECS"
     PROXY_PID=""
   fi
+  rm -f "${PROXY_READY_FILE:-}" >/dev/null 2>&1 || true
+  PROXY_READY_FILE=""
 }
 
 handle_interrupt() {
@@ -540,6 +543,8 @@ start_proxy() {
   stop_proxy
   reclaim_stale_proxy_port "$log_file"
   metrics_file="$(proxy_request_metrics_path "$log_file")"
+  PROXY_READY_FILE="$(mktemp "${LOG_DIR}/cache-registry-ready.XXXXXX")"
+  rm -f "${PROXY_READY_FILE}"
   {
     echo ""
     echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} metrics=${metrics_file} hints=${metadata_hints:-none} ==="
@@ -552,15 +557,15 @@ start_proxy() {
     "$TMP_BINARY" cache-registry "$WORKSPACE" "$tag" \
     --host "$PROXY_HOST" \
     --port "$PROXY_PORT" \
+    --ready-file "${PROXY_READY_FILE}" \
     --no-platform \
     --no-git >>"$log_file" 2>&1 &
   PROXY_PID=$!
-  sleep 2
 }
 
 ensure_proxy_ready() {
   local log_file="$1"
-  wait_for_proxy "${PROXY_PORT}" "${PROXY_PID:-}" "$log_file"
+  wait_for_ready_file "${PROXY_READY_FILE}" "${PROXY_PID:-}" "$log_file"
 }
 
 reset_sccache() {

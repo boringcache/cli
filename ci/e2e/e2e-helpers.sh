@@ -38,6 +38,7 @@ declare -ag E2E_TAG_SCOPE_FLAGS=(--no-platform --no-git)
 _HELPER_PROXY_PID=""
 _HELPER_PROXY_LOG=""
 _HELPER_PROXY_METRICS=""
+_HELPER_PROXY_READY_FILE=""
 _HELPER_INTERRUPTED="0"
 _HELPER_PORT_TOOL=""
 declare -a _HELPER_TAGS_TO_DELETE=()
@@ -209,6 +210,8 @@ start_proxy() {
   local metrics_dir
   metrics_dir="$(dirname "$log_file")"
   _HELPER_PROXY_METRICS="${metrics_dir}/cache-registry-request-metrics.jsonl"
+  _HELPER_PROXY_READY_FILE="$(mktemp "${metrics_dir}/cache-registry-ready.XXXXXX")"
+  rm -f "${_HELPER_PROXY_READY_FILE}"
   {
     echo ""
     echo "=== Proxy start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${tag} ==="
@@ -224,6 +227,7 @@ start_proxy() {
       "$binary" cache-registry "$workspace" "$tag" \
       --host "$PROXY_HOST" \
       --port "$port" \
+      --ready-file "${_HELPER_PROXY_READY_FILE}" \
       "${E2E_TAG_SCOPE_FLAGS[@]}" \
       $extra_args >>"$log_file" 2>&1 &
   else
@@ -234,6 +238,7 @@ start_proxy() {
       "$binary" cache-registry "$workspace" "$tag" \
       --host "$PROXY_HOST" \
       --port "$port" \
+      --ready-file "${_HELPER_PROXY_READY_FILE}" \
       "${E2E_TAG_SCOPE_FLAGS[@]}" >>"$log_file" 2>&1 &
   fi
   _HELPER_PROXY_PID=$!
@@ -301,10 +306,48 @@ wait_for_proxy_phase() {
   exit 1
 }
 
+wait_for_ready_file() {
+  local ready_file="$1"
+  local pid="${2:-}"
+  local log_file="${3:-/dev/null}"
+  local attempts start_ts next_warn now waited
+  attempts="$((PROXY_READY_TIMEOUT_SECS / PROXY_READY_POLL_SECS))"
+  if (( attempts < 1 )); then
+    attempts=1
+  fi
+  start_ts="$(date +%s)"
+  next_warn=$((start_ts + PROXY_READY_WARN_SECS))
+  for _ in $(seq 1 "$attempts"); do
+    if [[ -f "$ready_file" ]]; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now >= next_warn )); then
+      waited="$((now - start_ts))"
+      echo "WARNING: proxy readiness marker still waiting after ${waited}s (${ready_file})"
+      next_warn=$((now + PROXY_READY_WARN_SECS))
+    fi
+    if [[ -n "${pid:-}" ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
+      echo "ERROR: proxy exited before readiness"
+      tail -n 80 "${log_file}" || true
+      exit 1
+    fi
+    sleep "$PROXY_READY_POLL_SECS"
+  done
+  echo "ERROR: proxy failed to create readiness marker within ${PROXY_READY_TIMEOUT_SECS}s (${ready_file})"
+  tail -n 80 "${log_file}" || true
+  exit 1
+}
+
 wait_for_proxy() {
   local port="${1:-${PROXY_PORT:-5050}}"
   local pid="${2:-${_HELPER_PROXY_PID:-}}"
   local log_file="${3:-${_HELPER_PROXY_LOG:-/dev/null}}"
+  local ready_file="${4:-${_HELPER_PROXY_READY_FILE:-}}"
+  if [[ -n "${ready_file:-}" ]]; then
+    wait_for_ready_file "$ready_file" "$pid" "$log_file"
+    return 0
+  fi
   wait_for_proxy_phase "ready" "$port" "$pid" "$log_file"
 }
 
@@ -349,6 +392,8 @@ stop_proxy() {
     stop_pid_tree "$_HELPER_PROXY_PID" "proxy" "$PROXY_SHUTDOWN_WAIT_SECS"
     _HELPER_PROXY_PID=""
   fi
+  rm -f "${_HELPER_PROXY_READY_FILE:-}" >/dev/null 2>&1 || true
+  _HELPER_PROXY_READY_FILE=""
 }
 
 proxy_pid() {

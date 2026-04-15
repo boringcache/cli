@@ -56,6 +56,9 @@ BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 PROXY_PID_A=""
 PROXY_PID_B=""
 PROXY_PID_VERIFY=""
+PROXY_READY_FILE_A=""
+PROXY_READY_FILE_B=""
+PROXY_READY_FILE_VERIFY=""
 INTERRUPTED="0"
 declare -a ACTIVE_BUILD_PIDS=()
 PREWARM_REMOTE_TAG_HITS=0
@@ -347,10 +350,13 @@ stop_proxy_by_var() {
   local pid_var="$1"
   local label="$2"
   local pid="${!pid_var:-}"
+  local ready_file_var="${pid_var/PID/READY_FILE}"
   if [[ -n "$pid" ]]; then
     stop_pid_tree "$pid" "proxy ${label}" "$SHUTDOWN_WAIT"
     eval "${pid_var}=''"
   fi
+  rm -f "${!ready_file_var:-}" >/dev/null 2>&1 || true
+  eval "${ready_file_var}=''"
 }
 
 stop_all() {
@@ -605,10 +611,13 @@ start_proxy() {
   local pid_var="$4"
   local metadata_hints="${5:-}"
   local metrics_file
+  local ready_file_var="${pid_var/PID/READY_FILE}"
   metrics_file="$(proxy_request_metrics_path "$log_file")"
   rm -f "$metrics_file"
   stop_proxy_by_var "$pid_var" "$label"
   reclaim_stale_proxy_port "$port" "$log_file"
+  eval "${ready_file_var}=\"\$(mktemp \\\"${LOG_DIR}/cache-registry-ready.${label}.XXXXXX\\\")\""
+  rm -f "${!ready_file_var}"
   {
     echo ""
     echo "=== Proxy ${label} start $(date -u +"%Y-%m-%dT%H:%M:%SZ") tag=${TAG} port=${port} hints=${metadata_hints:-none} ==="
@@ -621,17 +630,18 @@ start_proxy() {
     "$TMP_BINARY" cache-registry "$WORKSPACE" "$TAG" \
     --host "$PROXY_HOST" \
     --port "$port" \
+    --ready-file "${!ready_file_var}" \
     --no-platform \
     --no-git >>"$log_file" 2>&1 &
   eval "${pid_var}=$!"
-  sleep 2
 }
 
 ensure_proxy_ready() {
   local port="$1"
   local log_file="$2"
   local pid_var="$3"
-  wait_for_proxy "$port" "${!pid_var:-}" "$log_file"
+  local ready_file_var="${pid_var/PID/READY_FILE}"
+  wait_for_ready_file "${!ready_file_var}" "${!pid_var:-}" "$log_file"
 }
 
 stop_proxy_graceful() {

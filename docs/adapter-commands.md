@@ -42,7 +42,7 @@ Proxy-backed adapter commands start in warm mode by default. Use `--on-demand` w
 The product split is:
 
 - `cache-registry` is the proxy
-- adapter commands temporarily start that proxy for one tool invocation and wire the tool to it
+- adapter commands temporarily start that proxy for one tool invocation, wait internally until it is ready, and wire the tool to it
 
 ## Repo config
 
