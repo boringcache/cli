@@ -9,7 +9,11 @@ pub(super) const RUNNER: AdapterRunner = AdapterRunner {
     prepare_command: passthrough_command,
 };
 
-fn inject_proxy_env(set: &mut BTreeMap<String, String>, context: &proxy::ProxyContext) {
+fn inject_proxy_env(
+    set: &mut BTreeMap<String, String>,
+    context: &proxy::ProxyContext,
+    _: &super::AdapterCommandOptions,
+) {
     set.insert("TURBO_API".to_string(), context.endpoint());
     set.insert(
         "TURBO_TOKEN".to_string(),

@@ -71,7 +71,7 @@ impl Tool {
 impl From<KvNamespace> for Tool {
     fn from(ns: KvNamespace) -> Self {
         match ns {
-            KvNamespace::Turborepo => Self::Turborepo,
+            KvNamespace::Turborepo | KvNamespace::TurborepoMeta => Self::Turborepo,
             KvNamespace::Nx | KvNamespace::NxTerminalOutput => Self::Nx,
             KvNamespace::BazelAc | KvNamespace::BazelCas => Self::Bazel,
             KvNamespace::Gradle => Self::Gradle,

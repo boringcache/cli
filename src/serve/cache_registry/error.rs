@@ -2,9 +2,16 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 #[derive(Debug)]
+enum RegistryErrorBody {
+    PlainText,
+    Json { code: String },
+}
+
+#[derive(Debug)]
 pub struct RegistryError {
     pub(crate) status: StatusCode,
     message: String,
+    body: RegistryErrorBody,
 }
 
 impl RegistryError {
@@ -12,6 +19,7 @@ impl RegistryError {
         Self {
             status,
             message: message.into(),
+            body: RegistryErrorBody::PlainText,
         }
     }
 
@@ -34,15 +42,42 @@ impl RegistryError {
     pub(crate) fn message(&self) -> &str {
         &self.message
     }
+
+    pub(crate) fn with_json_code(mut self, code: impl Into<String>) -> Self {
+        self.body = RegistryErrorBody::Json { code: code.into() };
+        self
+    }
+}
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 impl IntoResponse for RegistryError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            [("Content-Type", "text/plain; charset=utf-8")],
-            self.message,
-        )
-            .into_response()
+        match self.body {
+            RegistryErrorBody::PlainText => (
+                self.status,
+                [("Content-Type", "text/plain; charset=utf-8")],
+                self.message,
+            )
+                .into_response(),
+            RegistryErrorBody::Json { code } => (
+                self.status,
+                [("Content-Type", "application/json")],
+                serde_json::json!({
+                    "code": code,
+                    "message": self.message,
+                    "error": {
+                        "code": code,
+                        "message": self.message,
+                    }
+                })
+                .to_string(),
+            )
+                .into_response(),
+        }
     }
 }

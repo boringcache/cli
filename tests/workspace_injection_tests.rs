@@ -331,6 +331,7 @@ fn test_run_proxy_only_with_default_workspace_injects_workspace() {
             "run",
             "--proxy",
             "main",
+            "--on-demand",
             "--port",
             "0",
             "--",

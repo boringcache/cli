@@ -51,6 +51,13 @@ async fn wait_for_prefetch_state(client: &reqwest::Client, base_url: &str, expec
     }
 }
 
+fn assert_json_error(response: &serde_json::Value, code: &str) {
+    assert_eq!(response["code"], code);
+    assert_eq!(response["error"]["code"], code);
+    assert!(response["message"].is_string());
+    assert!(response["error"]["message"].is_string());
+}
+
 async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard) {
     let guard = test_env::lock();
     let _ = *ORIGINAL_TMPDIR;
@@ -87,6 +94,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
         kv_flush_lock: Arc::new(Mutex::new(())),
         kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
+        oci_lookup_inflight: Arc::new(dashmap::DashMap::new()),
         kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_replication_enqueue_deferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -120,6 +128,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         backend_breaker: Arc::new(boring_cache_cli::serve::state::BackendCircuitBreaker::new()),
         prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         prefetch_complete_notify: Arc::new(tokio::sync::Notify::new()),
+        prefetch_error: Arc::new(RwLock::new(None)),
     };
 
     (state, temp_home, guard)
@@ -216,6 +225,7 @@ async fn test_startup_manifest_warm_runs_by_default() {
         "registry".to_string(),
         BTreeMap::new(),
         true,
+        Vec::new(),
         true,
         false,
     )
@@ -229,6 +239,46 @@ async fn test_startup_manifest_warm_runs_by_default() {
 
     handle.shutdown_and_flush().await.expect("shutdown proxy");
     restore_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_command_proxy_start_fails_when_warmup_fails() {
+    let mut server = Server::new_async().await;
+    let (_state, _home, _guard) = setup(&server).await;
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(500)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":"boom"}"#)
+        .create_async()
+        .await;
+
+    let error = match boring_cache_cli::commands::cache_registry::start_proxy_background(
+        "org/repo".to_string(),
+        "main".to_string(),
+        "127.0.0.1".to_string(),
+        0,
+        false,
+        false,
+        Vec::new(),
+        None,
+        BTreeMap::new(),
+        true,
+        true,
+        false,
+    )
+    .await
+    {
+        Ok(_) => panic!("warm startup should fail"),
+        Err(error) => error,
+    };
+
+    let message = format!("{error:#}");
+    assert!(!message.is_empty());
 }
 
 #[tokio::test]
@@ -464,6 +514,7 @@ async fn test_startup_prefetch_hydrates_full_tag_before_ready() {
         "registry".to_string(),
         BTreeMap::new(),
         true,
+        Vec::new(),
         true,
         false,
     )
@@ -705,7 +756,7 @@ async fn test_nonexistent_route_returns_404() {
 }
 
 #[tokio::test]
-async fn test_unknown_put_route_returns_created() {
+async fn test_unknown_protocol_put_route_returns_not_found() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
     let app = build_router(state.clone());
@@ -721,7 +772,7 @@ async fn test_unknown_put_route_returns_created() {
     .await
     .unwrap();
 
-    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1359,6 +1410,153 @@ async fn test_manifest_head_returns_headers_no_body() {
 }
 
 #[tokio::test]
+async fn test_referrers_route_returns_empty_index_when_missing() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let subject_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let referrers_tag = ref_tag(
+        "my-cache",
+        "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": referrers_tag,
+                "status": "miss",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v2/my-cache/referrers/{subject_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("Content-Type").unwrap(),
+        "application/vnd.oci.image.index.v1+json"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["schemaVersion"], 2);
+    assert_eq!(
+        parsed["mediaType"],
+        "application/vnd.oci.image.index.v1+json"
+    );
+    assert_eq!(parsed["manifests"], json!([]));
+}
+
+#[tokio::test]
+async fn test_referrers_route_filters_artifact_type() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let subject_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let reference = "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let index_json = serde_json::to_vec(&json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {
+                "mediaType": "application/vnd.oci.artifact.manifest.v1+json",
+                "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "size": 123,
+                "artifactType": "application/vnd.example.sbom.v1",
+                "annotations": {
+                    "org.example.kind": "sbom"
+                }
+            },
+            {
+                "mediaType": "application/vnd.oci.artifact.manifest.v1+json",
+                "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                "size": 456,
+                "artifactType": "application/vnd.example.signature.v1",
+                "annotations": {
+                    "org.example.kind": "signature"
+                }
+            }
+        ]
+    }))
+    .unwrap();
+    state.oci_manifest_cache.insert(
+        ref_tag("my-cache", reference),
+        Arc::new(OciManifestCacheEntry {
+            index_json: index_json.clone(),
+            content_type: "application/vnd.oci.image.index.v1+json".to_string(),
+            manifest_digest: cas_oci::prefixed_sha256_digest(&index_json),
+            cache_entry_id: "entry-referrers".to_string(),
+            blobs: Vec::new(),
+            name: "my-cache".to_string(),
+            inserted_at: Instant::now(),
+        }),
+    );
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/v2/my-cache/referrers/{subject_digest}?artifactType=application/vnd.example.signature.v1"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("OCI-Filters-Applied").unwrap(),
+        "artifactType"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["manifests"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        parsed["manifests"][0]["artifactType"],
+        "application/vnd.example.signature.v1"
+    );
+}
+
+#[tokio::test]
+async fn test_referrers_route_rejects_invalid_digest() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v2/my-cache/referrers/not-a-digest")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["errors"][0]["code"], "DIGEST_INVALID");
+}
+
+#[tokio::test]
 async fn test_blob_unknown_without_manifest_returns_404() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
@@ -1960,6 +2158,13 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        response
+            .headers()
+            .get("Docker-Distribution-API-Version")
+            .unwrap(),
+        "registry/2.0"
+    );
 
     primary_save_mock.assert_async().await;
     pointer_upload_mock.assert_async().await;
@@ -1968,6 +2173,276 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
     alias_save_mock.assert_async().await;
     alias_pointer_mock.assert_async().await;
     alias_confirm_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.fail_on_cache_error = false;
+
+    let subject_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let manifest_body = serde_json::to_vec(&json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.artifact.manifest.v1+json",
+        "artifactType": "application/vnd.example.sbom.v1",
+        "blobs": [],
+        "subject": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": subject_digest,
+            "size": 123
+        },
+        "annotations": {
+            "org.example.kind": "sbom"
+        }
+    }))
+    .unwrap();
+    let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
+    let primary_tag = ref_tag("my-cache", "main");
+
+    let primary_save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": primary_tag
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": primary_tag,
+                "cache_entry_id": "entry-primary-subject",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 0,
+                "blob_total_size_bytes": 0,
+                "cas_layout": "oci-v1",
+                "manifest_upload_url": format!("{}/uploads/entry-primary-subject-manifest", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let primary_pointer_upload_mock = server
+        .mock("PUT", "/uploads/entry-primary-subject-manifest")
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let primary_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&primary_tag)
+    );
+    let primary_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&primary_tag)
+    );
+    let primary_pointer_mock = server
+        .mock("GET", primary_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "3",
+                "cache_entry_id": "entry-primary-subject",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let primary_confirm_mock = server
+        .mock("PUT", primary_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "3")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "3",
+                "status": "ok",
+                "cache_entry_id": "entry-primary-subject"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let referrers_reference =
+        "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let referrers_tag = ref_tag("my-cache", referrers_reference);
+    let referrers_restore_miss_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": referrers_tag,
+                "status": "miss"
+            }])
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let referrers_save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": referrers_tag
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": referrers_tag,
+                "cache_entry_id": "entry-referrers",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 0,
+                "blob_total_size_bytes": 0,
+                "cas_layout": "oci-v1",
+                "manifest_upload_url": format!("{}/uploads/entry-referrers-manifest", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let referrers_pointer_upload_mock = server
+        .mock("PUT", "/uploads/entry-referrers-manifest")
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let referrers_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&referrers_tag)
+    );
+    let referrers_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&referrers_tag)
+    );
+    let referrers_pointer_mock = server
+        .mock("GET", referrers_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "7",
+                "cache_entry_id": "entry-referrers",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let referrers_confirm_mock = server
+        .mock("PUT", referrers_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "7")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "7",
+                "status": "ok",
+                "cache_entry_id": "entry-referrers"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state.clone()),
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v2/my-cache/manifests/main")
+            .header(
+                "Content-Type",
+                "application/vnd.oci.artifact.manifest.v1+json",
+            )
+            .body(Body::from(manifest_body.clone()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        response.headers().get("OCI-Subject").unwrap(),
+        subject_digest
+    );
+    assert!(
+        response
+            .headers()
+            .get("X-BoringCache-Cache-Degraded")
+            .is_none()
+    );
+
+    let referrers_response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v2/my-cache/referrers/{subject_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(referrers_response.status(), StatusCode::OK);
+    let body = referrers_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["manifests"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        parsed["manifests"][0]["digest"],
+        serde_json::Value::String(manifest_digest)
+    );
+    assert_eq!(
+        parsed["manifests"][0]["artifactType"],
+        "application/vnd.example.sbom.v1"
+    );
+    assert_eq!(
+        parsed["manifests"][0]["annotations"]["org.example.kind"],
+        "sbom"
+    );
+
+    primary_save_mock.assert_async().await;
+    primary_pointer_upload_mock.assert_async().await;
+    primary_pointer_mock.assert_async().await;
+    primary_confirm_mock.assert_async().await;
+    referrers_restore_miss_mock.assert_async().await;
+    referrers_save_mock.assert_async().await;
+    referrers_pointer_upload_mock.assert_async().await;
+    referrers_pointer_mock.assert_async().await;
+    referrers_confirm_mock.assert_async().await;
 }
 
 #[tokio::test]
@@ -2214,6 +2689,151 @@ async fn test_manifest_put_rejects_invalid_json_body() {
     )
     .unwrap();
     assert!(body.contains("\"MANIFEST_INVALID\""));
+}
+
+#[tokio::test]
+async fn test_manifest_put_rejects_missing_blob_with_blob_unknown_even_in_best_effort_mode() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.fail_on_cache_error = false;
+
+    let missing_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let manifest_body = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": missing_digest,
+            "size": 10
+        },
+        "layers": []
+    })
+    .to_string();
+
+    let check_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true,
+            "blobs": [{
+                "digest": missing_digest,
+                "size_bytes": 10
+            }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": missing_digest,
+                    "exists": false
+                }]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .expect(0)
+        .create_async()
+        .await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v2/my-cache/manifests/main")
+            .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+            .body(Body::from(manifest_body))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response.headers().get("X-BoringCache-Degraded").is_none());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["errors"][0]["code"], "BLOB_UNKNOWN");
+    assert_eq!(parsed["errors"][0]["detail"]["digest"], missing_digest);
+
+    check_mock.assert_async().await;
+    save_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_manifest_put_rejects_missing_artifact_blob_with_blob_unknown() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let missing_digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let manifest_body = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.artifact.manifest.v1+json",
+        "artifactType": "application/vnd.example.sbom.v1",
+        "blobs": [{
+            "mediaType": "application/vnd.example.sbom.v1+json",
+            "digest": missing_digest,
+            "size": 10
+        }]
+    })
+    .to_string();
+
+    let check_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true,
+            "blobs": [{
+                "digest": missing_digest,
+                "size_bytes": 10
+            }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": missing_digest,
+                    "exists": false
+                }]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .expect(0)
+        .create_async()
+        .await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v2/my-cache/manifests/main")
+            .header(
+                "Content-Type",
+                "application/vnd.oci.artifact.manifest.v1+json",
+            )
+            .body(Body::from(manifest_body))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["errors"][0]["code"], "BLOB_UNKNOWN");
+    assert_eq!(parsed["errors"][0]["detail"]["digest"], missing_digest);
+
+    check_mock.assert_async().await;
+    save_mock.assert_async().await;
 }
 
 #[tokio::test]
@@ -2851,7 +3471,7 @@ async fn test_put_upload_body_stream_error_returns_internal_error() {
 }
 
 #[tokio::test]
-async fn test_patch_retry_with_same_content_range_is_idempotent() {
+async fn test_patch_retry_with_stale_content_range_returns_416() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
 
@@ -2897,13 +3517,14 @@ async fn test_patch_retry_with_same_content_range_is_idempotent() {
         Request::builder()
             .method(Method::PATCH)
             .uri(format!("/v2/my-cache/blobs/uploads/{uuid}"))
-            .header("Content-Range", range)
+            .header("Content-Range", &range)
             .body(Body::from(blob_data.to_vec()))
             .unwrap(),
     )
     .await
     .unwrap();
-    assert_eq!(retry_patch.status(), StatusCode::ACCEPTED);
+    assert_eq!(retry_patch.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(retry_patch.headers().get("Range").unwrap(), range.as_str());
 
     let digest = cas_oci::prefixed_sha256_digest(blob_data);
     let app = build_router(state.clone());
@@ -2979,7 +3600,7 @@ async fn test_put_upload_uses_content_range_offset() {
 }
 
 #[tokio::test]
-async fn test_put_upload_rewrites_when_put_body_digest_matches() {
+async fn test_put_upload_with_stale_content_range_returns_416() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
 
@@ -3032,7 +3653,11 @@ async fn test_put_upload_rewrites_when_put_body_digest_matches() {
     )
     .await
     .unwrap();
-    assert_eq!(finalize.status(), StatusCode::CREATED);
+    assert_eq!(finalize.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        finalize.headers().get("Range").unwrap(),
+        format!("0-{}", stale_blob.len() - 1).as_str()
+    );
 }
 
 #[tokio::test]
@@ -5360,6 +5985,13 @@ async fn test_turborepo_query_rejects_invalid_payload() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/json"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_json_error(&parsed, "bad_request");
 }
 
 #[tokio::test]
@@ -5477,6 +6109,10 @@ async fn test_turborepo_put_head_get_round_trip() {
             .method(Method::PUT)
             .uri(format!("/v8/artifacts/{hash}"))
             .header("authorization", "Bearer token")
+            .header("x-artifact-duration", "123")
+            .header("x-artifact-tag", "signed-tag")
+            .header("x-artifact-sha", "abc123def456")
+            .header("x-artifact-dirty-hash", "dirty789")
             .body(Body::from(payload.to_vec()))
             .unwrap(),
     )
@@ -5529,6 +6165,22 @@ async fn test_turborepo_put_head_get_round_trip() {
     .await
     .unwrap();
     assert_eq!(head_response.status(), StatusCode::OK);
+    assert_eq!(
+        head_response.headers().get("x-artifact-duration").unwrap(),
+        "123"
+    );
+    assert_eq!(
+        head_response.headers().get("x-artifact-sha").unwrap(),
+        "abc123def456"
+    );
+    assert_eq!(
+        head_response
+            .headers()
+            .get("x-artifact-dirty-hash")
+            .unwrap(),
+        "dirty789"
+    );
+    assert!(head_response.headers().get("x-artifact-tag").is_none());
 
     let _restore_get_mock = server
         .mock(
@@ -5599,6 +6251,22 @@ async fn test_turborepo_put_head_get_round_trip() {
     .await
     .unwrap();
     assert_eq!(get_response.status(), StatusCode::OK);
+    assert_eq!(
+        get_response.headers().get("x-artifact-duration").unwrap(),
+        "123"
+    );
+    assert_eq!(
+        get_response.headers().get("x-artifact-tag").unwrap(),
+        "signed-tag"
+    );
+    assert_eq!(
+        get_response.headers().get("x-artifact-sha").unwrap(),
+        "abc123def456"
+    );
+    assert_eq!(
+        get_response.headers().get("x-artifact-dirty-hash").unwrap(),
+        "dirty789"
+    );
     let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(get_body.as_ref(), payload);
 }
@@ -5626,78 +6294,42 @@ async fn test_turborepo_artifact_rejects_unsupported_method() {
 
 #[tokio::test]
 async fn test_turborepo_query_artifacts_returns_metadata_map() {
-    let mut server = Server::new_async().await;
+    let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
+    let payload_a = b"hello-world";
+    let payload_b = b"second-artifact-data";
 
-    let digest_a = format!("sha256:{}", "a".repeat(64));
-    let digest_b = format!("sha256:{}", "b".repeat(64));
-    let pointer = cas_file::FilePointer {
-        format_version: 1,
-        adapter: "file-v1".to_string(),
-        entries: vec![
-            cas_file::FilePointerEntry {
-                path: "turbo/a1b2".to_string(),
-                entry_type: EntryType::File,
-                size_bytes: 11,
-                executable: None,
-                target: None,
-                digest: Some(digest_a.clone()),
-            },
-            cas_file::FilePointerEntry {
-                path: "turbo/c3d4".to_string(),
-                entry_type: EntryType::File,
-                size_bytes: 17,
-                executable: None,
-                target: None,
-                digest: Some(digest_b.clone()),
-            },
-        ],
-        blobs: vec![
-            cas_file::FilePointerBlob {
-                digest: digest_a,
-                size_bytes: 11,
-                sequence: None,
-            },
-            cas_file::FilePointerBlob {
-                digest: digest_b,
-                size_bytes: 17,
-                sequence: None,
-            },
-        ],
-    };
-    let pointer_bytes = serde_json::to_vec(&pointer).unwrap();
-    let manifest_url = format!("{}/pointer/registry", server.url());
+    let app = build_router(state.clone());
+    let put_a = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v8/artifacts/a1b2")
+            .header("authorization", "Bearer token")
+            .header("x-artifact-duration", "55")
+            .header("x-artifact-tag", "tag-a1")
+            .body(Body::from(payload_a.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_a.status(), StatusCode::ACCEPTED);
 
-    let _restore_mock = server
-        .mock(
-            "GET",
-            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
-        )
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!([
-                {
-                    "tag": "registry",
-                    "status": "hit",
-                    "cache_entry_id": "entry-turbo-index",
-                    "manifest_url": manifest_url,
-                    "storage_mode": "cas",
-                    "cas_layout": "file-v1",
-                }
-            ])
-            .to_string(),
-        )
-        .create_async()
-        .await;
-
-    let _pointer_mock = server
-        .mock("GET", "/pointer/registry")
-        .with_status(200)
-        .with_header("content-type", "application/cbor")
-        .with_body(pointer_bytes)
-        .create_async()
-        .await;
+    let app = build_router(state.clone());
+    let put_b = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v8/artifacts/c3d4")
+            .header("authorization", "Bearer token")
+            .header("x-artifact-duration", "99")
+            .header("x-artifact-tag", "tag-c3")
+            .body(Body::from(payload_b.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_b.status(), StatusCode::ACCEPTED);
 
     let app = build_router(state);
     let response = tower::ServiceExt::oneshot(
@@ -5721,9 +6353,12 @@ async fn test_turborepo_query_artifacts_returns_metadata_map() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(parsed["a1b2"]["size"], 11);
-    assert_eq!(parsed["c3d4"]["size"], 17);
-    assert_eq!(parsed["a1b2"]["taskDurationMs"], 0);
+    assert_eq!(parsed["a1b2"]["size"], payload_a.len() as u64);
+    assert_eq!(parsed["c3d4"]["size"], payload_b.len() as u64);
+    assert_eq!(parsed["a1b2"]["taskDurationMs"], 55);
+    assert_eq!(parsed["c3d4"]["taskDurationMs"], 99);
+    assert_eq!(parsed["a1b2"]["tag"], "tag-a1");
+    assert_eq!(parsed["c3d4"]["tag"], "tag-c3");
 }
 
 #[tokio::test]
@@ -5760,6 +6395,35 @@ async fn test_turborepo_events_accepts_post_with_bearer() {
 }
 
 #[tokio::test]
+async fn test_turborepo_events_rejects_invalid_payload() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v8/artifacts/events")
+            .header("authorization", "Bearer token")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"not":"an-array"}"#))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/json"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_json_error(&parsed, "bad_request");
+}
+
+#[tokio::test]
 async fn test_turborepo_events_rejects_get() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
@@ -5778,6 +6442,26 @@ async fn test_turborepo_events_rejects_get() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn test_turborepo_invalid_put_path_returns_not_found() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v8/artifacts/not-a-hex-hash")
+            .body(Body::from("payload"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

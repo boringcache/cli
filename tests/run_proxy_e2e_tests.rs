@@ -52,6 +52,7 @@ phase="$(printf '%s\n' "$status_headers" | awk -F': ' 'tolower($1) == "x-boringc
             "test-org/test-workspace",
             "--proxy",
             "main",
+            "--on-demand",
             "--no-platform",
             "--no-git",
             "--host",
@@ -99,6 +100,7 @@ fn test_run_proxy_propagates_child_exit_code() {
             "test-org/test-workspace",
             "--proxy",
             "main",
+            "--on-demand",
             "--no-platform",
             "--no-git",
             "--host",
@@ -147,6 +149,7 @@ phase="$(printf '%s\n' "$status_headers" | awk -F': ' 'tolower($1) == "x-boringc
             &pair,
             "--proxy",
             "main",
+            "--on-demand",
             "--skip-restore",
             "--skip-save",
             "--no-platform",
@@ -173,6 +176,49 @@ phase="$(printf '%s\n' "$status_headers" | awk -F': ' 'tolower($1) == "x-boringc
     assert!(
         output.status.success(),
         "Expected successful combined run mode, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_run_proxy_warm_start_fails_when_backend_cannot_hydrate() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let output = Command::new(cli_binary())
+        .args([
+            "run",
+            "test-org/test-workspace",
+            "--proxy",
+            "main",
+            "--no-platform",
+            "--no-git",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .env("HOME", temp_dir.path())
+        .env("BORINGCACHE_API_URL", DUMMY_API_URL)
+        .env("BORINGCACHE_SAVE_TOKEN", "test-save-token")
+        .env_remove("BORINGCACHE_API_TOKEN")
+        .env_remove("BORINGCACHE_TOKEN_FILE")
+        .output()
+        .expect("run proxy command");
+
+    assert_eq!(
+        output.status.code(),
+        Some(78),
+        "Expected warm proxy startup to fail before command launch, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Cache registry warmup failed"),
+        "Expected warmup failure message, stdout: {}, stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

@@ -157,18 +157,7 @@ pub(super) async fn get_upload_status(
         (session.name.clone(), session.bytes_received)
     };
 
-    let end = if bytes_received == 0 {
-        0
-    } else {
-        bytes_received - 1
-    };
-    let location = format!("/v2/{name}/blobs/uploads/{uuid}");
-    let range = format!("0-{end}");
-    let mut headers = HeaderMap::new();
-    insert_header(&mut headers, "Location", &location)?;
-    insert_header(&mut headers, "Docker-Upload-UUID", &uuid)?;
-    insert_header(&mut headers, "Range", &range)?;
-    insert_header(&mut headers, "Content-Length", "0")?;
+    let headers = upload_status_headers(&name, &uuid, bytes_received)?;
 
     Ok((StatusCode::NO_CONTENT, headers, Body::empty()).into_response())
 }
@@ -189,20 +178,25 @@ pub(super) async fn patch_upload(
     };
     let _session_guard = session_write_lock.lock().await;
 
-    let bytes_before = {
+    let (name, bytes_before) = {
         let sessions = state.upload_sessions.read().await;
         let session = sessions
             .get(&uuid)
             .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
-        session.bytes_received
+        (session.name.clone(), session.bytes_received)
     };
 
-    let write_offset = parse_upload_offset(&headers).unwrap_or(bytes_before);
-    if write_offset > bytes_before {
-        return Err(OciError::digest_invalid(format!(
-            "upload offset {write_offset} exceeds current size {bytes_before}"
-        )));
-    }
+    let write_offset = if headers.contains_key("Content-Range") || headers.contains_key("Range") {
+        let Some(write_offset) = parse_upload_offset(&headers) else {
+            return invalid_upload_range_response(&name, &uuid, bytes_before);
+        };
+        if write_offset != bytes_before {
+            return invalid_upload_range_response(&name, &uuid, bytes_before);
+        }
+        write_offset
+    } else {
+        bytes_before
+    };
 
     use tokio::io::AsyncSeekExt;
 
@@ -223,30 +217,13 @@ pub(super) async fn patch_upload(
     let session = sessions
         .get_mut(&uuid)
         .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
-    if write_offset > session.bytes_received {
-        return Err(OciError::digest_invalid(format!(
-            "upload offset {write_offset} exceeds current size {}",
-            session.bytes_received
-        )));
-    }
     let written_until = write_offset.saturating_add(bytes_written);
     if written_until > session.bytes_received {
         session.bytes_received = written_until;
     }
-    let end = if session.bytes_received == 0 {
-        0
-    } else {
-        session.bytes_received - 1
-    };
     let name = session.name.clone();
 
-    let location = format!("/v2/{name}/blobs/uploads/{uuid}");
-    let range = format!("0-{end}");
-    let mut headers = HeaderMap::new();
-    insert_header(&mut headers, "Location", &location)?;
-    insert_header(&mut headers, "Docker-Upload-UUID", &uuid)?;
-    insert_header(&mut headers, "Range", &range)?;
-    insert_header(&mut headers, "Content-Length", "0")?;
+    let headers = upload_status_headers(&name, &uuid, session.bytes_received)?;
 
     Ok((StatusCode::ACCEPTED, headers, Body::empty()).into_response())
 }
@@ -273,19 +250,17 @@ pub(super) async fn put_upload(
     };
     let _session_guard = session_write_lock.lock().await;
 
-    let (bytes_before, write_offset) = {
+    let (session_name, bytes_before) = {
         let sessions = state.upload_sessions.read().await;
         let session = sessions
             .get(&uuid)
             .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
-        let bytes_before = session.bytes_received;
-        let write_offset = parse_put_upload_offset(&headers, bytes_before);
-        if write_offset > bytes_before {
-            return Err(OciError::digest_invalid(format!(
-                "upload offset {write_offset} exceeds current size {bytes_before}"
-            )));
-        }
-        (bytes_before, write_offset)
+        (session.name.clone(), session.bytes_received)
+    };
+    let write_offset = match parse_put_upload_offset(&headers, bytes_before) {
+        Ok(Some(write_offset)) => write_offset,
+        Ok(None) => bytes_before,
+        Err(()) => return invalid_upload_range_response(&session_name, &uuid, bytes_before),
     };
 
     use tokio::io::AsyncSeekExt;
@@ -426,6 +401,9 @@ pub(super) async fn delete_upload(state: AppState, uuid: String) -> Result<Respo
 }
 
 pub(super) fn parse_upload_offset(headers: &HeaderMap) -> Option<u64> {
+    if !(headers.contains_key("Content-Range") || headers.contains_key("Range")) {
+        return None;
+    }
     headers
         .get("Content-Range")
         .or_else(|| headers.get("Range"))
@@ -433,13 +411,22 @@ pub(super) fn parse_upload_offset(headers: &HeaderMap) -> Option<u64> {
         .and_then(parse_range_start)
 }
 
-pub(super) fn parse_put_upload_offset(headers: &HeaderMap, bytes_before: u64) -> u64 {
+pub(super) fn parse_put_upload_offset(
+    headers: &HeaderMap,
+    bytes_before: u64,
+) -> Result<Option<u64>, ()> {
     if let Some(offset) = headers
         .get("Content-Range")
         .and_then(|value| value.to_str().ok())
         .and_then(parse_range_start)
     {
-        return offset;
+        if offset != bytes_before {
+            return Err(());
+        }
+        return Ok(Some(offset));
+    }
+    if headers.contains_key("Content-Range") {
+        return Err(());
     }
 
     if let Some(end) = headers
@@ -449,16 +436,44 @@ pub(super) fn parse_put_upload_offset(headers: &HeaderMap, bytes_before: u64) ->
     {
         let reported_bytes = end.saturating_add(1);
         if reported_bytes != bytes_before {
-            log::debug!(
-                "OCI finalize Range header differs from tracked size: reported={} tracked={}",
-                reported_bytes,
-                bytes_before
-            );
+            return Err(());
         }
-        return bytes_before;
+        return Ok(Some(bytes_before));
+    }
+    if headers.contains_key("Range") {
+        return Err(());
     }
 
-    bytes_before
+    Ok(None)
+}
+
+fn upload_status_headers(
+    name: &str,
+    uuid: &str,
+    bytes_received: u64,
+) -> Result<HeaderMap, OciError> {
+    let end = if bytes_received == 0 {
+        0
+    } else {
+        bytes_received - 1
+    };
+    let location = format!("/v2/{name}/blobs/uploads/{uuid}");
+    let range = format!("0-{end}");
+    let mut headers = HeaderMap::new();
+    insert_header(&mut headers, "Location", &location)?;
+    insert_header(&mut headers, "Docker-Upload-UUID", uuid)?;
+    insert_header(&mut headers, "Range", &range)?;
+    insert_header(&mut headers, "Content-Length", "0")?;
+    Ok(headers)
+}
+
+fn invalid_upload_range_response(
+    name: &str,
+    uuid: &str,
+    bytes_received: u64,
+) -> Result<Response, OciError> {
+    let headers = upload_status_headers(name, uuid, bytes_received)?;
+    Ok((StatusCode::RANGE_NOT_SATISFIABLE, headers, Body::empty()).into_response())
 }
 
 async fn write_body_to_file(body: Body, file: &mut tokio::fs::File) -> Result<u64, OciError> {

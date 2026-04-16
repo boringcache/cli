@@ -221,6 +221,13 @@ pub struct RunArgs {
     )]
     pub metadata_hint: Vec<String>,
 
+    #[arg(
+        long,
+        value_name = "NAME@REFERENCE",
+        help = "Seed OCI manifest cache for selected repository refs on proxy startup (repeatable)"
+    )]
+    pub oci_prefetch_ref: Vec<String>,
+
     #[arg(long, help = "Skip startup warming and serve cache reads on demand")]
     pub on_demand: bool,
 

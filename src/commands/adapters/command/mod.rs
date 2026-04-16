@@ -22,7 +22,7 @@ mod turbo;
 const EXIT_CONFIG: i32 = 78;
 
 type ProxyEnvSet = BTreeMap<String, String>;
-type InjectProxyEnvFn = fn(&mut ProxyEnvSet, &proxy::ProxyContext);
+type InjectProxyEnvFn = fn(&mut ProxyEnvSet, &proxy::ProxyContext, &AdapterCommandOptions);
 type PrepareCommandFn =
     fn(&[String], Option<&proxy::ProxyContext>, &AdapterCommandOptions) -> Result<Vec<String>>;
 
@@ -58,7 +58,11 @@ struct AdapterCommandOptions {
 }
 
 impl AdapterRunner {
-    fn proxy_env_plan(&self, context: &proxy::ProxyContext) -> ProxyEnvPlan {
+    fn proxy_env_plan(
+        &self,
+        context: &proxy::ProxyContext,
+        options: &AdapterCommandOptions,
+    ) -> ProxyEnvPlan {
         let mut set = BTreeMap::new();
         set.insert(
             "BORINGCACHE_PROXY_PORT".to_string(),
@@ -68,7 +72,7 @@ impl AdapterRunner {
             "BORINGCACHE_CACHE_REF".to_string(),
             context.cache_ref.clone(),
         );
-        (self.inject_proxy_env)(&mut set, context);
+        (self.inject_proxy_env)(&mut set, context, options);
         ProxyEnvPlan { set }
     }
 }
@@ -82,16 +86,21 @@ impl AdapterKind {
         runner_for(self).name
     }
 
-    fn proxy_env_plan(self, context: &proxy::ProxyContext) -> ProxyEnvPlan {
-        runner_for(self).proxy_env_plan(context)
+    fn proxy_env_plan(
+        self,
+        context: &proxy::ProxyContext,
+        options: &AdapterCommandOptions,
+    ) -> ProxyEnvPlan {
+        runner_for(self).proxy_env_plan(context, options)
     }
 
     fn inject_proxy_env(
         self,
         command: &mut tokio::process::Command,
         context: &proxy::ProxyContext,
+        options: &AdapterCommandOptions,
     ) {
-        command.envs(self.proxy_env_plan(context).set);
+        command.envs(self.proxy_env_plan(context, options).set);
     }
 
     fn prepare_command(
@@ -117,7 +126,7 @@ fn runner_for(kind: AdapterKind) -> &'static AdapterRunner {
     }
 }
 
-fn no_extra_proxy_env(_: &mut ProxyEnvSet, _: &proxy::ProxyContext) {}
+fn no_extra_proxy_env(_: &mut ProxyEnvSet, _: &proxy::ProxyContext, _: &AdapterCommandOptions) {}
 
 fn passthrough_command(
     command: &[String],
@@ -347,7 +356,7 @@ pub async fn adapter_execute(
         &preview_context,
     );
     let mut preview_env_vars = resolved_plan.env_vars.clone();
-    preview_env_vars.extend(kind.proxy_env_plan(&preview_context).set);
+    preview_env_vars.extend(kind.proxy_env_plan(&preview_context, &command_options).set);
 
     if args.dry_run {
         let plan = DryRunPlan {
@@ -463,6 +472,7 @@ pub async fn adapter_execute(
         port,
         no_platform,
         no_git,
+        Vec::new(),
         endpoint_host_override,
         proxy_metadata_hints,
         startup_warm,
@@ -483,7 +493,7 @@ pub async fn adapter_execute(
         &command_to_run,
         &resolved_plan.env_vars,
         Some(&proxy_context),
-        |process, context| kind.inject_proxy_env(process, context),
+        |process, context| kind.inject_proxy_env(process, context, &command_options),
     )
     .await;
 

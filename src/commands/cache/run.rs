@@ -77,6 +77,8 @@ struct DryRunProxyPlan {
     port: u16,
     read_only: bool,
     startup_mode: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    oci_prefetch_refs: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     metadata_hints: BTreeMap<String, String>,
 }
@@ -162,6 +164,7 @@ pub async fn execute(
     recipient: Option<String>,
     identity: Option<String>,
     proxy: Option<String>,
+    oci_prefetch_ref: Vec<String>,
     metadata_hints: Vec<String>,
     startup_warm: bool,
     host: String,
@@ -348,6 +351,11 @@ pub async fn execute(
     let archive_enabled = !tag_path_pairs.is_empty();
     let proxy_enabled = proxy.is_some();
     let proxy_metadata_hints = cache_registry::resolve_proxy_metadata_hints(&metadata_hints)?;
+    let oci_prefetch_refs = cache_registry::resolve_oci_prefetch_refs(&oci_prefetch_ref)?;
+    let oci_prefetch_ref_specs = oci_prefetch_refs
+        .iter()
+        .map(|(name, reference)| format!("{name}@{reference}"))
+        .collect::<Vec<_>>();
     let advertised_endpoint_host = endpoint_host
         .clone()
         .map(|value| value.trim().to_string())
@@ -382,6 +390,7 @@ pub async fn execute(
                 port,
                 read_only: effective_proxy_read_only,
                 startup_mode: cache_registry::proxy_startup_mode(startup_warm).to_string(),
+                oci_prefetch_refs: oci_prefetch_ref_specs.clone(),
                 metadata_hints: proxy_metadata_hints.clone(),
             });
             let plan = DryRunPlan {
@@ -419,6 +428,7 @@ pub async fn execute(
                 effective_skip_save,
                 fail_on_cache_error,
                 fail_on_cache_miss,
+                &oci_prefetch_ref_specs,
                 &command,
             );
         }
@@ -477,6 +487,7 @@ pub async fn execute(
             port,
             no_platform,
             no_git,
+            oci_prefetch_refs,
             endpoint_host,
             proxy_metadata_hints.clone(),
             startup_warm,
@@ -640,6 +651,7 @@ fn print_dry_run(
     skip_save: bool,
     fail_on_cache_error: bool,
     fail_on_cache_miss: bool,
+    oci_prefetch_refs: &[String],
     command: &[String],
 ) {
     ui::info("[boringcache] Dry run:");
@@ -700,6 +712,10 @@ fn print_dry_run(
         }
         if fail_on_cache_error {
             proxy_parts.push("--fail-on-cache-error".to_string());
+        }
+        for oci_prefetch_ref in oci_prefetch_refs {
+            proxy_parts.push("--oci-prefetch-ref".to_string());
+            proxy_parts.push(oci_prefetch_ref.to_string());
         }
         for (key, value) in proxy_metadata_hints {
             proxy_parts.push("--metadata-hint".to_string());

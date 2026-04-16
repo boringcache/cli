@@ -238,13 +238,7 @@ async fn dispatch_with_path(
     } else {
         format!("/{normalized_path}")
     };
-    let route = match route::detect_route(&method, &normalized_path) {
-        Ok(r) => r,
-        Err(e) if e.status == StatusCode::NOT_FOUND && method == Method::PUT => {
-            return Ok((StatusCode::CREATED, Body::empty()).into_response());
-        }
-        Err(e) => return Err(e),
-    };
+    let route = route::detect_route(&method, &normalized_path)?;
     let route_tool = tool_for_route(&route);
     let route_instruments_cache_ops = route_instruments_cache_ops(&route);
     let is_sccache_connect_route = matches!(route, route::RegistryRoute::SccacheMkcol);
@@ -296,7 +290,9 @@ async fn dispatch_with_path(
                 route::RegistryRoute::TurborepoQueryArtifacts => {
                     turborepo::handle_query_artifacts(&route_state, method, &headers, body).await
                 }
-                route::RegistryRoute::TurborepoEvents => turborepo::handle_events(method, &headers),
+                route::RegistryRoute::TurborepoEvents => {
+                    turborepo::handle_events(method, &headers, body).await
+                }
                 route::RegistryRoute::SccacheObject { key_path } => {
                     sccache::handle_object(&route_state, method, &key_path, body).await
                 }

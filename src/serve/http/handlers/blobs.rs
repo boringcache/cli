@@ -6,6 +6,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::api::models::cache::BlobDescriptor;
 use crate::serve::http::error::OciError;
+use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
 use crate::serve::http::oci_route::insert_header;
 use crate::serve::state::{AppState, BlobLocatorEntry, BlobReadHandle};
 
@@ -96,19 +97,6 @@ pub(super) async fn get_blob(
         return Ok((StatusCode::OK, headers, Body::empty()).into_response());
     }
 
-    let blob_desc = BlobDescriptor {
-        digest: digest.clone(),
-        size_bytes,
-    };
-
-    let (download_url, from_cache) = if let Some(url) = cached_download_url {
-        (url, true)
-    } else {
-        let url =
-            resolve_oci_download_url(&state, &cache_entry_id, &blob_desc, &name, &digest).await?;
-        (url, false)
-    };
-
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, "Docker-Content-Digest", &digest)?;
     insert_header(&mut headers, "Content-Type", "application/octet-stream")?;
@@ -124,30 +112,74 @@ pub(super) async fn get_blob(
         return Ok((StatusCode::OK, headers, body).into_response());
     }
 
-    let _permit = state
-        .blob_download_semaphore
-        .acquire()
-        .await
-        .map_err(|_| OciError::internal("Blob download semaphore closed"))?;
+    let blob_desc = BlobDescriptor {
+        digest: digest.clone(),
+        size_bytes,
+    };
+    let flight_key = format!("blob:{digest}");
+    loop {
+        match begin_flight(&state.oci_lookup_inflight, flight_key.clone()) {
+            Flight::Leader(_guard) => {
+                if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
+                    let body = cached_blob_body(&handle).await?;
+                    return Ok((StatusCode::OK, headers, body).into_response());
+                }
 
-    if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
-        let body = cached_blob_body(&handle).await?;
-        return Ok((StatusCode::OK, headers, body).into_response());
+                let _permit = state
+                    .blob_download_semaphore
+                    .acquire()
+                    .await
+                    .map_err(|_| OciError::internal("Blob download semaphore closed"))?;
+
+                if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
+                    let body = cached_blob_body(&handle).await?;
+                    return Ok((StatusCode::OK, headers, body).into_response());
+                }
+
+                let (download_url, from_cache) = if let Some(url) = fresh_locator_download_url(
+                    &state,
+                    &name,
+                    &digest,
+                    cached_download_url.as_deref(),
+                )
+                .await
+                {
+                    (url, true)
+                } else {
+                    let url = resolve_oci_download_url(
+                        &state,
+                        &cache_entry_id,
+                        &blob_desc,
+                        &name,
+                        &digest,
+                    )
+                    .await?;
+                    (url, false)
+                };
+                let handle = download_oci_blob_to_cache(
+                    &state,
+                    &cache_entry_id,
+                    &blob_desc,
+                    &name,
+                    &digest,
+                    download_url,
+                    from_cache,
+                )
+                .await?;
+                let body = cached_blob_body(&handle).await?;
+                return Ok((StatusCode::OK, headers, body).into_response());
+            }
+            Flight::Follower(notified) => {
+                if !await_flight("oci-blob", &flight_key, notified).await {
+                    clear_flight_entry(&state.oci_lookup_inflight, &flight_key);
+                }
+                if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
+                    let body = cached_blob_body(&handle).await?;
+                    return Ok((StatusCode::OK, headers, body).into_response());
+                }
+            }
+        }
     }
-
-    let handle = download_oci_blob_to_cache(
-        &state,
-        &cache_entry_id,
-        &blob_desc,
-        &name,
-        &digest,
-        download_url,
-        from_cache,
-    )
-    .await?;
-    let body = cached_blob_body(&handle).await?;
-
-    Ok((StatusCode::OK, headers, body).into_response())
 }
 
 pub(super) async fn has_remote_blob(state: &AppState, digest: &str) -> Result<bool, OciError> {
@@ -339,4 +371,21 @@ fn fresh_download_url(entry: &BlobLocatorEntry) -> Option<String> {
         return None;
     }
     entry.download_url.clone()
+}
+
+async fn fresh_locator_download_url(
+    state: &AppState,
+    name: &str,
+    digest: &str,
+    fallback: Option<&str>,
+) -> Option<String> {
+    {
+        let locator = state.blob_locator.read().await;
+        if let Some(entry) = locator.get(name, digest)
+            && let Some(url) = fresh_download_url(entry)
+        {
+            return Some(url);
+        }
+    }
+    fallback.map(ToOwned::to_owned)
 }

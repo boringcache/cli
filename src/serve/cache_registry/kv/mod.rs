@@ -122,6 +122,7 @@ pub(crate) enum KvNamespace {
     Nx,
     NxTerminalOutput,
     Turborepo,
+    TurborepoMeta,
     Sccache,
     GoCache,
 }
@@ -137,6 +138,7 @@ impl KvNamespace {
             | KvNamespace::Nx
             | KvNamespace::NxTerminalOutput
             | KvNamespace::Turborepo
+            | KvNamespace::TurborepoMeta
             | KvNamespace::Sccache => key.to_string(),
         }
     }
@@ -150,6 +152,7 @@ impl KvNamespace {
             KvNamespace::Nx => "nx",
             KvNamespace::NxTerminalOutput => "nx_terminal",
             KvNamespace::Turborepo => "turbo",
+            KvNamespace::TurborepoMeta => "turbo_meta",
             KvNamespace::Sccache => "sccache",
             KvNamespace::GoCache => "go_cache",
         }
@@ -262,6 +265,7 @@ mod tests {
             kv_pending: std::sync::Arc::new(RwLock::new(KvPendingStore::default())),
             kv_flush_lock: std::sync::Arc::new(TokioMutex::new(())),
             kv_lookup_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
+            oci_lookup_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
             kv_last_put: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             kv_backlog_rejects: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             kv_replication_enqueue_deferred: std::sync::Arc::new(
@@ -303,6 +307,7 @@ mod tests {
             backend_breaker: std::sync::Arc::new(BackendCircuitBreaker::new()),
             prefetch_complete: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             prefetch_complete_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            prefetch_error: std::sync::Arc::new(RwLock::new(None)),
         };
 
         (state, temp_home)
@@ -355,6 +360,7 @@ mod tests {
             kv_pending: std::sync::Arc::new(RwLock::new(KvPendingStore::default())),
             kv_flush_lock: std::sync::Arc::new(TokioMutex::new(())),
             kv_lookup_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
+            oci_lookup_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
             kv_last_put: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             kv_backlog_rejects: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             kv_replication_enqueue_deferred: std::sync::Arc::new(
@@ -396,6 +402,7 @@ mod tests {
             backend_breaker: std::sync::Arc::new(BackendCircuitBreaker::new()),
             prefetch_complete: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             prefetch_complete_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            prefetch_error: std::sync::Arc::new(RwLock::new(None)),
         };
 
         let response = put_kv_object(

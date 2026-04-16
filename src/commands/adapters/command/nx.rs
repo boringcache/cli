@@ -9,7 +9,11 @@ pub(super) const RUNNER: AdapterRunner = AdapterRunner {
     prepare_command: passthrough_command,
 };
 
-fn inject_proxy_env(set: &mut BTreeMap<String, String>, context: &proxy::ProxyContext) {
+fn inject_proxy_env(
+    set: &mut BTreeMap<String, String>,
+    context: &proxy::ProxyContext,
+    _: &super::AdapterCommandOptions,
+) {
     set.insert(
         "NX_SELF_HOSTED_REMOTE_CACHE_SERVER".to_string(),
         context.endpoint(),

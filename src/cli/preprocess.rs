@@ -9,6 +9,7 @@ fn long_option_requires_value(command: &str, option: &str) -> bool {
                 | "--identity"
                 | "--proxy"
                 | "--metadata-hint"
+                | "--oci-prefetch-ref"
                 | "--host"
                 | "--endpoint-host"
                 | "--port"
@@ -17,7 +18,7 @@ fn long_option_requires_value(command: &str, option: &str) -> bool {
         "cache-registry" => {
             matches!(
                 option,
-                "--host" | "--port" | "--metadata-hint" | "--ready-file"
+                "--host" | "--port" | "--metadata-hint" | "--oci-prefetch-ref" | "--ready-file"
             )
         }
         _ => false,

@@ -112,9 +112,23 @@ pub(crate) async fn await_startup_prefetch_readiness(
             return Ok(());
         }
 
+        if let Some(message) = state.prefetch_error.read().await.clone() {
+            return Err(RegistryError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Cache registry startup warmup failed: {message}"),
+            ));
+        }
+
         let notified = state.prefetch_complete_notify.notified();
         if state.prefetch_complete.load(Ordering::Acquire) {
             return Ok(());
+        }
+
+        if let Some(message) = state.prefetch_error.read().await.clone() {
+            return Err(RegistryError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Cache registry startup warmup failed: {message}"),
+            ));
         }
 
         match tokio::time::timeout(KV_PREFETCH_READINESS_TIMEOUT, notified).await {

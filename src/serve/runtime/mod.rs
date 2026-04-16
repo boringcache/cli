@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{Notify, RwLock, oneshot};
 
 use crate::api::client::ApiClient;
 use crate::serve::http::routes;
@@ -20,6 +20,7 @@ pub struct ServeHandle {
     shutdown_requested: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
     ready_notify: Arc<Notify>,
+    prefetch_error: Arc<RwLock<Option<String>>>,
     pub port: u16,
 }
 
@@ -34,6 +35,10 @@ impl ServeHandle {
 
     pub(crate) fn ready_notification(&self) -> tokio::sync::futures::Notified<'_> {
         self.ready_notify.notified()
+    }
+
+    pub(crate) async fn prefetch_error_message(&self) -> Option<String> {
+        self.prefetch_error.read().await.clone()
     }
 
     pub async fn shutdown_and_flush(mut self) -> Result<()> {
@@ -60,6 +65,7 @@ pub async fn run_server(
     registry_root_tag: String,
     proxy_metadata_hints: BTreeMap<String, String>,
     startup_warm: bool,
+    oci_prefetch_refs: Vec<(String, String)>,
     fail_on_cache_error: bool,
     read_only: bool,
     ready_file: Option<PathBuf>,
@@ -80,7 +86,7 @@ pub async fn run_server(
     .await?;
 
     maintenance::spawn_maintenance_tasks(&state, replication_rx);
-    spawn_startup_prefetch(&state);
+    spawn_startup_prefetch(&state, startup_warm, oci_prefetch_refs);
     spawn_ready_file_marker(
         state.prefetch_complete.clone(),
         state.prefetch_complete_notify.clone(),
@@ -113,6 +119,7 @@ pub async fn start_server_background(
     registry_root_tag: String,
     proxy_metadata_hints: BTreeMap<String, String>,
     startup_warm: bool,
+    oci_prefetch_refs: Vec<(String, String)>,
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<ServeHandle> {
@@ -132,7 +139,7 @@ pub async fn start_server_background(
     .await?;
 
     maintenance::spawn_maintenance_tasks(&state, replication_rx);
-    spawn_startup_prefetch(&state);
+    spawn_startup_prefetch(&state, startup_warm, oci_prefetch_refs);
 
     let router = routes::build_router(state.clone());
     let bound_port = listener
@@ -164,17 +171,40 @@ pub async fn start_server_background(
         shutdown_requested: shutdown_handle_flag,
         ready: state.prefetch_complete.clone(),
         ready_notify: state.prefetch_complete_notify.clone(),
+        prefetch_error: state.prefetch_error.clone(),
         port: bound_port,
     })
 }
 
-fn spawn_startup_prefetch(state: &AppState) {
+fn spawn_startup_prefetch(
+    state: &AppState,
+    startup_warm: bool,
+    oci_prefetch_refs: Vec<(String, String)>,
+) {
     let prefetch_state = state.clone();
     tokio::spawn(async move {
-        crate::serve::cache_registry::prefetch_manifest_blobs(&prefetch_state).await;
-        prefetch_state
-            .prefetch_complete
-            .store(true, Ordering::Release);
+        match crate::serve::cache_registry::prefetch_manifest_blobs(
+            &prefetch_state,
+            startup_warm,
+            oci_prefetch_refs,
+        )
+        .await
+        {
+            Ok(()) => {
+                prefetch_state
+                    .prefetch_complete
+                    .store(true, Ordering::Release);
+            }
+            Err(error) if startup_warm => {
+                let message = format!("{error:#}");
+                log::warn!("Startup prefetch failed: {message}");
+                let mut prefetch_error = prefetch_state.prefetch_error.write().await;
+                *prefetch_error = Some(message);
+            }
+            Err(error) => {
+                log::warn!("Background prefetch failed: {error:#}");
+            }
+        }
         prefetch_state.prefetch_complete_notify.notify_waiters();
     });
 }
@@ -216,6 +246,9 @@ fn spawn_ready_file_marker(
             let notified = ready_notify.notified();
             if !ready.load(Ordering::Acquire) {
                 notified.await;
+                if !ready.load(Ordering::Acquire) {
+                    return;
+                }
             }
         }
 

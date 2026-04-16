@@ -46,6 +46,7 @@ pub struct AppState {
     pub kv_pending: Arc<RwLock<KvPendingStore>>,
     pub kv_flush_lock: Arc<Mutex<()>>,
     pub kv_lookup_inflight: Arc<DashMap<String, Arc<Notify>>>,
+    pub oci_lookup_inflight: Arc<DashMap<String, Arc<Notify>>>,
     pub kv_last_put: Arc<AtomicU64>,
     pub kv_backlog_rejects: Arc<AtomicU64>,
     pub kv_replication_enqueue_deferred: Arc<AtomicU64>,
@@ -73,6 +74,7 @@ pub struct AppState {
     pub backend_breaker: Arc<BackendCircuitBreaker>,
     pub prefetch_complete: Arc<AtomicBool>,
     pub prefetch_complete_notify: Arc<Notify>,
+    pub prefetch_error: Arc<RwLock<Option<String>>>,
 }
 
 #[cfg(test)]

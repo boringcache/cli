@@ -1,5 +1,6 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -58,6 +59,10 @@ impl ProxyServerHandle {
         loop {
             if self.handle.is_ready() {
                 return Ok(());
+            }
+
+            if let Some(message) = self.handle.prefetch_error_message().await {
+                anyhow::bail!("Cache registry warmup failed: {message}");
             }
 
             if self.handle.is_finished() {
@@ -133,6 +138,7 @@ pub async fn execute(
     port: u16,
     no_platform: bool,
     no_git: bool,
+    oci_prefetch_ref: Vec<String>,
     metadata_hints: Vec<String>,
     startup_warm: bool,
     ready_file: Option<String>,
@@ -156,6 +162,7 @@ pub async fn execute(
     let tag_resolver = build_tag_resolver(no_platform, no_git)?;
     let (registry_root_tag, configured_human_tags) =
         resolve_registry_tag_config(&tag_resolver, &tag)?;
+    let oci_prefetch_refs = resolve_oci_prefetch_refs(&oci_prefetch_ref)?;
     let proxy_metadata_hints = resolve_proxy_metadata_hints(&metadata_hints)?;
 
     crate::serve::run_server(
@@ -168,6 +175,7 @@ pub async fn execute(
         registry_root_tag,
         proxy_metadata_hints,
         startup_warm,
+        oci_prefetch_refs,
         fail_on_cache_error,
         read_only,
         ready_file.map(PathBuf::from),
@@ -183,6 +191,7 @@ pub async fn start_proxy_background(
     port: u16,
     no_platform: bool,
     no_git: bool,
+    oci_prefetch_refs: Vec<(String, String)>,
     endpoint_host_override: Option<String>,
     proxy_metadata_hints: BTreeMap<String, String>,
     startup_warm: bool,
@@ -225,6 +234,7 @@ pub async fn start_proxy_background(
         registry_root_tag,
         proxy_metadata_hints,
         startup_warm,
+        oci_prefetch_refs,
         fail_on_cache_error,
         read_only,
     )
@@ -270,6 +280,36 @@ fn resolve_registry_tag_config(
     let configured_human_tags = resolved_tags;
 
     Ok((registry_root_tag, configured_human_tags))
+}
+
+pub(crate) fn resolve_oci_prefetch_refs(
+    oci_prefetch_ref: &[String],
+) -> Result<Vec<(String, String)>> {
+    let mut refs = Vec::new();
+    let mut seen = BTreeSet::<(String, String)>::new();
+
+    for raw in oci_prefetch_ref {
+        let trimmed = raw.trim();
+        let (name, reference) = parse_oci_prefetch_ref(trimmed).context(format!(
+            "Invalid OCI prefetch ref format for {trimmed}, expected NAME@REFERENCE"
+        ))?;
+        if seen.insert((name.clone(), reference.clone())) {
+            refs.push((name, reference));
+        }
+    }
+
+    Ok(refs)
+}
+
+fn parse_oci_prefetch_ref(raw: &str) -> Result<(String, String)> {
+    let (name, reference) = raw
+        .split_once('@')
+        .ok_or_else(|| anyhow::anyhow!("missing '@' separator"))?;
+    let name = name.trim();
+    let reference = reference.trim();
+    ensure!(!name.is_empty(), "repository name is empty");
+    ensure!(!reference.is_empty(), "reference is empty");
+    Ok((name.to_string(), reference.to_string()))
 }
 
 fn build_tag_resolver(no_platform: bool, no_git: bool) -> Result<TagResolver> {
@@ -479,6 +519,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_oci_prefetch_refs_deduplicates_and_trims() {
+        let refs = resolve_oci_prefetch_refs(&[
+            "library/ubuntu  @  latest ".to_string(),
+            "library/ubuntu@latest".to_string(),
+            "node:20@sha256:abc".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            refs,
+            vec![
+                ("library/ubuntu".to_string(), "latest".to_string()),
+                ("node:20".to_string(), "sha256:abc".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_oci_prefetch_refs_rejects_invalid_values() {
+        let missing_separator =
+            resolve_oci_prefetch_refs(&["library/ubuntu".to_string()]).unwrap_err();
+        assert!(
+            missing_separator
+                .to_string()
+                .contains("Invalid OCI prefetch ref format for library/ubuntu")
+        );
+        assert!(
+            resolve_oci_prefetch_refs(&["@sha256:abc".to_string()])
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid OCI prefetch ref format for @sha256:abc")
+        );
+    }
+
     #[tokio::test]
     async fn start_proxy_background_waits_for_ready_before_returning() {
         let _guard = test_env::lock();
@@ -497,6 +572,7 @@ mod tests {
             0,
             true,
             true,
+            Vec::new(),
             Some("builder.internal.invalid".to_string()),
             BTreeMap::new(),
             true,
@@ -554,6 +630,7 @@ mod tests {
             0,
             true,
             true,
+            Vec::new(),
             None,
             BTreeMap::new(),
             false,

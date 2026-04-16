@@ -78,6 +78,14 @@ run_leg() {
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
       bash "${REQUIRED_DIR}/e2e-docker-buildkit-registry-test.sh"
       ;;
+    oci-manifest-contract)
+      BINARY="$binary" \
+      WORKSPACE="$workspace" \
+      E2E_TAG_PREFIX="gha-cache-registry" \
+      PROXY_PORT="5000" \
+      LOG_DIR="$log_dir" \
+      bash "${REQUIRED_DIR}/e2e-oci-manifest-contract-test.sh"
+      ;;
     prefetch-smoke)
       BINARY="$binary" \
       WORKSPACE="$workspace" \
@@ -301,6 +309,13 @@ EOF
 === Phase 3: Implicit latest cache import compatibility ===
 === Phase 4: Alias publish and alias warm import ===
 Docker buildkit registry e2e passed
+EOF
+      ;;
+    oci-manifest-contract)
+      cat <<'EOF'
+=== Phase 1: Push subject manifest and verify referrers ===
+=== Phase 2: Restart proxy and verify persisted referrers ===
+OCI manifest contract e2e passed
 EOF
       ;;
     prefetch-smoke|prefetch-readiness)

@@ -9,7 +9,11 @@ pub(super) const RUNNER: AdapterRunner = AdapterRunner {
     prepare_command: passthrough_command,
 };
 
-fn inject_proxy_env(set: &mut BTreeMap<String, String>, context: &proxy::ProxyContext) {
+fn inject_proxy_env(
+    set: &mut BTreeMap<String, String>,
+    context: &proxy::ProxyContext,
+    _: &super::AdapterCommandOptions,
+) {
     let endpoint = context.endpoint();
     set.insert("RUSTC_WRAPPER".to_string(), "sccache".to_string());
     set.insert(
@@ -31,7 +35,14 @@ mod tests {
             cache_ref: "127.0.0.1:5000/cache:test".to_string(),
         };
 
-        let plan = AdapterKind::Sccache.proxy_env_plan(&context);
+        let plan = AdapterKind::Sccache.proxy_env_plan(
+            &context,
+            &super::super::AdapterCommandOptions {
+                cache_ref_tag: "buildcache".to_string(),
+                cache_mode: "max".to_string(),
+                read_only: false,
+            },
+        );
         assert_eq!(
             plan.set.get("SCCACHE_WEBDAV_ENDPOINT"),
             Some(&"http://127.0.0.1:5000/".to_string())

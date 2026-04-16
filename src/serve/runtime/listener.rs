@@ -47,11 +47,10 @@ pub(super) async fn build_server_runtime(
     let blob_read_metrics = Arc::new(BlobReadMetrics::new());
     let prefetch_metrics = Arc::new(state::PrefetchMetrics::new());
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
-    let pf_concurrency = dl_concurrency;
     let (kv_replication_work_tx, kv_replication_work_rx) =
         mpsc::channel(KV_REPLICATION_WORK_QUEUE_CAPACITY);
     let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
-    let blob_prefetch_semaphore = Arc::new(tokio::sync::Semaphore::new(pf_concurrency));
+    let blob_prefetch_semaphore = blob_download_semaphore.clone();
     let runtime_temp_dir = new_runtime_temp_dir()?;
     let kv_blob_temp_dir = runtime_temp_dir.join("kv-blobs");
     let oci_upload_temp_dir = runtime_temp_dir.join("oci-uploads");
@@ -83,6 +82,7 @@ pub(super) async fn build_server_runtime(
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
         kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
         kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
+        oci_lookup_inflight: Arc::new(dashmap::DashMap::new()),
         kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_replication_enqueue_deferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -114,6 +114,7 @@ pub(super) async fn build_server_runtime(
         backend_breaker: Arc::new(state::BackendCircuitBreaker::new()),
         prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(!startup_warm)),
         prefetch_complete_notify: Arc::new(tokio::sync::Notify::new()),
+        prefetch_error: Arc::new(RwLock::new(None)),
     };
 
     cache_registry::restore_kv_pending_publish_handoff(&state).await;

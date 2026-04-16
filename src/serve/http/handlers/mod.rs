@@ -1,5 +1,5 @@
 mod blobs;
-mod manifest;
+pub(crate) mod manifest;
 mod uploads;
 
 use axum::Json;
@@ -19,7 +19,7 @@ use self::manifest::{
     expand_manifest_blob_descriptors, extract_blob_descriptors,
     resolve_pushed_manifest_content_type_for_tests, stage_manifest_reference_uploads,
 };
-use self::manifest::{get_manifest, put_manifest};
+use self::manifest::{empty_referrers_response, get_manifest, get_referrers, put_manifest};
 use self::uploads::{delete_upload, get_upload_status, patch_upload, put_upload, start_upload};
 #[cfg(test)]
 use self::uploads::{parse_put_upload_offset, parse_upload_offset};
@@ -66,6 +66,7 @@ struct ProxyStatusResponse {
     publish_state: &'static str,
     publish_settled: bool,
     prefetch_complete: bool,
+    prefetch_error: Option<String>,
     shutdown_requested: bool,
     cache_entry_id: Option<String>,
     tags_visible: bool,
@@ -80,11 +81,14 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
     let prefetch_complete = state
         .prefetch_complete
         .load(std::sync::atomic::Ordering::Acquire);
+    let prefetch_error = state.prefetch_error.read().await.clone();
     let shutdown_requested = state
         .shutdown_requested
         .load(std::sync::atomic::Ordering::Acquire);
     let phase = if shutdown_requested {
         "draining"
+    } else if prefetch_error.is_some() {
+        "error"
     } else if prefetch_complete {
         "ready"
     } else {
@@ -130,6 +134,7 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
             publish_state,
             publish_settled,
             prefetch_complete,
+            prefetch_error,
             shutdown_requested,
             cache_entry_id,
             tags_visible,
@@ -197,6 +202,12 @@ pub async fn oci_dispatch(
                 get_manifest(method, state.clone(), name, reference).await
             }
             Method::PUT => put_manifest(state.clone(), name, reference, headers, body).await,
+            _ => Err(OciError::unsupported("method not allowed")),
+        },
+        OciRoute::Referrers { name, digest } => match method {
+            Method::GET | Method::HEAD => {
+                get_referrers(method, state.clone(), name, digest, params).await
+            }
             _ => Err(OciError::unsupported("method not allowed")),
         },
         OciRoute::Blob { name, digest } => match method {
@@ -326,6 +337,7 @@ fn best_effort_oci_read_response(route: &OciRoute) -> Result<Response, OciError>
         OciRoute::Manifest { name, reference } => {
             Err(OciError::manifest_unknown(format!("{name}:{reference}")))
         }
+        OciRoute::Referrers { .. } => empty_referrers_response(Method::GET, None),
         OciRoute::Blob { name, digest } => Err(OciError::blob_unknown(format!("{name}@{digest}"))),
         OciRoute::BlobUploadStart { .. } => Err(OciError::name_unknown("not found")),
         OciRoute::BlobUpload { name, uuid } => {
@@ -376,6 +388,7 @@ mod tests {
             kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
             kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
             kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
+            oci_lookup_inflight: Arc::new(dashmap::DashMap::new()),
             kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             kv_replication_enqueue_deferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -412,6 +425,7 @@ mod tests {
             backend_breaker: Arc::new(crate::serve::state::BackendCircuitBreaker::new()),
             prefetch_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             prefetch_complete_notify: Arc::new(tokio::sync::Notify::new()),
+            prefetch_error: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -454,6 +468,17 @@ mod tests {
                 assert_eq!(digest, "sha256:abc");
             }
             _ => panic!("expected Blob"),
+        }
+    }
+
+    #[test]
+    fn parse_referrers_route() {
+        match parse_oci_path("org/cache/referrers/sha256:abc") {
+            Some(OciRoute::Referrers { name, digest }) => {
+                assert_eq!(name, "org/cache");
+                assert_eq!(digest, "sha256:abc");
+            }
+            _ => panic!("expected Referrers"),
         }
     }
 
@@ -797,21 +822,21 @@ mod tests {
     fn parse_put_upload_offset_uses_content_range_start() {
         let mut headers = HeaderMap::new();
         headers.insert("Content-Range", "bytes 4096-8191".parse().unwrap());
-        assert_eq!(parse_put_upload_offset(&headers, 8192), 4096);
+        assert_eq!(parse_put_upload_offset(&headers, 4096), Ok(Some(4096)));
     }
 
     #[test]
     fn parse_put_upload_offset_uses_range_end_for_finalize() {
         let mut headers = HeaderMap::new();
         headers.insert("Range", "0-8191".parse().unwrap());
-        assert_eq!(parse_put_upload_offset(&headers, 8192), 8192);
+        assert_eq!(parse_put_upload_offset(&headers, 8192), Ok(Some(8192)));
     }
 
     #[test]
     fn parse_put_upload_offset_clamps_empty_range_to_current_size() {
         let mut headers = HeaderMap::new();
         headers.insert("Range", "0-0".parse().unwrap());
-        assert_eq!(parse_put_upload_offset(&headers, 0), 0);
+        assert_eq!(parse_put_upload_offset(&headers, 1), Ok(Some(1)));
     }
 
     #[test]

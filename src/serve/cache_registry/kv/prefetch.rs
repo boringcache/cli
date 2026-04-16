@@ -23,6 +23,21 @@ pub(crate) fn spawn_preload_blobs(state: &AppState, cache_entry_id: &str) {
     });
 }
 
+async fn count_missing_local_blobs(state: &AppState, blobs: &[BlobDescriptor]) -> usize {
+    let mut missing = 0usize;
+    for blob in blobs {
+        if state
+            .blob_read_cache
+            .get_handle(&blob.digest)
+            .await
+            .is_none()
+        {
+            missing = missing.saturating_add(1);
+        }
+    }
+    missing
+}
+
 pub(crate) async fn preload_download_urls_for_blobs(
     state: &AppState,
     cache_entry_id: &str,
@@ -267,6 +282,7 @@ pub(crate) async fn preload_single_blob(
     cache_entry_id: String,
     blob: BlobDescriptor,
     cached_url: Option<String>,
+    acquired_permit: &tokio::sync::OwnedSemaphorePermit,
 ) -> anyhow::Result<bool> {
     if state
         .blob_read_cache
@@ -279,7 +295,15 @@ pub(crate) async fn preload_single_blob(
 
     let mut retry_delay = std::time::Duration::from_millis(250);
     for attempt in 1..=4 {
-        match download_blob_to_cache(&state, &cache_entry_id, &blob, cached_url.as_deref()).await {
+        match download_blob_to_cache_with_permit(
+            &state,
+            &cache_entry_id,
+            &blob,
+            cached_url.as_deref(),
+            acquired_permit,
+        )
+        .await
+        {
             Ok(_) => return Ok(true),
             Err(error)
                 if attempt < 4
@@ -369,13 +393,19 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         let cache_entry_id = cache_entry_id.to_string();
         let prefetch_semaphore = prefetch_semaphore.clone();
         tasks.spawn(async move {
-            let _permit = prefetch_semaphore
+            let prefetch_permit = prefetch_semaphore
                 .acquire_owned()
                 .await
                 .map_err(|error| anyhow::anyhow!("prefetch semaphore closed: {error}"))?;
-            let result =
-                preload_single_blob(state, cache_entry_id, target.blob, target.cached_url).await;
-            drop(_permit);
+            let result = preload_single_blob(
+                state,
+                cache_entry_id,
+                target.blob,
+                target.cached_url,
+                &prefetch_permit,
+            )
+            .await;
+            drop(prefetch_permit);
             result
         });
     }
@@ -434,7 +464,38 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
     }
 }
 
-pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
+pub(crate) async fn prefetch_manifest_blobs(
+    state: &AppState,
+    require_full_warm: bool,
+    oci_prefetch_refs: Vec<(String, String)>,
+) -> Result<(), RegistryError> {
+    if !oci_prefetch_refs.is_empty() {
+        eprintln!(
+            "Prefetch: prefetching {} selected OCI manifest refs",
+            oci_prefetch_refs.len()
+        );
+        let mut failures = 0usize;
+        for (name, reference) in oci_prefetch_refs {
+            if let Err(error) = crate::serve::http::handlers::manifest::prefetch_manifest_reference(
+                state, &name, &reference,
+            )
+            .await
+            {
+                failures = failures.saturating_add(1);
+                let message = format!(
+                    "Startup OCI manifest prefetch failed for {name}@{reference}: {error:#?}"
+                );
+                if require_full_warm {
+                    return Err(RegistryError::internal(message));
+                }
+                log::warn!("{message}");
+            }
+        }
+        if failures > 0 {
+            log::warn!("Startup OCI manifest prefetch incomplete: {failures} failures");
+        }
+    }
+
     eprintln!("Prefetch: loading index and hydrating full tag before serving...");
     let started_at = std::time::Instant::now();
     state.prefetch_metrics.reset_startup();
@@ -505,13 +566,35 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
                     );
                 }
                 Err(_) => {
+                    let message = format!(
+                        "Startup warmup timed out after {}s",
+                        KV_PREFETCH_READINESS_TIMEOUT.as_secs()
+                    );
                     eprintln!(
                         "Prefetch: timed out after {}s (partial prefetch, continuing)",
                         KV_PREFETCH_READINESS_TIMEOUT.as_secs(),
                     );
+                    if require_full_warm {
+                        return Err(RegistryError::internal(message));
+                    }
                 }
             }
-            spawn_preload_blobs(state, &cache_entry_id);
+
+            let missing_local_blobs = count_missing_local_blobs(state, &unique_blobs).await;
+            if missing_local_blobs > 0 {
+                let message = format!(
+                    "Startup warmup incomplete: {missing_local_blobs}/{} blobs are still cold",
+                    unique_blobs.len()
+                );
+                if require_full_warm {
+                    return Err(RegistryError::internal(message));
+                }
+                log::warn!("{message}");
+            }
+
+            if !require_full_warm {
+                spawn_preload_blobs(state, &cache_entry_id);
+            }
         }
         Ok(_) => {
             {
@@ -519,17 +602,24 @@ pub(crate) async fn prefetch_manifest_blobs(state: &AppState) {
                 published.set_empty_incomplete();
             }
             eprintln!("Prefetch: no existing entries, skipping");
+            return Ok(());
         }
         Err(e) => {
+            if require_full_warm {
+                return Err(e);
+            }
+
             if is_invalid_file_pointer_error(&e) {
                 let mut published = state.kv_published_index.write().await;
                 published.set_empty_incomplete();
                 eprintln!("Prefetch: invalid file pointer, degraded to empty index");
-                return;
+                return Ok(());
             }
             log::warn!("Prefetch: index load failed: {e:?}");
         }
     }
+
+    Ok(())
 }
 
 pub(crate) async fn prefetch_all_blobs(
@@ -591,13 +681,19 @@ pub(crate) async fn prefetch_all_blobs(
         let cache_entry_id = cache_entry_id.to_string();
         let prefetch_semaphore = prefetch_semaphore.clone();
         tasks.spawn(async move {
-            let _permit = prefetch_semaphore
+            let prefetch_permit = prefetch_semaphore
                 .acquire_owned()
                 .await
                 .map_err(|error| anyhow::anyhow!("prefetch semaphore closed: {error}"))?;
-            let result =
-                preload_single_blob(state, cache_entry_id, target.blob, target.cached_url).await;
-            drop(_permit);
+            let result = preload_single_blob(
+                state,
+                cache_entry_id,
+                target.blob,
+                target.cached_url,
+                &prefetch_permit,
+            )
+            .await;
+            drop(prefetch_permit);
             result
         });
     }

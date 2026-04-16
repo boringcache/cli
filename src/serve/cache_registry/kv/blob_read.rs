@@ -92,6 +92,7 @@ pub(crate) async fn do_download_blob_to_cache(
     cache_entry_id: &str,
     blob: &BlobDescriptor,
     cached_url: Option<&str>,
+    acquired_permit: Option<&tokio::sync::OwnedSemaphorePermit>,
 ) -> Result<(BlobReadHandle, BlobReadSource), RegistryError> {
     if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
         return Ok((cache_handle, BlobReadSource::LocalCache));
@@ -119,11 +120,19 @@ pub(crate) async fn do_download_blob_to_cache(
         }
     };
 
-    let _permit = state
-        .blob_download_semaphore
-        .acquire()
-        .await
-        .map_err(|_| RegistryError::internal("Download semaphore closed"))?;
+    let owned_permit = if acquired_permit.is_none() {
+        Some(
+            state
+                .blob_download_semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| RegistryError::internal("Download semaphore closed"))?,
+        )
+    } else {
+        None
+    };
+    let _download_permit = owned_permit.as_ref().or(acquired_permit);
 
     if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
         return Ok((cache_handle, BlobReadSource::LocalCache));
@@ -296,11 +305,12 @@ pub(crate) fn short_digest(digest: &str) -> &str {
     }
 }
 
-pub(crate) async fn download_blob_to_cache(
+async fn download_blob_to_cache_internal(
     state: &AppState,
     cache_entry_id: &str,
     blob: &BlobDescriptor,
     cached_url: Option<&str>,
+    acquired_permit: Option<&tokio::sync::OwnedSemaphorePermit>,
 ) -> Result<BlobReadHandle, RegistryError> {
     let started_at = std::time::Instant::now();
     if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
@@ -331,8 +341,14 @@ pub(crate) async fn download_blob_to_cache(
                     return Ok(cache_handle);
                 }
 
-                let (cache_handle, source) =
-                    do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
+                let (cache_handle, source) = do_download_blob_to_cache(
+                    state,
+                    cache_entry_id,
+                    blob,
+                    cached_url,
+                    acquired_permit,
+                )
+                .await?;
                 emit_blob_read_elapsed_metric(state, cache_entry_id, source, blob, started_at);
                 return Ok(cache_handle);
             }
@@ -366,4 +382,30 @@ pub(crate) async fn download_blob_to_cache(
             }
         }
     }
+}
+
+pub(crate) async fn download_blob_to_cache(
+    state: &AppState,
+    cache_entry_id: &str,
+    blob: &BlobDescriptor,
+    cached_url: Option<&str>,
+) -> Result<BlobReadHandle, RegistryError> {
+    download_blob_to_cache_internal(state, cache_entry_id, blob, cached_url, None).await
+}
+
+pub(crate) async fn download_blob_to_cache_with_permit(
+    state: &AppState,
+    cache_entry_id: &str,
+    blob: &BlobDescriptor,
+    cached_url: Option<&str>,
+    acquired_permit: &tokio::sync::OwnedSemaphorePermit,
+) -> Result<BlobReadHandle, RegistryError> {
+    download_blob_to_cache_internal(
+        state,
+        cache_entry_id,
+        blob,
+        cached_url,
+        Some(acquired_permit),
+    )
+    .await
 }

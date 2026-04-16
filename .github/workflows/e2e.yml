@@ -169,6 +169,16 @@ jobs:
             needs_node: false
             needs_rust: false
             needs_sccache: false
+          - leg: oci-manifest-contract
+            label: Registry / OCI Manifest Contract
+            artifact: registry-oci-manifest-contract
+            tier: required
+            needs_bazel: false
+            needs_docker: false
+            needs_java: false
+            needs_node: false
+            needs_rust: false
+            needs_sccache: false
           - leg: prefetch-smoke
             label: Registry / Prefetch Smoke
             artifact: registry-prefetch-smoke

@@ -105,12 +105,9 @@ boringcache bazel
 ```
 
 `boringcache bazel` starts the proxy and runs Bazel.
-Bazel still needs a remote-cache setting, usually in `.bazelrc`:
+It injects `--remote_cache=http://127.0.0.1:5000` automatically and keeps upload enabled unless you run the adapter in read-only mode.
 
-```bazelrc
-build --remote_cache=http://127.0.0.1:5000
-build --remote_upload_local_results
-```
+If the repo already has Bazel cache flags in `.bazelrc`, those stay in effect and explicit user flags still win.
 
 For a long-lived endpoint:
 
@@ -133,27 +130,10 @@ boringcache gradle
 ```
 
 `boringcache gradle` starts the proxy and runs Gradle.
-Keep the remote build cache config in `settings.gradle.kts` or `settings.gradle`:
+It injects `--build-cache` and a generated init script that points Gradle remote cache traffic at `http://127.0.0.1:5000/cache/`.
+The adapter keeps push enabled unless you run it in read-only mode.
 
-```kotlin
-buildCache {
-    local {
-        isEnabled = false
-    }
-    remote<HttpBuildCache> {
-        url = uri("http://127.0.0.1:5000/cache/")
-        isPush = true
-        isAllowUntrustedServer = true
-        isAllowInsecureProtocol = true
-    }
-}
-```
-
-And enable build caching in `gradle.properties`:
-
-```properties
-org.gradle.caching=true
-```
+If the repo already has build cache config in `settings.gradle(.kts)`, that still works. The adapter-owned init script just makes the local proxy turnkey for one command.
 
 For a long-lived endpoint:
 
@@ -175,20 +155,8 @@ boringcache maven
 ```
 
 `boringcache maven` starts the proxy and runs Maven.
-Keep the Maven build cache config in `.mvn/maven-build-cache-config.xml`:
-
-```xml
-<cache xmlns="http://maven.apache.org/BUILD-CACHE-CONFIG/1.0.0">
-  <configuration>
-    <enabled>true</enabled>
-    <remote>
-      <url>http://127.0.0.1:5000</url>
-    </remote>
-  </configuration>
-</cache>
-```
-
-If the repo does not already use the Maven build cache extension, add that first.
+It injects the `maven.build.cache.remote.url` and `maven.build.cache.remote.save.enabled` properties automatically.
+If the repo does not already use the Maven build cache extension, add that first. The adapter owns the endpoint and save mode, but it does not bootstrap the extension itself.
 
 For a long-lived endpoint:
 

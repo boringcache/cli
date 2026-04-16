@@ -82,3 +82,8 @@ For restart-path measurements, force a distinct local blob-cache directory with 
 2. Measure object-size distributions and read locality before changing hydration ordering.
 3. Add request-shaped warming only where real protocol traffic proves it helps.
 4. Inspect OCI blob and manifest fetch counts before changing any registry behavior.
+5. For OCI manifest PUT, validate referenced config and layer blobs before publish so missing content returns `400 BLOB_UNKNOWN` instead of degrading into an internal publish failure.
+6. Tighten OCI resumable upload offset handling to match Distribution-spec `416 Requested Range Not Satisfiable` behavior for stale or out-of-order chunk ranges.
+7. Add OCI startup warming for selected refs into `oci_manifest_cache` and `blob_locator`, with optional blob-byte hydration through the shared `blob_read_cache` only when measurements justify it.
+8. Measure the new OCI manifest and blob inflight dedupe under concurrent BuildKit and direct-OCI read load before changing blob-download semaphore policy.
+9. Keep the OCI manifest-contract and BuildKit registry-cache E2E legs covering spec-sensitive manifest, referrers, blob-upload, and warm-start behavior as OCI proxy changes land.

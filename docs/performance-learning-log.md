@@ -113,6 +113,21 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
 - Guardrail:
   - Do not add short outer timeouts around publish confirm paths; use one authoritative publish lifecycle.
 
+## 2026-04-16 - OCI proxy parity and warm-path backlog
+
+- Completed:
+  - Added explicit startup OCI prewarm via `--oci-prefetch-ref` for selected `repo@ref` pairs, which seeds both manifest and blob locator state during startup when not using `--on-demand`.
+
+- Spec cross-check:
+  - Distribution manifest pushes should fail with `400 BLOB_UNKNOWN` when referenced blobs are missing.
+  - Distribution resumable blob uploads should reject stale or out-of-order chunk offsets with `416 Requested Range Not Satisfiable`.
+  - OCI 1.1 subject-aware manifest pushes should return `OCI-Subject` when the registry supports referrers processing.
+- Current gaps:
+  - OCI startup policy still does not decide whether selected-ref blob-byte hydration should happen eagerly or only after measured read locality proves it worthwhile.
+  - Track the new OCI manifest-contract E2E leg alongside the existing BuildKit registry-cache leg so subject/referrers and restart behavior stay covered as proxy changes land.
+  - Measure whether the new OCI inflight dedupe meaningfully reduces restore, pointer, download-url, and blob-fetch fan-out under concurrent reader load.
+  - Add an E2E BuildKit OCI-spec mirror that covers manifest PUT validation, resumable upload edge cases, warm restart behavior, and cache import/export parity.
+
 ## Merge Checklist For Cache-Registry Changes
 
 Before merging changes touching `src/serve/cache_registry/*`, `src/serve/mod.rs`, or publish/confirm client paths:

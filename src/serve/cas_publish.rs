@@ -104,10 +104,7 @@ pub(crate) async fn upload_tracked_blobs(
             let session = sessions
                 .find_by_digest(&upload_url_info.digest)
                 .ok_or_else(|| {
-                    OciError::internal(format!(
-                        "No upload session for blob {}",
-                        upload_url_info.digest
-                    ))
+                    OciError::blob_unknown_upload(vec![upload_url_info.digest.clone()])
                 })?;
             jobs.push(TrackedBlobUploadJob {
                 digest: upload_url_info.digest.clone(),

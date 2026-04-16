@@ -23,13 +23,22 @@ pub struct OciError {
 
 impl OciError {
     fn new(status: StatusCode, code: &str, message: impl Into<String>) -> Self {
+        Self::new_with_detail(status, code, message, None)
+    }
+
+    fn new_with_detail(
+        status: StatusCode,
+        code: &str,
+        message: impl Into<String>,
+        detail: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             status,
             body: OciErrorBody {
                 errors: vec![OciErrorEntry {
                     code: code.to_string(),
                     message: message.into(),
-                    detail: None,
+                    detail,
                 }],
             },
         }
@@ -45,6 +54,25 @@ impl OciError {
 
     pub fn blob_unknown(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", detail)
+    }
+
+    pub fn blob_unknown_upload(digests: Vec<String>) -> Self {
+        let detail = if digests.len() == 1 {
+            serde_json::json!({ "digest": digests[0] })
+        } else {
+            serde_json::Value::Array(
+                digests
+                    .into_iter()
+                    .map(|digest| serde_json::json!({ "digest": digest }))
+                    .collect(),
+            )
+        };
+        Self::new_with_detail(
+            StatusCode::BAD_REQUEST,
+            "BLOB_UNKNOWN",
+            "blob unknown to registry",
+            Some(detail),
+        )
     }
 
     pub fn digest_invalid(detail: impl Into<String>) -> Self {

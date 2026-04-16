@@ -434,6 +434,69 @@ fn test_run_dry_run_json_reports_proxy_startup_mode() {
 }
 
 #[test]
+fn test_run_dry_run_json_reports_oci_prefetch_refs() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .args([
+            "run",
+            "test-org/test-workspace",
+            "--proxy",
+            "tool-cache",
+            "--oci-prefetch-ref",
+            "library/ubuntu@latest",
+            "--oci-prefetch-ref",
+            "node@sha256:abcdef",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("Failed to execute proxy-only json-dry-run command");
+
+    assert!(
+        output.status.success(),
+        "JSON dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_eq!(
+        parsed["proxy"]["oci_prefetch_refs"],
+        serde_json::json!(["library/ubuntu@latest", "node@sha256:abcdef"])
+    );
+}
+
+#[test]
+fn test_run_dry_run_rejects_invalid_oci_prefetch_ref() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .args([
+            "run",
+            "test-org/test-workspace",
+            "--proxy",
+            "tool-cache",
+            "--oci-prefetch-ref",
+            "badref",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("Failed to execute invalid dry-run command");
+
+    assert!(
+        !output.status.success(),
+        "Expected invalid prefetch ref to fail, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Invalid OCI prefetch ref format"),
+        "Expected validation error in stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_run_dry_run_json_marks_manual_pairs_as_manual() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);
@@ -919,14 +982,23 @@ port = 6001
     assert_eq!(parsed["tag"], "bazel-cache");
     assert_eq!(parsed["proxy"]["endpoint_host"], "host.docker.internal");
     assert_eq!(parsed["proxy"]["port"], 6001);
-    assert_eq!(parsed["command"][0], "bazel");
-    assert_eq!(
-        parsed["command"][2],
-        "--remote_cache=http://host.docker.internal:6001"
+    let command = parsed["command"]
+        .as_array()
+        .expect("command should be an array");
+    assert_eq!(command[0], "bazel");
+    let command_strings: Vec<&str> = command
+        .iter()
+        .map(|value| value.as_str().expect("command args should be strings"))
+        .collect();
+    assert!(
+        command_strings.contains(&"--remote_cache=http://host.docker.internal:6001"),
+        "command args: {command_strings:?}"
     );
-    let cache_ref_arg = parsed["command"][3]
-        .as_str()
-        .expect("cache ref arg should be a string");
+    let cache_ref_arg = command_strings
+        .iter()
+        .copied()
+        .find(|arg| arg.starts_with("--remote_instance_name="))
+        .expect("cache ref arg should be present");
     assert!(
         cache_ref_arg
             .starts_with("--remote_instance_name=host.docker.internal:6001/cache:bazel-cache"),
@@ -936,6 +1008,149 @@ port = 6001
         !cache_ref_arg.contains("{CACHE_REF}"),
         "cache_ref_arg: {cache_ref_arg}"
     );
+}
+
+#[test]
+fn test_bazel_dry_run_json_injects_remote_cache_flags_by_default() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.bazel]
+tag = "bazel-cache"
+command = ["bazel", "build", "//..."]
+endpoint-host = "host.docker.internal"
+port = 6001
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["bazel", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute bazel dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    let command = parsed["command"]
+        .as_array()
+        .expect("command should be an array");
+    assert_eq!(command[0], "bazel");
+    assert_eq!(command[1], "build");
+    assert_eq!(
+        command[2],
+        "--remote_cache=http://host.docker.internal:6001"
+    );
+    assert_eq!(command[3], "--remote_upload_local_results=true");
+    assert_eq!(command[4], "//...");
+}
+
+#[test]
+fn test_gradle_dry_run_json_injects_init_script_and_env() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.gradle]
+tag = "gradle-cache"
+command = ["./gradlew", "build", "--no-daemon"]
+endpoint-host = "host.docker.internal"
+port = 6001
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["gradle", "--read-only", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute gradle dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    let command = parsed["command"]
+        .as_array()
+        .expect("command should be an array");
+    assert_eq!(command[0], "./gradlew");
+    assert_eq!(command[1], "--build-cache");
+    assert!(
+        command[2]
+            .as_str()
+            .is_some_and(|value| value.starts_with("--init-script="))
+    );
+    assert_eq!(
+        parsed["env_vars"]["BORINGCACHE_GRADLE_CACHE_URL"],
+        "http://host.docker.internal:6001/cache/"
+    );
+    assert_eq!(parsed["env_vars"]["BORINGCACHE_GRADLE_CACHE_PUSH"], "false");
+}
+
+#[test]
+fn test_maven_dry_run_json_injects_remote_cache_properties() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.maven]
+tag = "maven-cache"
+command = ["mvn", "install", "-DskipTests"]
+endpoint-host = "host.docker.internal"
+port = 6001
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["maven", "--read-only", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute maven dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    let command = parsed["command"]
+        .as_array()
+        .expect("command should be an array");
+    let args = command
+        .iter()
+        .skip(1)
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(args.contains(&"-Dmaven.build.cache.enabled=true"));
+    assert!(args.contains(&"-Dmaven.build.cache.remote.enabled=true"));
+    assert!(args.contains(&"-Dmaven.build.cache.remote.url=http://host.docker.internal:6001"));
+    assert!(args.contains(&"-Dmaven.build.cache.remote.save.enabled=false"));
 }
 
 #[test]

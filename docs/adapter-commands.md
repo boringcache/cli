@@ -93,17 +93,17 @@ These adapters inject the tool-specific settings for you:
 - `docker`
 - `nx`
 - `turbo`
-- `sccache`
-- `go`
-
-These adapters start the proxy and run the command, but the tool still needs its own remote-cache config pointing at the local endpoint:
-
 - `bazel`
 - `gradle`
 - `maven`
+- `sccache`
+- `go`
 
-That split is intentional.
-If the tool already has a stable config file, keep that config in the repo and let the adapter command just own proxy lifecycle.
+For Bazel, the adapter injects the remote-cache flags directly.
+For Gradle, the adapter adds `--build-cache` plus a generated init script that points the remote cache at the local proxy.
+For Maven, the adapter injects the `maven.build.cache.*` remote endpoint properties, but the Maven build cache extension still needs to be present in the repo.
+
+If a repo already has a stable checked-in cache config, that still works. Explicit tool flags and checked-in config stay user-owned.
 
 ## CLI overrides
 

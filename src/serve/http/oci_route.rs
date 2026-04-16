@@ -7,6 +7,7 @@ use crate::serve::state::AppState;
 #[derive(Clone)]
 pub(crate) enum OciRoute {
     Manifest { name: String, reference: String },
+    Referrers { name: String, digest: String },
     Blob { name: String, digest: String },
     BlobUploadStart { name: String },
     BlobUpload { name: String, uuid: String },
@@ -66,6 +67,17 @@ pub(crate) fn parse_oci_path(path: &str) -> Option<OciRoute> {
         }
     }
 
+    if let Some(idx) = path.rfind("/referrers/") {
+        let name = &path[..idx];
+        let digest = &path[idx + "/referrers/".len()..];
+        if !name.is_empty() && !digest.is_empty() {
+            return Some(OciRoute::Referrers {
+                name: name.to_string(),
+                digest: digest.to_string(),
+            });
+        }
+    }
+
     if let Some(idx) = path.rfind("/manifests/") {
         let name = &path[..idx];
         let reference = &path[idx + "/manifests/".len()..];
@@ -94,6 +106,13 @@ pub(crate) fn oci_cache_op_for_route_method(
                 None
             }
         }
+        OciRoute::Referrers { .. } => {
+            if *method == Method::GET || *method == Method::HEAD {
+                Some(crate::serve::cache_registry::cache_ops::Op::Get)
+            } else {
+                None
+            }
+        }
         OciRoute::Blob { .. } => {
             if *method == Method::GET || *method == Method::HEAD {
                 Some(crate::serve::cache_registry::cache_ops::Op::Get)
@@ -115,6 +134,7 @@ pub(crate) fn oci_cache_op_for_route_method(
 pub(crate) fn oci_miss_key(route: &OciRoute) -> Option<String> {
     match route {
         OciRoute::Manifest { name, reference } => Some(format!("manifest:{name}:{reference}")),
+        OciRoute::Referrers { name, digest } => Some(format!("referrers:{name}@{digest}")),
         OciRoute::Blob { name, digest } => Some(format!("blob:{name}@{digest}")),
         OciRoute::BlobUploadStart { .. } | OciRoute::BlobUpload { .. } => None,
     }
