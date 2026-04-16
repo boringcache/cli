@@ -132,11 +132,15 @@ pub(crate) async fn handle_events(
                 "Invalid events request body: {e}"
             )))
         })?;
-    let events: Vec<TurborepoCacheEvent> = serde_json::from_slice(&bytes).map_err(|e| {
-        turborepo_error(RegistryError::bad_request(format!(
-            "Invalid events request payload: {e}"
-        )))
-    })?;
+    let events: Vec<TurborepoCacheEvent> = if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
+        Vec::new()
+    } else {
+        serde_json::from_slice(&bytes).map_err(|e| {
+            turborepo_error(RegistryError::bad_request(format!(
+                "Invalid events request payload: {e}"
+            )))
+        })?
+    };
     for event in &events {
         if event.session_id.trim().is_empty() || event.hash.trim().is_empty() {
             return Err(turborepo_error(RegistryError::bad_request(
@@ -491,6 +495,7 @@ fn parse_turborepo_metadata(bytes: &[u8]) -> Result<TurborepoArtifactMetadata, R
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Body;
     use axum::http::HeaderValue;
 
     use super::*;
@@ -518,5 +523,23 @@ mod tests {
             HeaderValue::from_static("Bearer any-non-empty-token"),
         );
         assert!(ensure_proxy_bearer_header(&headers).is_ok());
+    }
+
+    #[tokio::test]
+    async fn handle_events_accepts_empty_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Bearer token"));
+        let response = handle_events(Method::POST, &headers, Body::empty())
+            .await
+            .expect("events handler should accept empty body");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn handle_events_rejects_invalid_non_json_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Bearer token"));
+        let response = handle_events(Method::POST, &headers, Body::from("EOF")).await;
+        assert!(response.is_err());
     }
 }

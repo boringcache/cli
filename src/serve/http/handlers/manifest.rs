@@ -685,6 +685,9 @@ async fn persist_manifest_entry(
         additional_aliases,
     } = input;
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
+    let blob_count = blob_descriptors.len() as u64;
+    let blob_total_size_bytes: u64 = blob_descriptors.iter().map(|blob| blob.size_bytes).sum();
+
     let pointer = cas_oci::OciPointer {
         format_version: 1,
         adapter: "oci-v1".to_string(),
@@ -703,14 +706,17 @@ async fn persist_manifest_entry(
     let pointer_bytes = serde_json::to_vec(&pointer)
         .map_err(|e| OciError::internal(format!("Failed to serialize pointer: {e}")))?;
     let manifest_root_digest = cas_oci::prefixed_sha256_digest(&pointer_bytes);
-    let blob_count = blob_descriptors.len() as u64;
-    let blob_total_size_bytes: u64 = blob_descriptors.iter().map(|blob| blob.size_bytes).sum();
+    let (request_blob_count, request_blob_total_size_bytes) = request_cas_blob_summary(
+        blob_count,
+        blob_total_size_bytes,
+        pointer_bytes.len() as u64,
+    );
     let total_size_bytes = blob_total_size_bytes + manifest_body.len() as u64;
     let alias_manifest = AliasTagManifest {
         manifest_root_digest: manifest_root_digest.clone(),
         manifest_size: pointer_bytes.len() as u64,
-        blob_count,
-        blob_total_size_bytes,
+        blob_count: request_blob_count,
+        blob_total_size_bytes: request_blob_total_size_bytes,
         total_size_bytes,
     };
 
@@ -720,14 +726,14 @@ async fn persist_manifest_entry(
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
+        blob_count: Some(request_blob_count),
+        blob_total_size_bytes: Some(request_blob_total_size_bytes),
         cas_layout: Some("oci-v1".to_string()),
         manifest_format_version: Some(1),
         total_size_bytes,
         uncompressed_size: None,
         compressed_size: None,
-        file_count: Some(blob_count.min(u32::MAX as u64) as u32),
+        file_count: Some(request_blob_count.min(u32::MAX as u64) as u32),
         expected_manifest_digest: Some(manifest_root_digest.clone()),
         expected_manifest_size: Some(alias_manifest.manifest_size),
         force: None,
@@ -761,7 +767,7 @@ async fn persist_manifest_entry(
     let confirm_cache_entry_id = save_response.cache_entry_id.clone();
     let confirm_manifest_digest = manifest_root_digest.clone();
     let confirm_manifest_size = pointer_bytes.len() as u64;
-    let confirm_file_count = blob_count.min(u32::MAX as u64) as u32;
+    let confirm_file_count = request_blob_count.min(u32::MAX as u64) as u32;
     crate::serve::cas_publish::publish_after_save(
         &state.api_client,
         &state.workspace,
@@ -837,8 +843,8 @@ async fn persist_manifest_entry(
                     manifest_etag: None,
                     archive_size: None,
                     archive_etag: None,
-                    blob_count: Some(blob_count),
-                    blob_total_size_bytes: Some(blob_total_size_bytes),
+                    blob_count: Some(request_blob_count),
+                    blob_total_size_bytes: Some(request_blob_total_size_bytes),
                     file_count: Some(confirm_file_count),
                     uncompressed_size: None,
                     compressed_size: None,
@@ -906,6 +912,20 @@ async fn persist_manifest_entry(
     }
 
     Ok(PersistManifestResult { manifest_digest })
+}
+
+fn request_cas_blob_summary(
+    manifest_blob_count: u64,
+    manifest_blob_total_size_bytes: u64,
+    pointer_size_bytes: u64,
+) -> (u64, u64) {
+    let request_blob_count = manifest_blob_count.max(1);
+    let request_blob_total_size_bytes = if manifest_blob_total_size_bytes == 0 {
+        pointer_size_bytes.max(1)
+    } else {
+        manifest_blob_total_size_bytes
+    };
+    (request_blob_count, request_blob_total_size_bytes)
 }
 
 async fn persist_referrers_manifest(
@@ -1482,5 +1502,31 @@ async fn cleanup_blob_sessions(state: &AppState, blob_descriptors: &[BlobDescrip
         {
             let _ = tokio::fs::remove_file(&removed.temp_path).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_cas_blob_summary;
+
+    #[test]
+    fn request_cas_blob_summary_preserves_non_zero_values() {
+        let (blob_count, blob_total_size_bytes) = request_cas_blob_summary(3, 456, 789);
+        assert_eq!(blob_count, 3);
+        assert_eq!(blob_total_size_bytes, 456);
+    }
+
+    #[test]
+    fn request_cas_blob_summary_minimum_blob_count_is_one() {
+        let (blob_count, blob_total_size_bytes) = request_cas_blob_summary(0, 456, 789);
+        assert_eq!(blob_count, 1);
+        assert_eq!(blob_total_size_bytes, 456);
+    }
+
+    #[test]
+    fn request_cas_blob_summary_minimum_blob_size_uses_pointer_size() {
+        let (blob_count, blob_total_size_bytes) = request_cas_blob_summary(0, 0, 789);
+        assert_eq!(blob_count, 1);
+        assert_eq!(blob_total_size_bytes, 789);
     }
 }

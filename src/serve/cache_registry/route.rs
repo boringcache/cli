@@ -15,6 +15,7 @@ pub(crate) enum RegistryRoute {
     TurborepoArtifact { hash: String },
     TurborepoQueryArtifacts,
     TurborepoEvents,
+    SccacheProbe { path: String },
     SccacheObject { key_path: String },
     SccacheMkcol,
     GoCacheObject { action_hex: String },
@@ -53,6 +54,10 @@ pub(crate) fn detect_route(method: &Method, path: &str) -> Result<RegistryRoute,
 
     if let Some(cache_key) = parse_maven_path(&components) {
         return Ok(RegistryRoute::Maven { cache_key });
+    }
+
+    if let Some(route) = parse_sccache_probe_path(&components) {
+        return Ok(route);
     }
 
     if method.as_str() == "MKCOL" {
@@ -212,6 +217,15 @@ fn looks_like_sccache_key_path(components: &[&str]) -> bool {
         && shard_c.eq_ignore_ascii_case(&key[2..3])
 }
 
+fn parse_sccache_probe_path(components: &[&str]) -> Option<RegistryRoute> {
+    if components.len() == 1 && components[0] == ".sccache_check" {
+        return Some(RegistryRoute::SccacheProbe {
+            path: components[0].to_string(),
+        });
+    }
+    None
+}
+
 fn parse_go_action_id(raw: &str) -> Result<String, RegistryError> {
     if raw.len() != 64 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(RegistryError::bad_request(
@@ -311,6 +325,17 @@ mod tests {
         let method = Method::from_bytes(b"MKCOL").unwrap();
         let route = detect_route(&method, "any/path").unwrap();
         assert_eq!(route, RegistryRoute::SccacheMkcol);
+    }
+
+    #[test]
+    fn detect_route_accepts_sccache_probe_path() {
+        let route = detect_route(&Method::GET, ".sccache_check").unwrap();
+        assert_eq!(
+            route,
+            RegistryRoute::SccacheProbe {
+                path: ".sccache_check".to_string()
+            }
+        );
     }
 
     #[test]

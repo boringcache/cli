@@ -386,6 +386,7 @@ run_round_trip_phase() {
   local nx_payload="${phase_dir}/nx.payload"
   local nx_terminal_payload="${phase_dir}/nx-terminal.payload"
   local turbo_payload="${phase_dir}/turbo.payload"
+  local turbo_events_payload="${phase_dir}/turbo-events.payload"
   local sccache_payload="${phase_dir}/sccache.payload"
   local go_payload="${phase_dir}/go.payload"
 
@@ -398,6 +399,7 @@ run_round_trip_phase() {
   printf "turbo-%s\n" "$phase" >"$turbo_payload"
   printf "sccache-%s\n" "$phase" >"$sccache_payload"
   printf "go-%s\n" "$phase" >"$go_payload"
+  printf "[]\n" >"$turbo_events_payload"
   local bazel_ac_digest
   local bazel_cas_digest
   bazel_ac_digest="$(sha256_file_hex "$bazel_ac_payload")"
@@ -420,7 +422,7 @@ run_round_trip_phase() {
   http_request "POST" "/v8/artifacts" "200" "${phase_dir}/turbo-query.json" "${phase_dir}/turbo-query.out" "$auth_header" "$json_header"
   assert_contains "\"${TURBO_HASH}\"" "${phase_dir}/turbo-query.out" "turborepo query response"
   assert_contains "\"${TURBO_MISS}\":null" "${phase_dir}/turbo-query.out" "turborepo query miss response"
-  http_request "POST" "/v8/artifacts/events" "200" "" "${phase_dir}/turbo-events.out" "$auth_header"
+  http_request "POST" "/v8/artifacts/events" "200" "${turbo_events_payload}" "${phase_dir}/turbo-events.out" "$auth_header" "$json_header"
   http_request "MKCOL" "/a/b/c" "201" "" "${phase_dir}/sccache-mkcol.out"
   http_request "PUT" "/a/b/c/${SCCACHE_KEY}" "201" "$sccache_payload" "${phase_dir}/sccache-put.out"
   http_request "PUT" "/gocache/${GO_ACTION}" "201" "$go_payload" "${phase_dir}/go-put.out"

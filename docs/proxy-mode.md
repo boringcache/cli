@@ -16,7 +16,7 @@ boringcache cache-registry my-org/app registry-cache --port 5000
 
 That command starts in warm mode by default.
 The proxy warms its current internal active tag and shared blob cache state before it reports `ready`.
-That warm path improves first reads for disk-backed proxy traffic today; startup does not preseed per-repository OCI manifest refs unless they are listed explicitly.
+That warm path improves first reads for disk-backed proxy traffic today; startup does not preseed per-repository OCI manifest refs unless they are listed explicitly with `--oci-prefetch-ref`.
 Use `--on-demand` only when you want the proxy to come up immediately and accept colder first reads:
 
 ```bash

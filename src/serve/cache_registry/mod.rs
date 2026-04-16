@@ -244,7 +244,9 @@ async fn dispatch_with_path(
     let is_sccache_connect_route = matches!(route, route::RegistryRoute::SccacheMkcol);
     let is_sccache_route = matches!(
         route,
-        route::RegistryRoute::SccacheObject { .. } | route::RegistryRoute::SccacheMkcol
+        route::RegistryRoute::SccacheObject { .. }
+            | route::RegistryRoute::SccacheMkcol
+            | route::RegistryRoute::SccacheProbe { .. }
     );
     if is_sccache_connect_route {
         state
@@ -295,6 +297,9 @@ async fn dispatch_with_path(
                 }
                 route::RegistryRoute::SccacheObject { key_path } => {
                     sccache::handle_object(&route_state, method, &key_path, body).await
+                }
+                route::RegistryRoute::SccacheProbe { path } => {
+                    sccache::handle_probe(method, &path).await
                 }
                 route::RegistryRoute::SccacheMkcol => sccache::handle_mkcol(method),
                 route::RegistryRoute::GoCacheObject { action_hex } => {
@@ -389,9 +394,9 @@ fn tool_for_route(route: &route::RegistryRoute) -> Option<cache_ops::Tool> {
         }
         route::RegistryRoute::Gradle { .. } => Some(cache_ops::Tool::Gradle),
         route::RegistryRoute::Maven { .. } => Some(cache_ops::Tool::Maven),
-        route::RegistryRoute::SccacheObject { .. } | route::RegistryRoute::SccacheMkcol => {
-            Some(cache_ops::Tool::Sccache)
-        }
+        route::RegistryRoute::SccacheObject { .. }
+        | route::RegistryRoute::SccacheProbe { .. }
+        | route::RegistryRoute::SccacheMkcol => Some(cache_ops::Tool::Sccache),
         route::RegistryRoute::GoCacheObject { .. } => Some(cache_ops::Tool::GoCache),
     }
 }
@@ -422,6 +427,7 @@ fn route_instruments_cache_ops(route: &route::RegistryRoute) -> bool {
             | route::RegistryRoute::TurborepoEvents
             | route::RegistryRoute::SccacheObject { .. }
             | route::RegistryRoute::SccacheMkcol
+            | route::RegistryRoute::SccacheProbe { .. }
             | route::RegistryRoute::GoCacheObject { .. }
     )
 }

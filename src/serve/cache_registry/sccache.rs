@@ -56,6 +56,15 @@ pub(crate) fn handle_mkcol(method: Method) -> Result<Response, RegistryError> {
     }
 }
 
+pub(crate) async fn handle_probe(method: Method, _path: &str) -> Result<Response, RegistryError> {
+    match method {
+        Method::GET | Method::HEAD => Ok((StatusCode::OK, Body::empty()).into_response()),
+        _ => Err(RegistryError::method_not_allowed(
+            "sccache probe endpoint supports GET and HEAD",
+        )),
+    }
+}
+
 pub(crate) async fn handle_object(
     state: &AppState,
     method: Method,
@@ -95,5 +104,24 @@ pub(crate) async fn handle_object(
         _ => Err(RegistryError::method_not_allowed(
             "sccache cache supports GET, HEAD, PUT, and MKCOL",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn handle_probe_accepts_read_methods() {
+        assert!(handle_probe(Method::GET, ".sccache_check").await.is_ok());
+        assert!(handle_probe(Method::HEAD, ".sccache_check").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn handle_probe_rejects_non_read_methods() {
+        let error = handle_probe(Method::PUT, ".sccache_check")
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::METHOD_NOT_ALLOWED);
     }
 }
