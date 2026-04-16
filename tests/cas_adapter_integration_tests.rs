@@ -1180,6 +1180,7 @@ async fn test_restore_materializes_oci_layout() {
     let pointer = cas_oci::OciPointer {
         format_version: 1,
         adapter: "oci-v1".to_string(),
+        manifest_content_type: None,
         index_json_base64: base64::engine::general_purpose::STANDARD
             .encode(b"{\"schemaVersion\":2}"),
         oci_layout_base64: base64::engine::general_purpose::STANDARD

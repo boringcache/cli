@@ -104,6 +104,12 @@ pub struct RestoreArgs {
 
     #[arg(
         long,
+        help = "Allow restoring symlinks that point outside the restore root; disabled by default for security"
+    )]
+    pub allow_external_symlinks: bool,
+
+    #[arg(
+        long,
         help = "Exit with error if restore encounters cache/backend failures"
     )]
     pub fail_on_cache_error: bool,

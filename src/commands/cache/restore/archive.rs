@@ -26,6 +26,7 @@ pub(super) async fn process_restore_archive(
     verbose: bool,
     identity: Option<String>,
     passphrase_cache: Arc<Mutex<crate::encryption::PassphraseCache>>,
+    allow_external_symlinks: bool,
     require_server_signature: bool,
 ) -> Result<RestoreOutcome> {
     let client = api_client.transfer_client().clone();
@@ -373,6 +374,7 @@ pub(super) async fn process_restore_archive(
         &final_archive_path,
         Path::new(&target_path),
         verbose,
+        allow_external_symlinks,
         Some(progress_callback),
     )
     .await;

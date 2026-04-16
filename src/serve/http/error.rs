@@ -39,6 +39,10 @@ impl OciError {
         Self::new(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", detail)
     }
 
+    pub fn manifest_invalid(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "MANIFEST_INVALID", detail)
+    }
+
     pub fn blob_unknown(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", detail)
     }

@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 use self::blobs::get_blob;
 #[cfg(test)]
 use self::manifest::{
-    adaptive_blob_upload_concurrency, extract_blob_descriptors, stage_manifest_reference_uploads,
+    adaptive_blob_upload_concurrency, detect_manifest_content_type_for_tests,
+    expand_manifest_blob_descriptors, extract_blob_descriptors,
+    resolve_pushed_manifest_content_type_for_tests, stage_manifest_reference_uploads,
 };
 use self::manifest::{get_manifest, put_manifest};
 use self::uploads::{delete_upload, get_upload_status, patch_upload, put_upload, start_upload};
@@ -194,7 +196,7 @@ pub async fn oci_dispatch(
             Method::GET | Method::HEAD => {
                 get_manifest(method, state.clone(), name, reference).await
             }
-            Method::PUT => put_manifest(state.clone(), name, reference, body).await,
+            Method::PUT => put_manifest(state.clone(), name, reference, headers, body).await,
             _ => Err(OciError::unsupported("method not allowed")),
         },
         OciRoute::Blob { name, digest } => match method {
@@ -908,6 +910,198 @@ mod tests {
         let error = extract_blob_descriptors(&manifest_json).unwrap_err();
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn detect_manifest_content_type_prefers_declared_media_type() {
+        let docker_manifest = br#"{
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+            "config": {
+                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "size": 32
+            },
+            "layers": []
+        }"#;
+
+        assert_eq!(
+            detect_manifest_content_type_for_tests(docker_manifest),
+            "application/vnd.docker.distribution.manifest.v2+json"
+        );
+    }
+
+    #[test]
+    fn resolve_pushed_manifest_content_type_prefers_header_when_body_omits_media_type() {
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "manifests": []
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "application/vnd.docker.distribution.manifest.list.v2+json"
+                .parse()
+                .unwrap(),
+        );
+
+        assert_eq!(
+            resolve_pushed_manifest_content_type_for_tests(&headers, &manifest_json).unwrap(),
+            "application/vnd.docker.distribution.manifest.list.v2+json"
+        );
+    }
+
+    #[test]
+    fn resolve_pushed_manifest_content_type_rejects_header_media_type_mismatch() {
+        let manifest_json = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": []
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "application/vnd.docker.distribution.manifest.list.v2+json"
+                .parse()
+                .unwrap(),
+        );
+
+        let error =
+            resolve_pushed_manifest_content_type_for_tests(&headers, &manifest_json).unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .message()
+                .contains("does not match declared mediaType")
+        );
+    }
+
+    #[tokio::test]
+    async fn expand_manifest_blob_descriptors_skips_non_manifest_entries_in_manifests_array() {
+        let state = test_state();
+        let layer_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let cache_config_digest =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let manifest_list = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+            "manifests": [
+                {
+                    "digest": layer_digest,
+                    "size": 128,
+                    "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip"
+                },
+                {
+                    "digest": cache_config_digest,
+                    "size": 64,
+                    "mediaType": "application/vnd.buildkit.cacheconfig.v0"
+                }
+            ]
+        });
+
+        let blobs = expand_manifest_blob_descriptors(&state, "cache", &manifest_list)
+            .await
+            .expect("expand top-level descriptors without recursing into non-manifests");
+        let digests: Vec<&str> = blobs.iter().map(|blob| blob.digest.as_str()).collect();
+
+        assert_eq!(blobs.len(), 2);
+        assert!(digests.contains(&layer_digest));
+        assert!(digests.contains(&cache_config_digest));
+    }
+
+    #[tokio::test]
+    async fn stage_manifest_reference_uploads_ignores_non_manifest_entries() {
+        let state = test_state();
+        let layer_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let cache_config_digest =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let manifest_list = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+            "manifests": [
+                {
+                    "digest": layer_digest,
+                    "size": 128,
+                    "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip"
+                },
+                {
+                    "digest": cache_config_digest,
+                    "size": 64,
+                    "mediaType": "application/vnd.buildkit.cacheconfig.v0"
+                }
+            ]
+        });
+
+        let blob_descriptors = extract_blob_descriptors(&manifest_list).unwrap();
+        stage_manifest_reference_uploads(&state, "cache", &blob_descriptors, &manifest_list)
+            .await
+            .expect("ignore non-manifest top-level descriptors");
+
+        let sessions = state.upload_sessions.read().await;
+        assert!(
+            sessions.find_by_digest(layer_digest).is_none(),
+            "layer descriptor should not be staged as a manifest upload"
+        );
+        assert!(
+            sessions.find_by_digest(cache_config_digest).is_none(),
+            "cache config descriptor should not be staged as a manifest upload"
+        );
+    }
+
+    #[tokio::test]
+    async fn expand_manifest_blob_descriptors_includes_child_manifest_descendants() {
+        let state = test_state();
+        let child_config_digest =
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let child_layer_digest =
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let child_manifest = format!(
+            r#"{{
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {{"digest": "{child_config_digest}", "size": 12}},
+                "layers": [
+                    {{"digest": "{child_layer_digest}", "size": 34}}
+                ]
+            }}"#
+        );
+        let child_digest = cas_oci::prefixed_sha256_digest(child_manifest.as_bytes());
+        let child_size = child_manifest.len() as u64;
+        let child_tag = digest_tag(&child_digest);
+        state.oci_manifest_cache.insert(
+            child_tag,
+            Arc::new(OciManifestCacheEntry {
+                index_json: child_manifest.into_bytes(),
+                content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                manifest_digest: child_digest.clone(),
+                cache_entry_id: "entry-child".to_string(),
+                blobs: vec![],
+                name: "cache".to_string(),
+                inserted_at: Instant::now(),
+            }),
+        );
+
+        let index_json = serde_json::json!({
+            "schemaVersion": 2,
+            "manifests": [
+                {
+                    "digest": child_digest,
+                    "size": child_size,
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json"
+                }
+            ]
+        });
+
+        let blobs = expand_manifest_blob_descriptors(&state, "cache", &index_json)
+            .await
+            .expect("expand child descriptors");
+        let digests: Vec<&str> = blobs.iter().map(|blob| blob.digest.as_str()).collect();
+
+        assert_eq!(blobs.len(), 3);
+        assert!(digests.contains(&child_digest.as_str()));
+        assert!(digests.contains(&child_config_digest));
+        assert!(digests.contains(&child_layer_digest));
     }
 
     #[tokio::test]

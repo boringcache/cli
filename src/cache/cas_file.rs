@@ -243,12 +243,20 @@ fn validate_relative_path(relative: &str) -> Result<()> {
     validate_relative_path_components(Path::new(relative))
 }
 
-pub fn validate_symlink_target(root: &Path, destination: &Path, target: &Path) -> Result<()> {
+pub fn validate_symlink_target(
+    root: &Path,
+    destination: &Path,
+    target: &Path,
+    allow_external_symlinks: bool,
+) -> Result<()> {
     if target.as_os_str().is_empty() {
         return Err(anyhow!(
             "Symlink target is empty for {}",
             destination.display()
         ));
+    }
+    if allow_external_symlinks {
+        return Ok(());
     }
     if target.is_absolute() {
         return Err(absolute_symlink_target_error(destination, target));
@@ -378,14 +386,14 @@ mod tests {
     fn validate_symlink_target_allows_relative_target_inside_root() {
         let root = PathBuf::from("/tmp/root");
         let destination = root.join("nested/link");
-        validate_symlink_target(&root, &destination, Path::new("../file.txt")).unwrap();
+        validate_symlink_target(&root, &destination, Path::new("../file.txt"), false).unwrap();
     }
 
     #[test]
     fn validate_symlink_target_rejects_absolute_target() {
         let root = PathBuf::from("/tmp/root");
         let destination = root.join("nested/link");
-        let error = validate_symlink_target(&root, &destination, Path::new("/etc/passwd"))
+        let error = validate_symlink_target(&root, &destination, Path::new("/etc/passwd"), false)
             .unwrap_err()
             .to_string();
         assert!(error.contains("Absolute symlink target"));
@@ -395,10 +403,14 @@ mod tests {
     fn validate_symlink_target_hints_for_mise_shims() {
         let root = PathBuf::from("/tmp/root");
         let destination = root.join(".local/share/mise/shims/bundle");
-        let error =
-            validate_symlink_target(&root, &destination, Path::new("/tmp/root/.local/bin/mise"))
-                .unwrap_err()
-                .to_string();
+        let error = validate_symlink_target(
+            &root,
+            &destination,
+            Path::new("/tmp/root/.local/bin/mise"),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("Cache the mise installs directory instead of shims"));
         assert!(error.contains("mise reshim"));
     }
@@ -407,9 +419,18 @@ mod tests {
     fn validate_symlink_target_rejects_escape() {
         let root = PathBuf::from("/tmp/root");
         let destination = root.join("nested/link");
-        let error = validate_symlink_target(&root, &destination, Path::new("../../../secret"))
-            .unwrap_err()
-            .to_string();
+        let error =
+            validate_symlink_target(&root, &destination, Path::new("../../../secret"), false)
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("escapes restore root"));
+    }
+
+    #[test]
+    fn validate_symlink_target_allows_external_target_when_opted_in() {
+        let root = PathBuf::from("/tmp/root");
+        let destination = root.join("nested/link");
+        validate_symlink_target(&root, &destination, Path::new("../../../secret"), true).unwrap();
+        validate_symlink_target(&root, &destination, Path::new("/etc/passwd"), true).unwrap();
     }
 }

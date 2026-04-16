@@ -59,6 +59,7 @@ pub(super) async fn put_manifest(
     state: AppState,
     name: String,
     reference: String,
+    headers: HeaderMap,
     body: Body,
 ) -> Result<Response, OciError> {
     let manifest_body = axum::body::to_bytes(body, 32 * 1024 * 1024)
@@ -69,14 +70,21 @@ pub(super) async fn put_manifest(
     let index_json_base64 = STANDARD.encode(&manifest_body);
 
     let parsed: serde_json::Value = serde_json::from_slice(&manifest_body)
-        .map_err(|e| OciError::internal(format!("Invalid manifest JSON: {e}")))?;
+        .map_err(|e| OciError::manifest_invalid(format!("Invalid manifest JSON: {e}")))?;
+    let content_type = resolve_pushed_manifest_content_type(&headers, &parsed)?;
+    if reference.starts_with("sha256:") && !reference.eq_ignore_ascii_case(&manifest_digest) {
+        return Err(OciError::digest_invalid(format!(
+            "Manifest digest {manifest_digest} does not match requested reference {reference}"
+        )));
+    }
 
-    let blob_descriptors = extract_blob_descriptors_impl(&parsed)?;
+    let blob_descriptors = expand_manifest_blob_descriptors_impl(&state, &name, &parsed).await?;
     stage_manifest_reference_uploads_impl(&state, &name, &blob_descriptors, &parsed).await?;
 
     let pointer = cas_oci::OciPointer {
         format_version: 1,
         adapter: "oci-v1".to_string(),
+        manifest_content_type: Some(content_type.clone()),
         index_json_base64,
         oci_layout_base64: STANDARD.encode(br#"{"imageLayoutVersion":"1.0.0"}"#),
         blobs: blob_descriptors
@@ -271,7 +279,7 @@ pub(super) async fn put_manifest(
         {
             let cached = OciManifestCacheEntry {
                 index_json: manifest_body.clone(),
-                content_type: detect_manifest_content_type(&manifest_body),
+                content_type: content_type.clone(),
                 manifest_digest: manifest_digest.clone(),
                 cache_entry_id: save_response.cache_entry_id.clone(),
                 blobs: blob_descriptors.clone(),
@@ -347,6 +355,11 @@ pub(super) async fn put_manifest(
         "Location",
         &format!("/v2/{name}/manifests/{manifest_digest}"),
     )?;
+    insert_header(
+        &mut headers,
+        "Docker-Distribution-API-Version",
+        "registry/2.0",
+    )?;
     insert_header(&mut headers, "Content-Length", "0")?;
     if degraded_fallback {
         insert_header(&mut headers, OCI_DEGRADED_HEADER, "1")?;
@@ -365,6 +378,28 @@ pub(super) fn extract_blob_descriptors(
     manifest: &serde_json::Value,
 ) -> Result<Vec<BlobDescriptor>, OciError> {
     extract_blob_descriptors_impl(manifest)
+}
+
+#[cfg(test)]
+pub(super) async fn expand_manifest_blob_descriptors(
+    state: &AppState,
+    name: &str,
+    manifest: &serde_json::Value,
+) -> Result<Vec<BlobDescriptor>, OciError> {
+    expand_manifest_blob_descriptors_impl(state, name, manifest).await
+}
+
+#[cfg(test)]
+pub(super) fn detect_manifest_content_type_for_tests(json_bytes: &[u8]) -> String {
+    detect_manifest_content_type(json_bytes)
+}
+
+#[cfg(test)]
+pub(super) fn resolve_pushed_manifest_content_type_for_tests(
+    headers: &HeaderMap,
+    manifest: &serde_json::Value,
+) -> Result<String, OciError> {
+    resolve_pushed_manifest_content_type(headers, manifest)
 }
 
 #[cfg(test)]
@@ -516,7 +551,11 @@ async fn resolve_manifest(
     )
     .await;
 
-    let content_type = detect_manifest_content_type(&index_json);
+    let content_type = pointer
+        .manifest_content_type
+        .clone()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| detect_manifest_content_type(&index_json));
     let digest = cas_oci::prefixed_sha256_digest(&index_json);
     let resolved_entry_tag = entry.tag.clone();
     let cached = Arc::new(OciManifestCacheEntry {
@@ -650,12 +689,58 @@ fn lookup_oci_manifest_cache(
 }
 
 fn detect_manifest_content_type(json_bytes: &[u8]) -> String {
+    if let Some(media_type) = cas_oci::manifest_content_type_from_json_bytes(json_bytes) {
+        return media_type;
+    }
     if let Ok(val) = serde_json::from_slice::<serde_json::Value>(json_bytes)
         && val.get("manifests").is_some()
     {
         return "application/vnd.oci.image.index.v1+json".to_string();
     }
     "application/vnd.oci.image.manifest.v1+json".to_string()
+}
+
+fn resolve_pushed_manifest_content_type(
+    headers: &HeaderMap,
+    manifest: &serde_json::Value,
+) -> Result<String, OciError> {
+    let header_content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .map(|value| {
+            value.to_str().map_err(|e| {
+                OciError::manifest_invalid(format!("Invalid manifest Content-Type header: {e}"))
+            })
+        })
+        .transpose()?
+        .and_then(normalize_manifest_content_type);
+    let declared_media_type = cas_oci::manifest_declared_media_type(manifest);
+
+    if let (Some(header_content_type), Some(declared_media_type)) =
+        (header_content_type.as_deref(), declared_media_type)
+        && !header_content_type.eq_ignore_ascii_case(declared_media_type)
+    {
+        return Err(OciError::manifest_invalid(format!(
+            "Manifest Content-Type {header_content_type} does not match declared mediaType {declared_media_type}"
+        )));
+    }
+
+    if let Some(header_content_type) = header_content_type {
+        return Ok(header_content_type);
+    }
+    if let Some(declared_media_type) = declared_media_type {
+        return Ok(declared_media_type.to_string());
+    }
+    let manifest_bytes = serde_json::to_vec(manifest)
+        .map_err(|e| OciError::internal(format!("Failed to serialize manifest JSON: {e}")))?;
+    Ok(detect_manifest_content_type(&manifest_bytes))
+}
+
+fn normalize_manifest_content_type(value: &str) -> Option<String> {
+    let media_type = value.split(';').next()?.trim();
+    if media_type.is_empty() {
+        return None;
+    }
+    Some(media_type.to_string())
 }
 
 fn adaptive_blob_upload_concurrency_impl(operation_count: usize) -> usize {
@@ -731,6 +816,12 @@ fn extract_blob_descriptors_impl(
         }
     }
 
+    dedupe_blob_descriptors_impl(blobs)
+}
+
+fn dedupe_blob_descriptors_impl(
+    blobs: Vec<BlobDescriptor>,
+) -> Result<Vec<BlobDescriptor>, OciError> {
     let mut deduped: Vec<BlobDescriptor> = Vec::with_capacity(blobs.len());
     let mut positions: HashMap<String, usize> = HashMap::new();
     for descriptor in blobs {
@@ -752,6 +843,119 @@ fn extract_blob_descriptors_impl(
     Ok(deduped)
 }
 
+async fn expand_manifest_blob_descriptors_impl(
+    state: &AppState,
+    name: &str,
+    manifest: &serde_json::Value,
+) -> Result<Vec<BlobDescriptor>, OciError> {
+    let mut blobs = extract_blob_descriptors_impl(manifest)?;
+    let mut pending = manifest_child_descriptors(manifest);
+    let mut visited = HashSet::new();
+
+    while let Some(child_manifest) = pending.pop() {
+        if !visited.insert(child_manifest.digest.clone()) {
+            continue;
+        }
+
+        let child_manifest_bytes = load_manifest_bytes_by_digest(
+            state,
+            name,
+            &child_manifest.digest,
+            Some(child_manifest.size_bytes),
+        )
+        .await?;
+        let child_manifest: serde_json::Value = serde_json::from_slice(&child_manifest_bytes)
+            .map_err(|e| {
+                OciError::internal(format!(
+                    "Invalid child manifest JSON for {}: {}",
+                    child_manifest.digest, e
+                ))
+            })?;
+        blobs.extend(extract_blob_descriptors_impl(&child_manifest)?);
+        pending.extend(manifest_child_descriptors(&child_manifest));
+    }
+
+    dedupe_blob_descriptors_impl(blobs)
+}
+
+fn manifest_child_descriptors(manifest: &serde_json::Value) -> Vec<BlobDescriptor> {
+    manifest
+        .get("manifests")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|child| cas_oci::descriptor_is_manifest_reference(child))
+        .filter_map(|child| {
+            let digest = child.get("digest").and_then(|value| value.as_str())?;
+            let size_bytes = child.get("size").and_then(|value| value.as_u64())?;
+            Some(BlobDescriptor {
+                digest: digest.to_string(),
+                size_bytes,
+            })
+        })
+        .collect()
+}
+
+async fn load_manifest_bytes_by_digest(
+    state: &AppState,
+    name: &str,
+    digest: &str,
+    expected_size: Option<u64>,
+) -> Result<Vec<u8>, OciError> {
+    let digest_lookup_tag = digest_tag(digest);
+    let manifest_bytes = match lookup_oci_manifest_cache(state, &[digest_lookup_tag]) {
+        Some(cached) => cached.index_json.clone(),
+        None => {
+            let staged_path = {
+                let sessions = state.upload_sessions.read().await;
+                sessions
+                    .find_by_name_and_digest(name, digest)
+                    .or_else(|| sessions.find_by_digest(digest))
+                    .map(|session| session.temp_path.clone())
+            };
+
+            if let Some(temp_path) = staged_path {
+                tokio::fs::read(&temp_path).await.map_err(|e| {
+                    OciError::internal(format!(
+                        "Failed to read staged child manifest {}: {}",
+                        digest, e
+                    ))
+                })?
+            } else {
+                let (manifest_bytes, _content_type, resolved_digest) =
+                    resolve_manifest(state, name, digest, false).await?;
+                if resolved_digest != digest {
+                    return Err(OciError::internal(format!(
+                        "resolved child manifest digest mismatch for {}: got {}",
+                        digest, resolved_digest
+                    )));
+                }
+                manifest_bytes
+            }
+        }
+    };
+
+    let actual_digest = cas_oci::prefixed_sha256_digest(&manifest_bytes);
+    if actual_digest != digest {
+        return Err(OciError::internal(format!(
+            "child manifest digest mismatch for {}: got {}",
+            digest, actual_digest
+        )));
+    }
+
+    if let Some(expected_size) = expected_size {
+        let actual_size = manifest_bytes.len() as u64;
+        if actual_size != expected_size {
+            return Err(OciError::internal(format!(
+                "child manifest size mismatch for {}: expected {} got {}",
+                digest, expected_size, actual_size
+            )));
+        }
+    }
+
+    Ok(manifest_bytes)
+}
+
 async fn stage_manifest_reference_uploads_impl(
     state: &AppState,
     name: &str,
@@ -764,6 +968,7 @@ async fn stage_manifest_reference_uploads_impl(
 
     let manifest_digests: HashSet<&str> = manifests
         .iter()
+        .filter(|child| cas_oci::descriptor_is_manifest_reference(child))
         .filter_map(|child| child.get("digest").and_then(|value| value.as_str()))
         .collect();
 
@@ -786,37 +991,10 @@ async fn stage_manifest_reference_upload(
         return Ok(());
     }
 
-    let digest_tag = digest_tag(&descriptor.digest);
-    let manifest_bytes = match lookup_oci_manifest_cache(state, &[digest_tag]) {
-        Some(cached) => cached.index_json.clone(),
-        _ => {
-            let (manifest_bytes, _content_type, resolved_digest) =
-                resolve_manifest(state, name, &descriptor.digest, false).await?;
-            if resolved_digest != descriptor.digest {
-                return Err(OciError::internal(format!(
-                    "resolved child manifest digest mismatch for {}: got {}",
-                    descriptor.digest, resolved_digest
-                )));
-            }
-            manifest_bytes
-        }
-    };
-
-    let actual_digest = cas_oci::prefixed_sha256_digest(&manifest_bytes);
-    if actual_digest != descriptor.digest {
-        return Err(OciError::internal(format!(
-            "child manifest digest mismatch for {}: got {}",
-            descriptor.digest, actual_digest
-        )));
-    }
-
+    let manifest_bytes =
+        load_manifest_bytes_by_digest(state, name, &descriptor.digest, Some(descriptor.size_bytes))
+            .await?;
     let actual_size = manifest_bytes.len() as u64;
-    if actual_size != descriptor.size_bytes {
-        return Err(OciError::internal(format!(
-            "child manifest size mismatch for {}: expected {} got {}",
-            descriptor.digest, descriptor.size_bytes, actual_size
-        )));
-    }
 
     let temp_dir = state
         .runtime_temp_dir

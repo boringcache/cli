@@ -325,9 +325,15 @@ pub(super) async fn initial_restore_archive(
     }
     tokio::fs::create_dir_all(local_path).await?;
 
-    crate::cache::archive::extract_tar_archive(&final_archive_path, local_path, verbose, None)
-        .await
-        .context("Failed to extract archive")?;
+    crate::cache::archive::extract_tar_archive(
+        &final_archive_path,
+        local_path,
+        verbose,
+        false,
+        None,
+    )
+    .await
+    .context("Failed to extract archive")?;
 
     drop(decrypted_temp_path);
 

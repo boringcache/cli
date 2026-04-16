@@ -445,6 +445,7 @@ pub async fn adapter_execute(
             false,
             false,
             None,
+            false,
             fail_on_cache_error,
             require_server_signature,
         )

@@ -451,6 +451,7 @@ pub async fn execute(
             fail_on_cache_miss,
             false,
             identity.clone(),
+            false,
             fail_on_cache_error,
             require_server_signature,
         )

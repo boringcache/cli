@@ -151,7 +151,8 @@ pub(super) async fn initial_restore_file(
         .await?;
     }
 
-    materialize_file_cas_entries(local_path, &pointer.entries, &destination_by_digest).await?;
+    materialize_file_cas_entries(local_path, &pointer.entries, &destination_by_digest, false)
+        .await?;
 
     Ok(RestoreAction::Downloaded)
 }

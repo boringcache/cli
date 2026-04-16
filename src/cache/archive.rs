@@ -225,6 +225,7 @@ pub async fn extract_tar_archive(
     archive_path: &Path,
     target_path: &Path,
     verbose: bool,
+    allow_external_symlinks: bool,
     progress_callback: Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
 ) -> Result<()> {
     let start_time = Instant::now();
@@ -263,6 +264,7 @@ pub async fn extract_tar_archive(
             &archive_path,
             &target_path_owned,
             &extraction_config,
+            allow_external_symlinks,
             progress_callback,
         )
     })
@@ -380,6 +382,7 @@ fn extract_parallel(
     archive_path: &Path,
     target_path: &Path,
     config: &ExtractionConfig,
+    allow_external_symlinks: bool,
     progress_callback: Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
 ) -> Result<()> {
     use std::sync::mpsc;
@@ -560,6 +563,7 @@ fn extract_parallel(
                         &target_path,
                         &full_path,
                         &link_target,
+                        allow_external_symlinks,
                     )?;
                     job_tx
                         .send(ExtractJob::Symlink {
@@ -823,7 +827,7 @@ mod tests {
 
         let target_dir = tempfile::tempdir().unwrap();
         let restore_root = target_dir.path().join("restored");
-        extract_tar_archive(&archive.archive_path, &restore_root, false, None)
+        extract_tar_archive(&archive.archive_path, &restore_root, false, false, None)
             .await
             .unwrap();
 
@@ -837,6 +841,43 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(restore_root.join("hello.txt")).unwrap(),
             "hello\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn extract_archive_requires_opt_in_for_external_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let source_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source_dir.path().join("v10/projects/demo")).unwrap();
+        symlink(
+            "../../../../files/demo",
+            source_dir.path().join("v10/projects/demo/link"),
+        )
+        .unwrap();
+
+        let draft = ManifestBuilder::new(source_dir.path()).build().unwrap();
+        let archive = create_tar_archive(&draft, source_dir.path().to_str().unwrap(), false, None)
+            .await
+            .unwrap();
+
+        let blocked_target = tempfile::tempdir().unwrap();
+        let blocked_root = blocked_target.path().join("restored");
+        let error = extract_tar_archive(&archive.archive_path, &blocked_root, false, false, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("escapes restore root"));
+
+        let allowed_target = tempfile::tempdir().unwrap();
+        let allowed_root = allowed_target.path().join("restored");
+        extract_tar_archive(&archive.archive_path, &allowed_root, false, true, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_link(allowed_root.join("v10/projects/demo/link")).unwrap(),
+            PathBuf::from("../../../../files/demo")
         );
     }
 }

@@ -21,6 +21,7 @@ pub(super) async fn process_restore_file(
     hit: CacheResolutionEntry,
     target_path: String,
     verbose: bool,
+    allow_external_symlinks: bool,
     require_server_signature: bool,
 ) -> Result<RestoreOutcome> {
     match ensure_empty_target(&target_path).await? {
@@ -137,7 +138,13 @@ pub(super) async fn process_restore_file(
     let materialize_step = session.start_step("Materialize files".to_string(), None)?;
     let materialize_started = std::time::Instant::now();
     let target_root = Path::new(&target_path);
-    materialize_file_cas_entries(target_root, &pointer.entries, &blob_path_by_digest).await?;
+    materialize_file_cas_entries(
+        target_root,
+        &pointer.entries,
+        &blob_path_by_digest,
+        allow_external_symlinks,
+    )
+    .await?;
 
     materialize_step.complete()?;
     let materialize_elapsed = materialize_started.elapsed();

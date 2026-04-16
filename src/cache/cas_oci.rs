@@ -37,6 +37,8 @@ pub struct OciPointerBlob {
 pub struct OciPointer {
     pub format_version: u32,
     pub adapter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_content_type: Option<String>,
     pub index_json_base64: String,
     pub oci_layout_base64: String,
     pub blobs: Vec<OciPointerBlob>,
@@ -141,6 +143,7 @@ pub fn build_pointer(scan: &OciLayoutScan) -> Result<Vec<u8>> {
     let pointer = OciPointer {
         format_version: FORMAT_VERSION,
         adapter: ADAPTER.to_string(),
+        manifest_content_type: manifest_content_type_from_json_bytes(&scan.index_json),
         index_json_base64: STANDARD.encode(&scan.index_json),
         oci_layout_base64: STANDARD.encode(&scan.oci_layout),
         blobs: scan
@@ -308,6 +311,41 @@ fn descriptor_digest(node: &serde_json::Value) -> Option<&str> {
         .filter(|digest| is_valid_sha256_digest(digest))
 }
 
+pub(crate) fn descriptor_media_type(node: &serde_json::Value) -> Option<&str> {
+    node.get("mediaType")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn descriptor_is_manifest_reference(node: &serde_json::Value) -> bool {
+    descriptor_media_type(node).is_some_and(is_manifest_media_type)
+}
+
+pub(crate) fn manifest_content_type_from_json_bytes(json_bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(json_bytes).ok()?;
+    manifest_declared_media_type(&value).map(ToString::to_string)
+}
+
+pub(crate) fn manifest_declared_media_type(manifest: &serde_json::Value) -> Option<&str> {
+    manifest
+        .get("mediaType")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn is_manifest_media_type(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "application/vnd.oci.image.manifest.v1+json"
+            | "application/vnd.oci.image.index.v1+json"
+            | "application/vnd.oci.artifact.manifest.v1+json"
+            | "application/vnd.docker.distribution.manifest.v2+json"
+            | "application/vnd.docker.distribution.manifest.list.v2+json"
+    )
+}
+
 fn blob_path_for_digest(layout_root: &Path, digest: &str) -> Option<PathBuf> {
     let hex = digest_hex_component(digest)?;
     Some(
@@ -472,5 +510,16 @@ mod tests {
         assert!(!digest_matches(&hex, &hex));
         assert!(digest_matches(&prefixed, &hex));
         assert_eq!(digest_hex_component(&prefixed), Some(hex.as_str()));
+    }
+
+    #[test]
+    fn descriptor_is_manifest_reference_accepts_oci_artifact_manifest() {
+        let descriptor = serde_json::json!({
+            "mediaType": "application/vnd.oci.artifact.manifest.v1+json",
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "size": 123
+        });
+
+        assert!(descriptor_is_manifest_reference(&descriptor));
     }
 }

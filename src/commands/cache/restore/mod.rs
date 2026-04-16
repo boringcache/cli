@@ -391,6 +391,7 @@ pub async fn execute_batch_restore(
     fail_on_cache_miss: bool,
     lookup_only: bool,
     identity: Option<String>,
+    allow_external_symlinks: bool,
     fail_on_cache_error: bool,
     require_server_signature: bool,
 ) -> Result<()> {
@@ -404,6 +405,7 @@ pub async fn execute_batch_restore(
             fail_on_cache_miss,
             lookup_only,
             identity,
+            allow_external_symlinks,
             fail_on_cache_error,
             require_server_signature,
         )
@@ -424,6 +426,7 @@ async fn execute_batch_restore_inner(
     fail_on_cache_miss: bool,
     lookup_only: bool,
     identity: Option<String>,
+    allow_external_symlinks: bool,
     fail_on_cache_error: bool,
     require_server_signature: bool,
 ) -> Result<()> {
@@ -766,6 +769,7 @@ async fn execute_batch_restore_inner(
                 verbose,
                 identity,
                 passphrase_cache,
+                allow_external_symlinks,
                 require_server_signature,
             )
             .await;
@@ -1042,6 +1046,7 @@ async fn process_restore(
     verbose: bool,
     identity: Option<String>,
     passphrase_cache: Arc<Mutex<crate::encryption::PassphraseCache>>,
+    allow_external_symlinks: bool,
     require_server_signature: bool,
 ) -> Result<RestoreOutcome> {
     let restore_adapter = crate::cache_adapter::detect_restore_transport(
@@ -1093,6 +1098,7 @@ async fn process_restore(
                     verbose,
                     archive_identity,
                     archive_passphrase_cache,
+                    allow_external_symlinks,
                     require_server_signature,
                 )
             },
@@ -1119,6 +1125,7 @@ async fn process_restore(
                     hit,
                     target_path,
                     verbose,
+                    allow_external_symlinks,
                     require_server_signature,
                 )
             },

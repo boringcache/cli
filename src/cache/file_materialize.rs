@@ -25,6 +25,7 @@ pub(crate) async fn materialize_file_cas_entries(
     target_root: &Path,
     entries: &[crate::cas_file::FilePointerEntry],
     blob_path_by_digest: &HashMap<String, PathBuf>,
+    allow_external_symlinks: bool,
 ) -> Result<()> {
     fs::create_dir_all(target_root)
         .await
@@ -90,6 +91,7 @@ pub(crate) async fn materialize_file_cas_entries(
                     target_root,
                     &destination,
                     Path::new(&link_target),
+                    allow_external_symlinks,
                 )?;
                 symlink_jobs.push((destination, link_target));
             }

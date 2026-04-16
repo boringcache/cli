@@ -201,6 +201,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
                 args.fail_on_cache_miss,
                 args.lookup_only,
                 args.identity,
+                args.allow_external_symlinks,
                 args.fail_on_cache_error,
                 require_server_signature,
             )

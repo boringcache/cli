@@ -129,6 +129,7 @@ fn make_pointer(index_json: &[u8], blobs: &[(&str, u64)]) -> Vec<u8> {
     let pointer = cas_oci::OciPointer {
         format_version: 1,
         adapter: "oci-v1".to_string(),
+        manifest_content_type: None,
         index_json_base64: STANDARD.encode(index_json),
         oci_layout_base64: STANDARD.encode(br#"{"imageLayoutVersion":"1.0.0"}"#),
         blobs: blobs
@@ -2150,6 +2151,69 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
     latest_alias_save_mock.assert_async().await;
     latest_alias_pointer_mock.assert_async().await;
     latest_alias_confirm_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_manifest_put_by_digest_rejects_mismatched_digest_reference() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::PUT)
+            .uri(
+                "/v2/my-cache/manifests/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .body(Body::from(br#"{"schemaVersion":2}"#.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("\"DIGEST_INVALID\""));
+}
+
+#[tokio::test]
+async fn test_manifest_put_rejects_invalid_json_body() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v2/my-cache/manifests/main")
+            .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+            .body(Body::from("{not-json"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("\"MANIFEST_INVALID\""));
 }
 
 #[tokio::test]
