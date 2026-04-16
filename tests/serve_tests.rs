@@ -621,6 +621,45 @@ async fn test_proxy_status_reports_warming_phase() {
 }
 
 #[tokio::test]
+async fn test_proxy_status_reports_error_phase() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    state
+        .prefetch_complete
+        .store(false, std::sync::atomic::Ordering::Release);
+    {
+        let mut prefetch_error = state.prefetch_error.write().await;
+        *prefetch_error = Some("cache index load failed".to_string());
+    }
+    let app = build_router(state.clone());
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri("/_boringcache/status")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("X-BoringCache-Proxy-Phase")
+            .and_then(|value| value.to_str().ok()),
+        Some("error")
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status["phase"], "error");
+    assert_eq!(status["prefetch_error"], "cache index load failed");
+    assert_eq!(status["prefetch_complete"], false);
+}
+
+#[tokio::test]
 async fn test_proxy_status_reports_pending_publish_when_entries_buffered() {
     let server = Server::new_async().await;
     let (state, home, _guard) = setup(&server).await;

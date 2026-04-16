@@ -24,7 +24,7 @@ Product shape:
 
 Headers:
 
-- `X-BoringCache-Proxy-Phase`: `warming`, `ready`, or `draining`
+- `X-BoringCache-Proxy-Phase`: `warming`, `ready`, `error`, or `draining`
 - `X-BoringCache-Publish-State`: `pending` or `settled`
 
 JSON body fields:
@@ -46,6 +46,7 @@ JSON body fields:
 
 - `warming`: the proxy is up, but startup warming has not completed yet
 - `ready`: startup warming has completed and shutdown has not started
+- `error`: startup warming failed in strict mode; operations should fail fast
 - `draining`: shutdown has started and the proxy may still be flushing or waiting for tag visibility
 
 `phase=ready` is the HTTP readiness gate for external lifecycle inspection.
