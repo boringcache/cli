@@ -214,7 +214,9 @@ RESTORE_FILE_DIR="${CLI_LOG_DIR}/restore-file"
 MOUNT_SRC_DIR="${CLI_LOG_DIR}/mount-src"
 MOUNT_WATCH_DIR="${CLI_LOG_DIR}/mount-watch"
 MOUNT_RESTORE_DIR="${CLI_LOG_DIR}/mount-restore"
+MOUNT_READINESS_DIR="${CLI_LOG_DIR}/mount-readiness"
 MOUNT_LOG="${CLI_LOG_DIR}/mount.log"
+MOUNT_READINESS_LOG="${CLI_LOG_DIR}/mount-readiness.log"
 IDENTITY_FILE="${CLI_LOG_DIR}/age-identity.txt"
 MISSING_TAG="${TAG_ROOT}-missing"
 
@@ -456,16 +458,36 @@ printf 'mount-initial-%s\n' "${RUN_SHA}" > "${MOUNT_SRC_DIR}/file.txt"
 "${CLI}" save "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_SRC_DIR}" > "${CLI_LOG_DIR}/mount-save.log"
 
 encrypted_visible=0
-for _ in $(seq 1 10); do
+mount_tag_visible=0
+mount_tag_ready=0
+for _ in $(seq 1 30); do
   "${CLI}" ls "${WORKSPACE}" --limit 500 --json > "${CLI_LOG_DIR}/ls-after-encryption.json"
+  if jq -e --arg tag "${TAG_MOUNT}" '.entries[]? | select(.tag == $tag)' "${CLI_LOG_DIR}/ls-after-encryption.json" >/dev/null; then
+    mount_tag_visible=1
+  fi
   if jq -e --arg tag "${TAG_MOUNT}" '.entries[]? | select(.tag == $tag and .encrypted == true)' "${CLI_LOG_DIR}/ls-after-encryption.json" >/dev/null; then
     encrypted_visible=1
     break
   fi
+  if [[ "${mount_tag_visible}" == "1" ]]; then
+    rm -rf "${MOUNT_READINESS_DIR}"
+    mkdir -p "${MOUNT_READINESS_DIR}"
+    if "${CLI}" restore "${E2E_TAG_SCOPE_FLAGS[@]}" --identity "${IDENTITY_FILE}" --lookup-only --fail-on-cache-miss "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_READINESS_DIR}" > "${MOUNT_READINESS_LOG}" 2>&1; then
+      mount_tag_ready=1
+    fi
+  fi
   sleep 1
 done
 if [[ "${encrypted_visible}" != "1" ]]; then
-  echo "encrypted entry for ${TAG_MOUNT} was not visible in ls output"
+  if [[ "${mount_tag_visible}" == "1" ]]; then
+    if [[ "${mount_tag_ready}" == "1" ]]; then
+      echo "tag ${TAG_MOUNT} is visible in ls output and restore is ready, but encrypted flag is still false"
+    else
+      echo "tag ${TAG_MOUNT} is visible in ls output but still not ready for restore"
+    fi
+  else
+    echo "encrypted entry for ${TAG_MOUNT} was not visible in ls output"
+  fi
   cat "${CLI_LOG_DIR}/ls-after-encryption.json"
   exit 1
 fi
