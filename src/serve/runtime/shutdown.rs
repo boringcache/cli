@@ -105,7 +105,10 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
                         eprintln!("Shutdown: deferred pending upload flush via restart handoff");
                         return;
                     }
-                    cache_registry::FlushResult::Conflict | cache_registry::FlushResult::Error => {}
+                    cache_registry::FlushResult::Conflict | cache_registry::FlushResult::Error => {
+                        let mut gate = state.kv_next_flush_at.write().await;
+                        *gate = None;
+                    }
                 }
             }
             None => {
@@ -124,14 +127,7 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
             return;
         }
 
-        let delay = {
-            let gate = state.kv_next_flush_at.read().await;
-            match *gate {
-                Some(next) => next.saturating_duration_since(std::time::Instant::now()),
-                None => std::time::Duration::from_secs(1),
-            }
-        };
-        tokio::time::sleep(delay.min(std::time::Duration::from_secs(10))).await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
 

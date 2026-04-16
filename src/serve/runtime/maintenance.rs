@@ -175,6 +175,9 @@ pub(super) fn spawn_maintenance_tasks(
                     urgent = true;
                 }
             }
+            if replication_state.shutdown_requested.load(Ordering::Acquire) {
+                continue;
+            }
             process_replication_work(&replication_state, urgent, &mut consecutive_failures).await;
         }
     });
@@ -185,6 +188,9 @@ pub(super) fn spawn_maintenance_tasks(
         interval.tick().await;
         loop {
             interval.tick().await;
+            if sweep_state.shutdown_requested.load(Ordering::Acquire) {
+                continue;
+            }
             let pending_count = {
                 let pending = sweep_state.kv_pending.read().await;
                 pending.entry_count()
