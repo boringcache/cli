@@ -205,7 +205,7 @@ pub(super) async fn put_manifest(
     }
     .await;
 
-    cleanup_blob_sessions(&state, &blob_descriptors).await;
+    cleanup_blob_sessions(&state, &name, &blob_descriptors).await;
     let mut degraded_fallback = false;
     let mut subject_processed = false;
 
@@ -1510,10 +1510,12 @@ async fn stage_manifest_reference_upload(
     Ok(())
 }
 
-async fn cleanup_blob_sessions(state: &AppState, blob_descriptors: &[BlobDescriptor]) {
+async fn cleanup_blob_sessions(state: &AppState, name: &str, blob_descriptors: &[BlobDescriptor]) {
     let mut sessions = state.upload_sessions.write().await;
     for blob in blob_descriptors {
-        if let Some(session) = sessions.find_by_digest(&blob.digest).map(|s| s.id.clone())
+        if let Some(session) = sessions
+            .find_by_name_and_digest(name, &blob.digest)
+            .map(|s| s.id.clone())
             && let Some(removed) = sessions.remove(&session)
         {
             let _ = tokio::fs::remove_file(&removed.temp_path).await;
