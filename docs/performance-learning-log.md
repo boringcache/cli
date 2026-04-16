@@ -128,6 +128,39 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Measure whether the new OCI inflight dedupe meaningfully reduces restore, pointer, download-url, and blob-fetch fan-out under concurrent reader load.
   - Add an E2E BuildKit OCI-spec mirror that covers manifest PUT validation, resumable upload edge cases, warm restart behavior, and cache import/export parity.
 
+## 2026-04-16 - shutdown flush stall and session cleanup race
+
+- Symptom:
+  - Proxy runs with writes occasionally took 180s to shut down instead of the expected 10–15s.
+  - `cleanup_blob_sessions` used global `find_by_digest`, which could remove upload sessions belonging to a different OCI repository during concurrent multi-repo manifest pushes.
+- Root cause (shutdown):
+  - After a Conflict or transient Error during `flush_pending_on_shutdown`, the normal-mode backoff gate (`kv_next_flush_at`) was inherited by the shutdown loop, causing up to 10s sleep per retry iteration.
+  - The replication worker did not check `shutdown_requested` and could hold `kv_flush_lock` during a slow network flush while the shutdown path waited for the lock.
+  - The sweep task continued enqueuing new flush hints after shutdown was requested.
+- Root cause (session cleanup):
+  - `cleanup_blob_sessions` called `find_by_digest` (global) instead of `find_by_name_and_digest`, so a completed manifest push for repo A could remove the staged session for repo B if they shared a blob digest.
+- Product-side changes:
+  - Clear `kv_next_flush_at` on Conflict/Error during shutdown flush loop so retries happen immediately.
+  - Use a fixed 1s retry interval during shutdown instead of reading the normal-mode backoff gate.
+  - Skip replication worker flush processing and sweep task enqueuing once `shutdown_requested` is set.
+  - Scope `cleanup_blob_sessions` by repository name using `find_by_name_and_digest`.
+- Guardrail:
+  - Shutdown flush path should never inherit normal-mode backoff timing. Background maintenance tasks must check `shutdown_requested` before acquiring `kv_flush_lock`.
+  - Upload session lookups should always be scoped by repository name. Global `find_by_digest` is only safe for read-only queries where cross-repo hits are acceptable.
+
+## 2026-04-16 - OCI manifest confirm pending as best-effort error
+
+- Symptom:
+  - OCI manifest PUT failed when the backend deferred publish via `423 pending_publish`, because the old code path did not handle that lifecycle state.
+- Root cause:
+  - OCI path used plain `confirm()` which returned a hard error on `423`. It did not wait for the server-owned pending publish lifecycle to settle.
+- Product-side changes:
+  - Switch OCI manifest confirm and alias bind to `confirm_wait_for_publish_or_pending_timeout`, which waits for the publish lifecycle to settle.
+  - Treat `Pending` outcome as an internal error (`500`) that triggers best-effort degraded fallback when `fail_on_cache_error` is false.
+  - Check for `prefetch_error` after `Notify` wakeup in `await_startup_prefetch_readiness` to avoid an unnecessary loop iteration on error.
+- Guardrail:
+  - OCI confirm paths should use the pending-aware confirm variant. A pending publish outcome is a degraded result, not a crash.
+
 ## Merge Checklist For Cache-Registry Changes
 
 Before merging changes touching `src/serve/cache_registry/*`, `src/serve/mod.rs`, or publish/confirm client paths:
