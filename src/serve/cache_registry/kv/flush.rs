@@ -712,12 +712,14 @@ pub(crate) async fn do_flush(
 
     let upload_stats_holder = Arc::new(std::sync::Mutex::new(BlobUploadStats::default()));
     let publish_upload_stats = upload_stats_holder.clone();
+    let all_blob_digests: Vec<String> = blobs.iter().map(|b| b.digest.clone()).collect();
     let confirm_outcome = crate::serve::cas_publish::publish_after_save(
         &state.api_client,
         &state.workspace,
         &save_response,
         manifest_root_digest.clone(),
         expected_manifest_size,
+        Some(all_blob_digests),
         |save_response| {
             let cache_entry_id = save_response.cache_entry_id.clone();
             let upload_session_id = save_response.upload_session_id.clone();

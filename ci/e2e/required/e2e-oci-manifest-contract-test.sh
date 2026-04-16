@@ -39,7 +39,7 @@ require_save_capable_token
 bootstrap_cli_session "${BINARY}" "${WORKSPACE}" "${API_URL}" "${LOG_DIR}/auth.log" admin
 
 cat >"${MANIFEST_FILE}" <<EOF
-{"schemaVersion":2,"mediaType":"application/vnd.oci.artifact.manifest.v1+json","artifactType":"${ARTIFACT_TYPE}","blobs":[],"subject":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"${SUBJECT_DIGEST}","size":123},"annotations":{"org.example.kind":"sbom"}}
+{"schemaVersion":2,"mediaType":"application/vnd.oci.artifact.manifest.v1+json","artifactType":"${ARTIFACT_TYPE}","blobs":[],"subject":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"${SUBJECT_DIGEST}","size":123},"annotations":{"org.example.kind":"sbom","org.example.run":"${RUN_ID}-${RUN_ATTEMPT}"}}
 EOF
 
 MANIFEST_DIGEST="sha256:$(sha256_file_hex "${MANIFEST_FILE}")"
@@ -58,7 +58,7 @@ assert_header() {
   local headers="$1"
   local name="$2"
   local expected="$3"
-  if ! grep -Eiq "^${name}: ${expected}" "${headers}"; then
+  if ! grep -Fqi -- "${name}: ${expected}" "${headers}"; then
     echo "ASSERT FAILED: expected header ${name}: ${expected}"
     cat "${headers}"
     exit 1

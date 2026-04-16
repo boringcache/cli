@@ -110,7 +110,7 @@ pub(crate) async fn upload_missing_blobs(
                 .acquire_owned()
                 .await
                 .map_err(|error| anyhow!("CAS upload semaphore closed: {error}"))?;
-            let (_etag, metrics) = crate::multipart_upload::upload_via_single_url(
+            let (etag, metrics) = crate::multipart_upload::upload_via_single_url(
                 &upload_item.path,
                 &upload_item.url,
                 &progress,
@@ -119,15 +119,19 @@ pub(crate) async fn upload_missing_blobs(
             )
             .await
             .with_context(|| format!("Failed to upload blob {}", upload_item.path.display()))?;
-            Ok::<(String, StorageMetrics), anyhow::Error>((upload_item.digest, metrics))
+            Ok::<(String, Option<String>, StorageMetrics), anyhow::Error>((
+                upload_item.digest,
+                etag,
+                metrics,
+            ))
         });
         tasks.push(task);
     }
 
     let mut outcome = BlobUploadOutcome::default();
     for task in tasks {
-        let (digest, metrics) = task.await.context("Blob upload task panicked")??;
-        outcome.receipts.push(BlobReceipt { digest, etag: None });
+        let (digest, etag, metrics) = task.await.context("Blob upload task panicked")??;
+        outcome.receipts.push(BlobReceipt { digest, etag });
         if outcome.storage_metrics.region.is_none() {
             outcome.storage_metrics = metrics;
         }
@@ -251,6 +255,7 @@ pub(crate) async fn upload_missing_blobs_and_manifest(
     workspace: &str,
     save_response: &SaveResponse,
     missing_blobs: &[BlobDescriptor],
+    all_blob_digests: &[String],
     blob_sources: &HashMap<String, BlobUploadSource>,
     pointer_bytes: &[u8],
     manifest_digest: String,
@@ -289,6 +294,11 @@ pub(crate) async fn upload_missing_blobs_and_manifest(
         &save_response.upload_headers,
     )
     .await?;
+    let blob_digests = if all_blob_digests.is_empty() {
+        None
+    } else {
+        Some(all_blob_digests.to_vec())
+    };
     maybe_commit_manifest_receipt(
         api_client,
         workspace,
@@ -296,6 +306,7 @@ pub(crate) async fn upload_missing_blobs_and_manifest(
         manifest_digest,
         manifest_size,
         manifest_etag.clone(),
+        blob_digests,
     )
     .await;
     result.manifest_etag = manifest_etag;

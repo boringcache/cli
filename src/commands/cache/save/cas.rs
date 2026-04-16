@@ -295,6 +295,7 @@ where
     .await?;
     index_step.complete()?;
 
+    let all_blob_digests: Vec<String> = bundle.blobs.iter().map(|b| b.digest.clone()).collect();
     maybe_commit_manifest_receipt(
         &api_client,
         &workspace,
@@ -302,6 +303,7 @@ where
         bundle.confirm_spec.manifest_digest.clone(),
         bundle.confirm_spec.manifest_size,
         manifest_etag.clone(),
+        Some(all_blob_digests),
     )
     .await;
 

@@ -36,6 +36,7 @@ pub(crate) async fn publish_after_save<
     save_response: &SaveResponse,
     manifest_digest: String,
     manifest_size: u64,
+    blob_digests: Option<Vec<String>>,
     upload_blobs: UploadBlobs,
     upload_manifest: UploadManifest,
     confirm: Confirm,
@@ -68,6 +69,7 @@ where
             manifest_digest,
             manifest_size,
             manifest_etag.clone(),
+            blob_digests,
         )
         .await;
         manifest_etag

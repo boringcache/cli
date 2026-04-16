@@ -494,6 +494,8 @@ pub struct ManifestReceiptCommitRequest {
     pub manifest_size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_etag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_digests: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]

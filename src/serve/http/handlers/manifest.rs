@@ -767,12 +767,14 @@ async fn persist_manifest_entry(
     let confirm_manifest_digest = manifest_root_digest.clone();
     let confirm_manifest_size = pointer_bytes.len() as u64;
     let confirm_file_count = request_blob_count.min(u32::MAX as u64) as u32;
+    let all_blob_digests: Vec<String> = blob_descriptors.iter().map(|b| b.digest.clone()).collect();
     crate::serve::cas_publish::publish_after_save(
         &state.api_client,
         &state.workspace,
         &save_response,
         manifest_root_digest.clone(),
         pointer_bytes.len() as u64,
+        Some(all_blob_digests),
         move |save_response| {
             let state = blob_state.clone();
             let blob_descriptors = publish_blob_descriptors.clone();

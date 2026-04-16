@@ -98,11 +98,13 @@ pub(super) async fn sync_to_remote_cas(
         ui::info("  Uploading CAS index...");
     }
 
+    let all_blob_digests: Vec<String> = bundle.blobs.iter().map(|b| b.digest.clone()).collect();
     let publish_result = cas_publish::upload_missing_blobs_and_manifest(
         api_client,
         workspace,
         &save_response,
         &missing_blobs,
+        &all_blob_digests,
         &bundle.blob_sources,
         &bundle.pointer_bytes,
         bundle.confirm_spec.manifest_digest.clone(),

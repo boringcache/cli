@@ -211,6 +211,7 @@ mod request_validation {
             manifest_digest: "sha256:manifest123".to_string(),
             manifest_size: 8192,
             manifest_etag: Some("\"manifest-etag\"".to_string()),
+            blob_digests: Some(vec!["sha256:blob1".to_string(), "sha256:blob2".to_string()]),
         };
 
         let json = serde_json::to_value(&request).unwrap();
@@ -218,14 +219,18 @@ mod request_validation {
         assert_eq!(json.get("manifest_digest").unwrap(), "sha256:manifest123");
         assert_eq!(json.get("manifest_size").unwrap(), 8192);
         assert_eq!(json.get("manifest_etag").unwrap(), "\"manifest-etag\"");
+        let digests = json.get("blob_digests").unwrap().as_array().unwrap();
+        assert_eq!(digests.len(), 2);
+        assert_eq!(digests[0], "sha256:blob1");
     }
 
     #[test]
-    fn test_manifest_receipt_commit_request_omits_null_etag() {
+    fn test_manifest_receipt_commit_request_omits_null_fields() {
         let request = ManifestReceiptCommitRequest {
             manifest_digest: "sha256:manifest123".to_string(),
             manifest_size: 4096,
             manifest_etag: None,
+            blob_digests: None,
         };
 
         let json = serde_json::to_value(&request).unwrap();
@@ -234,6 +239,7 @@ mod request_validation {
         assert!(json.get("manifest_digest").is_some());
         assert!(json.get("manifest_size").is_some());
         assert!(json.get("manifest_etag").is_none());
+        assert!(json.get("blob_digests").is_none());
     }
 
     #[test]

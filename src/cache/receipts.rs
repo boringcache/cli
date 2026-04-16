@@ -25,12 +25,14 @@ pub async fn try_commit_manifest_receipt(
     manifest_digest: String,
     manifest_size: u64,
     manifest_etag: Option<String>,
+    blob_digests: Option<Vec<String>>,
 ) -> Result<()> {
     if let Some(upload_session_id) = upload_session_id {
         let request = ManifestReceiptCommitRequest {
             manifest_digest,
             manifest_size,
             manifest_etag,
+            blob_digests,
         };
         api_client
             .commit_manifest_receipt(workspace, upload_session_id, &request)
@@ -60,6 +62,7 @@ pub async fn maybe_commit_manifest_receipt(
     manifest_digest: String,
     manifest_size: u64,
     manifest_etag: Option<String>,
+    blob_digests: Option<Vec<String>>,
 ) {
     if let Err(error) = try_commit_manifest_receipt(
         api_client,
@@ -68,6 +71,7 @@ pub async fn maybe_commit_manifest_receipt(
         manifest_digest,
         manifest_size,
         manifest_etag,
+        blob_digests,
     )
     .await
     {
