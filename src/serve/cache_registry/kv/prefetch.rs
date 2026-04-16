@@ -282,7 +282,6 @@ pub(crate) async fn preload_single_blob(
     cache_entry_id: String,
     blob: BlobDescriptor,
     cached_url: Option<String>,
-    acquired_permit: &tokio::sync::OwnedSemaphorePermit,
 ) -> anyhow::Result<bool> {
     if state
         .blob_read_cache
@@ -295,15 +294,7 @@ pub(crate) async fn preload_single_blob(
 
     let mut retry_delay = std::time::Duration::from_millis(250);
     for attempt in 1..=4 {
-        match download_blob_to_cache_with_permit(
-            &state,
-            &cache_entry_id,
-            &blob,
-            cached_url.as_deref(),
-            acquired_permit,
-        )
-        .await
-        {
+        match download_blob_to_cache(&state, &cache_entry_id, &blob, cached_url.as_deref()).await {
             Ok(_) => return Ok(true),
             Err(error)
                 if attempt < 4
@@ -397,14 +388,8 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
                 .acquire_owned()
                 .await
                 .map_err(|error| anyhow::anyhow!("prefetch semaphore closed: {error}"))?;
-            let result = preload_single_blob(
-                state,
-                cache_entry_id,
-                target.blob,
-                target.cached_url,
-                &prefetch_permit,
-            )
-            .await;
+            let result =
+                preload_single_blob(state, cache_entry_id, target.blob, target.cached_url).await;
             drop(prefetch_permit);
             result
         });
@@ -685,14 +670,8 @@ pub(crate) async fn prefetch_all_blobs(
                 .acquire_owned()
                 .await
                 .map_err(|error| anyhow::anyhow!("prefetch semaphore closed: {error}"))?;
-            let result = preload_single_blob(
-                state,
-                cache_entry_id,
-                target.blob,
-                target.cached_url,
-                &prefetch_permit,
-            )
-            .await;
+            let result =
+                preload_single_blob(state, cache_entry_id, target.blob, target.cached_url).await;
             drop(prefetch_permit);
             result
         });

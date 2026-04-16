@@ -450,10 +450,9 @@ async fn load_published_turborepo_metadata(
         return Ok(None);
     };
 
-    let handle =
-        do_download_blob_to_cache(state, &cache_entry_id, &blob, cached_url.as_deref(), None)
-            .await?
-            .0;
+    let handle = do_download_blob_to_cache(state, &cache_entry_id, &blob, cached_url.as_deref())
+        .await?
+        .0;
     let bytes =
         read_metadata_blob_bytes(handle.path(), handle.offset(), handle.size_bytes()).await?;
     parse_turborepo_metadata(&bytes).map(Some)
