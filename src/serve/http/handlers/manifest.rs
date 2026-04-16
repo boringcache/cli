@@ -9,6 +9,7 @@ use std::time::Instant;
 use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
 use crate::cas_transport::upload_payload;
+use crate::error::PendingMetadata;
 use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
 use crate::serve::http::oci_route::insert_header;
@@ -44,6 +45,24 @@ struct PersistManifestEntryInput<'a> {
     blob_descriptors: Vec<BlobDescriptor>,
     configured_human_tags: &'a [String],
     additional_aliases: &'a [AliasBinding],
+}
+
+fn pending_publish_message(
+    prefix: &str,
+    tag: &str,
+    cache_entry_id: &str,
+    metadata: &PendingMetadata,
+) -> String {
+    let upload_session = metadata.upload_session_id.as_deref().unwrap_or("<unknown>");
+    let publish_attempt = metadata
+        .publish_attempt_id
+        .as_deref()
+        .unwrap_or("<unknown>");
+    let poll_path = metadata.poll_path.as_deref().unwrap_or("<unknown>");
+    let retry_after = metadata.retry_after_seconds.unwrap_or(0);
+    format!(
+        "{prefix} for {tag}:{cache_entry_id} (upload_session_id={upload_session}, publish_attempt_id={publish_attempt}, poll_path={poll_path}, retry_after_seconds={retry_after})"
+    )
 }
 
 pub(super) async fn get_manifest(
@@ -866,9 +885,11 @@ async fn persist_manifest_entry(
                 {
                     Ok(crate::api::client::ConfirmPublishResult::Published(_)) => {}
                     Ok(crate::api::client::ConfirmPublishResult::Pending(metadata)) => {
-                        return Err(OciError::internal(format!(
-                            "confirm deferred for {tag_for_error}:{cache_entry_id} ({:?})",
-                            metadata
+                        return Err(OciError::locked(pending_publish_message(
+                            "confirm deferred",
+                            &tag_for_error,
+                            &cache_entry_id,
+                            &metadata,
                         )));
                     }
                     Err(error) => {

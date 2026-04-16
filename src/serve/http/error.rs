@@ -87,6 +87,10 @@ impl OciError {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", detail)
     }
 
+    pub fn locked(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::LOCKED, "LOCKED", detail)
+    }
+
     pub fn unsupported(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "UNSUPPORTED", detail)
     }

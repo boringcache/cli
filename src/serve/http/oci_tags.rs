@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use super::error::OciError;
 use crate::api::models::cache::SaveRequest;
+use crate::error::PendingMetadata;
 use crate::serve::state::{AppState, digest_tag, ref_tag_for_input};
 use crate::tag_utils::TagResolver;
 
@@ -53,6 +54,23 @@ pub(crate) struct AliasTagManifest {
     pub blob_count: u64,
     pub blob_total_size_bytes: u64,
     pub total_size_bytes: u64,
+}
+
+fn pending_publish_message(
+    tag: &str,
+    manifest_entry_id: &str,
+    metadata: &PendingMetadata,
+) -> String {
+    let upload_session = metadata.upload_session_id.as_deref().unwrap_or("<unknown>");
+    let publish_attempt = metadata
+        .publish_attempt_id
+        .as_deref()
+        .unwrap_or("<unknown>");
+    let poll_path = metadata.poll_path.as_deref().unwrap_or("<unknown>");
+    let retry_after = metadata.retry_after_seconds.unwrap_or(0);
+    format!(
+        "confirm deferred for {tag} ({manifest_entry_id}) (upload_session_id={upload_session}, publish_attempt_id={publish_attempt}, poll_path={poll_path}, retry_after_seconds={retry_after})"
+    )
 }
 
 pub(crate) fn alias_tags_for_manifest(
@@ -154,7 +172,11 @@ pub(crate) async fn bind_alias_tag(
     {
         Ok(crate::api::client::ConfirmPublishResult::Published(_)) => {}
         Ok(crate::api::client::ConfirmPublishResult::Pending(metadata)) => {
-            return Err(format!("confirm deferred: ({:?})", metadata));
+            return Err(pending_publish_message(
+                alias_tag,
+                &response.cache_entry_id,
+                &metadata,
+            ));
         }
         Err(error) => {
             return Err(format!("confirm failed: {error}"));
