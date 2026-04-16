@@ -557,7 +557,6 @@ async fn validate_manifest_blob_availability(
                 sessions
                     .find_by_name_and_digest(name, &descriptor.digest)
                     .is_none()
-                    && sessions.find_by_digest(&descriptor.digest).is_none()
             })
             .cloned()
             .collect::<Vec<_>>()
@@ -1251,6 +1250,8 @@ fn extract_blob_descriptors_impl(
         }
     }
 
+    // `blobs` is a BoringCache extension used by artifact workflows
+    // to express content blobs that are outside the OCI image/index schema.
     if let Some(extra_blobs) = manifest.get("blobs").and_then(|value| value.as_array()) {
         for blob in extra_blobs {
             if let (Some(digest), Some(size)) = (
@@ -1364,7 +1365,6 @@ async fn load_manifest_bytes_by_digest(
                 let sessions = state.upload_sessions.read().await;
                 sessions
                     .find_by_name_and_digest(name, digest)
-                    .or_else(|| sessions.find_by_digest(digest))
                     .map(|session| session.temp_path.clone())
             };
 
@@ -1473,7 +1473,6 @@ async fn stage_manifest_reference_upload(
     if sessions
         .find_by_name_and_digest(name, &descriptor.digest)
         .is_some()
-        || sessions.find_by_digest(&descriptor.digest).is_some()
     {
         drop(sessions);
         let _ = tokio::fs::remove_file(&temp_path).await;

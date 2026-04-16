@@ -2795,7 +2795,7 @@ async fn test_manifest_put_rejects_missing_blob_with_blob_unknown_even_in_best_e
     assert!(response.headers().get("X-BoringCache-Degraded").is_none());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(parsed["errors"][0]["code"], "BLOB_UNKNOWN");
+    assert_eq!(parsed["errors"][0]["code"], "MANIFEST_BLOB_UNKNOWN");
     assert_eq!(parsed["errors"][0]["detail"]["digest"], missing_digest);
 
     check_mock.assert_async().await;
@@ -2868,7 +2868,7 @@ async fn test_manifest_put_rejects_missing_artifact_blob_with_blob_unknown() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(parsed["errors"][0]["code"], "BLOB_UNKNOWN");
+    assert_eq!(parsed["errors"][0]["code"], "MANIFEST_BLOB_UNKNOWN");
     assert_eq!(parsed["errors"][0]["detail"]["digest"], missing_digest);
 
     check_mock.assert_async().await;

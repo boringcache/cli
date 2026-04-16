@@ -69,7 +69,7 @@ impl OciError {
         };
         Self::new_with_detail(
             StatusCode::BAD_REQUEST,
-            "BLOB_UNKNOWN",
+            "MANIFEST_BLOB_UNKNOWN",
             "blob unknown to registry",
             Some(detail),
         )

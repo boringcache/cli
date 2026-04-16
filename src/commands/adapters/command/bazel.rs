@@ -33,7 +33,8 @@ fn prepare_command(
     }
 
     let mut prepared = command.to_vec();
-    prepared.splice(bazel_insert_at(command)..bazel_insert_at(command), injected);
+    let insert_at = bazel_insert_at(command);
+    prepared.splice(insert_at..insert_at, injected);
     Ok(prepared)
 }
 

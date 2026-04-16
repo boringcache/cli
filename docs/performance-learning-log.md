@@ -119,7 +119,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Added explicit startup OCI prewarm via `--oci-prefetch-ref` for selected `repo@ref` pairs, which seeds both manifest and blob locator state during startup when not using `--on-demand`.
 
 - Spec cross-check:
-  - Distribution manifest pushes should fail with `400 BLOB_UNKNOWN` when referenced blobs are missing.
+- Distribution manifest pushes should fail with `400 MANIFEST_BLOB_UNKNOWN` when referenced blobs are missing.
   - Distribution resumable blob uploads should reject stale or out-of-order chunk offsets with `416 Requested Range Not Satisfiable`.
   - OCI 1.1 subject-aware manifest pushes should return `OCI-Subject` when the registry supports referrers processing.
 - Current gaps:
