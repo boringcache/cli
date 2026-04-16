@@ -836,6 +836,7 @@ async fn persist_manifest_entry(
             let cache_entry_id = confirm_cache_entry_id.clone();
             let manifest_digest = confirm_manifest_digest.clone();
             async move {
+                let tag_for_error = tag.clone();
                 let confirm_request = ConfirmRequest {
                     manifest_digest,
                     manifest_size: confirm_manifest_size,
@@ -848,15 +849,31 @@ async fn persist_manifest_entry(
                     uncompressed_size: None,
                     compressed_size: None,
                     storage_mode: Some("cas".to_string()),
-                    tag: Some(tag),
+                    tag: Some(tag.clone()),
                     write_scope_tag: Some(write_scope_tag),
                 };
 
-                state
+                match state
                     .api_client
-                    .confirm(&state.workspace, &cache_entry_id, &confirm_request)
+                    .confirm_wait_for_publish_or_pending_timeout(
+                        &state.workspace,
+                        &cache_entry_id,
+                        &confirm_request,
+                    )
                     .await
-                    .map_err(|e| OciError::internal(format!("confirm failed: {e}")))?;
+                {
+                    Ok(crate::api::client::ConfirmPublishResult::Published(_)) => {}
+                    Ok(crate::api::client::ConfirmPublishResult::Pending(metadata)) => {
+                        return Err(OciError::internal(format!(
+                            "confirm deferred for {tag_for_error}:{cache_entry_id} ({:?})",
+                            metadata
+                        )));
+                    }
+                    Err(error) => {
+                        return Err(OciError::internal(format!("confirm failed: {error}")));
+                    }
+                }
+
                 Ok(())
             }
         },

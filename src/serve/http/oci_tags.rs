@@ -143,11 +143,23 @@ pub(crate) async fn bind_alias_tag(
         write_scope_tag: write_scope_tag.map(ToOwned::to_owned),
     };
 
-    state
+    match state
         .api_client
-        .confirm(&state.workspace, &response.cache_entry_id, &confirm_request)
+        .confirm_wait_for_publish_or_pending_timeout(
+            &state.workspace,
+            &response.cache_entry_id,
+            &confirm_request,
+        )
         .await
-        .map_err(|e| format!("confirm failed: {e}"))?;
+    {
+        Ok(crate::api::client::ConfirmPublishResult::Published(_)) => {}
+        Ok(crate::api::client::ConfirmPublishResult::Pending(metadata)) => {
+            return Err(format!("confirm deferred: ({:?})", metadata));
+        }
+        Err(error) => {
+            return Err(format!("confirm failed: {error}"));
+        }
+    }
 
     Ok(())
 }
