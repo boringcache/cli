@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::File;
@@ -15,6 +16,33 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
 
 const STREAM_CHUNK_SIZE: usize = 2 * 1024 * 1024;
+
+#[derive(Debug)]
+pub(crate) struct MissingMultipartUploadSessionError {
+    part_number: usize,
+}
+
+impl MissingMultipartUploadSessionError {
+    fn new(part_number: usize) -> Self {
+        Self { part_number }
+    }
+}
+
+impl fmt::Display for MissingMultipartUploadSessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "multipart upload session disappeared while uploading part {}",
+            self.part_number
+        )
+    }
+}
+
+impl std::error::Error for MissingMultipartUploadSessionError {}
+
+fn is_missing_multipart_upload_response(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::NOT_FOUND && body.contains("NoSuchUpload")
+}
 
 pub async fn upload_via_single_url(
     archive_path: &Path,
@@ -258,6 +286,21 @@ async fn upload_single_part(
             status,
             error_body
         );
+        if is_missing_multipart_upload_response(status, &error_body) {
+            return Err(
+                anyhow::Error::new(MissingMultipartUploadSessionError::new(part_number)).context(
+                    format!(
+                        "HTTP {} - {}",
+                        status,
+                        if error_body.is_empty() {
+                            status.canonical_reason().unwrap_or("Unknown error")
+                        } else {
+                            &error_body
+                        }
+                    ),
+                ),
+            );
+        }
         anyhow::bail!(
             "HTTP {} - {}",
             status,
@@ -318,4 +361,29 @@ fn calculate_upload_concurrency() -> usize {
     };
 
     cpu_adjusted.min(6)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_missing_multipart_upload_response;
+
+    #[test]
+    fn detects_missing_multipart_upload_response() {
+        assert!(is_missing_multipart_upload_response(
+            reqwest::StatusCode::NOT_FOUND,
+            "<Error><Code>NoSuchUpload</Code></Error>"
+        ));
+    }
+
+    #[test]
+    fn ignores_other_multipart_upload_failures() {
+        assert!(!is_missing_multipart_upload_response(
+            reqwest::StatusCode::NOT_FOUND,
+            "<Error><Code>AccessDenied</Code></Error>"
+        ));
+        assert!(!is_missing_multipart_upload_response(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "<Error><Code>NoSuchUpload</Code></Error>"
+        ));
+    }
 }

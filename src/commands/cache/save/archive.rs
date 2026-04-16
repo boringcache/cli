@@ -44,6 +44,50 @@ impl ArchiveConfirmOutcome {
     }
 }
 
+fn is_missing_multipart_upload_session_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::cache::multipart_upload::MissingMultipartUploadSessionError>()
+            .is_some()
+    })
+}
+
+async fn request_fresh_multipart_upload(
+    api_client: &ApiClient,
+    workspace: &str,
+    request: &SaveRequest,
+    tag: &str,
+) -> Result<crate::api::models::cache::SaveResponse> {
+    let mut retry_request = request.clone();
+    retry_request.force = Some(true);
+
+    let response = api_client
+        .save_entry(workspace, &retry_request)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to request a fresh multipart upload session for {}",
+                tag
+            )
+        })?;
+
+    if response.exists {
+        anyhow::bail!(
+            "Fresh multipart retry for {} unexpectedly returned an existing cache entry",
+            tag
+        );
+    }
+
+    if response.get_archive_urls().is_empty() {
+        anyhow::bail!(
+            "Fresh multipart retry for {} did not return archive upload URLs",
+            tag
+        );
+    }
+
+    Ok(response)
+}
+
 async fn confirm_archive_upload(
     api_client: &ApiClient,
     workspace: &str,
@@ -435,7 +479,7 @@ pub(super) async fn save_single_archive_entry(
         Some("1 archive".to_string()),
     )?;
 
-    let save_response = match api_client.save_entry(&workspace, &request).await {
+    let mut save_response = match api_client.save_entry(&workspace, &request).await {
         Ok(response) => response,
         Err(err) => {
             let bc_error = err.downcast_ref::<crate::error::BoringCacheError>();
@@ -533,14 +577,13 @@ pub(super) async fn save_single_archive_entry(
         anyhow::bail!(message);
     }
 
-    let archive_urls = save_response.get_archive_urls();
-    let needs_upload = !archive_urls.is_empty();
+    let needs_upload = !save_response.get_archive_urls().is_empty();
 
     log::debug!(
         "Server accepted cache entry tag={} exists={} archive_urls={}",
         tag,
         save_response.exists,
-        archive_urls.len()
+        save_response.get_archive_urls().len()
     );
 
     if save_response.exists {
@@ -558,7 +601,7 @@ pub(super) async fn save_single_archive_entry(
         let save_status_pending = save_response.status.as_deref() == Some("pending");
         let same_tag = save_response.tag == tag;
 
-        if save_status_pending && archive_urls.is_empty() {
+        if save_status_pending && save_response.get_archive_urls().is_empty() {
             if same_tag {
                 progress_info(&reporter, "  Cache upload in progress; skipping wait");
             } else {
@@ -569,7 +612,7 @@ pub(super) async fn save_single_archive_entry(
             }
         }
 
-        if save_status_pending && archive_urls.is_empty() && same_tag {
+        if save_status_pending && save_response.get_archive_urls().is_empty() && same_tag {
             complete_skipped_step(
                 &mut session,
                 "Confirming upload",
@@ -650,7 +693,6 @@ pub(super) async fn save_single_archive_entry(
         ),
     );
 
-    let cache_entry_id = &save_response.cache_entry_id;
     let mut archive_etag: Option<String> = None;
     let mut upload_storage_metrics = StorageMetrics::default();
 
@@ -674,68 +716,96 @@ pub(super) async fn save_single_archive_entry(
         )?;
         let upload_step_number = step6.step_number();
 
-        let progress = TransferProgress::new(
-            reporter.clone(),
-            session_id.clone(),
-            upload_step_number,
-            total_compressed_size,
-        );
-        progress.record_bytes(0)?;
+        let mut multipart_retry_count = 0u32;
 
-        let upload_started = Instant::now();
-
-        if verbose
-            && !save_response.upload_headers.is_empty()
-            && let Some(regions) = save_response.upload_headers.get("x-tigris-regions")
-        {
-            let count = regions.split(',').count();
-            progress_info(
-                &reporter,
-                format!("  Replication: {} regions ({})", count, regions),
+        loop {
+            let archive_urls = save_response.get_archive_urls().to_vec();
+            let progress = TransferProgress::new(
+                reporter.clone(),
+                session_id.clone(),
+                upload_step_number,
+                total_compressed_size,
             );
-        }
+            progress.record_bytes(0)?;
 
-        if let Some(upload_id) = save_response.get_upload_id() {
-            log::info!(
-                "Using multipart upload: {} parts, upload_id={}",
-                archive_urls.len(),
-                upload_id
-            );
-            if verbose {
+            let upload_started = Instant::now();
+
+            if verbose
+                && !save_response.upload_headers.is_empty()
+                && let Some(regions) = save_response.upload_headers.get("x-tigris-regions")
+            {
+                let count = regions.split(',').count();
                 progress_info(
                     &reporter,
-                    format!("  Using multipart upload with {} parts", archive_urls.len()),
+                    format!("  Replication: {} regions ({})", count, regions),
                 );
             }
 
-            (archive_etag, upload_storage_metrics) = upload_archive_multipart(
-                final_archive_path.as_ref(),
-                archive_urls,
-                upload_id,
-                &progress,
-                api_client.transfer_client(),
-                &api_client,
-                &workspace,
-                cache_entry_id,
-                &save_response.upload_headers,
-            )
-            .await
-            .with_context(|| format!("Failed to upload archive parts for {}", tag))?;
-        } else {
-            log::info!("Using single-part upload");
-            (archive_etag, upload_storage_metrics) = upload_archive_file(
-                final_archive_path.as_ref(),
-                &archive_urls[0],
-                &progress,
-                api_client.transfer_client(),
-                &save_response.upload_headers,
-            )
-            .await
-            .with_context(|| format!("Failed to upload archive for {}", tag))?;
+            let upload_result = if let Some(upload_id) = save_response.get_upload_id() {
+                log::info!(
+                    "Using multipart upload: {} parts, upload_id={}",
+                    archive_urls.len(),
+                    upload_id
+                );
+                if verbose {
+                    progress_info(
+                        &reporter,
+                        format!("  Using multipart upload with {} parts", archive_urls.len()),
+                    );
+                }
+
+                upload_archive_multipart(
+                    final_archive_path.as_ref(),
+                    &archive_urls,
+                    upload_id,
+                    &progress,
+                    api_client.transfer_client(),
+                    &api_client,
+                    &workspace,
+                    save_response.cache_entry_id.as_str(),
+                    &save_response.upload_headers,
+                )
+                .await
+                .with_context(|| format!("Failed to upload archive parts for {}", tag))
+            } else {
+                log::info!("Using single-part upload");
+                upload_archive_file(
+                    final_archive_path.as_ref(),
+                    &archive_urls[0],
+                    &progress,
+                    api_client.transfer_client(),
+                    &save_response.upload_headers,
+                )
+                .await
+                .with_context(|| format!("Failed to upload archive for {}", tag))
+            };
+
+            match upload_result {
+                Ok((etag, metrics)) => {
+                    archive_etag = etag;
+                    upload_storage_metrics = metrics;
+                    upload_duration = Some(upload_started.elapsed());
+                    break;
+                }
+                Err(err)
+                    if save_response.get_upload_id().is_some()
+                        && is_missing_multipart_upload_session_error(&err)
+                        && multipart_retry_count < 1 =>
+                {
+                    multipart_retry_count += 1;
+                    progress_warning(
+                        &reporter,
+                        "  Multipart upload session disappeared; retrying once with a fresh upload session",
+                    );
+                    save_response =
+                        request_fresh_multipart_upload(&api_client, &workspace, &request, &tag)
+                            .await?;
+                }
+                Err(err) => return Err(err),
+            }
         }
 
-        let upload_elapsed = upload_started.elapsed();
-        upload_duration = Some(upload_elapsed);
+        let upload_elapsed = upload_duration.unwrap_or_default();
         step6.complete()?;
 
         let compression_ratio_percent = if total_uncompressed_size > 0 {
@@ -789,10 +859,14 @@ pub(super) async fn save_single_archive_entry(
         write_scope_tag: None,
     };
 
-    let confirm_outcome =
-        confirm_archive_upload(&api_client, &workspace, cache_entry_id, &confirm_request)
-            .await
-            .with_context(|| format!("Failed to confirm upload for {}", tag))?;
+    let confirm_outcome = confirm_archive_upload(
+        &api_client,
+        &workspace,
+        save_response.cache_entry_id.as_str(),
+        &confirm_request,
+    )
+    .await
+    .with_context(|| format!("Failed to confirm upload for {}", tag))?;
     match confirm_outcome {
         ArchiveConfirmOutcome::Published {
             winner_id: Some(winner_id),
