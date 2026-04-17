@@ -76,6 +76,19 @@ proxy_port() {
   printf '%s\n' "${port}"
 }
 
+proxy_startup_mode() {
+  local mode="${BORINGCACHE_CARGO_PROXY_STARTUP:-warm}"
+  case "${mode}" in
+    warm|on-demand)
+      printf '%s\n' "${mode}"
+      ;;
+    *)
+      echo "ERROR: unsupported BORINGCACHE_CARGO_PROXY_STARTUP=${mode}" >&2
+      exit 1
+      ;;
+  esac
+}
+
 detect_profile() {
   local profile="debug"
   local expect_profile="0"
@@ -245,6 +258,7 @@ cargo_target_dir=${CARGO_TARGET_DIR}
 sccache_dir=${SCCACHE_DIR:-none}
 sccache_server_port=${SCCACHE_SERVER_PORT:-none}
 proxy_port=$(proxy_port)
+proxy_startup_mode=$(proxy_startup_mode)
 cargo_incremental=${CARGO_INCREMENTAL:-unset}
 target_archive_mode=$(target_archive_mode)
 target_archive_action=$(target_archive_action "${profile}")
@@ -337,6 +351,9 @@ run_flow() {
   restore_target_archive_if_needed "${profile}"
 
   run_args=(sccache --workspace "${WORKSPACE}" --tag "${proxy_tag}" --no-platform --no-git --host 127.0.0.1 --port "$(proxy_port)")
+  if [[ "$(proxy_startup_mode)" == "on-demand" ]]; then
+    run_args+=(--on-demand)
+  fi
   case "$(target_archive_action "${profile}")" in
     restore-and-save)
       run_args+=(--entry "$(build_target_tag "${profile}"):${CARGO_TARGET_DIR}")
