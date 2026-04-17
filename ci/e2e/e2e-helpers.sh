@@ -33,7 +33,7 @@ SCCACHE_CONFLICT_ENV_VARS=(
   SCCACHE_WEBDAV_USERNAME
   SCCACHE_WEBDAV_PASSWORD
 )
-declare -ag E2E_TAG_SCOPE_FLAGS=(--no-platform --no-git)
+declare -a E2E_TAG_SCOPE_FLAGS=(--no-platform --no-git)
 
 _HELPER_PROXY_PID=""
 _HELPER_PROXY_LOG=""

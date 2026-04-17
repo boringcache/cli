@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/../e2e-helpers.sh"
+CONTRACT_SCRIPT_DIR="${SCRIPT_DIR}"
+source "${CONTRACT_SCRIPT_DIR}/../e2e-helpers.sh"
 
 LOG_DIR="${LOG_DIR:-.}"
 
@@ -60,18 +61,18 @@ run_contract_test \
   "oci-publish-conflict" \
   cargo test --test cas_adapter_integration_tests test_save_oci_skips_when_publish_conflicts_for_existing_entry -- --exact
 
-echo "=== Phase 3: Pending publish completion ==="
+echo "=== Phase 3: Optimistic publish conflict handling ==="
 run_contract_test \
-  "pending-publish-polling" \
-  cargo test confirm_polls_pending_publish_until_published
+  "confirm-transient-retry-classification" \
+  cargo test confirm_retry_reason_retries_transient_server_errors
 run_contract_test \
-  "pending-publish-conflict-terminal-state" \
-  cargo test normal_confirm_waits_for_pending_publish_terminal_state
+  "oci-primary-confirm-locked" \
+  cargo test --test serve_tests test_manifest_put_degrades_when_primary_confirm_is_locked -- --exact
 
 echo "=== Phase 4: E2E harness guards ==="
 run_contract_test \
   "dual-proxy-port-validation" \
-  env VALIDATE_PORT_SELECTION_ONLY=1 bash "${SCRIPT_DIR}/e2e-dual-proxy-contention-test.sh"
+  env VALIDATE_PORT_SELECTION_ONLY=1 bash "${CONTRACT_SCRIPT_DIR}/e2e-dual-proxy-contention-test.sh"
 
 echo "--- dual-proxy-port-collision-rejected ---"
 collision_log="${CONTRACT_LOG_DIR}/dual-proxy-port-collision-rejected.log"
@@ -83,7 +84,7 @@ env \
   PROXY_PORT_VERIFY=5054 \
   SCCACHE_PORT_A=5052 \
   SCCACHE_PORT_B=5053 \
-  bash "${SCRIPT_DIR}/e2e-dual-proxy-contention-test.sh" \
+  bash "${CONTRACT_SCRIPT_DIR}/e2e-dual-proxy-contention-test.sh" \
   2>&1 | tee "${collision_log}"
 collision_status=${PIPESTATUS[0]}
 set -e
