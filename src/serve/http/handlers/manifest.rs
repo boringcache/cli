@@ -99,9 +99,73 @@ pub(crate) async fn prefetch_manifest_reference(
     state: &AppState,
     name: &str,
     reference: &str,
-) -> Result<(), OciError> {
-    let _ = resolve_manifest(state, name, reference, true).await?;
-    Ok(())
+) -> Result<(crate::serve::cache_registry::BlobPrefetchStats, usize), OciError> {
+    let tags = manifest_restore_tags(state, name, reference);
+    let (_, _, digest) = resolve_manifest(state, name, reference, true).await?;
+    let digest_tags = [digest_tag(&digest)];
+    let cached = lookup_oci_manifest_cache(state, &tags)
+        .or_else(|| lookup_oci_manifest_cache(state, &digest_tags))
+        .ok_or_else(|| {
+            OciError::internal(format!("Manifest cache missing for {name}:{reference}"))
+        })?;
+
+    let mut cached_urls = {
+        let locator = state.blob_locator.read().await;
+        cached
+            .blobs
+            .iter()
+            .filter_map(|blob| {
+                locator
+                    .get(&cached.name, &blob.digest)
+                    .and_then(|entry| entry.download_url.clone())
+                    .map(|url| (blob.digest.clone(), url))
+            })
+            .collect::<HashMap<_, _>>()
+    };
+    if cached_urls.len() < cached.blobs.len() {
+        let resolved_urls = prefetch_manifest_blob_download_urls(
+            state,
+            &cached.cache_entry_id,
+            &cached.name,
+            reference,
+            &cached.blobs,
+        )
+        .await;
+        if !resolved_urls.is_empty() {
+            cache_blob_locator_entries(
+                state,
+                &cached.name,
+                &cached.cache_entry_id,
+                &cached.blobs,
+                &resolved_urls,
+            )
+            .await;
+            cached_urls.extend(resolved_urls);
+        }
+    }
+    let label = format!("OCI prefetch {name}@{reference}");
+    let stats = crate::serve::cache_registry::prefetch_blob_descriptors(
+        state,
+        &cached.cache_entry_id,
+        &cached.blobs,
+        |digest| cached_urls.get(digest).cloned(),
+        &label,
+    )
+    .await;
+    let missing_local_blobs =
+        crate::serve::cache_registry::count_missing_local_blobs(state, &cached.blobs).await;
+    if stats.failures > 0 || missing_local_blobs > 0 {
+        let message = format!(
+            "OCI prefetch incomplete for {name}@{reference}: failures={} cold_blobs={}/{}",
+            stats.failures,
+            missing_local_blobs,
+            cached.blobs.len()
+        );
+        log::warn!("{message}");
+        eprintln!("{message}; serving remaining blobs on demand");
+    }
+
+    Ok((stats, missing_local_blobs))
 }
 
 pub(super) async fn get_referrers(
@@ -321,11 +385,7 @@ async fn resolve_manifest(
     reference: &str,
     prefetch_blob_urls: bool,
 ) -> Result<(Vec<u8>, String, String), OciError> {
-    let tags = if reference.starts_with("sha256:") {
-        vec![digest_tag(reference)]
-    } else {
-        scoped_restore_tags(&state.tag_resolver, name, reference)
-    };
+    let tags = manifest_restore_tags(state, name, reference);
 
     if let Some(cached) = lookup_oci_manifest_cache(state, &tags) {
         return cached_manifest_response(state, cached).await;
@@ -350,6 +410,14 @@ async fn resolve_manifest(
                 }
             }
         }
+    }
+}
+
+fn manifest_restore_tags(state: &AppState, name: &str, reference: &str) -> Vec<String> {
+    if reference.starts_with("sha256:") {
+        vec![digest_tag(reference)]
+    } else {
+        scoped_restore_tags(&state.tag_resolver, name, reference)
     }
 }
 

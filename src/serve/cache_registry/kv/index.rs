@@ -265,10 +265,6 @@ pub(crate) async fn fetch_pointer(
         .map_err(|e| RegistryError::internal(format!("Invalid file CAS pointer: {e}")))
 }
 
-pub(crate) fn is_invalid_file_pointer_error(error: &RegistryError) -> bool {
-    error.message().contains("Invalid file CAS pointer")
-}
-
 pub(crate) fn build_index_pointer(
     entries: &BTreeMap<String, BlobDescriptor>,
     blob_order: &[BlobDescriptor],

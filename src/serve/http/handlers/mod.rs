@@ -8,7 +8,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -67,6 +67,7 @@ struct ProxyStatusResponse {
     publish_settled: bool,
     prefetch_complete: bool,
     prefetch_error: Option<String>,
+    startup_prefetch: BTreeMap<String, String>,
     shutdown_requested: bool,
     cache_entry_id: Option<String>,
     tags_visible: bool,
@@ -82,6 +83,7 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
         .prefetch_complete
         .load(std::sync::atomic::Ordering::Acquire);
     let prefetch_error = state.prefetch_error.read().await.clone();
+    let startup_prefetch = state.prefetch_metrics.metadata_hints();
     let shutdown_requested = state
         .shutdown_requested
         .load(std::sync::atomic::Ordering::Acquire);
@@ -135,6 +137,7 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
             publish_settled,
             prefetch_complete,
             prefetch_error,
+            startup_prefetch,
             shutdown_requested,
             cache_entry_id,
             tags_visible,

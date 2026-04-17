@@ -3,27 +3,9 @@ use crate::observability;
 
 pub(crate) const KV_PREFETCH_READINESS_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(300);
+const PREFETCH_BLOB_DOWNLOAD_ATTEMPTS: usize = 3;
 
-pub(crate) fn spawn_preload_blobs(state: &AppState, cache_entry_id: &str) {
-    let preload_state = state.clone();
-    let preload_cache_entry_id = cache_entry_id.to_string();
-    tokio::spawn(async move {
-        match tokio::time::timeout(
-            KV_BLOB_PRELOAD_TIMEOUT,
-            preload_blobs(&preload_state, &preload_cache_entry_id),
-        )
-        .await
-        {
-            Ok(()) => {}
-            Err(_) => eprintln!(
-                "KV blob preload: timed out after {}s",
-                KV_BLOB_PRELOAD_TIMEOUT.as_secs()
-            ),
-        }
-    });
-}
-
-async fn count_missing_local_blobs(state: &AppState, blobs: &[BlobDescriptor]) -> usize {
+pub(crate) async fn count_missing_local_blobs(state: &AppState, blobs: &[BlobDescriptor]) -> usize {
     let mut missing = 0usize;
     for blob in blobs {
         if state
@@ -277,6 +259,17 @@ where
     build_prefetch_targets(startup_blobs, cached_url_for_digest)
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct BlobPrefetchStats {
+    pub(crate) total_unique_blobs: usize,
+    pub(crate) scheduled: usize,
+    pub(crate) inserted: usize,
+    pub(crate) failures: usize,
+    pub(crate) already_local: usize,
+    pub(crate) scheduled_bytes: u64,
+    pub(crate) duration_ms: u64,
+}
+
 pub(crate) async fn preload_single_blob(
     state: AppState,
     cache_entry_id: String,
@@ -293,18 +286,15 @@ pub(crate) async fn preload_single_blob(
     }
 
     let mut retry_delay = std::time::Duration::from_millis(250);
-    for attempt in 1..=4 {
+    for attempt in 1..=PREFETCH_BLOB_DOWNLOAD_ATTEMPTS {
         match download_blob_to_cache(&state, &cache_entry_id, &blob, cached_url.as_deref()).await {
             Ok(_) => return Ok(true),
             Err(error)
-                if attempt < 4
-                    && matches!(
-                        error.status,
-                        StatusCode::NOT_FOUND | StatusCode::SERVICE_UNAVAILABLE
-                    ) =>
+                if attempt < PREFETCH_BLOB_DOWNLOAD_ATTEMPTS
+                    && should_retry_prefetch_blob_error(error.status) =>
             {
                 log::debug!(
-                    "Prefetch startup blob retry {attempt}/4 digest={} status={} after {:?}",
+                    "Prefetch startup blob retry {attempt}/{PREFETCH_BLOB_DOWNLOAD_ATTEMPTS} digest={} status={} after {:?}",
                     short_digest(&blob.digest),
                     error.status,
                     retry_delay,
@@ -328,58 +318,96 @@ pub(crate) async fn preload_single_blob(
     ))
 }
 
-pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
-    let (total_unique_blobs, mut targets, summary) = {
-        let published = state.kv_published_index.read().await;
-        let blobs = published.unique_blobs();
-        let total_unique_blobs = blobs.len();
-        let (targets, summary) = build_prefetch_targets(&blobs, |digest| {
-            published.download_url(digest).map(str::to_string)
-        });
-        (total_unique_blobs, targets, summary)
+fn should_retry_prefetch_blob_error(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::NOT_FOUND
+            | StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::SERVICE_UNAVAILABLE
+    ) || status.is_server_error()
+}
+
+pub(crate) async fn prefetch_blob_descriptors<F>(
+    state: &AppState,
+    cache_entry_id: &str,
+    blobs: &[BlobDescriptor],
+    cached_url_for_digest: F,
+    log_label: &str,
+) -> BlobPrefetchStats
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let (targets, summary) = build_prefetch_targets(blobs, cached_url_for_digest);
+    prefetch_blob_targets(
+        state,
+        cache_entry_id,
+        blobs.len(),
+        targets,
+        summary,
+        log_label,
+    )
+    .await
+}
+
+async fn prefetch_blob_targets(
+    state: &AppState,
+    cache_entry_id: &str,
+    total_unique_blobs: usize,
+    targets: Vec<StartupPrefetchTarget>,
+    summary: StartupPrefetchTargetSummary,
+    log_label: &str,
+) -> BlobPrefetchStats {
+    let mut stats = BlobPrefetchStats {
+        total_unique_blobs,
+        ..BlobPrefetchStats::default()
     };
 
     if targets.is_empty() {
-        return;
+        return stats;
     }
 
-    let mut ready_targets = Vec::new();
-    let mut already_local = 0usize;
-    for target in targets.drain(..) {
+    let mut pending_targets = Vec::new();
+    for target in targets {
         if state
             .blob_read_cache
             .get_handle(&target.blob.digest)
             .await
             .is_none()
         {
-            ready_targets.push(target);
+            pending_targets.push(target);
         } else {
-            already_local = already_local.saturating_add(1);
+            stats.already_local = stats.already_local.saturating_add(1);
         }
     }
-    if ready_targets.is_empty() {
-        return;
+
+    if pending_targets.is_empty() {
+        eprintln!(
+            "{log_label}: already warm (cached_urls={} unresolved_urls={} already_local={})",
+            summary.cached_url_count, summary.unresolved_url_count, stats.already_local,
+        );
+        return stats;
     }
 
-    let scheduled = ready_targets.len();
-    let scheduled_bytes = ready_targets
+    stats.scheduled = pending_targets.len();
+    stats.scheduled_bytes = pending_targets
         .iter()
         .map(|target| target.blob.size_bytes)
-        .fold(0u64, |acc, size| acc.saturating_add(size));
-    emit_serve_event(
-        Some(&state.workspace),
-        SERVE_PREFETCH_OPERATION,
-        SERVE_PREFETCH_PATH,
-        format!(
-            "start: scheduled={scheduled} scheduled_bytes={scheduled_bytes} total_unique_blobs={total_unique_blobs} cached_urls={} unresolved_urls={} already_local={already_local}",
-            summary.cached_url_count, summary.unresolved_url_count,
-        ),
+        .sum();
+    eprintln!(
+        "{log_label}: warming {}/{} blobs ({:.1} MB, cached_urls={}, unresolved_urls={}, already_local={})",
+        stats.scheduled,
+        stats.total_unique_blobs,
+        stats.scheduled_bytes as f64 / (1024.0 * 1024.0),
+        summary.cached_url_count,
+        summary.unresolved_url_count,
+        stats.already_local,
     );
-    let prefetch_started_at = std::time::Instant::now();
 
+    let prefetch_started_at = std::time::Instant::now();
     let prefetch_semaphore = state.blob_prefetch_semaphore.clone();
     let mut tasks = tokio::task::JoinSet::new();
-    for target in ready_targets {
+    for target in pending_targets {
         let state = state.clone();
         let cache_entry_id = cache_entry_id.to_string();
         let prefetch_semaphore = prefetch_semaphore.clone();
@@ -395,97 +423,108 @@ pub(crate) async fn preload_blobs(state: &AppState, cache_entry_id: &str) {
         });
     }
 
-    let mut inserted = 0usize;
-    let mut failures = 0usize;
+    let log_interval = (stats.scheduled / 10).max(1);
+    let mut completed = 0usize;
     loop {
         let next_result = tasks.join_next().await;
         let Some(result) = next_result else {
             break;
         };
         match result {
-            Ok(Ok(true)) => inserted = inserted.saturating_add(1),
+            Ok(Ok(true)) => stats.inserted = stats.inserted.saturating_add(1),
             Ok(Ok(false)) => {}
             Ok(Err(error)) => {
-                failures = failures.saturating_add(1);
-                log::warn!("KV blob preload failed: {error}");
+                stats.failures = stats.failures.saturating_add(1);
+                log::warn!("{log_label} blob failed: {error}");
             }
             Err(error) => {
-                failures = failures.saturating_add(1);
-                log::warn!("KV blob preload task failed: {error}");
+                stats.failures = stats.failures.saturating_add(1);
+                log::warn!("{log_label} task failed: {error}");
             }
+        }
+        completed = completed.saturating_add(1);
+        if completed.is_multiple_of(log_interval) {
+            eprintln!(
+                "{log_label}: {completed}/{} blobs ({} inserted, {} failed, {:.1}s)",
+                stats.scheduled,
+                stats.inserted,
+                stats.failures,
+                prefetch_started_at.elapsed().as_secs_f64(),
+            );
         }
     }
 
-    let status = if failures == 0 {
-        200
-    } else if inserted > 0 {
-        207
-    } else {
-        500
-    };
-    emit_serve_phase_metric(
-        Some(&state.workspace),
-        Some(cache_entry_id),
-        SERVE_PREFETCH_OPERATION,
-        SERVE_PREFETCH_PATH,
-        status,
-        prefetch_started_at.elapsed().as_millis() as u64,
-        Some(scheduled as u64),
+    stats.duration_ms = prefetch_started_at.elapsed().as_millis() as u64;
+    eprintln!(
+        "{log_label}: done inserted={} scheduled={} failures={} cache_size={} bytes in {:.1}s",
+        stats.inserted,
+        stats.scheduled,
+        stats.failures,
+        state.blob_read_cache.total_bytes(),
+        prefetch_started_at.elapsed().as_secs_f64(),
     );
-    emit_serve_event(
-        Some(&state.workspace),
-        SERVE_PREFETCH_OPERATION,
-        SERVE_PREFETCH_PATH,
-        format!(
-            "done: inserted={inserted} scheduled={scheduled} failures={failures} scheduled_bytes={scheduled_bytes}"
-        ),
-    );
-
-    if inserted > 0 || failures > 0 {
-        eprintln!(
-            "KV blob preload: inserted={inserted} scheduled={scheduled} failures={failures} cache_size={} bytes",
-            state.blob_read_cache.total_bytes()
-        );
-    }
+    stats
 }
 
 pub(crate) async fn prefetch_manifest_blobs(
     state: &AppState,
     require_full_warm: bool,
     oci_prefetch_refs: Vec<(String, String)>,
-) -> Result<(), RegistryError> {
-    let require_lossless_warm = require_full_warm && state.fail_on_cache_error;
+) {
+    if !require_full_warm {
+        return;
+    }
+
+    state.prefetch_metrics.reset_startup();
 
     if !oci_prefetch_refs.is_empty() {
         eprintln!(
-            "Prefetch: prefetching {} selected OCI manifest refs",
+            "Prefetch: hydrating {} selected OCI manifest refs",
             oci_prefetch_refs.len()
         );
+        let oci_started_at = std::time::Instant::now();
+        let mut completed_refs = 0usize;
+        let mut total_unique_blobs = 0usize;
+        let mut inserted = 0usize;
         let mut failures = 0usize;
+        let mut cold_blobs = 0usize;
         for (name, reference) in oci_prefetch_refs {
-            if let Err(error) = crate::serve::http::handlers::manifest::prefetch_manifest_reference(
+            match crate::serve::http::handlers::manifest::prefetch_manifest_reference(
                 state, &name, &reference,
             )
             .await
             {
-                failures = failures.saturating_add(1);
-                let message = format!(
-                    "Startup OCI manifest prefetch failed for {name}@{reference}: {error:#?}"
-                );
-                if require_lossless_warm {
-                    return Err(RegistryError::internal(message));
+                Ok((stats, missing_local_blobs)) => {
+                    completed_refs = completed_refs.saturating_add(1);
+                    total_unique_blobs =
+                        total_unique_blobs.saturating_add(stats.total_unique_blobs);
+                    inserted = inserted.saturating_add(stats.inserted);
+                    failures = failures.saturating_add(stats.failures);
+                    cold_blobs = cold_blobs.saturating_add(missing_local_blobs);
                 }
-                log::warn!("{message}");
+                Err(error) => {
+                    completed_refs = completed_refs.saturating_add(1);
+                    failures = failures.saturating_add(1);
+                    let message = format!(
+                        "Startup OCI manifest prefetch failed for {name}@{reference}: {error:#?}"
+                    );
+                    log::warn!("{message}");
+                    eprintln!("{message}; serving this OCI ref on demand");
+                }
             }
         }
-        if failures > 0 {
-            log::warn!("Startup OCI manifest prefetch incomplete: {failures} failures");
-        }
+        state.prefetch_metrics.record_startup_oci_execution(
+            completed_refs,
+            total_unique_blobs,
+            inserted,
+            failures,
+            cold_blobs,
+            oci_started_at.elapsed().as_millis() as u64,
+        );
     }
 
     eprintln!("Prefetch: loading index and hydrating full tag before serving...");
     let started_at = std::time::Instant::now();
-    state.prefetch_metrics.reset_startup();
 
     emit_serve_event(
         Some(&state.workspace),
@@ -557,30 +596,21 @@ pub(crate) async fn prefetch_manifest_blobs(
                         "Startup warmup timed out after {}s",
                         KV_PREFETCH_READINESS_TIMEOUT.as_secs()
                     );
-                    eprintln!(
-                        "Prefetch: timed out after {}s (partial prefetch, continuing)",
-                        KV_PREFETCH_READINESS_TIMEOUT.as_secs(),
-                    );
-                    if require_lossless_warm {
-                        return Err(RegistryError::internal(message));
-                    }
+                    log::warn!("{message}");
                 }
             }
 
             let missing_local_blobs = count_missing_local_blobs(state, &unique_blobs).await;
+            state
+                .prefetch_metrics
+                .record_startup_cold_blobs(missing_local_blobs);
             if missing_local_blobs > 0 {
                 let message = format!(
                     "Startup warmup incomplete: {missing_local_blobs}/{} blobs are still cold",
                     unique_blobs.len()
                 );
-                if require_lossless_warm {
-                    return Err(RegistryError::internal(message));
-                }
                 log::warn!("{message}");
-            }
-
-            if !require_lossless_warm {
-                spawn_preload_blobs(state, &cache_entry_id);
+                eprintln!("Prefetch: {message}; serving remaining blobs on demand");
             }
         }
         Ok(_) => {
@@ -589,24 +619,14 @@ pub(crate) async fn prefetch_manifest_blobs(
                 published.set_empty_incomplete();
             }
             eprintln!("Prefetch: no existing entries, skipping");
-            return Ok(());
         }
         Err(e) => {
-            if require_lossless_warm {
-                return Err(e);
-            }
-
-            if is_invalid_file_pointer_error(&e) {
-                let mut published = state.kv_published_index.write().await;
-                published.set_empty_incomplete();
-                eprintln!("Prefetch: invalid file pointer, degraded to empty index");
-                return Ok(());
-            }
+            let mut published = state.kv_published_index.write().await;
+            published.set_empty_incomplete();
             log::warn!("Prefetch: index load failed: {e:?}");
+            eprintln!("Prefetch: index load failed; serving cache reads on demand");
         }
     }
-
-    Ok(())
 }
 
 pub(crate) async fn prefetch_all_blobs(
@@ -614,8 +634,6 @@ pub(crate) async fn prefetch_all_blobs(
     cache_entry_id: &str,
     blobs: &[BlobDescriptor],
 ) {
-    let total_unique_blobs = blobs.len();
-
     let (startup_targets, startup_summary) = {
         let published = state.kv_published_index.read().await;
         build_prefetch_targets(blobs, |digest| {
@@ -623,116 +641,36 @@ pub(crate) async fn prefetch_all_blobs(
         })
     };
 
-    if startup_targets.is_empty() {
-        return;
-    }
+    let stats = prefetch_blob_targets(
+        state,
+        cache_entry_id,
+        blobs.len(),
+        startup_targets,
+        startup_summary,
+        "Prefetch: full tag",
+    )
+    .await;
 
-    let mut targets = Vec::new();
-    let mut already_local = 0usize;
-    for target in startup_targets {
-        if state
-            .blob_read_cache
-            .get_handle(&target.blob.digest)
-            .await
-            .is_none()
-        {
-            targets.push(target);
-        } else {
-            already_local = already_local.saturating_add(1);
-        }
-    }
-
-    if targets.is_empty() {
-        eprintln!(
-            "Prefetch: full tag already warm (cached_urls={} unresolved_urls={} already_local={})",
-            startup_summary.cached_url_count, startup_summary.unresolved_url_count, already_local,
-        );
-        return;
-    }
-
-    let scheduled = targets.len();
-    let scheduled_bytes: u64 = targets.iter().map(|target| target.blob.size_bytes).sum();
-    eprintln!(
-        "Prefetch: warming full tag {scheduled}/{total_unique_blobs} blobs ({:.1} MB, cached_urls={}, unresolved_urls={}, already_local={})",
-        scheduled_bytes as f64 / (1024.0 * 1024.0),
-        startup_summary.cached_url_count,
-        startup_summary.unresolved_url_count,
-        already_local,
-    );
-
-    let prefetch_started_at = std::time::Instant::now();
-    let prefetch_semaphore = state.blob_prefetch_semaphore.clone();
-    let mut tasks = tokio::task::JoinSet::new();
-    for target in targets {
-        let state = state.clone();
-        let cache_entry_id = cache_entry_id.to_string();
-        let prefetch_semaphore = prefetch_semaphore.clone();
-        tasks.spawn(async move {
-            let prefetch_permit = prefetch_semaphore
-                .acquire_owned()
-                .await
-                .map_err(|error| anyhow::anyhow!("prefetch semaphore closed: {error}"))?;
-            let result =
-                preload_single_blob(state, cache_entry_id, target.blob, target.cached_url).await;
-            drop(prefetch_permit);
-            result
-        });
-    }
-
-    let mut inserted = 0usize;
-    let mut failures = 0usize;
-    let log_interval = (scheduled / 10).max(1);
-    let mut completed = 0usize;
-    loop {
-        let next_result = tasks.join_next().await;
-        let Some(result) = next_result else {
-            break;
-        };
-        match result {
-            Ok(Ok(true)) => inserted = inserted.saturating_add(1),
-            Ok(Ok(false)) => {}
-            Ok(Err(error)) => {
-                failures = failures.saturating_add(1);
-                log::warn!("Prefetch startup blob failed: {error}");
-            }
-            Err(error) => {
-                failures = failures.saturating_add(1);
-                log::warn!("Prefetch startup task failed: {error}");
-            }
-        }
-        completed = completed.saturating_add(1);
-        if completed.is_multiple_of(log_interval) {
-            eprintln!(
-                "Prefetch: full tag {completed}/{scheduled} blobs ({inserted} inserted, {failures} failed, {:.1}s)",
-                prefetch_started_at.elapsed().as_secs_f64(),
-            );
-        }
-    }
-
-    let status = if failures == 0 {
+    let status = if stats.failures == 0 {
         200
-    } else if inserted > 0 {
+    } else if stats.inserted > 0 {
         207
     } else {
         500
     };
-    let duration_ms = prefetch_started_at.elapsed().as_millis() as u64;
-    state
-        .prefetch_metrics
-        .record_startup_execution(already_local, inserted, failures, duration_ms);
+    state.prefetch_metrics.record_startup_execution(
+        stats.already_local,
+        stats.inserted,
+        stats.failures,
+        stats.duration_ms,
+    );
     emit_serve_phase_metric(
         Some(&state.workspace),
         Some(cache_entry_id),
         SERVE_PREFETCH_OPERATION,
         SERVE_PREFETCH_PATH,
         status,
-        duration_ms,
-        Some(scheduled as u64),
-    );
-
-    eprintln!(
-        "Prefetch: full tag done inserted={inserted} scheduled={scheduled} failures={failures} cache_size={} bytes in {:.1}s",
-        state.blob_read_cache.total_bytes(),
-        prefetch_started_at.elapsed().as_secs_f64(),
+        stats.duration_ms,
+        Some(stats.scheduled as u64),
     );
 }

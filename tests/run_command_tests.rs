@@ -893,6 +893,39 @@ fn test_turbo_dry_run_json_reports_on_demand_proxy_mode() {
 }
 
 #[test]
+fn test_adapter_dry_run_json_reports_oci_prefetch_refs() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .args([
+            "turbo",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "turbo-main",
+            "--oci-prefetch-ref",
+            "cache@buildcache",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("Failed to execute turbo dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(
+        parsed["proxy"]["oci_prefetch_refs"],
+        serde_json::json!(["cache@buildcache"])
+    );
+}
+
+#[test]
 fn test_adapter_dry_run_json_replaces_configured_entry_list_and_merges_metadata_hints() {
     let temp_dir = TempDir::new().expect("temp dir");
     std::fs::write(
@@ -1242,6 +1275,10 @@ fn test_docker_dry_run_json_injects_cache_flags() {
     assert_eq!(
         parsed["oci_cache"]["cache_to"],
         "type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max"
+    );
+    assert_eq!(
+        parsed["proxy"]["oci_prefetch_refs"],
+        serde_json::json!(["cache@buildcache"])
     );
     let command = parsed["command"]
         .as_array()

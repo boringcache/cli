@@ -182,7 +182,7 @@ phase="$(printf '%s\n' "$status_headers" | awk -F': ' 'tolower($1) == "x-boringc
 }
 
 #[test]
-fn test_run_proxy_warm_start_best_effort_runs_when_backend_cannot_hydrate() {
+fn test_run_proxy_warm_start_continues_when_backend_cannot_hydrate() {
     let temp_dir = TempDir::new().expect("temp dir");
     let output = Command::new(cli_binary())
         .args([
@@ -211,13 +211,13 @@ fn test_run_proxy_warm_start_best_effort_runs_when_backend_cannot_hydrate() {
 
     assert!(
         output.status.success(),
-        "Expected warm proxy startup to continue in best-effort mode, stdout: {}, stderr: {}",
+        "Expected warm proxy startup to launch command after failed warm attempt, stdout: {}, stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("launched"),
-        "Expected command to launch after best-effort warmup, stdout: {}, stderr: {}",
+        "Command should launch after failed warm attempt, stdout: {}, stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

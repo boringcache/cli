@@ -43,6 +43,13 @@ pub struct AdapterArgs {
     )]
     pub metadata_hint: Vec<String>,
 
+    #[arg(
+        long,
+        value_name = "NAME@REFERENCE",
+        help = "Hydrate selected OCI repository refs during warm proxy startup (repeatable)"
+    )]
+    pub oci_prefetch_ref: Vec<String>,
+
     #[arg(long, help = "Skip startup warming and serve cache reads on demand")]
     pub on_demand: bool,
 

@@ -197,6 +197,8 @@ struct DryRunProxyPlan {
     no_git: bool,
     read_only: bool,
     startup_mode: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    oci_prefetch_refs: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     metadata_hints: BTreeMap<String, String>,
 }
@@ -280,6 +282,7 @@ pub async fn adapter_execute(
     let save_on_failure = adapter_config.save_on_failure || args.save_on_failure;
     let metadata_hint_args =
         merge_metadata_hints(&adapter_config.metadata_hints, &args.metadata_hint);
+    let mut oci_prefetch_refs = cache_registry::resolve_oci_prefetch_refs(&args.oci_prefetch_ref)?;
     let profile_requests = merge_profiles(&adapter_config.profiles, &args.profile);
     let entry_requests = merge_entries(&adapter_config.entries, &args.entry);
     let infer_entries = profile_requests.is_empty() && entry_requests.is_empty();
@@ -317,6 +320,19 @@ pub async fn adapter_execute(
     } else {
         None
     };
+    if startup_warm && let Some(plan) = &docker_plan {
+        let docker_ref = ("cache".to_string(), plan.oci_cache.ref_tag.clone());
+        if !oci_prefetch_refs
+            .iter()
+            .any(|existing| existing == &docker_ref)
+        {
+            oci_prefetch_refs.push(docker_ref);
+        }
+    }
+    let oci_prefetch_ref_specs = oci_prefetch_refs
+        .iter()
+        .map(|(name, reference)| format!("{name}@{reference}"))
+        .collect::<Vec<_>>();
     let tag = raw_tag.clone();
     let docker_cache_ref_tag = docker_plan
         .as_ref()
@@ -407,6 +423,7 @@ pub async fn adapter_execute(
                 no_git,
                 read_only: effective_read_only,
                 startup_mode: cache_registry::proxy_startup_mode(startup_warm).to_string(),
+                oci_prefetch_refs: oci_prefetch_ref_specs,
                 metadata_hints: proxy_metadata_hints,
             },
             oci_cache: docker_plan.map(|plan| plan.oci_cache),
@@ -472,7 +489,7 @@ pub async fn adapter_execute(
         port,
         no_platform,
         no_git,
-        Vec::new(),
+        oci_prefetch_refs,
         endpoint_host_override,
         proxy_metadata_hints,
         startup_warm,
@@ -618,6 +635,10 @@ fn print_dry_run(plan: &DryRunPlan, skip_save: bool, skip_restore: bool, save_on
 
     for (key, value) in &plan.proxy.metadata_hints {
         ui::info(&format!("[boringcache]   hint {key}={value}"));
+    }
+
+    for oci_prefetch_ref in &plan.proxy.oci_prefetch_refs {
+        ui::info(&format!("[boringcache]   oci-prefetch {oci_prefetch_ref}"));
     }
 
     for entry in &plan.archive_entries {

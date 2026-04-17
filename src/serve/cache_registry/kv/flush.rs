@@ -361,7 +361,6 @@ pub(crate) async fn flush_kv_index_with_mode(
             );
             drop(guard);
             preload_download_urls(state, &cache_entry_id).await;
-            spawn_preload_blobs(state, &cache_entry_id);
             FlushResult::Ok
         }
         Err(FlushError::Conflict(msg)) => {

@@ -198,11 +198,15 @@ start_proxy() {
   local log_file="$1"
   local metadata_hints="${2:-}"
   local readiness_reference="${3:-}"
+  local prefetch_args=()
   local attempts start_ts next_warn now waited
   stop_proxy
   LOG_FILES+=("${log_file}")
   PROXY_READY_FILE="$(mktemp "${LOG_DIR}/cache-registry-ready.XXXXXX")"
   rm -f "${PROXY_READY_FILE}"
+  if [[ -n "$readiness_reference" ]]; then
+    prefetch_args=(--oci-prefetch-ref "boringcache-e2e/cache@${readiness_reference}")
+  fi
   BORINGCACHE_PROXY_METADATA_HINTS="${metadata_hints}" \
   "${BINARY}" cache-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" \
     --host 127.0.0.1 \
@@ -210,7 +214,8 @@ start_proxy() {
     --ready-file "${PROXY_READY_FILE}" \
     --no-platform \
     --no-git \
-    --fail-on-cache-error > "${log_file}" 2>&1 &
+    --fail-on-cache-error \
+    "${prefetch_args[@]}" > "${log_file}" 2>&1 &
   SERVE_PID=$!
 
   local ready=0

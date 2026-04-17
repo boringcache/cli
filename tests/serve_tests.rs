@@ -242,22 +242,24 @@ async fn test_startup_manifest_warm_runs_by_default() {
 }
 
 #[tokio::test]
-async fn test_command_proxy_start_fails_when_warmup_fails() {
+async fn test_command_proxy_start_continues_when_warmup_fails() {
     let mut server = Server::new_async().await;
     let (_state, _home, _guard) = setup(&server).await;
+    test_env::set_var("BORINGCACHE_SAVE_TOKEN", "test-token");
 
-    let _restore_mock = server
+    let restore_mock = server
         .mock(
             "GET",
             Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
         )
+        .expect_at_least(1)
         .with_status(500)
         .with_header("content-type", "application/json")
         .with_body(r#"{"error":"boom"}"#)
         .create_async()
         .await;
 
-    let error = match boring_cache_cli::commands::cache_registry::start_proxy_background(
+    let handle = boring_cache_cli::commands::cache_registry::start_proxy_background(
         "org/repo".to_string(),
         "main".to_string(),
         "127.0.0.1".to_string(),
@@ -272,13 +274,10 @@ async fn test_command_proxy_start_fails_when_warmup_fails() {
         false,
     )
     .await
-    {
-        Ok(_) => panic!("warm startup should fail"),
-        Err(error) => error,
-    };
+    .expect("start proxy");
 
-    let message = format!("{error:#}");
-    assert!(!message.is_empty());
+    handle.shutdown_and_flush().await.expect("shutdown proxy");
+    restore_mock.assert_async().await;
 }
 
 #[tokio::test]
@@ -528,6 +527,7 @@ async fn test_startup_prefetch_hydrates_full_tag_before_ready() {
 
     warm_blob_a_mock.assert_async().await;
     warm_blob_b_mock.assert_async().await;
+    cold_blob_mock.assert_async().await;
 
     let blob_response = client
         .get(format!("{base_url}/cas/{key_c}"))
@@ -542,12 +542,11 @@ async fn test_startup_prefetch_hydrates_full_tag_before_ready() {
     restore_mock.assert_async().await;
     pointer_mock.assert_async().await;
     download_urls_mock.assert_async().await;
-    cold_blob_mock.assert_async().await;
     pointer_visibility_mock.assert_async().await;
 }
 
 #[tokio::test]
-async fn test_startup_prefetch_partial_blob_failure_is_ready_when_best_effort() {
+async fn test_startup_prefetch_partial_blob_failure_does_not_block_readiness() {
     let mut server = Server::new_async().await;
     let (_state, _home, _guard) = setup(&server).await;
 
@@ -693,6 +692,16 @@ async fn test_startup_prefetch_partial_blob_failure_is_ready_when_best_effort() 
     assert_eq!(status["phase"], "ready");
     assert_eq!(status["prefetch_complete"], true);
     assert!(status["prefetch_error"].is_null());
+    assert_eq!(
+        status["startup_prefetch"]["startup_prefetch_total_unique_blobs"],
+        "2"
+    );
+    assert_eq!(status["startup_prefetch"]["startup_prefetch_inserted"], "1");
+    assert_eq!(status["startup_prefetch"]["startup_prefetch_failures"], "1");
+    assert_eq!(
+        status["startup_prefetch"]["startup_prefetch_cold_blobs"],
+        "1"
+    );
 
     handle.shutdown_and_flush().await.expect("shutdown proxy");
 
@@ -702,6 +711,147 @@ async fn test_startup_prefetch_partial_blob_failure_is_ready_when_best_effort() 
     warm_blob_mock.assert_async().await;
     cold_blob_mock.assert_async().await;
     pointer_visibility_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_oci_prefetch_ref_hydrates_blobs_before_ready() {
+    let mut server = Server::new_async().await;
+    let (_state, _home, _guard) = setup(&server).await;
+
+    let blob_payload = b"oci-prefetched-blob";
+    let blob_digest = cas_oci::prefixed_sha256_digest(blob_payload);
+    let index_json = br#"{"schemaVersion":2,"layers":[]}"#;
+    let pointer_bytes = make_pointer(
+        index_json,
+        &[(blob_digest.as_str(), blob_payload.len() as u64)],
+    );
+    let oci_tag = ref_tag("img", "v1");
+    let oci_entries = urlencoding::encode(&oci_tag);
+
+    let oci_restore_mock = server
+        .mock(
+            "GET",
+            format!("/v2/workspaces/org/repo/caches?entries={oci_entries}").as_str(),
+        )
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": oci_tag,
+                "status": "hit",
+                "cache_entry_id": "entry-oci-prefetch",
+                "manifest_url": format!("{}/pointers/entry-oci-prefetch", server.url()),
+                "manifest_root_digest": cas_oci::prefixed_sha256_digest(&pointer_bytes),
+                "storage_mode": "cas",
+                "cas_layout": "oci-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let kv_restore_mock = server
+        .mock("GET", "/v2/workspaces/org/repo/caches?entries=registry")
+        .expect_at_least(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create_async()
+        .await;
+
+    let pointer_mock = server
+        .mock("GET", "/pointers/entry-oci-prefetch")
+        .expect(1)
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let download_urls_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .expect(1)
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": blob_digest,
+                    "url": format!("{}/blobs/{}", server.url(), blob_digest),
+                }],
+                "missing": [],
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let blob_mock = server
+        .mock("GET", format!("/blobs/{}", blob_digest).as_str())
+        .expect(1)
+        .with_status(200)
+        .with_body(blob_payload)
+        .create_async()
+        .await;
+
+    let handle = boring_cache_cli::serve::start_server_background(
+        ApiClient::new_with_token_override(Some("test-token".to_string())).expect("api client"),
+        "org/repo".to_string(),
+        "127.0.0.1".to_string(),
+        0,
+        TagResolver::new(None, GitContext::default(), false),
+        Vec::new(),
+        "registry".to_string(),
+        BTreeMap::new(),
+        true,
+        vec![("img".to_string(), "v1".to_string())],
+        true,
+        false,
+    )
+    .await
+    .expect("start proxy");
+
+    let base_url = format!("http://127.0.0.1:{}", handle.port);
+    let client = reqwest::Client::new();
+    wait_for_prefetch_state(&client, &base_url, "ready").await;
+
+    let status_response = client
+        .get(format!("{base_url}/_boringcache/status"))
+        .send()
+        .await
+        .expect("status request");
+    assert_eq!(status_response.status(), reqwest::StatusCode::OK);
+    let status: serde_json::Value = status_response.json().await.expect("status json");
+    assert_eq!(status["startup_prefetch"]["startup_prefetch_oci_refs"], "1");
+    assert_eq!(
+        status["startup_prefetch"]["startup_prefetch_oci_total_unique_blobs"],
+        "1"
+    );
+    assert_eq!(
+        status["startup_prefetch"]["startup_prefetch_oci_inserted"],
+        "1"
+    );
+    assert_eq!(
+        status["startup_prefetch"]["startup_prefetch_oci_cold_blobs"],
+        "0"
+    );
+
+    let response = client
+        .get(format!("{base_url}/v2/img/blobs/{blob_digest}"))
+        .send()
+        .await
+        .expect("blob request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), blob_payload);
+
+    handle.shutdown_and_flush().await.expect("shutdown proxy");
+
+    oci_restore_mock.assert_async().await;
+    kv_restore_mock.assert_async().await;
+    pointer_mock.assert_async().await;
+    download_urls_mock.assert_async().await;
+    blob_mock.assert_async().await;
 }
 
 #[tokio::test]

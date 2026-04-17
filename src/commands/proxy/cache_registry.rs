@@ -20,7 +20,7 @@ const PROXY_STATUS_PATH: &str = "/_boringcache/status";
 const PROXY_PHASE_HEADER: &str = "X-BoringCache-Proxy-Phase";
 #[cfg(test)]
 const PROXY_READY_PHASE: &str = "ready";
-const PROXY_READY_TIMEOUT: Duration = Duration::from_secs(300);
+const PROXY_READY_TIMEOUT: Duration = Duration::from_secs(330);
 const PROXY_READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PROXY_READY_WARN_INTERVAL: Duration = Duration::from_secs(15);
 

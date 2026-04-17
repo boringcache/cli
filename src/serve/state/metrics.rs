@@ -103,7 +103,15 @@ struct StartupPrefetchSnapshot {
     already_local: u64,
     inserted: u64,
     failures: u64,
+    cold_blobs: u64,
     duration_ms: u64,
+    timed_out: bool,
+    oci_refs: u64,
+    oci_total_unique_blobs: u64,
+    oci_inserted: u64,
+    oci_failures: u64,
+    oci_cold_blobs: u64,
+    oci_duration_ms: u64,
 }
 
 pub struct PrefetchMetrics {
@@ -160,11 +168,48 @@ impl PrefetchMetrics {
         }
     }
 
+    pub fn record_startup_cold_blobs(&self, cold_blobs: usize) {
+        if let Ok(mut snapshot) = self.startup.lock() {
+            snapshot.cold_blobs = cold_blobs as u64;
+        }
+    }
+
+    pub fn record_startup_timeout(&self) {
+        if let Ok(mut snapshot) = self.startup.lock() {
+            snapshot.timed_out = true;
+        }
+    }
+
+    pub fn record_startup_oci_execution(
+        &self,
+        refs: usize,
+        total_unique_blobs: usize,
+        inserted: usize,
+        failures: usize,
+        cold_blobs: usize,
+        duration_ms: u64,
+    ) {
+        if let Ok(mut snapshot) = self.startup.lock() {
+            snapshot.oci_refs = snapshot.oci_refs.saturating_add(refs as u64);
+            snapshot.oci_total_unique_blobs = snapshot
+                .oci_total_unique_blobs
+                .saturating_add(total_unique_blobs as u64);
+            snapshot.oci_inserted = snapshot.oci_inserted.saturating_add(inserted as u64);
+            snapshot.oci_failures = snapshot.oci_failures.saturating_add(failures as u64);
+            snapshot.oci_cold_blobs = snapshot.oci_cold_blobs.saturating_add(cold_blobs as u64);
+            snapshot.oci_duration_ms = snapshot.oci_duration_ms.saturating_add(duration_ms);
+        }
+    }
+
     pub fn metadata_hints(&self) -> BTreeMap<String, String> {
         let Ok(snapshot) = self.startup.lock() else {
             return BTreeMap::new();
         };
-        if snapshot.target_blobs == 0 && snapshot.total_unique_blobs == 0 {
+        if snapshot.target_blobs == 0
+            && snapshot.total_unique_blobs == 0
+            && snapshot.oci_refs == 0
+            && !snapshot.timed_out
+        {
             return BTreeMap::new();
         }
 
@@ -205,9 +250,42 @@ impl PrefetchMetrics {
             snapshot.failures.to_string(),
         );
         hints.insert(
+            "startup_prefetch_cold_blobs".to_string(),
+            snapshot.cold_blobs.to_string(),
+        );
+        hints.insert(
             "startup_prefetch_duration_ms".to_string(),
             snapshot.duration_ms.to_string(),
         );
+        if snapshot.timed_out {
+            hints.insert("startup_prefetch_timed_out".to_string(), "true".to_string());
+        }
+        if snapshot.oci_refs > 0 {
+            hints.insert(
+                "startup_prefetch_oci_refs".to_string(),
+                snapshot.oci_refs.to_string(),
+            );
+            hints.insert(
+                "startup_prefetch_oci_total_unique_blobs".to_string(),
+                snapshot.oci_total_unique_blobs.to_string(),
+            );
+            hints.insert(
+                "startup_prefetch_oci_inserted".to_string(),
+                snapshot.oci_inserted.to_string(),
+            );
+            hints.insert(
+                "startup_prefetch_oci_failures".to_string(),
+                snapshot.oci_failures.to_string(),
+            );
+            hints.insert(
+                "startup_prefetch_oci_cold_blobs".to_string(),
+                snapshot.oci_cold_blobs.to_string(),
+            );
+            hints.insert(
+                "startup_prefetch_oci_duration_ms".to_string(),
+                snapshot.oci_duration_ms.to_string(),
+            );
+        }
         hints
     }
 }

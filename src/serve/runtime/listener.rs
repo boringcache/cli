@@ -208,7 +208,7 @@ pub(super) async fn build_server_runtime(
         if startup_warm {
             "before ready"
         } else {
-            "background"
+            "per-request only"
         }
     );
     eprintln!("  KV backlog policy: {KV_BACKLOG_POLICY}");

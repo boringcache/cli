@@ -169,7 +169,6 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
     clear_tag_misses(state, &state.registry_root_tag);
     eprintln!("KV index refresh: {count} entries loaded");
     preload_download_urls(state, &cache_entry_id).await;
-    spawn_preload_blobs(state, &cache_entry_id);
 }
 
 pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {

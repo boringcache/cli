@@ -181,30 +181,33 @@ fn spawn_startup_prefetch(
     startup_warm: bool,
     oci_prefetch_refs: Vec<(String, String)>,
 ) {
+    if !startup_warm {
+        return;
+    }
+
     let prefetch_state = state.clone();
     tokio::spawn(async move {
-        match crate::serve::cache_registry::prefetch_manifest_blobs(
-            &prefetch_state,
-            startup_warm,
-            oci_prefetch_refs,
+        let timeout = crate::serve::cache_registry::KV_PREFETCH_READINESS_TIMEOUT
+            .saturating_sub(std::time::Duration::from_secs(5));
+        if tokio::time::timeout(
+            timeout,
+            crate::serve::cache_registry::prefetch_manifest_blobs(
+                &prefetch_state,
+                startup_warm,
+                oci_prefetch_refs,
+            ),
         )
         .await
+        .is_err()
         {
-            Ok(()) => {
-                prefetch_state
-                    .prefetch_complete
-                    .store(true, Ordering::Release);
-            }
-            Err(error) if startup_warm => {
-                let message = format!("{error:#}");
-                log::warn!("Startup prefetch failed: {message}");
-                let mut prefetch_error = prefetch_state.prefetch_error.write().await;
-                *prefetch_error = Some(message);
-            }
-            Err(error) => {
-                log::warn!("Background prefetch failed: {error:#}");
-            }
+            let message = format!("Startup warmup timed out after {}s", timeout.as_secs());
+            prefetch_state.prefetch_metrics.record_startup_timeout();
+            log::warn!("{message}");
+            eprintln!("Prefetch: {message}; serving remaining blobs on demand");
         }
+        prefetch_state
+            .prefetch_complete
+            .store(true, Ordering::Release);
         prefetch_state.prefetch_complete_notify.notify_waiters();
     });
 }

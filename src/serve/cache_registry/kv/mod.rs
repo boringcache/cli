@@ -46,7 +46,6 @@ const KV_EMPTY_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration
 const KV_PENDING_REFRESH_SUPPRESSION_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(12);
 const KV_RESOLVE_NOT_FOUND_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
-const KV_BLOB_PRELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const KV_BLOB_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const KV_BLOB_URL_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_LOOKUP_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
