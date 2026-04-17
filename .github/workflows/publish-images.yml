@@ -89,6 +89,7 @@ jobs:
           push: true
           load: false
           cache-tag: base-bookworm
+          proxy-port: 5000
           verify: warn
           verify-timeout-seconds: 30
           build-args: |
@@ -113,6 +114,7 @@ jobs:
           push: true
           load: false
           cache-tag: base-bookworm-build
+          proxy-port: 5001
           verify: warn
           verify-timeout-seconds: 30
           build-args: |
