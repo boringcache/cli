@@ -69,32 +69,6 @@ impl ApiClient {
         Ok(CapabilityFlags::default())
     }
 
-    async fn tag_pointer_v2(&self, workspace: &str, tag: &str) -> Result<Option<TagPointer>> {
-        let encoded_tag = urlencoding::encode(tag);
-        let endpoint =
-            self.workspace_endpoint(workspace, &format!("caches/tags/{encoded_tag}/pointer"))?;
-        let url = self.build_v2_url(&endpoint);
-        debug!("GET {}", url);
-        let response = self
-            .send_authenticated_request(self.client.get(&url))
-            .await?;
-        let status = response.status();
-
-        if status == StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-
-        if !status.is_success() {
-            return Err(self.create_error_from_response(response).await);
-        }
-
-        let pointer: TagPointer = response
-            .json()
-            .await
-            .context("Failed to parse tag pointer response")?;
-        Ok(Some(pointer))
-    }
-
     pub async fn check_manifests(
         &self,
         workspace: &str,
@@ -619,21 +593,7 @@ impl ApiClient {
             cache: PublishFinalizePayload,
         }
 
-        let capabilities = self.get_capabilities().await;
         let publish_mode = determine_publish_mode(request);
-        let if_match = if publish_mode == "cas" {
-            match self.tag_pointer_v2(workspace, tag).await? {
-                Some(pointer) => Some(pointer.version),
-                None => capabilities.cas_publish_bootstrap_if_match.clone(),
-            }
-        } else {
-            None
-        };
-        if publish_mode == "cas" && if_match.is_none() {
-            anyhow::bail!(
-                "CAS publish requires server bootstrap If-Match capability or existing pointer version"
-            );
-        }
 
         let encoded_tag = urlencoding::encode(tag);
         let endpoint =
@@ -665,7 +625,7 @@ impl ApiClient {
                 .put_v2_with_if_match(
                     &endpoint,
                     &publish_payload,
-                    if_match.as_deref(),
+                    None,
                     CACHE_METRIC_ENDPOINT_OPERATION_CONFIRM_PUBLISH,
                 )
                 .await;
@@ -816,19 +776,13 @@ impl ApiClient {
                 .as_deref()
                 .or(Some(status.state.as_str()))
             {
-                Some("published") => match self.tag_pointer_v2(workspace, tag).await? {
-                    Some(pointer) => {
-                        return Ok(PendingPublishPollOutcome::Published(TagPointer {
-                            version: pointer.version,
-                            cache_entry_id: pointer.cache_entry_id,
-                            status: Some("published".to_string()),
-                            uploaded_at: None,
-                        }));
-                    }
-                    None => {
-                        anyhow::bail!("Pending publish completed but tag pointer was not found")
-                    }
-                },
+                Some("published") => {
+                    return Ok(PendingPublishPollOutcome::Published(TagPointer {
+                        cache_entry_id: Some(status.cache_entry_id),
+                        status: Some("published".to_string()),
+                        uploaded_at: None,
+                    }));
+                }
                 Some("conflicted") => {
                     return Err(BoringCacheError::cache_conflict(
                         status

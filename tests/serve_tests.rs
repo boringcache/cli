@@ -2249,13 +2249,12 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let primary_confirm_mock = server
         .mock("PUT", primary_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_header("if-match", "3")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2320,13 +2319,12 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let alias_confirm_mock = server
         .mock("PUT", alias_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_header("if-match", "5")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2438,13 +2436,12 @@ async fn test_manifest_put_degrades_when_primary_confirm_is_pending() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let primary_confirm_mock = server
         .mock("PUT", primary_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_header("if-match", "3")
         .match_body(Matcher::Any)
         .with_status(423)
         .with_header("content-type", "application/json")
@@ -2560,13 +2557,12 @@ async fn test_manifest_put_skips_alias_when_confirm_is_pending() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let primary_confirm_mock = server
         .mock("PUT", primary_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_header("if-match", "3")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2631,13 +2627,12 @@ async fn test_manifest_put_skips_alias_when_confirm_is_pending() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let alias_confirm_mock = server
         .mock("PUT", alias_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_header("if-match", "5")
         .match_body(Matcher::Any)
         .with_status(423)
         .with_header("content-type", "application/json")
@@ -2765,13 +2760,12 @@ async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers()
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let primary_confirm_mock = server
         .mock("PUT", primary_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_header("if-match", "3")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -2862,13 +2856,12 @@ async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers()
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let referrers_confirm_mock = server
         .mock("PUT", referrers_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_header("if-match", "7")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -3022,13 +3015,12 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let primary_confirm_mock = server
         .mock("PUT", primary_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_header("if-match", "3")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -3093,13 +3085,12 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let latest_alias_confirm_mock = server
         .mock("PUT", latest_alias_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_header("if-match", "4")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -3365,7 +3356,7 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
             })
             .to_string(),
         )
-        .expect_at_least(1)
+        .expect(0)
         .create_async()
         .await;
 
@@ -3431,13 +3422,12 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let primary_confirm_mock = server
         .mock("PUT", primary_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_header("if-match", "3")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -3512,7 +3502,7 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
             })
             .to_string(),
         )
-        .expect_at_least(1)
+        .expect(0)
         .create_async()
         .await;
 
@@ -3578,13 +3568,12 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let primary_confirm_mock = server
         .mock("PUT", primary_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_header("if-match", "3")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -3664,13 +3653,12 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let human_alias_confirm_mock = server
         .mock("PUT", human_alias_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
-        .match_header("if-match", "5")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -4810,7 +4798,6 @@ async fn test_bazel_cas_put_head_get_round_trip() {
             "PUT",
             "/v2/workspaces/org/repo/caches/tags/registry/publish",
         )
-        .match_header("if-match", "9")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -5087,7 +5074,6 @@ async fn test_sccache_put_head_get_round_trip() {
             "PUT",
             "/v2/workspaces/org/repo/caches/tags/registry/publish",
         )
-        .match_header("if-match", "11")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -5749,7 +5735,6 @@ async fn test_gradle_put_get_round_trip() {
             "PUT",
             "/v2/workspaces/org/repo/caches/tags/registry/publish",
         )
-        .match_header("if-match", "13")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -5962,7 +5947,6 @@ async fn test_maven_put_get_round_trip() {
             "PUT",
             "/v2/workspaces/org/repo/caches/tags/registry/publish",
         )
-        .match_header("if-match", "13")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -6597,7 +6581,6 @@ async fn test_turborepo_put_head_get_round_trip() {
             "PUT",
             "/v2/workspaces/org/repo/caches/tags/registry/publish",
         )
-        .match_header("if-match", "15")
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")

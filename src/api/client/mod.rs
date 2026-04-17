@@ -115,7 +115,6 @@ struct CapabilityFlags {
 
 #[derive(Debug, Clone, Deserialize)]
 struct TagPointer {
-    version: String,
     #[serde(default)]
     cache_entry_id: Option<String>,
     #[serde(default)]

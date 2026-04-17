@@ -444,6 +444,7 @@ async fn test_save_skips_stage_for_existing_cas_blobs() {
             })
             .to_string(),
         )
+        .expect(0)
         .create_async()
         .await;
 
@@ -460,7 +461,6 @@ async fn test_save_skips_stage_for_existing_cas_blobs() {
             "/v2/workspaces/test/workspace/caches/tags/oci-attach-tag/publish",
         )
         .match_header("authorization", "Bearer test-token-123")
-        .match_header("if-match", "7")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -728,7 +728,7 @@ async fn test_save_bazel_cas_skips_when_publish_conflicts_for_existing_entry() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let publish_mock = server
@@ -736,7 +736,6 @@ async fn test_save_bazel_cas_skips_when_publish_conflicts_for_existing_entry() {
             "PUT",
             "/v2/workspaces/test/workspace/caches/tags/bazel-publish-conflict-tag/publish",
         )
-        .match_header("if-match", "5")
         .with_status(412)
         .with_header("content-type", "application/json")
         .with_body(
@@ -836,7 +835,7 @@ async fn test_save_oci_skips_when_publish_conflicts_for_existing_entry() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let publish_mock = server
@@ -844,7 +843,6 @@ async fn test_save_oci_skips_when_publish_conflicts_for_existing_entry() {
             "PUT",
             "/v2/workspaces/test/workspace/caches/tags/oci-publish-conflict-tag/publish",
         )
-        .match_header("if-match", "11")
         .with_status(412)
         .with_header("content-type", "application/json")
         .with_body(

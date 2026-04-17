@@ -1127,6 +1127,7 @@ async fn test_run_workflow_restore_then_save_lifecycle_success() {
             })
             .to_string(),
         )
+        .expect(0)
         .create_async()
         .await;
 

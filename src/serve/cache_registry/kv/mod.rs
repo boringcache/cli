@@ -544,6 +544,7 @@ mod tests {
             .with_body(
                 r#"{"features":{"tag_publish_v2":true,"pending_publish_status_v2":true,"upload_sessions_v2":true,"cas_publish_bootstrap_if_match":"0"}}"#,
             )
+            .expect(0)
             .create_async()
             .await;
         let pointer_initial = server
@@ -555,7 +556,7 @@ mod tests {
             .with_status(404)
             .with_header("content-type", "application/json")
             .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
         let pointer_after_publish = server
@@ -567,12 +568,12 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"version":"1","cache_entry_id":"entry-1","status":"published"}"#)
+            .expect(0)
             .create_async()
             .await;
         let publish = server
             .mock("PUT", "/v2/workspaces/org/repo/caches/tags/registry/publish")
             .match_header("authorization", "Bearer test-token")
-            .match_header("if-match", "0")
             .match_header("x-boringcache-pending-publish-poll", "1")
             .match_header("content-type", Matcher::Regex("application/json".to_string()))
             .with_status(423)
@@ -637,6 +638,7 @@ mod tests {
             .with_body(
                 r#"{"features":{"tag_publish_v2":true,"pending_publish_status_v2":true,"upload_sessions_v2":true,"cas_publish_bootstrap_if_match":"0"}}"#,
             )
+            .expect(0)
             .create_async()
             .await;
         let pointer = server
@@ -648,12 +650,12 @@ mod tests {
             .with_status(404)
             .with_header("content-type", "application/json")
             .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
+            .expect(0)
             .create_async()
             .await;
         let publish = server
             .mock("PUT", "/v2/workspaces/org/repo/caches/tags/registry/publish")
             .match_header("authorization", "Bearer test-token")
-            .match_header("if-match", "0")
             .match_header("x-boringcache-pending-publish-poll", "1")
             .match_header("content-type", Matcher::Regex("application/json".to_string()))
             .with_status(423)
@@ -716,6 +718,7 @@ mod tests {
             .with_body(
                 r#"{"features":{"tag_publish_v2":true,"pending_publish_status_v2":true,"upload_sessions_v2":true,"cas_publish_bootstrap_if_match":"0"}}"#,
             )
+            .expect(0)
             .create_async()
             .await;
         let pointer = server
@@ -727,7 +730,7 @@ mod tests {
             .with_status(404)
             .with_header("content-type", "application/json")
             .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
         let pointer_after_publish = server
@@ -739,12 +742,12 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"version":"1","cache_entry_id":"entry-1","status":"published"}"#)
+            .expect(0)
             .create_async()
             .await;
         let publish = server
             .mock("PUT", "/v2/workspaces/org/repo/caches/tags/registry/publish")
             .match_header("authorization", "Bearer test-token")
-            .match_header("if-match", "0")
             .match_header("x-boringcache-pending-publish-poll", "1")
             .match_header("content-type", Matcher::Regex("application/json".to_string()))
             .with_status(423)
@@ -812,6 +815,7 @@ mod tests {
             .with_body(
                 r#"{"features":{"tag_publish_v2":true,"pending_publish_status_v2":true,"upload_sessions_v2":true,"cas_publish_bootstrap_if_match":"0"}}"#,
             )
+            .expect(0)
             .create_async()
             .await;
         let pointer_initial = server
@@ -823,13 +827,12 @@ mod tests {
             .with_status(404)
             .with_header("content-type", "application/json")
             .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
         let publish = server
             .mock("PUT", "/v2/workspaces/org/repo/caches/tags/registry/publish")
             .match_header("authorization", "Bearer test-token")
-            .match_header("if-match", "0")
             .match_header("x-boringcache-pending-publish-poll", "1")
             .match_header("content-type", Matcher::Regex("application/json".to_string()))
             .with_status(423)
@@ -885,6 +888,7 @@ mod tests {
             .with_body(
                 r#"{"features":{"tag_publish_v2":true,"pending_publish_status_v2":true,"upload_sessions_v2":true,"cas_publish_bootstrap_if_match":"0"}}"#,
             )
+            .expect(0)
             .create_async()
             .await;
         let pointer_initial = server
@@ -896,7 +900,7 @@ mod tests {
             .with_status(404)
             .with_header("content-type", "application/json")
             .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
         let pointer_after_publish = server
@@ -908,12 +912,12 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"version":"1","cache_entry_id":"entry-1","status":"published"}"#)
+            .expect(0)
             .create_async()
             .await;
         let publish = server
             .mock("PUT", "/v2/workspaces/org/repo/caches/tags/registry/publish")
             .match_header("authorization", "Bearer test-token")
-            .match_header("if-match", "0")
             .match_header("x-boringcache-pending-publish-poll", "1")
             .match_header("content-type", Matcher::Regex("application/json".to_string()))
             .with_status(423)
