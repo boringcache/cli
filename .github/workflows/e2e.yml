@@ -6,6 +6,7 @@ on:
     paths:
       - "src/**"
       - "ci/e2e/**"
+      - "scripts/ci/**"
       - "scripts/rust-version.sh"
       - "scripts/cli-version.sh"
       - ".github/workflows/e2e.yml"
@@ -16,6 +17,7 @@ on:
     paths:
       - "src/**"
       - "ci/e2e/**"
+      - "scripts/ci/**"
       - "scripts/rust-version.sh"
       - "scripts/cli-version.sh"
       - ".github/workflows/e2e.yml"
@@ -75,7 +77,9 @@ jobs:
           toolchain: ${{ steps.rust-version.outputs.version }}
 
       - name: Build CLI binary
-        run: cargo build --release --locked
+        env:
+          BORINGCACHE_RUST_SETUP_OUTCOME: ${{ steps.boringcache-rust.outcome }}
+        run: ./scripts/ci/run-with-rust-cache-env.sh cargo build --release --locked
 
       - name: Generate CLI artifact checksum
         run: sha256sum target/release/boringcache > target/release/boringcache.sha256

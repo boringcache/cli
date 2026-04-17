@@ -56,13 +56,14 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           BORINGCACHE_CARGO_FLOW_MODE: plain
+          BORINGCACHE_RUST_SETUP_OUTCOME: ${{ steps.boringcache-rust.outcome }}
         run: |
           set -euo pipefail
           START_TIME=$(date +%s%N)
-          ./scripts/cargo-flow.sh build
-          ./scripts/cargo-flow.sh test
-          ./scripts/cargo-flow.sh clippy
-          ./scripts/cargo-flow.sh compat
+          ./scripts/ci/run-with-rust-cache-env.sh ./scripts/cargo-flow.sh build
+          ./scripts/ci/run-with-rust-cache-env.sh ./scripts/cargo-flow.sh test
+          ./scripts/ci/run-with-rust-cache-env.sh ./scripts/cargo-flow.sh clippy
+          ./scripts/ci/run-with-rust-cache-env.sh ./scripts/cargo-flow.sh compat
           END_TIME=$(date +%s%N)
           DURATION=$(( (END_TIME - START_TIME) / 1000000 ))
           echo "BoringCache build+test: ${DURATION}ms"
@@ -130,7 +131,8 @@ jobs:
       - name: Warm debug cache via cargo-flow
         env:
           BORINGCACHE_CARGO_FLOW_MODE: plain
-        run: ./scripts/cargo-flow.sh build
+          BORINGCACHE_RUST_SETUP_OUTCOME: ${{ steps.boringcache-rust.outcome }}
+        run: ./scripts/ci/run-with-rust-cache-env.sh ./scripts/cargo-flow.sh build
 
   build:
     name: Build CLI - ${{ matrix.name }}
@@ -293,9 +295,10 @@ jobs:
         shell: bash
         env:
           BORINGCACHE_CARGO_FLOW_MODE: plain
+          BORINGCACHE_RUST_SETUP_OUTCOME: ${{ steps.boringcache-rust-native.outcome }}
         run: |
           set -euo pipefail
-          ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
+          ./scripts/ci/run-with-rust-cache-env.sh ./scripts/cargo-flow.sh build --release --target ${{ matrix.target }}
 
       - name: Prepare binary (Native builds)
         if: matrix.use_docker != true
