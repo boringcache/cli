@@ -2,11 +2,15 @@
 #
 # Release script for BoringCache CLI
 #
-# Usage:
-#   ./scripts/release.sh patch    # 0.1.2 -> 0.1.3
-#   ./scripts/release.sh minor    # 0.1.2 -> 0.2.0
-#   ./scripts/release.sh major    # 0.1.2 -> 1.0.0
-#   ./scripts/release.sh 0.2.0    # Explicit version
+# Preferred usage:
+#   ./scripts/release.sh prepare patch    # create and push the signed version commit
+#   ./scripts/release.sh tag 0.1.3        # tag the already-green release commit
+#
+# Legacy one-shot usage:
+#   ./scripts/release.sh patch            # bump, commit, tag, and push in one run
+#   ./scripts/release.sh minor            # 0.1.2 -> 0.2.0
+#   ./scripts/release.sh major            # 0.1.2 -> 1.0.0
+#   ./scripts/release.sh 0.2.0            # explicit version
 #
 # This script:
 #   1. Validates the working directory is clean
@@ -18,8 +22,8 @@
 #   7. Updates install fallback versions
 #   8. Updates Cargo.lock
 #   9. Commits the version bump (signed)
-#   10. Creates an annotated git tag
-#   11. Pushes the commit and tag
+#   10. Creates a signed annotated git tag
+#   11. Pushes the commit and/or tag
 
 set -euo pipefail
 
@@ -48,6 +52,29 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  ./scripts/release.sh prepare <patch|minor|major|VERSION>
+      Create and push the signed version commit. Wait for CLI CI/E2E on
+      that commit, then run the tag command.
+
+  ./scripts/release.sh tag <VERSION>
+      Create and push a signed tag for the current already-green release
+      commit. This does not create a new commit or run local tests.
+
+  ./scripts/release.sh <patch|minor|major|VERSION>
+      Legacy one-shot release. This bumps, commits, tags, and pushes in
+      one run, so the pushed release commit will run branch CI before the
+      tag release workflow publishes assets.
+
+Examples:
+  ./scripts/release.sh prepare patch
+  ./scripts/release.sh tag 1.2.3
+  ./scripts/release.sh 1.2.3
+USAGE
 }
 
 # Get current version from Cargo.toml
@@ -132,62 +159,27 @@ verify_install_fallback_version() {
     fi
 }
 
-# Main release function
-main() {
-    if [[ $# -lt 1 ]]; then
-        echo "Usage: $0 <patch|minor|major|VERSION>"
-        echo ""
-        echo "Examples:"
-        echo "  $0 patch    # Bump patch version (0.1.2 -> 0.1.3)"
-        echo "  $0 minor    # Bump minor version (0.1.2 -> 0.2.0)"
-        echo "  $0 major    # Bump major version (0.1.2 -> 1.0.0)"
-        echo "  $0 0.2.0    # Set explicit version"
+ensure_tag_absent() {
+    local version="$1"
+    local tag="v${version}"
+    local remote_status=0
+
+    if git rev-parse "${tag}" >/dev/null 2>&1; then
+        log_error "Tag ${tag} already exists locally!"
         exit 1
     fi
 
-    local bump_type="$1"
-
-    cd "$PROJECT_ROOT"
-
-    # Step 1: Check git status
-    log_info "Checking git status..."
-    if [[ -n "$(git status --porcelain)" ]]; then
-        log_error "Working directory is not clean. Please commit or stash changes first."
-        git status --short
+    git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1 || remote_status=$?
+    if [[ "${remote_status}" -eq 0 ]]; then
+        log_error "Tag ${tag} already exists on origin!"
         exit 1
     fi
-
-    # Ensure we're on main branch
-    local current_branch
-    current_branch=$(git branch --show-current)
-    if [[ "$current_branch" != "main" ]]; then
-        log_warn "Not on main branch (currently on '$current_branch')"
-        read -p "Continue anyway? [y/N] " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
+    if [[ "${remote_status}" -ne 2 ]]; then
+        log_warn "Could not confirm whether ${tag} exists on origin; continuing with local check only."
     fi
+}
 
-    # Pull latest changes
-    log_info "Pulling latest changes..."
-    git pull --rebase origin "$current_branch" || true
-
-    # Get versions
-    local current_version
-    current_version=$(get_current_version)
-    local new_version
-    new_version=$(bump_version "$current_version" "$bump_type")
-
-    log_info "Current version: $current_version"
-    log_info "New version: $new_version"
-
-    # Check if tag already exists
-    if git rev-parse "v$new_version" >/dev/null 2>&1; then
-        log_error "Tag v$new_version already exists!"
-        exit 1
-    fi
-
+run_local_gates() {
     # Step 2: Run cargo fmt --check
     log_info "Running cargo fmt --check..."
     if ! cargo fmt -- --check; then
@@ -219,6 +211,145 @@ main() {
         exit 1
     fi
     log_success "All tests passed"
+}
+
+create_signed_tag() {
+    local version="$1"
+
+    log_info "Creating tag v${version}..."
+    git tag -s "v${version}" -m "Release v${version}"
+}
+
+assert_head_matches_origin() {
+    local branch="$1"
+    local local_sha
+    local remote_sha
+
+    log_info "Verifying HEAD matches origin/${branch}..."
+    git fetch origin "$branch"
+    local_sha="$(git rev-parse HEAD)"
+    remote_sha="$(git rev-parse "origin/${branch}")"
+    if [[ "$local_sha" != "$remote_sha" ]]; then
+        log_error "HEAD ${local_sha} does not match origin/${branch} ${remote_sha}."
+        log_error "Tag mode must run on the pushed, already-green release commit."
+        exit 1
+    fi
+}
+
+# Main release function
+main() {
+    if [[ $# -lt 1 ]]; then
+        usage
+        exit 1
+    fi
+
+    local mode="one-shot"
+    local bump_type="$1"
+
+    case "$1" in
+        prepare)
+            if [[ $# -ne 2 ]]; then
+                usage
+                exit 1
+            fi
+            mode="prepare"
+            bump_type="$2"
+            ;;
+        tag)
+            if [[ $# -ne 2 ]]; then
+                usage
+                exit 1
+            fi
+            mode="tag"
+            bump_type="$2"
+            if [[ ! "$bump_type" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                log_error "Tag mode requires an explicit version, for example: ./scripts/release.sh tag 1.2.3"
+                exit 1
+            fi
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            if [[ $# -ne 1 ]]; then
+                usage
+                exit 1
+            fi
+            ;;
+    esac
+
+    cd "$PROJECT_ROOT"
+
+    # Step 1: Check git status
+    log_info "Checking git status..."
+    if [[ -n "$(git status --porcelain)" ]]; then
+        log_error "Working directory is not clean. Please commit or stash changes first."
+        git status --short
+        exit 1
+    fi
+
+    # Ensure we're on main branch
+    local current_branch
+    current_branch=$(git branch --show-current)
+    if [[ "$current_branch" != "main" ]]; then
+        log_warn "Not on main branch (currently on '$current_branch')"
+        read -p "Continue anyway? [y/N] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+
+    # Pull latest changes
+    log_info "Pulling latest changes..."
+    git pull --rebase origin "$current_branch" || true
+
+    # Get versions
+    local current_version
+    current_version=$(get_current_version)
+    local new_version
+    if [[ "$mode" == "tag" ]]; then
+        new_version="$bump_type"
+    else
+        new_version=$(bump_version "$current_version" "$bump_type")
+    fi
+
+    log_info "Current version: $current_version"
+    log_info "New version: $new_version"
+    if [[ "$mode" == "one-shot" ]]; then
+        log_warn "One-shot release creates a release commit and branch CI will run on it. Prefer: prepare, wait for green CI, then tag."
+    fi
+
+    # Check if tag already exists
+    ensure_tag_absent "$new_version"
+
+    if [[ "$mode" == "tag" ]]; then
+        if [[ "$current_version" != "$new_version" ]]; then
+            log_error "Cargo.toml version is ${current_version}, but tag mode requested ${new_version}."
+            log_error "Run './scripts/release.sh prepare ${new_version}' first, wait for CI, then tag."
+            exit 1
+        fi
+        assert_head_matches_origin "$current_branch"
+
+        log_info "Tagging already-prepared release commit $(git rev-parse --short HEAD)."
+        create_signed_tag "$new_version"
+        log_info "Pushing tag v${new_version} to origin..."
+        git push origin "v$new_version"
+
+        log_success "Tagged v$new_version!"
+        echo ""
+        echo "The release workflow will verify existing CLI CI/E2E for this commit, then build and publish binaries."
+        echo "Monitor progress at: https://github.com/$(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\.git/\1/')/actions"
+        exit 0
+    fi
+
+    if [[ "$mode" == "prepare" && "$current_version" == "$new_version" ]]; then
+        log_error "Version is already set to $new_version. Run './scripts/release.sh tag $new_version' after CI is green."
+        exit 1
+    fi
+
+    run_local_gates
 
     # Step 6-9: Update version and commit (skip if version unchanged)
     if [[ "$current_version" == "$new_version" ]]; then
@@ -252,9 +383,19 @@ main() {
         git commit -S -m "chore: bump version to $new_version"
     fi
 
+    if [[ "$mode" == "prepare" ]]; then
+        log_info "Pushing release commit to origin..."
+        git push origin "$current_branch"
+
+        log_success "Prepared v$new_version release commit!"
+        echo ""
+        echo "Wait for CLI CI and E2E Tests to pass on $(git rev-parse --short HEAD), then run:"
+        echo "  ./scripts/release.sh tag $new_version"
+        exit 0
+    fi
+
     # Step 8: Create signed annotated tag
-    log_info "Creating tag v$new_version..."
-    git tag -s "v$new_version" -m "Release v$new_version"
+    create_signed_tag "$new_version"
 
     # Step 9: Push commit and tag
     log_info "Pushing to origin..."
