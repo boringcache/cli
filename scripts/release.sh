@@ -252,9 +252,9 @@ main() {
         git commit -S -m "chore: bump version to $new_version"
     fi
 
-    # Step 8: Create annotated tag
+    # Step 8: Create signed annotated tag
     log_info "Creating tag v$new_version..."
-    git tag -a "v$new_version" -m "Release v$new_version"
+    git tag -s "v$new_version" -m "Release v$new_version"
 
     # Step 9: Push commit and tag
     log_info "Pushing to origin..."
