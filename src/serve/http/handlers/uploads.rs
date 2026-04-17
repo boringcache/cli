@@ -42,11 +42,17 @@ pub(super) async fn find_local_uploaded_blob(
 }
 
 pub(super) async fn has_non_empty_local_blob(state: &AppState, digest: &str) -> bool {
-    let sessions = state.upload_sessions.read().await;
-    sessions
-        .find_by_digest(digest)
-        .map(|session| session.finalized_size.unwrap_or(session.bytes_received) > 0)
-        .unwrap_or(false)
+    {
+        let sessions = state.upload_sessions.read().await;
+        if sessions
+            .find_by_digest(digest)
+            .is_some_and(|session| session.finalized_size.unwrap_or(session.bytes_received) > 0)
+        {
+            return true;
+        }
+    }
+
+    state.blob_read_cache.get_handle(digest).await.is_some()
 }
 
 pub(super) async fn start_upload(

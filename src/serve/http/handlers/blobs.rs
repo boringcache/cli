@@ -20,26 +20,11 @@ pub(super) async fn get_blob(
     digest: String,
 ) -> Result<Response, OciError> {
     if let Some(handle) = find_local_uploaded_blob(&state, &name, &digest).await {
-        let mut headers = HeaderMap::new();
-        insert_header(&mut headers, "Docker-Content-Digest", &digest)?;
-        insert_header(&mut headers, "Content-Type", "application/octet-stream")?;
-        insert_header(
-            &mut headers,
-            "Content-Length",
-            &handle.size_bytes().to_string(),
-        )?;
-        insert_header(
-            &mut headers,
-            "Docker-Distribution-API-Version",
-            "registry/2.0",
-        )?;
+        return local_blob_response(method, &digest, &handle).await;
+    }
 
-        if method == Method::HEAD {
-            return Ok((StatusCode::OK, headers, Body::empty()).into_response());
-        }
-
-        let body = cached_blob_body(&handle).await?;
-        return Ok((StatusCode::OK, headers, body).into_response());
+    if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
+        return local_blob_response(method, &digest, &handle).await;
     }
 
     let Some((cache_entry_id, size_bytes, cached_download_url)) = ({
@@ -180,6 +165,33 @@ pub(super) async fn get_blob(
             }
         }
     }
+}
+
+async fn local_blob_response(
+    method: Method,
+    digest: &str,
+    handle: &BlobReadHandle,
+) -> Result<Response, OciError> {
+    let mut headers = HeaderMap::new();
+    insert_header(&mut headers, "Docker-Content-Digest", digest)?;
+    insert_header(&mut headers, "Content-Type", "application/octet-stream")?;
+    insert_header(
+        &mut headers,
+        "Content-Length",
+        &handle.size_bytes().to_string(),
+    )?;
+    insert_header(
+        &mut headers,
+        "Docker-Distribution-API-Version",
+        "registry/2.0",
+    )?;
+
+    if method == Method::HEAD {
+        return Ok((StatusCode::OK, headers, Body::empty()).into_response());
+    }
+
+    let body = cached_blob_body(handle).await?;
+    Ok((StatusCode::OK, headers, body).into_response())
 }
 
 pub(super) async fn has_remote_blob(state: &AppState, digest: &str) -> Result<bool, OciError> {

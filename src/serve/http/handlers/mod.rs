@@ -627,6 +627,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blob_head_uses_prefetched_local_blob_without_locator_entry() {
+        let state = test_state();
+        let payload = b"prefetched-oci-blob";
+        let digest = cas_oci::prefixed_sha256_digest(payload);
+        state
+            .blob_read_cache
+            .insert(&digest, payload)
+            .await
+            .expect("insert prefetched blob");
+
+        let response = get_blob(Method::HEAD, state, "cache".to_string(), digest.clone())
+            .await
+            .expect("head should use prefetched local blob");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("Docker-Content-Digest")
+                .and_then(|value| value.to_str().ok()),
+            Some(digest.as_str())
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("Content-Length")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+            Some(payload.len().to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn start_upload_mount_reuses_prefetched_local_blob() {
+        let state = test_state();
+        let payload = b"prefetched-mount";
+        let digest = cas_oci::prefixed_sha256_digest(payload);
+        state
+            .blob_read_cache
+            .insert(&digest, payload)
+            .await
+            .expect("insert prefetched blob");
+
+        let mut params = HashMap::new();
+        params.insert("mount".to_string(), digest);
+        params.insert("from".to_string(), "cache".to_string());
+
+        let response = start_upload(state, "cache".to_string(), params, Body::empty())
+            .await
+            .expect("start upload mount should reuse prefetched blob");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
     async fn put_upload_retries_local_reuse_before_remote_lookup() {
         let state = test_state();
         let digest = cas_oci::prefixed_sha256_digest(b"delayed payload");
