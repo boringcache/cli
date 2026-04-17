@@ -1296,6 +1296,58 @@ fn test_docker_dry_run_json_injects_cache_flags() {
 }
 
 #[test]
+fn test_docker_read_only_dry_run_json_uses_on_demand_proxy_mode() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .args([
+            "docker",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "docker-main",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--read-only",
+            "--dry-run",
+            "--json",
+            "--",
+            "docker",
+            "buildx",
+            "build",
+            ".",
+        ])
+        .output()
+        .expect("Failed to execute docker read-only dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(parsed["adapter"], "docker");
+    assert_eq!(parsed["proxy"]["read_only"], true);
+    assert_eq!(parsed["proxy"]["startup_mode"], "on-demand");
+    assert!(parsed["proxy"].get("oci_prefetch_refs").is_none());
+    assert!(parsed["oci_cache"].get("cache_to").is_none());
+
+    let command = parsed["command"]
+        .as_array()
+        .expect("command array")
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(
+        command
+            .contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache")
+    );
+    assert!(!command.iter().any(|arg| arg.starts_with("--cache-to=")));
+}
+
+#[test]
 fn test_docker_dry_run_rejects_embedded_ref_tag_syntax() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);

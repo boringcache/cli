@@ -293,10 +293,10 @@ pub async fn adapter_execute(
         if infer_entries { &command } else { &[] },
     )?;
     let archive_enabled = !resolved_plan.tag_path_pairs.is_empty();
-    let proxy_metadata_hints = cache_registry::resolve_proxy_metadata_hints(&metadata_hint_args)?;
-    let startup_warm = !args.on_demand;
-
     let effective_read_only = cache_registry::effective_proxy_read_only(configured_read_only);
+    let docker_read_only_on_demand = kind == AdapterKind::Docker && effective_read_only;
+    let startup_warm = !(args.on_demand || docker_read_only_on_demand);
+    let proxy_metadata_hints = cache_registry::resolve_proxy_metadata_hints(&metadata_hint_args)?;
     let effective_skip_save = skip_save || effective_read_only;
     let docker_cache_mode = project_config::prefer_cli_scalar(
         adapter_config.cache_mode.clone(),
