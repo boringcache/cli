@@ -9,7 +9,6 @@ use std::time::Instant;
 use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
 use crate::cas_transport::upload_payload;
-use crate::error::PendingMetadata;
 use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
 use crate::serve::http::oci_route::insert_header;
@@ -45,24 +44,6 @@ struct PersistManifestEntryInput<'a> {
     blob_descriptors: Vec<BlobDescriptor>,
     configured_human_tags: &'a [String],
     additional_aliases: &'a [AliasBinding],
-}
-
-fn pending_publish_message(
-    prefix: &str,
-    tag: &str,
-    cache_entry_id: &str,
-    metadata: &PendingMetadata,
-) -> String {
-    let upload_session = metadata.upload_session_id.as_deref().unwrap_or("<unknown>");
-    let publish_attempt = metadata
-        .publish_attempt_id
-        .as_deref()
-        .unwrap_or("<unknown>");
-    let poll_path = metadata.poll_path.as_deref().unwrap_or("<unknown>");
-    let retry_after = metadata.retry_after_seconds.unwrap_or(0);
-    format!(
-        "{prefix} for {tag}:{cache_entry_id} (upload_session_id={upload_session}, publish_attempt_id={publish_attempt}, poll_path={poll_path}, retry_after_seconds={retry_after})"
-    )
 }
 
 pub(super) async fn get_manifest(
@@ -925,7 +906,6 @@ async fn persist_manifest_entry(
             let cache_entry_id = confirm_cache_entry_id.clone();
             let manifest_digest = confirm_manifest_digest.clone();
             async move {
-                let tag_for_error = tag.clone();
                 let confirm_request = ConfirmRequest {
                     manifest_digest,
                     manifest_size: confirm_manifest_size,
@@ -944,22 +924,10 @@ async fn persist_manifest_entry(
 
                 match state
                     .api_client
-                    .confirm_wait_for_publish_or_pending_timeout(
-                        &state.workspace,
-                        &cache_entry_id,
-                        &confirm_request,
-                    )
+                    .confirm_with_retry(&state.workspace, &cache_entry_id, &confirm_request)
                     .await
                 {
-                    Ok(crate::api::client::ConfirmPublishResult::Published(_)) => {}
-                    Ok(crate::api::client::ConfirmPublishResult::Pending(metadata)) => {
-                        return Err(OciError::locked(pending_publish_message(
-                            "confirm deferred",
-                            &tag_for_error,
-                            &cache_entry_id,
-                            &metadata,
-                        )));
-                    }
+                    Ok(_) => {}
                     Err(error) => {
                         return Err(OciError::internal(format!("confirm failed: {error}")));
                     }

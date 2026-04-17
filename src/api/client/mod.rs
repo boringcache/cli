@@ -8,7 +8,7 @@ mod metrics;
 mod workspace;
 
 use crate::config::{AuthPurpose, Config};
-use crate::error::{BoringCacheError, ConflictMetadata, PendingMetadata};
+use crate::error::{BoringCacheError, ConflictMetadata};
 use crate::observability;
 use crate::retry_resume::RetryConfig;
 use crate::types::Result;
@@ -18,7 +18,6 @@ use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
@@ -36,55 +35,9 @@ const API_VERSION_V2: &str = "v2";
 const FALLBACK_API_BASE_URL: &str = "https://api.boringcache.com";
 const CONFIRM_PUBLISH_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_CONFIRM_PUBLISH_TIMEOUT_SECS";
 const DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS: u64 = 10;
-const SHUTDOWN_PENDING_PUBLISH_GRACE_SECS_ENV: &str =
-    "BORINGCACHE_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS";
-const DEFAULT_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS: u64 = 10;
 const TRANSFER_CONNECT_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_TRANSFER_CONNECT_TIMEOUT_SECS";
 const DEFAULT_TRANSFER_CONNECT_TIMEOUT_SECS: u64 = 10;
-const PENDING_PUBLISH_POLL_TIMEOUT: Duration = Duration::from_secs(180);
-const PENDING_PUBLISH_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const PENDING_PUBLISH_POLL_MAX_INTERVAL: Duration = Duration::from_secs(10);
 const BLOB_RECEIPT_COMMIT_BATCH_MAX: usize = 500;
-
-#[derive(Debug)]
-pub enum ConfirmPublishResult {
-    Published(Box<super::models::cache::CacheConfirmResponse>),
-    Pending(PendingMetadata),
-}
-
-#[derive(Debug)]
-enum PendingPublishPollOutcome {
-    Published(TagPointer),
-    Pending(PendingMetadata),
-}
-
-#[derive(Clone, Copy)]
-struct PendingPublishPollContext<'a> {
-    started_at: Instant,
-    pending_started_at: Instant,
-    shutdown_pending_policy: ShutdownPendingPublishPolicy<'a>,
-    accept_server_owned_pending_after_timeout: bool,
-}
-
-#[derive(Clone, Copy)]
-struct ShutdownPendingPublishPolicy<'a> {
-    shutdown_requested: Option<&'a AtomicBool>,
-    grace: Duration,
-}
-
-impl ShutdownPendingPublishPolicy<'_> {
-    fn should_accept_server_owned_pending(
-        self,
-        metadata: &PendingMetadata,
-        pending_started_at: Instant,
-    ) -> bool {
-        server_owned_pending_publish(metadata)
-            && self
-                .shutdown_requested
-                .is_some_and(|flag| flag.load(Ordering::Acquire))
-            && pending_started_at.elapsed() >= self.grace
-    }
-}
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct CapabilityResponse {
@@ -107,8 +60,6 @@ struct CapabilityFlags {
     upload_sessions_v2: bool,
     #[serde(default)]
     upload_receipts_v2: bool,
-    #[serde(default)]
-    pending_publish_status_v2: bool,
     #[serde(default)]
     cas_publish_bootstrap_if_match: Option<String>,
 }
@@ -221,69 +172,6 @@ fn parse_restore_not_found_body(
     Ok(None)
 }
 
-fn parse_pending_metadata(
-    body: &str,
-    parsed_payload: Option<&ParsedError>,
-) -> Option<PendingMetadata> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let details = value.get("details")?;
-
-    let upload_session_id = details
-        .get("upload_session_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let publish_attempt_id = details
-        .get("publish_attempt_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let poll_path = details
-        .get("poll_path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let retry_after_seconds = details
-        .get("retry_after_seconds")
-        .and_then(|v| v.as_u64())
-        .or_else(|| {
-            details
-                .get("retry_after_seconds")
-                .and_then(|v| v.as_str())
-                .and_then(|v| v.parse::<u64>().ok())
-        });
-
-    Some(PendingMetadata {
-        code: parsed_payload.and_then(|p| p.code.clone()),
-        upload_session_id,
-        publish_attempt_id,
-        poll_path,
-        retry_after_seconds,
-    })
-}
-
-fn pending_metadata_from_error(error: &anyhow::Error) -> Option<&PendingMetadata> {
-    error.downcast_ref::<BoringCacheError>()?.pending_metadata()
-}
-
-fn server_owned_pending_publish(metadata: &PendingMetadata) -> bool {
-    if metadata.code.as_deref() != Some("pending_publish") {
-        return false;
-    }
-
-    metadata.poll_path.is_some() || metadata.upload_session_id.is_some()
-}
-
-fn should_accept_server_owned_pending_after_timeout(
-    accept_server_owned_pending_after_timeout: bool,
-    metadata: &PendingMetadata,
-) -> bool {
-    accept_server_owned_pending_after_timeout && server_owned_pending_publish(metadata)
-}
-
-fn pending_publish_poll_delay(retry_after_seconds: Option<u64>) -> Duration {
-    Duration::from_secs(retry_after_seconds.unwrap_or(1).max(1))
-        .max(PENDING_PUBLISH_POLL_INTERVAL)
-        .min(PENDING_PUBLISH_POLL_MAX_INTERVAL)
-}
-
 fn is_rate_limit_error(error: &anyhow::Error) -> bool {
     let lower = format!("{error:#}").to_lowercase();
     lower.contains("429")
@@ -292,42 +180,18 @@ fn is_rate_limit_error(error: &anyhow::Error) -> bool {
         || lower.contains("throttled")
 }
 
-fn pending_publish_poll_error_delay(
-    retry_after_seconds: Option<u64>,
-    error: &anyhow::Error,
-    consecutive_errors: u32,
-) -> Duration {
-    let base = pending_publish_poll_delay(retry_after_seconds);
+fn confirm_publish_error_delay(error: &anyhow::Error, consecutive_errors: u32) -> Duration {
+    let base = Duration::from_secs(1);
     if !is_rate_limit_error(error) {
         return base;
     }
 
-    // Start a little slower on throttling to avoid hammering publish-status APIs.
-    let throttled_base = base.max(Duration::from_secs(2));
+    let throttled_base = Duration::from_secs(2);
     let multiplier = 1u32 << consecutive_errors.saturating_sub(1).min(4);
     throttled_base
         .checked_mul(multiplier)
-        .unwrap_or(PENDING_PUBLISH_POLL_MAX_INTERVAL)
-        .min(PENDING_PUBLISH_POLL_MAX_INTERVAL)
-}
-
-fn confirm_publish_error_delay(error: &anyhow::Error, consecutive_errors: u32) -> Duration {
-    pending_publish_poll_error_delay(Some(1), error, consecutive_errors)
-}
-
-fn should_retry_pending_publish_poll_error(error: &anyhow::Error) -> bool {
-    if crate::error::is_connection_error(error) {
-        return true;
-    }
-
-    let lower = format!("{error:#}").to_lowercase();
-    is_rate_limit_error(error)
-        || lower.contains("503")
-        || lower.contains("service unavailable")
-        || lower.contains("504")
-        || lower.contains("gateway timeout")
-        || lower.contains("request timeout")
-        || lower.contains("timed out")
+        .unwrap_or(Duration::from_secs(10))
+        .min(Duration::from_secs(10))
 }
 
 fn should_retry_confirm_publish_error(error: &anyhow::Error) -> bool {
@@ -474,14 +338,6 @@ fn confirm_publish_request_timeout() -> Duration {
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS);
-    Duration::from_secs(seconds)
-}
-
-fn shutdown_pending_publish_grace() -> Duration {
-    let seconds = std::env::var(SHUTDOWN_PENDING_PUBLISH_GRACE_SECS_ENV)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS);
     Duration::from_secs(seconds)
 }
 
@@ -1016,194 +872,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_pending_metadata_extracts_polling_fields() {
-        let body = r#"{
-            "success": false,
-            "error": "1 blob(s) not yet verified in storage — retry after upload completes",
-            "code": "pending_publish",
-            "details": {
-                "cache_entry_id": "entry-1",
-                "upload_session_id": "session-1",
-                "publish_attempt_id": "attempt-1",
-                "pending_blob_count": 1,
-                "retry_after_seconds": 3,
-                "poll_path": "/v2/workspaces/acme/demo/upload-sessions/session-1"
-            }
-        }"#;
-
-        let parsed = parse_error_payload(body).expect("payload should parse");
-        let metadata = parse_pending_metadata(body, Some(&parsed)).expect("metadata should parse");
-
-        assert_eq!(metadata.code.as_deref(), Some("pending_publish"));
-        assert_eq!(metadata.upload_session_id.as_deref(), Some("session-1"));
-        assert_eq!(metadata.publish_attempt_id.as_deref(), Some("attempt-1"));
-        assert_eq!(
-            metadata.poll_path.as_deref(),
-            Some("/v2/workspaces/acme/demo/upload-sessions/session-1")
-        );
-        assert_eq!(metadata.retry_after_seconds, Some(3));
-    }
-
-    #[test]
-    fn test_server_owned_pending_publish_requires_publish_code_and_poll_target() {
-        let metadata = PendingMetadata {
-            code: Some("pending_publish".to_string()),
-            upload_session_id: Some("session-1".to_string()),
-            publish_attempt_id: None,
-            poll_path: None,
-            retry_after_seconds: Some(1),
-        };
-        assert!(server_owned_pending_publish(&metadata));
-
-        let wrong_code = PendingMetadata {
-            code: Some("blob_verification_pending".to_string()),
-            ..metadata.clone()
-        };
-        assert!(!server_owned_pending_publish(&wrong_code));
-
-        let no_locator = PendingMetadata {
-            code: Some("pending_publish".to_string()),
-            upload_session_id: None,
-            publish_attempt_id: Some("attempt-1".to_string()),
-            poll_path: None,
-            retry_after_seconds: Some(1),
-        };
-        assert!(!server_owned_pending_publish(&no_locator));
-    }
-
-    #[test]
-    fn test_pending_publish_timeout_acceptance_requires_opt_in() {
-        let metadata = PendingMetadata {
-            code: Some("pending_publish".to_string()),
-            upload_session_id: Some("session-1".to_string()),
-            publish_attempt_id: None,
-            poll_path: None,
-            retry_after_seconds: Some(1),
-        };
-
-        assert!(!should_accept_server_owned_pending_after_timeout(
-            false, &metadata
-        ));
-        assert!(should_accept_server_owned_pending_after_timeout(
-            true, &metadata
-        ));
-    }
-
-    #[test]
-    fn test_pending_publish_timeout_acceptance_still_requires_server_owned_pending() {
-        let metadata = PendingMetadata {
-            code: Some("blob_verification_pending".to_string()),
-            upload_session_id: Some("session-1".to_string()),
-            publish_attempt_id: None,
-            poll_path: None,
-            retry_after_seconds: Some(1),
-        };
-
-        assert!(!should_accept_server_owned_pending_after_timeout(
-            true, &metadata
-        ));
-    }
-
-    #[test]
-    fn test_shutdown_pending_publish_policy_grace_starts_when_pending_is_observed() {
-        let shutdown_requested = AtomicBool::new(true);
-        let policy = ShutdownPendingPublishPolicy {
-            shutdown_requested: Some(&shutdown_requested),
-            grace: Duration::from_secs(5),
-        };
-        let metadata = PendingMetadata {
-            code: Some("pending_publish".to_string()),
-            upload_session_id: Some("session-1".to_string()),
-            publish_attempt_id: Some("attempt-1".to_string()),
-            poll_path: Some("/v2/workspaces/ns/ws/upload-sessions/session-1".to_string()),
-            retry_after_seconds: Some(1),
-        };
-
-        assert!(!policy.should_accept_server_owned_pending(&metadata, Instant::now()));
-        assert!(policy.should_accept_server_owned_pending(
-            &metadata,
-            Instant::now() - Duration::from_secs(5)
-        ));
-    }
-
-    #[test]
-    fn test_pending_publish_poll_delay_respects_retry_after_floor_and_cap() {
-        assert_eq!(
-            pending_publish_poll_delay(Some(0)),
-            Duration::from_secs(1),
-            "retry_after=0 should floor to 1s"
-        );
-        assert_eq!(
-            pending_publish_poll_delay(Some(1)),
-            Duration::from_secs(1),
-            "retry_after=1 should remain 1s"
-        );
-        assert_eq!(
-            pending_publish_poll_delay(Some(3)),
-            Duration::from_secs(3),
-            "retry_after=3 should remain 3s"
-        );
-        assert_eq!(
-            pending_publish_poll_delay(Some(60)),
-            PENDING_PUBLISH_POLL_MAX_INTERVAL,
-            "retry_after should cap at max interval"
-        );
-    }
-
-    #[test]
-    fn test_pending_publish_poll_error_delay_backs_off_on_rate_limit() {
-        let throttled = anyhow::anyhow!("Transient error: 429 Too Many Requests");
-
-        assert_eq!(
-            pending_publish_poll_error_delay(Some(1), &throttled, 1),
-            Duration::from_secs(2)
-        );
-        assert_eq!(
-            pending_publish_poll_error_delay(Some(1), &throttled, 2),
-            Duration::from_secs(4)
-        );
-        assert_eq!(
-            pending_publish_poll_error_delay(Some(1), &throttled, 3),
-            Duration::from_secs(8)
-        );
-        assert_eq!(
-            pending_publish_poll_error_delay(Some(1), &throttled, 4),
-            PENDING_PUBLISH_POLL_MAX_INTERVAL
-        );
-        assert_eq!(
-            pending_publish_poll_error_delay(Some(1), &throttled, 5),
-            PENDING_PUBLISH_POLL_MAX_INTERVAL,
-            "rate-limit backoff should cap at max interval"
-        );
-    }
-
-    #[test]
-    fn test_pending_publish_poll_error_delay_uses_base_for_non_rate_limit_errors() {
-        let unavailable = anyhow::anyhow!("503 Service Unavailable");
-        assert_eq!(
-            pending_publish_poll_error_delay(Some(2), &unavailable, 4),
-            Duration::from_secs(2)
-        );
-    }
-
-    #[test]
-    fn test_should_retry_pending_publish_poll_error_detects_transient_statuses() {
-        let throttled = anyhow::anyhow!(
-            "Failed to poll pending publish status: API request failed after 3 attempts: Transient error: 429 Too Many Requests"
-        );
-        assert!(should_retry_pending_publish_poll_error(&throttled));
-
-        let throttled_message = anyhow::anyhow!("Rate limit exceeded. Please try again later.");
-        assert!(should_retry_pending_publish_poll_error(&throttled_message));
-
-        let unavailable = anyhow::anyhow!("Server returned 503 Service Unavailable");
-        assert!(should_retry_pending_publish_poll_error(&unavailable));
-
-        let permanent = anyhow::anyhow!("Server returned 403 Forbidden");
-        assert!(!should_retry_pending_publish_poll_error(&permanent));
-    }
-
-    #[test]
     fn test_should_retry_confirm_publish_error_detects_transient_statuses() {
         let internal =
             anyhow::anyhow!("confirm failed: Server error (500). Please try again later.");
@@ -1255,24 +923,6 @@ mod tests {
         assert_eq!(confirm_publish_request_timeout(), Duration::from_secs(7));
 
         test_env::remove_var(CONFIRM_PUBLISH_TIMEOUT_SECS_ENV);
-    }
-
-    #[test]
-    fn test_shutdown_pending_publish_grace_uses_default_and_env_override() {
-        let _guard = test_env::lock();
-        test_env::remove_var(SHUTDOWN_PENDING_PUBLISH_GRACE_SECS_ENV);
-        assert_eq!(
-            shutdown_pending_publish_grace(),
-            Duration::from_secs(DEFAULT_SHUTDOWN_PENDING_PUBLISH_GRACE_SECS)
-        );
-
-        test_env::set_var(SHUTDOWN_PENDING_PUBLISH_GRACE_SECS_ENV, "0");
-        assert_eq!(shutdown_pending_publish_grace(), Duration::from_secs(0));
-
-        test_env::set_var(SHUTDOWN_PENDING_PUBLISH_GRACE_SECS_ENV, "3");
-        assert_eq!(shutdown_pending_publish_grace(), Duration::from_secs(3));
-
-        test_env::remove_var(SHUTDOWN_PENDING_PUBLISH_GRACE_SECS_ENV);
     }
 
     #[test]

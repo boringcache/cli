@@ -6,4 +6,4 @@ mod kinds;
 mod tests;
 
 pub use classify::{is_connection_error, is_non_retryable_error};
-pub use kinds::{BoringCacheError, ConflictMetadata, PendingMetadata};
+pub use kinds::{BoringCacheError, ConflictMetadata};

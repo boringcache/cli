@@ -543,52 +543,16 @@ impl ApiClient {
         cache_entry_id: &str,
         request: &crate::api::models::cache::ConfirmRequest,
     ) -> Result<crate::api::models::cache::CacheConfirmResponse> {
-        match self
-            .confirm_with_publish_poll(workspace, cache_entry_id, request, None, false)
-            .await?
-        {
-            ConfirmPublishResult::Published(response) => Ok(*response),
-            ConfirmPublishResult::Pending(metadata) => {
-                Err(BoringCacheError::cache_pending_with_metadata(metadata).into())
-            }
-        }
-    }
-
-    pub async fn confirm_wait_for_publish_or_shutdown_pending(
-        &self,
-        workspace: &str,
-        cache_entry_id: &str,
-        request: &crate::api::models::cache::ConfirmRequest,
-        shutdown_requested: &AtomicBool,
-    ) -> Result<ConfirmPublishResult> {
-        self.confirm_with_publish_poll(
-            workspace,
-            cache_entry_id,
-            request,
-            Some(shutdown_requested),
-            false,
-        )
-        .await
-    }
-
-    pub async fn confirm_wait_for_publish_or_pending_timeout(
-        &self,
-        workspace: &str,
-        cache_entry_id: &str,
-        request: &crate::api::models::cache::ConfirmRequest,
-    ) -> Result<ConfirmPublishResult> {
-        self.confirm_with_publish_poll(workspace, cache_entry_id, request, None, true)
+        self.confirm_with_retry(workspace, cache_entry_id, request)
             .await
     }
 
-    async fn confirm_with_publish_poll(
+    pub async fn confirm_with_retry(
         &self,
         workspace: &str,
         cache_entry_id: &str,
         request: &crate::api::models::cache::ConfirmRequest,
-        shutdown_requested: Option<&AtomicBool>,
-        accept_server_owned_pending_after_timeout: bool,
-    ) -> Result<ConfirmPublishResult> {
+    ) -> Result<crate::api::models::cache::CacheConfirmResponse> {
         let tag = request
             .tag
             .as_deref()
@@ -653,11 +617,6 @@ impl ApiClient {
             },
         };
         let started_at = Instant::now();
-        let shutdown_pending_policy = ShutdownPendingPublishPolicy {
-            shutdown_requested,
-            grace: shutdown_pending_publish_grace(),
-        };
-        let mut pending_started_at: Option<Instant> = None;
         let mut transient_publish_errors = 0u32;
 
         let response: TagPointer = loop {
@@ -672,222 +631,25 @@ impl ApiClient {
             match publish_result {
                 Ok(response) => break response,
                 Err(error) => {
-                    if pending_metadata_from_error(&error).is_none() {
-                        if started_at.elapsed() < PENDING_PUBLISH_POLL_TIMEOUT
-                            && should_retry_confirm_publish_error(&error)
-                        {
-                            transient_publish_errors = transient_publish_errors.saturating_add(1);
-                            let delay =
-                                confirm_publish_error_delay(&error, transient_publish_errors);
-                            log::warn!(
-                                "Confirm publish transient error for tag={tag}: {error}; retrying in {:.1}s (consecutive_errors={})",
-                                delay.as_secs_f32(),
-                                transient_publish_errors
-                            );
-                            sleep(delay).await;
-                            continue;
-                        }
-                        return Err(error);
-                    }
-
-                    let Some(metadata) = pending_metadata_from_error(&error).cloned() else {
-                        return Err(error);
-                    };
-                    transient_publish_errors = 0;
-                    let pending_started_at = *pending_started_at.get_or_insert_with(Instant::now);
-
-                    if shutdown_pending_policy
-                        .should_accept_server_owned_pending(&metadata, pending_started_at)
+                    if started_at.elapsed() < confirm_publish_request_timeout()
+                        && should_retry_confirm_publish_error(&error)
                     {
-                        return Ok(ConfirmPublishResult::Pending(metadata));
-                    }
-
-                    if started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT {
-                        if should_accept_server_owned_pending_after_timeout(
-                            accept_server_owned_pending_after_timeout,
-                            &metadata,
-                        ) {
-                            return Ok(ConfirmPublishResult::Pending(metadata));
-                        }
-                        return Err(error);
-                    }
-
-                    if metadata.poll_path.is_some() || metadata.upload_session_id.is_some() {
-                        let poll_context = PendingPublishPollContext {
-                            started_at,
-                            pending_started_at,
-                            shutdown_pending_policy,
-                            accept_server_owned_pending_after_timeout,
-                        };
-                        let poll_result = self
-                            .poll_pending_publish(workspace, tag, metadata, poll_context)
-                            .await?;
-                        match poll_result {
-                            PendingPublishPollOutcome::Published(pointer) => break pointer,
-                            PendingPublishPollOutcome::Pending(metadata) => {
-                                return Ok(ConfirmPublishResult::Pending(metadata));
-                            }
-                        }
-                    }
-
-                    let delay = Duration::from_secs(metadata.retry_after_seconds.unwrap_or(1));
-                    sleep(delay).await;
-                }
-            }
-        };
-
-        Ok(ConfirmPublishResult::Published(Box::new(
-            cache_confirm_response_from_tag_pointer(response),
-        )))
-    }
-
-    async fn poll_pending_publish(
-        &self,
-        workspace: &str,
-        tag: &str,
-        metadata: PendingMetadata,
-        context: PendingPublishPollContext<'_>,
-    ) -> Result<PendingPublishPollOutcome> {
-        let mut transient_poll_errors = 0u32;
-
-        loop {
-            if context
-                .shutdown_pending_policy
-                .should_accept_server_owned_pending(&metadata, context.pending_started_at)
-            {
-                return Ok(PendingPublishPollOutcome::Pending(metadata));
-            }
-
-            if context.started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT {
-                if context
-                    .shutdown_pending_policy
-                    .should_accept_server_owned_pending(&metadata, context.pending_started_at)
-                    || should_accept_server_owned_pending_after_timeout(
-                        context.accept_server_owned_pending_after_timeout,
-                        &metadata,
-                    )
-                {
-                    return Ok(PendingPublishPollOutcome::Pending(metadata));
-                }
-                return Err(BoringCacheError::cache_pending_with_metadata(metadata).into());
-            }
-
-            let status = match self.upload_session_status(workspace, &metadata).await {
-                Ok(status) => {
-                    transient_poll_errors = 0;
-                    status
-                }
-                Err(error) => {
-                    if context.started_at.elapsed() < PENDING_PUBLISH_POLL_TIMEOUT
-                        && should_retry_pending_publish_poll_error(&error)
-                    {
-                        transient_poll_errors = transient_poll_errors.saturating_add(1);
-                        let delay = pending_publish_poll_error_delay(
-                            metadata.retry_after_seconds,
-                            &error,
-                            transient_poll_errors,
-                        );
+                        transient_publish_errors = transient_publish_errors.saturating_add(1);
+                        let delay = confirm_publish_error_delay(&error, transient_publish_errors);
                         log::warn!(
-                            "Pending publish poll transient error for tag={tag}: {error}; retrying in {:.1}s (consecutive_errors={})",
+                            "Confirm publish transient error for tag={tag}: {error}; retrying in {:.1}s (consecutive_errors={})",
                             delay.as_secs_f32(),
-                            transient_poll_errors
+                            transient_publish_errors
                         );
                         sleep(delay).await;
                         continue;
                     }
-
-                    if context
-                        .shutdown_pending_policy
-                        .should_accept_server_owned_pending(&metadata, context.pending_started_at)
-                        || (context.started_at.elapsed() >= PENDING_PUBLISH_POLL_TIMEOUT
-                            && should_accept_server_owned_pending_after_timeout(
-                                context.accept_server_owned_pending_after_timeout,
-                                &metadata,
-                            ))
-                    {
-                        return Ok(PendingPublishPollOutcome::Pending(metadata));
-                    }
-                    return Err(error).context("Failed to poll pending publish status");
-                }
-            };
-
-            match status
-                .publish_state
-                .as_deref()
-                .or(Some(status.state.as_str()))
-            {
-                Some("published") => match self.tag_pointer_v2(workspace, tag).await? {
-                    Some(pointer) => {
-                        return Ok(PendingPublishPollOutcome::Published(TagPointer {
-                            version: pointer.version,
-                            cache_entry_id: pointer.cache_entry_id,
-                            status: Some("published".to_string()),
-                            uploaded_at: None,
-                        }));
-                    }
-                    None => {
-                        anyhow::bail!("Pending publish completed but tag pointer was not found")
-                    }
-                },
-                Some("conflicted") => {
-                    return Err(BoringCacheError::cache_conflict(
-                        status
-                            .error
-                            .unwrap_or_else(|| "Tag publish conflict".to_string()),
-                    )
-                    .into());
-                }
-                Some("failed") => {
-                    anyhow::bail!(
-                        "{}",
-                        status
-                            .error
-                            .unwrap_or_else(|| "Pending publish failed".to_string())
-                    );
-                }
-                _ => {
-                    if context
-                        .shutdown_pending_policy
-                        .should_accept_server_owned_pending(&metadata, context.pending_started_at)
-                    {
-                        return Ok(PendingPublishPollOutcome::Pending(metadata));
-                    }
-
-                    let delay = pending_publish_poll_delay(metadata.retry_after_seconds);
-                    sleep(delay).await;
+                    return Err(error);
                 }
             }
-        }
-    }
+        };
 
-    async fn upload_session_status(
-        &self,
-        workspace: &str,
-        metadata: &PendingMetadata,
-    ) -> Result<crate::api::models::cache::UploadSessionStatusResponse> {
-        if let Some(path) = metadata.poll_path.as_deref() {
-            let normalized = path
-                .trim_start_matches('/')
-                .strip_prefix("v2/")
-                .unwrap_or_else(|| path.trim_start_matches('/'));
-            return self.get_v2_no_retry(normalized).await;
-        }
-
-        let upload_session_id = metadata
-            .upload_session_id
-            .as_deref()
-            .context("Pending publish response did not include upload_session_id")?;
-        let endpoint =
-            self.workspace_endpoint(workspace, &format!("upload-sessions/{upload_session_id}"))?;
-        self.get_v2_no_retry(&endpoint).await
-    }
-
-    pub async fn pending_publish_status(
-        &self,
-        workspace: &str,
-        metadata: &PendingMetadata,
-    ) -> Result<crate::api::models::cache::UploadSessionStatusResponse> {
-        self.upload_session_status(workspace, metadata).await
+        Ok(cache_confirm_response_from_tag_pointer(response))
     }
 
     pub async fn complete_multipart(

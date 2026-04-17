@@ -7,7 +7,6 @@ use tokio::sync::OnceCell;
 use tokio::task;
 
 use crate::api::ApiClient;
-use crate::api::client::ConfirmPublishResult;
 use crate::api::models::cache::{
     ConfirmRequest, ManifestCheckRequest, ManifestCheckResult, SaveRequest,
 };
@@ -29,7 +28,6 @@ use crate::ui;
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ArchiveConfirmOutcome {
     Published { winner_id: Option<String> },
-    Pending,
 }
 
 impl ArchiveConfirmOutcome {
@@ -94,16 +92,13 @@ async fn confirm_archive_upload(
     cache_entry_id: &str,
     request: &ConfirmRequest,
 ) -> Result<ArchiveConfirmOutcome> {
-    match api_client
-        .confirm_wait_for_publish_or_pending_timeout(workspace, cache_entry_id, request)
-        .await?
-    {
-        ConfirmPublishResult::Published(response) => Ok(ArchiveConfirmOutcome::from_response(
-            cache_entry_id,
-            *response,
-        )),
-        ConfirmPublishResult::Pending(_) => Ok(ArchiveConfirmOutcome::Pending),
-    }
+    let response = api_client
+        .confirm_with_retry(workspace, cache_entry_id, request)
+        .await?;
+    Ok(ArchiveConfirmOutcome::from_response(
+        cache_entry_id,
+        response,
+    ))
 }
 
 pub(super) fn build_archive_manifest_checks(
@@ -511,7 +506,7 @@ pub(super) async fn save_single_archive_entry(
                 return Ok(SaveStatus::Skipped);
             }
 
-            if let Some(crate::error::BoringCacheError::CachePending { .. }) = bc_error {
+            if let Some(crate::error::BoringCacheError::CachePending) = bc_error {
                 create_step.complete()?;
                 progress_info(
                     &reporter,
@@ -880,12 +875,6 @@ pub(super) async fn save_single_archive_entry(
             );
         }
         ArchiveConfirmOutcome::Published { winner_id: None } => {}
-        ArchiveConfirmOutcome::Pending => {
-            progress_info(
-                &reporter,
-                "  Upload accepted for server-side completion; tag may become visible shortly",
-            );
-        }
     }
     confirm_step.complete()?;
 

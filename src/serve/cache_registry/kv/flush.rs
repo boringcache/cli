@@ -5,7 +5,6 @@ pub(crate) enum FlushResult {
     Conflict,
     Error,
     Permanent,
-    Deferred,
 }
 
 #[derive(Debug)]
@@ -17,14 +16,6 @@ pub(crate) enum FlushError {
 
 pub(crate) enum KvConfirmOutcome {
     Published,
-    Pending(PendingMetadata),
-}
-
-pub(crate) fn kv_confirm_pending_metadata(outcome: &KvConfirmOutcome) -> Option<&PendingMetadata> {
-    match outcome {
-        KvConfirmOutcome::Published => None,
-        KvConfirmOutcome::Pending(metadata) => Some(metadata),
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,7 +57,7 @@ pub(crate) fn classify_flush_error(error: &anyhow::Error, context: &str) -> Flus
             BoringCacheError::CacheConflict { .. } => {
                 return FlushError::Conflict(message);
             }
-            BoringCacheError::CachePending { .. } => {
+            BoringCacheError::CachePending => {
                 if context.contains("confirm") {
                     return FlushError::Transient(message);
                 }
@@ -148,47 +139,17 @@ pub(crate) async fn confirm_kv_flush(
     state: &AppState,
     cache_entry_id: &str,
     confirm_request: &ConfirmRequest,
-    flush_mode: FlushMode,
+    _flush_mode: FlushMode,
 ) -> Result<KvConfirmOutcome, FlushError> {
     let started_at = std::time::Instant::now();
     let mut attempt = 0u32;
 
     loop {
-        let result: Result<KvConfirmOutcome, anyhow::Error> = match flush_mode {
-            FlushMode::Shutdown => state
-                .api_client
-                .confirm_wait_for_publish_or_shutdown_pending(
-                    &state.workspace,
-                    cache_entry_id,
-                    confirm_request,
-                    state.shutdown_requested.as_ref(),
-                )
-                .await
-                .map(|response| match response {
-                    crate::api::client::ConfirmPublishResult::Published(_) => {
-                        KvConfirmOutcome::Published
-                    }
-                    crate::api::client::ConfirmPublishResult::Pending(metadata) => {
-                        KvConfirmOutcome::Pending(metadata)
-                    }
-                }),
-            FlushMode::Normal => state
-                .api_client
-                .confirm_wait_for_publish_or_pending_timeout(
-                    &state.workspace,
-                    cache_entry_id,
-                    confirm_request,
-                )
-                .await
-                .map(|response| match response {
-                    crate::api::client::ConfirmPublishResult::Published(_) => {
-                        KvConfirmOutcome::Published
-                    }
-                    crate::api::client::ConfirmPublishResult::Pending(metadata) => {
-                        KvConfirmOutcome::Pending(metadata)
-                    }
-                }),
-        };
+        let result: Result<KvConfirmOutcome, anyhow::Error> = state
+            .api_client
+            .confirm_with_retry(&state.workspace, cache_entry_id, confirm_request)
+            .await
+            .map(|_| KvConfirmOutcome::Published);
 
         match result {
             Ok(outcome) => return Ok(outcome),
@@ -375,36 +336,13 @@ pub(crate) async fn flush_kv_index_with_mode(
         }
         Err(FlushError::Transient(msg)) => {
             eprintln!("KV batch flush failed: {msg}");
-            let should_defer_to_restart_handoff = flush_mode == FlushMode::Shutdown
-                || state.shutdown_requested.load(Ordering::Acquire);
-            if should_defer_to_restart_handoff {
-                let blob_order = pending_entries.values().cloned().collect::<Vec<_>>();
-                persist_kv_pending_publish_handoff(
-                    state,
-                    &pending_entries,
-                    &blob_order,
-                    "",
-                    PendingPublishHandoffPersist {
-                        root_pending: None,
-                        pending_alias_tags: false,
-                        pending_blob_paths: Some(&pending_blob_paths),
-                    },
-                )
-                .await;
-                eprintln!(
-                    "KV batch flush: deferred pending upload handoff with {entry_count} entries ({} blobs)",
-                    pending_blob_paths.len()
-                );
-                FlushResult::Deferred
-            } else {
-                let mut pending = state.kv_pending.write().await;
-                let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
-                drop(pending);
-                cleanup_paths(paths_to_cleanup).await;
-                let (base_ms, jitter_ms) = transient_backoff_window(&msg);
-                set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
-                FlushResult::Error
-            }
+            let mut pending = state.kv_pending.write().await;
+            let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
+            drop(pending);
+            cleanup_paths(paths_to_cleanup).await;
+            let (base_ms, jitter_ms) = transient_backoff_window(&msg);
+            set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
+            FlushResult::Error
         }
         Err(FlushError::Permanent(msg)) => {
             eprintln!("KV batch flush dropped permanently: {msg}");
@@ -642,9 +580,8 @@ pub(crate) async fn do_flush(
             tag: Some(confirm_tag.clone()),
             write_scope_tag: confirm_write_scope_tag.clone(),
         };
-        let confirm_outcome =
-            confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request, flush_mode).await?;
-        let pending_alias_count = bind_kv_alias_tags(
+        confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request, flush_mode).await?;
+        let alias_count = bind_kv_alias_tags(
             state,
             &manifest_root_digest,
             expected_manifest_size,
@@ -654,49 +591,14 @@ pub(crate) async fn do_flush(
             flush_mode,
         )
         .await?;
-        persist_kv_pending_publish_handoff(
-            state,
-            &entries,
-            &merged_blob_order,
-            &save_response.cache_entry_id,
-            PendingPublishHandoffPersist {
-                root_pending: kv_confirm_pending_metadata(&confirm_outcome),
-                pending_alias_tags: pending_alias_count > 0,
-                pending_blob_paths: None,
-            },
-        )
-        .await;
-
-        let (publish_state, upload_session_id, publish_attempt_id) = match &confirm_outcome {
-            KvConfirmOutcome::Pending(metadata) => (
-                "pending",
-                metadata.upload_session_id.as_deref().unwrap_or("-"),
-                metadata.publish_attempt_id.as_deref().unwrap_or("-"),
-            ),
-            KvConfirmOutcome::Published => ("published", "-", "-"),
-        };
-
         eprintln!(
-            "KV flush root publish: tag={} cache_entry_id={} state={} upload_session_id={} publish_attempt_id={} pending_alias_tags={}",
-            tag,
-            save_response.cache_entry_id,
-            publish_state,
-            upload_session_id,
-            publish_attempt_id,
-            pending_alias_count
+            "KV flush root publish: tag={} cache_entry_id={} state=published alias_tags={}",
+            tag, save_response.cache_entry_id, alias_count
         );
-        if let KvConfirmOutcome::Pending(metadata) = &confirm_outcome {
+        if alias_count > 0 {
             eprintln!(
-                "KV publish accepted for server-side completion: cache_entry_id={} upload_session_id={} publish_attempt_id={} pending_alias_tags={}",
-                save_response.cache_entry_id,
-                metadata.upload_session_id.as_deref().unwrap_or("-"),
-                metadata.publish_attempt_id.as_deref().unwrap_or("-"),
-                pending_alias_count
-            );
-        } else if pending_alias_count > 0 {
-            eprintln!(
-                "KV alias publish accepted for server-side completion: cache_entry_id={} pending_alias_tags={}",
-                save_response.cache_entry_id, pending_alias_count
+                "KV alias publish completed: cache_entry_id={} alias_tags={}",
+                save_response.cache_entry_id, alias_count
             );
         }
 
@@ -712,7 +614,7 @@ pub(crate) async fn do_flush(
     let upload_stats_holder = Arc::new(std::sync::Mutex::new(BlobUploadStats::default()));
     let publish_upload_stats = upload_stats_holder.clone();
     let all_blob_digests: Vec<String> = blobs.iter().map(|b| b.digest.clone()).collect();
-    let confirm_outcome = crate::serve::cas_publish::publish_after_save(
+    crate::serve::cas_publish::publish_after_save(
         &state.api_client,
         &state.workspace,
         &save_response,
@@ -807,7 +709,7 @@ pub(crate) async fn do_flush(
     .await?;
     let upload_stats = upload_stats_holder.lock().unwrap().clone();
 
-    let pending_alias_count = bind_kv_alias_tags(
+    let alias_count = bind_kv_alias_tags(
         state,
         &manifest_root_digest,
         expected_manifest_size,
@@ -817,50 +719,15 @@ pub(crate) async fn do_flush(
         flush_mode,
     )
     .await?;
-    persist_kv_pending_publish_handoff(
-        state,
-        &entries,
-        &merged_blob_order,
-        &save_response.cache_entry_id,
-        PendingPublishHandoffPersist {
-            root_pending: kv_confirm_pending_metadata(&confirm_outcome),
-            pending_alias_tags: pending_alias_count > 0,
-            pending_blob_paths: None,
-        },
-    )
-    .await;
-
-    let (publish_state, upload_session_id, publish_attempt_id) = match &confirm_outcome {
-        KvConfirmOutcome::Pending(metadata) => (
-            "pending",
-            metadata.upload_session_id.as_deref().unwrap_or("-"),
-            metadata.publish_attempt_id.as_deref().unwrap_or("-"),
-        ),
-        KvConfirmOutcome::Published => ("published", "-", "-"),
-    };
-
     eprintln!(
-        "KV flush root publish: tag={} cache_entry_id={} state={} upload_session_id={} publish_attempt_id={} pending_alias_tags={}",
-        tag,
-        save_response.cache_entry_id,
-        publish_state,
-        upload_session_id,
-        publish_attempt_id,
-        pending_alias_count
+        "KV flush root publish: tag={} cache_entry_id={} state=published alias_tags={}",
+        tag, save_response.cache_entry_id, alias_count
     );
 
-    if let KvConfirmOutcome::Pending(metadata) = &confirm_outcome {
+    if alias_count > 0 {
         eprintln!(
-            "KV publish accepted for server-side completion: cache_entry_id={} upload_session_id={} publish_attempt_id={} pending_alias_tags={}",
-            save_response.cache_entry_id,
-            metadata.upload_session_id.as_deref().unwrap_or("-"),
-            metadata.publish_attempt_id.as_deref().unwrap_or("-"),
-            pending_alias_count
-        );
-    } else if pending_alias_count > 0 {
-        eprintln!(
-            "KV alias publish accepted for server-side completion: cache_entry_id={} pending_alias_tags={}",
-            save_response.cache_entry_id, pending_alias_count
+            "KV alias publish completed: cache_entry_id={} alias_tags={}",
+            save_response.cache_entry_id, alias_count
         );
     }
 
@@ -944,7 +811,7 @@ pub(crate) async fn bind_kv_alias_tag(
     blob_total_size_bytes: u64,
     file_count: u32,
     flush_mode: FlushMode,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<()> {
     let alias_request = SaveRequest {
         tag: alias_tag.to_string(),
         write_scope_tag: None,
@@ -990,16 +857,15 @@ pub(crate) async fn bind_kv_alias_tag(
         write_scope_tag: None,
     };
 
-    let result = confirm_kv_flush(
+    confirm_kv_flush(
         state,
         &alias_save.cache_entry_id,
         &alias_confirm,
         flush_mode,
     )
     .await
-    .map_err(|error| anyhow::anyhow!("alias confirm failed: {:?}", error))?;
-
-    Ok(matches!(result, KvConfirmOutcome::Pending(_)))
+    .map_err(|error| anyhow::anyhow!("alias confirm failed: {:?}", error))
+    .map(|_| ())
 }
 
 pub(crate) async fn bind_kv_alias_tags(
@@ -1011,7 +877,7 @@ pub(crate) async fn bind_kv_alias_tags(
     file_count: u32,
     flush_mode: FlushMode,
 ) -> Result<usize, FlushError> {
-    let mut pending_count = 0usize;
+    let mut alias_count = 0usize;
     for alias_tag in kv_alias_tags(state) {
         let bind_result = bind_kv_alias_tag(
             state,
@@ -1025,10 +891,8 @@ pub(crate) async fn bind_kv_alias_tags(
         )
         .await;
         match bind_result {
-            Ok(pending) => {
-                if pending {
-                    pending_count = pending_count.saturating_add(1);
-                }
+            Ok(()) => {
+                alias_count = alias_count.saturating_add(1);
             }
             Err(error) => {
                 if state.fail_on_cache_error {
@@ -1039,7 +903,7 @@ pub(crate) async fn bind_kv_alias_tags(
             }
         }
     }
-    Ok(pending_count)
+    Ok(alias_count)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

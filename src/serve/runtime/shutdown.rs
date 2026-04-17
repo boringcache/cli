@@ -7,17 +7,7 @@ use crate::api::client::TagPointerPollResult;
 use crate::serve::cache_registry;
 use crate::serve::state::AppState;
 
-const SHUTDOWN_TAG_VISIBILITY_HANDOFF_GRACE: std::time::Duration =
-    std::time::Duration::from_secs(5);
-
 pub(super) async fn cleanup_runtime_temp_dir(state: &AppState) {
-    if cache_registry::should_preserve_runtime_temp_dir_for_shutdown_handoff(state).await {
-        eprintln!(
-            "Shutdown: preserving runtime temp dir {} for pending upload handoff",
-            state.runtime_temp_dir.display()
-        );
-        return;
-    }
     if let Err(error) = tokio::fs::remove_dir_all(&state.runtime_temp_dir).await
         && error.kind() != std::io::ErrorKind::NotFound
     {
@@ -56,23 +46,7 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
                     };
                 }
                 if let Some(cache_entry_id) = expected_root_cache_entry_id.as_deref() {
-                    if cache_registry::should_skip_shutdown_tag_visibility_wait(
-                        state,
-                        cache_entry_id,
-                    )
-                    .await
-                    {
-                        let handoff_deadline = shutdown_handoff_visibility_deadline(deadline);
-                        if wait_for_tag_visibility(state, cache_entry_id, handoff_deadline).await {
-                            return;
-                        }
-                        eprintln!(
-                            "Shutdown: deferred tag visibility wait for cache_entry_id={} via pending publish handoff",
-                            cache_entry_id
-                        );
-                    } else {
-                        let _ = wait_for_tag_visibility(state, cache_entry_id, deadline).await;
-                    }
+                    let _ = wait_for_tag_visibility(state, cache_entry_id, deadline).await;
                 }
                 return;
             }
@@ -98,12 +72,6 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
                     cache_registry::FlushResult::Permanent => {
                         let mut gate = state.kv_next_flush_at.write().await;
                         *gate = None;
-                    }
-                    cache_registry::FlushResult::Deferred => {
-                        let mut gate = state.kv_next_flush_at.write().await;
-                        *gate = None;
-                        eprintln!("Shutdown: deferred pending upload flush via restart handoff");
-                        return;
                     }
                     cache_registry::FlushResult::Conflict | cache_registry::FlushResult::Error => {
                         let mut gate = state.kv_next_flush_at.write().await;
@@ -199,15 +167,6 @@ pub(super) async fn shutdown_signal_with_channel(
 
     shutdown_requested.store(true, Ordering::Release);
     eprintln!("\nShutting down...");
-}
-
-fn shutdown_handoff_visibility_deadline(deadline: std::time::Instant) -> std::time::Instant {
-    let handoff_deadline = std::time::Instant::now() + SHUTDOWN_TAG_VISIBILITY_HANDOFF_GRACE;
-    if handoff_deadline < deadline {
-        handoff_deadline
-    } else {
-        deadline
-    }
 }
 
 fn visibility_tags_from_values(
@@ -315,20 +274,5 @@ mod tests {
                 "digest-sha256-abc".to_string(),
             ]
         );
-    }
-
-    #[test]
-    fn shutdown_handoff_visibility_deadline_caps_wait_to_short_grace() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let bounded = shutdown_handoff_visibility_deadline(deadline);
-        let wait = bounded.saturating_duration_since(std::time::Instant::now());
-        assert!(wait <= SHUTDOWN_TAG_VISIBILITY_HANDOFF_GRACE);
-    }
-
-    #[test]
-    fn shutdown_handoff_visibility_deadline_respects_earlier_deadline() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
-        let bounded = shutdown_handoff_visibility_deadline(deadline);
-        assert!(bounded <= deadline);
     }
 }

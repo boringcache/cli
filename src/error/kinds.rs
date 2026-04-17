@@ -8,15 +8,6 @@ pub struct ConflictMetadata {
     pub current_tag: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingMetadata {
-    pub code: Option<String>,
-    pub upload_session_id: Option<String>,
-    pub publish_attempt_id: Option<String>,
-    pub poll_path: Option<String>,
-    pub retry_after_seconds: Option<u64>,
-}
-
 #[derive(Debug)]
 pub enum BoringCacheError {
     ConfigNotFound,
@@ -27,9 +18,7 @@ pub enum BoringCacheError {
     ConnectionError(String),
     RequestConfiguration(String),
     CacheMiss,
-    CachePending {
-        metadata: Option<PendingMetadata>,
-    },
+    CachePending,
     CacheConflict {
         message: String,
         metadata: Option<ConflictMetadata>,
@@ -57,13 +46,7 @@ impl BoringCacheError {
     }
 
     pub fn cache_pending() -> Self {
-        Self::CachePending { metadata: None }
-    }
-
-    pub fn cache_pending_with_metadata(metadata: PendingMetadata) -> Self {
-        Self::CachePending {
-            metadata: Some(metadata),
-        }
+        Self::CachePending
     }
 
     pub fn conflict_message(&self) -> Option<&str> {
@@ -76,13 +59,6 @@ impl BoringCacheError {
     pub fn conflict_metadata(&self) -> Option<&ConflictMetadata> {
         match self {
             Self::CacheConflict { metadata, .. } => metadata.as_ref(),
-            _ => None,
-        }
-    }
-
-    pub fn pending_metadata(&self) -> Option<&PendingMetadata> {
-        match self {
-            Self::CachePending { metadata } => metadata.as_ref(),
             _ => None,
         }
     }
@@ -105,7 +81,7 @@ impl fmt::Display for BoringCacheError {
             BoringCacheError::ConnectionError(msg) => write!(f, "{msg}"),
             BoringCacheError::RequestConfiguration(msg) => write!(f, "{msg}"),
             BoringCacheError::CacheMiss => write!(f, "Cache miss"),
-            BoringCacheError::CachePending { .. } => write!(f, "Cache upload in progress"),
+            BoringCacheError::CachePending => write!(f, "Cache upload in progress"),
             BoringCacheError::CacheConflict { message, .. } => write!(f, "{message}"),
             BoringCacheError::WorkspaceNotFound(workspace) => {
                 write!(f, "Workspace '{workspace}' not found")

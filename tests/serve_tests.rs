@@ -968,7 +968,7 @@ async fn test_proxy_status_reports_error_phase() {
 }
 
 #[tokio::test]
-async fn test_proxy_status_reports_pending_publish_when_entries_buffered() {
+async fn test_proxy_status_reports_pending_when_entries_buffered() {
     let server = Server::new_async().await;
     let (state, home, _guard) = setup(&server).await;
     let temp_path = home.path().join("pending-blob.bin");
@@ -2523,7 +2523,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
 }
 
 #[tokio::test]
-async fn test_manifest_put_degrades_when_primary_confirm_is_pending() {
+async fn test_manifest_put_degrades_when_primary_confirm_is_locked() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.fail_on_cache_error = false;
@@ -2600,13 +2600,9 @@ async fn test_manifest_put_degrades_when_primary_confirm_is_pending() {
         .with_header("content-type", "application/json")
         .with_body(
             json!({
-                "error": "upload in progress",
-                "message": "upload in progress",
-                "code": "pending_publish",
-                "details": {
-                    "upload_session_id": "upload-session-123",
-                    "poll_path": "/v2/workspaces/org/repo/pending/manifest"
-                }
+                "error": "tag is locked",
+                "message": "tag is locked",
+                "code": "tag_locked"
             })
             .to_string(),
         )
@@ -2643,7 +2639,7 @@ async fn test_manifest_put_degrades_when_primary_confirm_is_pending() {
 }
 
 #[tokio::test]
-async fn test_manifest_put_skips_alias_when_confirm_is_pending() {
+async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.fail_on_cache_error = false;
@@ -2793,13 +2789,9 @@ async fn test_manifest_put_skips_alias_when_confirm_is_pending() {
         .with_header("content-type", "application/json")
         .with_body(
             json!({
-                "error": "upload in progress",
-                "message": "upload in progress",
-                "code": "pending_publish",
-                "details": {
-                    "upload_session_id": "upload-session-456",
-                    "poll_path": "/v2/workspaces/org/repo/pending/alias"
-                }
+                "error": "tag is locked",
+                "message": "tag is locked",
+                "code": "tag_locked"
             })
             .to_string(),
         )

@@ -119,8 +119,6 @@ pub(super) async fn build_server_runtime(
         prefetch_error: Arc::new(RwLock::new(None)),
     };
 
-    cache_registry::restore_kv_pending_publish_handoff(&state).await;
-
     let addr = format!("{host}:{port}");
     let mut resolved = lookup_host(&addr)
         .await

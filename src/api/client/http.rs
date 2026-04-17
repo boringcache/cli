@@ -55,11 +55,6 @@ impl ApiClient {
             "X-BoringCache-CLI-Version",
             reqwest::header::HeaderValue::from_str(cli_version).context("Invalid CLI version")?,
         );
-        headers.insert(
-            "X-BoringCache-Pending-Publish-Poll",
-            reqwest::header::HeaderValue::from_static("1"),
-        );
-
         let client = build_api_client_with_headers(Some(headers.clone()))?;
         let transfer_client = build_transfer_client_with_headers(Some(headers))?;
 
@@ -186,29 +181,11 @@ impl ApiClient {
         self.get_with_base(&self.v2_base_url, endpoint).await
     }
 
-    pub(crate) async fn get_v2_no_retry<T>(&self, endpoint: &str) -> Result<T>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        self.get_with_base_no_retry(&self.v2_base_url, endpoint)
-            .await
-    }
-
     async fn get_with_base<T>(&self, base_url: &str, endpoint: &str) -> Result<T>
     where
         T: for<'de> Deserialize<'de>,
     {
         let response = self.get_response_with_base(base_url, endpoint).await?;
-        self.parse_json_response(response).await
-    }
-
-    async fn get_with_base_no_retry<T>(&self, base_url: &str, endpoint: &str) -> Result<T>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        let response = self
-            .get_response_with_base_no_retry(base_url, endpoint)
-            .await?;
         self.parse_json_response(response).await
     }
 
@@ -220,17 +197,6 @@ impl ApiClient {
         let url = Self::build_url_from_base(base_url, endpoint);
         debug!("GET {}", url);
         self.send_authenticated_request(self.client.get(&url)).await
-    }
-
-    async fn get_response_with_base_no_retry(
-        &self,
-        base_url: &str,
-        endpoint: &str,
-    ) -> Result<Response> {
-        let url = Self::build_url_from_base(base_url, endpoint);
-        debug!("GET {}", url);
-        self.send_authenticated_request_no_retry(self.client.get(&url))
-            .await
     }
 
     pub async fn post<T, R>(&self, endpoint: &str, body: &T) -> Result<R>
@@ -312,29 +278,6 @@ impl ApiClient {
             .send_authenticated_request_with_retry_count(request)
             .await;
         result
-    }
-
-    async fn send_authenticated_request_no_retry(
-        &self,
-        request: reqwest::RequestBuilder,
-    ) -> Result<Response> {
-        let token = self
-            .auth_token
-            .as_ref()
-            .ok_or(BoringCacheError::TokenNotFound)?;
-        let request = request.header("Authorization", format!("Bearer {}", token));
-
-        match request.send().await {
-            Ok(response) => Ok(response),
-            Err(err) if err.is_connect() => Err(BoringCacheError::ConnectionError(
-                "ERROR: Cannot connect to BoringCache server. Please check:\n\
-                 • Is the API URL correct? (Check with: boringcache config)\n\
-                 • Is there a firewall blocking the connection?"
-                    .to_string(),
-            )
-            .into()),
-            Err(err) => Err(map_request_send_error(err)),
-        }
     }
 
     pub(crate) async fn send_authenticated_request_with_retry_count(
@@ -526,14 +469,7 @@ impl ApiClient {
                     None => BoringCacheError::cache_conflict(message).into(),
                 }
             }
-            StatusCode::LOCKED => {
-                match parse_pending_metadata(&error_body, parsed_payload.as_ref()) {
-                    Some(metadata) => {
-                        BoringCacheError::cache_pending_with_metadata(metadata).into()
-                    }
-                    None => BoringCacheError::cache_pending().into(),
-                }
-            }
+            StatusCode::LOCKED => BoringCacheError::cache_pending().into(),
             StatusCode::INTERNAL_SERVER_ERROR => {
                 anyhow::anyhow!("Server error (500). Please try again later.")
             }

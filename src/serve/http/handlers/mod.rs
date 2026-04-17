@@ -75,7 +75,6 @@ struct ProxyStatusResponse {
     pending_blobs: usize,
     pending_spool_bytes: u64,
     flush_in_progress: bool,
-    pending_publish_handoff: bool,
 }
 
 pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
@@ -106,7 +105,6 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
         )
     };
     let flush_in_progress = state.kv_flushing.read().await.is_some();
-    let pending_publish_handoff = cache_registry::has_kv_pending_publish_handoff(&state).await;
     let cache_entry_id = {
         let published = state.kv_published_index.read().await;
         published.cache_entry_id().map(str::to_string)
@@ -117,8 +115,7 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
         }
         None => true,
     };
-    let publish_settled =
-        pending_entries == 0 && !flush_in_progress && !pending_publish_handoff && tags_visible;
+    let publish_settled = pending_entries == 0 && !flush_in_progress && tags_visible;
     let publish_state = if publish_settled {
         "settled"
     } else {
@@ -145,7 +142,6 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
             pending_blobs,
             pending_spool_bytes,
             flush_in_progress,
-            pending_publish_handoff,
         }),
     )
 }

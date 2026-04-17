@@ -54,7 +54,7 @@ pub(crate) fn conflict_message_from_error(err: &anyhow::Error) -> Option<String>
 
 pub(crate) fn is_cache_pending_error(err: &anyhow::Error) -> bool {
     err.downcast_ref::<crate::error::BoringCacheError>()
-        .is_some_and(|bc_err| matches!(bc_err, crate::error::BoringCacheError::CachePending { .. }))
+        .is_some_and(|bc_err| matches!(bc_err, crate::error::BoringCacheError::CachePending))
 }
 
 pub(crate) fn manifest_files_from_draft(

@@ -647,10 +647,6 @@ pub struct UploadSessionStatusResponse {
     pub storage_mode: Option<String>,
     pub state: String,
     #[serde(default)]
-    pub publish_attempt_id: Option<String>,
-    #[serde(default)]
-    pub publish_state: Option<String>,
-    #[serde(default)]
     pub expected_blob_count: Option<u64>,
     #[serde(default)]
     pub attached_blob_count: Option<u64>,
@@ -662,8 +658,6 @@ pub struct UploadSessionStatusResponse {
     pub manifest_receipt_received_at: Option<String>,
     #[serde(default)]
     pub pending_blob_count: Option<u64>,
-    #[serde(default)]
-    pub published_tag_version: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
 }

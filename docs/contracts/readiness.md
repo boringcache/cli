@@ -40,7 +40,6 @@ JSON body fields:
 - `pending_blobs`
 - `pending_spool_bytes`
 - `flush_in_progress`
-- `pending_publish_handoff`
 
 ## Phase meanings
 
@@ -59,7 +58,6 @@ The current implementation computes that from all of these being true:
 
 - `pending_entries == 0`
 - `flush_in_progress == false`
-- `pending_publish_handoff == false`
 - `tags_visible == true`
 
 `publish_state=settled` is the header form of the same condition.

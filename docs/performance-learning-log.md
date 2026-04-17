@@ -83,35 +83,31 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Warm tool runs showed local hits, but cross-process remote tag checks failed (`hits=0, misses=1`).
   - Proxy was often force-killed before publish/tag convergence completed.
 - Failure shape:
-  - `cache_finalize_publish` returned pending (`423`) and remote tag never became visible before teardown.
+  - Tag publish had not converged before teardown, so remote readers observed the old tag state.
 - Product-side changes:
-  - Keep shutdown publish polling robust for server-owned pending states.
-  - Increase pending-publish poll timeout in CLI client to `180s`.
-  - Poll pending publish status more aggressively (sub-second capable interval clamp).
+  - Keep shutdown flush and tag-visibility polling bounded but long enough for real storage/API convergence.
   - Add adaptive small-batch flush behavior in cache-registry so tiny pending sets are flushed sooner during active runs instead of being deferred to shutdown.
 - Harness guardrails (CLI repo e2e scripts):
   - Centralized proxy graceful-stop default to `210s`.
   - Enforce a minimum graceful-stop budget of `210s` even if lower env values are set.
   - Remove per-tool hardcoded remote-tag verify timings (`30/2`), use shared defaults.
 
-## 2026-04-08 - OCI publish confirm timed out before pending publish settled (Hugo/Turbo)
+## 2026-04-08 - OCI publish confirm timed out before tag settled (Hugo/Turbo)
 
 - Symptom:
   - OCI tool e2e legs failed with remote tag not published after cold save.
   - Proxy logs showed `Best-effort OCI manifest publish fallback ... (500 Internal Server Error)`.
 - Root cause:
   - OCI manifest put wrapped `api_client.confirm(...)` in a hard `30s` handler timeout.
-  - Confirm supports server-owned pending publish and may legitimately take longer than `30s`.
+  - Confirm can legitimately take longer than `30s` when upload receipts, storage visibility, and pointer publish are all in flight.
   - On timeout, the request degraded/fell back before publish completed, so tag checks observed misses.
 - Secondary pressure signal:
-  - Pending publish status polls hit `429 Too Many Requests` under concurrent CI load.
-  - Poll path used generic request retries (`3` attempts), amplifying each poll cycle.
+  - Generic request retries under concurrent CI load amplified backend pressure.
 - Product-side changes:
-  - Remove the extra `30s` wrapper around OCI confirm in `serve/handlers.rs`; rely on confirm’s publish lifecycle.
-  - Use single-attempt status GETs for pending publish poll path.
+  - Remove the extra `30s` wrapper around OCI confirm in `serve/handlers.rs`; rely on the shared confirm path.
   - Add explicit poll backoff on `429` (rate-limit aware) to reduce retry storms.
 - Guardrail:
-  - Do not add short outer timeouts around publish confirm paths; use one authoritative publish lifecycle.
+  - Do not add short outer timeouts around publish confirm paths; use one authoritative confirm/retry lifecycle.
 
 ## 2026-04-16 - OCI proxy parity and warm-path backlog
 
@@ -148,25 +144,25 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Shutdown flush path should never inherit normal-mode backoff timing. Background maintenance tasks must check `shutdown_requested` before acquiring `kv_flush_lock`.
   - Upload session lookups should always be scoped by repository name. Global `find_by_digest` is only safe for read-only queries where cross-repo hits are acceptable.
 
-## 2026-04-16 - OCI manifest confirm pending as best-effort error
+## 2026-04-16 - OCI manifest confirm lock as best-effort error
 
 - Symptom:
-  - OCI manifest PUT failed when the backend deferred publish via `423 pending_publish`, because the old code path did not handle that lifecycle state.
+  - OCI manifest PUT failed when the backend returned `423` during confirm.
 - Root cause:
-  - OCI path used plain `confirm()` which returned a hard error on `423`. It did not wait for the server-owned pending publish lifecycle to settle.
+  - OCI path used plain `confirm()` and treated `423` as a hard error.
 - Product-side changes:
-  - Switch OCI manifest confirm and alias bind to `confirm_wait_for_publish_or_pending_timeout`, which waits for the publish lifecycle to settle.
-  - Treat `Pending` outcome as an internal error (`500`) that triggers best-effort degraded fallback when `fail_on_cache_error` is false.
+  - Switch OCI manifest confirm and alias bind to `confirm_with_retry`, which uses the shared optimistic confirm path.
+  - Treat an unresolved lock as an internal error (`500`) that triggers best-effort degraded fallback when `fail_on_cache_error` is false.
   - Check for `prefetch_error` after `Notify` wakeup in `await_startup_prefetch_readiness` to avoid an unnecessary loop iteration on error.
 - Guardrail:
-  - OCI confirm paths should use the pending-aware confirm variant. A pending publish outcome is a degraded result, not a crash.
+  - OCI confirm paths should use the same optimistic confirm helper as archive and KV flush paths.
 
 ## Merge Checklist For Cache-Registry Changes
 
 Before merging changes touching `src/serve/cache_registry/*`, `src/serve/mod.rs`, or publish/confirm client paths:
 
 1. Run targeted correctness tests:
-   - `cargo test pending_publish_completion -- --nocapture`
+   - `cargo test confirm_retry_reason_retries_transient_server_errors -- --nocapture`
    - `cargo test should_flush_pending_values -- --nocapture`
 2. Validate at least one tool e2e path that relies on remote tag visibility across process restarts.
 3. Confirm no workflow-only tuning is required for correctness.

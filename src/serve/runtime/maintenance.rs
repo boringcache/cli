@@ -491,11 +491,6 @@ async fn process_replication_work(state: &AppState, urgent: bool, consecutive_fa
                 .kv_replication_flush_permanent
                 .fetch_add(1, Ordering::AcqRel);
         }
-        cache_registry::FlushResult::Deferred => {
-            state
-                .kv_replication_flush_error
-                .fetch_add(1, Ordering::AcqRel);
-        }
     }
 }
 
@@ -504,7 +499,7 @@ fn update_consecutive_failures_on_flush_result(
     consecutive_failures: &mut u32,
 ) {
     match result {
-        cache_registry::FlushResult::Error | cache_registry::FlushResult::Deferred => {
+        cache_registry::FlushResult::Error => {
             *consecutive_failures = consecutive_failures.saturating_add(1);
         }
         cache_registry::FlushResult::Ok
