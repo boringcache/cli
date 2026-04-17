@@ -3356,7 +3356,7 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
             })
             .to_string(),
         )
-        .expect(0)
+        .expect(1)
         .create_async()
         .await;
 
@@ -3502,7 +3502,7 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
             })
             .to_string(),
         )
-        .expect(0)
+        .expect(1)
         .create_async()
         .await;
 

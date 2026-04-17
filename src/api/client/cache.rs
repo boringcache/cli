@@ -594,6 +594,11 @@ impl ApiClient {
         }
 
         let publish_mode = determine_publish_mode(request);
+        let compatibility_if_match = if publish_mode == "cas" {
+            self.get_capabilities().await.cas_publish_bootstrap_if_match
+        } else {
+            None
+        };
 
         let encoded_tag = urlencoding::encode(tag);
         let endpoint =
@@ -625,7 +630,7 @@ impl ApiClient {
                 .put_v2_with_if_match(
                     &endpoint,
                     &publish_payload,
-                    None,
+                    compatibility_if_match.as_deref(),
                     CACHE_METRIC_ENDPOINT_OPERATION_CONFIRM_PUBLISH,
                 )
                 .await;
