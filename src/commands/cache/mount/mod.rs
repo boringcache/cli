@@ -108,6 +108,7 @@ pub async fn execute(workspace: String, tag_path: String, options: MountOptions)
         &local_path,
         options.verbose,
         options.force,
+        recipient.clone(),
         options.identity.clone(),
         passphrase_cache.clone(),
         options.require_server_signature,
@@ -270,6 +271,7 @@ async fn initial_restore(
     local_path: &Path,
     verbose: bool,
     force: bool,
+    recipient: Option<String>,
     identity: Option<String>,
     passphrase_cache: Arc<Mutex<crate::encryption::PassphraseCache>>,
     require_server_signature: bool,
@@ -311,6 +313,7 @@ async fn initial_restore(
         adapter.transport_kind().as_str()
     );
     let archive_identity = identity.clone();
+    let archive_recipient = recipient.clone();
     let archive_passphrase_cache = passphrase_cache.clone();
     let restore_action = adapter
         .dispatch(
@@ -321,6 +324,7 @@ async fn initial_restore(
                     local_path,
                     verbose,
                     force,
+                    archive_recipient,
                     archive_identity,
                     archive_passphrase_cache,
                     require_server_signature,
@@ -546,6 +550,7 @@ mod tests {
     use super::oci::local_oci_manifest_digest;
     use super::*;
     use crate::api::models::cache::ManifestCheckResult;
+    use crate::command_support::save_support::archive_cache_root_digest;
     use crate::{archive, encryption, manifest, test_env};
     use chrono::Utc;
     use mockito::Server;
@@ -704,6 +709,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_restore_archive_accepts_recipient_scoped_encrypted_local_digest() {
+        let _guard = test_env::lock();
+        test_env::set_var("BORINGCACHE_API_URL", "https://api.example.com");
+        test_env::set_var("BORINGCACHE_API_TOKEN", "test-token-123");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source_dir = temp_dir.path().join("data");
+        fs::create_dir(&source_dir).unwrap();
+        fs::write(source_dir.join("hello.txt"), "hello").unwrap();
+
+        let draft = manifest::ManifestBuilder::new(&source_dir).build().unwrap();
+        let content_root_digest = manifest::diff::compute_digest_from_draft(&draft);
+        let recipient = "age1recipient-local";
+        let scoped_root_digest = archive_cache_root_digest(&content_root_digest, Some(recipient));
+        let api_client = crate::api::ApiClient::for_save().unwrap();
+        let hit = crate::api::models::cache::CacheResolutionEntry {
+            tag: "cache-tag".to_string(),
+            primary_tag: None,
+            signature_tag: None,
+            status: "hit".to_string(),
+            cache_entry_id: Some("123".to_string()),
+            manifest_url: None,
+            manifest_root_digest: Some(scoped_root_digest),
+            manifest_digest: None,
+            compression_algorithm: Some("zstd".to_string()),
+            storage_mode: None,
+            blob_count: None,
+            blob_total_size_bytes: None,
+            cas_layout: None,
+            archive_urls: Vec::new(),
+            size: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            uploaded_at: None,
+            content_hash: None,
+            pending: false,
+            error: None,
+            workspace_signing_public_key: None,
+            server_signature: None,
+            server_signed_at: None,
+            encrypted: true,
+        };
+
+        let result = initial_restore_archive(
+            &api_client,
+            &hit,
+            &source_dir,
+            false,
+            false,
+            Some(recipient.to_string()),
+            None,
+            Arc::new(Mutex::new(encryption::PassphraseCache::default())),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(result, RestoreAction::AlreadyInSync));
+
+        test_env::remove_var("BORINGCACHE_API_TOKEN");
+        test_env::remove_var("BORINGCACHE_API_URL");
+    }
+
+    #[tokio::test]
     async fn initial_restore_archive_extracts_encrypted_archive() {
         let _guard = test_env::lock();
         test_env::set_var("BORINGCACHE_TEST_MODE", "1");
@@ -823,6 +892,7 @@ mod tests {
             &target_dir,
             false,
             false,
+            Some(recipient.to_string()),
             Some(identity_path.to_string_lossy().into_owned()),
             Arc::new(Mutex::new(encryption::PassphraseCache::default())),
             false,

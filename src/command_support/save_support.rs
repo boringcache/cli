@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 use crate::api::ApiClient;
@@ -73,6 +74,31 @@ pub(crate) fn manifest_files_from_draft(
             state: crate::manifest::EntryState::Present,
         })
         .collect()
+}
+
+pub(crate) fn archive_cache_root_digest(
+    content_root_digest: &str,
+    recipient: Option<&str>,
+) -> String {
+    let Some(recipient) = recipient.filter(|value| !value.is_empty()) else {
+        return content_root_digest.to_string();
+    };
+
+    // Archive object keys are rooted by this digest; encryption must include
+    // the recipient so identical plaintext under different Age keys cannot alias.
+    let mut hasher = Sha256::new();
+    hasher.update(content_root_digest.as_bytes());
+    hasher.update([0]);
+    hasher.update(crate::encryption::ENCRYPTION_ALGORITHM_AGE_X25519.as_bytes());
+    hasher.update([0]);
+    hasher.update(recipient.as_bytes());
+
+    let hex = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
 }
 
 pub(crate) fn build_manifest_bytes(

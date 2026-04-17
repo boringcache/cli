@@ -13,9 +13,9 @@ use crate::api::models::cache::{
 use crate::cache::archive::{TarArchiveInfo, create_tar_archive};
 use crate::ci_detection::detect_ci_environment;
 use crate::command_support::save_support::{
-    build_manifest_bytes, complete_skipped_step, format_phase_duration, format_phase_duration_ms,
-    manifest_files_from_draft, progress_info, progress_warning, upload_archive_file,
-    upload_archive_multipart, upload_manifest,
+    archive_cache_root_digest, build_manifest_bytes, complete_skipped_step, format_phase_duration,
+    format_phase_duration_ms, manifest_files_from_draft, progress_info, progress_warning,
+    upload_archive_file, upload_archive_multipart, upload_manifest,
 };
 use crate::manifest::diff::compute_digest_from_draft;
 use crate::manifest::{EntryType, ManifestBuilder};
@@ -175,7 +175,7 @@ pub(super) async fn save_single_archive_entry(
     .context("Manifest build task panicked")??;
     step1.complete()?;
 
-    let manifest_root_digest = compute_digest_from_draft(&draft);
+    let content_root_digest = compute_digest_from_draft(&draft);
     let file_count = draft
         .descriptors
         .iter()
@@ -208,6 +208,7 @@ pub(super) async fn save_single_archive_entry(
     let age_recipient = recipient_str
         .map(crate::encryption::parse_recipient)
         .transpose()?;
+    let manifest_root_digest = archive_cache_root_digest(&content_root_digest, recipient_str);
 
     let manifest_files = manifest_files_from_draft(&draft);
     let api_client = shared_save_api_client(shared_api_client.as_ref()).await?;

@@ -355,7 +355,8 @@ mod tests {
     };
     use crate::api::models::cache::ManifestCheckResult;
     use crate::command_support::save_support::{
-        conflict_message_from_error, is_cache_pending_error, serialize_manifest,
+        archive_cache_root_digest, conflict_message_from_error, is_cache_pending_error,
+        serialize_manifest,
     };
 
     fn manifest_check_result(
@@ -426,6 +427,24 @@ mod tests {
         assert_eq!(check.tag, "ruby-deps");
         assert_eq!(check.manifest_root_digest, "sha256:abc");
         assert_eq!(check.lookup, None);
+    }
+
+    #[test]
+    fn archive_cache_root_digest_is_plain_for_unencrypted_archives() {
+        let digest = "sha256:abc";
+        assert_eq!(archive_cache_root_digest(digest, None), digest);
+    }
+
+    #[test]
+    fn archive_cache_root_digest_is_recipient_scoped_for_encrypted_archives() {
+        let digest = "sha256:abc";
+        let scoped_a = archive_cache_root_digest(digest, Some("age1recipient-a"));
+        let scoped_b = archive_cache_root_digest(digest, Some("age1recipient-b"));
+
+        assert_ne!(scoped_a, digest);
+        assert_ne!(scoped_a, scoped_b);
+        assert!(scoped_a.starts_with("sha256:"));
+        assert_eq!(scoped_a.len(), "sha256:".len() + 64);
     }
 
     #[test]

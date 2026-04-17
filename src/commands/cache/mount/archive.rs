@@ -6,6 +6,7 @@ use crate::api::ApiClient;
 use crate::api::models::cache::{ConfirmRequest, SaveRequest};
 use crate::cache::archive::create_tar_archive;
 use crate::ci_detection::detect_ci_environment;
+use crate::command_support::save_support::archive_cache_root_digest;
 use crate::manifest::{EntryType, ManifestBuilder};
 use crate::signing::policy::verify_restore_signature;
 use crate::transfer::send_transfer_request_with_retry;
@@ -20,6 +21,7 @@ pub(super) async fn initial_restore_archive(
     local_path: &Path,
     verbose: bool,
     force: bool,
+    recipient: Option<String>,
     identity: Option<String>,
     passphrase_cache: Arc<Mutex<crate::encryption::PassphraseCache>>,
     require_server_signature: bool,
@@ -34,11 +36,13 @@ pub(super) async fn initial_restore_archive(
             ui::info("  Computing local manifest digest...");
         }
         let path_buf = local_path.to_path_buf();
+        let recipient = if hit.encrypted { recipient } else { None };
         let local_digest = tokio::task::spawn_blocking(move || {
             let builder = ManifestBuilder::new(&path_buf);
-            builder
-                .build()
-                .map(|draft| crate::manifest::diff::compute_digest_from_draft(&draft))
+            builder.build().map(|draft| {
+                let content_root_digest = crate::manifest::diff::compute_digest_from_draft(&draft);
+                archive_cache_root_digest(&content_root_digest, recipient.as_deref())
+            })
         })
         .await
         .context("Manifest build task panicked")??;
@@ -359,7 +363,7 @@ pub(super) async fn sync_to_remote_archive(
     .await
     .context("Manifest build task panicked")??;
 
-    let manifest_root_digest = crate::manifest::diff::compute_digest_from_draft(&draft);
+    let content_root_digest = crate::manifest::diff::compute_digest_from_draft(&draft);
     let file_count = draft
         .descriptors
         .iter()
@@ -374,6 +378,22 @@ pub(super) async fn sync_to_remote_archive(
             local_path.display()
         );
     }
+
+    let recipient_str = if encrypt {
+        Some(
+            recipient.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Encryption enabled but no recipient configured. Run `boringcache setup-encryption <workspace>` or pass --recipient."
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+    let age_recipient = recipient_str
+        .map(crate::encryption::parse_recipient)
+        .transpose()?;
+    let manifest_root_digest = archive_cache_root_digest(&content_root_digest, recipient_str);
 
     let check_response = api_client
         .check_manifests(
@@ -412,21 +432,6 @@ pub(super) async fn sync_to_remote_archive(
     let archive_info = create_tar_archive(&draft, &local_path_str, verbose, None)
         .await
         .context("Failed to create archive")?;
-
-    let recipient_str = if encrypt {
-        Some(
-            recipient.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Encryption enabled but no recipient configured. Run `boringcache setup-encryption <workspace>` or pass --recipient."
-                )
-            })?,
-        )
-    } else {
-        None
-    };
-    let age_recipient = recipient_str
-        .map(crate::encryption::parse_recipient)
-        .transpose()?;
 
     let (final_archive_path, final_compressed_size, archive_content_hash) = if encrypt {
         if verbose {
