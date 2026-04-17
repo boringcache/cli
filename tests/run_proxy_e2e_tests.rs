@@ -182,7 +182,7 @@ phase="$(printf '%s\n' "$status_headers" | awk -F': ' 'tolower($1) == "x-boringc
 }
 
 #[test]
-fn test_run_proxy_warm_start_fails_when_backend_cannot_hydrate() {
+fn test_run_proxy_warm_start_best_effort_runs_when_backend_cannot_hydrate() {
     let temp_dir = TempDir::new().expect("temp dir");
     let output = Command::new(cli_binary())
         .args([
@@ -199,7 +199,7 @@ fn test_run_proxy_warm_start_fails_when_backend_cannot_hydrate() {
             "--",
             "sh",
             "-c",
-            "exit 0",
+            "printf launched",
         ])
         .env("HOME", temp_dir.path())
         .env("BORINGCACHE_API_URL", DUMMY_API_URL)
@@ -209,16 +209,15 @@ fn test_run_proxy_warm_start_fails_when_backend_cannot_hydrate() {
         .output()
         .expect("run proxy command");
 
-    assert_eq!(
-        output.status.code(),
-        Some(78),
-        "Expected warm proxy startup to fail before command launch, stdout: {}, stderr: {}",
+    assert!(
+        output.status.success(),
+        "Expected warm proxy startup to continue in best-effort mode, stdout: {}, stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("Cache registry warmup failed"),
-        "Expected warmup failure message, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout).contains("launched"),
+        "Expected command to launch after best-effort warmup, stdout: {}, stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
