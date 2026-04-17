@@ -44,8 +44,15 @@ Key paths:
 - `install-web/` installation website assets
 - `.github/workflows/` CI, E2E, release, and image workflows
 
+## Comprehension Map
+
+- Use `.comprehension/README.md` before broad CLI changes.
+- Update the relevant `.comprehension` file before handoff when command surface, flags, environment/config behavior, cache lifecycle, proxy/adapters, release workflows, module ownership, support reachability, or file coverage changes.
+- If the CLI change changes Rails API contract expectations, also update the relevant web `.comprehension` docs in `/Users/gaurav/boringcache/web/.comprehension`.
+
 ## Structure Rules
 
+- Load `/Users/gaurav/boringcache/skills/categories/coding-principles/boringcache-engineering-guide/SKILL.md` before broad code changes.
 - Keep command entrypoints thin. Shared transport logic should live in focused helpers, not be duplicated across `save`, `restore`, and `mount`.
 - Use `src/commands/cas_publish.rs` for shared CAS publish flow.
 - Use `src/commands/cas_restore.rs` for shared CAS restore fetch/verify/download flow.
@@ -63,6 +70,7 @@ Key paths:
 - No inline comments; code must be self-documenting through clear naming.
 - Comments only for non-obvious business logic or external constraints.
 - Follow Rust conventions strictly.
+- Write Rust with the same restraint expected from good Ruby: clear names, small public APIs, low ceremony, no abstraction theater, and performance visible in the data path.
 - Prefer Rust 2024 idioms supported by the pinned toolchain instead of preserving older 2021-style patterns.
 - Use `let ... else`, let-chains, inline format args, and helpers like `is_some_and` or `is_ok_and` when they make control flow clearer.
 - New examples, fixtures, and generated Cargo manifests should default to `edition = "2024"`.
@@ -122,4 +130,5 @@ Recent reminder:
 ## Skills
 
 - Prefer global skills for general CLI, API, or repo work.
+- Use root `release-paths` (`/Users/gaurav/boringcache/skills/categories/release-operations/release-paths/SKILL.md`) before any CLI release, release tag, base-image publish, action follow-up, or benchmark dispatch.
 - Use local `cli-sccache-release-ops` for sccache proxy behavior, workflow tag conventions, benchmark regression checks, and CLI release execution.
