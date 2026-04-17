@@ -13,8 +13,8 @@ RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 RUN_SHA="${GITHUB_SHA:-localsha}"
 MOUNT_SHUTDOWN_WAIT_SECS="${MOUNT_SHUTDOWN_WAIT_SECS:-20}"
-CLI_CONTROL_PLANE_RETRY_ATTEMPTS="${CLI_CONTROL_PLANE_RETRY_ATTEMPTS:-2}"
-CLI_CONTROL_PLANE_RETRY_DELAY_SECS="${CLI_CONTROL_PLANE_RETRY_DELAY_SECS:-2}"
+CLI_CONTROL_PLANE_RETRY_ATTEMPTS="${CLI_CONTROL_PLANE_RETRY_ATTEMPTS:-4}"
+CLI_CONTROL_PLANE_RETRY_DELAY_SECS="${CLI_CONTROL_PLANE_RETRY_DELAY_SECS:-5}"
 
 require_positive() {
   local name="$1"
@@ -181,26 +181,62 @@ run_dashboard_smoke() {
   dashboard_cmd="${dashboard_cmd% }"
 
   if script -qec "printf ready >/dev/null" /dev/null >/dev/null 2>&1; then
-    ({ sleep 2; printf 'q' || true; } 2>/dev/null) |
+    if ! ({ sleep 2; printf 'q' || true; } 2>/dev/null) |
       TERM=xterm-256color COLUMNS=80 LINES=24 \
-      script -qec "${dashboard_cmd}" "${log_file}" >/dev/null 2>&1
+      script -qec "${dashboard_cmd}" "${log_file}" >/dev/null 2>&1; then
+      return 1
+    fi
 
     if [[ ! -s "${log_file}" ]]; then
       echo "dashboard smoke did not capture any terminal output"
-      exit 1
+      return 1
     fi
     assert_file_not_contains "${log_file}" "interactive terminal"
     assert_file_not_contains "${log_file}" "needs a larger terminal"
   else
-    ({ sleep 2; printf 'q' || true; } 2>/dev/null) |
+    if ! ({ sleep 2; printf 'q' || true; } 2>/dev/null) |
       TERM=xterm-256color COLUMNS=80 LINES=24 \
-      script -q "${log_file}" "${CLI}" dashboard "${WORKSPACE}" --interval 5 >/dev/null 2>&1
+      script -q "${log_file}" "${CLI}" dashboard "${WORKSPACE}" --interval 5 >/dev/null 2>&1; then
+      return 1
+    fi
 
     if [[ ! -s "${log_file}" ]]; then
       echo "dashboard smoke did not capture any terminal output"
-      exit 1
+      return 1
     fi
   fi
+}
+
+dashboard_smoke_transient_failure() {
+  local log_file="$1"
+  [[ -s "${log_file}" ]] && grep -q "Transient error:" "${log_file}"
+}
+
+run_dashboard_smoke_with_retry() {
+  local log_file="$1"
+  local attempt
+  local status=1
+
+  for ((attempt = 1; attempt <= CLI_CONTROL_PLANE_RETRY_ATTEMPTS; attempt++)); do
+    rm -f "${log_file}"
+    if run_dashboard_smoke "${log_file}"; then
+      return 0
+    fi
+    status=$?
+    if (( attempt == CLI_CONTROL_PLANE_RETRY_ATTEMPTS )) \
+      || ! dashboard_smoke_transient_failure "${log_file}"; then
+      echo "ERROR: dashboard smoke failed after ${attempt} attempt(s)"
+      if [[ -s "${log_file}" ]]; then
+        tail -n 80 "${log_file}" || true
+      fi
+      return "${status}"
+    fi
+    echo "WARNING: dashboard smoke failed on attempt ${attempt}/${CLI_CONTROL_PLANE_RETRY_ATTEMPTS}; retrying in ${CLI_CONTROL_PLANE_RETRY_DELAY_SECS}s"
+    tail -n 20 "${log_file}" || true
+    sleep "${CLI_CONTROL_PLANE_RETRY_DELAY_SECS}"
+  done
+
+  return "${status}"
 }
 
 TAG_ROOT="$(e2e_tag "cli-core")"
@@ -242,7 +278,7 @@ if [[ "${save_visible}" != "1" ]]; then
 fi
 
 echo "=== Phase 1b: dashboard compact TUI smoke ==="
-run_dashboard_smoke "${CLI_LOG_DIR}/dashboard.log"
+run_dashboard_smoke_with_retry "${CLI_LOG_DIR}/dashboard.log"
 
 "${CLI}" restore "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${TAG_DIR}:${RESTORE_DIR},${TAG_FILE}:${RESTORE_FILE_DIR}" > "${CLI_LOG_DIR}/restore.log"
 
