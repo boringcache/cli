@@ -128,6 +128,13 @@ pub(super) async fn sync_to_remote_cas(
         &confirm_response,
         resolved_tag,
     )?;
+    super::wait_for_mount_sync_visibility(
+        api_client,
+        workspace,
+        resolved_tag,
+        &bundle.manifest_root_digest,
+    )
+    .await?;
 
     if verbose {
         ui::info(&format!(

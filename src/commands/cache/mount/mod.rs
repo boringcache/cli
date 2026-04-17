@@ -15,13 +15,15 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::api::ApiClient;
-use crate::api::models::cache::ManifestCheckResult;
+use crate::api::models::cache::{ManifestCheckRequest, ManifestCheckResult};
 use crate::ui;
 
 const DEBOUNCE_TIMEOUT_SECS: u64 = 5;
 const MIN_CHANGES_TO_SYNC: usize = 50;
 const IDLE_SYNC_SECS: u64 = 60;
 const CAS_BLOB_WRITER_CAPACITY: usize = 512 * 1024;
+const SYNC_VISIBILITY_ATTEMPTS: usize = 10;
+const SYNC_VISIBILITY_DELAY_SECS: u64 = 1;
 
 enum RestoreAction {
     Downloaded,
@@ -46,6 +48,64 @@ fn manifest_check_is_pending(result: &ManifestCheckResult) -> bool {
 
 fn manifest_check_is_ready(result: &ManifestCheckResult) -> bool {
     result.exists && !manifest_check_is_pending(result)
+}
+
+fn manifest_check_matches_digest(result: &ManifestCheckResult, expected_digest: &str) -> bool {
+    match result.manifest_root_digest.as_deref() {
+        Some(actual_digest) => actual_digest == expected_digest,
+        None => true,
+    }
+}
+
+async fn wait_for_mount_sync_visibility(
+    api_client: &ApiClient,
+    workspace: &str,
+    resolved_tag: &str,
+    manifest_root_digest: &str,
+) -> Result<()> {
+    let mut last_observed = "no response".to_string();
+
+    for attempt in 1..=SYNC_VISIBILITY_ATTEMPTS {
+        if attempt > 1 {
+            tokio::time::sleep(Duration::from_secs(SYNC_VISIBILITY_DELAY_SECS)).await;
+        }
+
+        let check = ManifestCheckRequest {
+            tag: resolved_tag.to_string(),
+            manifest_root_digest: manifest_root_digest.to_string(),
+            lookup: None,
+        };
+
+        match api_client.check_manifests(workspace, &[check]).await {
+            Ok(response) => {
+                if let Some(result) = response.results.first() {
+                    if manifest_check_is_ready(result)
+                        && manifest_check_matches_digest(result, manifest_root_digest)
+                    {
+                        return Ok(());
+                    }
+
+                    last_observed = format!(
+                        "exists={}, pending={}, status={:?}, digest={:?}, error={:?}",
+                        result.exists,
+                        result.pending,
+                        result.status,
+                        result.manifest_root_digest,
+                        result.error
+                    );
+                } else {
+                    last_observed = "empty manifest-check response".to_string();
+                }
+            }
+            Err(error) => {
+                last_observed = error.to_string();
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "mount sync for {resolved_tag} was confirmed but did not become readable as {manifest_root_digest}: {last_observed}"
+    );
 }
 
 fn ensure_mount_sync_won(
@@ -629,6 +689,78 @@ mod tests {
 
         assert!(manifest_check_is_ready(&result));
         assert!(!manifest_check_is_pending(&result));
+    }
+
+    #[test]
+    fn manifest_check_matches_digest_when_server_returns_exact_digest() {
+        let result = ManifestCheckResult {
+            tag: "test-tag".to_string(),
+            exists: true,
+            pending: false,
+            manifest_root_digest: Some("sha256:expected".to_string()),
+            cache_entry_id: None,
+            content_hash: None,
+            manifest_digest: None,
+            manifest_url: None,
+            compression_algorithm: None,
+            archive_urls: Vec::new(),
+            size: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            uploaded_at: None,
+            status: Some("hit".to_string()),
+            error: None,
+        };
+
+        assert!(manifest_check_matches_digest(&result, "sha256:expected"));
+    }
+
+    #[test]
+    fn manifest_check_rejects_stale_digest_when_server_returns_other_digest() {
+        let result = ManifestCheckResult {
+            tag: "test-tag".to_string(),
+            exists: true,
+            pending: false,
+            manifest_root_digest: Some("sha256:old".to_string()),
+            cache_entry_id: None,
+            content_hash: None,
+            manifest_digest: None,
+            manifest_url: None,
+            compression_algorithm: None,
+            archive_urls: Vec::new(),
+            size: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            uploaded_at: None,
+            status: Some("hit".to_string()),
+            error: None,
+        };
+
+        assert!(!manifest_check_matches_digest(&result, "sha256:expected"));
+    }
+
+    #[test]
+    fn manifest_check_accepts_missing_digest_for_exact_lookup_response() {
+        let result = ManifestCheckResult {
+            tag: "test-tag".to_string(),
+            exists: true,
+            pending: false,
+            manifest_root_digest: None,
+            cache_entry_id: None,
+            content_hash: None,
+            manifest_digest: None,
+            manifest_url: None,
+            compression_algorithm: None,
+            archive_urls: Vec::new(),
+            size: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            uploaded_at: None,
+            status: Some("hit".to_string()),
+            error: None,
+        };
+
+        assert!(manifest_check_matches_digest(&result, "sha256:expected"));
     }
 
     #[test]
