@@ -454,6 +454,8 @@ pub(crate) async fn prefetch_manifest_blobs(
     require_full_warm: bool,
     oci_prefetch_refs: Vec<(String, String)>,
 ) -> Result<(), RegistryError> {
+    let require_lossless_warm = require_full_warm && state.fail_on_cache_error;
+
     if !oci_prefetch_refs.is_empty() {
         eprintln!(
             "Prefetch: prefetching {} selected OCI manifest refs",
@@ -470,7 +472,7 @@ pub(crate) async fn prefetch_manifest_blobs(
                 let message = format!(
                     "Startup OCI manifest prefetch failed for {name}@{reference}: {error:#?}"
                 );
-                if require_full_warm {
+                if require_lossless_warm {
                     return Err(RegistryError::internal(message));
                 }
                 log::warn!("{message}");
@@ -559,7 +561,7 @@ pub(crate) async fn prefetch_manifest_blobs(
                         "Prefetch: timed out after {}s (partial prefetch, continuing)",
                         KV_PREFETCH_READINESS_TIMEOUT.as_secs(),
                     );
-                    if require_full_warm {
+                    if require_lossless_warm {
                         return Err(RegistryError::internal(message));
                     }
                 }
@@ -571,13 +573,13 @@ pub(crate) async fn prefetch_manifest_blobs(
                     "Startup warmup incomplete: {missing_local_blobs}/{} blobs are still cold",
                     unique_blobs.len()
                 );
-                if require_full_warm {
+                if require_lossless_warm {
                     return Err(RegistryError::internal(message));
                 }
                 log::warn!("{message}");
             }
 
-            if !require_full_warm {
+            if !require_lossless_warm {
                 spawn_preload_blobs(state, &cache_entry_id);
             }
         }
@@ -590,7 +592,7 @@ pub(crate) async fn prefetch_manifest_blobs(
             return Ok(());
         }
         Err(e) => {
-            if require_full_warm {
+            if require_lossless_warm {
                 return Err(e);
             }
 
