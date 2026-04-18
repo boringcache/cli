@@ -1238,15 +1238,15 @@ mod tests {
             true,
         );
 
-        let tag = scoped_save_tag(&resolver, "buildkit-cache", "main").unwrap();
+        let tag = scoped_save_tag(&resolver, "registry-root", "buildkit-cache", "main").unwrap();
         assert_eq!(
             tag,
-            ref_tag_for_input("buildkit-cache:main-branch-feature-x")
+            ref_tag_for_input("registry-root:buildkit-cache:main-branch-feature-x")
         );
     }
 
     #[test]
-    fn scoped_restore_tags_use_single_effective_tag() {
+    fn scoped_restore_tags_use_root_scoped_tag_with_legacy_fallback() {
         let resolver = TagResolver::new(
             None,
             GitContext {
@@ -1258,10 +1258,13 @@ mod tests {
             true,
         );
 
-        let tags = scoped_restore_tags(&resolver, "buildkit-cache", "main");
+        let tags = scoped_restore_tags(&resolver, "registry-root", "buildkit-cache", "main");
         assert_eq!(
             tags,
-            vec![ref_tag_for_input("buildkit-cache:main-branch-feature-x")]
+            vec![
+                ref_tag_for_input("registry-root:buildkit-cache:main-branch-feature-x"),
+                ref_tag_for_input("buildkit-cache:main-branch-feature-x")
+            ]
         );
     }
 
@@ -1278,8 +1281,8 @@ mod tests {
             true,
         );
 
-        let tag = scoped_save_tag(&resolver, "buildkit-cache", "main").unwrap();
-        assert_eq!(tag, ref_tag_for_input("buildkit-cache:main"));
+        let tag = scoped_save_tag(&resolver, "registry-root", "buildkit-cache", "main").unwrap();
+        assert_eq!(tag, ref_tag_for_input("registry-root:buildkit-cache:main"));
     }
 
     #[test]
@@ -1295,10 +1298,10 @@ mod tests {
             false,
         );
 
-        let tag = scoped_save_tag(&resolver, "buildkit-cache", "main").unwrap();
+        let tag = scoped_save_tag(&resolver, "registry-root", "buildkit-cache", "main").unwrap();
         assert_eq!(
             tag,
-            ref_tag_for_input("buildkit-cache:main-ubuntu-22-x86_64")
+            ref_tag_for_input("registry-root:buildkit-cache:main-ubuntu-22-x86_64")
         );
     }
 

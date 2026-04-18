@@ -223,11 +223,21 @@ pub(super) async fn put_manifest(
     let tag = if reference.starts_with("sha256:") {
         digest_tag(&reference)
     } else {
-        scoped_save_tag(&state.tag_resolver, &name, &reference)?
+        scoped_save_tag(
+            &state.tag_resolver,
+            &state.registry_root_tag,
+            &name,
+            &reference,
+        )?
     };
     let additional_aliases = if reference.starts_with("sha256:") {
         vec![AliasBinding {
-            tag: scoped_save_tag(&state.tag_resolver, &name, "latest")?,
+            tag: scoped_save_tag(
+                &state.tag_resolver,
+                &state.registry_root_tag,
+                &name,
+                "latest",
+            )?,
             write_scope_tag: Some(scoped_write_scope_tag(
                 &state.tag_resolver,
                 &name,
@@ -399,7 +409,12 @@ fn manifest_restore_tags(state: &AppState, name: &str, reference: &str) -> Vec<S
     if reference.starts_with("sha256:") {
         vec![digest_tag(reference)]
     } else {
-        scoped_restore_tags(&state.tag_resolver, name, reference)
+        scoped_restore_tags(
+            &state.tag_resolver,
+            &state.registry_root_tag,
+            name,
+            reference,
+        )
     }
 }
 
@@ -849,25 +864,16 @@ async fn persist_manifest_entry(
             let blob_descriptors = publish_blob_descriptors.clone();
             let cache_entry_id = save_response.cache_entry_id.clone();
             async move {
-                tokio::time::timeout(
-                    OCI_API_CALL_TIMEOUT,
-                    crate::serve::cas_publish::upload_tracked_blobs(
-                        &state.api_client,
-                        &state.workspace,
-                        &cache_entry_id,
-                        &blob_descriptors,
-                        &state.upload_sessions,
-                        adaptive_blob_upload_concurrency_impl(blob_descriptors.len()),
-                        OCI_TRANSFER_CALL_TIMEOUT,
-                    ),
+                crate::serve::cas_publish::upload_tracked_blobs(
+                    &state.api_client,
+                    &state.workspace,
+                    &cache_entry_id,
+                    &blob_descriptors,
+                    &state.upload_sessions,
+                    adaptive_blob_upload_concurrency_impl(blob_descriptors.len()),
+                    OCI_TRANSFER_CALL_TIMEOUT,
                 )
                 .await
-                .map_err(|_| {
-                    OciError::internal(format!(
-                        "blob_upload_urls timed out after {}s",
-                        OCI_API_CALL_TIMEOUT.as_secs()
-                    ))
-                })?
             }
         },
         move |save_response| {
@@ -1025,7 +1031,12 @@ async fn persist_referrers_manifest(
     )?);
 
     let referrers_reference = referrers_reference_for_subject(subject_digest)?;
-    let referrers_tag = scoped_save_tag(&state.tag_resolver, name, &referrers_reference)?;
+    let referrers_tag = scoped_save_tag(
+        &state.tag_resolver,
+        &state.registry_root_tag,
+        name,
+        &referrers_reference,
+    )?;
     let referrers_write_scope_tag =
         scoped_write_scope_tag(&state.tag_resolver, name, &referrers_reference)?;
     let referrers_body = serde_json::to_vec(&serde_json::json!({

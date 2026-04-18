@@ -7,26 +7,28 @@ use crate::tag_utils::TagResolver;
 
 pub(crate) fn scoped_restore_tags(
     tag_resolver: &TagResolver,
+    registry_root_tag: &str,
     name: &str,
     reference: &str,
 ) -> Vec<String> {
-    let scoped_input = format!("{name}:{reference}");
-    let scoped = tag_resolver
-        .effective_save_tag(&scoped_input)
-        .unwrap_or(scoped_input);
-    vec![ref_tag_for_input(&scoped)]
+    let scoped = effective_ref_input(tag_resolver, name, reference);
+    let primary = root_scoped_ref_tag(registry_root_tag, &scoped);
+    let legacy = ref_tag_for_input(&scoped);
+    if primary == legacy {
+        vec![primary]
+    } else {
+        vec![primary, legacy]
+    }
 }
 
 pub(crate) fn scoped_save_tag(
     tag_resolver: &TagResolver,
+    registry_root_tag: &str,
     name: &str,
     reference: &str,
 ) -> Result<String, OciError> {
-    let scoped_input = format!("{name}:{reference}");
-    let scoped = tag_resolver
-        .effective_save_tag(&scoped_input)
-        .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))?;
-    Ok(ref_tag_for_input(&scoped))
+    let scoped = fallible_effective_ref_input(tag_resolver, name, reference)?;
+    Ok(root_scoped_ref_tag(registry_root_tag, &scoped))
 }
 
 pub(crate) fn scoped_write_scope_tag(
@@ -38,6 +40,33 @@ pub(crate) fn scoped_write_scope_tag(
     tag_resolver
         .effective_save_tag(&scoped_input)
         .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))
+}
+
+fn effective_ref_input(tag_resolver: &TagResolver, name: &str, reference: &str) -> String {
+    let scoped_input = format!("{name}:{reference}");
+    tag_resolver
+        .effective_save_tag(&scoped_input)
+        .unwrap_or(scoped_input)
+}
+
+fn fallible_effective_ref_input(
+    tag_resolver: &TagResolver,
+    name: &str,
+    reference: &str,
+) -> Result<String, OciError> {
+    let scoped_input = format!("{name}:{reference}");
+    tag_resolver
+        .effective_save_tag(&scoped_input)
+        .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))
+}
+
+fn root_scoped_ref_tag(registry_root_tag: &str, scoped_ref: &str) -> String {
+    let root = registry_root_tag.trim();
+    if root.is_empty() {
+        ref_tag_for_input(scoped_ref)
+    } else {
+        ref_tag_for_input(&format!("{root}:{scoped_ref}"))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
