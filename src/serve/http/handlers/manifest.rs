@@ -282,10 +282,11 @@ pub(super) async fn put_manifest(
                 return Err(error);
             }
             let warning = format!(
-                "Best-effort OCI manifest publish fallback on {}:{} ({})",
+                "Best-effort OCI manifest publish fallback on {}:{} ({}): {}",
                 name,
                 reference,
-                error.status()
+                error.status(),
+                error.message()
             );
             eprintln!("{warning}");
             log::warn!("{warning}");

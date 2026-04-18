@@ -303,11 +303,22 @@ impl ApiClient {
             &format!("upload-sessions/{upload_session_id}/blobs/commit"),
         )?;
         let mut last_response = None;
-        for chunk in receipts.chunks(BLOB_RECEIPT_COMMIT_BATCH_MAX) {
+        let batch_count = receipts.len().div_ceil(BLOB_RECEIPT_COMMIT_BATCH_MAX) as u64;
+        for (batch_index, chunk) in receipts.chunks(BLOB_RECEIPT_COMMIT_BATCH_MAX).enumerate() {
             let body = crate::api::models::cache::BlobReceiptCommitRequest {
                 receipts: chunk.to_vec(),
             };
-            last_response = Some(self.post_v2(&endpoint, &body).await?);
+            last_response = Some(
+                self.post_v2_with_request_metrics(
+                    &endpoint,
+                    &body,
+                    CACHE_METRIC_ENDPOINT_OPERATION_UPLOAD_SESSION_BLOB_RECEIPTS,
+                    Some((batch_index + 1) as u64),
+                    Some(batch_count),
+                    Some(chunk.len() as u64),
+                )
+                .await?,
+            );
         }
         Ok(last_response)
     }
@@ -330,7 +341,19 @@ impl ApiClient {
             workspace,
             &format!("upload-sessions/{upload_session_id}/manifest/commit"),
         )?;
-        self.post_v2(&endpoint, request).await.map(Some)
+        self.post_v2_with_request_metrics(
+            &endpoint,
+            request,
+            CACHE_METRIC_ENDPOINT_OPERATION_UPLOAD_SESSION_MANIFEST_RECEIPT,
+            None,
+            None,
+            request
+                .blob_digests
+                .as_ref()
+                .map(|digests| digests.len() as u64),
+        )
+        .await
+        .map(Some)
     }
 
     pub async fn blob_download_urls(

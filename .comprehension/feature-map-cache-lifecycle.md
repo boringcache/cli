@@ -36,6 +36,11 @@ This file covers the archive/CAS lifecycle and the read/admin/reporting commands
 | `src/signing/policy.rs` | `restore`, `mount`, `check` | Server signature verification policy; warn-only unless strict mode is enabled |
 | `src/project_config/**` | `run` and adapters only | `.boringcache.toml` discovery, built-in entry inference, profile resolution |
 
+## Diagnostics notes
+
+- Upload-session blob and manifest receipt commits use the API request-metrics path, so JSONL diagnostics include status, duration, request id, workspace, and receipt batch size for those phases.
+- Proxy OCI CAS publish emits observability events for blob upload URL planning, individual blob uploads, and the overall blob upload batch. Use these with `cache_finalize_publish` to distinguish URL planning, blob transfer, receipt commit, manifest transfer, manifest receipt, and confirm bottlenecks.
+
 ## Strongly used vs thinner
 
 ### Strongly used and well-covered

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::api::ApiClient;
 use crate::api::models::cache::{BlobReceipt, SaveResponse};
@@ -91,10 +91,34 @@ pub(crate) async fn upload_tracked_blobs(
         return Ok(Vec::new());
     }
 
+    let batch_started_at = Instant::now();
+    let requested_blob_count = blob_descriptors.len();
+    let requested_blob_bytes = blob_descriptors
+        .iter()
+        .fold(0u64, |sum, blob| sum.saturating_add(blob.size_bytes));
     let upload_plan = api_client
         .blob_upload_urls(workspace, cache_entry_id, blob_descriptors)
         .await
         .map_err(|e| OciError::internal(format!("blob_upload_urls failed: {e}")))?;
+    crate::observability::emit(
+        crate::observability::ObservabilityEvent::event(
+            "cli",
+            "oci_blob_upload_plan",
+            "POST",
+            "/v2/cache/blobs/upload-urls".to_string(),
+            format!(
+                "requested_blobs={} upload_urls={} already_present={} requested_bytes={} max_concurrent={} timeout_secs={}",
+                requested_blob_count,
+                upload_plan.upload_urls.len(),
+                upload_plan.already_present.len(),
+                requested_blob_bytes,
+                max_concurrent.max(1),
+                transfer_timeout.as_secs()
+            ),
+        )
+        .with_workspace(Some(workspace.to_string()))
+        .with_cache_entry_id(Some(cache_entry_id.to_string())),
+    );
     let size_by_digest: HashMap<&str, u64> = blob_descriptors
         .iter()
         .map(|blob| (blob.digest.as_str(), blob.size_bytes))
@@ -134,51 +158,180 @@ pub(crate) async fn upload_tracked_blobs(
     for upload_job in upload_jobs {
         let semaphore = semaphore.clone();
         let transfer_client = transfer_client.clone();
+        let workspace = workspace.to_string();
+        let cache_entry_id = cache_entry_id.to_string();
         let task = tokio::spawn(async move {
+            let upload_started_at = Instant::now();
             let _permit = semaphore
                 .acquire()
                 .await
                 .map_err(|e| OciError::internal(format!("Blob upload semaphore closed: {e}")))?;
             let progress = crate::progress::TransferProgress::new_noop();
-            tokio::time::timeout(
+            let digest = upload_job.digest;
+            let temp_path = upload_job.temp_path;
+            let url = upload_job.url;
+            let headers = upload_job.headers;
+            let size_bytes = upload_job.size_bytes;
+            let metric_path = format!("/v2/cache/blobs/{digest}");
+
+            match tokio::time::timeout(
                 transfer_timeout,
                 upload_via_single_url(
-                    upload_job.temp_path.as_path(),
-                    &upload_job.url,
+                    temp_path.as_path(),
+                    &url,
                     &progress,
                     &transfer_client,
-                    &upload_job.headers,
+                    &headers,
                 ),
             )
             .await
-            .map_err(|_| {
-                OciError::internal(format!(
-                    "Blob upload timed out for {} after {}s",
-                    upload_job.digest,
-                    transfer_timeout.as_secs()
-                ))
-            })?
-            .map_err(|e| {
-                OciError::internal(format!(
-                    "Blob upload failed for {}: {}",
-                    upload_job.digest, e
-                ))
-            })?;
-            Ok::<BlobReceipt, OciError>(BlobReceipt {
-                digest: upload_job.digest,
-                etag: None,
-            })
+            {
+                Ok(Ok((etag, _storage_metrics))) => {
+                    crate::observability::emit(
+                        crate::observability::ObservabilityEvent::success(
+                            "cli",
+                            "oci_blob_upload",
+                            "PUT",
+                            metric_path,
+                            200,
+                            upload_started_at.elapsed().as_millis() as u64,
+                            Some(size_bytes),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .with_workspace(Some(workspace))
+                        .with_cache_entry_id(Some(cache_entry_id))
+                        .with_details(Some(format!(
+                            "digest={digest} timeout_secs={}",
+                            transfer_timeout.as_secs()
+                        ))),
+                    );
+                    Ok::<BlobReceipt, OciError>(BlobReceipt { digest, etag })
+                }
+                Ok(Err(error)) => {
+                    let message = format!("Blob upload failed for {digest}: {error}");
+                    crate::observability::emit(
+                        crate::observability::ObservabilityEvent::failure(
+                            "cli",
+                            "oci_blob_upload",
+                            "PUT",
+                            metric_path,
+                            message.clone(),
+                            upload_started_at.elapsed().as_millis() as u64,
+                            None,
+                        )
+                        .with_workspace(Some(workspace))
+                        .with_cache_entry_id(Some(cache_entry_id))
+                        .with_details(Some(format!("digest={digest} size_bytes={size_bytes}"))),
+                    );
+                    Err(OciError::internal(message))
+                }
+                Err(_) => {
+                    let message = format!(
+                        "Blob upload timed out for {digest} after {}s",
+                        transfer_timeout.as_secs()
+                    );
+                    crate::observability::emit(
+                        crate::observability::ObservabilityEvent::failure(
+                            "cli",
+                            "oci_blob_upload",
+                            "PUT",
+                            metric_path,
+                            message.clone(),
+                            upload_started_at.elapsed().as_millis() as u64,
+                            None,
+                        )
+                        .with_workspace(Some(workspace))
+                        .with_cache_entry_id(Some(cache_entry_id))
+                        .with_details(Some(format!("digest={digest} size_bytes={size_bytes}"))),
+                    );
+                    Err(OciError::internal(message))
+                }
+            }
         });
         tasks.push(task);
     }
 
     let mut receipts = Vec::with_capacity(tasks.len());
+    let total_tasks = tasks.len();
+    let mut failure_count = 0usize;
+    let mut first_error: Option<OciError> = None;
     for task in tasks {
-        receipts.push(
-            task.await
-                .map_err(|e| OciError::internal(format!("Blob upload task failed: {e}")))??,
-        );
+        match task.await {
+            Ok(Ok(receipt)) => receipts.push(receipt),
+            Ok(Err(error)) => {
+                failure_count += 1;
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+            Err(error) => {
+                failure_count += 1;
+                if first_error.is_none() {
+                    first_error = Some(OciError::internal(format!(
+                        "Blob upload task failed: {error}"
+                    )));
+                }
+            }
+        }
     }
+
+    if let Some(error) = first_error {
+        crate::observability::emit(
+            crate::observability::ObservabilityEvent::failure(
+                "cli",
+                "oci_blob_upload_batch",
+                "PUT",
+                "/v2/cache/blobs".to_string(),
+                error.message().to_string(),
+                batch_started_at.elapsed().as_millis() as u64,
+                None,
+            )
+            .with_workspace(Some(workspace.to_string()))
+            .with_cache_entry_id(Some(cache_entry_id.to_string()))
+            .with_details(Some(format!(
+                "successful_blobs={} failed_blobs={} requested_blobs={} requested_bytes={}",
+                receipts.len(),
+                failure_count,
+                total_tasks,
+                requested_blob_bytes
+            ))),
+        );
+        return Err(OciError::internal(format!(
+            "Blob upload batch failed after {}/{} successful uploads: {}",
+            receipts.len(),
+            total_tasks,
+            error.message()
+        )));
+    }
+
+    crate::observability::emit(
+        crate::observability::ObservabilityEvent::success(
+            "cli",
+            "oci_blob_upload_batch",
+            "PUT",
+            "/v2/cache/blobs".to_string(),
+            200,
+            batch_started_at.elapsed().as_millis() as u64,
+            Some(requested_blob_bytes),
+            None,
+            None,
+            None,
+            Some(receipts.len() as u64),
+            None,
+        )
+        .with_workspace(Some(workspace.to_string()))
+        .with_cache_entry_id(Some(cache_entry_id.to_string()))
+        .with_details(Some(format!(
+            "successful_blobs={} requested_blobs={} already_present={}",
+            receipts.len(),
+            requested_blob_count,
+            upload_plan.already_present.len()
+        ))),
+    );
 
     Ok(receipts)
 }
