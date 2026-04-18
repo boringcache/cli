@@ -134,6 +134,10 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
     (state, temp_home, guard)
 }
 
+fn scoped_ref_tag(name: &str, reference: &str) -> String {
+    ref_tag("registry", &format!("{name}:{reference}"))
+}
+
 fn make_pointer(index_json: &[u8], blobs: &[(&str, u64)]) -> Vec<u8> {
     let pointer = cas_oci::OciPointer {
         format_version: 1,
@@ -714,7 +718,7 @@ async fn test_startup_prefetch_partial_blob_failure_does_not_block_readiness() {
 }
 
 #[tokio::test]
-async fn test_oci_prefetch_ref_hydrates_blobs_before_ready() {
+async fn test_oci_prefetch_ref_indexes_manifest_before_ready() {
     let mut server = Server::new_async().await;
     let (_state, _home, _guard) = setup(&server).await;
 
@@ -725,8 +729,10 @@ async fn test_oci_prefetch_ref_hydrates_blobs_before_ready() {
         index_json,
         &[(blob_digest.as_str(), blob_payload.len() as u64)],
     );
-    let oci_tag = ref_tag("img", "v1");
-    let oci_entries = urlencoding::encode(&oci_tag);
+    let oci_tag = scoped_ref_tag("img", "v1");
+    let legacy_oci_tag = ref_tag("img", "v1");
+    let oci_entries_input = format!("{oci_tag},{legacy_oci_tag}");
+    let oci_entries = urlencoding::encode(&oci_entries_input);
 
     let oci_restore_mock = server
         .mock(
@@ -830,7 +836,7 @@ async fn test_oci_prefetch_ref_hydrates_blobs_before_ready() {
     );
     assert_eq!(
         status["startup_prefetch"]["startup_prefetch_oci_inserted"],
-        "1"
+        "0"
     );
     assert_eq!(
         status["startup_prefetch"]["startup_prefetch_oci_cold_blobs"],
@@ -2339,7 +2345,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = ref_tag("my-cache", "main");
+    let primary_tag = scoped_ref_tag("my-cache", "main");
     let alias_tag = digest_tag(&manifest_digest);
 
     let primary_save_mock = server
@@ -2529,7 +2535,7 @@ async fn test_manifest_put_degrades_when_primary_confirm_is_locked() {
     state.fail_on_cache_error = false;
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
-    let primary_tag = ref_tag("my-cache", "main");
+    let primary_tag = scoped_ref_tag("my-cache", "main");
 
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -2646,7 +2652,7 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = ref_tag("my-cache", "main");
+    let primary_tag = scoped_ref_tag("my-cache", "main");
     let alias_tag = digest_tag(&manifest_digest);
 
     let primary_save_mock = server
@@ -2850,7 +2856,7 @@ async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers()
     }))
     .unwrap();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = ref_tag("my-cache", "main");
+    let primary_tag = scoped_ref_tag("my-cache", "main");
 
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -2931,7 +2937,7 @@ async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers()
 
     let referrers_reference =
         "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    let referrers_tag = ref_tag("my-cache", referrers_reference);
+    let referrers_tag = scoped_ref_tag("my-cache", referrers_reference);
     let referrers_restore_miss_mock = server
         .mock(
             "GET",
@@ -3105,7 +3111,7 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
     let primary_tag = digest_tag(&manifest_digest);
-    let latest_alias_tag = ref_tag("my-cache", "latest");
+    let latest_alias_tag = scoped_ref_tag("my-cache", "latest");
 
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -3513,7 +3519,7 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = ref_tag("my-cache", "main");
+    let primary_tag = scoped_ref_tag("my-cache", "main");
     let digest_alias_tag = digest_tag(&manifest_digest);
 
     let primary_save_mock = server
@@ -3660,7 +3666,7 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = ref_tag("my-cache", "main");
+    let primary_tag = scoped_ref_tag("my-cache", "main");
     let digest_alias_tag = digest_tag(&manifest_digest);
 
     let primary_save_mock = server

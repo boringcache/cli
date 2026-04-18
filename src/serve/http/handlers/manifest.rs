@@ -81,6 +81,7 @@ pub(crate) async fn prefetch_manifest_reference(
     name: &str,
     reference: &str,
 ) -> Result<(crate::serve::cache_registry::BlobPrefetchStats, usize), OciError> {
+    let started_at = Instant::now();
     let tags = manifest_restore_tags(state, name, reference);
     let (_, _, digest) = resolve_manifest(state, name, reference, true).await?;
     let digest_tags = [digest_tag(&digest)];
@@ -124,29 +125,34 @@ pub(crate) async fn prefetch_manifest_reference(
             cached_urls.extend(resolved_urls);
         }
     }
-    let label = format!("OCI prefetch {name}@{reference}");
-    let stats = crate::serve::cache_registry::prefetch_blob_descriptors(
-        state,
-        &cached.cache_entry_id,
-        &cached.blobs,
-        |digest| cached_urls.get(digest).cloned(),
-        &label,
-    )
-    .await;
-    let missing_local_blobs =
-        crate::serve::cache_registry::count_missing_local_blobs(state, &cached.blobs).await;
-    if stats.failures > 0 || missing_local_blobs > 0 {
-        let message = format!(
-            "OCI prefetch incomplete for {name}@{reference}: failures={} cold_blobs={}/{}",
-            stats.failures,
-            missing_local_blobs,
-            cached.blobs.len()
-        );
-        log::warn!("{message}");
-        eprintln!("{message}; serving remaining blobs on demand");
-    }
 
-    Ok((stats, missing_local_blobs))
+    let mut local_blobs = 0usize;
+    for blob in &cached.blobs {
+        if state
+            .blob_read_cache
+            .get_handle(&blob.digest)
+            .await
+            .is_some()
+        {
+            local_blobs = local_blobs.saturating_add(1);
+        }
+    }
+    eprintln!(
+        "OCI prefetch {name}@{reference}: indexed {} blobs ({} locator URLs, {} already local); blob bodies remain on demand",
+        cached.blobs.len(),
+        cached_urls.len(),
+        local_blobs,
+    );
+
+    Ok((
+        crate::serve::cache_registry::BlobPrefetchStats {
+            total_unique_blobs: cached.blobs.len(),
+            already_local: local_blobs,
+            duration_ms: started_at.elapsed().as_millis() as u64,
+            ..crate::serve::cache_registry::BlobPrefetchStats::default()
+        },
+        0,
+    ))
 }
 
 pub(super) async fn get_referrers(

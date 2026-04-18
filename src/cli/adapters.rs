@@ -46,7 +46,7 @@ pub struct AdapterArgs {
     #[arg(
         long,
         value_name = "NAME@REFERENCE",
-        help = "Hydrate selected OCI repository refs during warm proxy startup (repeatable)"
+        help = "Resolve selected OCI repository refs during warm proxy startup (repeatable)"
     )]
     pub oci_prefetch_ref: Vec<String>,
 

@@ -328,28 +328,6 @@ fn should_retry_prefetch_blob_error(status: StatusCode) -> bool {
     ) || status.is_server_error()
 }
 
-pub(crate) async fn prefetch_blob_descriptors<F>(
-    state: &AppState,
-    cache_entry_id: &str,
-    blobs: &[BlobDescriptor],
-    cached_url_for_digest: F,
-    log_label: &str,
-) -> BlobPrefetchStats
-where
-    F: FnMut(&str) -> Option<String>,
-{
-    let (targets, summary) = build_prefetch_targets(blobs, cached_url_for_digest);
-    prefetch_blob_targets(
-        state,
-        cache_entry_id,
-        blobs.len(),
-        targets,
-        summary,
-        log_label,
-    )
-    .await
-}
-
 async fn prefetch_blob_targets(
     state: &AppState,
     cache_entry_id: &str,
@@ -479,7 +457,7 @@ pub(crate) async fn prefetch_manifest_blobs(
 
     if !oci_prefetch_refs.is_empty() {
         eprintln!(
-            "Prefetch: hydrating {} selected OCI manifest refs",
+            "Prefetch: resolving {} selected OCI manifest refs",
             oci_prefetch_refs.len()
         );
         let oci_started_at = std::time::Instant::now();
