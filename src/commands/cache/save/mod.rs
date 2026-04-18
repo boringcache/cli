@@ -496,6 +496,7 @@ mod tests {
         let response = crate::api::models::cache::CacheConfirmResponse {
             status: "ready".to_string(),
             cache_entry_id: Some("entry-existing".to_string()),
+            manifest_root_digest: None,
             uploaded_at: None,
             tag: None,
             tag_status: None,
@@ -517,6 +518,7 @@ mod tests {
         let response = crate::api::models::cache::CacheConfirmResponse {
             status: "ready".to_string(),
             cache_entry_id: Some("entry-same".to_string()),
+            manifest_root_digest: None,
             uploaded_at: None,
             tag: None,
             tag_status: None,

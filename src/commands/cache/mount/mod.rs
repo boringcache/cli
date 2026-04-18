@@ -14,22 +14,28 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::api::ApiClient;
-use crate::api::models::cache::{ManifestCheckRequest, ManifestCheckResult};
+use crate::api::models::cache::ManifestCheckResult;
+use crate::api::{ApiClient, CacheResolutionEntry};
 use crate::ui;
 
 const DEBOUNCE_TIMEOUT_SECS: u64 = 5;
 const MIN_CHANGES_TO_SYNC: usize = 50;
 const IDLE_SYNC_SECS: u64 = 60;
 const CAS_BLOB_WRITER_CAPACITY: usize = 512 * 1024;
-const SYNC_VISIBILITY_ATTEMPTS: usize = 10;
-const SYNC_VISIBILITY_DELAY_SECS: u64 = 1;
+const MOUNT_SYNC_VISIBILITY_TIMEOUT_SECS: u64 = 15;
+const MOUNT_SYNC_VISIBILITY_POLL_MS: u64 = 250;
 
 enum RestoreAction {
     Downloaded,
     AlreadyInSync,
     LocalDiffers,
     NoRemoteCache,
+}
+
+#[derive(Clone, Copy)]
+struct MountSyncPublication<'a> {
+    cache_entry_id: &'a str,
+    manifest_root_digest: &'a str,
 }
 
 pub struct MountOptions {
@@ -50,77 +56,82 @@ fn manifest_check_is_ready(result: &ManifestCheckResult) -> bool {
     result.exists && !manifest_check_is_pending(result)
 }
 
-fn manifest_check_matches_digest(result: &ManifestCheckResult, expected_digest: &str) -> bool {
-    match result.manifest_root_digest.as_deref() {
-        Some(actual_digest) => actual_digest == expected_digest,
-        None => true,
-    }
-}
-
 async fn wait_for_mount_sync_visibility(
     api_client: &ApiClient,
     workspace: &str,
-    resolved_tag: &str,
-    manifest_root_digest: &str,
+    tag: &str,
+    publication: MountSyncPublication<'_>,
+    require_server_signature: bool,
 ) -> Result<()> {
-    let mut last_observed = "no response".to_string();
-
-    for attempt in 1..=SYNC_VISIBILITY_ATTEMPTS {
-        if attempt > 1 {
-            tokio::time::sleep(Duration::from_secs(SYNC_VISIBILITY_DELAY_SECS)).await;
+    let deadline =
+        std::time::Instant::now() + Duration::from_secs(MOUNT_SYNC_VISIBILITY_TIMEOUT_SECS);
+    loop {
+        let hit = api_client
+            .fetch_manifest_entry(workspace, tag, require_server_signature)
+            .await?;
+        if let Some(hit) = hit.as_ref()
+            && mount_sync_visible(hit, publication)
+        {
+            return Ok(());
         }
 
-        let check = ManifestCheckRequest {
-            tag: resolved_tag.to_string(),
-            manifest_root_digest: manifest_root_digest.to_string(),
-            lookup: None,
-        };
-
-        match api_client.check_manifests(workspace, &[check]).await {
-            Ok(response) => {
-                if let Some(result) = response.results.first() {
-                    if manifest_check_is_ready(result)
-                        && manifest_check_matches_digest(result, manifest_root_digest)
-                    {
-                        return Ok(());
-                    }
-
-                    last_observed = format!(
-                        "exists={}, pending={}, status={:?}, digest={:?}, error={:?}",
-                        result.exists,
-                        result.pending,
-                        result.status,
-                        result.manifest_root_digest,
-                        result.error
-                    );
-                } else {
-                    last_observed = "empty manifest-check response".to_string();
-                }
-            }
-            Err(error) => {
-                last_observed = error.to_string();
-            }
+        let last_observation = describe_mount_sync_visibility(hit.as_ref(), publication);
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "mount sync for {tag} was published but restore did not resolve the updated entry before timeout: {last_observation}"
+            );
         }
+
+        tokio::time::sleep(Duration::from_millis(MOUNT_SYNC_VISIBILITY_POLL_MS)).await;
     }
-
-    anyhow::bail!(
-        "mount sync for {resolved_tag} was confirmed but did not become readable as {manifest_root_digest}: {last_observed}"
-    );
 }
 
 fn ensure_mount_sync_won(
-    attempted_cache_entry_id: &str,
+    publication: MountSyncPublication<'_>,
     response: &crate::api::models::cache::CacheConfirmResponse,
     tag: &str,
 ) -> Result<()> {
     if let Some(winner_id) = response.cache_entry_id.as_deref()
-        && winner_id != attempted_cache_entry_id
+        && winner_id != publication.cache_entry_id
     {
         anyhow::bail!(
             "mount sync for {tag} did not publish the updated entry; server kept existing entry {winner_id}"
         );
     }
+    if let Some(published_digest) = response.manifest_root_digest.as_deref()
+        && published_digest != publication.manifest_root_digest
+    {
+        anyhow::bail!(
+            "mount sync for {tag} published unexpected digest {published_digest}; expected {}",
+            publication.manifest_root_digest
+        );
+    }
     Ok(())
+}
+
+fn mount_sync_visible(hit: &CacheResolutionEntry, publication: MountSyncPublication<'_>) -> bool {
+    !hit.pending
+        && !matches!(hit.status.as_str(), "pending" | "uploading")
+        && hit.cache_entry_id.as_deref() == Some(publication.cache_entry_id)
+        && hit.manifest_root_digest.as_deref() == Some(publication.manifest_root_digest)
+}
+
+fn describe_mount_sync_visibility(
+    hit: Option<&CacheResolutionEntry>,
+    publication: MountSyncPublication<'_>,
+) -> String {
+    match hit {
+        Some(hit) => format!(
+            "saw status={} cache_entry_id={} manifest_root_digest={}",
+            hit.status,
+            hit.cache_entry_id.as_deref().unwrap_or("<missing>"),
+            hit.manifest_root_digest.as_deref().unwrap_or("<missing>")
+        ),
+        None => format!(
+            "tag not visible for cache_entry_id={} manifest_root_digest={}",
+            publication.cache_entry_id, publication.manifest_root_digest
+        ),
+    }
 }
 
 pub async fn execute(workspace: String, tag_path: String, options: MountOptions) -> Result<()> {
@@ -193,6 +204,7 @@ pub async fn execute(workspace: String, tag_path: String, options: MountOptions)
                 options.verbose,
                 encrypt,
                 recipient.clone(),
+                options.require_server_signature,
             )
             .await?;
         }
@@ -211,6 +223,7 @@ pub async fn execute(workspace: String, tag_path: String, options: MountOptions)
                     options.verbose,
                     encrypt,
                     recipient.clone(),
+                    options.require_server_signature,
                 )
                 .await?;
             }
@@ -240,6 +253,7 @@ pub async fn execute(workspace: String, tag_path: String, options: MountOptions)
         shutdown,
         encrypt,
         recipient,
+        options.require_server_signature,
     )
     .await?;
     Ok(())
@@ -428,6 +442,7 @@ async fn watch_and_sync(
     shutdown: Arc<AtomicBool>,
     encrypt: bool,
     recipient: Option<String>,
+    require_server_signature: bool,
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<DebounceEventResult>(100);
 
@@ -462,6 +477,7 @@ async fn watch_and_sync(
                 verbose,
                 encrypt,
                 recipient.clone(),
+                require_server_signature,
             )
             .await
             {
@@ -490,6 +506,7 @@ async fn watch_and_sync(
                 verbose,
                 encrypt,
                 recipient.clone(),
+                require_server_signature,
             )
             .await
             {
@@ -547,6 +564,7 @@ async fn sync_to_remote(
     verbose: bool,
     encrypt: bool,
     recipient: Option<String>,
+    require_server_signature: bool,
 ) -> Result<()> {
     let adapter_detection = crate::cache_adapter::detect_layout(local_path);
     log::debug!(
@@ -577,6 +595,7 @@ async fn sync_to_remote(
                     verbose,
                     encrypt,
                     recipient,
+                    require_server_signature,
                 )
             },
             || {
@@ -587,6 +606,7 @@ async fn sync_to_remote(
                     resolved_tag,
                     local_path,
                     verbose,
+                    require_server_signature,
                 )
             },
             || {
@@ -598,6 +618,7 @@ async fn sync_to_remote(
                     local_path,
                     verbose,
                     adapter_detection.kind,
+                    require_server_signature,
                 )
             },
         )
@@ -692,78 +713,6 @@ mod tests {
     }
 
     #[test]
-    fn manifest_check_matches_digest_when_server_returns_exact_digest() {
-        let result = ManifestCheckResult {
-            tag: "test-tag".to_string(),
-            exists: true,
-            pending: false,
-            manifest_root_digest: Some("sha256:expected".to_string()),
-            cache_entry_id: None,
-            content_hash: None,
-            manifest_digest: None,
-            manifest_url: None,
-            compression_algorithm: None,
-            archive_urls: Vec::new(),
-            size: None,
-            uncompressed_size: None,
-            compressed_size: None,
-            uploaded_at: None,
-            status: Some("hit".to_string()),
-            error: None,
-        };
-
-        assert!(manifest_check_matches_digest(&result, "sha256:expected"));
-    }
-
-    #[test]
-    fn manifest_check_rejects_stale_digest_when_server_returns_other_digest() {
-        let result = ManifestCheckResult {
-            tag: "test-tag".to_string(),
-            exists: true,
-            pending: false,
-            manifest_root_digest: Some("sha256:old".to_string()),
-            cache_entry_id: None,
-            content_hash: None,
-            manifest_digest: None,
-            manifest_url: None,
-            compression_algorithm: None,
-            archive_urls: Vec::new(),
-            size: None,
-            uncompressed_size: None,
-            compressed_size: None,
-            uploaded_at: None,
-            status: Some("hit".to_string()),
-            error: None,
-        };
-
-        assert!(!manifest_check_matches_digest(&result, "sha256:expected"));
-    }
-
-    #[test]
-    fn manifest_check_accepts_missing_digest_for_exact_lookup_response() {
-        let result = ManifestCheckResult {
-            tag: "test-tag".to_string(),
-            exists: true,
-            pending: false,
-            manifest_root_digest: None,
-            cache_entry_id: None,
-            content_hash: None,
-            manifest_digest: None,
-            manifest_url: None,
-            compression_algorithm: None,
-            archive_urls: Vec::new(),
-            size: None,
-            uncompressed_size: None,
-            compressed_size: None,
-            uploaded_at: None,
-            status: Some("hit".to_string()),
-            error: None,
-        };
-
-        assert!(manifest_check_matches_digest(&result, "sha256:expected"));
-    }
-
-    #[test]
     fn local_oci_manifest_digest_returns_none_for_non_oci_layout() {
         let temp_dir = tempfile::tempdir().unwrap();
         std::fs::write(temp_dir.path().join("file.txt"), b"hello").unwrap();
@@ -806,6 +755,7 @@ mod tests {
         let response = crate::api::models::cache::CacheConfirmResponse {
             status: "published".to_string(),
             cache_entry_id: Some("entry-1".to_string()),
+            manifest_root_digest: Some("sha256:root".to_string()),
             uploaded_at: None,
             tag: None,
             tag_status: None,
@@ -814,7 +764,11 @@ mod tests {
             signed_at: None,
         };
 
-        ensure_mount_sync_won("entry-1", &response, "cache-tag").expect("same entry should pass");
+        let publication = MountSyncPublication {
+            cache_entry_id: "entry-1",
+            manifest_root_digest: "sha256:root",
+        };
+        ensure_mount_sync_won(publication, &response, "cache-tag").expect("same entry should pass");
     }
 
     #[test]
@@ -822,6 +776,7 @@ mod tests {
         let response = crate::api::models::cache::CacheConfirmResponse {
             status: "published".to_string(),
             cache_entry_id: Some("entry-existing".to_string()),
+            manifest_root_digest: Some("sha256:root".to_string()),
             uploaded_at: None,
             tag: None,
             tag_status: None,
@@ -830,7 +785,11 @@ mod tests {
             signed_at: None,
         };
 
-        let error = ensure_mount_sync_won("entry-new", &response, "cache-tag")
+        let publication = MountSyncPublication {
+            cache_entry_id: "entry-new",
+            manifest_root_digest: "sha256:root",
+        };
+        let error = ensure_mount_sync_won(publication, &response, "cache-tag")
             .expect_err("winner switch should fail");
         assert!(
             error
@@ -838,6 +797,88 @@ mod tests {
                 .contains("did not publish the updated entry"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn mount_sync_rejects_confirm_with_unexpected_digest() {
+        let response = crate::api::models::cache::CacheConfirmResponse {
+            status: "published".to_string(),
+            cache_entry_id: Some("entry-new".to_string()),
+            manifest_root_digest: Some("sha256:old".to_string()),
+            uploaded_at: None,
+            tag: None,
+            tag_status: None,
+            signature: None,
+            signing_public_key: None,
+            signed_at: None,
+        };
+
+        let publication = MountSyncPublication {
+            cache_entry_id: "entry-new",
+            manifest_root_digest: "sha256:new",
+        };
+        let error = ensure_mount_sync_won(publication, &response, "cache-tag")
+            .expect_err("digest mismatch should fail");
+        assert!(
+            error.to_string().contains("published unexpected digest"),
+            "unexpected error: {error}"
+        );
+    }
+
+    fn restore_entry_for_mount_visibility(
+        status: &str,
+        cache_entry_id: Option<&str>,
+        manifest_root_digest: Option<&str>,
+    ) -> CacheResolutionEntry {
+        CacheResolutionEntry {
+            tag: "cache-tag".to_string(),
+            primary_tag: None,
+            signature_tag: None,
+            status: status.to_string(),
+            cache_entry_id: cache_entry_id.map(str::to_string),
+            manifest_url: None,
+            manifest_root_digest: manifest_root_digest.map(str::to_string),
+            manifest_digest: None,
+            compression_algorithm: None,
+            storage_mode: None,
+            blob_count: None,
+            blob_total_size_bytes: None,
+            cas_layout: None,
+            archive_urls: Vec::new(),
+            size: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            uploaded_at: None,
+            content_hash: None,
+            pending: false,
+            error: None,
+            workspace_signing_public_key: None,
+            server_signature: None,
+            server_signed_at: None,
+            encrypted: false,
+        }
+    }
+
+    #[test]
+    fn mount_sync_visibility_requires_matching_entry_and_digest() {
+        let publication = MountSyncPublication {
+            cache_entry_id: "entry-new",
+            manifest_root_digest: "sha256:new",
+        };
+        let hit = restore_entry_for_mount_visibility("hit", Some("entry-new"), Some("sha256:new"));
+
+        assert!(mount_sync_visible(&hit, publication));
+    }
+
+    #[test]
+    fn mount_sync_visibility_rejects_old_restore_result() {
+        let publication = MountSyncPublication {
+            cache_entry_id: "entry-new",
+            manifest_root_digest: "sha256:new",
+        };
+        let hit = restore_entry_for_mount_visibility("hit", Some("entry-old"), Some("sha256:old"));
+
+        assert!(!mount_sync_visible(&hit, publication));
     }
 
     #[tokio::test]

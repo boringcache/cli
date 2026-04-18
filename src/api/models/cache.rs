@@ -332,6 +332,8 @@ pub struct CacheConfirmResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_entry_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_root_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub uploaded_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<TagResponse>,

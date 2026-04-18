@@ -166,6 +166,7 @@ pub(super) async fn sync_to_remote_file(
     local_path: &Path,
     verbose: bool,
     detected_kind: crate::cache_adapter::CacheAdapterKind,
+    require_server_signature: bool,
 ) -> Result<()> {
     let scan_path = local_path.to_path_buf();
     let scan =
@@ -243,6 +244,7 @@ pub(super) async fn sync_to_remote_file(
                 )
             }),
         },
+        require_server_signature,
     )
     .await
 }

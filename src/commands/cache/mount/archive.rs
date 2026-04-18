@@ -354,6 +354,7 @@ pub(super) async fn sync_to_remote_archive(
     verbose: bool,
     encrypt: bool,
     recipient: Option<String>,
+    require_server_signature: bool,
 ) -> Result<()> {
     let path_buf = local_path.to_path_buf();
     let draft = tokio::task::spawn_blocking(move || {
@@ -671,16 +672,17 @@ pub(super) async fn sync_to_remote_archive(
     let confirm_response = api_client
         .confirm(workspace, &save_response.cache_entry_id, &confirm_request)
         .await?;
-    super::ensure_mount_sync_won(
-        &save_response.cache_entry_id,
-        &confirm_response,
-        resolved_tag,
-    )?;
+    let publication = super::MountSyncPublication {
+        cache_entry_id: &save_response.cache_entry_id,
+        manifest_root_digest: &manifest_root_digest,
+    };
+    super::ensure_mount_sync_won(publication, &confirm_response, resolved_tag)?;
     super::wait_for_mount_sync_visibility(
         api_client,
         workspace,
         resolved_tag,
-        &manifest_root_digest,
+        publication,
+        require_server_signature,
     )
     .await?;
 

@@ -174,6 +174,7 @@ pub(super) async fn sync_to_remote_oci(
     resolved_tag: &str,
     local_path: &Path,
     verbose: bool,
+    require_server_signature: bool,
 ) -> Result<()> {
     let scan_path = local_path.to_path_buf();
     let scan = task::spawn_blocking(move || crate::cache::cas_oci::scan_layout(&scan_path))
@@ -237,6 +238,7 @@ pub(super) async fn sync_to_remote_oci(
             success_size_bytes: blob_total_size_bytes,
             empty_payload_error: None,
         },
+        require_server_signature,
     )
     .await
 }

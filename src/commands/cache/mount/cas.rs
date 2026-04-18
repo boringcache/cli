@@ -28,6 +28,7 @@ pub(super) async fn sync_to_remote_cas(
     resolved_tag: &str,
     verbose: bool,
     bundle: MountCasSyncBundle,
+    require_server_signature: bool,
 ) -> Result<()> {
     if let Some(message) = bundle.empty_payload_error.as_ref() {
         anyhow::bail!(message.clone());
@@ -123,16 +124,17 @@ pub(super) async fn sync_to_remote_cas(
         .confirm(workspace, &save_response.cache_entry_id, &confirm_request)
         .await
         .with_context(|| format!("Failed to confirm CAS upload for {}", resolved_tag))?;
-    super::ensure_mount_sync_won(
-        &save_response.cache_entry_id,
-        &confirm_response,
-        resolved_tag,
-    )?;
+    let publication = super::MountSyncPublication {
+        cache_entry_id: &save_response.cache_entry_id,
+        manifest_root_digest: &bundle.manifest_root_digest,
+    };
+    super::ensure_mount_sync_won(publication, &confirm_response, resolved_tag)?;
     super::wait_for_mount_sync_visibility(
         api_client,
         workspace,
         resolved_tag,
-        &bundle.manifest_root_digest,
+        publication,
+        require_server_signature,
     )
     .await?;
 

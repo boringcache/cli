@@ -74,6 +74,8 @@ struct TagPointer {
     #[serde(default)]
     cache_entry_id: Option<String>,
     #[serde(default)]
+    manifest_root_digest: Option<String>,
+    #[serde(default)]
     status: Option<String>,
     #[serde(default)]
     uploaded_at: Option<String>,
@@ -238,6 +240,7 @@ fn cache_confirm_response_from_tag_pointer(
             .clone()
             .unwrap_or_else(|| "ready".to_string()),
         cache_entry_id: response.cache_entry_id.clone(),
+        manifest_root_digest: response.manifest_root_digest,
         uploaded_at: response.uploaded_at,
         tag: None,
         tag_status: response.status,
