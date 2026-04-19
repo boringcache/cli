@@ -36,6 +36,14 @@ pub struct CacheRegistryArgs {
     )]
     pub oci_prefetch_ref: Vec<String>,
 
+    #[arg(
+        long,
+        default_value = "metadata-only",
+        value_parser = ["metadata-only", "bodies-before-ready", "bodies-background"],
+        help = "OCI/Docker startup hydration policy for selected refs"
+    )]
+    pub oci_hydration: String,
+
     #[arg(long, help = "Skip startup warming and serve cache reads on demand")]
     pub on_demand: bool,
 

@@ -229,6 +229,10 @@ pub(super) async fn flush_cache_ops(state: &AppState) {
             .cache_ops
             .merge_session_metadata_hints(blob_read_hints);
     }
+    let oci_body_hints = state.oci_body_metrics.metadata_hints();
+    if !oci_body_hints.is_empty() {
+        state.cache_ops.merge_session_metadata_hints(oci_body_hints);
+    }
     let prefetch_hints = state.prefetch_metrics.metadata_hints();
     if !prefetch_hints.is_empty() {
         state.cache_ops.merge_session_metadata_hints(prefetch_hints);

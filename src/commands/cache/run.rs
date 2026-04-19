@@ -77,6 +77,7 @@ struct DryRunProxyPlan {
     port: u16,
     read_only: bool,
     startup_mode: String,
+    oci_hydration: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     oci_prefetch_refs: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -165,6 +166,7 @@ pub async fn execute(
     identity: Option<String>,
     proxy: Option<String>,
     oci_prefetch_ref: Vec<String>,
+    oci_hydration: String,
     metadata_hints: Vec<String>,
     startup_warm: bool,
     host: String,
@@ -352,6 +354,7 @@ pub async fn execute(
     let proxy_enabled = proxy.is_some();
     let proxy_metadata_hints = cache_registry::resolve_proxy_metadata_hints(&metadata_hints)?;
     let oci_prefetch_refs = cache_registry::resolve_oci_prefetch_refs(&oci_prefetch_ref)?;
+    let oci_hydration_policy = cache_registry::resolve_oci_hydration_policy(&oci_hydration)?;
     let oci_prefetch_ref_specs = oci_prefetch_refs
         .iter()
         .map(|(name, reference)| format!("{name}@{reference}"))
@@ -390,6 +393,7 @@ pub async fn execute(
                 port,
                 read_only: effective_proxy_read_only,
                 startup_mode: cache_registry::proxy_startup_mode(startup_warm).to_string(),
+                oci_hydration: oci_hydration_policy.as_str().to_string(),
                 oci_prefetch_refs: oci_prefetch_ref_specs.clone(),
                 metadata_hints: proxy_metadata_hints.clone(),
             });
@@ -419,6 +423,7 @@ pub async fn execute(
                 proxy.as_deref(),
                 &proxy_metadata_hints,
                 startup_warm,
+                oci_hydration_policy,
                 &host,
                 endpoint_host.as_deref(),
                 port,
@@ -488,6 +493,7 @@ pub async fn execute(
             no_platform,
             no_git,
             oci_prefetch_refs,
+            oci_hydration_policy,
             endpoint_host,
             proxy_metadata_hints.clone(),
             startup_warm,
@@ -642,6 +648,7 @@ fn print_dry_run(
     proxy: Option<&str>,
     proxy_metadata_hints: &BTreeMap<String, String>,
     startup_warm: bool,
+    oci_hydration_policy: crate::serve::OciHydrationPolicy,
     host: &str,
     endpoint_host: Option<&str>,
     port: u16,
@@ -696,6 +703,10 @@ fn print_dry_run(
         ];
         if !startup_warm {
             proxy_parts.push("--on-demand".to_string());
+        }
+        if oci_hydration_policy != crate::serve::OciHydrationPolicy::MetadataOnly {
+            proxy_parts.push("--oci-hydration".to_string());
+            proxy_parts.push(oci_hydration_policy.as_str().to_string());
         }
         if let Some(endpoint_host) = endpoint_host {
             proxy_parts.push("--endpoint-host".to_string());

@@ -68,6 +68,7 @@ struct ProxyStatusResponse {
     prefetch_complete: bool,
     prefetch_error: Option<String>,
     startup_prefetch: BTreeMap<String, String>,
+    oci_body: BTreeMap<String, String>,
     shutdown_requested: bool,
     cache_entry_id: Option<String>,
     tags_visible: bool,
@@ -83,6 +84,7 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
         .load(std::sync::atomic::Ordering::Acquire);
     let prefetch_error = state.prefetch_error.read().await.clone();
     let startup_prefetch = state.prefetch_metrics.metadata_hints();
+    let oci_body = state.oci_body_metrics.metadata_hints();
     let shutdown_requested = state
         .shutdown_requested
         .load(std::sync::atomic::Ordering::Acquire);
@@ -135,6 +137,7 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
             prefetch_complete,
             prefetch_error,
             startup_prefetch,
+            oci_body,
             shutdown_requested,
             cache_entry_id,
             tags_visible,
@@ -382,6 +385,7 @@ mod tests {
             configured_human_tags: Vec::new(),
             registry_root_tag: "registry".to_string(),
             fail_on_cache_error: true,
+            oci_hydration_policy: crate::serve::OciHydrationPolicy::MetadataOnly,
             blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
             upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
             kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -415,6 +419,7 @@ mod tests {
                 .expect("blob read cache"),
             ),
             blob_read_metrics: Arc::new(BlobReadMetrics::new()),
+            oci_body_metrics: Arc::new(crate::serve::state::OciBodyMetrics::new()),
             prefetch_metrics: Arc::new(crate::serve::state::PrefetchMetrics::new()),
             blob_download_max_concurrency: 16,
             blob_download_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),

@@ -17,6 +17,12 @@ boringcache cache-registry my-org/app registry-cache --port 5000
 That command starts in warm mode by default.
 The proxy warms its current internal active tag and shared blob cache state before it reports `ready`.
 That warm path improves first reads for disk-backed proxy traffic today; startup does not preseed per-repository OCI manifest refs unless they are listed explicitly with `--oci-prefetch-ref`.
+OCI/BuildKit refs use an explicit body hydration policy:
+
+- `--oci-hydration metadata-only` is the default. Startup resolves selected manifests and blob download URLs, then serves blob bodies by read-through when BuildKit asks for them.
+- `--oci-hydration bodies-before-ready` hydrates selected OCI blob bodies before the proxy reports `ready`. Use it when predictable BuildKit import speed matters more than proxy startup time.
+- `--oci-hydration bodies-background` reports `ready` after metadata indexing, then hydrates selected OCI blob bodies concurrently while clients start.
+
 Use `--on-demand` only when you want the proxy to come up immediately and accept colder first reads:
 
 ```bash

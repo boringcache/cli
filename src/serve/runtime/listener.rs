@@ -41,11 +41,13 @@ pub(super) async fn build_server_runtime(
     registry_root_tag: String,
     proxy_metadata_hints: BTreeMap<String, String>,
     startup_warm: bool,
+    oci_hydration_policy: crate::serve::OciHydrationPolicy,
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<(AppState, TcpListener, mpsc::Receiver<KvReplicationWork>)> {
     let blob_read_cache = Arc::new(BlobReadCache::new(BLOB_READ_CACHE_MAX_BYTES)?);
     let blob_read_metrics = Arc::new(BlobReadMetrics::new());
+    let oci_body_metrics = Arc::new(state::OciBodyMetrics::new());
     let prefetch_metrics = Arc::new(state::PrefetchMetrics::new());
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
     let (prefetch_concurrency, prefetch_from_env) = blob_prefetch_concurrency(dl_concurrency);
@@ -79,6 +81,7 @@ pub(super) async fn build_server_runtime(
         configured_human_tags,
         registry_root_tag,
         fail_on_cache_error,
+        oci_hydration_policy,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -103,6 +106,7 @@ pub(super) async fn build_server_runtime(
         kv_miss_generations: Arc::new(dashmap::DashMap::new()),
         blob_read_cache,
         blob_read_metrics,
+        oci_body_metrics,
         prefetch_metrics,
         blob_download_max_concurrency: dl_concurrency,
         blob_download_semaphore,
@@ -200,6 +204,10 @@ pub(super) async fn build_server_runtime(
     eprintln!(
         "  Startup mode: {}",
         if startup_warm { "warm" } else { "on-demand" }
+    );
+    eprintln!(
+        "  OCI body hydration: {}",
+        state.oci_hydration_policy.as_str()
     );
     eprintln!(
         "  Full-tag hydration: {}",

@@ -139,6 +139,7 @@ pub async fn execute(
     no_platform: bool,
     no_git: bool,
     oci_prefetch_ref: Vec<String>,
+    oci_hydration: String,
     metadata_hints: Vec<String>,
     startup_warm: bool,
     ready_file: Option<String>,
@@ -163,6 +164,7 @@ pub async fn execute(
     let (registry_root_tag, configured_human_tags) =
         resolve_registry_tag_config(&tag_resolver, &tag)?;
     let oci_prefetch_refs = resolve_oci_prefetch_refs(&oci_prefetch_ref)?;
+    let oci_hydration_policy = resolve_oci_hydration_policy(&oci_hydration)?;
     let proxy_metadata_hints = resolve_proxy_metadata_hints(&metadata_hints)?;
 
     crate::serve::run_server(
@@ -176,6 +178,7 @@ pub async fn execute(
         proxy_metadata_hints,
         startup_warm,
         oci_prefetch_refs,
+        oci_hydration_policy,
         fail_on_cache_error,
         read_only,
         ready_file.map(PathBuf::from),
@@ -192,6 +195,7 @@ pub async fn start_proxy_background(
     no_platform: bool,
     no_git: bool,
     oci_prefetch_refs: Vec<(String, String)>,
+    oci_hydration_policy: crate::serve::OciHydrationPolicy,
     endpoint_host_override: Option<String>,
     proxy_metadata_hints: BTreeMap<String, String>,
     startup_warm: bool,
@@ -235,6 +239,7 @@ pub async fn start_proxy_background(
         proxy_metadata_hints,
         startup_warm,
         oci_prefetch_refs,
+        oci_hydration_policy,
         fail_on_cache_error,
         read_only,
     )
@@ -299,6 +304,12 @@ pub(crate) fn resolve_oci_prefetch_refs(
     }
 
     Ok(refs)
+}
+
+pub(crate) fn resolve_oci_hydration_policy(
+    value: &str,
+) -> Result<crate::serve::OciHydrationPolicy> {
+    crate::serve::OciHydrationPolicy::parse(value)
 }
 
 fn parse_oci_prefetch_ref(raw: &str) -> Result<(String, String)> {
@@ -573,6 +584,7 @@ mod tests {
             true,
             true,
             Vec::new(),
+            crate::serve::OciHydrationPolicy::MetadataOnly,
             Some("builder.internal.invalid".to_string()),
             BTreeMap::new(),
             true,
@@ -631,6 +643,7 @@ mod tests {
             true,
             true,
             Vec::new(),
+            crate::serve::OciHydrationPolicy::MetadataOnly,
             None,
             BTreeMap::new(),
             false,

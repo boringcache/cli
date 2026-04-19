@@ -19,11 +19,24 @@ pub(super) async fn get_blob(
     name: String,
     digest: String,
 ) -> Result<Response, OciError> {
+    let request_started_at = std::time::Instant::now();
     if let Some(handle) = find_local_uploaded_blob(&state, &name, &digest).await {
+        if method != Method::HEAD {
+            state.oci_body_metrics.record_local(
+                handle.size_bytes(),
+                request_started_at.elapsed().as_millis() as u64,
+            );
+        }
         return local_blob_response(method, &digest, &handle).await;
     }
 
     if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
+        if method != Method::HEAD {
+            state.oci_body_metrics.record_local(
+                handle.size_bytes(),
+                request_started_at.elapsed().as_millis() as u64,
+            );
+        }
         return local_blob_response(method, &digest, &handle).await;
     }
 
@@ -93,6 +106,10 @@ pub(super) async fn get_blob(
     )?;
 
     if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
+        state.oci_body_metrics.record_local(
+            handle.size_bytes(),
+            request_started_at.elapsed().as_millis() as u64,
+        );
         let body = cached_blob_body(&handle).await?;
         return Ok((StatusCode::OK, headers, body).into_response());
     }
@@ -106,6 +123,10 @@ pub(super) async fn get_blob(
         match begin_flight(&state.oci_lookup_inflight, flight_key.clone()) {
             Flight::Leader(_guard) => {
                 if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
+                    state.oci_body_metrics.record_local(
+                        handle.size_bytes(),
+                        request_started_at.elapsed().as_millis() as u64,
+                    );
                     let body = cached_blob_body(&handle).await?;
                     return Ok((StatusCode::OK, headers, body).into_response());
                 }
@@ -117,6 +138,10 @@ pub(super) async fn get_blob(
                     .map_err(|_| OciError::internal("Blob download semaphore closed"))?;
 
                 if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
+                    state.oci_body_metrics.record_local(
+                        handle.size_bytes(),
+                        request_started_at.elapsed().as_millis() as u64,
+                    );
                     let body = cached_blob_body(&handle).await?;
                     return Ok((StatusCode::OK, headers, body).into_response());
                 }
@@ -151,6 +176,10 @@ pub(super) async fn get_blob(
                     from_cache,
                 )
                 .await?;
+                state.oci_body_metrics.record_remote(
+                    handle.size_bytes(),
+                    request_started_at.elapsed().as_millis() as u64,
+                );
                 let body = cached_blob_body(&handle).await?;
                 return Ok((StatusCode::OK, headers, body).into_response());
             }
@@ -159,6 +188,10 @@ pub(super) async fn get_blob(
                     clear_flight_entry(&state.oci_lookup_inflight, &flight_key);
                 }
                 if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
+                    state.oci_body_metrics.record_local(
+                        handle.size_bytes(),
+                        request_started_at.elapsed().as_millis() as u64,
+                    );
                     let body = cached_blob_body(&handle).await?;
                     return Ok((StatusCode::OK, headers, body).into_response());
                 }

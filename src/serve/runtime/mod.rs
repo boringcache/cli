@@ -66,6 +66,7 @@ pub async fn run_server(
     proxy_metadata_hints: BTreeMap<String, String>,
     startup_warm: bool,
     oci_prefetch_refs: Vec<(String, String)>,
+    oci_hydration_policy: crate::serve::OciHydrationPolicy,
     fail_on_cache_error: bool,
     read_only: bool,
     ready_file: Option<PathBuf>,
@@ -80,13 +81,19 @@ pub async fn run_server(
         registry_root_tag,
         proxy_metadata_hints,
         startup_warm,
+        oci_hydration_policy,
         fail_on_cache_error,
         read_only,
     )
     .await?;
 
     maintenance::spawn_maintenance_tasks(&state, replication_rx);
-    spawn_startup_prefetch(&state, startup_warm, oci_prefetch_refs);
+    spawn_startup_prefetch(
+        &state,
+        startup_warm,
+        oci_prefetch_refs,
+        oci_hydration_policy,
+    );
     spawn_ready_file_marker(
         state.prefetch_complete.clone(),
         state.prefetch_complete_notify.clone(),
@@ -120,6 +127,7 @@ pub async fn start_server_background(
     proxy_metadata_hints: BTreeMap<String, String>,
     startup_warm: bool,
     oci_prefetch_refs: Vec<(String, String)>,
+    oci_hydration_policy: crate::serve::OciHydrationPolicy,
     fail_on_cache_error: bool,
     read_only: bool,
 ) -> Result<ServeHandle> {
@@ -133,13 +141,19 @@ pub async fn start_server_background(
         registry_root_tag,
         proxy_metadata_hints,
         startup_warm,
+        oci_hydration_policy,
         fail_on_cache_error,
         read_only,
     )
     .await?;
 
     maintenance::spawn_maintenance_tasks(&state, replication_rx);
-    spawn_startup_prefetch(&state, startup_warm, oci_prefetch_refs);
+    spawn_startup_prefetch(
+        &state,
+        startup_warm,
+        oci_prefetch_refs,
+        oci_hydration_policy,
+    );
 
     let router = routes::build_router(state.clone());
     let bound_port = listener
@@ -180,6 +194,7 @@ fn spawn_startup_prefetch(
     state: &AppState,
     startup_warm: bool,
     oci_prefetch_refs: Vec<(String, String)>,
+    oci_hydration_policy: crate::serve::OciHydrationPolicy,
 ) {
     if !startup_warm {
         return;
@@ -195,6 +210,7 @@ fn spawn_startup_prefetch(
                 &prefetch_state,
                 startup_warm,
                 oci_prefetch_refs,
+                oci_hydration_policy,
             ),
         )
         .await

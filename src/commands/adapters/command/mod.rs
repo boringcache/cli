@@ -197,6 +197,7 @@ struct DryRunProxyPlan {
     no_git: bool,
     read_only: bool,
     startup_mode: String,
+    oci_hydration: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     oci_prefetch_refs: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -283,6 +284,7 @@ pub async fn adapter_execute(
     let metadata_hint_args =
         merge_metadata_hints(&adapter_config.metadata_hints, &args.metadata_hint);
     let mut oci_prefetch_refs = cache_registry::resolve_oci_prefetch_refs(&args.oci_prefetch_ref)?;
+    let oci_hydration_policy = cache_registry::resolve_oci_hydration_policy(&args.oci_hydration)?;
     let profile_requests = merge_profiles(&adapter_config.profiles, &args.profile);
     let entry_requests = merge_entries(&adapter_config.entries, &args.entry);
     let infer_entries = profile_requests.is_empty() && entry_requests.is_empty();
@@ -423,6 +425,7 @@ pub async fn adapter_execute(
                 no_git,
                 read_only: effective_read_only,
                 startup_mode: cache_registry::proxy_startup_mode(startup_warm).to_string(),
+                oci_hydration: oci_hydration_policy.as_str().to_string(),
                 oci_prefetch_refs: oci_prefetch_ref_specs,
                 metadata_hints: proxy_metadata_hints,
             },
@@ -490,6 +493,7 @@ pub async fn adapter_execute(
         no_platform,
         no_git,
         oci_prefetch_refs,
+        oci_hydration_policy,
         endpoint_host_override,
         proxy_metadata_hints,
         startup_warm,
@@ -639,6 +643,12 @@ fn print_dry_run(plan: &DryRunPlan, skip_save: bool, skip_restore: bool, save_on
 
     for oci_prefetch_ref in &plan.proxy.oci_prefetch_refs {
         ui::info(&format!("[boringcache]   oci-prefetch {oci_prefetch_ref}"));
+    }
+    if plan.proxy.oci_hydration != crate::serve::OciHydrationPolicy::MetadataOnly.as_str() {
+        ui::info(&format!(
+            "[boringcache]   oci-hydration {}",
+            plan.proxy.oci_hydration
+        ));
     }
 
     for entry in &plan.archive_entries {

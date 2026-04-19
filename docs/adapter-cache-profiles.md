@@ -44,16 +44,16 @@ If a benchmark needs lower-level overrides, treat those as engineering controls,
 | `maven` | Maven build-cache HTTP or DAV remote | Local Maven repo and local build-cache extension state | Keyed module/project-state artifacts, often many small modules | Keep metadata cheap, preserve portability checks, and rely on local reuse after restore | Ignoring portability/config mismatches or assuming cross-env reuse is always safe |
 | `turborepo` | Remote cache API: `GET`/`HEAD`/`PUT`/`POST` | `.turbo/cache` on local disk | One artifact archive per task hash plus query/events calls | Keep query and artifact fetch cheap; warm opportunistically from observed cache state, not tool guesses | Full-tag hydration by default for large monorepos |
 | `nx` | Custom remote cache API: `PUT`/`GET`/`HEAD` and query | Local Nx cache folder | Tar archives per task hash plus optional terminal output objects | Same as Turborepo: low-overhead fetch path and opportunistic warming from observed cache state | Blanket hydration of all cached task hashes |
-| `docker` | BuildKit registry cache via OCI registry manifests and blobs | Builder local content store and layer cache | OCI manifests plus blob layers; `mode=max` exports more cache state | Optimize manifest/index reuse, URL batching, and local content-store reuse | Treating OCI cache like filesystem kv objects or forcing generic blob hydration into temp disk by default |
+| `docker` | BuildKit registry cache via OCI registry manifests and blobs | Builder local content store and layer cache | OCI manifests plus blob layers; `mode=max` exports more cache state | Optimize manifest/index reuse, URL batching, explicit OCI body hydration, and local content-store reuse | Treating OCI cache like filesystem kv objects or blindly forcing blob hydration for every user |
 | `go-cache` | Simple object API `GET`/`HEAD`/`PUT` | Go local build cache | One object per action/result key | Fast kv path, cheap metadata, local reuse after first fetch | Overengineering it with heavy startup hydration |
 
 ## Working rules
 
 - Adapters define protocol, key layout, and cache contents.
 - BoringCache owns storage, transfer, verification, and machine-safe scheduling.
-- Startup warming should hydrate the full active tag by default on disk-backed cache-registry paths. Capacity control belongs in the blob read cache size and eviction policy, not a separate startup selection budget.
+- Generic KV startup warming should hydrate the full active tag by default on disk-backed cache-registry paths. Capacity control belongs in the blob read cache size and eviction policy, not a separate startup selection budget.
 - Query-aware or protocol-aware optimizations should come from real request patterns, not adapter-name guesses.
-- `docker` should stay OCI-native. BuildKit already understands manifests, layers, and local content reuse.
+- `docker` should stay OCI-native. BuildKit already understands manifests, layers, and local content reuse. Use the OCI hydration policy to choose metadata-only read-through, bodies-before-ready, or background body hydration for selected refs.
 
 ## Local measurement plan
 

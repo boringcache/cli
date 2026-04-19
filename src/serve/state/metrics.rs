@@ -92,6 +92,82 @@ impl Default for BlobReadMetrics {
     }
 }
 
+pub struct OciBodyMetrics {
+    local_hits: AtomicU64,
+    remote_fetches: AtomicU64,
+    local_bytes: AtomicU64,
+    remote_bytes: AtomicU64,
+    local_duration_ms: AtomicU64,
+    remote_duration_ms: AtomicU64,
+}
+
+impl OciBodyMetrics {
+    pub fn new() -> Self {
+        Self {
+            local_hits: AtomicU64::new(0),
+            remote_fetches: AtomicU64::new(0),
+            local_bytes: AtomicU64::new(0),
+            remote_bytes: AtomicU64::new(0),
+            local_duration_ms: AtomicU64::new(0),
+            remote_duration_ms: AtomicU64::new(0),
+        }
+    }
+
+    pub fn record_local(&self, bytes: u64, duration_ms: u64) {
+        self.local_hits.fetch_add(1, Ordering::AcqRel);
+        self.local_bytes.fetch_add(bytes, Ordering::AcqRel);
+        self.local_duration_ms
+            .fetch_add(duration_ms, Ordering::AcqRel);
+    }
+
+    pub fn record_remote(&self, bytes: u64, duration_ms: u64) {
+        self.remote_fetches.fetch_add(1, Ordering::AcqRel);
+        self.remote_bytes.fetch_add(bytes, Ordering::AcqRel);
+        self.remote_duration_ms
+            .fetch_add(duration_ms, Ordering::AcqRel);
+    }
+
+    pub fn metadata_hints(&self) -> BTreeMap<String, String> {
+        let local_hits = self.local_hits.load(Ordering::Acquire);
+        let remote_fetches = self.remote_fetches.load(Ordering::Acquire);
+        if local_hits == 0 && remote_fetches == 0 {
+            return BTreeMap::new();
+        }
+
+        let local_bytes = self.local_bytes.load(Ordering::Acquire);
+        let remote_bytes = self.remote_bytes.load(Ordering::Acquire);
+        let local_duration_ms = self.local_duration_ms.load(Ordering::Acquire);
+        let remote_duration_ms = self.remote_duration_ms.load(Ordering::Acquire);
+
+        BTreeMap::from([
+            ("oci_body_local_hits".to_string(), local_hits.to_string()),
+            (
+                "oci_body_remote_fetches".to_string(),
+                remote_fetches.to_string(),
+            ),
+            ("oci_body_local_bytes".to_string(), local_bytes.to_string()),
+            (
+                "oci_body_remote_bytes".to_string(),
+                remote_bytes.to_string(),
+            ),
+            (
+                "oci_body_local_duration_ms".to_string(),
+                local_duration_ms.to_string(),
+            ),
+            (
+                "oci_body_remote_duration_ms".to_string(),
+                remote_duration_ms.to_string(),
+            ),
+        ])
+    }
+}
+
+impl Default for OciBodyMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct StartupPrefetchSnapshot {
     mode: Option<String>,
@@ -106,12 +182,27 @@ struct StartupPrefetchSnapshot {
     cold_blobs: u64,
     duration_ms: u64,
     timed_out: bool,
+    oci_hydration_policy: Option<String>,
     oci_refs: u64,
     oci_total_unique_blobs: u64,
     oci_inserted: u64,
     oci_failures: u64,
     oci_cold_blobs: u64,
     oci_duration_ms: u64,
+    oci_body_inserted: u64,
+    oci_body_failures: u64,
+    oci_body_cold_blobs: u64,
+    oci_body_duration_ms: u64,
+}
+
+pub struct StartupOciExecution<'a> {
+    pub hydration_policy: &'a str,
+    pub refs: usize,
+    pub total_unique_blobs: usize,
+    pub inserted: usize,
+    pub failures: usize,
+    pub cold_blobs: usize,
+    pub duration_ms: u64,
 }
 
 pub struct PrefetchMetrics {
@@ -180,24 +271,40 @@ impl PrefetchMetrics {
         }
     }
 
-    pub fn record_startup_oci_execution(
+    pub fn record_startup_oci_execution(&self, execution: StartupOciExecution<'_>) {
+        if let Ok(mut snapshot) = self.startup.lock() {
+            snapshot.oci_hydration_policy = Some(execution.hydration_policy.to_string());
+            snapshot.oci_refs = snapshot.oci_refs.saturating_add(execution.refs as u64);
+            snapshot.oci_total_unique_blobs = snapshot
+                .oci_total_unique_blobs
+                .saturating_add(execution.total_unique_blobs as u64);
+            snapshot.oci_inserted = snapshot
+                .oci_inserted
+                .saturating_add(execution.inserted as u64);
+            snapshot.oci_failures = snapshot
+                .oci_failures
+                .saturating_add(execution.failures as u64);
+            snapshot.oci_cold_blobs = snapshot
+                .oci_cold_blobs
+                .saturating_add(execution.cold_blobs as u64);
+            snapshot.oci_duration_ms = snapshot
+                .oci_duration_ms
+                .saturating_add(execution.duration_ms);
+        }
+    }
+
+    pub fn record_startup_oci_body_snapshot(
         &self,
-        refs: usize,
-        total_unique_blobs: usize,
         inserted: usize,
         failures: usize,
         cold_blobs: usize,
         duration_ms: u64,
     ) {
         if let Ok(mut snapshot) = self.startup.lock() {
-            snapshot.oci_refs = snapshot.oci_refs.saturating_add(refs as u64);
-            snapshot.oci_total_unique_blobs = snapshot
-                .oci_total_unique_blobs
-                .saturating_add(total_unique_blobs as u64);
-            snapshot.oci_inserted = snapshot.oci_inserted.saturating_add(inserted as u64);
-            snapshot.oci_failures = snapshot.oci_failures.saturating_add(failures as u64);
-            snapshot.oci_cold_blobs = snapshot.oci_cold_blobs.saturating_add(cold_blobs as u64);
-            snapshot.oci_duration_ms = snapshot.oci_duration_ms.saturating_add(duration_ms);
+            snapshot.oci_body_inserted = inserted as u64;
+            snapshot.oci_body_failures = failures as u64;
+            snapshot.oci_body_cold_blobs = cold_blobs as u64;
+            snapshot.oci_body_duration_ms = duration_ms;
         }
     }
 
@@ -261,6 +368,9 @@ impl PrefetchMetrics {
             hints.insert("startup_prefetch_timed_out".to_string(), "true".to_string());
         }
         if snapshot.oci_refs > 0 {
+            if let Some(policy) = &snapshot.oci_hydration_policy {
+                hints.insert("startup_prefetch_oci_hydration".to_string(), policy.clone());
+            }
             hints.insert(
                 "startup_prefetch_oci_refs".to_string(),
                 snapshot.oci_refs.to_string(),
@@ -284,6 +394,22 @@ impl PrefetchMetrics {
             hints.insert(
                 "startup_prefetch_oci_duration_ms".to_string(),
                 snapshot.oci_duration_ms.to_string(),
+            );
+            hints.insert(
+                "startup_prefetch_oci_body_inserted".to_string(),
+                snapshot.oci_body_inserted.to_string(),
+            );
+            hints.insert(
+                "startup_prefetch_oci_body_failures".to_string(),
+                snapshot.oci_body_failures.to_string(),
+            );
+            hints.insert(
+                "startup_prefetch_oci_body_cold_blobs".to_string(),
+                snapshot.oci_body_cold_blobs.to_string(),
+            );
+            hints.insert(
+                "startup_prefetch_oci_body_duration_ms".to_string(),
+                snapshot.oci_body_duration_ms.to_string(),
             );
         }
         hints
