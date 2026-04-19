@@ -386,6 +386,7 @@ Owner: repo operations support (`support-primary`)
 - `ci/e2e/required/e2e-tool-bazel-test.sh`
 - `ci/e2e/required/e2e-tool-gradle-test.sh`
 - `ci/e2e/required/e2e-tool-maven-test.sh`
+- `ci/e2e/required/e2e-tool-nx-test.sh`
 - `ci/e2e/required/e2e-tool-sccache-test.sh`
 - `ci/e2e/required/e2e-tool-turbo-test.sh`
 - `ci/e2e/extended/e2e-cli-contract-test.sh`

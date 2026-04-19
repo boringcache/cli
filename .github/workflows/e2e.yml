@@ -223,6 +223,16 @@ jobs:
             needs_node: true
             needs_rust: false
             needs_sccache: false
+          - leg: tool-nx
+            label: Tool / Nx
+            artifact: tool-nx
+            tier: required
+            needs_bazel: false
+            needs_docker: false
+            needs_java: false
+            needs_node: true
+            needs_rust: false
+            needs_sccache: false
           - leg: tool-sccache
             label: Tool / sccache
             artifact: tool-sccache
@@ -371,9 +381,9 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install Turbo
+      - name: Install Node tool CLIs
         if: steps.gate.outputs.run == 'true' && matrix.needs_node == true
-        run: npm install -g turbo
+        run: npm install -g turbo nx
 
       - name: Download prebuilt CLI binary
         if: steps.gate.outputs.run == 'true' && matrix.leg != 'cli-contract'

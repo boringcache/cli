@@ -127,6 +127,13 @@ run_leg() {
       BUDGET_REMOTE_TAG_HITS_MIN="1" \
       bash "${REQUIRED_DIR}/e2e-tool-turbo-test.sh"
       ;;
+    tool-nx)
+      BINARY="$binary" \
+      WORKSPACE="$workspace" \
+      LOG_DIR="$log_dir" \
+      BUDGET_REMOTE_TAG_HITS_MIN="1" \
+      bash "${REQUIRED_DIR}/e2e-tool-nx-test.sh"
+      ;;
     tool-sccache)
       BINARY="$binary" \
       WORKSPACE="$workspace" \
@@ -339,6 +346,13 @@ EOF
 === Phase 1: Cold Turbo build (seed remote cache) ===
 === Phase 2: Warm Turbo build (remote cache hit) ===
 Turbo tool e2e passed
+EOF
+      ;;
+    tool-nx)
+      cat <<'EOF'
+=== Phase 1: Cold Nx build (seed remote cache) ===
+=== Phase 2: Warm Nx build (remote cache hit) ===
+Nx tool e2e passed
 EOF
       ;;
     tool-sccache)
