@@ -74,6 +74,7 @@ These are decisions or strong direction already provided and should be treated a
 - `.boringcache.toml` is the intended canonical repo-config filename.
 - CLI flags should be able to override repo config where needed.
 - Archive, CAS, OCI, and file cache layouts are all intended to stay first-class, with archive as the direct save/restore path and CAS/OCI/file backing tool-oriented flows.
+- Engine-boundary direction is documented in `docs/adr/0001-engine-boundary.md`: keep the public product surface and native adapters stable, then add an internal engine boundary before snapshot-v2 or crate/workspace restructuring.
 - Adapters should stay thin where possible because the CLI should provide cache plumbing rather than tool-specific orchestration.
 
 ### Cleanup direction
@@ -163,6 +164,7 @@ These matter for future refactors and cleanup.
      - archive, CAS, OCI, and file layouts all remain first-class
      - archive is the direct directory save/restore surface
      - CAS/OCI/file are core tool-facing cache transports, not second-class compatibility leftovers
+     - snapshot-v2 is a future generic filesystem engine behind an explicit engine boundary, not a reason to force OCI, Bazel, sccache, Turbo, Nx, Gradle, Maven, or Go through archive mode
 
 7. Repo-config discovery and filename policy
    - `.boringcache.toml` is the intended canonical filename.

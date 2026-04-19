@@ -12,11 +12,18 @@ E2E_TAG_PREFIX="${E2E_TAG_PREFIX:-gha-cache-registry}"
 PORT="${PORT:-5000}"
 PROXY_PORT="${PROXY_PORT:-${PORT}}"
 REGISTRY_PORT="${REGISTRY_PORT:-${PORT}}"
+REGISTRY_HOST="${REGISTRY_HOST:-localhost}"
 LOG_DIR="${LOG_DIR:-.}"
+BUILDKITD_CONFIG_FILE="${BUILDKITD_CONFIG_FILE:-}"
+BUILDKIT_INSECURE_REGISTRY="${BUILDKIT_INSECURE_REGISTRY:-auto}"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_STATUS_HOST="${PROXY_STATUS_HOST:-127.0.0.1}"
 PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
 OCI_HYDRATION="${OCI_HYDRATION:-metadata-only}"
+E2E_LAYER_COUNT="${E2E_LAYER_COUNT:-12}"
+E2E_PAYLOAD_MB="${E2E_PAYLOAD_MB:-6}"
+E2E_PAYLOAD_MODE="${E2E_PAYLOAD_MODE:-zero}"
+E2E_BLOB_CACHE_SCOPE="${E2E_BLOB_CACHE_SCOPE:-shared}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-0}"
 BUILD_HEARTBEAT_SECS="${BUILD_HEARTBEAT_SECS:-30}"
 BUILD_CLEANUP_WAIT_SECS="${BUILD_CLEANUP_WAIT_SECS:-20}"
@@ -34,10 +41,10 @@ RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 BUILDER="bc-e2e-${RUN_ID}-${RUN_ATTEMPT}"
 CACHE_TAG="${E2E_TAG_PREFIX}-docker-buildkit-${RUN_ID}-${RUN_ATTEMPT}"
-CACHE_REF="localhost:${REGISTRY_PORT}/boringcache-e2e/cache:${CACHE_TAG}"
-CACHE_REF_IMPLICIT="localhost:${REGISTRY_PORT}/boringcache-e2e/cache"
+CACHE_REF="${REGISTRY_HOST}:${REGISTRY_PORT}/boringcache-e2e/cache:${CACHE_TAG}"
+CACHE_REF_IMPLICIT="${REGISTRY_HOST}:${REGISTRY_PORT}/boringcache-e2e/cache"
 CACHE_TAG_ALIAS="${CACHE_TAG}-alias"
-CACHE_REF_ALIAS="localhost:${REGISTRY_PORT}/boringcache-e2e/cache:${CACHE_TAG_ALIAS}"
+CACHE_REF_ALIAS="${REGISTRY_HOST}:${REGISTRY_PORT}/boringcache-e2e/cache:${CACHE_TAG_ALIAS}"
 REGISTRY_ROOT_TAG="${E2E_TAG_PREFIX}-docker-buildkit-registry-${RUN_ID}-${RUN_ATTEMPT}"
 SERVE_PID=""
 PROXY_READY_FILE=""
@@ -70,6 +77,22 @@ require_positive "BUILD_FAILURE_TAIL_LINES" "$BUILD_FAILURE_TAIL_LINES"
 require_positive "PROXY_READY_TIMEOUT_SECS" "$PROXY_READY_TIMEOUT_SECS"
 require_positive "PROXY_READY_POLL_SECS" "$PROXY_READY_POLL_SECS"
 require_positive "PROXY_READY_WARN_SECS" "$PROXY_READY_WARN_SECS"
+require_positive "E2E_LAYER_COUNT" "$E2E_LAYER_COUNT"
+require_positive "E2E_PAYLOAD_MB" "$E2E_PAYLOAD_MB"
+case "$E2E_PAYLOAD_MODE" in
+  zero|random) ;;
+  *)
+    echo "ERROR: E2E_PAYLOAD_MODE must be zero or random"
+    exit 1
+    ;;
+esac
+case "$E2E_BLOB_CACHE_SCOPE" in
+  shared|per-proxy) ;;
+  *)
+    echo "ERROR: E2E_BLOB_CACHE_SCOPE must be shared or per-proxy"
+    exit 1
+    ;;
+esac
 if [[ "${PROXY_SHUTDOWN_WAIT_SECS}" =~ ^[0-9]+$ ]] \
   && (( PROXY_SHUTDOWN_WAIT_SECS < PROXY_SHUTDOWN_WAIT_MIN_SECS )); then
   PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_MIN_SECS}"
@@ -77,6 +100,14 @@ fi
 require_positive "PROXY_SHUTDOWN_WAIT_SECS" "$PROXY_SHUTDOWN_WAIT_SECS"
 require_numeric "BUDGET_REMOTE_TAG_HITS_MIN" "$BUDGET_REMOTE_TAG_HITS_MIN"
 require_save_capable_token
+
+case "$BUILDKIT_INSECURE_REGISTRY" in
+  auto|true|false|1|0|yes|no) ;;
+  *)
+    echo "ERROR: BUILDKIT_INSECURE_REGISTRY must be auto, true, or false"
+    exit 1
+    ;;
+esac
 
 for dep in docker curl pgrep; do
   if ! command -v "$dep" >/dev/null 2>&1; then
@@ -211,6 +242,8 @@ start_proxy() {
   local metadata_hints="${2:-}"
   local readiness_reference="${3:-}"
   local -a proxy_cmd
+  local -a proxy_env
+  local blob_cache_dir cache_label
   local attempts start_ts next_warn now waited
   stop_proxy
   LOG_FILES+=("${log_file}")
@@ -229,8 +262,19 @@ start_proxy() {
   if [[ -n "$readiness_reference" ]]; then
     proxy_cmd+=(--oci-prefetch-ref "boringcache-e2e/cache@${readiness_reference}")
   fi
-  BORINGCACHE_PROXY_METADATA_HINTS="${metadata_hints}" \
-    "${proxy_cmd[@]}" > "${log_file}" 2>&1 &
+  proxy_env=(
+    "BORINGCACHE_PROXY_METADATA_HINTS=${metadata_hints}"
+    "BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1"
+    "BORINGCACHE_OBSERVABILITY_JSONL_PATH=${LOG_DIR}/cache-registry-request-metrics.jsonl"
+  )
+  if [[ "$E2E_BLOB_CACHE_SCOPE" == "per-proxy" ]]; then
+    cache_label="${log_file##*/}"
+    cache_label="${cache_label%.log}"
+    blob_cache_dir="${LOG_DIR}/blob-cache-${cache_label}"
+    mkdir -p "${blob_cache_dir}"
+    proxy_env+=("BORINGCACHE_BLOB_READ_CACHE_DIR=${blob_cache_dir}")
+  fi
+  env "${proxy_env[@]}" "${proxy_cmd[@]}" > "${log_file}" 2>&1 &
   SERVE_PID=$!
 
   local ready=0
@@ -370,12 +414,61 @@ run_build_with_retry() {
   done
 }
 
+registry_host_needs_buildkit_http_config() {
+  case "$REGISTRY_HOST" in
+    localhost|127.0.0.1|0.0.0.0)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+buildkit_insecure_registry_enabled() {
+  case "$BUILDKIT_INSECURE_REGISTRY" in
+    true|1|yes)
+      return 0
+      ;;
+    false|0|no)
+      return 1
+      ;;
+    auto)
+      registry_host_needs_buildkit_http_config
+      return $?
+      ;;
+  esac
+}
+
+prepare_buildkitd_config() {
+  if [[ -n "$BUILDKITD_CONFIG_FILE" ]]; then
+    return 0
+  fi
+
+  if ! buildkit_insecure_registry_enabled; then
+    return 0
+  fi
+
+  BUILDKITD_CONFIG_FILE="${LOG_DIR}/buildkitd.toml"
+  cat >"${BUILDKITD_CONFIG_FILE}" <<EOF
+[registry."${REGISTRY_HOST}:${REGISTRY_PORT}"]
+  http = true
+  insecure = true
+EOF
+}
+
 create_builder() {
-  docker buildx create \
-    --name "${BUILDER}" \
-    --driver docker-container \
-    --driver-opt network=host \
+  local -a create_args=(
+    docker buildx create
+    --name "${BUILDER}"
+    --driver docker-container
+    --driver-opt network=host
     --use
+  )
+  if [[ -n "$BUILDKITD_CONFIG_FILE" ]]; then
+    create_args+=(--buildkitd-config "${BUILDKITD_CONFIG_FILE}")
+  fi
+  "${create_args[@]}"
   docker buildx inspect "${BUILDER}" --bootstrap
 }
 
@@ -471,6 +564,7 @@ resolve_manifest_digest_with_retry() {
   return 1
 }
 
+prepare_buildkitd_config
 cd "${LOG_DIR}"
 reset_builder
 
@@ -479,29 +573,31 @@ echo "Build timeout: ${BUILD_TIMEOUT_SECS}s (0 disables)"
 echo "Build heartbeat: ${BUILD_HEARTBEAT_SECS}s"
 echo "Proxy shutdown wait: ${PROXY_SHUTDOWN_WAIT_SECS}s"
 echo "OCI hydration: ${OCI_HYDRATION}"
+echo "Registry host: ${REGISTRY_HOST}:${REGISTRY_PORT}"
+echo "BuildKit config: ${BUILDKITD_CONFIG_FILE:-default}"
+echo "Graph shape: ${E2E_LAYER_COUNT} file layers, ${E2E_PAYLOAD_MB} MiB ${E2E_PAYLOAD_MODE} payload"
+echo "Blob cache scope: ${E2E_BLOB_CACHE_SCOPE}"
 echo "Logs: ${LOG_DIR}"
 
 mkdir -p e2e-context
-cat > e2e-context/Dockerfile <<'EOF'
-FROM scratch
-COPY payload.bin /payload.bin
-COPY f01.txt /f01.txt
-COPY f02.txt /f02.txt
-COPY f03.txt /f03.txt
-COPY f04.txt /f04.txt
-COPY f05.txt /f05.txt
-COPY f06.txt /f06.txt
-COPY f07.txt /f07.txt
-COPY f08.txt /f08.txt
-COPY f09.txt /f09.txt
-COPY f10.txt /f10.txt
-COPY f11.txt /f11.txt
-COPY f12.txt /f12.txt
-EOF
-for i in $(seq -w 1 12); do
+{
+  echo "FROM scratch"
+  echo "COPY payload.bin /payload.bin"
+  for i in $(seq -w 1 "${E2E_LAYER_COUNT}"); do
+    echo "COPY f${i}.txt /f${i}.txt"
+  done
+} > e2e-context/Dockerfile
+for i in $(seq -w 1 "${E2E_LAYER_COUNT}"); do
   printf 'layer-%s\n' "${i}" > "e2e-context/f${i}.txt"
 done
-dd if=/dev/zero of=e2e-context/payload.bin bs=1M count=6 status=none
+case "$E2E_PAYLOAD_MODE" in
+  zero)
+    dd if=/dev/zero of=e2e-context/payload.bin bs=1M count="${E2E_PAYLOAD_MB}" status=none
+    ;;
+  random)
+    dd if=/dev/urandom of=e2e-context/payload.bin bs=1M count="${E2E_PAYLOAD_MB}" status=none
+    ;;
+esac
 
 phase_metadata_hints() {
   local phase="$1"

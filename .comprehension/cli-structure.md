@@ -291,6 +291,7 @@ Most of the root-level namespace split is in place now, so the remaining work is
 
 These are the next sensible follow-ons from the current tree.
 
+- Insert the engine boundary described in `docs/adr/0001-engine-boundary.md` before starting snapshot-v2 or any crate/workspace split.
 - Split `src/serve/cache_registry/kv/flush.rs` into scheduling, refresh, and pending-publish handoff helpers.
 - Trim `src/serve/cache_registry/kv/mod.rs` by moving shared KV policy, lookup-flight coordination, and pending-publish handoff types into focused helpers.
 - Revisit `src/api/client/mod.rs` for capability discovery, publish/pending polling, and error parsing helpers.

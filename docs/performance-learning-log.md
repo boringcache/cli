@@ -8,8 +8,8 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Turbo: command/env dry-run, route detection, auth/query/events behavior, and proxy round-trip tests passed (`cargo test turbo -- --nocapture`); earlier local adapter E2E also passed against the local Rails/Tigris setup.
   - Nx: command/env dry-run, route detection, auth/query behavior, and proxy round-trip tests passed (`cargo test nx -- --nocapture` plus `test_nx_dry_run_json_injects_remote_cache_env`); earlier local adapter E2E also passed against the local Rails/Tigris setup.
   - Bazel: command injection, route detection, CAS layout/materialization, and proxy round-trip tests passed (`cargo test bazel -- --nocapture`); earlier local adapter E2E also passed.
-  - Gradle: command injection, route detection, and proxy round-trip tests passed (`cargo test gradle -- --nocapture`); runtime E2E was not run because `gradle` is not installed on this local machine.
-  - Maven: command injection, route detection, v1/v1.1 path handling, and proxy round-trip tests passed (`cargo test maven -- --nocapture`); runtime E2E was not run because `mvn` is not installed on this local machine.
+  - Gradle: command injection, route detection, and proxy round-trip tests passed (`cargo test gradle -- --nocapture`); runtime E2E now runs through the local Rails/Tigris harness via mise (`LOCAL_ADAPTER_TOOLS=gradle`) and passed with remote tag visibility.
+  - Maven: command injection, route detection, v1/v1.1 path handling, and proxy round-trip tests passed (`cargo test maven -- --nocapture`); runtime E2E now runs through the local Rails/Tigris harness via mise (`LOCAL_ADAPTER_TOOLS=maven`) and passed with restored build info/JAR state plus remote tag visibility.
   - sccache: command/env dry-run, WebDAV env planning, route detection, miss tracking, coalesced blob reads, and proxy round-trip tests passed (`cargo test sccache -- --nocapture` plus `test_sccache_dry_run_json_injects_webdav_env`); earlier local adapter E2E also passed.
   - Go/GOCACHEPROG: command/env dry-run, helper parsing, endpoint validation, built-in config, route detection, and proxy round-trip tests passed (`cargo test go_cache -- --nocapture` plus `test_go_dry_run_json_injects_gocacheprog_env`); earlier local adapter E2E also passed.
   - Docker/OCI: Docker flag planning/read-only behavior passed (`cargo test docker -- --nocapture`); OCI layout, prefetch refs, body-storage status retry policy, hydration policy, manifest/referrers, and restore/materialization tests passed (`cargo test oci -- --nocapture`). The local Docker BuildKit registry E2E also passed through local Rails and Tigris, with a plain local registry baseline recorded.
@@ -20,9 +20,12 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - A registry-cache hit is not complete until both the manifest graph and blob bodies are locally reachable. Metadata-only startup can be logically cached while the first warm build still pays remote body reads.
   - `metadata-only`, `bodies-before-ready`, and `bodies-background` are the right product knobs. They should be reported in diagnostics alongside local OCI body hits, remote body fetches, remote bytes, remote duration, startup inserted/cold/failed counts, and BuildKit import/export wall time.
   - The local Docker E2E harness now records `/_boringcache/status` snapshots after warm phases so OCI body-plane behavior is visible instead of inferred from BuildKit wall time.
+  - Local Colima replay needs `REGISTRY_HOST=host.docker.internal` plus a BuildKit daemon config marking that registry as HTTP/insecure. The E2E harness now generates that config automatically for non-localhost registry refs.
+  - Strict local-edge replay must isolate the proxy blob cache (`E2E_BLOB_CACHE_SCOPE=per-proxy`). Otherwise a same-machine proxy restart can reuse the previous read-through blob cache and hide the cold body-plane cost.
+  - 84-layer, 32 MiB random-body replay through local Rails/Tigris passed all three policies. With per-proxy body-cache isolation, metadata-only had 86 cold selected bodies and fetched about 33.6 MB remotely during warm reads; `bodies-before-ready` inserted all 86 selected bodies before readiness in about 2.7s and avoided restart-warm remote body fetches; `bodies-background` inserted all 86 selected bodies in about 2.2s and also avoided restart-warm remote body fetches when it won the race.
 - Harness/product-DX lessons:
   - The debug path must keep the benchmark graph stable when testing a new `cli_ref`. A real binary copied into a Docker build context is a BuildKit input and can legitimately reseed after a binary change.
-  - Local Docker-on-macOS validation needs separate proxy and registry ports because a `docker-container` builder resolves `localhost` inside the Linux VM/Colima context.
+  - Local Docker-on-macOS validation needs separate proxy and registry hosts because a `docker-container` builder resolves `localhost` inside the Linux VM/Colima context.
   - macOS Bash 3 with `set -u` needs empty-array guards in E2E harnesses.
 - Review of the core-engine rewrite recommendation:
   - The direction stands: keep `one@v1`, CLI commands, repo config, split tokens, `cache-registry`, protocol adapters, and standalone benchmark repos; do not force OCI, Bazel, Turbo, sccache, Gradle, or Maven through generic archive mode.
@@ -33,12 +36,12 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - GitHub Actions cache is key/restore-key based, immutable once written, branch/default-branch scoped, and subject to repository storage/eviction policy.
   - Docker BuildKit registry cache must be explicitly imported/exported with `--cache-from`/`--cache-to`; `mode=max` is needed when intermediate layers matter.
   - Bazel's native model is action cache plus CAS; Turborepo has a published Remote Cache API; sccache supports remote storage including WebDAV. Native protocol identity should stay intact.
-- Remaining work:
-  - Add or run real Gradle and Maven runtime E2E legs on a machine with those tools installed.
-  - Teach the JSONL diagnostics summarizer to ingest OCI body-plane status snapshots, not only legacy `cache_blob_read` events.
-  - Harden local/staging workspace provisioning against concurrent Tigris `409` races.
-  - Replay a larger PostHog-style graph locally/staging with all three OCI hydration policies and compare body locality, BuildKit import/export time, and total wall time.
-  - Write the engine-boundary ADR before starting snapshot-v2 or crate/workspace restructuring.
+- Completed follow-up work from this investigation:
+  - Local Gradle and Maven runtime E2E legs were wired into the adapter command harness and passed on this machine through mise.
+  - The diagnostics summarizer now ingests proxy status snapshots and emits both aggregate OCI body-plane metrics and per-snapshot phase metrics.
+  - Local/staging Tigris workspace provisioning now treats `409` conflicts as recoverable by ensuring the bucket exists and minting a fresh workspace key.
+  - Larger Docker graph replay passed locally across all three OCI hydration policies with both shared and per-proxy body-cache scopes.
+  - The engine-boundary ADR is written in `docs/adr/0001-engine-boundary.md`; snapshot-v2/crate split work should start behind that boundary, not before it.
 
 ## 2026-04-15 - warm-first proxy startup
 

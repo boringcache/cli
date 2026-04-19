@@ -14,6 +14,9 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 LOG_DIR="${LOG_DIR:-${LOG_ROOT}/${RUN_ID}}"
 TMP_DIR="${LOG_DIR}/tmp"
 SUMMARY_FILE="${LOG_DIR}/summary.txt"
+LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-gradle,maven,turbo,nx,go,bazel,sccache}"
+JAVA_TOOL_VERSION="${JAVA_TOOL_VERSION:-java@21.0.2}"
+MAVEN_TOOL_VERSION="${MAVEN_TOOL_VERSION:-maven@3.9.14}"
 
 mkdir -p "${LOG_DIR}" "${TMP_DIR}"
 
@@ -53,6 +56,24 @@ pass_tool() {
   local detail="$2"
   PASSED_TOOLS+=("${tool}")
   append_summary "PASS ${tool}: ${detail}"
+}
+
+should_run_tool() {
+  local tool="$1"
+  case ",${LOCAL_ADAPTER_TOOLS}," in
+    *",${tool},"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+run_selected_tool() {
+  local tool="$1"
+  shift
+  if should_run_tool "${tool}"; then
+    "$@"
+  else
+    skip_tool "${tool}" "not selected by LOCAL_ADAPTER_TOOLS=${LOCAL_ADAPTER_TOOLS}"
+  fi
 }
 
 cleanup() {
@@ -264,6 +285,7 @@ start_local_rails() {
   [[ -n "${WORKSPACE}" ]] || fail "failed to determine local workspace"
   [[ -n "${TOKEN}" ]] || fail "failed to mint local API token"
 
+  export WORKSPACE
   export BORINGCACHE_API_URL="${API_URL}"
   export BORINGCACHE_ADMIN_TOKEN="${TOKEN}"
   export BORINGCACHE_SAVE_TOKEN="${TOKEN}"
@@ -281,6 +303,7 @@ start_local_rails() {
   wait_for_local_server
   append_summary "Workspace: ${WORKSPACE}"
   append_summary "API URL: ${API_URL}"
+  append_summary "Selected tools: ${LOCAL_ADAPTER_TOOLS}"
 }
 
 build_cli_binary() {
@@ -608,6 +631,44 @@ EOF
   pass_tool "go" "warm run recorded remote gocache hits"
 }
 
+run_gradle_e2e() {
+  if ! mise exec "${JAVA_TOOL_VERSION}" -- java -version >/dev/null 2>&1; then
+    skip_tool "gradle" "Java runtime ${JAVA_TOOL_VERSION} not available via mise"
+    return 0
+  fi
+
+  local tool_log_root="${LOG_DIR}/gradle-runtime"
+  mkdir -p "${tool_log_root}"
+
+  note "Gradle adapter runtime E2E"
+  LOG_DIR="${tool_log_root}" \
+  PROXY_PORT="${GRADLE_PROXY_PORT:-5316}" \
+  BINARY="${BINARY}" \
+    mise exec "${JAVA_TOOL_VERSION}" -- \
+      bash "${SCRIPT_DIR}/required/e2e-tool-gradle-test.sh"
+
+  pass_tool "gradle" "required runtime e2e passed"
+}
+
+run_maven_e2e() {
+  if ! mise exec "${JAVA_TOOL_VERSION}" "${MAVEN_TOOL_VERSION}" -- mvn -version >/dev/null 2>&1; then
+    skip_tool "maven" "Java ${JAVA_TOOL_VERSION} or Maven ${MAVEN_TOOL_VERSION} not available via mise"
+    return 0
+  fi
+
+  local tool_log_root="${LOG_DIR}/maven-runtime"
+  mkdir -p "${tool_log_root}"
+
+  note "Maven adapter runtime E2E"
+  LOG_DIR="${tool_log_root}" \
+  PROXY_PORT="${MAVEN_PROXY_PORT:-5317}" \
+  BINARY="${BINARY}" \
+    mise exec "${JAVA_TOOL_VERSION}" "${MAVEN_TOOL_VERSION}" -- \
+      bash "${SCRIPT_DIR}/required/e2e-tool-maven-test.sh"
+
+  pass_tool "maven" "required runtime e2e passed"
+}
+
 run_bazel_e2e() {
   local bazel_cmd=""
   if command -v bazelisk >/dev/null 2>&1; then
@@ -840,11 +901,13 @@ main() {
   build_cli_binary
   start_local_rails
 
-  run_turbo_e2e
-  run_nx_e2e
-  run_go_e2e
-  run_bazel_e2e
-  run_sccache_e2e
+  run_selected_tool "gradle" run_gradle_e2e
+  run_selected_tool "maven" run_maven_e2e
+  run_selected_tool "turbo" run_turbo_e2e
+  run_selected_tool "nx" run_nx_e2e
+  run_selected_tool "go" run_go_e2e
+  run_selected_tool "bazel" run_bazel_e2e
+  run_selected_tool "sccache" run_sccache_e2e
 
   append_summary ""
   append_summary "Passed tools: ${PASSED_TOOLS[*]:-none}"

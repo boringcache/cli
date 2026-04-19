@@ -28,6 +28,11 @@ if [[ ! -x "${BINARY}" ]]; then
   exit 1
 fi
 
+if ! command -v gradle >/dev/null 2>&1 && ! command -v unzip >/dev/null 2>&1; then
+  echo "ERROR: required dependency not found: unzip (needed to bootstrap Gradle ${GRADLE_VERSION})"
+  exit 1
+fi
+
 export_resolved_cli_tokens admin
 
 mkdir -p "${LOG_DIR}"

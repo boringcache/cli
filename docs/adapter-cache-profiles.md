@@ -66,6 +66,11 @@ When credentials are available, run the per-adapter harnesses and capture:
 - `ci/e2e/required/e2e-tool-turbo-test.sh`
 - `ci/e2e/required/e2e-docker-buildkit-registry-test.sh`
 
+For local Docker-on-macOS/Colima replay, set `REGISTRY_HOST=host.docker.internal`,
+`PROXY_HOST=0.0.0.0`, and `PROXY_STATUS_HOST=127.0.0.1`. The Docker E2E harness
+generates a BuildKit daemon config for non-localhost registry refs so BuildKit uses
+HTTP instead of trying HTTPS against the local proxy.
+
 After each run, summarize `cache-registry-request-metrics.jsonl` with `ci/e2e/request-metrics-summary.py` and compare:
 
 - local blob-read hit ratio
@@ -74,7 +79,9 @@ After each run, summarize `cache-registry-request-metrics.jsonl` with `ci/e2e/re
 - preload-index p95
 - prefetch-cycle p95
 
-For restart-path measurements, force a distinct local blob-cache directory with `BORINGCACHE_BLOB_READ_CACHE_DIR` so the run is not polluted by an older temp-cache from a previous proxy process.
+For OCI body-plane measurements, prefer a non-compressible payload (`E2E_PAYLOAD_MODE=random`) so blob bytes represent real transfer pressure instead of `/dev/zero` compression artifacts.
+
+For restart-path measurements, use `E2E_BLOB_CACHE_SCOPE=per-proxy` in the Docker E2E harness or force a distinct local blob-cache directory with `BORINGCACHE_BLOB_READ_CACHE_DIR` so the run is not polluted by an older blob cache from a previous proxy process.
 
 ## Immediate next tuning targets
 

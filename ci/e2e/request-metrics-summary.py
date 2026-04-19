@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import math
+from pathlib import Path
 import sys
 
 
@@ -36,12 +37,111 @@ def by_operation(records, operation):
     ]
 
 
+def parse_u64(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float):
+        return max(0, int(value))
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
+def find_status_paths(metrics_path, explicit_paths):
+    paths = []
+    seen = set()
+
+    def add(path):
+        resolved = path.resolve()
+        if resolved in seen or not path.is_file():
+            return
+        seen.add(resolved)
+        paths.append(path)
+
+    candidates = explicit_paths
+    if not candidates:
+        parent = metrics_path.parent if metrics_path.parent != Path("") else Path(".")
+        candidates = [parent]
+
+    for raw_path in candidates:
+        path = Path(raw_path)
+        if path.is_dir():
+            for candidate in sorted(path.rglob("proxy-status-*.json")):
+                add(candidate)
+        elif path.is_file():
+            add(path)
+
+    return paths
+
+
+def collect_status_snapshots(metrics_path, status_args):
+    numeric_max = {}
+    policies = set()
+    snapshots = []
+    count = 0
+
+    for path in find_status_paths(metrics_path, status_args):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        count += 1
+        snapshot = {
+            "label": env_slug(path.stem.replace("proxy-status-", "")) or f"snapshot_{count}",
+            "policy": "unknown",
+            "values": {},
+        }
+        startup = payload.get("startup_prefetch")
+        if isinstance(startup, dict):
+            policy = startup.get("startup_prefetch_oci_hydration")
+            if isinstance(policy, str) and policy.strip():
+                policy = policy.strip()
+                policies.add(policy)
+                snapshot["policy"] = env_slug(policy) or "unknown"
+            for key, value in startup.items():
+                if not isinstance(key, str):
+                    continue
+                parsed = parse_u64(value)
+                if parsed is not None:
+                    numeric_max[key] = max(parsed, numeric_max.get(key, 0))
+                    snapshot["values"][key] = parsed
+
+        oci_body = payload.get("oci_body")
+        if isinstance(oci_body, dict):
+            for key, value in oci_body.items():
+                if not isinstance(key, str):
+                    continue
+                parsed = parse_u64(value)
+                if parsed is not None:
+                    numeric_max[key] = max(parsed, numeric_max.get(key, 0))
+                    snapshot["values"][key] = parsed
+        snapshots.append(snapshot)
+
+    return {
+        "count": count,
+        "numeric_max": numeric_max,
+        "policies": sorted(policies),
+        "snapshots": snapshots,
+    }
+
+
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: request-metrics-summary.py <metrics-jsonl>", file=sys.stderr)
+    if len(sys.argv) < 2:
+        print(
+            "usage: request-metrics-summary.py <metrics-jsonl> [proxy-status-json-or-dir ...]",
+            file=sys.stderr,
+        )
         return 2
 
     path = sys.argv[1]
+    metrics_path = Path(path)
     records = []
     with open(path, "r", encoding="utf-8") as fh:
         for line in fh:
@@ -114,6 +214,14 @@ def main() -> int:
     local_blob_read_hit_ratio = (
         100.0 if blob_read_total == 0 else (100.0 * local_blob_reads["count"] / blob_read_total)
     )
+    status_snapshots = collect_status_snapshots(metrics_path, sys.argv[2:])
+    status_values = status_snapshots["numeric_max"]
+    oci_body_local_hits = status_values.get("oci_body_local_hits", 0)
+    oci_body_remote_fetches = status_values.get("oci_body_remote_fetches", 0)
+    oci_body_total_reads = oci_body_local_hits + oci_body_remote_fetches
+    oci_body_local_hit_ratio = (
+        100.0 if oci_body_total_reads == 0 else (100.0 * oci_body_local_hits / oci_body_total_reads)
+    )
 
     print(f"request_metrics_total={len(records)}")
     print(f"request_metrics_failures={failures}")
@@ -172,6 +280,92 @@ def main() -> int:
     )
     print(
         f"request_metrics_blob_read_remote_p95_ms={percentile(remote_blob_reads['durations'], 95)}"
+    )
+    print(f"request_metrics_status_snapshots_total={status_snapshots['count']}")
+    for index, snapshot in enumerate(status_snapshots["snapshots"], start=1):
+        values = snapshot["values"]
+        print(f"request_metrics_status_snapshot_{index}_label={snapshot['label']}")
+        print(f"request_metrics_status_snapshot_{index}_oci_hydration={snapshot['policy']}")
+        for key in (
+            "startup_prefetch_oci_total_unique_blobs",
+            "startup_prefetch_oci_body_inserted",
+            "startup_prefetch_oci_body_failures",
+            "startup_prefetch_oci_body_cold_blobs",
+            "startup_prefetch_oci_body_duration_ms",
+            "oci_body_local_hits",
+            "oci_body_remote_fetches",
+            "oci_body_local_bytes",
+            "oci_body_remote_bytes",
+            "oci_body_local_duration_ms",
+            "oci_body_remote_duration_ms",
+        ):
+            print(
+                f"request_metrics_status_snapshot_{index}_{key}="
+                f"{values.get(key, 0)}"
+            )
+    print(
+        "request_metrics_startup_prefetch_oci_hydration="
+        f"{','.join(status_snapshots['policies']) if status_snapshots['policies'] else 'unknown'}"
+    )
+    print(
+        "request_metrics_startup_prefetch_oci_refs="
+        f"{status_values.get('startup_prefetch_oci_refs', 0)}"
+    )
+    print(
+        "request_metrics_startup_prefetch_oci_total_unique_blobs="
+        f"{status_values.get('startup_prefetch_oci_total_unique_blobs', 0)}"
+    )
+    print(
+        "request_metrics_startup_prefetch_oci_inserted="
+        f"{status_values.get('startup_prefetch_oci_inserted', 0)}"
+    )
+    print(
+        "request_metrics_startup_prefetch_oci_failures="
+        f"{status_values.get('startup_prefetch_oci_failures', 0)}"
+    )
+    print(
+        "request_metrics_startup_prefetch_oci_cold_blobs="
+        f"{status_values.get('startup_prefetch_oci_cold_blobs', 0)}"
+    )
+    print(
+        "request_metrics_startup_prefetch_oci_duration_ms="
+        f"{status_values.get('startup_prefetch_oci_duration_ms', 0)}"
+    )
+    print(
+        "request_metrics_startup_prefetch_oci_body_inserted="
+        f"{status_values.get('startup_prefetch_oci_body_inserted', 0)}"
+    )
+    print(
+        "request_metrics_startup_prefetch_oci_body_failures="
+        f"{status_values.get('startup_prefetch_oci_body_failures', 0)}"
+    )
+    print(
+        "request_metrics_startup_prefetch_oci_body_cold_blobs="
+        f"{status_values.get('startup_prefetch_oci_body_cold_blobs', 0)}"
+    )
+    print(
+        "request_metrics_startup_prefetch_oci_body_duration_ms="
+        f"{status_values.get('startup_prefetch_oci_body_duration_ms', 0)}"
+    )
+    print(f"request_metrics_oci_body_reads_total={oci_body_total_reads}")
+    print(f"request_metrics_oci_body_local_hits={oci_body_local_hits}")
+    print(f"request_metrics_oci_body_remote_fetches={oci_body_remote_fetches}")
+    print(f"request_metrics_oci_body_local_hit_ratio={oci_body_local_hit_ratio:.2f}")
+    print(
+        "request_metrics_oci_body_local_bytes="
+        f"{status_values.get('oci_body_local_bytes', 0)}"
+    )
+    print(
+        "request_metrics_oci_body_remote_bytes="
+        f"{status_values.get('oci_body_remote_bytes', 0)}"
+    )
+    print(
+        "request_metrics_oci_body_local_duration_ms="
+        f"{status_values.get('oci_body_local_duration_ms', 0)}"
+    )
+    print(
+        "request_metrics_oci_body_remote_duration_ms="
+        f"{status_values.get('oci_body_remote_duration_ms', 0)}"
     )
     return 0
 
