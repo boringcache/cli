@@ -70,15 +70,37 @@ cat > "${PROJECT_DIR}/nx.json" <<'EOF'
 {
   "$schema": "./node_modules/nx/schemas/nx-schema.json",
   "namedInputs": {
-    "default": ["{projectRoot}/**/*"]
+    "default": [
+      "{workspaceRoot}/nx.json",
+      "{projectRoot}/package.json",
+      "{projectRoot}/project.json",
+      "{projectRoot}/build.sh"
+    ]
   },
   "targetDefaults": {
     "build": {
-      "cache": true
+      "cache": true,
+      "inputs": ["default"]
     }
   }
 }
 EOF
+
+cat > "${PROJECT_DIR}/build.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+count=0
+if [[ -f "${MARKER_FILE}" ]]; then
+  count="$(cat "${MARKER_FILE}")"
+fi
+count="$((count + 1))"
+
+echo "${count}" > "${MARKER_FILE}"
+mkdir -p dist
+echo "nx-${count}" > dist/out.txt
+EOF
+chmod +x "${PROJECT_DIR}/build.sh"
 
 cat > "${PROJECT_DIR}/project.json" <<'EOF'
 {
@@ -89,7 +111,7 @@ cat > "${PROJECT_DIR}/project.json" <<'EOF'
       "executor": "nx:run-commands",
       "outputs": ["{projectRoot}/dist"],
       "options": {
-        "command": "bash -lc 'count=0; [[ -f \"${MARKER_FILE}\" ]] && count=$(cat \"${MARKER_FILE}\"); count=$((count+1)); echo \"$count\" > \"${MARKER_FILE}\"; mkdir -p dist && echo nx-$count > dist/out.txt'"
+        "command": "bash ./build.sh"
       }
     }
   }
@@ -126,8 +148,19 @@ if [[ "$(cat "${NX_MARKER}")" != "1" ]]; then
   exit 1
 fi
 
+if [[ ! -s "${PROJECT_DIR}/dist/out.txt" ]]; then
+  echo "ERROR: nx cold run did not write dist/out.txt"
+  cat "${COLD_LOG}"
+  exit 1
+fi
 COLD_OUTPUT="$(cat "${PROJECT_DIR}/dist/out.txt")"
 
+# Nx keeps local cache metadata outside the explicit cache directory. Clear it so
+# the warm phase has to materialize from the remote proxy path.
+(
+  cd "${PROJECT_DIR}"
+  NX_DAEMON=false nx reset --onlyCache > "${NX_LOG_DIR}/nx-reset.log" 2>&1
+)
 rm -rf "${COLD_CACHE_DIR}" "${PROJECT_DIR}/dist"
 
 echo "=== Phase 2: Warm Nx build (remote cache hit) ==="
@@ -153,6 +186,11 @@ if [[ "$(cat "${NX_MARKER}")" != "1" ]]; then
   exit 1
 fi
 
+if [[ ! -s "${PROJECT_DIR}/dist/out.txt" ]]; then
+  echo "ERROR: nx warm cache hit did not restore dist/out.txt"
+  cat "${WARM_LOG}"
+  exit 1
+fi
 WARM_OUTPUT="$(cat "${PROJECT_DIR}/dist/out.txt")"
 if [[ "${COLD_OUTPUT}" != "${WARM_OUTPUT}" ]]; then
   echo "ERROR: nx warm output differs from cold output"
