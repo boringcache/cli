@@ -159,9 +159,11 @@ COLD_OUTPUT="$(cat "${PROJECT_DIR}/dist/out.txt")"
 # the warm phase has to materialize from the remote proxy path.
 (
   cd "${PROJECT_DIR}"
-  NX_DAEMON=false nx reset --onlyCache > "${NX_LOG_DIR}/nx-reset.log" 2>&1
+  NX_DAEMON=false \
+  NX_CACHE_DIRECTORY="${COLD_CACHE_DIR}" \
+    nx reset --onlyCache > "${NX_LOG_DIR}/nx-reset.log" 2>&1
 )
-rm -rf "${COLD_CACHE_DIR}" "${PROJECT_DIR}/dist"
+rm -rf "${COLD_CACHE_DIR}" "${PROJECT_DIR}/.nx" "${PROJECT_DIR}/dist"
 
 echo "=== Phase 2: Warm Nx build (remote cache hit) ==="
 WARM_CACHE_DIR="${NX_LOG_DIR}/nx-cache-warm"
@@ -182,6 +184,12 @@ echo "Warm build completed in ${WARM_SECS}s"
 
 if [[ "$(cat "${NX_MARKER}")" != "1" ]]; then
   echo "ERROR: nx warm run re-executed instead of using remote cache"
+  cat "${WARM_LOG}"
+  exit 1
+fi
+
+if ! grep -Eq '\[remote cache\]|remote cache' "${WARM_LOG}"; then
+  echo "ERROR: nx warm run did not report remote cache replay"
   cat "${WARM_LOG}"
   exit 1
 fi

@@ -506,9 +506,11 @@ EOF
   # Nx keeps a local DB cache outside the remote adapter path; clear it before the warm run.
   (
     cd "${tool_dir}"
-    NX_DAEMON=false nx reset --onlyCache > "${tool_dir}/reset.log" 2>&1
+    NX_DAEMON=false \
+    NX_CACHE_DIRECTORY="${cache_dir}" \
+      nx reset --onlyCache > "${tool_dir}/reset.log" 2>&1
   )
-  rm -rf "${cache_dir}" "${tool_dir}/dist"
+  rm -rf "${cache_dir}" "${tool_dir}/.nx" "${tool_dir}/dist"
   (
     cd "${tool_dir}"
     MARKER_FILE="${marker_file}" \
@@ -526,8 +528,8 @@ EOF
       > "${warm_log}" 2>&1
   )
   [[ "$(cat "${marker_file}")" == "1" ]] || fail "nx warm run re-executed instead of using remote cache"
-  if ! grep -Eq 'read the output from the cache|\[remote cache\]|\[local cache\]' "${warm_log}"; then
-    fail "nx warm run did not report cache reuse"
+  if ! grep -Eq '\[remote cache\]|remote cache' "${warm_log}"; then
+    fail "nx warm run did not report remote cache reuse"
   fi
 
   delete_tag "${tag}"
