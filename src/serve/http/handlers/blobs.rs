@@ -13,6 +13,9 @@ use crate::serve::state::{AppState, BlobLocatorEntry, BlobReadHandle};
 use super::uploads::find_local_uploaded_blob;
 use super::{DOWNLOAD_URL_CACHE_TTL, OCI_API_CALL_TIMEOUT, OCI_TRANSFER_CALL_TIMEOUT};
 
+const OCI_BLOB_DOWNLOAD_MAX_ATTEMPTS: usize = 4;
+const OCI_BLOB_DOWNLOAD_RETRY_BASE_MS: u64 = 500;
+
 pub(super) async fn get_blob(
     method: Method,
     state: AppState,
@@ -305,109 +308,187 @@ async fn download_oci_blob_to_cache(
 ) -> Result<BlobReadHandle, OciError> {
     use tokio::io::AsyncWriteExt;
 
-    let mut retried = false;
-    let response = loop {
-        let response = tokio::time::timeout(
-            OCI_TRANSFER_CALL_TIMEOUT,
-            state.api_client.transfer_client().get(&download_url).send(),
-        )
-        .await
-        .map_err(|_| {
-            OciError::internal(format!(
-                "Timed out downloading blob after {}s",
-                OCI_TRANSFER_CALL_TIMEOUT.as_secs()
-            ))
-        })?
-        .map_err(|e| OciError::internal(format!("Failed to download blob: {e}")))?;
-
-        if retried
-            || (response.status() != StatusCode::FORBIDDEN
-                && response.status() != StatusCode::NOT_FOUND)
-        {
-            break response;
-        }
-
-        if from_cached_url {
-            let mut locator = state.blob_locator.write().await;
-            if let Some(entry) = locator.get_mut(name, digest) {
-                entry.download_url = None;
-                entry.download_url_cached_at = None;
-            }
-        }
-        download_url =
-            resolve_oci_download_url(state, cache_entry_id, blob_desc, name, digest).await?;
-        from_cached_url = false;
-        retried = true;
-    };
-
-    let response = response
-        .error_for_status()
-        .map_err(|e| OciError::internal(format!("Blob storage returned error: {e}")))?;
-
     let digest_hex = crate::cas_file::sha256_hex(digest.as_bytes());
     let temp_dir = state.runtime_temp_dir.join("oci-downloads");
     tokio::fs::create_dir_all(&temp_dir)
         .await
         .map_err(|e| OciError::internal(format!("Failed to create temp dir: {e}")))?;
-    let temp_path = temp_dir.join(format!(
-        "blob-{}-{}",
-        &digest_hex[..16],
-        uuid::Uuid::new_v4()
-    ));
 
-    let mut file = tokio::fs::File::create(&temp_path)
+    let max_attempts = OCI_BLOB_DOWNLOAD_MAX_ATTEMPTS + usize::from(from_cached_url);
+    let mut last_error = None;
+    for attempt in 1..=max_attempts {
+        let response = match tokio::time::timeout(
+            OCI_TRANSFER_CALL_TIMEOUT,
+            state.api_client.transfer_client().get(&download_url).send(),
+        )
         .await
-        .map_err(|e| OciError::internal(format!("Failed to create temp blob file: {e}")))?;
-    let mut stream = response.bytes_stream();
-    let mut written = 0u64;
-    loop {
-        let next_chunk = stream.next().await;
-        let Some(chunk) = next_chunk else {
-            break;
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                let message = format!("Failed to download blob: {error}");
+                if attempt < max_attempts {
+                    log_oci_blob_download_retry(digest, attempt, max_attempts, &message);
+                    sleep_oci_blob_download_retry(attempt).await;
+                    continue;
+                }
+                return Err(OciError::internal(message));
+            }
+            Err(_) => {
+                let message = format!(
+                    "Timed out downloading blob after {}s",
+                    OCI_TRANSFER_CALL_TIMEOUT.as_secs()
+                );
+                if attempt < max_attempts {
+                    log_oci_blob_download_retry(digest, attempt, max_attempts, &message);
+                    sleep_oci_blob_download_retry(attempt).await;
+                    continue;
+                }
+                return Err(OciError::internal(message));
+            }
         };
-        let chunk =
-            chunk.map_err(|e| OciError::internal(format!("Failed to read blob stream: {e}")))?;
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| OciError::internal(format!("Failed to write temp blob file: {e}")))?;
-        written = written.saturating_add(chunk.len() as u64);
-    }
-    file.flush()
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to flush temp blob file: {e}")))?;
 
-    if written == 0 {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(OciError::internal("Downloaded blob was empty"));
-    }
-
-    if !from_cached_url {
-        let mut locator = state.blob_locator.write().await;
-        if let Some(entry) = locator.get_mut(name, digest) {
-            entry.download_url = Some(download_url);
-            entry.download_url_cached_at = Some(std::time::Instant::now());
+        if from_cached_url
+            && (response.status() == StatusCode::FORBIDDEN
+                || response.status() == StatusCode::NOT_FOUND)
+        {
+            let mut locator = state.blob_locator.write().await;
+            if let Some(entry) = locator.get_mut(name, digest) {
+                entry.download_url = None;
+                entry.download_url_cached_at = None;
+            }
+            drop(locator);
+            download_url =
+                resolve_oci_download_url(state, cache_entry_id, blob_desc, name, digest).await?;
+            from_cached_url = false;
+            last_error = Some(format!(
+                "Cached OCI blob URL returned {}",
+                response.status()
+            ));
+            continue;
         }
+
+        if is_retryable_oci_blob_storage_status(response.status()) && attempt < max_attempts {
+            let message = format!("Blob storage returned {}", response.status());
+            log_oci_blob_download_retry(digest, attempt, max_attempts, &message);
+            sleep_oci_blob_download_retry(attempt).await;
+            continue;
+        }
+
+        let response = response
+            .error_for_status()
+            .map_err(|e| OciError::internal(format!("Blob storage returned error: {e}")))?;
+
+        let temp_path = temp_dir.join(format!(
+            "blob-{}-{}",
+            &digest_hex[..16],
+            uuid::Uuid::new_v4()
+        ));
+
+        let mut file = tokio::fs::File::create(&temp_path)
+            .await
+            .map_err(|e| OciError::internal(format!("Failed to create temp blob file: {e}")))?;
+        let mut stream = response.bytes_stream();
+        let mut written = 0u64;
+        let mut stream_error = None;
+        loop {
+            let next_chunk = stream.next().await;
+            let Some(chunk) = next_chunk else {
+                break;
+            };
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    stream_error = Some(format!("Failed to read blob stream: {error}"));
+                    break;
+                }
+            };
+            if let Err(error) = file.write_all(&chunk).await {
+                stream_error = Some(format!("Failed to write temp blob file: {error}"));
+                break;
+            }
+            written = written.saturating_add(chunk.len() as u64);
+        }
+        if let Some(message) = stream_error {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            if attempt < max_attempts {
+                log_oci_blob_download_retry(digest, attempt, max_attempts, &message);
+                sleep_oci_blob_download_retry(attempt).await;
+                last_error = Some(message);
+                continue;
+            }
+            return Err(OciError::internal(message));
+        }
+        file.flush()
+            .await
+            .map_err(|e| OciError::internal(format!("Failed to flush temp blob file: {e}")))?;
+
+        if written == 0 {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            let message = "Downloaded blob was empty".to_string();
+            if attempt < max_attempts {
+                log_oci_blob_download_retry(digest, attempt, max_attempts, &message);
+                sleep_oci_blob_download_retry(attempt).await;
+                last_error = Some(message);
+                continue;
+            }
+            return Err(OciError::internal(message));
+        }
+
+        if !from_cached_url {
+            let mut locator = state.blob_locator.write().await;
+            if let Some(entry) = locator.get_mut(name, digest) {
+                entry.download_url = Some(download_url.clone());
+                entry.download_url_cached_at = Some(std::time::Instant::now());
+            }
+        }
+
+        if let Err(error) = state
+            .blob_read_cache
+            .promote(digest, &temp_path, written)
+            .await
+        {
+            log::warn!("OCI blob read cache promote failed for {digest}: {error}");
+        }
+
+        if let Some(handle) = state.blob_read_cache.get_handle(digest).await {
+            return Ok(handle);
+        }
+
+        if tokio::fs::metadata(&temp_path).await.is_ok() {
+            return Ok(BlobReadHandle::from_file(temp_path, written));
+        }
+
+        last_error = Some("Downloaded blob missing after cache promotion".to_string());
     }
 
-    if let Err(error) = state
-        .blob_read_cache
-        .promote(digest, &temp_path, written)
-        .await
-    {
-        log::warn!("OCI blob read cache promote failed for {digest}: {error}");
-    }
+    Err(OciError::internal(format!(
+        "Blob download failed after {} attempts: {}",
+        max_attempts,
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    )))
+}
 
-    if let Some(handle) = state.blob_read_cache.get_handle(digest).await {
-        return Ok(handle);
-    }
+fn is_retryable_oci_blob_storage_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
 
-    if tokio::fs::metadata(&temp_path).await.is_ok() {
-        return Ok(BlobReadHandle::from_file(temp_path, written));
-    }
+fn log_oci_blob_download_retry(digest: &str, attempt: usize, max_attempts: usize, message: &str) {
+    log::warn!(
+        "OCI blob body download failed for {} on attempt {}/{}: {}; retrying",
+        digest,
+        attempt,
+        max_attempts,
+        message
+    );
+}
 
-    Err(OciError::internal(
-        "Downloaded blob missing after cache promotion",
+async fn sleep_oci_blob_download_retry(attempt: usize) {
+    tokio::time::sleep(std::time::Duration::from_millis(
+        OCI_BLOB_DOWNLOAD_RETRY_BASE_MS.saturating_mul(attempt as u64),
     ))
+    .await;
 }
 
 fn fresh_download_url(entry: &BlobLocatorEntry) -> Option<String> {
@@ -433,4 +514,37 @@ async fn fresh_locator_download_url(
         }
     }
     fallback.map(ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::is_retryable_oci_blob_storage_status;
+
+    #[test]
+    fn retries_transient_oci_blob_storage_statuses() {
+        assert!(is_retryable_oci_blob_storage_status(
+            StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(is_retryable_oci_blob_storage_status(
+            StatusCode::BAD_GATEWAY
+        ));
+        assert!(is_retryable_oci_blob_storage_status(
+            StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(is_retryable_oci_blob_storage_status(
+            StatusCode::REQUEST_TIMEOUT
+        ));
+    }
+
+    #[test]
+    fn does_not_retry_permanent_oci_blob_storage_statuses() {
+        assert!(!is_retryable_oci_blob_storage_status(StatusCode::OK));
+        assert!(!is_retryable_oci_blob_storage_status(StatusCode::NOT_FOUND));
+        assert!(!is_retryable_oci_blob_storage_status(StatusCode::FORBIDDEN));
+        assert!(!is_retryable_oci_blob_storage_status(
+            StatusCode::UNPROCESSABLE_ENTITY
+        ));
+    }
 }

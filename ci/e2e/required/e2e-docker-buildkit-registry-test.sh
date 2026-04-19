@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/../e2e-auth.sh"
-source "${SCRIPT_DIR}/../e2e-remote-tag.sh"
+DOCKER_E2E_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${DOCKER_E2E_SCRIPT_DIR}/../e2e-auth.sh"
+source "${DOCKER_E2E_SCRIPT_DIR}/../e2e-remote-tag.sh"
 
-CLI_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+CLI_REPO_ROOT="$(cd "${DOCKER_E2E_SCRIPT_DIR}/../../.." && pwd)"
 BINARY="${BINARY:-${CLI_REPO_ROOT}/target/debug/boringcache}"
 WORKSPACE="${WORKSPACE:?WORKSPACE is required}"
 E2E_TAG_PREFIX="${E2E_TAG_PREFIX:-gha-cache-registry}"
 PORT="${PORT:-5000}"
+PROXY_PORT="${PROXY_PORT:-${PORT}}"
+REGISTRY_PORT="${REGISTRY_PORT:-${PORT}}"
 LOG_DIR="${LOG_DIR:-.}"
+PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
+PROXY_STATUS_HOST="${PROXY_STATUS_HOST:-127.0.0.1}"
 PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
+OCI_HYDRATION="${OCI_HYDRATION:-metadata-only}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-0}"
 BUILD_HEARTBEAT_SECS="${BUILD_HEARTBEAT_SECS:-30}"
 BUILD_CLEANUP_WAIT_SECS="${BUILD_CLEANUP_WAIT_SECS:-20}"
@@ -29,10 +34,10 @@ RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 BUILDER="bc-e2e-${RUN_ID}-${RUN_ATTEMPT}"
 CACHE_TAG="${E2E_TAG_PREFIX}-docker-buildkit-${RUN_ID}-${RUN_ATTEMPT}"
-CACHE_REF="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG}"
-CACHE_REF_IMPLICIT="localhost:${PORT}/boringcache-e2e/cache"
+CACHE_REF="localhost:${REGISTRY_PORT}/boringcache-e2e/cache:${CACHE_TAG}"
+CACHE_REF_IMPLICIT="localhost:${REGISTRY_PORT}/boringcache-e2e/cache"
 CACHE_TAG_ALIAS="${CACHE_TAG}-alias"
-CACHE_REF_ALIAS="localhost:${PORT}/boringcache-e2e/cache:${CACHE_TAG_ALIAS}"
+CACHE_REF_ALIAS="localhost:${REGISTRY_PORT}/boringcache-e2e/cache:${CACHE_TAG_ALIAS}"
 REGISTRY_ROOT_TAG="${E2E_TAG_PREFIX}-docker-buildkit-registry-${RUN_ID}-${RUN_ATTEMPT}"
 SERVE_PID=""
 PROXY_READY_FILE=""
@@ -86,12 +91,17 @@ remove_active_build_pid() {
   local target_pid="$1"
   local -a remaining=()
   local pid
-  for pid in "${ACTIVE_BUILD_PIDS[@]}"; do
-    if [[ "$pid" != "$target_pid" ]]; then
-      remaining+=("$pid")
-    fi
-  done
-  ACTIVE_BUILD_PIDS=("${remaining[@]-}")
+  if (( ${#ACTIVE_BUILD_PIDS[@]} > 0 )); then
+    for pid in "${ACTIVE_BUILD_PIDS[@]}"; do
+      if [[ "$pid" != "$target_pid" ]]; then
+        remaining+=("$pid")
+      fi
+    done
+  fi
+  ACTIVE_BUILD_PIDS=()
+  if (( ${#remaining[@]} > 0 )); then
+    ACTIVE_BUILD_PIDS=("${remaining[@]}")
+  fi
 }
 
 children_of_pid() {
@@ -168,9 +178,11 @@ cleanup() {
   set +e
   stop_background_jobs
   local pid
-  for pid in "${ACTIVE_BUILD_PIDS[@]}"; do
-    stop_pid_tree "$pid" "build" "$BUILD_CLEANUP_WAIT_SECS"
-  done
+  if (( ${#ACTIVE_BUILD_PIDS[@]} > 0 )); then
+    for pid in "${ACTIVE_BUILD_PIDS[@]}"; do
+      stop_pid_tree "$pid" "build" "$BUILD_CLEANUP_WAIT_SECS"
+    done
+  fi
   ACTIVE_BUILD_PIDS=()
   stop_proxy
   docker buildx rm --force "${BUILDER}" >/dev/null 2>&1 || true
@@ -183,7 +195,7 @@ proxy_status_probe() {
   response="$(
     curl -sS -D - -o /dev/null \
       --max-time 2 \
-      "http://127.0.0.1:${PORT}${PROXY_STATUS_PATH}" 2>/dev/null || true
+      "http://${PROXY_STATUS_HOST}:${PROXY_PORT}${PROXY_STATUS_PATH}" 2>/dev/null || true
   )"
   status="$(printf '%s\n' "$response" | awk 'tolower($1) ~ /^http\// { status = $2 } END { print status }')"
   phase="$(printf '%s\n' "$response" | awk -F': ' 'tolower($1) == "x-boringcache-proxy-phase" { gsub("\\r", "", $2); phase = tolower($2) } END { print phase }')"
@@ -198,24 +210,27 @@ start_proxy() {
   local log_file="$1"
   local metadata_hints="${2:-}"
   local readiness_reference="${3:-}"
-  local prefetch_args=()
+  local -a proxy_cmd
   local attempts start_ts next_warn now waited
   stop_proxy
   LOG_FILES+=("${log_file}")
   PROXY_READY_FILE="$(mktemp "${LOG_DIR}/cache-registry-ready.XXXXXX")"
   rm -f "${PROXY_READY_FILE}"
+  proxy_cmd=(
+    "${BINARY}" cache-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}"
+    --host "${PROXY_HOST}"
+    --port "${PROXY_PORT}"
+    --ready-file "${PROXY_READY_FILE}"
+    --no-platform
+    --no-git
+    --fail-on-cache-error
+    --oci-hydration "${OCI_HYDRATION}"
+  )
   if [[ -n "$readiness_reference" ]]; then
-    prefetch_args=(--oci-prefetch-ref "boringcache-e2e/cache@${readiness_reference}")
+    proxy_cmd+=(--oci-prefetch-ref "boringcache-e2e/cache@${readiness_reference}")
   fi
   BORINGCACHE_PROXY_METADATA_HINTS="${metadata_hints}" \
-  "${BINARY}" cache-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" \
-    --host 127.0.0.1 \
-    --port "${PORT}" \
-    --ready-file "${PROXY_READY_FILE}" \
-    --no-platform \
-    --no-git \
-    --fail-on-cache-error \
-    "${prefetch_args[@]}" > "${log_file}" 2>&1 &
+    "${proxy_cmd[@]}" > "${log_file}" 2>&1 &
   SERVE_PID=$!
 
   local ready=0
@@ -260,6 +275,15 @@ start_proxy() {
     cat "${log_file}"
     exit 1
   fi
+}
+
+capture_proxy_status() {
+  local label="$1"
+  local status_file="${LOG_DIR}/proxy-status-${label}.json"
+  LOG_FILES+=("${status_file}")
+  curl -fsS --max-time 5 \
+    "http://${PROXY_STATUS_HOST}:${PROXY_PORT}${PROXY_STATUS_PATH}" \
+    -o "${status_file}" 2>/dev/null || true
 }
 
 run_build() {
@@ -374,7 +398,7 @@ assert_registry_import_succeeded() {
     echo "expected registry cache import attempt in ${log_file}"
     exit 1
   fi
-  if grep -E -n "failed to configure registry cache importer|httpReadSeeker: failed open: .* not found" "${log_file}" >/tmp/e2e-import-failure.log 2>/dev/null; then
+  if grep -E -n "failed to configure registry cache importer|httpReadSeeker: failed open: .*(not found|500 Internal Server Error)|Blob storage returned error|OCI blob body download failed" "${log_file}" >/tmp/e2e-import-failure.log 2>/dev/null; then
     echo "registry cache import failed in ${log_file}"
     cat /tmp/e2e-import-failure.log
     exit 1
@@ -392,7 +416,7 @@ assert_import_reference_seen() {
 
 manifest_reference_is_readable() {
   local reference="$1"
-  local url="http://127.0.0.1:${PORT}/v2/boringcache-e2e/cache/manifests/${reference}"
+  local url="http://${PROXY_STATUS_HOST}:${PROXY_PORT}/v2/boringcache-e2e/cache/manifests/${reference}"
   local accept_header="Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
   local digest
   digest=$(
@@ -408,7 +432,7 @@ fetch_manifest_with_retry() {
   local reference="$1"
   local manifest_file="$2"
   local attempts="${3:-20}"
-  local url="http://127.0.0.1:${PORT}/v2/boringcache-e2e/cache/manifests/${reference}"
+  local url="http://${PROXY_STATUS_HOST}:${PROXY_PORT}/v2/boringcache-e2e/cache/manifests/${reference}"
   local accept_header="Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
 
   for _ in $(seq 1 "${attempts}"); do
@@ -425,7 +449,7 @@ fetch_manifest_with_retry() {
 resolve_manifest_digest_with_retry() {
   local reference="$1"
   local attempts="${2:-20}"
-  local url="http://127.0.0.1:${PORT}/v2/boringcache-e2e/cache/manifests/${reference}"
+  local url="http://${PROXY_STATUS_HOST}:${PROXY_PORT}/v2/boringcache-e2e/cache/manifests/${reference}"
   local accept_header="Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
 
   for _ in $(seq 1 "${attempts}"); do
@@ -454,6 +478,7 @@ echo "=== Docker Buildkit Registry Adapter E2E ==="
 echo "Build timeout: ${BUILD_TIMEOUT_SECS}s (0 disables)"
 echo "Build heartbeat: ${BUILD_HEARTBEAT_SECS}s"
 echo "Proxy shutdown wait: ${PROXY_SHUTDOWN_WAIT_SECS}s"
+echo "OCI hydration: ${OCI_HYDRATION}"
 echo "Logs: ${LOG_DIR}"
 
 mkdir -p e2e-context
@@ -495,6 +520,7 @@ run_build_with_retry "second-build.log" \
   --cache-to "type=registry,ref=${CACHE_REF},mode=max"
 assert_cached "second-build.log"
 assert_registry_import_succeeded "second-build.log"
+capture_proxy_status "phase1-warm"
 run_build_with_retry "third-build-reexport.log" \
   --no-cache \
   --cache-to "type=registry,ref=${CACHE_REF},mode=max"
@@ -515,6 +541,7 @@ run_build_with_retry "fourth-build-after-restart.log" \
   --cache-to "type=registry,ref=${CACHE_REF},mode=max"
 assert_cached "fourth-build-after-restart.log"
 assert_registry_import_succeeded "fourth-build-after-restart.log"
+capture_proxy_status "phase2-restart-warm"
 
 echo
 echo "=== Phase 3: Implicit latest cache import compatibility ==="
@@ -528,6 +555,7 @@ run_build_with_retry "sixth-build-implicit-warm.log" \
 assert_cached "sixth-build-implicit-warm.log"
 assert_registry_import_succeeded "sixth-build-implicit-warm.log"
 assert_import_reference_seen "sixth-build-implicit-warm.log" "${CACHE_REF_IMPLICIT}"
+capture_proxy_status "phase3-implicit-warm"
 
 echo
 echo "=== Phase 4: Alias publish and alias warm import ==="
@@ -540,6 +568,7 @@ run_build_with_retry "eighth-build-alias-warm.log" \
   --cache-to "type=registry,ref=${CACHE_REF_ALIAS},mode=max"
 assert_cached "eighth-build-alias-warm.log"
 assert_registry_import_succeeded "eighth-build-alias-warm.log"
+capture_proxy_status "phase4-alias-warm"
 
 for tag in "${CACHE_TAG}" "latest" "${CACHE_TAG_ALIAS}"; do
   manifest_file="manifest-${tag}.json"

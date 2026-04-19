@@ -893,6 +893,143 @@ fn test_turbo_dry_run_json_reports_on_demand_proxy_mode() {
 }
 
 #[test]
+fn test_nx_dry_run_json_injects_remote_cache_env() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.nx]
+tag = "nx-cache"
+command = ["nx", "run", "app:build"]
+endpoint-host = "host.docker.internal"
+port = 6001
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["nx", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute nx dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(parsed["adapter"], "nx");
+    assert_eq!(parsed["tag"], "nx-cache");
+    assert_eq!(
+        parsed["command"],
+        serde_json::json!(["nx", "run", "app:build"])
+    );
+    assert_eq!(
+        parsed["env_vars"]["NX_SELF_HOSTED_REMOTE_CACHE_SERVER"],
+        "http://host.docker.internal:6001"
+    );
+    assert_eq!(
+        parsed["env_vars"]["NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN"],
+        "boringcache"
+    );
+}
+
+#[test]
+fn test_sccache_dry_run_json_injects_webdav_env() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.sccache]
+tag = "sccache-cache"
+command = ["cargo", "build"]
+endpoint-host = "host.docker.internal"
+port = 6001
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["sccache", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute sccache dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(parsed["adapter"], "sccache");
+    assert_eq!(parsed["tag"], "sccache-cache");
+    assert_eq!(parsed["command"], serde_json::json!(["cargo", "build"]));
+    assert_eq!(parsed["env_vars"]["RUSTC_WRAPPER"], "sccache");
+    assert_eq!(
+        parsed["env_vars"]["SCCACHE_WEBDAV_ENDPOINT"],
+        "http://host.docker.internal:6001/"
+    );
+}
+
+#[test]
+fn test_go_dry_run_json_injects_gocacheprog_env() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.go]
+tag = "go-cache"
+command = ["go", "test", "./..."]
+endpoint-host = "host.docker.internal"
+port = 6001
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["go", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute go dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(parsed["adapter"], "go");
+    assert_eq!(parsed["tag"], "go-cache");
+    assert_eq!(
+        parsed["command"],
+        serde_json::json!(["go", "test", "./..."])
+    );
+    assert_eq!(
+        parsed["env_vars"]["GOCACHEPROG"],
+        "boringcache go-cacheprog --endpoint http://host.docker.internal:6001"
+    );
+}
+
+#[test]
 fn test_adapter_dry_run_json_reports_oci_prefetch_refs() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);

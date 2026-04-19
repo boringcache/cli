@@ -258,6 +258,9 @@ pub fn validate_symlink_target(
     if allow_external_symlinks {
         return Ok(());
     }
+    if absolute_symlink_target_stays_under_root(root, target) {
+        return Ok(());
+    }
     if target.is_absolute() {
         return Err(absolute_symlink_target_error(destination, target));
     }
@@ -298,6 +301,40 @@ pub fn validate_symlink_target(
     }
 
     Ok(())
+}
+
+fn absolute_symlink_target_stays_under_root(root: &Path, target: &Path) -> bool {
+    let Some(root) = normalize_absolute_path(root) else {
+        return false;
+    };
+    let Some(target) = normalize_absolute_path(target) else {
+        return false;
+    };
+    target.starts_with(root)
+}
+
+fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                normalized.push(Path::new(component.as_os_str()));
+            }
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+        }
+    }
+
+    Some(normalized)
 }
 
 fn absolute_symlink_target_error(destination: &Path, target: &Path) -> anyhow::Error {
@@ -400,13 +437,48 @@ mod tests {
     }
 
     #[test]
+    fn validate_symlink_target_allows_absolute_target_inside_root() {
+        let root = PathBuf::from("/tmp/root");
+        let destination = root.join("nested/link");
+        validate_symlink_target(&root, &destination, &root.join("file.txt"), false).unwrap();
+    }
+
+    #[test]
+    fn validate_symlink_target_allows_absolute_target_inside_root_after_normalizing() {
+        let root = PathBuf::from("/tmp/root");
+        let destination = root.join("nested/link");
+        validate_symlink_target(
+            &root,
+            &destination,
+            Path::new("/tmp/root/nested/../file.txt"),
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_symlink_target_rejects_absolute_target_escape_after_normalizing() {
+        let root = PathBuf::from("/tmp/root");
+        let destination = root.join("nested/link");
+        let error = validate_symlink_target(
+            &root,
+            &destination,
+            Path::new("/tmp/root/../secret.txt"),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Absolute symlink target"));
+    }
+
+    #[test]
     fn validate_symlink_target_hints_for_mise_shims() {
         let root = PathBuf::from("/tmp/root");
         let destination = root.join(".local/share/mise/shims/bundle");
         let error = validate_symlink_target(
             &root,
             &destination,
-            Path::new("/tmp/root/.local/bin/mise"),
+            Path::new("/opt/homebrew/bin/mise"),
             false,
         )
         .unwrap_err()
