@@ -1,14 +1,12 @@
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
+use crate::api::models::cache::BlobDescriptor;
 use crate::cas_oci;
-use crate::cas_transport::upload_payload;
 use crate::serve::engines::oci::manifests::{
     OCI_IMAGE_INDEX_CONTENT_TYPE, build_referrers_descriptor as engine_build_referrers_descriptor,
     dedupe_blob_descriptors as engine_dedupe_blob_descriptors,
@@ -20,6 +18,9 @@ use crate::serve::engines::oci::manifests::{
     referrers_reference_for_subject as engine_referrers_reference_for_subject,
     resolve_pushed_manifest_content_type as engine_resolve_pushed_manifest_content_type,
 };
+use crate::serve::engines::oci::publish::{
+    PersistManifestEntryInput, cleanup_present_blob_sessions, persist_manifest_entry,
+};
 use crate::serve::engines::oci::{
     PresentBlob, ensure_manifest_blobs_present, uploads::has_non_empty_local_blob,
 };
@@ -27,37 +28,17 @@ use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
 use crate::serve::http::oci_route::{insert_digest_etag, insert_header};
 use crate::serve::http::oci_tags::{
-    AliasBinding, AliasTagManifest, alias_tags_for_manifest, bind_alias_tag, scoped_restore_tags,
-    scoped_save_tag, scoped_write_scope_tag,
+    AliasBinding, scoped_restore_tags, scoped_save_tag, scoped_write_scope_tag,
 };
 use crate::serve::state::{
     AppState, BlobLocatorEntry, OCI_MANIFEST_CACHE_TTL, OciManifestCacheEntry, UploadSession,
     diagnostics_enabled, digest_tag,
 };
 
-use super::{
-    OCI_API_CALL_TIMEOUT, OCI_DEGRADED_HEADER, OCI_POINTER_FETCH_TIMEOUT, OCI_TRANSFER_CALL_TIMEOUT,
-};
+use super::{OCI_API_CALL_TIMEOUT, OCI_DEGRADED_HEADER, OCI_POINTER_FETCH_TIMEOUT};
 
 const OCI_SUBJECT_HEADER: &str = "OCI-Subject";
 const OCI_FILTERS_APPLIED_HEADER: &str = "OCI-Filters-Applied";
-
-struct PersistManifestResult {
-    manifest_digest: String,
-}
-
-struct PersistManifestEntryInput<'a> {
-    state: &'a AppState,
-    name: &'a str,
-    primary_tag: String,
-    write_scope_tag: String,
-    manifest_body: Vec<u8>,
-    content_type: String,
-    blob_descriptors: Vec<BlobDescriptor>,
-    present_blobs: Vec<PresentBlob>,
-    configured_human_tags: &'a [String],
-    additional_aliases: &'a [AliasBinding],
-}
 
 pub(super) async fn get_manifest(
     method: Method,
@@ -95,7 +76,7 @@ pub(crate) async fn prefetch_manifest_reference(
     name: &str,
     reference: &str,
     hydrate_bodies: bool,
-) -> Result<(crate::serve::cache_registry::BlobPrefetchStats, usize), OciError> {
+) -> Result<(crate::serve::engines::oci::blobs::BlobPrefetchStats, usize), OciError> {
     let started_at = Instant::now();
     let tags = manifest_restore_tags(state, name, reference);
     let (_, _, digest) = resolve_manifest(state, name, reference, true).await?;
@@ -152,11 +133,11 @@ pub(crate) async fn prefetch_manifest_reference(
         );
 
         return Ok((
-            crate::serve::cache_registry::BlobPrefetchStats {
+            crate::serve::engines::oci::blobs::BlobPrefetchStats {
                 total_unique_blobs: cached.blobs.len(),
                 already_local: local_blobs,
                 duration_ms: started_at.elapsed().as_millis() as u64,
-                ..crate::serve::cache_registry::BlobPrefetchStats::default()
+                ..crate::serve::engines::oci::blobs::BlobPrefetchStats::default()
             },
             cold_blobs,
         ));
@@ -168,8 +149,9 @@ pub(crate) async fn prefetch_manifest_reference(
         cached_urls.len(),
         local_blobs,
     );
-    let stats = crate::serve::cache_registry::prefetch_oci_blob_bodies(
+    let stats = crate::serve::engines::oci::blobs::prefetch_blob_bodies(
         state,
+        &cached.name,
         &cached.cache_entry_id,
         &cached.blobs,
         &cached_urls,
@@ -267,6 +249,11 @@ pub(super) async fn put_manifest(
     stage_manifest_reference_uploads_impl(&state, &name, &blob_descriptors, &parsed).await?;
     let present_blobs = ensure_manifest_blobs_present(&state, &name, &blob_descriptors).await?;
     log_manifest_blob_sources(&name, &reference, &present_blobs);
+    for blob in &present_blobs {
+        state
+            .oci_engine_diagnostics
+            .record_proof_source(blob.source.as_str(), blob.size_bytes);
+    }
 
     let write_scope_tag = scoped_write_scope_tag(&state.tag_resolver, &name, &reference)?;
     let tag = if reference.starts_with("sha256:") {
@@ -312,6 +299,7 @@ pub(super) async fn put_manifest(
         .await?;
 
         if let Some(subject_digest) = subject_digest.as_deref() {
+            let referrers_started_at = Instant::now();
             persist_referrers_manifest(
                 &state,
                 &name,
@@ -322,6 +310,10 @@ pub(super) async fn put_manifest(
                 manifest_body.len() as u64,
             )
             .await?;
+            state.oci_engine_diagnostics.record_publish_phase(
+                "referrers",
+                referrers_started_at.elapsed().as_millis() as u64,
+            );
             return Ok(true);
         }
 
@@ -380,7 +372,7 @@ pub(super) async fn put_manifest(
 
 #[cfg(test)]
 pub(super) fn adaptive_blob_upload_concurrency(operation_count: usize) -> usize {
-    adaptive_blob_upload_concurrency_impl(operation_count)
+    crate::serve::engines::oci::publish::adaptive_blob_upload_concurrency(operation_count)
 }
 
 #[cfg(test)]
@@ -523,8 +515,10 @@ async fn resolve_manifest_remote(
             .into_values()
             .find(|entry| entry.status == "hit");
     }
-    let entry =
-        selected.ok_or_else(|| OciError::manifest_unknown(format!("{name}:{reference}")))?;
+    let entry = selected.ok_or_else(|| {
+        state.oci_engine_diagnostics.record_miss("manifest");
+        OciError::manifest_unknown(format!("{name}:{reference}"))
+    })?;
 
     let cache_entry_id = entry
         .cache_entry_id
@@ -789,267 +783,6 @@ fn manifest_flight_key(tags: &[String]) -> String {
     format!("manifest:{digest}")
 }
 
-async fn persist_manifest_entry(
-    input: PersistManifestEntryInput<'_>,
-) -> Result<PersistManifestResult, OciError> {
-    let PersistManifestEntryInput {
-        state,
-        name,
-        primary_tag,
-        write_scope_tag,
-        manifest_body,
-        content_type,
-        blob_descriptors,
-        present_blobs,
-        configured_human_tags,
-        additional_aliases,
-    } = input;
-    let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let blob_count = blob_descriptors.len() as u64;
-    let blob_total_size_bytes: u64 = blob_descriptors.iter().map(|blob| blob.size_bytes).sum();
-
-    let pointer = cas_oci::OciPointer {
-        format_version: 1,
-        adapter: "oci-v1".to_string(),
-        manifest_content_type: Some(content_type.clone()),
-        index_json_base64: STANDARD.encode(&manifest_body),
-        oci_layout_base64: STANDARD.encode(br#"{"imageLayoutVersion":"1.0.0"}"#),
-        blobs: blob_descriptors
-            .iter()
-            .map(|blob| cas_oci::OciPointerBlob {
-                digest: blob.digest.clone(),
-                size_bytes: blob.size_bytes,
-                sequence: None,
-            })
-            .collect(),
-    };
-    let pointer_bytes = serde_json::to_vec(&pointer)
-        .map_err(|e| OciError::internal(format!("Failed to serialize pointer: {e}")))?;
-    let manifest_root_digest = cas_oci::prefixed_sha256_digest(&pointer_bytes);
-    let (request_blob_count, request_blob_total_size_bytes) = request_cas_blob_summary(
-        blob_count,
-        blob_total_size_bytes,
-        pointer_bytes.len() as u64,
-    );
-    let total_size_bytes = blob_total_size_bytes + manifest_body.len() as u64;
-    let alias_manifest = AliasTagManifest {
-        manifest_root_digest: manifest_root_digest.clone(),
-        manifest_size: pointer_bytes.len() as u64,
-        blob_count: request_blob_count,
-        blob_total_size_bytes: request_blob_total_size_bytes,
-        total_size_bytes,
-    };
-
-    let save_request = SaveRequest {
-        tag: primary_tag.clone(),
-        write_scope_tag: Some(write_scope_tag.clone()),
-        manifest_root_digest: manifest_root_digest.clone(),
-        compression_algorithm: "zstd".to_string(),
-        storage_mode: Some("cas".to_string()),
-        blob_count: Some(request_blob_count),
-        blob_total_size_bytes: Some(request_blob_total_size_bytes),
-        cas_layout: Some("oci-v1".to_string()),
-        manifest_format_version: Some(1),
-        total_size_bytes,
-        uncompressed_size: None,
-        compressed_size: None,
-        file_count: Some(request_blob_count.min(u32::MAX as u64) as u32),
-        expected_manifest_digest: Some(manifest_root_digest.clone()),
-        expected_manifest_size: Some(alias_manifest.manifest_size),
-        force: None,
-        use_multipart: None,
-        ci_provider: None,
-        encrypted: None,
-        encryption_algorithm: None,
-        encryption_recipient_hint: None,
-    };
-
-    let save_response = tokio::time::timeout(
-        OCI_API_CALL_TIMEOUT,
-        state.api_client.save_entry(&state.workspace, &save_request),
-    )
-    .await
-    .map_err(|_| {
-        OciError::internal(format!(
-            "save_entry timed out after {}s",
-            OCI_API_CALL_TIMEOUT.as_secs()
-        ))
-    })?
-    .map_err(|e| OciError::internal(format!("save_entry failed: {e}")))?;
-
-    let blob_state = state.clone();
-    let manifest_state = state.clone();
-    let confirm_state = state.clone();
-    let publish_present_blobs = present_blobs.clone();
-    let publish_pointer_bytes = pointer_bytes.clone();
-    let confirm_tag = primary_tag.clone();
-    let confirm_write_scope_tag = write_scope_tag.clone();
-    let confirm_cache_entry_id = save_response.cache_entry_id.clone();
-    let confirm_manifest_digest = manifest_root_digest.clone();
-    let confirm_manifest_size = pointer_bytes.len() as u64;
-    let confirm_file_count = request_blob_count.min(u32::MAX as u64) as u32;
-    let all_blob_digests: Vec<String> = present_blobs
-        .iter()
-        .map(|blob| blob.digest.clone())
-        .collect();
-    crate::serve::cas_publish::publish_after_save(
-        &state.api_client,
-        &state.workspace,
-        &save_response,
-        manifest_root_digest.clone(),
-        pointer_bytes.len() as u64,
-        Some(all_blob_digests),
-        move |save_response| {
-            let state = blob_state.clone();
-            let present_blobs = publish_present_blobs.clone();
-            let cache_entry_id = save_response.cache_entry_id.clone();
-            async move {
-                crate::serve::cas_publish::upload_tracked_blobs(
-                    &state.api_client,
-                    &state.workspace,
-                    &cache_entry_id,
-                    &present_blobs,
-                    &state.upload_sessions,
-                    adaptive_blob_upload_concurrency_impl(present_blobs.len()),
-                    OCI_TRANSFER_CALL_TIMEOUT,
-                )
-                .await
-            }
-        },
-        move |save_response| {
-            let state = manifest_state.clone();
-            let pointer_bytes = publish_pointer_bytes.clone();
-            let manifest_upload_url = save_response.manifest_upload_url.clone();
-            let upload_headers = save_response.upload_headers.clone();
-            async move {
-                let manifest_upload_url = manifest_upload_url
-                    .as_ref()
-                    .ok_or_else(|| OciError::internal("Missing manifest_upload_url"))?;
-
-                tokio::time::timeout(
-                    OCI_TRANSFER_CALL_TIMEOUT,
-                    upload_payload(
-                        state.api_client.transfer_client(),
-                        manifest_upload_url,
-                        &pointer_bytes,
-                        "application/cbor",
-                        &upload_headers,
-                    ),
-                )
-                .await
-                .map_err(|_| {
-                    OciError::internal(format!(
-                        "Pointer upload timed out after {}s",
-                        OCI_TRANSFER_CALL_TIMEOUT.as_secs()
-                    ))
-                })?
-                .map_err(|e| OciError::internal(format!("Pointer upload failed: {e}")))
-            }
-        },
-        move |_manifest_etag| {
-            let state = confirm_state.clone();
-            let tag = confirm_tag.clone();
-            let write_scope_tag = confirm_write_scope_tag.clone();
-            let cache_entry_id = confirm_cache_entry_id.clone();
-            let manifest_digest = confirm_manifest_digest.clone();
-            async move {
-                let confirm_request = ConfirmRequest {
-                    manifest_digest,
-                    manifest_size: confirm_manifest_size,
-                    manifest_etag: None,
-                    archive_size: None,
-                    archive_etag: None,
-                    blob_count: Some(request_blob_count),
-                    blob_total_size_bytes: Some(request_blob_total_size_bytes),
-                    file_count: Some(confirm_file_count),
-                    uncompressed_size: None,
-                    compressed_size: None,
-                    storage_mode: Some("cas".to_string()),
-                    tag: Some(tag.clone()),
-                    write_scope_tag: Some(write_scope_tag),
-                };
-
-                match state
-                    .api_client
-                    .confirm_with_retry(&state.workspace, &cache_entry_id, &confirm_request)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(error) => {
-                        return Err(OciError::internal(format!("confirm failed: {error}")));
-                    }
-                }
-
-                Ok(())
-            }
-        },
-    )
-    .await?;
-
-    let cached = Arc::new(OciManifestCacheEntry {
-        index_json: manifest_body,
-        content_type: content_type.clone(),
-        manifest_digest: manifest_digest.clone(),
-        cache_entry_id: save_response.cache_entry_id.clone(),
-        blobs: blob_descriptors.clone(),
-        name: name.to_string(),
-        inserted_at: Instant::now(),
-    });
-    state
-        .oci_manifest_cache
-        .insert(primary_tag.clone(), Arc::clone(&cached));
-    state
-        .oci_manifest_cache
-        .insert(digest_tag(&manifest_digest), Arc::clone(&cached));
-
-    let alias_tags = alias_tags_for_manifest(
-        &primary_tag,
-        &manifest_digest,
-        Some(write_scope_tag.as_str()),
-        configured_human_tags,
-        additional_aliases,
-    );
-    for alias in alias_tags {
-        if let Err(error) = bind_alias_tag(
-            state,
-            &alias.tag,
-            alias.write_scope_tag.as_deref(),
-            &alias_manifest,
-        )
-        .await
-        {
-            if state.fail_on_cache_error {
-                return Err(OciError::internal(format!(
-                    "Alias write failed for {} (workspace={}): {error}",
-                    alias.tag, state.workspace
-                )));
-            }
-            let warning = format!(
-                "Alias write skipped for {} (workspace={}): {}",
-                alias.tag, state.workspace, error
-            );
-            eprintln!("{warning}");
-            log::warn!("{warning}");
-        }
-    }
-
-    Ok(PersistManifestResult { manifest_digest })
-}
-
-fn request_cas_blob_summary(
-    manifest_blob_count: u64,
-    manifest_blob_total_size_bytes: u64,
-    pointer_size_bytes: u64,
-) -> (u64, u64) {
-    let request_blob_count = manifest_blob_count.max(1);
-    let request_blob_total_size_bytes = if manifest_blob_total_size_bytes == 0 {
-        pointer_size_bytes.max(1)
-    } else {
-        manifest_blob_total_size_bytes
-    };
-    (request_blob_count, request_blob_total_size_bytes)
-}
-
 async fn persist_referrers_manifest(
     state: &AppState,
     name: &str,
@@ -1149,19 +882,6 @@ fn referrers_response(
     Ok((StatusCode::OK, headers, Body::from(payload)).into_response())
 }
 
-fn adaptive_blob_upload_concurrency_impl(operation_count: usize) -> usize {
-    if operation_count == 0 {
-        return 1;
-    }
-
-    num_cpus::get()
-        .max(1)
-        .saturating_mul(2)
-        .clamp(16, 64)
-        .min(operation_count)
-        .max(1)
-}
-
 async fn expand_manifest_blob_descriptors_impl(
     state: &AppState,
     name: &str,
@@ -1194,7 +914,12 @@ async fn expand_manifest_blob_descriptors_impl(
         pending.extend(engine_manifest_child_descriptors(&child_manifest));
     }
 
-    engine_dedupe_blob_descriptors(blobs)
+    let expanded_child_count = visited.len();
+    let deduped = engine_dedupe_blob_descriptors(blobs)?;
+    state
+        .oci_engine_diagnostics
+        .record_graph_expansion(expanded_child_count, deduped.len());
+    Ok(deduped)
 }
 
 async fn load_manifest_bytes_by_digest(
@@ -1339,15 +1064,17 @@ async fn stage_manifest_reference_upload(
     Ok(())
 }
 
-async fn cleanup_present_blob_sessions(state: &AppState, present_blobs: &[PresentBlob]) {
-    let mut sessions = state.upload_sessions.write().await;
-    for blob in present_blobs {
-        if let Some(session_id) = blob.upload_session_id.as_deref()
-            && let Some(removed) = sessions.remove(session_id)
-        {
-            let _ = tokio::fs::remove_file(&removed.temp_path).await;
-        }
-    }
+#[cfg(test)]
+fn request_cas_blob_summary(
+    manifest_blob_count: u64,
+    manifest_blob_total_size_bytes: u64,
+    pointer_size_bytes: u64,
+) -> (u64, u64) {
+    crate::serve::engines::oci::publish::request_cas_blob_summary(
+        manifest_blob_count,
+        manifest_blob_total_size_bytes,
+        pointer_size_bytes,
+    )
 }
 
 #[cfg(test)]

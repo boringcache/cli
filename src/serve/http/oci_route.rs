@@ -175,7 +175,12 @@ pub(crate) fn oci_success_rollup_result(
     response: &Response,
     degraded_header: &str,
 ) -> (crate::serve::cache_registry::cache_ops::OpResult, bool) {
-    if response.headers().get(degraded_header).is_some() {
+    if !response.status().is_success() {
+        (
+            crate::serve::cache_registry::cache_ops::OpResult::Error,
+            false,
+        )
+    } else if response.headers().get(degraded_header).is_some() {
         (
             crate::serve::cache_registry::cache_ops::OpResult::Error,
             true,

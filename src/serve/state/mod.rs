@@ -67,6 +67,7 @@ pub struct AppState {
     pub blob_read_cache: Arc<BlobReadCache>,
     pub blob_read_metrics: Arc<BlobReadMetrics>,
     pub oci_body_metrics: Arc<OciBodyMetrics>,
+    pub oci_engine_diagnostics: Arc<OciEngineDiagnostics>,
     pub prefetch_metrics: Arc<PrefetchMetrics>,
     pub blob_download_max_concurrency: usize,
     pub blob_download_semaphore: Arc<tokio::sync::Semaphore>,

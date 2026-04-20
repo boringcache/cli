@@ -168,6 +168,364 @@ impl Default for OciBodyMetrics {
     }
 }
 
+pub struct OciEngineDiagnostics {
+    proof_total: AtomicU64,
+    proof_bytes: AtomicU64,
+    proof_upload_session: AtomicU64,
+    proof_mounted_session: AtomicU64,
+    proof_manifest_reference_session: AtomicU64,
+    proof_local_body_cache: AtomicU64,
+    proof_remote_storage: AtomicU64,
+    blob_local_reads: AtomicU64,
+    blob_remote_reads: AtomicU64,
+    blob_served_bytes: AtomicU64,
+    blob_remote_fetched_bytes: AtomicU64,
+    blob_read_throughs: AtomicU64,
+    range_requests: AtomicU64,
+    range_partial_responses: AtomicU64,
+    range_invalid_responses: AtomicU64,
+    graph_expansions: AtomicU64,
+    graph_child_manifests: AtomicU64,
+    graph_descriptors: AtomicU64,
+    publish_total_count: AtomicU64,
+    publish_total_duration_ms: AtomicU64,
+    publish_save_count: AtomicU64,
+    publish_save_duration_ms: AtomicU64,
+    publish_blob_count: AtomicU64,
+    publish_blob_duration_ms: AtomicU64,
+    publish_pointer_count: AtomicU64,
+    publish_pointer_duration_ms: AtomicU64,
+    publish_confirm_count: AtomicU64,
+    publish_confirm_duration_ms: AtomicU64,
+    publish_alias_count: AtomicU64,
+    publish_alias_duration_ms: AtomicU64,
+    publish_referrers_count: AtomicU64,
+    publish_referrers_duration_ms: AtomicU64,
+    miss_blob_locator: AtomicU64,
+    miss_remote_blob: AtomicU64,
+    miss_manifest: AtomicU64,
+    miss_download_url: AtomicU64,
+}
+
+impl OciEngineDiagnostics {
+    pub fn new() -> Self {
+        Self {
+            proof_total: AtomicU64::new(0),
+            proof_bytes: AtomicU64::new(0),
+            proof_upload_session: AtomicU64::new(0),
+            proof_mounted_session: AtomicU64::new(0),
+            proof_manifest_reference_session: AtomicU64::new(0),
+            proof_local_body_cache: AtomicU64::new(0),
+            proof_remote_storage: AtomicU64::new(0),
+            blob_local_reads: AtomicU64::new(0),
+            blob_remote_reads: AtomicU64::new(0),
+            blob_served_bytes: AtomicU64::new(0),
+            blob_remote_fetched_bytes: AtomicU64::new(0),
+            blob_read_throughs: AtomicU64::new(0),
+            range_requests: AtomicU64::new(0),
+            range_partial_responses: AtomicU64::new(0),
+            range_invalid_responses: AtomicU64::new(0),
+            graph_expansions: AtomicU64::new(0),
+            graph_child_manifests: AtomicU64::new(0),
+            graph_descriptors: AtomicU64::new(0),
+            publish_total_count: AtomicU64::new(0),
+            publish_total_duration_ms: AtomicU64::new(0),
+            publish_save_count: AtomicU64::new(0),
+            publish_save_duration_ms: AtomicU64::new(0),
+            publish_blob_count: AtomicU64::new(0),
+            publish_blob_duration_ms: AtomicU64::new(0),
+            publish_pointer_count: AtomicU64::new(0),
+            publish_pointer_duration_ms: AtomicU64::new(0),
+            publish_confirm_count: AtomicU64::new(0),
+            publish_confirm_duration_ms: AtomicU64::new(0),
+            publish_alias_count: AtomicU64::new(0),
+            publish_alias_duration_ms: AtomicU64::new(0),
+            publish_referrers_count: AtomicU64::new(0),
+            publish_referrers_duration_ms: AtomicU64::new(0),
+            miss_blob_locator: AtomicU64::new(0),
+            miss_remote_blob: AtomicU64::new(0),
+            miss_manifest: AtomicU64::new(0),
+            miss_download_url: AtomicU64::new(0),
+        }
+    }
+
+    pub fn record_proof_source(&self, source: &str, bytes: u64) {
+        self.proof_total.fetch_add(1, Ordering::AcqRel);
+        self.proof_bytes.fetch_add(bytes, Ordering::AcqRel);
+        match source {
+            "upload-session" => &self.proof_upload_session,
+            "mounted-session" => &self.proof_mounted_session,
+            "manifest-reference-session" => &self.proof_manifest_reference_session,
+            "local-body-cache" => &self.proof_local_body_cache,
+            "remote-storage" => &self.proof_remote_storage,
+            _ => return,
+        }
+        .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_local_blob_read(&self, served_bytes: u64, ranged: bool) {
+        self.blob_local_reads.fetch_add(1, Ordering::AcqRel);
+        self.blob_served_bytes
+            .fetch_add(served_bytes, Ordering::AcqRel);
+        if ranged {
+            self.range_partial_responses.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn record_remote_blob_read(&self, served_bytes: u64, fetched_bytes: u64, ranged: bool) {
+        self.blob_remote_reads.fetch_add(1, Ordering::AcqRel);
+        self.blob_served_bytes
+            .fetch_add(served_bytes, Ordering::AcqRel);
+        self.blob_remote_fetched_bytes
+            .fetch_add(fetched_bytes, Ordering::AcqRel);
+        self.blob_read_throughs.fetch_add(1, Ordering::AcqRel);
+        if ranged {
+            self.range_partial_responses.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn record_range_request(&self) {
+        self.range_requests.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_invalid_range(&self) {
+        self.range_invalid_responses.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_graph_expansion(&self, child_manifests: usize, descriptors: usize) {
+        self.graph_expansions.fetch_add(1, Ordering::AcqRel);
+        self.graph_child_manifests
+            .fetch_add(child_manifests as u64, Ordering::AcqRel);
+        self.graph_descriptors
+            .fetch_add(descriptors as u64, Ordering::AcqRel);
+    }
+
+    pub fn record_publish_phase(&self, phase: &str, duration_ms: u64) {
+        let (count, duration) = match phase {
+            "total" => (&self.publish_total_count, &self.publish_total_duration_ms),
+            "save" => (&self.publish_save_count, &self.publish_save_duration_ms),
+            "blobs" => (&self.publish_blob_count, &self.publish_blob_duration_ms),
+            "pointer" => (
+                &self.publish_pointer_count,
+                &self.publish_pointer_duration_ms,
+            ),
+            "confirm" => (
+                &self.publish_confirm_count,
+                &self.publish_confirm_duration_ms,
+            ),
+            "alias" => (&self.publish_alias_count, &self.publish_alias_duration_ms),
+            "referrers" => (
+                &self.publish_referrers_count,
+                &self.publish_referrers_duration_ms,
+            ),
+            _ => return,
+        };
+        count.fetch_add(1, Ordering::AcqRel);
+        duration.fetch_add(duration_ms, Ordering::AcqRel);
+    }
+
+    pub fn record_miss(&self, cause: &str) {
+        match cause {
+            "blob-locator" => &self.miss_blob_locator,
+            "remote-blob" => &self.miss_remote_blob,
+            "manifest" => &self.miss_manifest,
+            "download-url" => &self.miss_download_url,
+            _ => return,
+        }
+        .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn metadata_hints(&self, hydration_policy: &str) -> BTreeMap<String, String> {
+        let mut hints = BTreeMap::from([(
+            "oci_engine_hydration_policy".to_string(),
+            hydration_policy.to_string(),
+        )]);
+
+        self.insert_counter(&mut hints, "oci_engine_proof_total", &self.proof_total);
+        self.insert_counter(&mut hints, "oci_engine_proof_bytes", &self.proof_bytes);
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_proof_upload_session",
+            &self.proof_upload_session,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_proof_mounted_session",
+            &self.proof_mounted_session,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_proof_manifest_reference_session",
+            &self.proof_manifest_reference_session,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_proof_local_body_cache",
+            &self.proof_local_body_cache,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_proof_remote_storage",
+            &self.proof_remote_storage,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_blob_local_reads",
+            &self.blob_local_reads,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_blob_remote_reads",
+            &self.blob_remote_reads,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_blob_served_bytes",
+            &self.blob_served_bytes,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_blob_remote_fetched_bytes",
+            &self.blob_remote_fetched_bytes,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_blob_read_throughs",
+            &self.blob_read_throughs,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_range_requests",
+            &self.range_requests,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_range_partial_responses",
+            &self.range_partial_responses,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_range_invalid_responses",
+            &self.range_invalid_responses,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_graph_expansions",
+            &self.graph_expansions,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_graph_child_manifests",
+            &self.graph_child_manifests,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_graph_descriptors",
+            &self.graph_descriptors,
+        );
+        self.insert_publish_phase(
+            &mut hints,
+            "total",
+            &self.publish_total_count,
+            &self.publish_total_duration_ms,
+        );
+        self.insert_publish_phase(
+            &mut hints,
+            "save",
+            &self.publish_save_count,
+            &self.publish_save_duration_ms,
+        );
+        self.insert_publish_phase(
+            &mut hints,
+            "blobs",
+            &self.publish_blob_count,
+            &self.publish_blob_duration_ms,
+        );
+        self.insert_publish_phase(
+            &mut hints,
+            "pointer",
+            &self.publish_pointer_count,
+            &self.publish_pointer_duration_ms,
+        );
+        self.insert_publish_phase(
+            &mut hints,
+            "confirm",
+            &self.publish_confirm_count,
+            &self.publish_confirm_duration_ms,
+        );
+        self.insert_publish_phase(
+            &mut hints,
+            "alias",
+            &self.publish_alias_count,
+            &self.publish_alias_duration_ms,
+        );
+        self.insert_publish_phase(
+            &mut hints,
+            "referrers",
+            &self.publish_referrers_count,
+            &self.publish_referrers_duration_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_miss_blob_locator",
+            &self.miss_blob_locator,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_miss_remote_blob",
+            &self.miss_remote_blob,
+        );
+        self.insert_counter(&mut hints, "oci_engine_miss_manifest", &self.miss_manifest);
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_miss_download_url",
+            &self.miss_download_url,
+        );
+
+        hints
+    }
+
+    fn insert_counter(
+        &self,
+        hints: &mut BTreeMap<String, String>,
+        name: &str,
+        counter: &AtomicU64,
+    ) {
+        let value = counter.load(Ordering::Acquire);
+        if value > 0 {
+            hints.insert(name.to_string(), value.to_string());
+        }
+    }
+
+    fn insert_publish_phase(
+        &self,
+        hints: &mut BTreeMap<String, String>,
+        phase: &str,
+        count: &AtomicU64,
+        duration: &AtomicU64,
+    ) {
+        let count_value = count.load(Ordering::Acquire);
+        if count_value == 0 {
+            return;
+        }
+        let duration_value = duration.load(Ordering::Acquire);
+        hints.insert(
+            format!("oci_engine_publish_{phase}_count"),
+            count_value.to_string(),
+        );
+        hints.insert(
+            format!("oci_engine_publish_{phase}_duration_ms"),
+            duration_value.to_string(),
+        );
+    }
+}
+
+impl Default for OciEngineDiagnostics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct StartupPrefetchSnapshot {
     mode: Option<String>,

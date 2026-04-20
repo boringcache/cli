@@ -48,6 +48,7 @@ pub(super) async fn build_server_runtime(
     let blob_read_cache = Arc::new(BlobReadCache::new(BLOB_READ_CACHE_MAX_BYTES)?);
     let blob_read_metrics = Arc::new(BlobReadMetrics::new());
     let oci_body_metrics = Arc::new(state::OciBodyMetrics::new());
+    let oci_engine_diagnostics = Arc::new(state::OciEngineDiagnostics::new());
     let prefetch_metrics = Arc::new(state::PrefetchMetrics::new());
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
     let (prefetch_concurrency, prefetch_from_env) = blob_prefetch_concurrency(dl_concurrency);
@@ -107,6 +108,7 @@ pub(super) async fn build_server_runtime(
         blob_read_cache,
         blob_read_metrics,
         oci_body_metrics,
+        oci_engine_diagnostics,
         prefetch_metrics,
         blob_download_max_concurrency: dl_concurrency,
         blob_download_semaphore,

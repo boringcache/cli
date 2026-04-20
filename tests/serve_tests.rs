@@ -129,6 +129,9 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         ),
         blob_read_metrics: Arc::new(BlobReadMetrics::new()),
         oci_body_metrics: Arc::new(boring_cache_cli::serve::state::OciBodyMetrics::new()),
+        oci_engine_diagnostics: Arc::new(
+            boring_cache_cli::serve::state::OciEngineDiagnostics::new(),
+        ),
         prefetch_metrics: Arc::new(boring_cache_cli::serve::state::PrefetchMetrics::new()),
         blob_download_max_concurrency: 16,
         blob_download_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
@@ -1639,7 +1642,9 @@ async fn test_cached_manifest_hit_keeps_locator_urls() {
     let (mut state, _home, _guard) = setup(&server).await;
     state.fail_on_cache_error = false;
 
-    let blob_digest = "sha256:abababababababababababababababababababababababababababababababab";
+    let blob_content = b"cached-fast-blob";
+    let blob_digest = cas_oci::prefixed_sha256_digest(blob_content);
+    let blob_size = blob_content.len() as u64;
     let index_json =
         br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:aaaa","size":100},"layers":[]}"#
             .to_vec();
@@ -1651,8 +1656,8 @@ async fn test_cached_manifest_hit_keeps_locator_urls() {
         manifest_digest: manifest_digest.clone(),
         cache_entry_id: "entry-cached-fast".to_string(),
         blobs: vec![boring_cache_cli::api::models::cache::BlobDescriptor {
-            digest: blob_digest.to_string(),
-            size_bytes: 2048,
+            digest: blob_digest.clone(),
+            size_bytes: blob_size,
         }],
         name: "cached-fast".to_string(),
         inserted_at: Instant::now(),
@@ -1668,10 +1673,10 @@ async fn test_cached_manifest_hit_keeps_locator_urls() {
         let mut locator = state.blob_locator.write().await;
         locator.insert(
             "cached-fast",
-            blob_digest,
+            &blob_digest,
             BlobLocatorEntry {
                 cache_entry_id: "entry-cached-fast".to_string(),
-                size_bytes: 2048,
+                size_bytes: blob_size,
                 download_url: Some(format!("{}/blobs/{}", server.url(), blob_digest)),
                 download_url_cached_at: Some(Instant::now()),
             },
@@ -1681,7 +1686,7 @@ async fn test_cached_manifest_hit_keeps_locator_urls() {
     let _blob_mock = server
         .mock("GET", format!("/blobs/{}", blob_digest).as_str())
         .with_status(200)
-        .with_body("cached-fast-blob")
+        .with_body(blob_content)
         .expect(1)
         .create_async()
         .await;
@@ -1719,17 +1724,24 @@ async fn test_blob_get_refreshes_stale_locator_url_after_manifest_return() {
     let (mut state, _home, _guard) = setup(&server).await;
     state.fail_on_cache_error = false;
 
-    let blob_a = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let blob_a_content = b"fresh-a";
+    let blob_a = cas_oci::prefixed_sha256_digest(blob_a_content);
     let blob_b = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     let index_json =
         br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:aaaa","size":100},"layers":[]}"#;
-    let pointer_bytes = make_pointer(index_json, &[(blob_a, 1024), (blob_b, 2048)]);
+    let pointer_bytes = make_pointer(
+        index_json,
+        &[
+            (blob_a.as_str(), blob_a_content.len() as u64),
+            (blob_b, 2048),
+        ],
+    );
     let tag = ref_tag("img", "latest");
     let batch_request = json!({
         "cache_entry_id": "entry-refresh",
         "verify_storage": true,
         "blobs": [
-            {"digest": blob_a, "size_bytes": 1024},
+            {"digest": blob_a, "size_bytes": blob_a_content.len() as u64},
             {"digest": blob_b, "size_bytes": 2048}
         ]
     });
@@ -1737,7 +1749,7 @@ async fn test_blob_get_refreshes_stale_locator_url_after_manifest_return() {
         "cache_entry_id": "entry-refresh",
         "verify_storage": true,
         "blobs": [
-            {"digest": blob_a, "size_bytes": 1024}
+            {"digest": blob_a, "size_bytes": blob_a_content.len() as u64}
         ]
     });
 
@@ -1825,7 +1837,7 @@ async fn test_blob_get_refreshes_stale_locator_url_after_manifest_return() {
     let _fresh_blob_mock = server
         .mock("GET", format!("/blobs/fresh/{}", blob_a).as_str())
         .with_status(200)
-        .with_body("fresh-a")
+        .with_body(blob_a_content)
         .expect(1)
         .create_async()
         .await;
@@ -2112,10 +2124,11 @@ async fn test_blob_unknown_without_manifest_returns_404() {
     let (state, _home, _guard) = setup(&server).await;
     let app = build_router(state);
 
+    let missing_digest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
     let response = tower::ServiceExt::oneshot(
         app,
         Request::builder()
-            .uri("/v2/my-cache/blobs/sha256:deadbeef")
+            .uri(format!("/v2/my-cache/blobs/{missing_digest}"))
             .body(Body::empty())
             .unwrap(),
     )
@@ -2188,6 +2201,166 @@ async fn test_blob_head_and_get_return_local_finalized_upload_session() {
     assert_eq!(get_response.status(), StatusCode::OK);
     assert_digest_etag(get_response.headers(), &blob_digest);
     let body = get_response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], blob_content);
+}
+
+#[tokio::test]
+async fn test_blob_get_range_returns_partial_content_from_local_upload_session() {
+    let server = Server::new_async().await;
+    let (state, temp_home, _guard) = setup(&server).await;
+
+    let blob_content = b"0123456789abcdef";
+    let blob_digest = cas_oci::prefixed_sha256_digest(blob_content);
+    let temp_path = temp_home.path().join("uploaded-range-blob");
+    tokio::fs::write(&temp_path, blob_content).await.unwrap();
+
+    {
+        let mut sessions = state.upload_sessions.write().await;
+        sessions.create(UploadSession {
+            id: "upload-range-local".to_string(),
+            name: "my-cache".to_string(),
+            temp_path,
+            write_lock: Arc::new(Mutex::new(())),
+            bytes_received: blob_content.len() as u64,
+            finalized_digest: Some(blob_digest.clone()),
+            finalized_size: Some(blob_content.len() as u64),
+            created_at: Instant::now(),
+        });
+    }
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .uri(format!("/v2/my-cache/blobs/{blob_digest}"))
+            .header("Range", "bytes=2-6")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_digest_etag(response.headers(), &blob_digest);
+    assert_eq!(response.headers().get("Accept-Ranges").unwrap(), "bytes");
+    assert_eq!(
+        response.headers().get("Content-Range").unwrap(),
+        &format!("bytes 2-6/{}", blob_content.len())
+    );
+    assert_eq!(response.headers().get("Content-Length").unwrap(), "5");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], &blob_content[2..=6]);
+}
+
+#[tokio::test]
+async fn test_blob_get_suffix_range_returns_partial_content_from_body_cache() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let blob_content = b"suffix-range-body";
+    let blob_digest = cas_oci::prefixed_sha256_digest(blob_content);
+    state
+        .blob_read_cache
+        .insert(&blob_digest, blob_content)
+        .await
+        .expect("insert blob body");
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .uri(format!("/v2/my-cache/blobs/{blob_digest}"))
+            .header("Range", "bytes=-4")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response.headers().get("Content-Range").unwrap(),
+        &format!(
+            "bytes {}-{}/{}",
+            blob_content.len() - 4,
+            blob_content.len() - 1,
+            blob_content.len()
+        )
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], &blob_content[blob_content.len() - 4..]);
+}
+
+#[tokio::test]
+async fn test_blob_get_invalid_range_returns_416() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let blob_content = b"range-error";
+    let blob_digest = cas_oci::prefixed_sha256_digest(blob_content);
+    state
+        .blob_read_cache
+        .insert(&blob_digest, blob_content)
+        .await
+        .expect("insert blob body");
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state.clone()),
+        Request::builder()
+            .uri(format!("/v2/my-cache/blobs/{blob_digest}"))
+            .header("Range", "bytes=99-100")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        response.headers().get("Content-Range").unwrap(),
+        &format!("bytes */{}", blob_content.len())
+    );
+
+    let diagnostics = state
+        .oci_engine_diagnostics
+        .metadata_hints(state.oci_hydration_policy.as_str());
+    assert_eq!(
+        diagnostics.get("oci_engine_range_invalid_responses"),
+        Some(&"1".to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_blob_get_if_range_mismatch_ignores_range() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let blob_content = b"if-range-body";
+    let blob_digest = cas_oci::prefixed_sha256_digest(blob_content);
+    let other_digest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    state
+        .blob_read_cache
+        .insert(&blob_digest, blob_content)
+        .await
+        .expect("insert blob body");
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .uri(format!("/v2/my-cache/blobs/{blob_digest}"))
+            .header("Range", "bytes=0-3")
+            .header("If-Range", format!("\"{other_digest}\""))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get("Content-Range").is_none());
+    assert_eq!(
+        response.headers().get("Content-Length").unwrap(),
+        &blob_content.len().to_string()
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], blob_content);
 }
 
@@ -2336,11 +2509,14 @@ async fn test_blob_get_after_manifest_resolution() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
 
-    let blob_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let blob_content = b"hello blob content";
+    let blob_digest = cas_oci::prefixed_sha256_digest(blob_content);
     let index_json =
         br#"{"schemaVersion":2,"config":{"digest":"sha256:cc","size":10},"layers":[]}"#;
-    let pointer_bytes = make_pointer(index_json, &[(blob_digest, blob_content.len() as u64)]);
+    let pointer_bytes = make_pointer(
+        index_json,
+        &[(blob_digest.as_str(), blob_content.len() as u64)],
+    );
     let tag = ref_tag("img", "v1");
 
     let _restore_mock = server
@@ -2423,7 +2599,7 @@ async fn test_blob_get_after_manifest_resolution() {
     .unwrap();
 
     assert_eq!(first_response.status(), StatusCode::OK);
-    assert_digest_etag(first_response.headers(), blob_digest);
+    assert_digest_etag(first_response.headers(), &blob_digest);
     assert_eq!(
         first_response
             .headers()
@@ -2458,7 +2634,7 @@ async fn test_blob_get_after_manifest_resolution() {
     .unwrap();
 
     assert_eq!(second_response.status(), StatusCode::OK);
-    assert_digest_etag(second_response.headers(), blob_digest);
+    assert_digest_etag(second_response.headers(), &blob_digest);
     let second_body = second_response
         .into_body()
         .collect()

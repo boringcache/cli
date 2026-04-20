@@ -1,7 +1,9 @@
 # ADR 0001: Engine Boundary Before Snapshot V2
 
-Status: accepted
+Status: accepted; superseded in part by ADR 0002 for native adapter shape
 Date: 2026-04-19
+
+2026-04-20 amendment: this ADR still stands for "do not let snapshot-v2 become a product rewrite." It no longer requires a universal engine trait across archive, OCI, Bazel, Turbo, Nx, sccache, and other native adapters. ADR 0002 is the controlling plan for adapter rewrites: keep adapter engines native and standardize the backend/session/data-plane contracts they use.
 
 ## Context
 
@@ -46,19 +48,32 @@ Shared model terms:
 - receipt: proof that object, manifest, or pointer work was uploaded and committed;
 - pack: future storage format for small-object compaction, not a requirement for the first boundary.
 
-## Required Interface Shape
+## Required Boundary Shape
 
-The boundary should keep CLI orchestration thin:
+The boundary should keep CLI/action orchestration thin without forcing every cache type into archive-shaped `save` and `restore` methods.
+
+The stable boundary is the platform contract:
+
+```text
+native adapter engine
+    -> shared Rails metadata/session APIs
+    -> direct object transfer client
+    -> shared telemetry and receipts
+```
+
+Each adapter may expose its own native operations internally. OCI speaks registry manifest/blob/upload/referrer operations. Bazel should preserve AC/CAS operations. Turbo and Nx should preserve their HTTP remote-cache APIs. sccache/WebDAV should preserve object-key behavior. Generic directory cache engines can still expose restore/save plans because that is their natural shape.
+
+A thin operational shell can exist for process orchestration:
 
 ```rust
-trait CacheEngine {
-    fn restore_plan(&self, input: RestoreInput) -> Result<RestorePlan>;
-    fn save_plan(&self, input: SaveInput) -> Result<SavePlan>;
-    fn diagnostics(&self) -> EngineDiagnostics;
+trait Mode {
+    fn prepare(&self) -> Result<()>;
+    fn run(&self) -> Result<()>;
+    fn finalize(&self) -> Result<()>;
 }
 ```
 
-Protocol engines may expose richer internal operations, but command entrypoints should depend on restore/save/proxy plans rather than duplicating transport and layout rules.
+That shell must not become the storage abstraction. In particular, do not require native adapters to implement a generic `save(paths)` / `restore(paths)` engine API.
 
 Every engine must report diagnostics that can explain misses and latency:
 
@@ -91,12 +106,12 @@ The benchmark harnesses remain valid acceptance tests. They should grow better d
 
 ## Migration Plan
 
-1. Define the engine model and diagnostics structs behind the current commands.
-2. Wrap current archive behavior as `ArchiveV1Engine` without changing public UX.
-3. Wrap existing OCI/file-CAS/proxy paths behind protocol engines where that reduces duplication.
-4. Build snapshot-v2 behind an explicit opt-in once the boundary exists.
-5. Add small-object packing and range-read support after snapshot roots and aliases are stable.
-6. Migrate generic filesystem commands to snapshot-v2 only after low-churn benchmarks prove it.
+1. Keep adapter engines native; do not pause OCI, Bazel, Turbo, Nx, or sccache work for a grand unified engine abstraction.
+2. Move duplicated Rails/Tigris/session/publish/receipt code into shared platform helpers only when the behavior is protocol-neutral.
+3. For OCI, keep moving registry truth out of HTTP handlers and KV-named helpers into `serve::engines::oci`, following ADR 0002.
+4. Add comparable telemetry across adapters: hit type, miss reason, local/remote bytes, upload/download counts, retry counts, and publish/finalize timings.
+5. Keep archive-v1 as the generic directory compatibility engine.
+6. Build snapshot-v2 as a later generic directory engine only after low-churn benchmarks prove it is worth switching.
 
 ## Acceptance Gates
 

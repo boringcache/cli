@@ -241,8 +241,12 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/serve/cas_publish.rs`
 - `src/serve/engines/mod.rs`
 - `src/serve/engines/oci/mod.rs`
+- `src/serve/engines/oci/blobs.rs`
 - `src/serve/engines/oci/manifests.rs`
 - `src/serve/engines/oci/present_blobs.rs`
+- `src/serve/engines/oci/prefetch.rs`
+- `src/serve/engines/oci/publish.rs`
+- `src/serve/engines/oci/uploads.rs`
 - `src/serve/http/mod.rs`
 - `src/serve/http/error.rs`
 - `src/serve/http/oci_route.rs`
@@ -252,7 +256,6 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/serve/http/handlers/blobs.rs`
 - `src/serve/http/handlers/manifest.rs`
 - `src/serve/http/handlers/uploads.rs`
-- `src/serve/engines/oci/uploads.rs`
 - `src/serve/runtime/mod.rs`
 - `src/serve/runtime/listener.rs`
 - `src/serve/runtime/maintenance.rs`

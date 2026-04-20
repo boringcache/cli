@@ -202,8 +202,11 @@ src/
       mod.rs
       oci/
         mod.rs
+        blobs.rs
         manifests.rs
         present_blobs.rs
+        prefetch.rs
+        publish.rs
         uploads.rs
     runtime/
       mod.rs

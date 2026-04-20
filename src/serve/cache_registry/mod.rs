@@ -190,7 +190,6 @@ mod sccache;
 mod turborepo;
 
 pub use error::RegistryError;
-pub(crate) use kv::BlobPrefetchStats;
 pub(crate) use kv::FlushResult;
 pub(crate) use kv::KV_PREFETCH_READINESS_TIMEOUT;
 pub(crate) use kv::cleanup_expired_kv_misses;
@@ -201,7 +200,6 @@ pub(crate) use kv::flush_kv_index_on_shutdown;
 pub(crate) use kv::kv_publish_tags_visible;
 pub(crate) use kv::poll_tag_version_loop;
 pub(crate) use kv::prefetch_manifest_blobs;
-pub(crate) use kv::prefetch_oci_blob_bodies;
 pub(crate) use kv::refresh_kv_index;
 pub(crate) use kv::try_schedule_flush;
 

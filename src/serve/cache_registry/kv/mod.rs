@@ -258,6 +258,9 @@ mod tests {
             ),
             blob_read_metrics: std::sync::Arc::new(BlobReadMetrics::new()),
             oci_body_metrics: std::sync::Arc::new(crate::serve::state::OciBodyMetrics::new()),
+            oci_engine_diagnostics: std::sync::Arc::new(
+                crate::serve::state::OciEngineDiagnostics::new(),
+            ),
             prefetch_metrics: std::sync::Arc::new(crate::serve::state::PrefetchMetrics::new()),
             blob_download_max_concurrency: 16,
             blob_download_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),

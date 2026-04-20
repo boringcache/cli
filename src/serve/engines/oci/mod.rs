@@ -1,5 +1,8 @@
+pub(crate) mod blobs;
 pub(crate) mod manifests;
+pub(crate) mod prefetch;
 mod present_blobs;
+pub(crate) mod publish;
 pub(crate) mod uploads;
 
 #[cfg(test)]

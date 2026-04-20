@@ -40,7 +40,6 @@ use crate::serve::state::{AppState, diagnostics_enabled};
 #[cfg(test)]
 use crate::serve::state::{OciManifestCacheEntry, UploadSession, digest_tag};
 
-const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
 const OCI_DEGRADED_HEADER: &str = "X-BoringCache-Cache-Degraded";
 const OCI_PREFETCH_STATE_HEADER: &str = "X-BoringCache-Prefetch-State";
 const OCI_PREFETCH_STATE_READY: &str = "ready";
@@ -49,7 +48,6 @@ const PROXY_PHASE_HEADER: &str = "X-BoringCache-Proxy-Phase";
 const PROXY_PUBLISH_STATE_HEADER: &str = "X-BoringCache-Publish-State";
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_POINTER_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
-const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn oci_request_log_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -65,6 +63,7 @@ struct ProxyStatusResponse {
     prefetch_error: Option<String>,
     startup_prefetch: BTreeMap<String, String>,
     oci_body: BTreeMap<String, String>,
+    oci_engine: BTreeMap<String, String>,
     shutdown_requested: bool,
     cache_entry_id: Option<String>,
     tags_visible: bool,
@@ -81,6 +80,9 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
     let prefetch_error = state.prefetch_error.read().await.clone();
     let startup_prefetch = state.prefetch_metrics.metadata_hints();
     let oci_body = state.oci_body_metrics.metadata_hints();
+    let oci_engine = state
+        .oci_engine_diagnostics
+        .metadata_hints(state.oci_hydration_policy.as_str());
     let shutdown_requested = state
         .shutdown_requested
         .load(std::sync::atomic::Ordering::Acquire);
@@ -134,6 +136,7 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
             prefetch_error,
             startup_prefetch,
             oci_body,
+            oci_engine,
             shutdown_requested,
             cache_entry_id,
             tags_visible,
@@ -209,7 +212,9 @@ pub async fn oci_dispatch(
             _ => Err(OciError::unsupported("method not allowed")),
         },
         OciRoute::Blob { name, digest } => match method {
-            Method::GET | Method::HEAD => get_blob(method, state.clone(), name, digest).await,
+            Method::GET | Method::HEAD => {
+                get_blob(method, headers, state.clone(), name, digest).await
+            }
             _ => Err(OciError::unsupported("method not allowed")),
         },
         OciRoute::BlobUploadStart { name } => match method {
@@ -418,6 +423,7 @@ mod tests {
             ),
             blob_read_metrics: Arc::new(BlobReadMetrics::new()),
             oci_body_metrics: Arc::new(crate::serve::state::OciBodyMetrics::new()),
+            oci_engine_diagnostics: Arc::new(crate::serve::state::OciEngineDiagnostics::new()),
             prefetch_metrics: Arc::new(crate::serve::state::PrefetchMetrics::new()),
             blob_download_max_concurrency: 16,
             blob_download_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
@@ -511,13 +517,27 @@ mod tests {
         assert!(degraded);
     }
 
+    #[test]
+    fn oci_success_rollup_with_non_success_response_is_error() {
+        let response = (StatusCode::RANGE_NOT_SATISFIABLE, Body::empty()).into_response();
+        let (result, degraded) = oci_success_rollup_result(&response, OCI_DEGRADED_HEADER);
+        assert_eq!(
+            result,
+            crate::serve::cache_registry::cache_ops::OpResult::Error
+        );
+        assert!(!degraded);
+    }
+
     #[tokio::test]
     async fn oci_dispatch_records_blob_miss_rollup_and_missed_key() {
         let state = test_state();
         let result = oci_dispatch(
             Method::GET,
             State(state.clone()),
-            Path("cache/blobs/sha256:deadbeef".to_string()),
+            Path(
+                "cache/blobs/sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    .to_string(),
+            ),
             Query(HashMap::new()),
             HeaderMap::new(),
             Body::empty(),
@@ -640,9 +660,15 @@ mod tests {
             .await
             .expect("insert prefetched blob");
 
-        let response = get_blob(Method::HEAD, state, "cache".to_string(), digest.clone())
-            .await
-            .expect("head should use prefetched local blob");
+        let response = get_blob(
+            Method::HEAD,
+            HeaderMap::new(),
+            state,
+            "cache".to_string(),
+            digest.clone(),
+        )
+        .await
+        .expect("head should use prefetched local blob");
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
