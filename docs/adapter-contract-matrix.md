@@ -20,3 +20,25 @@ This matrix records adapter behavior from primary sources. The implementation sh
 - If a source says a miss has a special non-error status, preserve it.
 - If a source says local file paths are part of the protocol, do not stream-only the implementation.
 - If an adapter source is silent, add tests against the real tool before making product policy.
+
+## Adapter Research Checklist
+
+Before changing an adapter engine:
+
+- Confirm the current primary source URLs still point at the relevant official docs or source code.
+- Extract the protocol root, object identities, alias model, read methods, write methods, miss statuses, retry behavior, and auth shape into the matrix row.
+- Add or update a mistake-ledger row for every product failure class the change is meant to prevent.
+- Write acceptance tests from source behavior before optimizing implementation details.
+- Keep shared code only where the behavior is protocol-neutral.
+
+## OCI / BuildKit Focus
+
+OCI is the active adapter pass. The goal is not generic "registry-like" behavior; the goal is the best BoringCache product path for Docker BuildKit registry cache.
+
+Implementation work should stay aligned with:
+
+- OCI Distribution Spec pull, push, mount, manifest, blob, HEAD, error, and referrers behavior.
+- OCI Image Spec descriptor graph rules for config, layers, image indexes, artifact manifests, and subject relationships.
+- Docker BuildKit registry cache import/export behavior through `--cache-to type=registry` and `--cache-from type=registry`, including `mode=max`, OCI media types, image-manifest vs image-index output, and cache refs separate from final image refs.
+
+The OCI engine should own OCI-specific correctness and performance. Shared runtime and BoringCache API plumbing should not grow OCI branches unless the branch is truly protocol-neutral.

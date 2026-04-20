@@ -15,3 +15,13 @@ This ledger captures recent OCI/BuildKit failure classes as implementation guard
 ## Next Ledger Updates
 
 Add one row for every future OCI fix before or with the code change. A row should name the official source, the corrected invariant, the test that prevents regression, and whether the risk is CLI, web, action, or user workflow.
+
+## Research Sources For Active OCI Work
+
+Use the official sources for every OCI engine change:
+
+- OCI Distribution Spec for registry endpoints, push/pull order, upload sessions, mount semantics, error codes, HEAD behavior, and referrers fallback.
+- OCI Image Spec for descriptor graph shape, config descriptors, layer descriptors, image indexes, artifact manifests, and subject relationships.
+- Docker BuildKit registry cache docs for the product path: `--cache-to type=registry`, `--cache-from type=registry`, `mode=min|max`, OCI media types, image manifest/index output, and cache refs separated from final image refs.
+
+Do not treat the existing handler layout as an authority. It is only evidence of current behavior.

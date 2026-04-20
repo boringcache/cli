@@ -38,6 +38,44 @@ Do not start from the existing proxy as the contract. Start from each adapter's 
 
 The proxy route layer should parse HTTP or subprocess requests and call an engine. It should not decide protocol correctness, publish safety, or alias visibility.
 
+## Research Discipline
+
+Each adapter rewrite starts with the primary source for that adapter, not with the current BoringCache implementation:
+
+1. Read the official protocol or tool documentation and update `docs/adapter-contract-matrix.md`.
+2. Capture recent local failure modes in an adapter mistake ledger.
+3. Write the engine acceptance list from source-backed success, miss, and error behavior.
+4. Only then move code behind the engine boundary.
+5. Keep benchmarks and diagnostics tied to the source-backed contract, not to incidental current behavior.
+
+For OCI, the controlling sources are the OCI Distribution Spec, OCI Image Spec, and Docker BuildKit registry cache documentation. BuildKit registry cache is the product path we optimize first, so the registry engine must behave like a real OCI registry for the subset BuildKit uses: manifest graphs, blob bodies, upload sessions, cross-repository mount, referrers, digest references, and cache-image import/export refs.
+
+For later adapters, repeat the same discipline. sccache is WebDAV first, Bazel is AC/CAS first, Gradle and Maven are HTTP object-cache first, Turbo and Nx are their own APIs first, and Go cacheprog is subprocess JSON first.
+
+## Engine Boundary Rule
+
+Move all OCI protocol semantics and hot-path decisions into `src/serve/engines/oci`. Do not move generic runtime plumbing just to make the tree look pure.
+
+Belongs in the OCI engine:
+
+- registry request object model and typed operations;
+- upload session state machine, range validation, digest finalize, empty finalize reuse, and mount `201`/`202` semantics;
+- manifest content-type rules, descriptor extraction, child manifest traversal, digest-reference validation, referrers index behavior, and missing-descriptor errors;
+- blob HEAD/GET locality, body cache, read-through, remote URL refresh, range behavior, and digest/size proof;
+- publish plan construction: save, blob upload selection from `PresentBlob`, pointer upload, confirm, alias/referrer publish, and cleanup;
+- OCI diagnostics: proof sources, local vs remote body bytes, graph expansion, publish timings, miss causes, and hydration policy.
+
+Stays shared outside the OCI engine:
+
+- auth and token handling;
+- server runtime, listener, readiness, shutdown, and maintenance loops;
+- tag resolver and registry-root derivation where it is not protocol-specific;
+- BoringCache API client DTOs and transport;
+- transfer client, upload URL calls, receipt commit helpers, and observability primitives;
+- generic HTTP routing glue that turns Axum requests and responses into typed engine calls.
+
+The end state is not "some OCI helpers in an engine". The end state is "handlers are glue; the OCI engine owns OCI truth". The migration stays incremental so every step remains testable.
+
 ## Adapter Order
 
 1. OCI/BuildKit registry cache.
@@ -78,13 +116,13 @@ From Docker/BuildKit docs:
 
 Create an `OciEngine` in increments rather than one branch:
 
-- `route`: parse registry paths into typed requests.
-- `uploads`: upload sessions, offsets, digest finalize, mount result semantics.
+- `route`: parse registry paths into typed requests without deciding protocol truth.
+- `uploads`: upload sessions, offsets, digest finalize, empty finalize reuse, mount result semantics.
 - `present_blobs`: descriptor availability proof before manifest publish.
-- `manifests`: content type, digest, descriptor traversal, manifest cache.
-- `blobs`: local body cache, read-through, HEAD/GET semantics.
-- `publish`: BoringCache save, blob upload receipts, pointer upload, confirm, aliases.
-- `referrers`: subject descriptor index and filter response.
+- `manifests`: content type, digest, descriptor traversal, child expansion, manifest cache.
+- `blobs`: local body cache, read-through, HEAD/GET semantics, range/digest/size proof.
+- `publish`: BoringCache save, blob upload selection, blob receipts, pointer upload, confirm, aliases.
+- `referrers`: subject descriptor index, fallback tag shape, and filter response.
 - `diagnostics`: source proof, miss cause, publish timing, hydration policy, local vs remote body bytes.
 
 The first implementation invariant is:
@@ -100,6 +138,19 @@ Allowed sources:
 - backend-confirmed storage-visible blob.
 
 If a descriptor is not proven through one of those sources, the engine must return an OCI-shaped missing-blob error and not call BoringCache publish.
+
+## OCI Step Plan
+
+The OCI pass should land in small commits in this order:
+
+1. Source-proof boundary: `PresentBlob` proves every descriptor and drives upload job selection. Done in the first increment.
+2. Upload engine: move start upload, PATCH, close PUT, empty finalize reuse, cross-repository mount, and `416` behavior from handlers into `serve::engines::oci::uploads`.
+3. Manifest engine: move descriptor extraction, content-type resolution, child manifest expansion, digest references, referrers descriptor construction, and missing-descriptor errors into `serve::engines::oci::manifests`.
+4. Blob engine: move HEAD/GET locality, blob body cache reads, remote URL refresh, range handling, and digest/size verification into `serve::engines::oci::blobs`.
+5. Publish engine: move save/pointer/confirm/alias/referrer orchestration into `serve::engines::oci::publish`, with handlers only parsing request bodies and returning responses.
+6. Diagnostics: add an `OciEngineDiagnostics` value with proof source counts, local vs remote reads, graph expansion count, publish timings, miss causes, and hydration state.
+7. BuildKit acceptance: run cold, warm, proxy restart, metadata-only, bodies-before-ready, bodies-background, and random body graph registry E2E.
+8. Backend contract check: touch Rails only if the BuildKit E2E proves the CLI needs backend-visible truth stronger than `check_blobs_verified`.
 
 ## Web Contract
 
