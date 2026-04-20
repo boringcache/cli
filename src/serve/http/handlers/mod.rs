@@ -676,14 +676,137 @@ mod tests {
             .expect("insert prefetched blob");
 
         let mut params = HashMap::new();
-        params.insert("mount".to_string(), digest);
+        params.insert("mount".to_string(), digest.clone());
         params.insert("from".to_string(), "cache".to_string());
 
-        let response = start_upload(state, "cache".to_string(), params, Body::empty())
+        let response = start_upload(state.clone(), "cache".to_string(), params, Body::empty())
             .await
             .expect("start upload mount should reuse prefetched blob");
 
         assert_eq!(response.status(), StatusCode::CREATED);
+
+        let sessions = state.upload_sessions.read().await;
+        let mounted = sessions
+            .find_by_name_and_digest("cache", &digest)
+            .expect("mount should create publish session");
+        assert_eq!(mounted.finalized_size, Some(payload.len() as u64));
+        assert_eq!(
+            tokio::fs::read(&mounted.temp_path)
+                .await
+                .expect("mounted copy"),
+            payload
+        );
+    }
+
+    #[tokio::test]
+    async fn start_upload_mount_from_existing_session_stages_target_session() {
+        let state = test_state();
+        let payload = b"source-repo-mount";
+        let digest = cas_oci::prefixed_sha256_digest(payload);
+        let source_path = write_temp_upload_file(payload).await;
+
+        {
+            let mut sessions = state.upload_sessions.write().await;
+            sessions.create(UploadSession {
+                id: "source-session".to_string(),
+                name: "source".to_string(),
+                temp_path: source_path.clone(),
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
+                bytes_received: payload.len() as u64,
+                finalized_digest: Some(digest.clone()),
+                finalized_size: Some(payload.len() as u64),
+                created_at: Instant::now(),
+            });
+        }
+
+        let mut params = HashMap::new();
+        params.insert("mount".to_string(), digest.clone());
+        params.insert("from".to_string(), "source".to_string());
+
+        let response = start_upload(state.clone(), "cache".to_string(), params, Body::empty())
+            .await
+            .expect("start upload mount should stage target session");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let target_path = {
+            let sessions = state.upload_sessions.read().await;
+            let mounted = sessions
+                .find_by_name_and_digest("cache", &digest)
+                .expect("mount should stage target session");
+            assert_eq!(mounted.finalized_size, Some(payload.len() as u64));
+            mounted.temp_path.clone()
+        };
+        assert_eq!(
+            tokio::fs::read(&target_path).await.expect("mounted copy"),
+            payload
+        );
+
+        let _ = tokio::fs::remove_file(&source_path).await;
+        let _ = tokio::fs::remove_file(&target_path).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_start_upload_mounts_stage_one_target_session() {
+        let state = test_state();
+        let payload = b"prefetched-concurrent-mount";
+        let digest = cas_oci::prefixed_sha256_digest(payload);
+        state
+            .blob_read_cache
+            .insert(&digest, payload)
+            .await
+            .expect("insert prefetched blob");
+
+        let mut tasks = Vec::new();
+        for _ in 0..12 {
+            let state = state.clone();
+            let digest = digest.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut params = HashMap::new();
+                params.insert("mount".to_string(), digest);
+                params.insert("from".to_string(), "source".to_string());
+                start_upload(state, "cache".to_string(), params, Body::empty()).await
+            }));
+        }
+
+        for task in tasks {
+            let response = task
+                .await
+                .expect("mount task should complete")
+                .expect("mount request should succeed");
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        let target_path = {
+            let sessions = state.upload_sessions.read().await;
+            let mounted = sessions
+                .find_by_name_and_digest("cache", &digest)
+                .expect("mount should stage target session");
+            assert_eq!(mounted.finalized_size, Some(payload.len() as u64));
+            mounted.temp_path.clone()
+        };
+        assert_eq!(
+            tokio::fs::read(&target_path).await.expect("mounted copy"),
+            payload
+        );
+
+        let mounts_dir = state.oci_upload_temp_dir.join("mounts");
+        let mut mounted_files = 0;
+        let mut entries = tokio::fs::read_dir(&mounts_dir)
+            .await
+            .expect("mount temp dir");
+        while let Some(entry) = entries.next_entry().await.expect("mount temp entry") {
+            if entry
+                .file_type()
+                .await
+                .expect("mount temp file type")
+                .is_file()
+            {
+                mounted_files += 1;
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+        assert_eq!(mounted_files, 1);
     }
 
     #[tokio::test]

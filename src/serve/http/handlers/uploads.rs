@@ -68,7 +68,7 @@ pub(super) async fn start_upload(
             )));
         }
 
-        if has_non_empty_local_blob(&state, mount_digest).await {
+        if stage_mounted_blob_session(&state, &name, mount_digest).await? {
             let location = format!("/v2/{name}/blobs/{mount_digest}");
             let mut headers = HeaderMap::new();
             insert_header(&mut headers, "Location", &location)?;
@@ -148,6 +148,136 @@ pub(super) async fn start_upload(
     insert_header(&mut headers, "Content-Length", "0")?;
 
     Ok((StatusCode::ACCEPTED, headers, Body::empty()).into_response())
+}
+
+async fn stage_mounted_blob_session(
+    state: &AppState,
+    name: &str,
+    digest: &str,
+) -> Result<bool, OciError> {
+    {
+        let sessions = state.upload_sessions.read().await;
+        if sessions.find_by_name_and_digest(name, digest).is_some() {
+            return Ok(true);
+        }
+    }
+
+    if let Some(handle) = existing_mounted_blob_handle(state, name, digest).await {
+        let session_id = format!("oci-mount-{}", uuid::Uuid::new_v4());
+        let temp_path = materialize_mounted_blob(state, digest, &handle).await?;
+        let size_bytes = handle.size_bytes();
+
+        let mut sessions = state.upload_sessions.write().await;
+        if sessions.find_by_name_and_digest(name, digest).is_some() {
+            drop(sessions);
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Ok(true);
+        }
+
+        sessions.create(UploadSession {
+            id: session_id,
+            name: name.to_string(),
+            temp_path,
+            write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            bytes_received: size_bytes,
+            finalized_digest: Some(digest.to_string()),
+            finalized_size: Some(size_bytes),
+            created_at: std::time::Instant::now(),
+        });
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+async fn existing_mounted_blob_handle(
+    state: &AppState,
+    name: &str,
+    digest: &str,
+) -> Option<BlobReadHandle> {
+    {
+        let sessions = state.upload_sessions.read().await;
+        if let Some(session) = sessions.find_by_name_and_digest(name, digest) {
+            let size_bytes = session.finalized_size.unwrap_or(session.bytes_received);
+            if size_bytes > 0 {
+                return Some(BlobReadHandle::from_file(
+                    session.temp_path.clone(),
+                    size_bytes,
+                ));
+            }
+        }
+        if let Some(session) = sessions.find_by_digest(digest) {
+            let size_bytes = session.finalized_size.unwrap_or(session.bytes_received);
+            if size_bytes > 0 {
+                return Some(BlobReadHandle::from_file(
+                    session.temp_path.clone(),
+                    size_bytes,
+                ));
+            }
+        }
+    }
+
+    state.blob_read_cache.get_handle(digest).await
+}
+
+async fn materialize_mounted_blob(
+    state: &AppState,
+    digest: &str,
+    handle: &BlobReadHandle,
+) -> Result<std::path::PathBuf, OciError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    let digest_hex = crate::cas_oci::digest_hex_component(digest)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            crate::cas_oci::sha256_hex(format!("{digest}:{}", uuid::Uuid::new_v4()).as_bytes())
+        });
+    let temp_dir = state.oci_upload_temp_dir.join("mounts");
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to create mount temp dir: {e}")))?;
+    let temp_path = temp_dir.join(format!(
+        "blob-{}-{}",
+        &digest_hex[..digest_hex.len().min(16)],
+        uuid::Uuid::new_v4()
+    ));
+
+    let mut source = tokio::fs::File::open(handle.path()).await.map_err(|e| {
+        OciError::internal(format!(
+            "Failed to open mounted blob source {}: {e}",
+            handle.path().display()
+        ))
+    })?;
+    if handle.offset() > 0 {
+        source
+            .seek(std::io::SeekFrom::Start(handle.offset()))
+            .await
+            .map_err(|e| OciError::internal(format!("Failed to seek mounted blob source: {e}")))?;
+    }
+
+    let mut dest = tokio::fs::File::create(&temp_path)
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to create mounted blob copy: {e}")))?;
+    let mut limited = source.take(handle.size_bytes());
+    let copied = tokio::io::copy(&mut limited, &mut dest)
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to copy mounted blob: {e}")))?;
+    if copied != handle.size_bytes() {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(OciError::internal(format!(
+            "Mounted blob copy was incomplete for {digest}: expected {} bytes, copied {}",
+            handle.size_bytes(),
+            copied
+        )));
+    }
+    dest.flush()
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to flush mounted blob copy: {e}")))?;
+    dest.sync_data()
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to sync mounted blob copy: {e}")))?;
+
+    Ok(temp_path)
 }
 
 pub(super) async fn get_upload_status(
