@@ -1,6 +1,6 @@
 # ADR 0002: Proxy Engine Plan B From Adapter Sources
 
-Status: proposed
+Status: accepted
 Date: 2026-04-20
 
 ## Context
@@ -155,13 +155,25 @@ The OCI pass should land in small commits in this order:
 
 1. Source-proof boundary: `PresentBlob` proves every descriptor and drives upload job selection. Done in the first increment.
 2. Upload engine: move start upload, PATCH, close PUT, empty finalize reuse, cross-repository mount, and `416` behavior from handlers into `serve::engines::oci::uploads`. Done in the second increment.
-3. OCI/KV path audit: before moving manifests, list every `cache_registry/kv` path touched by OCI and decide whether it is protocol-neutral substrate or OCI manifest-graph behavior that belongs in the engine.
-4. Manifest engine: move descriptor extraction, content-type resolution, child manifest expansion, digest references, referrers descriptor construction, and missing-descriptor errors into `serve::engines::oci::manifests`.
-5. Blob engine: move HEAD/GET locality, blob body cache reads, remote URL refresh, range handling, and digest/size verification into `serve::engines::oci::blobs`.
-6. Publish engine: move save/pointer/confirm/alias/referrer orchestration into `serve::engines::oci::publish`, with handlers only parsing request bodies and returning responses.
-7. Diagnostics: add an `OciEngineDiagnostics` value with proof source counts, local vs remote reads, graph expansion count, publish timings, miss causes, and hydration state.
+3. OCI/KV path audit: before moving manifests, list every `cache_registry/kv` path touched by OCI and decide whether it is protocol-neutral substrate or OCI manifest-graph behavior that belongs in the engine. Done in `docs/oci-kv-path-audit.md`.
+4. Manifest engine: move descriptor extraction, content-type resolution, child manifest expansion, digest references, referrers descriptor construction, and missing-descriptor errors into `serve::engines::oci::manifests`. Done for the current manifest publish/read path.
+5. Blob engine: move HEAD/GET locality, blob body cache reads, remote URL refresh, range handling, and digest/size verification into `serve::engines::oci::blobs`. Done, including ranged GET, invalid ranges, `If-Range`, digest/size verification, and read-through hydration.
+6. Publish engine: move save/pointer/confirm/alias/referrer orchestration into `serve::engines::oci::publish`, with handlers only parsing request bodies and returning responses. Done for the OCI publish path.
+7. Diagnostics: add an `OciEngineDiagnostics` value with proof source counts, local vs remote reads, graph expansion count, publish timings, miss causes, and hydration state. Done, exposed through status snapshots and cache-op metadata hints.
 8. BuildKit acceptance: run cold, warm, proxy restart, default strict body hydration, hidden metadata-only/background controls, and random body graph registry E2E.
 9. Backend contract check: touch Rails only if the BuildKit E2E proves the CLI needs backend-visible truth stronger than `check_blobs_verified`.
+
+## Post-Release Telemetry Contract
+
+OCI diagnostics are part of the feature contract, not debug leftovers. Every BuildKit acceptance run must leave enough evidence to explain whether performance came from local manifest locality, local body locality, remote read-through, or publish timing.
+
+The required surfaces are:
+
+- `/_boringcache/status` exposes `startup_prefetch`, `oci_body`, and `oci_engine` maps.
+- `oci_engine` includes proof source counts, local and remote body reads, served and fetched bytes, range requests, partial and invalid range responses, graph expansion counts, publish phase counts and durations, miss causes, and hydration policy.
+- Cache-op session metadata merges OCI body, OCI engine, startup prefetch, and blob-read hints before records are flushed so production telemetry can be grouped by workspace, tool, phase, scenario, and session.
+- E2E artifacts include `proxy-status-*.json` snapshots plus `request-metrics-summary.env`; the summary must promote OCI engine keys so post-release analysis does not require manual JSON inspection.
+- Docker BuildKit E2E defaults to strict selected-ref body hydration. `metadata-only` and `bodies-background` stay hidden controls for targeted comparisons, not user-facing product modes.
 
 ## Web Contract
 
@@ -198,7 +210,7 @@ For OCI specifically:
 - OCI responses that represent immutable digest-addressed content include digest-valued `ETag` headers.
 - Upload digest verification hashes streaming request bodies on one-shot paths and only rereads files when resumable state makes that necessary.
 - Transfer clients keep HTTP/2 pooling and adaptive windows on by default; any change to pool sizing or protocol fallback must be benchmarked against BuildKit cache import/export.
-- Blob engine extraction must add ranged `GET` acceptance before claiming full blob-path parity.
+- Blob engine ranged `GET` behavior remains covered before claiming full blob-path parity.
 - BuildKit E2E proves cold, warm, restart, default strict body hydration, hidden metadata-only/background controls, and random-body graph behavior.
 - Manifest publish refuses descriptors that cannot be traced to a named source.
 - Blob body locality is measured separately from manifest/index locality.

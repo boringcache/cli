@@ -76,6 +76,10 @@ After each run, summarize `cache-registry-request-metrics.jsonl` with `ci/e2e/re
 - local blob-read hit ratio
 - local vs remote bytes served
 - local vs remote p50/p95 read latency
+- OCI engine local vs remote blob reads
+- OCI proof source counts and miss causes
+- OCI range request, partial response, and invalid range counts
+- OCI publish phase counts and durations
 - preload-index p95
 - prefetch-cycle p95
 
@@ -85,12 +89,9 @@ For restart-path measurements, use `E2E_BLOB_CACHE_SCOPE=per-proxy` in the Docke
 
 ## Immediate next tuning targets
 
-1. Validate that strict selected-ref OCI body hydration shifts BuildKit warm reads from `remote_fetch` to `local_cache`.
-2. Measure object-size distributions and read locality before changing any non-OCI adapter hydration ordering.
-3. Add request-shaped warming only where real protocol traffic proves it helps.
-4. Inspect OCI blob and manifest fetch counts before changing any registry behavior.
-5. For OCI manifest PUT, validate referenced config and layer blobs before publish so missing content returns `400 MANIFEST_BLOB_UNKNOWN` instead of degrading into an internal publish failure.
-6. Tighten OCI resumable upload offset handling to match Distribution-spec `416 Requested Range Not Satisfiable` behavior for stale or out-of-order chunk ranges.
-7. Keep metadata-only and background OCI body modes as benchmark controls, not normal workflow choices.
-8. Measure the new OCI manifest and blob inflight dedupe under concurrent BuildKit and direct-OCI read load before changing blob-download semaphore policy.
-9. Keep the OCI manifest-contract and BuildKit registry-cache E2E legs covering spec-sensitive manifest, referrers, blob-upload, and warm-start behavior as OCI proxy changes land.
+1. Run the Docker BuildKit acceptance matrix with the default strict body hydration path.
+2. Re-run the same graph with hidden `metadata-only` and `bodies-background` controls only to compare readiness latency against remote read-through.
+3. Use `E2E_PAYLOAD_MODE=random` and a larger layer count for the final pass so digest/size verification and range behavior are tested under real byte pressure.
+4. Compare `request_metrics_oci_engine_blob_local_hit_ratio`, remote fetched bytes, range counts, proof sources, miss causes, and publish phase durations before changing registry behavior.
+5. Measure object-size distributions and read locality before changing any non-OCI adapter hydration ordering.
+6. Keep the OCI manifest-contract and BuildKit registry-cache E2E legs covering spec-sensitive manifest, referrers, blob-upload, and warm-start behavior as OCI proxy changes land.

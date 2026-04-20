@@ -9,6 +9,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
 - OCI selected-ref body hydration no longer uses the KV body-prefetch helper. Startup still has one scheduling path, but selected OCI refs delegate to `serve::engines::oci::prefetch` and body reads hydrate through the OCI blob engine. This keeps KV adapter bottlenecks or compatibility choices from shaping OCI behavior.
 - OCI publish orchestration moved to `serve::engines::oci::publish`: save, tracked blob uploads from `PresentBlob` proofs, pointer upload, confirm, alias binding, publish phase timing, and session cleanup. `serve::cas_publish` remains the shared protocol-neutral sequence helper.
 - Added `OciEngineDiagnostics` for proof-source counts, graph expansion, local vs remote blob reads, range/read-through details, publish phase timings, miss causes, and hydration policy. `/_boringcache/status` now exposes these alongside existing OCI body metrics.
+- The request metrics summarizer now promotes `oci_engine` status keys into `request-metrics-summary.env`, so BuildKit E2E artifacts can be studied after release without hand-parsing proxy status JSON.
 - Acceptance is intentionally still pending: run focused range/status tests and then the BuildKit cold/warm/restart/hydration/random-body matrix before claiming full OCI blob-path parity.
 
 ## 2026-04-19 - adapter-by-adapter local pass and engine direction

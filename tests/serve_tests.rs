@@ -2326,6 +2326,32 @@ async fn test_blob_get_invalid_range_returns_416() {
         diagnostics.get("oci_engine_range_invalid_responses"),
         Some(&"1".to_string())
     );
+
+    let status_response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .uri("/_boringcache/status")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status_response.status(), StatusCode::OK);
+    let body = status_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        status["oci_engine"]["oci_engine_range_invalid_responses"],
+        "1"
+    );
+    assert_eq!(
+        status["oci_engine"]["oci_engine_hydration_policy"],
+        "metadata-only"
+    );
 }
 
 #[tokio::test]

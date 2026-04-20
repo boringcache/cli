@@ -19,7 +19,7 @@ BUILDKIT_INSECURE_REGISTRY="${BUILDKIT_INSECURE_REGISTRY:-auto}"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_STATUS_HOST="${PROXY_STATUS_HOST:-127.0.0.1}"
 PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
-OCI_HYDRATION="${OCI_HYDRATION:-metadata-only}"
+OCI_HYDRATION="${OCI_HYDRATION:-bodies-before-ready}"
 E2E_LAYER_COUNT="${E2E_LAYER_COUNT:-12}"
 E2E_PAYLOAD_MB="${E2E_PAYLOAD_MB:-6}"
 E2E_PAYLOAD_MODE="${E2E_PAYLOAD_MODE:-zero}"
@@ -90,6 +90,13 @@ case "$E2E_BLOB_CACHE_SCOPE" in
   shared|per-proxy) ;;
   *)
     echo "ERROR: E2E_BLOB_CACHE_SCOPE must be shared or per-proxy"
+    exit 1
+    ;;
+esac
+case "$OCI_HYDRATION" in
+  metadata-only|bodies-before-ready|bodies-background) ;;
+  *)
+    echo "ERROR: OCI_HYDRATION must be metadata-only, bodies-before-ready, or bodies-background"
     exit 1
     ;;
 esac

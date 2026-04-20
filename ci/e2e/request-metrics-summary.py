@@ -5,6 +5,65 @@ from pathlib import Path
 import sys
 
 
+STATUS_NUMERIC_SECTIONS = ("startup_prefetch", "oci_body", "oci_engine")
+STATUS_POLICY_FIELDS = (
+    ("startup_prefetch", "startup_prefetch_oci_hydration"),
+    ("oci_engine", "oci_engine_hydration_policy"),
+)
+STATUS_SNAPSHOT_KEYS = (
+    "startup_prefetch_oci_total_unique_blobs",
+    "startup_prefetch_oci_body_inserted",
+    "startup_prefetch_oci_body_failures",
+    "startup_prefetch_oci_body_cold_blobs",
+    "startup_prefetch_oci_body_duration_ms",
+    "oci_body_local_hits",
+    "oci_body_remote_fetches",
+    "oci_body_local_bytes",
+    "oci_body_remote_bytes",
+    "oci_body_local_duration_ms",
+    "oci_body_remote_duration_ms",
+    "oci_engine_proof_total",
+    "oci_engine_proof_bytes",
+    "oci_engine_proof_upload_session",
+    "oci_engine_proof_mounted_session",
+    "oci_engine_proof_manifest_reference_session",
+    "oci_engine_proof_local_body_cache",
+    "oci_engine_proof_remote_storage",
+    "oci_engine_blob_local_reads",
+    "oci_engine_blob_remote_reads",
+    "oci_engine_blob_served_bytes",
+    "oci_engine_blob_remote_fetched_bytes",
+    "oci_engine_blob_read_throughs",
+    "oci_engine_range_requests",
+    "oci_engine_range_partial_responses",
+    "oci_engine_range_invalid_responses",
+    "oci_engine_graph_expansions",
+    "oci_engine_graph_child_manifests",
+    "oci_engine_graph_descriptors",
+    "oci_engine_publish_total_count",
+    "oci_engine_publish_total_duration_ms",
+    "oci_engine_publish_save_count",
+    "oci_engine_publish_save_duration_ms",
+    "oci_engine_publish_blobs_count",
+    "oci_engine_publish_blobs_duration_ms",
+    "oci_engine_publish_pointer_count",
+    "oci_engine_publish_pointer_duration_ms",
+    "oci_engine_publish_confirm_count",
+    "oci_engine_publish_confirm_duration_ms",
+    "oci_engine_publish_alias_count",
+    "oci_engine_publish_alias_duration_ms",
+    "oci_engine_publish_referrers_count",
+    "oci_engine_publish_referrers_duration_ms",
+    "oci_engine_miss_blob_locator",
+    "oci_engine_miss_remote_blob",
+    "oci_engine_miss_manifest",
+    "oci_engine_miss_download_url",
+)
+OCI_ENGINE_SUMMARY_KEYS = tuple(
+    key for key in STATUS_SNAPSHOT_KEYS if key.startswith("oci_engine_")
+)
+
+
 def parse_details(details):
     if not isinstance(details, str) or not details.strip():
         return {}
@@ -98,24 +157,23 @@ def collect_status_snapshots(metrics_path, status_args):
             "policy": "unknown",
             "values": {},
         }
-        startup = payload.get("startup_prefetch")
-        if isinstance(startup, dict):
-            policy = startup.get("startup_prefetch_oci_hydration")
+
+        for section, policy_key in STATUS_POLICY_FIELDS:
+            status_section = payload.get(section)
+            if not isinstance(status_section, dict):
+                continue
+            policy = status_section.get(policy_key)
             if isinstance(policy, str) and policy.strip():
                 policy = policy.strip()
                 policies.add(policy)
-                snapshot["policy"] = env_slug(policy) or "unknown"
-            for key, value in startup.items():
-                if not isinstance(key, str):
-                    continue
-                parsed = parse_u64(value)
-                if parsed is not None:
-                    numeric_max[key] = max(parsed, numeric_max.get(key, 0))
-                    snapshot["values"][key] = parsed
+                if snapshot["policy"] == "unknown":
+                    snapshot["policy"] = env_slug(policy) or "unknown"
 
-        oci_body = payload.get("oci_body")
-        if isinstance(oci_body, dict):
-            for key, value in oci_body.items():
+        for section in STATUS_NUMERIC_SECTIONS:
+            status_section = payload.get(section)
+            if not isinstance(status_section, dict):
+                continue
+            for key, value in status_section.items():
                 if not isinstance(key, str):
                     continue
                 parsed = parse_u64(value)
@@ -222,6 +280,14 @@ def main() -> int:
     oci_body_local_hit_ratio = (
         100.0 if oci_body_total_reads == 0 else (100.0 * oci_body_local_hits / oci_body_total_reads)
     )
+    oci_engine_blob_local_reads = status_values.get("oci_engine_blob_local_reads", 0)
+    oci_engine_blob_remote_reads = status_values.get("oci_engine_blob_remote_reads", 0)
+    oci_engine_blob_reads_total = oci_engine_blob_local_reads + oci_engine_blob_remote_reads
+    oci_engine_blob_local_hit_ratio = (
+        100.0
+        if oci_engine_blob_reads_total == 0
+        else (100.0 * oci_engine_blob_local_reads / oci_engine_blob_reads_total)
+    )
 
     print(f"request_metrics_total={len(records)}")
     print(f"request_metrics_failures={failures}")
@@ -286,25 +352,17 @@ def main() -> int:
         values = snapshot["values"]
         print(f"request_metrics_status_snapshot_{index}_label={snapshot['label']}")
         print(f"request_metrics_status_snapshot_{index}_oci_hydration={snapshot['policy']}")
-        for key in (
-            "startup_prefetch_oci_total_unique_blobs",
-            "startup_prefetch_oci_body_inserted",
-            "startup_prefetch_oci_body_failures",
-            "startup_prefetch_oci_body_cold_blobs",
-            "startup_prefetch_oci_body_duration_ms",
-            "oci_body_local_hits",
-            "oci_body_remote_fetches",
-            "oci_body_local_bytes",
-            "oci_body_remote_bytes",
-            "oci_body_local_duration_ms",
-            "oci_body_remote_duration_ms",
-        ):
+        for key in STATUS_SNAPSHOT_KEYS:
             print(
                 f"request_metrics_status_snapshot_{index}_{key}="
                 f"{values.get(key, 0)}"
             )
     print(
         "request_metrics_startup_prefetch_oci_hydration="
+        f"{','.join(status_snapshots['policies']) if status_snapshots['policies'] else 'unknown'}"
+    )
+    print(
+        "request_metrics_oci_engine_hydration_policy="
         f"{','.join(status_snapshots['policies']) if status_snapshots['policies'] else 'unknown'}"
     )
     print(
@@ -367,6 +425,10 @@ def main() -> int:
         "request_metrics_oci_body_remote_duration_ms="
         f"{status_values.get('oci_body_remote_duration_ms', 0)}"
     )
+    print(f"request_metrics_oci_engine_blob_reads_total={oci_engine_blob_reads_total}")
+    print(f"request_metrics_oci_engine_blob_local_hit_ratio={oci_engine_blob_local_hit_ratio:.2f}")
+    for key in OCI_ENGINE_SUMMARY_KEYS:
+        print(f"request_metrics_{key}={status_values.get(key, 0)}")
     return 0
 
 
