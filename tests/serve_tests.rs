@@ -4839,6 +4839,237 @@ async fn test_put_upload_accepts_empty_body_when_blob_already_exists_remote() {
 }
 
 #[tokio::test]
+async fn test_manifest_put_uses_remote_proof_after_empty_finalize_reuse() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.fail_on_cache_error = false;
+
+    let blob_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let _empty_finalize_check_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true,
+            "blobs": [{
+                "digest": blob_digest,
+                "size_bytes": 0
+            }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": blob_digest,
+                    "exists": true
+                }]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let start_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v2/my-cache/blobs/uploads/")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(start_response.status(), StatusCode::ACCEPTED);
+    let uuid = start_response
+        .headers()
+        .get("Docker-Upload-UUID")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let app = build_router(state.clone());
+    let finalize_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!(
+                "/v2/my-cache/blobs/uploads/{uuid}?digest={blob_digest}"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(finalize_response.status(), StatusCode::CREATED);
+
+    let descriptor_size = 10u64;
+    let _descriptor_check_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true,
+            "blobs": [{
+                "digest": blob_digest,
+                "size_bytes": descriptor_size
+            }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": blob_digest,
+                    "exists": true
+                }]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let primary_tag = scoped_ref_tag("my-cache", "main");
+    let primary_save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": primary_tag,
+                "blob_count": 1,
+                "blob_total_size_bytes": descriptor_size
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": primary_tag,
+                "cache_entry_id": "entry-primary",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": descriptor_size,
+                "cas_layout": "oci-v1",
+                "manifest_upload_url": format!("{}/uploads/entry-primary-manifest", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let blob_stage_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/stage")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary",
+            "blobs": [{
+                "digest": blob_digest,
+                "size_bytes": descriptor_size
+            }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_urls": [],
+                "already_present": [blob_digest]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let pointer_upload_mock = server
+        .mock("PUT", "/uploads/entry-primary-manifest")
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let primary_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&primary_tag)
+    );
+    let primary_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&primary_tag)
+    );
+    let primary_pointer_mock = server
+        .mock("GET", primary_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "3",
+                "cache_entry_id": "entry-primary",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let primary_confirm_mock = server
+        .mock("PUT", primary_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "3")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "3",
+                "status": "ok",
+                "cache_entry_id": "entry-primary"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let manifest_body = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": blob_digest,
+            "size": descriptor_size
+        },
+        "layers": []
+    })
+    .to_string();
+
+    let app = build_router(state);
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v2/my-cache/manifests/main")
+            .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+            .body(Body::from(manifest_body))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    primary_save_mock.assert_async().await;
+    blob_stage_mock.assert_async().await;
+    pointer_upload_mock.assert_async().await;
+    primary_pointer_mock.assert_async().await;
+    primary_confirm_mock.assert_async().await;
+}
+
+#[tokio::test]
 async fn test_blob_proxy_returns_error_on_storage_failure() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;

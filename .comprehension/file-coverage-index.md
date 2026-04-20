@@ -241,6 +241,7 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/serve/cas_publish.rs`
 - `src/serve/engines/mod.rs`
 - `src/serve/engines/oci/mod.rs`
+- `src/serve/engines/oci/manifests.rs`
 - `src/serve/engines/oci/present_blobs.rs`
 - `src/serve/http/mod.rs`
 - `src/serve/http/error.rs`

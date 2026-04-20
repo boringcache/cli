@@ -202,6 +202,7 @@ src/
       mod.rs
       oci/
         mod.rs
+        manifests.rs
         present_blobs.rs
         uploads.rs
     runtime/
@@ -288,7 +289,7 @@ Most of the root-level namespace split is in place now, so the remaining work is
 - `src/api/models/` is already split by response family, so future API work should prefer adding files there instead of growing `mod.rs`.
 - `src/optimize/` and `src/platform/` are already real namespaces, not placeholders.
 - `src/serve/runtime/`, `src/serve/http/`, `src/serve/cache_registry/`, and `src/serve/state/` are the durable runtime namespaces; the next work is to keep their remaining hot files thin.
-- `src/serve/engines/` is the incremental engine-boundary namespace. `oci/present_blobs.rs` owns descriptor proof before manifest publish, and `oci/uploads.rs` owns the OCI blob upload session state machine: start, PATCH, final PUT, mount `201`/`202`, empty finalize reuse, stale offset `416`, and streaming digest verification for one-shot upload bodies.
+- `src/serve/engines/` is the incremental engine-boundary namespace. `oci/manifests.rs` owns pure OCI manifest descriptor, content-type, subject/referrers, and child-manifest classification rules; `oci/present_blobs.rs` owns descriptor proof before manifest publish; and `oci/uploads.rs` owns the OCI blob upload session state machine: start, PATCH, final PUT, mount `201`/`202`, empty finalize reuse, stale offset `416`, and streaming digest verification for one-shot upload bodies.
 - `src/serve/http/handlers/` now owns the split OCI manifest, blob, and upload HTTP glue, while `handlers/mod.rs` still carries shared dispatch and proxy-status orchestration.
 - `src/serve/cache_registry/kv/` now has separate `blob_read.rs`, `prefetch.rs`, and `index.rs` helpers, while `kv/mod.rs` still carries shared KV policy, lookup-flight coordination, and pending-publish handoff types.
 - `src/telemetry.rs` remains a thin front module, while `src/progress/mod.rs` fronts the progress namespace and `src/observability/` remains the request/event metrics namespace.
@@ -372,6 +373,7 @@ src/
       mod.rs
       oci/
         mod.rs
+        manifests.rs
         present_blobs.rs
         uploads.rs
     http/
@@ -428,6 +430,7 @@ src/
 
 | Current path | Target path | Status |
 | --- | --- | --- |
+| `src/serve/http/handlers/manifest.rs` descriptor extraction, content-type, subject/referrers, and child-manifest classification | `src/serve/engines/oci/manifests.rs` | started |
 | `src/serve/http/handlers/manifest.rs` descriptor availability and upload-session proof logic | `src/serve/engines/oci/present_blobs.rs` | started |
 | `src/serve/http/handlers/uploads.rs` upload session state machine | `src/serve/engines/oci/uploads.rs` | done |
 | `src/serve/mod.rs` | `src/serve/runtime/{mod,listener,maintenance,shutdown}.rs` | done |

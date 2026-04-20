@@ -2,7 +2,7 @@ use crate::api::models::cache::BlobDescriptor;
 use crate::api::{ApiClient, CacheResolutionEntry};
 use crate::progress::TransferProgress;
 use crate::telemetry::StorageMetrics;
-use crate::transfer::send_transfer_request_with_retry;
+use crate::transfer::send_manifest_request_with_retry;
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -55,7 +55,7 @@ where
         .ok_or_else(|| anyhow!("No manifest URL in response"))?;
     let transfer_client = api_client.transfer_client().clone();
 
-    let response = send_transfer_request_with_retry("CAS index fetch", || async {
+    let response = send_manifest_request_with_retry("CAS index fetch", || async {
         Ok(transfer_client.get(manifest_url).send().await?)
     })
     .await?

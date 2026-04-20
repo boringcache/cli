@@ -148,6 +148,9 @@ async fn local_session_source(
         return Ok(None);
     };
     let actual_size = session.finalized_size.unwrap_or(session.bytes_received);
+    if actual_size == 0 && descriptor.size_bytes > 0 {
+        return Ok(None);
+    }
     validate_size(descriptor, actual_size, "upload session")?;
     Ok(Some((
         source_for_session_id(&session.id),

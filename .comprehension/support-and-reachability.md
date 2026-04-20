@@ -20,7 +20,7 @@ This file answers two questions:
 | Progress and UI | lifecycle commands, workspace commands, status/reporting | `support-primary` | `src/progress/mod.rs`, `src/progress/**`, `src/ui.rs`, `src/ui/summary.rs` | Real shared presentation layer, not dead code |
 | Observability | API request metrics and proxy runtime events | `internal-only` | `src/observability/mod.rs`, `request_metrics.rs`, `src/api/client/metrics.rs` | Operational support, especially for proxy/runtime diagnosis |
 | Telemetry metrics models | save/restore/archive transport reporting | `support-primary` | `src/telemetry/model.rs`, `src/telemetry/operation.rs` | `SaveMetrics` and `RestoreMetrics` are active inputs in lifecycle code |
-| Retry config | HTTP transport retries | `support-primary` | `src/retry_resume/mod.rs`, `src/retry_resume/config.rs`, `src/retry_resume/policy.rs`, call sites in `src/api/client/http.rs` | Retry logic is active and real |
+| Retry config | HTTP transport retries | `support-primary` | `src/retry_resume/mod.rs`, `src/retry_resume/config.rs`, `src/retry_resume/policy.rs`, `src/cache/transfer.rs`, call sites in `src/api/client/http.rs` | Retry logic is active and real. Manifest/pointer object fetches opt into a short `404` retry window for storage read-after-write lag; blob body misses keep the normal non-404 retry policy. |
 
 ## Reachability notes
 

@@ -6,7 +6,7 @@ use crate::api::{ApiClient, CacheResolutionEntry};
 use crate::progress::{ProgressSession, Summary};
 use crate::signing::policy::verify_restore_signature;
 use crate::telemetry::StorageMetrics;
-use crate::transfer::send_transfer_request_with_retry;
+use crate::transfer::send_manifest_request_with_retry;
 use crate::ui;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -64,7 +64,7 @@ pub(super) async fn process_restore_archive(
 
     let manifest_step = session.start_step("Fetch manifest".to_string(), None)?;
 
-    let manifest_future = send_transfer_request_with_retry("Manifest fetch", || async {
+    let manifest_future = send_manifest_request_with_retry("Manifest fetch", || async {
         Ok(client.get(&manifest_url).send().await?)
     });
     let archive_head_future = client.head(&archive_url).send();

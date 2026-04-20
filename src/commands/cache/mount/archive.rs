@@ -9,7 +9,7 @@ use crate::ci_detection::detect_ci_environment;
 use crate::command_support::save_support::archive_cache_root_digest;
 use crate::manifest::{EntryType, ManifestBuilder};
 use crate::signing::policy::verify_restore_signature;
-use crate::transfer::send_transfer_request_with_retry;
+use crate::transfer::{send_manifest_request_with_retry, send_transfer_request_with_retry};
 use crate::ui;
 
 use super::RestoreAction;
@@ -76,7 +76,7 @@ pub(super) async fn initial_restore_archive(
 
     let client = api_client.transfer_client();
 
-    let manifest_future = send_transfer_request_with_retry("Manifest fetch", || async {
+    let manifest_future = send_manifest_request_with_retry("Manifest fetch", || async {
         Ok(client.get(manifest_url).send().await?)
     });
     let archive_head_future = client.head(archive_url).send();

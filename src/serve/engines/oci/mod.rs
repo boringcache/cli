@@ -1,3 +1,4 @@
+pub(crate) mod manifests;
 mod present_blobs;
 pub(crate) mod uploads;
 
