@@ -186,6 +186,7 @@ This ADR does not require a web API change for the first CLI increment. If a lat
 Before replacing an adapter path:
 
 - Its row exists in `docs/adapter-contract-matrix.md`.
+- All applicable rows in `docs/adapter-contract-matrix.md#known-rewrite-findings` are closed by tests/code or named as residual risk in the handoff.
 - Its recent mistakes are captured in `docs/oci-mistake-ledger.md` or an adapter-specific ledger.
 - Tests cover the official success and miss status codes.
 - Diagnostics include the source of every cache hit and the reason for every important miss.
@@ -193,6 +194,7 @@ Before replacing an adapter path:
 For OCI specifically:
 
 - Upload start, PATCH, closing PUT, stale range `416`, cross-repo mount `201/202`, HEAD/GET, missing manifest blobs, digest refs, and referrers are covered.
+- Upload range parsing accepts the client spellings BoringCache supports, including Docker-style bare upload ranges and RFC-style `bytes=` byte ranges, while still enforcing exact offsets.
 - OCI responses that represent immutable digest-addressed content include digest-valued `ETag` headers.
 - Upload digest verification hashes streaming request bodies on one-shot paths and only rereads files when resumable state makes that necessary.
 - Transfer clients keep HTTP/2 pooling and adaptive windows on by default; any change to pool sizing or protocol fallback must be benchmarked against BuildKit cache import/export.
@@ -200,6 +202,7 @@ For OCI specifically:
 - BuildKit E2E proves cold, warm, restart, metadata-only, bodies-before-ready, bodies-background, and random-body graph behavior.
 - Manifest publish refuses descriptors that cannot be traced to a named source.
 - Blob body locality is measured separately from manifest/index locality.
+- Generic KV code remains substrate only; OCI manifest graphs, upload sessions, range behavior, referrers, and digest response semantics move into `serve::engines::oci`.
 
 ## Non-Goals
 

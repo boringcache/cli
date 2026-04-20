@@ -32,6 +32,19 @@ Before changing an adapter engine:
 - Write acceptance tests from source behavior before optimizing implementation details.
 - Keep shared code only where the behavior is protocol-neutral.
 
+## Known Rewrite Findings
+
+Carry these findings into the relevant adapter rewrite plan. A rewrite is not done until every applicable row is either closed by tests and code, or left as an explicit residual risk.
+
+| Adapter / area | Finding | Rewrite owner | Required guardrail |
+| --- | --- | --- | --- |
+| OCI / blob reads | Blob pulls still ignore `Range` and return full `200` bodies. | `serve::engines::oci::blobs` extraction | Add valid range, suffix range, `If-Range`, invalid range `416`, `Content-Range`, `Accept-Ranges`, digest, and size proof tests before claiming blob-path parity. |
+| OCI / upload resume | Upload offset parsing accepts Docker-style bare ranges but not RFC-style `bytes=` forms. | `serve::engines::oci::uploads` | Accept equivalent `Range` / `Content-Range` byte spellings while still rejecting stale or out-of-order offsets with `416`. |
+| OCI / engine boundary | OCI must not be treated as generic KV. Registry truth is manifest/blob/session/referrer shaped. | OCI/KV path audit before manifest and blob engine moves | Classify every touched `cache_registry/kv` path as protocol-neutral substrate or OCI behavior that belongs in the engine. |
+| Shared KV adapters | KV is justified for object-cache adapters, but only as substrate. | sccache, Gradle, Maven, Turbo, Nx, Go, and Bazel HTTP rewrites | Keep key identity, status codes, auth shape, retry/miss behavior, and binary payload ownership in the adapter row; do not add archive or OCI assumptions to shared KV. |
+| Example selection | The comparison implementation must match the adapter protocol. | Per-adapter research step | Use BuildKit/containerd for OCI, sccache's own backend behavior for sccache, BuildBuddy-style behavior for Bazel AC/CAS, Develocity-style behavior for Gradle, official Turbo/Nx APIs for Turbo/Nx, Apache Maven extension behavior for Maven, and Go cacheprog source for Go. |
+| Transfer hot path | HTTP/2 and pool settings are part of adapter performance, not incidental transport defaults. | Transfer client/runtime work | Benchmark BuildKit import/export before changing pool sizing, h2 fallback, adaptive windows, connection limits, or compression behavior. |
+
 ## Implementation Examples To Audit
 
 | Adapter | Examples to audit before rewrite | Compatibility and performance questions |
