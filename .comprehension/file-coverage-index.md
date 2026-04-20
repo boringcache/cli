@@ -242,6 +242,7 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/serve/engines/mod.rs`
 - `src/serve/engines/oci/mod.rs`
 - `src/serve/engines/oci/blobs.rs`
+- `src/serve/engines/oci/manifest_cache.rs`
 - `src/serve/engines/oci/manifests.rs`
 - `src/serve/engines/oci/present_blobs.rs`
 - `src/serve/engines/oci/prefetch.rs`

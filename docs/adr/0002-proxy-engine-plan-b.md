@@ -130,6 +130,7 @@ Create an `OciEngine` in increments rather than one branch:
 - `uploads`: upload sessions, offsets, digest finalize, empty finalize reuse, mount result semantics.
 - `present_blobs`: descriptor availability proof before manifest publish.
 - `manifests`: content type, digest, descriptor traversal, child expansion, manifest cache.
+- `manifest_cache`: OCI-specific manifest cache entry shape and TTL.
 - `blobs`: local body cache, read-through, HEAD/GET semantics, range/digest/size proof.
 - `publish`: BoringCache save, blob upload selection, blob receipts, pointer upload, confirm, aliases.
 - `referrers`: subject descriptor index, fallback tag shape, and filter response.
@@ -160,7 +161,7 @@ The OCI pass should land in small commits in this order:
 5. Blob engine: move HEAD/GET locality, blob body cache reads, remote URL refresh, range handling, and digest/size verification into `serve::engines::oci::blobs`. Done, including ranged GET, invalid ranges, `If-Range`, digest/size verification, and read-through hydration.
 6. Publish engine: move save/pointer/confirm/alias/referrer orchestration into `serve::engines::oci::publish`, with handlers only parsing request bodies and returning responses. Done for the OCI publish path.
 7. Diagnostics: add an `OciEngineDiagnostics` value with proof source counts, local vs remote reads, graph expansion count, publish timings, miss causes, and hydration state. Done, exposed through status snapshots, cache-op metadata hints, and E2E summary artifacts.
-8. BuildKit acceptance: run cold, warm, proxy restart, default metadata-only read-through, hidden background/strict controls, and random body graph registry E2E. Done locally before real-project replay.
+8. BuildKit acceptance: run cold, warm, proxy restart, default metadata-only read-through, hidden background/strict controls, and random body graph registry E2E. Done locally before real-project replay; release gating must keep the Docker BuildKit and OCI manifest-contract E2E legs present and green.
 9. Backend contract check: touch Rails only if the BuildKit E2E proves the CLI needs backend-visible truth stronger than `check_blobs_verified`.
 
 ## sccache / WebDAV Step Plan
@@ -186,6 +187,7 @@ The required surfaces are:
 - Cache-op session metadata merges OCI body, OCI engine, startup prefetch, and blob-read hints before records are flushed so production telemetry can be grouped by workspace, tool, phase, scenario, and session.
 - E2E artifacts include `proxy-status-*.json` or real-run `status-*.json` snapshots plus `request-metrics-summary.env`; the summary must promote OCI engine keys so post-release analysis does not require manual JSON inspection.
 - Docker BuildKit E2E defaults to metadata-only selected-ref hydration, so BuildKit fetches bodies on demand through the proxy. `bodies-background` and `bodies-before-ready` stay hidden controls for targeted comparisons, not user-facing product modes. Under metadata-only, `oci_body_remote_fetches` is the expected client-after-ready read-through signal; under background/strict modes, `oci_engine_blob_remote_reads` can include intentional hydration.
+- CLI release gating checks that the Docker BuildKit and OCI manifest-contract E2E jobs were present and successful in the prerequisite E2E workflow run, so OCI coverage stays attached to release readiness instead of only ad hoc benchmark review.
 
 ## Web Contract
 

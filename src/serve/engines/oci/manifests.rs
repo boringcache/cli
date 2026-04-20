@@ -6,15 +6,13 @@ use std::time::{Duration, Instant};
 use crate::api::models::cache::BlobDescriptor;
 use crate::cas_oci;
 use crate::serve::engines::oci::blobs::{self, BlobPrefetchStats};
+use crate::serve::engines::oci::manifest_cache::{OCI_MANIFEST_CACHE_TTL, OciManifestCacheEntry};
 use crate::serve::engines::oci::publish::{PersistManifestEntryInput, persist_manifest_entry};
 use crate::serve::engines::oci::uploads::has_non_empty_local_blob;
 use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
 use crate::serve::http::oci_tags::{scoped_restore_tags, scoped_save_tag, scoped_write_scope_tag};
-use crate::serve::state::{
-    AppState, BlobLocatorEntry, OCI_MANIFEST_CACHE_TTL, OciManifestCacheEntry, UploadSession,
-    digest_tag,
-};
+use crate::serve::state::{AppState, BlobLocatorEntry, UploadSession, digest_tag};
 
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_POINTER_FETCH_TIMEOUT: Duration = Duration::from_secs(60);

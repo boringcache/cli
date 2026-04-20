@@ -1,4 +1,5 @@
 pub(crate) mod blobs;
+pub(crate) mod manifest_cache;
 pub(crate) mod manifests;
 pub(crate) mod prefetch;
 mod present_blobs;

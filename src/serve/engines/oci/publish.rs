@@ -5,11 +5,12 @@ use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
 use crate::cas_transport::upload_payload;
 use crate::serve::engines::oci::PresentBlob;
+use crate::serve::engines::oci::manifest_cache::OciManifestCacheEntry;
 use crate::serve::http::error::OciError;
 use crate::serve::http::oci_tags::{
     AliasBinding, AliasTagManifest, alias_tags_for_manifest, bind_alias_tag,
 };
-use crate::serve::state::{AppState, OciManifestCacheEntry, digest_tag};
+use crate::serve::state::{AppState, digest_tag};
 
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);

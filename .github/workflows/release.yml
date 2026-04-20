@@ -151,6 +151,20 @@ jobs:
             fi
           done
 
+          E2E_JOBS_JSON="$(fetch_jobs_json "${E2E_RUN_ID}")"
+          for prefix in "E2E / Registry / Docker BuildKit" "E2E / Registry / OCI Manifest Contract"; do
+            TOTAL="$(printf '%s' "${E2E_JOBS_JSON}" | jq --arg p "${prefix}" '[.jobs[] | select((.name // "") | startswith($p))] | length')"
+            OK="$(printf '%s' "${E2E_JOBS_JSON}" | jq --arg p "${prefix}" '[.jobs[] | select(((.name // "") | startswith($p)) and ((.conclusion // "")=="success"))] | length')"
+            if [[ "${TOTAL}" -eq 0 ]]; then
+              echo "Required E2E job missing for prefix: ${prefix}"
+              exit 1
+            fi
+            if [[ "${TOTAL}" -ne "${OK}" ]]; then
+              echo "Required E2E job not successful for prefix: ${prefix} (${OK}/${TOTAL})"
+              exit 1
+            fi
+          done
+
   # Build CLI binaries for multiple platforms
   build-cli:
     name: Build CLI - ${{ matrix.name }}

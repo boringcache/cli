@@ -25,6 +25,8 @@ pub use kv_published_index::*;
 pub use metrics::*;
 pub use upload_sessions::*;
 
+pub use crate::serve::engines::oci::manifest_cache::OciManifestCacheEntry;
+
 pub fn diagnostics_enabled() -> bool {
     log::log_enabled!(log::Level::Debug)
 }

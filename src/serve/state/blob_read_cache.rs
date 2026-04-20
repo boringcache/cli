@@ -1,6 +1,5 @@
 use super::*;
 
-pub const OCI_MANIFEST_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 const BLOB_READ_CACHE_DIR_ENV: &str = "BORINGCACHE_BLOB_READ_CACHE_DIR";
 const BLOB_READ_CACHE_DIR_NAME: &str = "boringcache-blob-cache";
 const BLOB_READ_SEGMENTS_DIR_NAME: &str = "segments";
@@ -14,16 +13,6 @@ const BLOB_READ_FLIGHT_WAIT_WARN_THRESHOLD: std::time::Duration = std::time::Dur
 const BLOB_READ_FLIGHT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
 const BLOB_READ_FLIGHT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
-
-pub struct OciManifestCacheEntry {
-    pub index_json: Vec<u8>,
-    pub content_type: String,
-    pub manifest_digest: String,
-    pub cache_entry_id: String,
-    pub blobs: Vec<BlobDescriptor>,
-    pub name: String,
-    pub inserted_at: Instant,
-}
 
 struct BlobReadInFlightGuard {
     key: String,
