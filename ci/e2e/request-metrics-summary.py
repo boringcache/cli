@@ -10,6 +10,7 @@ STATUS_POLICY_FIELDS = (
     ("startup_prefetch", "startup_prefetch_oci_hydration"),
     ("oci_engine", "oci_engine_hydration_policy"),
 )
+STATUS_SNAPSHOT_PATTERNS = ("proxy-status-*.json", "status-*.json")
 STATUS_SNAPSHOT_KEYS = (
     "startup_prefetch_oci_total_unique_blobs",
     "startup_prefetch_oci_body_inserted",
@@ -129,12 +130,22 @@ def find_status_paths(metrics_path, explicit_paths):
     for raw_path in candidates:
         path = Path(raw_path)
         if path.is_dir():
-            for candidate in sorted(path.rglob("proxy-status-*.json")):
-                add(candidate)
+            for pattern in STATUS_SNAPSHOT_PATTERNS:
+                for candidate in sorted(path.rglob(pattern)):
+                    add(candidate)
         elif path.is_file():
             add(path)
 
     return paths
+
+
+def status_snapshot_label(path, count):
+    stem = path.stem
+    for prefix in ("proxy-status-", "status-"):
+        if stem.startswith(prefix):
+            stem = stem[len(prefix) :]
+            break
+    return env_slug(stem) or f"snapshot_{count}"
 
 
 def collect_status_snapshots(metrics_path, status_args):
@@ -153,7 +164,7 @@ def collect_status_snapshots(metrics_path, status_args):
 
         count += 1
         snapshot = {
-            "label": env_slug(path.stem.replace("proxy-status-", "")) or f"snapshot_{count}",
+            "label": status_snapshot_label(path, count),
             "policy": "unknown",
             "values": {},
         }
