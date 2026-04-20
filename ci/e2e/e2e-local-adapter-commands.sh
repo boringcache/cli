@@ -12,6 +12,7 @@ API_URL="${BORINGCACHE_API_URL:-http://${RAILS_HOST}:${RAILS_PORT}}"
 LOG_ROOT="${LOG_ROOT:-${TMPDIR:-/tmp}/boringcache-local-adapter-e2e}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 LOG_DIR="${LOG_DIR:-${LOG_ROOT}/${RUN_ID}}"
+RAILS_PIDFILE="${RAILS_PIDFILE:-${LOG_DIR}/rails-server.pid}"
 TMP_DIR="${LOG_DIR}/tmp"
 SUMMARY_FILE="${LOG_DIR}/summary.txt"
 LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-gradle,maven,turbo,nx,go,bazel,sccache}"
@@ -82,6 +83,7 @@ cleanup() {
     kill "${RAILS_PID}" >/dev/null 2>&1 || true
     wait "${RAILS_PID}" >/dev/null 2>&1 || true
   fi
+  rm -f "${RAILS_PIDFILE}" >/dev/null 2>&1 || true
 }
 
 dump_logs_on_error() {
@@ -297,6 +299,7 @@ start_local_rails() {
   (
     cd "${WEB_DIR}"
     PORT="${RAILS_PORT}" mise exec -- bin/rails server -b "${RAILS_HOST}" -p "${RAILS_PORT}" \
+      --pid "${RAILS_PIDFILE}" \
       > "${LOG_DIR}/rails-server.log" 2>&1
   ) &
   RAILS_PID=$!
