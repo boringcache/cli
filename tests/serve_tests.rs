@@ -6472,6 +6472,209 @@ async fn test_bazel_put_rejects_digest_key_mismatch() {
 }
 
 #[tokio::test]
+async fn test_bazel_ac_put_keeps_action_result_payload_opaque() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/ac/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .body(Body::from("action-result-metadata-is-not-cas-bytes"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_bazel_cas_get_ignores_pending_digest_mismatch() {
+    let server = Server::new_async().await;
+    let (state, home, _guard) = setup(&server).await;
+
+    let key = cas_file::prefixed_sha256_digest(b"expected-bazel-cas-payload")
+        .strip_prefix("sha256:")
+        .expect("sha256 prefix")
+        .to_string();
+    let mismatched_payload = b"mismatched-pending-bazel-cas-payload";
+    let mismatched_digest = cas_file::prefixed_sha256_digest(mismatched_payload);
+    let temp_path = home.path().join("mismatched-pending-bazel-cas.bin");
+    tokio::fs::write(&temp_path, mismatched_payload)
+        .await
+        .expect("write pending blob");
+    {
+        let mut pending = state.kv_pending.write().await;
+        pending.insert(
+            format!("bazel_cas/{key}"),
+            BlobDescriptor {
+                digest: mismatched_digest,
+                size_bytes: mismatched_payload.len() as u64,
+            },
+            temp_path,
+        );
+    }
+    {
+        let mut published = state.kv_published_index.write().await;
+        published.set_empty();
+    }
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/cas/{key}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_bazel_cas_get_ignores_published_digest_mismatch() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let key = cas_file::prefixed_sha256_digest(b"expected-published-bazel-cas-payload")
+        .strip_prefix("sha256:")
+        .expect("sha256 prefix")
+        .to_string();
+    let mismatched_payload = b"mismatched-published-bazel-cas-payload";
+    let mismatched_digest = cas_file::prefixed_sha256_digest(mismatched_payload);
+    let blob_mock = server
+        .mock("GET", "/mismatched-published-bazel-cas")
+        .expect(0)
+        .with_status(200)
+        .with_body(mismatched_payload)
+        .create_async()
+        .await;
+
+    {
+        let mut published = state.kv_published_index.write().await;
+        published.update(
+            std::collections::HashMap::from([(
+                format!("bazel_cas/{key}"),
+                BlobDescriptor {
+                    digest: mismatched_digest.clone(),
+                    size_bytes: mismatched_payload.len() as u64,
+                },
+            )]),
+            vec![BlobDescriptor {
+                digest: mismatched_digest.clone(),
+                size_bytes: mismatched_payload.len() as u64,
+            }],
+            "entry-bazel-mismatched-published".to_string(),
+        );
+        published.set_download_url(
+            mismatched_digest,
+            format!("{}/mismatched-published-bazel-cas", server.url()),
+        );
+    }
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/cas/{key}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    blob_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_bazel_cas_get_ignores_backend_index_digest_mismatch() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let key = cas_file::prefixed_sha256_digest(b"expected-backend-bazel-cas-payload")
+        .strip_prefix("sha256:")
+        .expect("sha256 prefix")
+        .to_string();
+    let mismatched_payload = b"mismatched-backend-bazel-cas-payload";
+    let mismatched_digest = cas_file::prefixed_sha256_digest(mismatched_payload);
+    let pointer_bytes = make_kv_pointer(&[(
+        format!("bazel_cas/{key}"),
+        mismatched_digest.clone(),
+        mismatched_payload.len() as u64,
+    )]);
+    let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
+
+    let restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "registry",
+                "status": "hit",
+                "cache_entry_id": "entry-bazel-mismatched-backend",
+                "manifest_url": format!("{}/pointer-bazel-mismatched-backend", server.url()),
+                "manifest_root_digest": pointer_digest,
+                "storage_mode": "cas",
+                "cas_layout": "file-v1",
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let pointer_mock = server
+        .mock("GET", "/pointer-bazel-mismatched-backend")
+        .expect(1)
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .create_async()
+        .await;
+    let download_urls_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .expect(0)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": mismatched_digest,
+                    "url": format!("{}/mismatched-backend-bazel-cas", server.url())
+                }],
+                "missing": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/cas/{key}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    restore_mock.assert_async().await;
+    pointer_mock.assert_async().await;
+    download_urls_mock.assert_async().await;
+}
+
+#[tokio::test]
 async fn test_bazel_rejects_unsupported_method() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
