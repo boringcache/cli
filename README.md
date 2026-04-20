@@ -10,7 +10,7 @@ cd your-project
 boringcache onboard
 ```
 
-`boringcache onboard` authenticates the CLI, chooses a workspace, writes `.boringcache.toml` when it can, and lines up the same cache names across local runs, Dockerfiles, and GitHub Actions.
+`boringcache onboard` authenticates the CLI, chooses a workspace, writes `.boringcache.toml` when it can, and lines up the same cache names across local runs, Docker builds, and GitHub Actions.
 
 If you want to start sign-in from the terminal by email, use `boringcache onboard --email you@example.com`. For a brand-new account, pass `--name` and `--username` too.
 

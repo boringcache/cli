@@ -10,7 +10,9 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use self::blobs::get_blob;
 #[cfg(test)]
@@ -46,8 +48,6 @@ const OCI_PREFETCH_STATE_READY: &str = "ready";
 const OCI_PREFETCH_STATE_WARMING: &str = "warming";
 const PROXY_PHASE_HEADER: &str = "X-BoringCache-Proxy-Phase";
 const PROXY_PUBLISH_STATE_HEADER: &str = "X-BoringCache-Publish-State";
-const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
-const OCI_POINTER_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn oci_request_log_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();

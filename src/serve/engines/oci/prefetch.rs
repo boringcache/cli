@@ -26,7 +26,7 @@ pub(crate) async fn prefetch_selected_refs(
     let hydrate_before_ready = oci_hydration_policy.waits_before_ready();
 
     for (name, reference) in oci_prefetch_refs {
-        match crate::serve::http::handlers::manifest::prefetch_manifest_reference(
+        match crate::serve::engines::oci::manifests::prefetch_manifest_reference(
             state,
             &name,
             &reference,
@@ -96,7 +96,7 @@ pub(crate) async fn prefetch_selected_refs(
             let mut failures = 0usize;
             let mut cold_blobs = 0usize;
             for (name, reference) in background_body_refs {
-                match crate::serve::http::handlers::manifest::prefetch_manifest_reference(
+                match crate::serve::engines::oci::manifests::prefetch_manifest_reference(
                     &background_state,
                     &name,
                     &reference,

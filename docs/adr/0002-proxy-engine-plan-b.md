@@ -163,6 +163,18 @@ The OCI pass should land in small commits in this order:
 8. BuildKit acceptance: run cold, warm, proxy restart, default metadata-only read-through, hidden background/strict controls, and random body graph registry E2E. Done locally before real-project replay.
 9. Backend contract check: touch Rails only if the BuildKit E2E proves the CLI needs backend-visible truth stronger than `check_blobs_verified`.
 
+## sccache / WebDAV Step Plan
+
+2026-04-20 status: sccache/WebDAV is the next adapter pass after OCI cleanup. The first source reread is captured in `docs/adapter-contract-matrix.md` and `docs/sccache-mistake-ledger.md`.
+
+Land the pass in small increments:
+
+1. Source-backed contract: keep the matrix row current for WebDAV endpoint/root, key-prefix/auth shape, normalized keys, `.sccache_check`, `MKCOL`, read-miss behavior, and opaque payload bytes.
+2. Mistake ledger: add a ledger row before or with each fix so route changes are tied to sccache/OpenDAL behavior, not generic KV convenience.
+3. Route acceptance: keep existing `MKCOL`, `.sccache_check`, `GET`/`HEAD`, `PUT`, unsupported-method, exact-key, and concurrent-read tests green before moving code.
+4. Engine boundary: introduce a `serve::engines::sccache` module only when it owns WebDAV-specific truth. Leave generic object upload/download substrate in KV/shared helpers where behavior remains protocol-neutral.
+5. E2E acceptance: run the required sccache tool E2E and compare sccache stats with cache-op records so BoringCache hit/miss accounting stays aligned with the tool.
+
 ## Post-Release Telemetry Contract
 
 OCI diagnostics are part of the feature contract, not debug leftovers. Every BuildKit acceptance run must leave enough evidence to explain whether performance came from local manifest locality, local body locality, remote read-through, or publish timing.

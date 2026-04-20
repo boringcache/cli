@@ -2,6 +2,48 @@
 
 This log captures regressions, root causes, and guardrails for cache-registry performance/correctness.
 
+## 2026-04-20 - OCI metadata-only release and PostHog benchmark interpretation
+
+- Release:
+  - `boringcache/one v1.12.58` was released from action commit `e22cc5a6a0039389329b4c974722196a738553ca` by workflow run `24672935639`.
+  - The signed `v1` major tag now dereferences to the same commit as `v1.12.58`.
+  - The released action still installs CLI `v1.12.40`; no new CLI release was needed for this action change because CLI `v1.12.40` already supports the hidden `--oci-hydration metadata-only` policy.
+  - The action and Docker benchmark workflows now use the product default instead of forcing `bodies-before-ready`. The Docker-mode configure step passes `oci-hydration: metadata-only`, and logs show `Registry proxy OCI hydration: metadata-only`.
+- Product decision:
+  - `metadata-only` is the BuildKit product default. Startup indexes the selected OCI refs and locator/download URL metadata, reports ready quickly, and lets BuildKit fetch blob bodies on demand through the proxy.
+  - `bodies-background` and `bodies-before-ready` remain diagnostic policies. `bodies-background` can still compete with a large BuildKit graph, and `bodies-before-ready` can front-load multi-GB downloads before the build starts.
+  - For user-facing workflows, do not expose three ordinary modes. Keep the product path simple and use diagnostics when investigating body-plane behavior.
+- Same-ref PostHog rolling signal before the next upstream sync:
+  - Run `24673108689` used `boringcache/one@v1` at `e22cc5a` and CLI `v1.12.40`.
+  - Proxy readiness dropped to `0.8s` with `metadata-only`; the prior strict body hydration run had waited about `119s` to prefetch about `5.8GB`.
+  - Seed build wall time was `9s`; total run was `2m10s`.
+  - BuildKit imported the registry cache manifest, `cached_steps=67`, and cache export was `3.7s`.
+  - OCI body diagnostics: `startup_body_inserted=0`, `startup_body_failures=0`, `startup_body_cold_blobs=84`, `body_remote_fetches=1`, `body_remote_bytes=27412`, `body_remote_duration_ms=194`.
+  - Publish diagnostics: `upload_requested_blobs=84`, `upload_already_present=84`, `new_blob_count=0`, `upload_batch_seconds=0.269`, no registry 4xx/5xx or digest failures. This is the clean warm/product-path signal.
+- New-upstream PostHog rolling cohort after sync to `0272b80f663cf9de0ef03ad60325540402ac9ad7`:
+  - BC rolling run `24673312060` finished in `12m54s`; AC rolling run `24673311004` finished in `20m49s`.
+  - The BC artifact correctly classified the run as a reseed, not steady state: `new_blob_count=32`, `upload_requested_blobs=84`, `upload_already_present=52`, `body_remote_fetches=51`, `body_remote_bytes=2164140408`, `body_remote_duration_ms=30027`, and BuildKit cache export `339.1s`.
+  - Backend publish was not the long pole: `oci_blob_upload_batch` was `9.501s`, manifest commit was about `81ms`, and later publish phases were short. Most of the wall time was BuildKit rebuilding/exporting the changed graph.
+  - Use this run as a changed-upstream reseed sample, not as a warm headline.
+- Same-upstream rerun after the reseed:
+  - BC rolling run `24674563294` finished in `1m55s`; seed build wall time was `10s`.
+  - It still imported the cache with `cached_steps=67`, proxy readiness stayed fast, cache export was `4.0s`, and body read-through was only one `27401` byte fetch.
+  - The artifact still classified it as a reseed because `new_blob_count=1` and `upload_already_present=83`. Treat this as a near-warm signal, but not a formal zero-new-blob steady-state sample.
+  - The diagnostics also showed `oci_engine_miss_blob_locator=1` and `oci_engine_proof_upload_session=1`; investigate why one small blob still needed an upload-session proof on the second same-ref run before claiming perfect steady state.
+- Fresh lane note:
+  - BC fresh run `24673306681` completed the seed build and the layer-miss scenario, but the workflow failed in `Scenario (warm1)` during GitHub runner action download: `An action could not be found at the URI 'https://api.github.com/repos/boringcache/one/tarball/e22cc5a...'`.
+  - That failure happened in the GitHub Actions setup step while fetching `boringcache/one@v1`, after the tag move, not in the BoringCache proxy or BuildKit path. Rerun fresh after action tarball availability settles before using it for warm/stale conclusions.
+  - AC fresh run `24673306674` succeeded for the same upstream commit.
+- Benchmark artifact fix:
+  - Docker benchmark workflows now label `oci.new_blob_bytes` from actual `oci_blob_upload` event bytes after the latest upload plan, not from the upload plan's full `requested_bytes` graph size.
+  - Older artifacts before this fix are misleading when `new_blob_count=0` or `1`, because they can still report the full requested descriptor graph size. Recompute from `oci_blob_upload` events when reviewing those runs.
+- Guardrails:
+  - Rolling comparisons must use the same upstream ref and the same workflow graph. The first run after an upstream, Dockerfile, action, CLI, cache tag, or hydration-policy change is allowed to reseed.
+  - A valid Docker steady-state sample needs cache import success, high cached-step count, `new_blob_count == 0`, short BuildKit export, no widespread import-time remote body reads, no startup body failures, and no registry 4xx/5xx or digest failures.
+  - `oci_body_remote_fetches` is not a failure under `metadata-only`; it is the expected on-demand read-through counter. Judge it by count, bytes, duration, and whether it persists on the second same-ref run.
+  - If comparing `metadata-only`, `bodies-background`, and `bodies-before-ready`, do it as a diagnostic rolling-only matrix with policy-suffixed cache tags. Do not run hydration variants in parallel against the same registry cache refs, or they will write into each other's cache state.
+  - Keep benchmark pass/fail focused on body read-through metrics, startup hydration failures, BuildKit import/export wall time, new blob count/upload plan, publish phase timings, and registry/digest errors. Do not compare total run wall time without classifying reseed versus steady state.
+
 ## 2026-04-20 - OCI engine isolation before BuildKit matrix
 
 - OCI blob behavior moved out of the HTTP handler into `serve::engines::oci::blobs`.

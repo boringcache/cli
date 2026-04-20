@@ -9,7 +9,7 @@ boringcache onboard
 ```
 
 `boringcache onboard` is the default starting point.
-It authenticates the CLI, chooses a default workspace, and writes `.boringcache.toml` when it can so local runs, Dockerfiles, and CI can reuse the same cache names.
+It authenticates the CLI, chooses a default workspace, and writes `.boringcache.toml` when it can so local runs, Docker builds, and CI can reuse the same cache names.
 
 After onboard, start with the shortest command that fits the tool:
 
