@@ -305,6 +305,8 @@ These are the next sensible follow-ons from the current tree.
 
 - Insert the engine boundary described in `docs/adr/0001-engine-boundary.md` before starting snapshot-v2 or any crate/workspace split.
 - Continue the OCI engine extraction described in `docs/adr/0002-proxy-engine-plan-b.md`, moving route-handler correctness decisions into `src/serve/engines/oci/` one invariant at a time.
+- Use `docs/adr/0003-runner-proxy-optimization-roadmap.md` for the next runner-proxy optimization sequence: add session trace and OCI negative cache, design immutable Docker run refs and alias promotion, remove local body-cache copy/sync, prototype large-blob stream-through, then tune cache policy and concurrency from traces.
+- Use `docs/adr/0004-oci-large-blob-stream-through.md`, `docs/adr/0005-borrowed-upload-sessions-and-blob-cache-policy.md`, `docs/adr/0006-cache-session-trace-and-oci-negative-cache.md`, and `docs/adr/0007-docker-immutable-run-refs-and-alias-promotion.md` for the concrete OCI hot-path and Docker correctness implementation tracks.
 - Split `src/serve/cache_registry/kv/flush.rs` into scheduling, refresh, and pending-publish handoff helpers.
 - Trim `src/serve/cache_registry/kv/mod.rs` by moving shared KV policy, lookup-flight coordination, and pending-publish handoff types into focused helpers.
 - Revisit `src/api/client/mod.rs` for capability discovery, publish/pending polling, and error parsing helpers.

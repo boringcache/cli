@@ -1,0 +1,219 @@
+# ADR 0007: Docker Immutable Run Refs And Alias Promotion
+
+Status: proposed
+Date: 2026-04-20
+
+## Context
+
+Docker BuildKit registry cache writes are tag-shaped. If two jobs write the same cache ref concurrently, one writer can replace the visible tag state from the other. The current CAS publish path uses optimistic tag publish and write scopes, which protects the backend pointer update better than a blind overwrite, but the product model still treats a branch cache ref as both the write destination and the read alias.
+
+That is acceptable for early Docker rollout, but it makes correctness and benchmarks noisier:
+
+- a slower stale job can publish after a newer job;
+- same-tag benchmark variants can write into each other's state;
+- losing writers may appear as cache corruption even when immutable data is still present;
+- branch cache refs mix immutable root identity with mutable alias identity.
+
+The right model is:
+
+```text
+immutable root:
+  docker-cache/runs/<run-id-or-root-digest>
+
+mutable aliases:
+  docker-cache/branch/main
+  docker-cache/branch/<branch>
+  docker-cache/pr/<number>
+  docker-cache/recent
+```
+
+BuildKit should write one immutable run ref. Rails should atomically promote aliases after validating the root.
+
+## Source Grounding
+
+This ADR depends on these source-backed properties:
+
+- Docker documents registry cache as a separate cache image location and requires explicit `--cache-to` export plus `--cache-from` import.
+- Docker warns that writing a cache location twice overwrites prior cached data. That is the core reason branch aliases should not be the only durable write target.
+- Docker documents importing multiple caches, with current branch plus main branch as the common pattern. That grounds multiple `--cache-from` aliases.
+- Docker registry cache `mode=max` exports all intermediate-step layers, so the alias/root model must preserve complete cache manifests and blobs, not only final-image layers.
+- OCI tag references are constrained to 128 characters and a limited character set. Logical run refs and aliases may need hashing into valid OCI tags.
+- BuildKit registry cache source canonicalizes the registry `ref`, obtains a pusher for export, and obtains a resolver/fetcher for import. BoringCache should map immutable roots and aliases onto normal registry refs rather than a side channel invisible to BuildKit.
+- OCI referrers fallback notes that simultaneous updates to a tag-shaped index can race, and clients may use conditional requests where supported. That reinforces Rails-side compare-and-swap alias promotion.
+
+Source URLs are listed in ADR 0003.
+
+## Decision
+
+Design Docker registry cache publishing around immutable run refs plus atomic alias promotion.
+
+Do not lock the whole build. Do not let branch aliases be the only durable location for a cache root.
+
+The write path becomes:
+
+1. CLI/action chooses an immutable run ref for `--cache-to`.
+2. BuildKit exports to the local proxy using that run ref.
+3. Proxy publishes a CAS root for that immutable ref.
+4. Rails validates the root and records immutable root metadata.
+5. Rails atomically promotes selected aliases to that root if policy allows.
+6. A losing or stale promotion leaves the immutable root intact and records an alias conflict.
+
+The read path becomes:
+
+1. CLI/action asks Rails or local planning for candidate aliases.
+2. BuildKit imports multiple `--cache-from` refs when supported:
+   - current branch alias;
+   - default branch alias;
+   - PR alias when applicable;
+   - recent alias/list when implemented;
+   - optional previous run ref for retries.
+3. Proxy resolves those aliases to immutable roots through the existing OCI restore machinery.
+
+## Ref Shape
+
+OCI tag constraints are tighter than arbitrary path strings. The final shape must be valid as Docker registry refs.
+
+Suggested local registry ref shape:
+
+```text
+cache:<alias-or-run-tag>
+```
+
+Suggested logical identities behind the proxy:
+
+```text
+docker-cache/runs/<run-id>-<attempt>
+docker-cache/branches/<safe-branch>
+docker-cache/prs/<number>
+docker-cache/default
+docker-cache/recent/<n>
+```
+
+The CLI can hash long logical identities into OCI-safe tags using the existing scoped ref tag helpers. User-facing inputs should stay simple:
+
+- `--tag` remains the proxy cache tag or logical cache family;
+- `--cache-ref-tag` remains the Docker OCI cache tag override;
+- action-level run-ref and alias controls start hidden/internal until benchmarked.
+
+## Rails/API Contract
+
+Rails owns alias policy and atomic promotion.
+
+Required backend concepts:
+
+- immutable cache root id;
+- root digest and manifest digest;
+- source ref/branch/PR metadata;
+- run id and attempt;
+- commit SHA when available;
+- run started/completed timestamps;
+- alias pointer version;
+- alias conflict or ignored promotion state.
+
+Required API operations:
+
+```text
+create_or_confirm_root(workspace, root_ref, root_digest, metadata)
+promote_alias(workspace, alias, root_ref, expected_version?, policy_metadata)
+resolve_aliases(workspace, aliases[]) -> root refs / manifests / miss reasons
+```
+
+This can be represented by new endpoints or by extending the existing tag publish endpoint, but the semantics must be explicit:
+
+- root writes are immutable and idempotent;
+- alias promotion is compare-and-swap or equivalent atomic update;
+- a promotion conflict does not delete or corrupt the root;
+- clients can distinguish promoted, conflicted, ignored, and failed.
+
+## Promotion Policy
+
+Initial policy should be conservative and easy to explain.
+
+Promote branch alias when:
+
+- the build command exits successfully;
+- cache export/publish succeeds;
+- the run metadata matches the alias scope;
+- Rails accepts the alias version/policy.
+
+Promote default branch alias only from default branch builds.
+
+Promote PR alias only from the PR scope.
+
+Do not promote on failed builds unless explicitly configured for a benchmark.
+
+For out-of-order completions, Rails should avoid obviously stale promotion. Acceptable first policy:
+
+- if alias is empty, promote;
+- if alias points to older completed run metadata for the same source scope, promote;
+- if alias points to newer run metadata, record ignored-stale promotion;
+- if metadata is missing, fall back to CAS version conflict semantics and record ambiguity.
+
+The exact run ordering field should be chosen by Rails. GitHub `run_id` is monotonic enough for GitHub-specific policy, but provider-neutral metadata should use explicit started/completed timestamps where possible.
+
+## CLI And Action Changes
+
+The CLI/action should:
+
+- generate or accept immutable run-ref identity in CI;
+- pass immutable run ref as Docker `--cache-to`;
+- pass selected aliases as Docker `--cache-from`;
+- include alias promotion intent in proxy metadata or publish requests;
+- surface alias promotion result in diagnostics;
+- keep current same-ref behavior as compatibility fallback during rollout.
+
+For `boringcache docker`, multiple `--cache-from` flags are allowed. The current injection path should grow from one cache-from ref to a planned list when this feature is enabled.
+
+Read-only Docker adapter runs should only inject `--cache-from` refs and must not promote aliases.
+
+## Session Trace Requirements
+
+ADR 0006 session trace should include:
+
+- immutable run ref;
+- aliases requested for import;
+- aliases requested for promotion;
+- alias promotion result;
+- alias conflict/ignored count;
+- root digest;
+- run classification and cache ref generation.
+
+This is required so benchmark artifacts can explain whether a same-tag race affected the result.
+
+## Rollout Plan
+
+1. Document the API contract in the web repo and update web comprehension.
+2. Add CLI/action planning fields behind hidden/internal controls.
+3. Teach Docker adapter dry-run JSON to show run ref, cache-from aliases, and promotion aliases.
+4. Add Rails root and alias promotion API support.
+5. Wire proxy publish metadata through to Rails.
+6. Enable in benchmark workflows with policy-suffixed tags first.
+7. Enable in `one@v1` Docker mode after benchmark artifacts prove compatibility.
+8. Keep old same-ref behavior as fallback for at least one release window.
+
+## Acceptance Gates
+
+Before enabling in benchmarks:
+
+- two concurrent writes to the same branch alias leave both immutable roots intact;
+- exactly one alias pointer wins according to policy;
+- losing/ignored promotion is visible in API response and session trace;
+- read path can import from branch plus default aliases;
+- read-only runs do not promote.
+
+Before making it default:
+
+- Docker BuildKit E2E covers concurrent same-alias writers;
+- real-project benchmark uses immutable run refs and classifies alias conflicts separately from cache misses;
+- CLI/action docs explain the visible behavior without exposing internal root IDs as ordinary user ceremony;
+- Rails and CLI comprehension maps are updated.
+
+## Rejected Options
+
+Do not serialize all builds with a global alias lock. BuildKit runs are long and should not hold a write lock for the duration of a build.
+
+Do not keep branch aliases as the only durable cache root. A failed or losing promotion must not erase the run's immutable output.
+
+Do not make users hand-author run refs for normal GitHub Actions usage. The action should derive them from CI metadata.
+
+Do not solve this only in the CLI. Alias promotion policy and atomicity belong in Rails/API.
