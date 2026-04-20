@@ -116,7 +116,7 @@ case "$BUILDKIT_INSECURE_REGISTRY" in
     ;;
 esac
 
-for dep in docker curl pgrep; do
+for dep in docker curl pgrep python3; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     echo "ERROR: required dependency not found: ${dep}"
     exit 1
@@ -335,6 +335,94 @@ capture_proxy_status() {
   curl -fsS --max-time 5 \
     "http://${PROXY_STATUS_HOST}:${PROXY_PORT}${PROXY_STATUS_PATH}" \
     -o "${status_file}" 2>/dev/null || true
+}
+
+status_metric() {
+  local status_file="$1"
+  local path="$2"
+  local default_value="${3:-0}"
+  python3 - "$status_file" "$path" "$default_value" <<'PY'
+import json
+import sys
+
+status_file, path, default_value = sys.argv[1:]
+try:
+    value = json.loads(open(status_file, encoding="utf-8").read())
+except Exception:
+    print(default_value)
+    raise SystemExit(0)
+
+for part in path.split("."):
+    if not isinstance(value, dict) or part not in value:
+        print(default_value)
+        raise SystemExit(0)
+    value = value[part]
+
+if value is None or value == "":
+    print(default_value)
+else:
+    print(value)
+PY
+}
+
+assert_default_restart_body_locality() {
+  local status_file="${LOG_DIR}/proxy-status-phase2-restart-warm.json"
+  local inserted failures local_hits remote_fetches engine_local_reads
+
+  if [[ "$OCI_HYDRATION" != "bodies-before-ready" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$status_file" ]]; then
+    echo "missing restart status snapshot: ${status_file}"
+    exit 1
+  fi
+
+  inserted="$(status_metric "$status_file" "startup_prefetch.startup_prefetch_oci_body_inserted")"
+  failures="$(status_metric "$status_file" "startup_prefetch.startup_prefetch_oci_body_failures")"
+  local_hits="$(status_metric "$status_file" "oci_body.oci_body_local_hits")"
+  remote_fetches="$(status_metric "$status_file" "oci_body.oci_body_remote_fetches")"
+  engine_local_reads="$(status_metric "$status_file" "oci_engine.oci_engine_blob_local_reads")"
+
+  echo "OCI restart locality: startup_inserted=${inserted} body_failures=${failures} local_hits=${local_hits} remote_fetches=${remote_fetches} engine_local_reads=${engine_local_reads}"
+
+  if (( inserted <= 0 )); then
+    echo "expected strict OCI hydration to insert selected bodies before restart readiness"
+    exit 1
+  fi
+  if (( failures != 0 )); then
+    echo "expected zero strict OCI body hydration failures"
+    exit 1
+  fi
+  if (( local_hits <= 0 )); then
+    echo "expected restart warm BuildKit body reads to hit local cache"
+    exit 1
+  fi
+  if (( remote_fetches != 0 )); then
+    echo "expected restart warm BuildKit body reads to avoid remote read-through"
+    exit 1
+  fi
+  if (( engine_local_reads <= 0 )); then
+    echo "expected OCI engine diagnostics to record local blob reads"
+    exit 1
+  fi
+}
+
+summarize_request_metrics() {
+  local metrics_file="${LOG_DIR}/cache-registry-request-metrics.jsonl"
+  local summary_file="${LOG_DIR}/request-metrics-summary.env"
+
+  if [[ ! -f "$metrics_file" ]]; then
+    echo "request metrics file missing: ${metrics_file}"
+    return 0
+  fi
+
+  python3 "${DOCKER_E2E_SCRIPT_DIR}/../request-metrics-summary.py" \
+    "$metrics_file" \
+    "$LOG_DIR" > "$summary_file"
+  LOG_FILES+=("${summary_file}")
+
+  echo "=== OCI metrics summary ==="
+  grep -E 'request_metrics_(startup_prefetch_oci_hydration|startup_prefetch_oci_body_inserted|startup_prefetch_oci_body_failures|startup_prefetch_oci_body_duration_ms|oci_body_reads_total|oci_body_local_hits|oci_body_remote_fetches|oci_body_local_hit_ratio|oci_engine_blob_reads_total|oci_engine_blob_local_reads|oci_engine_blob_remote_reads|oci_engine_blob_local_hit_ratio|oci_engine_blob_served_bytes|oci_engine_blob_remote_fetched_bytes|oci_engine_range_requests|oci_engine_range_partial_responses|oci_engine_range_invalid_responses|oci_engine_publish_total_count|oci_engine_publish_total_duration_ms)=' "$summary_file" || true
 }
 
 run_build() {
@@ -682,6 +770,9 @@ for tag in "${CACHE_TAG}" "latest" "${CACHE_TAG_ALIAS}"; do
   LOG_FILES+=("${digest_manifest_file}")
   fetch_manifest_with_retry "${manifest_digest}" "${digest_manifest_file}"
 done
+
+summarize_request_metrics
+assert_default_restart_body_locality
 
 declare -a BAD_PATTERNS=(
   'expected sha256:.*got sha256:e3b0'

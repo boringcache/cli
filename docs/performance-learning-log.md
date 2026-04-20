@@ -10,6 +10,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
 - OCI publish orchestration moved to `serve::engines::oci::publish`: save, tracked blob uploads from `PresentBlob` proofs, pointer upload, confirm, alias binding, publish phase timing, and session cleanup. `serve::cas_publish` remains the shared protocol-neutral sequence helper.
 - Added `OciEngineDiagnostics` for proof-source counts, graph expansion, local vs remote blob reads, range/read-through details, publish phase timings, miss causes, and hydration policy. `/_boringcache/status` now exposes these alongside existing OCI body metrics.
 - The request metrics summarizer now promotes `oci_engine` status keys into `request-metrics-summary.env`, so BuildKit E2E artifacts can be studied after release without hand-parsing proxy status JSON.
+- The Docker BuildKit E2E harness now emits the OCI metrics summary directly and gates the default strict restart path on selected body insertion, zero body hydration failures, local body hits, zero client remote body fetches, and OCI engine local blob reads.
 - Acceptance is intentionally still pending: run focused range/status tests and then the BuildKit cold/warm/restart/hydration/random-body matrix before claiming full OCI blob-path parity.
 
 ## 2026-04-19 - adapter-by-adapter local pass and engine direction
