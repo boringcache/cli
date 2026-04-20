@@ -306,6 +306,7 @@ skip-save = true
 save-on-failure = true
 port = 5001
 endpoint-host = "host.docker.internal"
+sccache-key-prefix = "rust/ci"
 "#,
         )
         .unwrap();
@@ -327,6 +328,7 @@ endpoint-host = "host.docker.internal"
             adapter.endpoint_host.as_deref(),
             Some("host.docker.internal")
         );
+        assert_eq!(adapter.sccache_key_prefix.as_deref(), Some("rust/ci"));
         assert_eq!(
             adapter.command.unwrap().argv().unwrap(),
             vec!["pnpm", "turbo", "run", "build"]

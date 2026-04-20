@@ -175,13 +175,15 @@ mvn install -DskipTests --batch-mode -ntp -Dmaven.build.cache.remote.save.enable
 [adapters.sccache]
 tag = "rust-cache"
 command = ["cargo", "build", "--release"]
+# Optional: keep sccache objects under a WebDAV sub-root.
+sccache-key-prefix = "rust/ci"
 ```
 
 ```bash
 boringcache sccache
 ```
 
-The adapter sets `RUSTC_WRAPPER=sccache` and `SCCACHE_WEBDAV_ENDPOINT` automatically.
+The adapter sets `RUSTC_WRAPPER=sccache`, `SCCACHE_WEBDAV_ENDPOINT`, and `SCCACHE_WEBDAV_KEY_PREFIX` automatically.
 
 For a long-lived endpoint:
 
@@ -190,6 +192,7 @@ boringcache cache-registry my-org/app registry-cache --port 5000
 
 RUSTC_WRAPPER=sccache \
 SCCACHE_WEBDAV_ENDPOINT=http://127.0.0.1:5000/ \
+SCCACHE_WEBDAV_KEY_PREFIX=rust/ci \
 cargo build --release
 ```
 

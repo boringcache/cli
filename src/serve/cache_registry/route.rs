@@ -218,9 +218,12 @@ fn looks_like_sccache_key_path(components: &[&str]) -> bool {
 }
 
 fn parse_sccache_probe_path(components: &[&str]) -> Option<RegistryRoute> {
-    if components.len() == 1 && components[0] == ".sccache_check" {
+    if components
+        .last()
+        .is_some_and(|component| *component == ".sccache_check")
+    {
         return Some(RegistryRoute::SccacheProbe {
-            path: components[0].to_string(),
+            path: components.join("/"),
         });
     }
     None
@@ -334,6 +337,17 @@ mod tests {
             route,
             RegistryRoute::SccacheProbe {
                 path: ".sccache_check".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn detect_route_accepts_prefixed_sccache_probe_path() {
+        let route = detect_route(&Method::GET, "rust/ci/.sccache_check").unwrap();
+        assert_eq!(
+            route,
+            RegistryRoute::SccacheProbe {
+                path: "rust/ci/.sccache_check".to_string()
             }
         );
     }

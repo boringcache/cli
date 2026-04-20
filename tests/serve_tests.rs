@@ -5804,6 +5804,26 @@ async fn test_sccache_mkcol_is_noop_success() {
 }
 
 #[tokio::test]
+async fn test_sccache_prefixed_probe_is_noop_success() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/rust/ci/.sccache_check")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
 async fn test_sccache_put_head_get_round_trip() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;

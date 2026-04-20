@@ -55,6 +55,7 @@ struct AdapterCommandOptions {
     cache_ref_tag: String,
     cache_mode: String,
     read_only: bool,
+    sccache_key_prefix: Option<String>,
 }
 
 impl AdapterRunner {
@@ -350,6 +351,8 @@ pub async fn adapter_execute(
         cache_ref_tag: docker_cache_ref_tag,
         cache_mode: docker_cache_mode,
         read_only: effective_read_only,
+        sccache_key_prefix: trim_non_empty(adapter_config.sccache_key_prefix.as_deref())
+            .map(ToOwned::to_owned),
     };
 
     let preview_context = proxy::ProxyContext {

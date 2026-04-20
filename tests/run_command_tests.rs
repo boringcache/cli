@@ -954,6 +954,7 @@ tag = "sccache-cache"
 command = ["cargo", "build"]
 endpoint-host = "host.docker.internal"
 port = 6001
+sccache-key-prefix = "rust/ci"
 "#,
     )
     .expect("write repo config");
@@ -982,6 +983,7 @@ port = 6001
         parsed["env_vars"]["SCCACHE_WEBDAV_ENDPOINT"],
         "http://host.docker.internal:6001/"
     );
+    assert_eq!(parsed["env_vars"]["SCCACHE_WEBDAV_KEY_PREFIX"], "rust/ci");
 }
 
 #[test]

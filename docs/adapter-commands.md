@@ -71,6 +71,7 @@ Useful adapter fields:
 - `host`, `endpoint-host`, `port` — local endpoint settings
 - `skip-restore`, `skip-save`, `save-on-failure` — archive behavior overrides
 - `cache-mode`, `cache-ref-tag` — Docker-only cache export settings
+- `sccache-key-prefix` — sccache-only WebDAV key prefix/root
 
 `command` is repo config, not a general templating system.
 For proxy-backed commands, BoringCache only substitutes these placeholders inside command arguments:
@@ -102,6 +103,7 @@ These adapters inject the tool-specific settings for you:
 For Bazel, the adapter injects the remote-cache flags directly.
 For Gradle, the adapter adds `--build-cache` plus a generated init script that points the remote cache at the local proxy.
 For Maven, the adapter injects the `maven.build.cache.*` remote endpoint properties, but the Maven build cache extension still needs to be present in the repo.
+For sccache, the adapter injects `RUSTC_WRAPPER`, `SCCACHE_WEBDAV_ENDPOINT`, and `SCCACHE_WEBDAV_KEY_PREFIX`. Leave `sccache-key-prefix` unset unless you need a stable WebDAV sub-root within the proxy cache.
 
 If a repo already has a stable checked-in cache config, that still works. Explicit tool flags and checked-in config stay user-owned.
 

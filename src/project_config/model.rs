@@ -85,6 +85,12 @@ pub struct AdapterConfig {
     pub cache_mode: Option<String>,
     #[serde(rename = "cache-ref-tag", skip_serializing_if = "Option::is_none")]
     pub cache_ref_tag: Option<String>,
+    #[serde(
+        rename = "sccache-key-prefix",
+        alias = "sccache_key_prefix",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sccache_key_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     #[serde(rename = "endpoint-host", skip_serializing_if = "Option::is_none")]

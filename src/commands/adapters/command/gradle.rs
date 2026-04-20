@@ -131,6 +131,7 @@ mod tests {
             cache_ref_tag: "buildcache".to_string(),
             cache_mode: "max".to_string(),
             read_only,
+            sccache_key_prefix: None,
         }
     }
 
