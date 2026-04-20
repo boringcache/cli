@@ -82,3 +82,14 @@ sccache is the next native adapter pass. The source-backed contract starts from:
 - OpenDAL WebDAV behavior: writes may create parent collections with `MKCOL`; some compatible servers skip or reject directory creation differently.
 
 The next engine boundary should start by preserving the existing route behavior in `src/serve/cache_registry/sccache.rs` while moving the WebDAV-specific truth out of generic KV helpers only when the behavior is not protocol-neutral. The acceptance list should cover `.sccache_check`, `MKCOL`, `GET`/`HEAD` misses, `PUT` writes, unsupported methods, exact key paths, and concurrent warm reads.
+
+## Bazel / AC-CAS Next
+
+Bazel is the next native adapter pass after the sccache WebDAV source/E2E alignment. The source-backed contract starts from:
+
+- Bazel remote caching docs: remote cache stores action cache metadata and CAS output files; stdout/stderr inspection is not a reliable cache-hit signal.
+- Bazel HTTP caching protocol: action result metadata is stored under `/ac/`, output files are stored under `/cas/`, `PUT` uploads binary blobs, and `GET` downloads binary blobs.
+- Bazel remote-cache usage docs: `--remote_upload_local_results=false` makes the remote cache read-only, and writers should usually be CI-controlled.
+- Bazel auth docs: HTTP Basic Auth may be embedded in the remote cache URL and must be used with HTTPS when credentials are present.
+
+The next engine boundary should preserve the current route behavior in `src/serve/cache_registry/bazel.rs` while moving Bazel-specific truth out of generic KV helpers only when the behavior is not protocol-neutral. The acceptance list should cover `/ac/<sha256>` and `/cas/<sha256>` separation, invalid digest rejection, CAS PUT digest mismatch rejection, `GET`/`HEAD`/`PUT`, unsupported methods, read-only upload behavior, warm Bazel E2E reuse, and cache-op GET records/hits.

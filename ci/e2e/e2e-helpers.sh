@@ -413,6 +413,7 @@ proxy_metrics_file() {
 dump_cache_ops_summary() {
   local metrics_file="${1:-$(proxy_metrics_file)}"
   local summary_file="${2:-}"
+  local tool="${3:-sccache}"
   if [[ ! -f "${metrics_file}" ]]; then
     echo "  cache ops: no metrics file found"
     return 0
@@ -424,9 +425,24 @@ dump_cache_ops_summary() {
   fi
   if python3 "${script_dir}/request-metrics-summary.py" "${metrics_file}" > "${summary_file}" 2>/dev/null; then
     source "${summary_file}"
-    echo "  cache ops: records=${request_metrics_cache_ops_records_total:-0} hits=${request_metrics_cache_ops_sccache_get_hits:-0} misses=${request_metrics_cache_ops_sccache_get_misses:-0}"
+    local records_key="request_metrics_cache_ops_${tool}_get_records_total"
+    local hits_key="request_metrics_cache_ops_${tool}_get_hits"
+    local misses_key="request_metrics_cache_ops_${tool}_get_misses"
+    echo "  cache ops (${tool} GET): records=${!records_key:-0} hits=${!hits_key:-0} misses=${!misses_key:-0}"
   else
     echo "  cache ops: summary unavailable"
+  fi
+}
+
+assert_metric_gt_zero() {
+  local summary_file="$1"
+  local key="$2"
+  # shellcheck source=/dev/null
+  source "${summary_file}"
+  local value="${!key:-0}"
+  if ! [[ "${value}" =~ ^[0-9]+$ ]] || [[ "${value}" -eq 0 ]]; then
+    echo "ERROR: expected ${key} > 0 in ${summary_file}" >&2
+    return 1
   fi
 }
 

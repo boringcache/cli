@@ -21,6 +21,7 @@ If you are working on the CLI repo itself:
 - [Engine boundary ADR](adr/0001-engine-boundary.md)
 - [Proxy engine Plan B ADR](adr/0002-proxy-engine-plan-b.md)
 - [OCI mistake ledger](oci-mistake-ledger.md)
+- [Bazel mistake ledger](bazel-mistake-ledger.md)
 - [Installation setup](../INSTALLATION.md)
 
 The website docs live at [boringcache.com/docs](https://boringcache.com/docs).

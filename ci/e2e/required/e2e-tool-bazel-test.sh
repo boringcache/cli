@@ -148,7 +148,10 @@ fi
 (cd "${PROJECT_DIR}" && ${BAZEL_CMD} --output_base="${WARM_OUTPUT_BASE}" shutdown 2>/dev/null || true)
 
 stop_proxy
-dump_cache_ops_summary
+BAZEL_CACHE_OPS_SUMMARY="${BAZEL_LOG_DIR}/cache-ops-summary.env"
+dump_cache_ops_summary "$(proxy_metrics_file)" "${BAZEL_CACHE_OPS_SUMMARY}" "bazel"
+assert_metric_gt_zero "${BAZEL_CACHE_OPS_SUMMARY}" "request_metrics_cache_ops_bazel_get_records_total"
+assert_metric_gt_zero "${BAZEL_CACHE_OPS_SUMMARY}" "request_metrics_cache_ops_bazel_get_hits"
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
   if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${BAZEL_LOG_DIR}" \
