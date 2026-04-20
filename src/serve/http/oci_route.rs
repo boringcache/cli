@@ -26,6 +26,10 @@ pub(crate) fn insert_header(
     Ok(())
 }
 
+pub(crate) fn insert_digest_etag(headers: &mut HeaderMap, digest: &str) -> Result<(), OciError> {
+    insert_header(headers, "ETag", &format!("\"{digest}\""))
+}
+
 pub(crate) fn parse_oci_path(path: &str) -> Option<OciRoute> {
     let path = path.strip_prefix('/').unwrap_or(path);
 

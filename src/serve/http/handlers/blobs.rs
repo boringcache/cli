@@ -5,12 +5,12 @@ use futures_util::StreamExt;
 use tokio_util::io::ReaderStream;
 
 use crate::api::models::cache::BlobDescriptor;
+use crate::serve::engines::oci::uploads::{find_local_uploaded_blob, has_remote_blob};
 use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
-use crate::serve::http::oci_route::insert_header;
+use crate::serve::http::oci_route::{insert_digest_etag, insert_header};
 use crate::serve::state::{AppState, BlobLocatorEntry, BlobReadHandle};
 
-use super::uploads::find_local_uploaded_blob;
 use super::{DOWNLOAD_URL_CACHE_TTL, OCI_API_CALL_TIMEOUT, OCI_TRANSFER_CALL_TIMEOUT};
 
 const OCI_BLOB_DOWNLOAD_MAX_ATTEMPTS: usize = 4;
@@ -88,6 +88,7 @@ pub(super) async fn get_blob(
         }
         let mut headers = HeaderMap::new();
         insert_header(&mut headers, "Docker-Content-Digest", &digest)?;
+        insert_digest_etag(&mut headers, &digest)?;
         insert_header(&mut headers, "Content-Type", "application/octet-stream")?;
         insert_header(&mut headers, "Content-Length", &size_bytes.to_string())?;
         insert_header(
@@ -100,6 +101,7 @@ pub(super) async fn get_blob(
 
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, "Docker-Content-Digest", &digest)?;
+    insert_digest_etag(&mut headers, &digest)?;
     insert_header(&mut headers, "Content-Type", "application/octet-stream")?;
     insert_header(&mut headers, "Content-Length", &size_bytes.to_string())?;
     insert_header(
@@ -210,6 +212,7 @@ async fn local_blob_response(
 ) -> Result<Response, OciError> {
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, "Docker-Content-Digest", digest)?;
+    insert_digest_etag(&mut headers, digest)?;
     insert_header(&mut headers, "Content-Type", "application/octet-stream")?;
     insert_header(
         &mut headers,
@@ -228,32 +231,6 @@ async fn local_blob_response(
 
     let body = cached_blob_body(handle).await?;
     Ok((StatusCode::OK, headers, body).into_response())
-}
-
-pub(super) async fn has_remote_blob(state: &AppState, digest: &str) -> Result<bool, OciError> {
-    let check = tokio::time::timeout(
-        OCI_API_CALL_TIMEOUT,
-        state.api_client.check_blobs_verified(
-            &state.workspace,
-            &[BlobDescriptor {
-                digest: digest.to_string(),
-                size_bytes: 0,
-            }],
-        ),
-    )
-    .await
-    .map_err(|_| {
-        OciError::internal(format!(
-            "Timed out checking blob existence after {}s",
-            OCI_API_CALL_TIMEOUT.as_secs()
-        ))
-    })?
-    .map_err(|e| OciError::internal(format!("Failed to check blob existence: {e}")))?;
-
-    Ok(check
-        .results
-        .iter()
-        .any(|result| result.digest == digest && result.exists))
 }
 
 pub(super) async fn resolve_oci_download_url(

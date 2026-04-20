@@ -1,5 +1,5 @@
 use axum::body::Body;
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{HeaderMap, Method, Request, StatusCode};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use boring_cache_cli::api::client::ApiClient;
 use boring_cache_cli::api::models::cache::BlobDescriptor;
@@ -56,6 +56,14 @@ fn assert_json_error(response: &serde_json::Value, code: &str) {
     assert_eq!(response["error"]["code"], code);
     assert!(response["message"].is_string());
     assert!(response["error"]["message"].is_string());
+}
+
+fn assert_digest_etag(headers: &HeaderMap, digest: &str) {
+    let etag = headers
+        .get("ETag")
+        .and_then(|value| value.to_str().ok())
+        .expect("ETag header");
+    assert_eq!(etag, format!("\"{digest}\""));
 }
 
 async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard) {
@@ -1940,7 +1948,13 @@ async fn test_manifest_head_returns_headers_no_body() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.headers().get("Docker-Content-Digest").is_some());
+    let manifest_digest = response
+        .headers()
+        .get("Docker-Content-Digest")
+        .and_then(|value| value.to_str().ok())
+        .expect("Docker-Content-Digest header")
+        .to_string();
+    assert_digest_etag(response.headers(), &manifest_digest);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert!(body.is_empty());
 }
@@ -2151,6 +2165,7 @@ async fn test_blob_head_and_get_return_local_finalized_upload_session() {
     .unwrap();
 
     assert_eq!(head_response.status(), StatusCode::OK);
+    assert_digest_etag(head_response.headers(), &blob_digest);
     assert_eq!(
         head_response
             .headers()
@@ -2171,6 +2186,7 @@ async fn test_blob_head_and_get_return_local_finalized_upload_session() {
     .unwrap();
 
     assert_eq!(get_response.status(), StatusCode::OK);
+    assert_digest_etag(get_response.headers(), &blob_digest);
     let body = get_response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], blob_content);
 }
@@ -2407,6 +2423,7 @@ async fn test_blob_get_after_manifest_resolution() {
     .unwrap();
 
     assert_eq!(first_response.status(), StatusCode::OK);
+    assert_digest_etag(first_response.headers(), blob_digest);
     assert_eq!(
         first_response
             .headers()
@@ -2441,6 +2458,7 @@ async fn test_blob_get_after_manifest_resolution() {
     .unwrap();
 
     assert_eq!(second_response.status(), StatusCode::OK);
+    assert_digest_etag(second_response.headers(), blob_digest);
     let second_body = second_response
         .into_body()
         .collect()
@@ -2694,6 +2712,13 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::CREATED);
+    let manifest_digest = response
+        .headers()
+        .get("Docker-Content-Digest")
+        .and_then(|value| value.to_str().ok())
+        .expect("Docker-Content-Digest header")
+        .to_string();
+    assert_digest_etag(response.headers(), &manifest_digest);
     assert_eq!(
         response
             .headers()
@@ -2811,6 +2836,13 @@ async fn test_manifest_put_degrades_when_primary_confirm_is_locked() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::CREATED);
+    let manifest_digest = response
+        .headers()
+        .get("Docker-Content-Digest")
+        .and_then(|value| value.to_str().ok())
+        .expect("Docker-Content-Digest header")
+        .to_string();
+    assert_digest_etag(response.headers(), &manifest_digest);
     assert_eq!(
         response
             .headers()

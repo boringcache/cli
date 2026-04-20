@@ -9,10 +9,12 @@ use std::time::Instant;
 use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
 use crate::cas_transport::upload_payload;
-use crate::serve::engines::oci::{PresentBlob, ensure_manifest_blobs_present};
+use crate::serve::engines::oci::{
+    PresentBlob, ensure_manifest_blobs_present, uploads::has_non_empty_local_blob,
+};
 use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
-use crate::serve::http::oci_route::insert_header;
+use crate::serve::http::oci_route::{insert_digest_etag, insert_header};
 use crate::serve::http::oci_tags::{
     AliasBinding, AliasTagManifest, alias_tags_for_manifest, bind_alias_tag, scoped_restore_tags,
     scoped_save_tag, scoped_write_scope_tag,
@@ -22,7 +24,6 @@ use crate::serve::state::{
     diagnostics_enabled, digest_tag,
 };
 
-use super::uploads::has_non_empty_local_blob;
 use super::{
     OCI_API_CALL_TIMEOUT, OCI_DEGRADED_HEADER, OCI_POINTER_FETCH_TIMEOUT, OCI_TRANSFER_CALL_TIMEOUT,
 };
@@ -59,6 +60,7 @@ pub(super) async fn get_manifest(
 
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, "Docker-Content-Digest", &digest)?;
+    insert_digest_etag(&mut headers, &digest)?;
     insert_header(&mut headers, "Content-Type", &content_type)?;
     insert_header(
         &mut headers,
@@ -344,6 +346,7 @@ pub(super) async fn put_manifest(
 
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, "Docker-Content-Digest", &manifest_digest)?;
+    insert_digest_etag(&mut headers, &manifest_digest)?;
     insert_header(
         &mut headers,
         "Location",

@@ -14,6 +14,8 @@ Primary sources:
 - OCI Distribution Spec: https://github.com/opencontainers/distribution-spec/blob/main/spec.md
 - OCI Image Manifest Spec: https://github.com/opencontainers/image-spec/blob/main/manifest.md
 - Docker registry cache backend: https://docs.docker.com/build/cache/backends/registry/
+- BuildKit registry cache source: https://github.com/moby/buildkit/blob/d787da7fa4a8655ce2aa6657ef65707379710f8f/cache/remotecache/registry/registry.go
+- BuildKit GitHub Actions cache source: https://github.com/moby/buildkit/blob/d787da7fa4a8655ce2aa6657ef65707379710f8f/cache/remotecache/gha/gha.go
 - Bazel remote caching: https://bazel.build/remote/caching
 - Gradle HTTP build cache: https://docs.gradle.org/current/userguide/build_cache.html
 - Apache Maven Build Cache Extension remote cache: https://maven.apache.org/extensions/maven-build-cache-extension/remote-cache.html
@@ -51,6 +53,14 @@ Each adapter rewrite starts with the primary source for that adapter, not with t
 For OCI, the controlling sources are the OCI Distribution Spec, OCI Image Spec, and Docker BuildKit registry cache documentation. BuildKit registry cache is the product path we optimize first, so the registry engine must behave like a real OCI registry for the subset BuildKit uses: manifest graphs, blob bodies, upload sessions, cross-repository mount, referrers, digest references, and cache-image import/export refs.
 
 For later adapters, repeat the same discipline. sccache is WebDAV first, Bazel is AC/CAS first, Gradle and Maven are HTTP object-cache first, Turbo and Nx are their own APIs first, and Go cacheprog is subprocess JSON first.
+
+## Source Examples
+
+Each adapter rewrite must name at least one production-grade open-source or standard industry implementation before moving code. The point is not to copy architecture; it is to catch performance and compatibility expectations that specs often leave implicit.
+
+For OCI, the active comparison set is BuildKit's registry cache backend and GitHub Actions cache backend. The registry backend delegates to containerd distribution resolver, fetcher, pusher, and content-store utilities instead of inventing a custom registry protocol. The GHA backend makes cache existence, mutable indexes, timeouts, and parallel scope loading explicit. BoringCache should preserve the same broad properties: digest-addressed content, resumable upload/session behavior, bounded network waits, pooled transfers, and fast metadata decisions before body movement.
+
+For later adapters, add the concrete comparison in `docs/adapter-contract-matrix.md` before implementation. Candidates include the tool's own server/client source, BuildBuddy-style Bazel AC/CAS behavior, Develocity-style Gradle cache behavior, official Turbo/Nx remote-cache APIs, and sccache's native backend sources.
 
 ## Engine Boundary Rule
 
@@ -144,13 +154,14 @@ If a descriptor is not proven through one of those sources, the engine must retu
 The OCI pass should land in small commits in this order:
 
 1. Source-proof boundary: `PresentBlob` proves every descriptor and drives upload job selection. Done in the first increment.
-2. Upload engine: move start upload, PATCH, close PUT, empty finalize reuse, cross-repository mount, and `416` behavior from handlers into `serve::engines::oci::uploads`.
-3. Manifest engine: move descriptor extraction, content-type resolution, child manifest expansion, digest references, referrers descriptor construction, and missing-descriptor errors into `serve::engines::oci::manifests`.
-4. Blob engine: move HEAD/GET locality, blob body cache reads, remote URL refresh, range handling, and digest/size verification into `serve::engines::oci::blobs`.
-5. Publish engine: move save/pointer/confirm/alias/referrer orchestration into `serve::engines::oci::publish`, with handlers only parsing request bodies and returning responses.
-6. Diagnostics: add an `OciEngineDiagnostics` value with proof source counts, local vs remote reads, graph expansion count, publish timings, miss causes, and hydration state.
-7. BuildKit acceptance: run cold, warm, proxy restart, metadata-only, bodies-before-ready, bodies-background, and random body graph registry E2E.
-8. Backend contract check: touch Rails only if the BuildKit E2E proves the CLI needs backend-visible truth stronger than `check_blobs_verified`.
+2. Upload engine: move start upload, PATCH, close PUT, empty finalize reuse, cross-repository mount, and `416` behavior from handlers into `serve::engines::oci::uploads`. Done in the second increment.
+3. OCI/KV path audit: before moving manifests, list every `cache_registry/kv` path touched by OCI and decide whether it is protocol-neutral substrate or OCI manifest-graph behavior that belongs in the engine.
+4. Manifest engine: move descriptor extraction, content-type resolution, child manifest expansion, digest references, referrers descriptor construction, and missing-descriptor errors into `serve::engines::oci::manifests`.
+5. Blob engine: move HEAD/GET locality, blob body cache reads, remote URL refresh, range handling, and digest/size verification into `serve::engines::oci::blobs`.
+6. Publish engine: move save/pointer/confirm/alias/referrer orchestration into `serve::engines::oci::publish`, with handlers only parsing request bodies and returning responses.
+7. Diagnostics: add an `OciEngineDiagnostics` value with proof source counts, local vs remote reads, graph expansion count, publish timings, miss causes, and hydration state.
+8. BuildKit acceptance: run cold, warm, proxy restart, metadata-only, bodies-before-ready, bodies-background, and random body graph registry E2E.
+9. Backend contract check: touch Rails only if the BuildKit E2E proves the CLI needs backend-visible truth stronger than `check_blobs_verified`.
 
 ## Web Contract
 
@@ -182,6 +193,10 @@ Before replacing an adapter path:
 For OCI specifically:
 
 - Upload start, PATCH, closing PUT, stale range `416`, cross-repo mount `201/202`, HEAD/GET, missing manifest blobs, digest refs, and referrers are covered.
+- OCI responses that represent immutable digest-addressed content include digest-valued `ETag` headers.
+- Upload digest verification hashes streaming request bodies on one-shot paths and only rereads files when resumable state makes that necessary.
+- Transfer clients keep HTTP/2 pooling and adaptive windows on by default; any change to pool sizing or protocol fallback must be benchmarked against BuildKit cache import/export.
+- Blob engine extraction must add ranged `GET` acceptance before claiming full blob-path parity.
 - BuildKit E2E proves cold, warm, restart, metadata-only, bodies-before-ready, bodies-background, and random-body graph behavior.
 - Manifest publish refuses descriptors that cannot be traced to a named source.
 - Blob body locality is measured separately from manifest/index locality.

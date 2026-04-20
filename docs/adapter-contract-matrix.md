@@ -26,10 +26,23 @@ This matrix records adapter behavior from primary sources. The implementation sh
 Before changing an adapter engine:
 
 - Confirm the current primary source URLs still point at the relevant official docs or source code.
+- Name at least one open-source or standard industry implementation to compare against for compatibility and performance expectations.
 - Extract the protocol root, object identities, alias model, read methods, write methods, miss statuses, retry behavior, and auth shape into the matrix row.
 - Add or update a mistake-ledger row for every product failure class the change is meant to prevent.
 - Write acceptance tests from source behavior before optimizing implementation details.
 - Keep shared code only where the behavior is protocol-neutral.
+
+## Implementation Examples To Audit
+
+| Adapter | Examples to audit before rewrite | Compatibility and performance questions |
+| --- | --- | --- |
+| OCI / Docker BuildKit registry cache | BuildKit registry cache source, BuildKit GitHub Actions cache source, containerd distribution resolver behavior | Does the path preserve digest-addressed manifests/blobs, resumable upload offsets, cross-repository mount, referrers, digest `ETag`, streaming digest verification, pooled HTTP/2 transfer, and fast metadata decisions before body movement? |
+| sccache WebDAV | sccache native backend source and docs; any production WebDAV cache deployment used by real CI | Does the path preserve WebDAV key identity, conditional/error behavior, and high-concurrency artifact reads without forcing archive semantics? |
+| Bazel AC/CAS | Bazel remote cache docs and BuildBuddy-style AC/CAS behavior | Are action cache and CAS namespaces distinct, are digest and size checks strict, and are misses surfaced in the shape Bazel retries correctly? |
+| Gradle | Gradle build cache docs and Develocity-style HTTP cache behavior | Are `GET`/`PUT` status codes, redirect behavior, oversized `413`, and binary object identity preserved without inspecting payloads? |
+| Maven | Maven Build Cache Extension source/docs and Maven Resolver storage behavior | Are raw-byte/source/effective-POM portability misses visible, and do `GET`/`HEAD`/`PUT` behave as Maven expects? |
+| Turborepo and Nx | Official Turbo Remote Cache API and Nx custom remote cache OpenAPI/server examples | Are artifact hash routes, bearer auth, batch/event APIs, and binary archive bodies preserved exactly? |
+| Go GOCACHEPROG | Go `cmd/go/internal/cacheprog` source | Is the line-oriented JSON subprocess protocol preserved, including request IDs, supported commands, and local file lifetime? |
 
 ## OCI / BuildKit Focus
 
@@ -40,5 +53,7 @@ Implementation work should stay aligned with:
 - OCI Distribution Spec pull, push, mount, manifest, blob, HEAD, error, and referrers behavior.
 - OCI Image Spec descriptor graph rules for config, layers, image indexes, artifact manifests, and subject relationships.
 - Docker BuildKit registry cache import/export behavior through `--cache-to type=registry` and `--cache-from type=registry`, including `mode=max`, OCI media types, image-manifest vs image-index output, and cache refs separate from final image refs.
+- BuildKit `application/vnd.buildkit.cacheconfig.v0` cache config handling before the manifest engine moves descriptor traversal; this media type is product-critical and should be researched explicitly instead of treated as a generic unknown blob.
+- BuildKit/distribution best practices for streaming digest verification, cross-repository mount `201`/`202`, digest-valued `ETag`, pooled HTTP/2 transfer, resumable upload offset validation, and ranged blob reads.
 
 The OCI engine should own OCI-specific correctness and performance. Shared runtime and BoringCache API plumbing should not grow OCI branches unless the branch is truly protocol-neutral.

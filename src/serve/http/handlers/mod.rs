@@ -41,10 +41,6 @@ use crate::serve::state::{AppState, diagnostics_enabled};
 use crate::serve::state::{OciManifestCacheEntry, UploadSession, digest_tag};
 
 const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
-const EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS: usize = 20;
-const EMPTY_FINALIZE_LOCAL_RETRY_DELAY_MS: u64 = 75;
-const EMPTY_FINALIZE_REMOTE_RETRY_ATTEMPTS: usize = 3;
-const EMPTY_FINALIZE_REMOTE_RETRY_DELAY_MS: u64 = 100;
 const OCI_DEGRADED_HEADER: &str = "X-BoringCache-Cache-Degraded";
 const OCI_PREFETCH_STATE_HEADER: &str = "X-BoringCache-Prefetch-State";
 const OCI_PREFETCH_STATE_READY: &str = "ready";
