@@ -10,8 +10,8 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
 - OCI publish orchestration moved to `serve::engines::oci::publish`: save, tracked blob uploads from `PresentBlob` proofs, pointer upload, confirm, alias binding, publish phase timing, and session cleanup. `serve::cas_publish` remains the shared protocol-neutral sequence helper.
 - Added `OciEngineDiagnostics` for proof-source counts, graph expansion, local vs remote blob reads, range/read-through details, publish phase timings, miss causes, and hydration policy. `/_boringcache/status` now exposes these alongside existing OCI body metrics.
 - The request metrics summarizer now promotes `oci_engine` status keys from both `proxy-status-*.json` and real-run `status-*.json` snapshots into `request-metrics-summary.env`, including stable per-snapshot labels such as `request_metrics_status_phase2_restart_warm_oci_body_remote_fetches`, so BuildKit E2E and ad hoc project artifacts can be studied after release without hand-parsing proxy status JSON.
-- The Docker BuildKit E2E harness now emits the OCI metrics summary directly and gates the default strict restart path on selected body insertion, zero body hydration failures, local body hits, zero client remote body fetches, and OCI engine local blob reads. The gate intentionally treats `oci_body_remote_fetches` as the client-after-ready remote read-through signal; `oci_engine_blob_remote_reads` includes startup hydration and is not bad by itself under strict readiness.
-- BuildKit cold/warm/restart, strict body hydration, hidden metadata-only/background controls, and random-body graph replay passed locally before real-project testing. A real Hugo multi-stage Dockerfile then passed through the committed production workspace path with `255s` cold and `15s` warm, and through an isolated local Rails plus MinIO backend with `145s` cold and `20s` warm. Both warm runs cached BuildKit stages `#18` through `#35`, inserted `20` selected OCI bodies before readiness, recorded zero body hydration failures, and had `oci_body_remote_fetches=0` after readiness.
+- The Docker BuildKit E2E harness now emits the OCI metrics summary directly and gates the default metadata-only restart path on selected ref indexing, bounded client remote body fetches, and OCI engine read-through diagnostics. The gate intentionally treats `oci_body_remote_fetches` as the client-after-ready remote read-through signal; background and strict controls can still move body reads into startup/background hydration.
+- BuildKit cold/warm/restart, default metadata-only read-through, hidden background/strict controls, and random-body graph replay passed locally before real-project testing. A real Hugo multi-stage Dockerfile then passed through the committed production workspace path with `255s` cold and `15s` warm, and through an isolated local Rails plus MinIO backend with `145s` cold and `20s` warm. Both warm runs cached BuildKit stages `#18` through `#35`, recorded zero body hydration failures, and kept body-plane behavior visible through OCI diagnostics.
 
 ## 2026-04-19 - adapter-by-adapter local pass and engine direction
 
@@ -29,7 +29,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - CAS layout/materialization only applies to OCI/file-CAS adapters. For proxy-native KV/object protocols (Turbo, Nx, Gradle, Maven, sccache, Go), the equivalent materialization proof is PUT/HEAD/GET or query behavior through the proxy.
 - Docker parity lesson:
   - A registry-cache hit is not complete until both the manifest graph and blob bodies are locally reachable. Metadata-only startup can be logically cached while the first warm build still pays remote body reads.
-  - `metadata-only`, `bodies-before-ready`, and `bodies-background` are the right internal benchmark modes, but not ordinary user choices. The product default should be `bodies-before-ready`, with the selected policy reported in diagnostics alongside local OCI body hits, remote body fetches, remote bytes, remote duration, startup inserted/cold/failed counts, and BuildKit import/export wall time.
+  - `metadata-only`, `bodies-background`, and `bodies-before-ready` are the right internal benchmark modes, but not ordinary user choices. The product default should be `metadata-only`, with the selected policy reported in diagnostics alongside local OCI body hits, remote body fetches, remote bytes, remote duration, startup inserted/cold/failed counts, and BuildKit import/export wall time.
   - The local Docker E2E harness now records `/_boringcache/status` snapshots after warm phases so OCI body-plane behavior is visible instead of inferred from BuildKit wall time.
   - Local Colima replay needs `REGISTRY_HOST=host.docker.internal` plus a BuildKit daemon config marking that registry as HTTP/insecure. The E2E harness now generates that config automatically for non-localhost registry refs.
   - Strict local-edge replay must isolate the proxy blob cache (`E2E_BLOB_CACHE_SCOPE=per-proxy`). Otherwise a same-machine proxy restart can reuse the previous read-through blob cache and hide the cold body-plane cost.
@@ -51,7 +51,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Local Gradle and Maven runtime E2E legs were wired into the adapter command harness and passed on this machine through mise.
   - The diagnostics summarizer now ingests proxy status snapshots and emits both aggregate OCI body-plane metrics and per-snapshot phase metrics.
   - Local/staging Tigris workspace provisioning now treats `409` conflicts as recoverable by ensuring the bucket exists and minting a fresh workspace key.
-  - Larger Docker graph replay passed locally across the default strict OCI body hydration path and hidden metadata-only/background controls with both shared and per-proxy body-cache scopes.
+  - Larger Docker graph replay passed locally across the product metadata-only OCI read-through path and hidden background/strict controls with both shared and per-proxy body-cache scopes.
   - The engine-boundary ADR is written in `docs/adr/0001-engine-boundary.md`; snapshot-v2/crate split work should start behind that boundary, not before it.
 
 ## 2026-04-15 - warm-first proxy startup
@@ -171,7 +171,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Distribution resumable blob uploads should reject stale or out-of-order chunk offsets with `416 Requested Range Not Satisfiable`.
   - OCI 1.1 subject-aware manifest pushes should return `OCI-Subject` when the registry supports referrers processing.
 - Current gaps:
-  - OCI startup now defaults to strict selected-ref body hydration; the remaining gap is proving that default against the full BuildKit acceptance matrix and keeping hidden metadata-only/background modes as controls.
+  - OCI startup now defaults to metadata-only selected-ref hydration; the remaining gap is proving that default against the full BuildKit acceptance matrix and keeping hidden background/strict modes as controls.
   - Track the new OCI manifest-contract E2E leg alongside the existing BuildKit registry-cache leg so subject/referrers and restart behavior stay covered as proxy changes land.
   - Measure whether the new OCI inflight dedupe meaningfully reduces restore, pointer, download-url, and blob-fetch fan-out under concurrent reader load.
   - Add an E2E BuildKit OCI-spec mirror that covers manifest PUT validation, resumable upload edge cases, warm restart behavior, and cache import/export parity.

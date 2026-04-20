@@ -1361,6 +1361,32 @@ async fn test_manifest_hit_returns_decoded_index_json() {
         .create_async()
         .await;
 
+    let download_urls_request = json!({
+        "cache_entry_id": "entry-123",
+        "verify_storage": true,
+        "blobs": [
+            {"digest": blob_digest, "size_bytes": 5000}
+        ]
+    });
+    let _download_urls_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Json(download_urls_request))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": blob_digest,
+                    "url": format!("{}/blobs/{}", server.url(), blob_digest),
+                }],
+                "missing": [],
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
     let app = build_router(state.clone());
     let response = tower::ServiceExt::oneshot(
         app,
@@ -1393,7 +1419,7 @@ async fn test_manifest_hit_returns_decoded_index_json() {
 }
 
 #[tokio::test]
-async fn test_manifest_serves_even_when_prefetch_batch_reports_missing_blobs() {
+async fn test_manifest_misses_when_prefetch_batch_reports_missing_blobs() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.fail_on_cache_error = false;
@@ -1464,46 +1490,14 @@ async fn test_manifest_serves_even_when_prefetch_batch_reports_missing_blobs() {
     .await
     .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-    let single_request = json!({
-        "cache_entry_id": "entry-123",
-        "verify_storage": true,
-        "blobs": [
-            {"digest": blob_digest, "size_bytes": 5000}
-        ]
-    });
-    let _download_urls_single_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
-        .match_body(Matcher::Json(single_request))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "download_urls": [],
-                "missing": [blob_digest]
-            })
-            .to_string(),
-        )
-        .create_async()
-        .await;
-
-    let app = build_router(state.clone());
-    let blob_response = tower::ServiceExt::oneshot(
-        app,
-        Request::builder()
-            .uri(format!("/v2/my-cache/blobs/{blob_digest}"))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(blob_response.status(), StatusCode::NOT_FOUND);
+    let locator = state.blob_locator.read().await;
+    assert!(locator.get("my-cache", blob_digest).is_none());
 }
 
 #[tokio::test]
-async fn test_manifest_serves_without_blob_storage_preflight_in_best_effort() {
+async fn test_manifest_serves_after_verified_blob_storage_preflight_in_best_effort() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.fail_on_cache_error = false;
@@ -2428,6 +2422,32 @@ async fn test_blob_head_after_manifest_resolution_uses_remote_existence_check() 
         .mock("GET", "/pointers/entry-head-check")
         .with_status(200)
         .with_body(pointer_bytes)
+        .create_async()
+        .await;
+
+    let download_urls_request = json!({
+        "cache_entry_id": "entry-head-check",
+        "verify_storage": true,
+        "blobs": [
+            {"digest": blob_digest, "size_bytes": blob_size}
+        ]
+    });
+    let _download_urls_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Json(download_urls_request))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": blob_digest,
+                    "url": format!("{}/blobs/{}", server.url(), blob_digest),
+                }],
+                "missing": [],
+            })
+            .to_string(),
+        )
+        .expect(1)
         .create_async()
         .await;
 

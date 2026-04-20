@@ -53,7 +53,7 @@ pub struct AdapterArgs {
     #[arg(
         long,
         hide = true,
-        default_value = "bodies-before-ready",
+        default_value = "metadata-only",
         value_parser = ["metadata-only", "bodies-before-ready", "bodies-background"],
         help = "Expert: OCI/Docker startup hydration policy for selected refs"
     )]

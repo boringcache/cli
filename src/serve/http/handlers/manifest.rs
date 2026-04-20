@@ -40,14 +40,25 @@ use super::{OCI_API_CALL_TIMEOUT, OCI_DEGRADED_HEADER, OCI_POINTER_FETCH_TIMEOUT
 const OCI_SUBJECT_HEADER: &str = "OCI-Subject";
 const OCI_FILTERS_APPLIED_HEADER: &str = "OCI-Filters-Applied";
 
+#[derive(Clone, Copy)]
+enum ManifestBlobUrlPolicy {
+    VerifyAndCache,
+    VerifyOnly,
+}
+
 pub(super) async fn get_manifest(
     method: Method,
     state: AppState,
     name: String,
     reference: String,
 ) -> Result<Response, OciError> {
+    let blob_url_policy = if method == Method::GET {
+        ManifestBlobUrlPolicy::VerifyAndCache
+    } else {
+        ManifestBlobUrlPolicy::VerifyOnly
+    };
     let (manifest_bytes, content_type, digest) =
-        resolve_manifest(&state, &name, &reference, method == Method::GET).await?;
+        resolve_manifest(&state, &name, &reference, blob_url_policy).await?;
 
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, "Docker-Content-Digest", &digest)?;
@@ -79,7 +90,13 @@ pub(crate) async fn prefetch_manifest_reference(
 ) -> Result<(crate::serve::engines::oci::blobs::BlobPrefetchStats, usize), OciError> {
     let started_at = Instant::now();
     let tags = manifest_restore_tags(state, name, reference);
-    let (_, _, digest) = resolve_manifest(state, name, reference, true).await?;
+    let (_, _, digest) = resolve_manifest(
+        state,
+        name,
+        reference,
+        ManifestBlobUrlPolicy::VerifyAndCache,
+    )
+    .await?;
     let digest_tags = [digest_tag(&digest)];
     let cached = lookup_oci_manifest_cache(state, &tags)
         .or_else(|| lookup_oci_manifest_cache(state, &digest_tags))
@@ -101,14 +118,14 @@ pub(crate) async fn prefetch_manifest_reference(
             .collect::<HashMap<_, _>>()
     };
     if cached_urls.len() < cached.blobs.len() {
-        let resolved_urls = prefetch_manifest_blob_download_urls(
+        let resolved_urls = verified_manifest_blob_download_urls(
             state,
             &cached.cache_entry_id,
             &cached.name,
             reference,
             &cached.blobs,
         )
-        .await;
+        .await?;
         if !resolved_urls.is_empty() {
             cache_blob_locator_entries(
                 state,
@@ -434,7 +451,7 @@ async fn resolve_manifest(
     state: &AppState,
     name: &str,
     reference: &str,
-    prefetch_blob_urls: bool,
+    blob_url_policy: ManifestBlobUrlPolicy,
 ) -> Result<(Vec<u8>, String, String), OciError> {
     let tags = manifest_restore_tags(state, name, reference);
 
@@ -449,7 +466,7 @@ async fn resolve_manifest(
                 if let Some(cached) = lookup_oci_manifest_cache(state, &tags) {
                     return cached_manifest_response(state, cached).await;
                 }
-                return resolve_manifest_remote(state, name, reference, &tags, prefetch_blob_urls)
+                return resolve_manifest_remote(state, name, reference, &tags, blob_url_policy)
                     .await;
             }
             Flight::Follower(notified) => {
@@ -482,7 +499,7 @@ async fn resolve_manifest_remote(
     name: &str,
     reference: &str,
     tags: &[String],
-    prefetch_blob_urls: bool,
+    blob_url_policy: ManifestBlobUrlPolicy,
 ) -> Result<(Vec<u8>, String, String), OciError> {
     let entries = tokio::time::timeout(
         OCI_API_CALL_TIMEOUT,
@@ -567,17 +584,28 @@ async fn resolve_manifest_remote(
         })
         .collect();
 
-    let prefetched_urls = if prefetch_blob_urls {
-        prefetch_manifest_blob_download_urls(
-            state,
-            cache_entry_id,
-            name,
-            reference,
-            &blob_descriptors,
-        )
-        .await
-    } else {
-        HashMap::new()
+    let prefetched_urls = match blob_url_policy {
+        ManifestBlobUrlPolicy::VerifyAndCache => {
+            verified_manifest_blob_download_urls(
+                state,
+                cache_entry_id,
+                name,
+                reference,
+                &blob_descriptors,
+            )
+            .await?
+        }
+        ManifestBlobUrlPolicy::VerifyOnly => {
+            verified_manifest_blob_download_urls(
+                state,
+                cache_entry_id,
+                name,
+                reference,
+                &blob_descriptors,
+            )
+            .await?;
+            HashMap::new()
+        }
     };
     cache_blob_locator_entries(
         state,
@@ -643,46 +671,53 @@ async fn cached_manifest_response(
     ))
 }
 
-async fn prefetch_manifest_blob_download_urls(
+async fn verified_manifest_blob_download_urls(
     state: &AppState,
     cache_entry_id: &str,
     name: &str,
     reference: &str,
     blob_descriptors: &[BlobDescriptor],
-) -> HashMap<String, String> {
+) -> Result<HashMap<String, String>, OciError> {
     if blob_descriptors.is_empty() {
-        return HashMap::new();
+        return Ok(HashMap::new());
     }
 
-    match crate::serve::blob_download_urls::resolve_verified_blob_download_urls(
+    let resolved = crate::serve::blob_download_urls::resolve_verified_blob_download_urls(
         state,
         cache_entry_id,
         blob_descriptors,
         OCI_API_CALL_TIMEOUT,
     )
     .await
-    {
-        Ok(resolved) => {
-            if !resolved.missing.is_empty() {
-                log::debug!(
-                    "OCI manifest URL prefetch skipped {} missing blobs for {}:{}",
-                    resolved.missing.len(),
-                    name,
-                    reference
-                );
-            }
-            resolved.urls
-        }
-        Err(error) => {
-            log::debug!(
-                "OCI manifest URL prefetch failed for {}:{} ({})",
-                name,
-                reference,
-                error
-            );
-            HashMap::new()
-        }
+    .map_err(|error| {
+        OciError::internal(format!(
+            "OCI manifest blob verification failed for {name}:{reference}: {error}"
+        ))
+    })?;
+
+    if !resolved.missing.is_empty() {
+        state.oci_engine_diagnostics.record_miss("download-url");
+        log::warn!(
+            "OCI manifest {}:{} references {} missing blob(s): {}",
+            name,
+            reference,
+            resolved.missing.len(),
+            missing_blob_sample(&resolved.missing)
+        );
+        return Err(OciError::manifest_unknown(format!(
+            "{name}:{reference} references missing blob(s)"
+        )));
     }
+
+    Ok(resolved.urls)
+}
+
+fn missing_blob_sample(missing: &[String]) -> String {
+    let mut sample = missing.iter().take(3).cloned().collect::<Vec<_>>();
+    if missing.len() > sample.len() {
+        sample.push("...".to_string());
+    }
+    sample.join(", ")
 }
 
 async fn cache_blob_locator_entries(
@@ -846,11 +881,12 @@ async fn load_referrers_descriptors(
     subject_digest: &str,
 ) -> Result<Vec<serde_json::Value>, OciError> {
     let reference = engine_referrers_reference_for_subject(subject_digest)?;
-    let manifest_bytes = match resolve_manifest(state, name, &reference, false).await {
-        Ok((manifest_bytes, _, _)) => manifest_bytes,
-        Err(error) if error.status() == StatusCode::NOT_FOUND => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
+    let manifest_bytes =
+        match resolve_manifest(state, name, &reference, ManifestBlobUrlPolicy::VerifyOnly).await {
+            Ok((manifest_bytes, _, _)) => manifest_bytes,
+            Err(error) if error.status() == StatusCode::NOT_FOUND => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
     engine_parse_referrers_descriptors(&manifest_bytes)
 }
 
@@ -948,7 +984,9 @@ async fn load_manifest_bytes_by_digest(
                 })?
             } else {
                 let (manifest_bytes, _content_type, resolved_digest) =
-                    match resolve_manifest(state, name, digest, false).await {
+                    match resolve_manifest(state, name, digest, ManifestBlobUrlPolicy::VerifyOnly)
+                        .await
+                    {
                         Ok(result) => result,
                         Err(error) if error.status() == StatusCode::NOT_FOUND => {
                             return Err(OciError::blob_unknown_upload(vec![digest.to_string()]));

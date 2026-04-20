@@ -44,7 +44,7 @@ If a benchmark needs lower-level overrides, treat those as engineering controls,
 | `maven` | Maven build-cache HTTP or DAV remote | Local Maven repo and local build-cache extension state | Keyed module/project-state artifacts, often many small modules | Keep metadata cheap, preserve portability checks, and rely on local reuse after restore | Ignoring portability/config mismatches or assuming cross-env reuse is always safe |
 | `turborepo` | Remote cache API: `GET`/`HEAD`/`PUT`/`POST` | `.turbo/cache` on local disk | One artifact archive per task hash plus query/events calls | Keep query and artifact fetch cheap; warm opportunistically from observed cache state, not tool guesses | Full-tag hydration by default for large monorepos |
 | `nx` | Custom remote cache API: `PUT`/`GET`/`HEAD` and query | Local Nx cache folder | Tar archives per task hash plus optional terminal output objects | Same as Turborepo: low-overhead fetch path and opportunistic warming from observed cache state | Blanket hydration of all cached task hashes |
-| `docker` | BuildKit registry cache via OCI registry manifests and blobs | Builder local content store and layer cache | OCI manifests plus blob layers; `mode=max` exports more cache state | Optimize manifest/index reuse, URL batching, strict selected-ref body hydration, and local content-store reuse | Treating OCI cache like filesystem kv objects or exposing internal hydration modes as ordinary choices |
+| `docker` | BuildKit registry cache via OCI registry manifests and blobs | Builder local content store and layer cache | OCI manifests plus blob layers; `mode=max` exports more cache state | Optimize manifest/index reuse, URL batching, on-demand blob read-through, and local content-store reuse | Treating OCI cache like filesystem kv objects or forcing full blob hydration before BuildKit starts |
 | `go-cache` | Simple object API `GET`/`HEAD`/`PUT` | Go local build cache | One object per action/result key | Fast kv path, cheap metadata, local reuse after first fetch | Overengineering it with heavy startup hydration |
 
 ## Working rules
@@ -53,7 +53,7 @@ If a benchmark needs lower-level overrides, treat those as engineering controls,
 - BoringCache owns storage, transfer, verification, and machine-safe scheduling.
 - Generic KV startup warming should hydrate the full active tag by default on disk-backed cache-registry paths. Capacity control belongs in the blob read cache size and eviction policy, not a separate startup selection budget.
 - Query-aware or protocol-aware optimizations should come from real request patterns, not adapter-name guesses.
-- `docker` should stay OCI-native. BuildKit already understands manifests, layers, and local content reuse. The product default is strict selected-ref body hydration before readiness; metadata-only and background hydration stay internal benchmark/diagnostic modes.
+- `docker` should stay OCI-native. BuildKit already understands manifests, layers, and local content reuse. The product default resolves selected refs and serves blob bodies on demand (`metadata-only`); `bodies-background` and `bodies-before-ready` stay internal benchmark/diagnostic modes.
 
 ## Local measurement plan
 
@@ -96,8 +96,8 @@ For restart-path measurements, use `E2E_BLOB_CACHE_SCOPE=per-proxy` in the Docke
 
 ## Current OCI tuning targets
 
-1. Use the default strict body hydration path for real project and GitHub Actions adapter rollout.
-2. Keep hidden `metadata-only` and `bodies-background` controls only for targeted readiness/read-through comparisons.
+1. Use the default metadata-only/on-demand body path for real project and GitHub Actions adapter rollout.
+2. Keep hidden `bodies-background` and `bodies-before-ready` controls only for targeted readiness/read-through comparisons.
 3. Use `E2E_PAYLOAD_MODE=random` when validating byte movement so digest/size verification and range behavior see real transfer pressure.
 4. Compare labeled restart-path `request_metrics_status_<phase>_*` locality values plus top-level `request_metrics_oci_engine_blob_remote_fetched_bytes`, range counts, proof sources, miss causes, and publish phase durations before changing registry behavior.
 5. Measure object-size distributions and read locality before changing any non-OCI adapter hydration ordering.

@@ -160,7 +160,7 @@ The OCI pass should land in small commits in this order:
 5. Blob engine: move HEAD/GET locality, blob body cache reads, remote URL refresh, range handling, and digest/size verification into `serve::engines::oci::blobs`. Done, including ranged GET, invalid ranges, `If-Range`, digest/size verification, and read-through hydration.
 6. Publish engine: move save/pointer/confirm/alias/referrer orchestration into `serve::engines::oci::publish`, with handlers only parsing request bodies and returning responses. Done for the OCI publish path.
 7. Diagnostics: add an `OciEngineDiagnostics` value with proof source counts, local vs remote reads, graph expansion count, publish timings, miss causes, and hydration state. Done, exposed through status snapshots, cache-op metadata hints, and E2E summary artifacts.
-8. BuildKit acceptance: run cold, warm, proxy restart, default strict body hydration, hidden metadata-only/background controls, and random body graph registry E2E. Done locally before real-project replay.
+8. BuildKit acceptance: run cold, warm, proxy restart, default metadata-only read-through, hidden background/strict controls, and random body graph registry E2E. Done locally before real-project replay.
 9. Backend contract check: touch Rails only if the BuildKit E2E proves the CLI needs backend-visible truth stronger than `check_blobs_verified`.
 
 ## Post-Release Telemetry Contract
@@ -173,7 +173,7 @@ The required surfaces are:
 - `oci_engine` includes proof source counts, local and remote body reads, served and fetched bytes, range requests, partial and invalid range responses, graph expansion counts, publish phase counts and durations, miss causes, and hydration policy.
 - Cache-op session metadata merges OCI body, OCI engine, startup prefetch, and blob-read hints before records are flushed so production telemetry can be grouped by workspace, tool, phase, scenario, and session.
 - E2E artifacts include `proxy-status-*.json` or real-run `status-*.json` snapshots plus `request-metrics-summary.env`; the summary must promote OCI engine keys so post-release analysis does not require manual JSON inspection.
-- Docker BuildKit E2E defaults to strict selected-ref body hydration. `metadata-only` and `bodies-background` stay hidden controls for targeted comparisons, not user-facing product modes. Under strict readiness, `oci_body_remote_fetches` is the client-after-ready read-through signal; `oci_engine_blob_remote_reads` can include intentional startup hydration.
+- Docker BuildKit E2E defaults to metadata-only selected-ref hydration, so BuildKit fetches bodies on demand through the proxy. `bodies-background` and `bodies-before-ready` stay hidden controls for targeted comparisons, not user-facing product modes. Under metadata-only, `oci_body_remote_fetches` is the expected client-after-ready read-through signal; under background/strict modes, `oci_engine_blob_remote_reads` can include intentional hydration.
 
 ## Web Contract
 
@@ -211,7 +211,7 @@ For OCI specifically:
 - Upload digest verification hashes streaming request bodies on one-shot paths and only rereads files when resumable state makes that necessary.
 - Transfer clients keep HTTP/2 pooling and adaptive windows on by default; any change to pool sizing or protocol fallback must be benchmarked against BuildKit cache import/export.
 - Blob engine ranged `GET` behavior remains covered before claiming full blob-path parity.
-- BuildKit E2E proves cold, warm, restart, default strict body hydration, hidden metadata-only/background controls, and random-body graph behavior. Real-project replay should then prove the same default path against a normal multi-stage Dockerfile before GHA adapter rollout.
+- BuildKit E2E proves cold, warm, restart, default metadata-only read-through, hidden background/strict controls, and random-body graph behavior. Real-project replay should then prove the same default path against a normal multi-stage Dockerfile before GHA adapter rollout.
 - Manifest publish refuses descriptors that cannot be traced to a named source.
 - Blob body locality is measured separately from manifest/index locality.
 - Generic KV code remains substrate only; OCI manifest graphs, upload sessions, range behavior, referrers, and digest response semantics move into `serve::engines::oci`.
