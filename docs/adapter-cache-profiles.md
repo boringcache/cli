@@ -83,6 +83,13 @@ After each run, summarize `cache-registry-request-metrics.jsonl` with `ci/e2e/re
 - preload-index p95
 - prefetch-cycle p95
 
+When a run captures multiple proxy status snapshots, prefer the labeled
+`request_metrics_status_<phase>_*` values for pass/fail checks. For example, the
+strict restart gate should read
+`request_metrics_status_phase2_restart_warm_oci_body_remote_fetches`, not the
+top-level `request_metrics_oci_body_remote_fetches`, because the top-level value
+is the max across all snapshots and can include intentional cold-path reads.
+
 For OCI body-plane measurements, prefer a non-compressible payload (`E2E_PAYLOAD_MODE=random`) so blob bytes represent real transfer pressure instead of `/dev/zero` compression artifacts.
 
 For restart-path measurements, use `E2E_BLOB_CACHE_SCOPE=per-proxy` in the Docker E2E harness or force a distinct local blob-cache directory with `BORINGCACHE_BLOB_READ_CACHE_DIR` so the run is not polluted by an older blob cache from a previous proxy process.
@@ -92,6 +99,6 @@ For restart-path measurements, use `E2E_BLOB_CACHE_SCOPE=per-proxy` in the Docke
 1. Use the default strict body hydration path for real project and GitHub Actions adapter rollout.
 2. Keep hidden `metadata-only` and `bodies-background` controls only for targeted readiness/read-through comparisons.
 3. Use `E2E_PAYLOAD_MODE=random` when validating byte movement so digest/size verification and range behavior see real transfer pressure.
-4. Compare `request_metrics_oci_body_remote_fetches`, `request_metrics_oci_engine_blob_remote_fetched_bytes`, range counts, proof sources, miss causes, and publish phase durations before changing registry behavior.
+4. Compare labeled restart-path `request_metrics_status_<phase>_*` locality values plus top-level `request_metrics_oci_engine_blob_remote_fetched_bytes`, range counts, proof sources, miss causes, and publish phase durations before changing registry behavior.
 5. Measure object-size distributions and read locality before changing any non-OCI adapter hydration ordering.
 6. Keep the OCI manifest-contract and BuildKit registry-cache E2E legs covering spec-sensitive manifest, referrers, blob-upload, and warm-start behavior as OCI proxy changes land.

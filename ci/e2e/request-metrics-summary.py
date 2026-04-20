@@ -201,6 +201,13 @@ def collect_status_snapshots(metrics_path, status_args):
     }
 
 
+def print_status_snapshot(prefix, snapshot):
+    values = snapshot["values"]
+    print(f"{prefix}_oci_hydration={snapshot['policy']}")
+    for key in STATUS_SNAPSHOT_KEYS:
+        print(f"{prefix}_{key}={values.get(key, 0)}")
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(
@@ -360,14 +367,9 @@ def main() -> int:
     )
     print(f"request_metrics_status_snapshots_total={status_snapshots['count']}")
     for index, snapshot in enumerate(status_snapshots["snapshots"], start=1):
-        values = snapshot["values"]
         print(f"request_metrics_status_snapshot_{index}_label={snapshot['label']}")
-        print(f"request_metrics_status_snapshot_{index}_oci_hydration={snapshot['policy']}")
-        for key in STATUS_SNAPSHOT_KEYS:
-            print(
-                f"request_metrics_status_snapshot_{index}_{key}="
-                f"{values.get(key, 0)}"
-            )
+        print_status_snapshot(f"request_metrics_status_snapshot_{index}", snapshot)
+        print_status_snapshot(f"request_metrics_status_{snapshot['label']}", snapshot)
     print(
         "request_metrics_startup_prefetch_oci_hydration="
         f"{','.join(status_snapshots['policies']) if status_snapshots['policies'] else 'unknown'}"
