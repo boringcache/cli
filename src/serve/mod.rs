@@ -8,8 +8,8 @@ pub mod state;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OciHydrationPolicy {
-    #[default]
     MetadataOnly,
+    #[default]
     BodiesBeforeReady,
     BodiesBackground,
 }

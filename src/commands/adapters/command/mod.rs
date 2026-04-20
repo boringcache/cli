@@ -644,7 +644,7 @@ fn print_dry_run(plan: &DryRunPlan, skip_save: bool, skip_restore: bool, save_on
     for oci_prefetch_ref in &plan.proxy.oci_prefetch_refs {
         ui::info(&format!("[boringcache]   oci-prefetch {oci_prefetch_ref}"));
     }
-    if plan.proxy.oci_hydration != crate::serve::OciHydrationPolicy::MetadataOnly.as_str() {
+    if plan.proxy.oci_hydration != crate::serve::OciHydrationPolicy::default().as_str() {
         ui::info(&format!(
             "[boringcache]   oci-hydration {}",
             plan.proxy.oci_hydration

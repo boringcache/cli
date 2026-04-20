@@ -1060,7 +1060,7 @@ fn test_adapter_dry_run_json_reports_oci_prefetch_refs() {
         parsed["proxy"]["oci_prefetch_refs"],
         serde_json::json!(["cache@buildcache"])
     );
-    assert_eq!(parsed["proxy"]["oci_hydration"], "metadata-only");
+    assert_eq!(parsed["proxy"]["oci_hydration"], "bodies-before-ready");
 }
 
 #[test]
@@ -1469,7 +1469,7 @@ fn test_docker_read_only_dry_run_json_uses_on_demand_proxy_mode() {
     assert_eq!(parsed["adapter"], "docker");
     assert_eq!(parsed["proxy"]["read_only"], true);
     assert_eq!(parsed["proxy"]["startup_mode"], "on-demand");
-    assert_eq!(parsed["proxy"]["oci_hydration"], "metadata-only");
+    assert_eq!(parsed["proxy"]["oci_hydration"], "bodies-before-ready");
     assert!(parsed["proxy"].get("oci_prefetch_refs").is_none());
     assert!(parsed["oci_cache"].get("cache_to").is_none());
 
@@ -1487,7 +1487,7 @@ fn test_docker_read_only_dry_run_json_uses_on_demand_proxy_mode() {
 }
 
 #[test]
-fn test_docker_dry_run_json_reports_oci_hydration_policy() {
+fn test_docker_dry_run_json_accepts_expert_oci_hydration_policy() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);
     let output = command
@@ -1500,7 +1500,7 @@ fn test_docker_dry_run_json_reports_oci_hydration_policy() {
             "--endpoint-host",
             "host.docker.internal",
             "--oci-hydration",
-            "bodies-before-ready",
+            "metadata-only",
             "--dry-run",
             "--json",
             "--",
@@ -1521,7 +1521,7 @@ fn test_docker_dry_run_json_reports_oci_hydration_policy() {
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
     assert_schema_version(&parsed);
     assert_eq!(parsed["adapter"], "docker");
-    assert_eq!(parsed["proxy"]["oci_hydration"], "bodies-before-ready");
+    assert_eq!(parsed["proxy"]["oci_hydration"], "metadata-only");
     assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
         serde_json::json!(["cache@buildcache"])

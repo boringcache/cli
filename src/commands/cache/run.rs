@@ -704,7 +704,7 @@ fn print_dry_run(
         if !startup_warm {
             proxy_parts.push("--on-demand".to_string());
         }
-        if oci_hydration_policy != crate::serve::OciHydrationPolicy::MetadataOnly {
+        if oci_hydration_policy != crate::serve::OciHydrationPolicy::default() {
             proxy_parts.push("--oci-hydration".to_string());
             proxy_parts.push(oci_hydration_policy.as_str().to_string());
         }

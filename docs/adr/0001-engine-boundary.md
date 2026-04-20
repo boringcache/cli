@@ -14,7 +14,7 @@ BoringCache now has more than one cache shape:
 - proxy/native adapters for OCI/BuildKit, Bazel, sccache/WebDAV, Turbo, Nx, Gradle, Maven, and Go;
 - `one@v1`, `.boringcache.toml`, split restore/save/admin tokens, and standalone benchmark repos as the public product surface.
 
-Recent Docker work showed that protocol-native behavior matters. A BuildKit registry cache hit is not just a manifest hit: BuildKit also needs blob bodies. `metadata-only`, `bodies-before-ready`, and `bodies-background` are OCI-specific body-plane policies, not generic filesystem snapshot behavior.
+Recent Docker work showed that protocol-native behavior matters. A BuildKit registry cache hit is not just a manifest hit: BuildKit also needs blob bodies. The product default is to hydrate selected OCI bodies before readiness; `metadata-only` and `bodies-background` remain OCI-specific diagnostic modes, not generic filesystem snapshot behavior.
 
 The generic archive path still pays full tree scan, full manifest build, tar creation, upload, download, and extraction costs. That is a real roadmap problem for low-churn generic caches, but it is separate from Docker/OCI parity and should not force a product restart.
 

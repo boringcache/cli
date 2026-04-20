@@ -160,7 +160,7 @@ The OCI pass should land in small commits in this order:
 5. Blob engine: move HEAD/GET locality, blob body cache reads, remote URL refresh, range handling, and digest/size verification into `serve::engines::oci::blobs`.
 6. Publish engine: move save/pointer/confirm/alias/referrer orchestration into `serve::engines::oci::publish`, with handlers only parsing request bodies and returning responses.
 7. Diagnostics: add an `OciEngineDiagnostics` value with proof source counts, local vs remote reads, graph expansion count, publish timings, miss causes, and hydration state.
-8. BuildKit acceptance: run cold, warm, proxy restart, metadata-only, bodies-before-ready, bodies-background, and random body graph registry E2E.
+8. BuildKit acceptance: run cold, warm, proxy restart, default strict body hydration, hidden metadata-only/background controls, and random body graph registry E2E.
 9. Backend contract check: touch Rails only if the BuildKit E2E proves the CLI needs backend-visible truth stronger than `check_blobs_verified`.
 
 ## Web Contract
@@ -199,7 +199,7 @@ For OCI specifically:
 - Upload digest verification hashes streaming request bodies on one-shot paths and only rereads files when resumable state makes that necessary.
 - Transfer clients keep HTTP/2 pooling and adaptive windows on by default; any change to pool sizing or protocol fallback must be benchmarked against BuildKit cache import/export.
 - Blob engine extraction must add ranged `GET` acceptance before claiming full blob-path parity.
-- BuildKit E2E proves cold, warm, restart, metadata-only, bodies-before-ready, bodies-background, and random-body graph behavior.
+- BuildKit E2E proves cold, warm, restart, default strict body hydration, hidden metadata-only/background controls, and random-body graph behavior.
 - Manifest publish refuses descriptors that cannot be traced to a named source.
 - Blob body locality is measured separately from manifest/index locality.
 - Generic KV code remains substrate only; OCI manifest graphs, upload sessions, range behavior, referrers, and digest response semantics move into `serve::engines::oci`.

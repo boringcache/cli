@@ -27,7 +27,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - CAS layout/materialization only applies to OCI/file-CAS adapters. For proxy-native KV/object protocols (Turbo, Nx, Gradle, Maven, sccache, Go), the equivalent materialization proof is PUT/HEAD/GET or query behavior through the proxy.
 - Docker parity lesson:
   - A registry-cache hit is not complete until both the manifest graph and blob bodies are locally reachable. Metadata-only startup can be logically cached while the first warm build still pays remote body reads.
-  - `metadata-only`, `bodies-before-ready`, and `bodies-background` are the right product knobs. They should be reported in diagnostics alongside local OCI body hits, remote body fetches, remote bytes, remote duration, startup inserted/cold/failed counts, and BuildKit import/export wall time.
+  - `metadata-only`, `bodies-before-ready`, and `bodies-background` are the right internal benchmark modes, but not ordinary user choices. The product default should be `bodies-before-ready`, with the selected policy reported in diagnostics alongside local OCI body hits, remote body fetches, remote bytes, remote duration, startup inserted/cold/failed counts, and BuildKit import/export wall time.
   - The local Docker E2E harness now records `/_boringcache/status` snapshots after warm phases so OCI body-plane behavior is visible instead of inferred from BuildKit wall time.
   - Local Colima replay needs `REGISTRY_HOST=host.docker.internal` plus a BuildKit daemon config marking that registry as HTTP/insecure. The E2E harness now generates that config automatically for non-localhost registry refs.
   - Strict local-edge replay must isolate the proxy blob cache (`E2E_BLOB_CACHE_SCOPE=per-proxy`). Otherwise a same-machine proxy restart can reuse the previous read-through blob cache and hide the cold body-plane cost.
@@ -49,7 +49,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Local Gradle and Maven runtime E2E legs were wired into the adapter command harness and passed on this machine through mise.
   - The diagnostics summarizer now ingests proxy status snapshots and emits both aggregate OCI body-plane metrics and per-snapshot phase metrics.
   - Local/staging Tigris workspace provisioning now treats `409` conflicts as recoverable by ensuring the bucket exists and minting a fresh workspace key.
-  - Larger Docker graph replay passed locally across all three OCI hydration policies with both shared and per-proxy body-cache scopes.
+  - Larger Docker graph replay passed locally across the default strict OCI body hydration path and hidden metadata-only/background controls with both shared and per-proxy body-cache scopes.
   - The engine-boundary ADR is written in `docs/adr/0001-engine-boundary.md`; snapshot-v2/crate split work should start behind that boundary, not before it.
 
 ## 2026-04-15 - warm-first proxy startup
@@ -169,7 +169,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Distribution resumable blob uploads should reject stale or out-of-order chunk offsets with `416 Requested Range Not Satisfiable`.
   - OCI 1.1 subject-aware manifest pushes should return `OCI-Subject` when the registry supports referrers processing.
 - Current gaps:
-  - OCI startup policy still does not decide whether selected-ref blob-byte hydration should happen eagerly or only after measured read locality proves it worthwhile.
+  - OCI startup now defaults to strict selected-ref body hydration; the remaining gap is proving that default against the full BuildKit acceptance matrix and keeping hidden metadata-only/background modes as controls.
   - Track the new OCI manifest-contract E2E leg alongside the existing BuildKit registry-cache leg so subject/referrers and restart behavior stay covered as proxy changes land.
   - Measure whether the new OCI inflight dedupe meaningfully reduces restore, pointer, download-url, and blob-fetch fan-out under concurrent reader load.
   - Add an E2E BuildKit OCI-spec mirror that covers manifest PUT validation, resumable upload edge cases, warm restart behavior, and cache import/export parity.

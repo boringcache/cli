@@ -29,8 +29,8 @@ boringcache docker --tag docker-cache -- docker buildx build .
 `boringcache docker` injects `--cache-from` and `--cache-to` for you.
 Do not pass those flags yourself.
 Use `--cache-ref-tag` and `--cache-mode` when you need to override the OCI cache ref or export mode.
-By default the Docker path indexes the selected OCI manifest and blob URLs, then lets BuildKit fetch layer bodies on demand through the local proxy.
-Use `--oci-hydration bodies-before-ready` when you want the selected registry cache bodies local before BuildKit starts, or `--oci-hydration bodies-background` when you want startup to continue while body hydration runs.
+By default the Docker path warms the selected OCI manifest, blob URLs, and blob bodies before BuildKit starts.
+That keeps the normal path simple: a warm BuildKit run should read cache bodies through the local proxy instead of discovering remote body reads after the manifest hit.
 
 If the builder runs in another container, set `endpoint-host = "host.docker.internal"` in `.boringcache.toml` or pass `--endpoint-host host.docker.internal`.
 
