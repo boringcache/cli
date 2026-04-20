@@ -7,6 +7,17 @@ pub(crate) async fn put_kv_object(
     body: Body,
     put_status: StatusCode,
 ) -> Result<Response, RegistryError> {
+    put_kv_object_with_integrity(state, namespace, key, body, put_status, None).await
+}
+
+pub(crate) async fn put_kv_object_with_integrity(
+    state: &AppState,
+    namespace: KvNamespace,
+    key: &str,
+    body: Body,
+    put_status: StatusCode,
+    integrity: Option<KvBlobIntegrity>,
+) -> Result<Response, RegistryError> {
     let put_start = std::time::Instant::now();
     let scoped_key = namespace.scoped_key(key);
     if state.read_only {
@@ -48,14 +59,11 @@ pub(crate) async fn put_kv_object(
     put_probe.stage("read_body");
     let (path, blob_size, blob_digest) = write_body_to_temp_file(state, body, &put_probe).await?;
 
-    if let Some(expected_digest) = expected_bazel_cas_blob_digest(namespace, key)
-        && !blob_digest.eq_ignore_ascii_case(&expected_digest)
+    if let Some(policy) = integrity
+        && let Err(error) = policy.validate_put_digest(key, &blob_digest)
     {
         cleanup_temp_file(&path).await;
-        return Err(RegistryError::new(
-            StatusCode::BAD_REQUEST,
-            format!("Bazel CAS digest mismatch: expected {expected_digest}, got {blob_digest}"),
-        ));
+        return Err(error);
     }
 
     let miss_key = kv_miss_cache_key(state, &state.registry_root_tag, &scoped_key);

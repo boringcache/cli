@@ -5,31 +5,37 @@ use axum::response::Response;
 use crate::serve::state::AppState;
 
 use super::error::RegistryError;
-use super::kv::{KvNamespace, get_or_head_kv_object, put_kv_object};
+use super::kv::{get_or_head_kv_object_with_integrity, put_kv_object_with_integrity};
+use crate::serve::engines::bazel::BazelStore;
 
-pub(crate) async fn handle_ac(
+async fn handle_store(
     state: &AppState,
+    store: BazelStore,
     method: Method,
     digest_hex: &str,
     body: Body,
 ) -> Result<Response, RegistryError> {
+    let namespace = store.namespace();
+    let integrity = store.blob_integrity();
     match method {
         Method::PUT => {
-            put_kv_object(
+            put_kv_object_with_integrity(
                 state,
-                KvNamespace::BazelAc,
+                namespace,
                 digest_hex,
                 body,
                 StatusCode::OK,
+                integrity,
             )
             .await
         }
         Method::GET | Method::HEAD => {
-            get_or_head_kv_object(
+            get_or_head_kv_object_with_integrity(
                 state,
-                KvNamespace::BazelAc,
+                namespace,
                 digest_hex,
                 method == Method::HEAD,
+                integrity,
             )
             .await
         }
@@ -39,34 +45,27 @@ pub(crate) async fn handle_ac(
     }
 }
 
+pub(crate) async fn handle_ac(
+    state: &AppState,
+    method: Method,
+    digest_hex: &str,
+    body: Body,
+) -> Result<Response, RegistryError> {
+    handle_store(state, BazelStore::ActionCache, method, digest_hex, body).await
+}
+
 pub(crate) async fn handle_cas(
     state: &AppState,
     method: Method,
     digest_hex: &str,
     body: Body,
 ) -> Result<Response, RegistryError> {
-    match method {
-        Method::PUT => {
-            put_kv_object(
-                state,
-                KvNamespace::BazelCas,
-                digest_hex,
-                body,
-                StatusCode::OK,
-            )
-            .await
-        }
-        Method::GET | Method::HEAD => {
-            get_or_head_kv_object(
-                state,
-                KvNamespace::BazelCas,
-                digest_hex,
-                method == Method::HEAD,
-            )
-            .await
-        }
-        _ => Err(RegistryError::method_not_allowed(
-            "Bazel cache supports GET, HEAD, and PUT",
-        )),
-    }
+    handle_store(
+        state,
+        BazelStore::ContentAddressableStore,
+        method,
+        digest_hex,
+        body,
+    )
+    .await
 }

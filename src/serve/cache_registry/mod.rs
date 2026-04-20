@@ -192,6 +192,8 @@ mod turborepo;
 pub use error::RegistryError;
 pub(crate) use kv::FlushResult;
 pub(crate) use kv::KV_PREFETCH_READINESS_TIMEOUT;
+pub(crate) use kv::KvBlobIntegrity;
+pub(crate) use kv::KvNamespace;
 pub(crate) use kv::cleanup_expired_kv_misses;
 pub(crate) use kv::count_missing_local_blobs;
 pub(crate) use kv::enqueue_replication_flush_hint;

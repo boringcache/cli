@@ -37,22 +37,20 @@ pub(crate) fn content_length_bytes(response: &Response) -> u64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn expected_bazel_cas_blob_digest(namespace: KvNamespace, key: &str) -> Option<String> {
-    if !matches!(namespace, KvNamespace::BazelCas) {
-        return None;
-    }
-    Some(format!("sha256:{}", namespace.normalize_key(key)))
-}
-
-pub(crate) fn bazel_cas_blob_matches(
-    namespace: KvNamespace,
+fn blob_matches_integrity(
+    integrity: Option<KvBlobIntegrity>,
+    phase: &str,
     key: &str,
     blob: &BlobDescriptor,
 ) -> bool {
-    match expected_bazel_cas_blob_digest(namespace, key) {
-        Some(expected) => blob.digest.eq_ignore_ascii_case(&expected),
-        None => true,
+    let Some(policy) = integrity else {
+        return true;
+    };
+    if policy.blob_matches_key(key, blob) {
+        return true;
     }
+    policy.log_mismatch(phase, key, blob);
+    false
 }
 
 pub(crate) async fn get_or_head_kv_object(
@@ -61,8 +59,18 @@ pub(crate) async fn get_or_head_kv_object(
     key: &str,
     is_head: bool,
 ) -> Result<Response, RegistryError> {
+    get_or_head_kv_object_with_integrity(state, namespace, key, is_head, None).await
+}
+
+pub(crate) async fn get_or_head_kv_object_with_integrity(
+    state: &AppState,
+    namespace: KvNamespace,
+    key: &str,
+    is_head: bool,
+    integrity: Option<KvBlobIntegrity>,
+) -> Result<Response, RegistryError> {
     let get_start = std::time::Instant::now();
-    let result = get_or_head_kv_object_inner(state, namespace, key, is_head).await;
+    let result = get_or_head_kv_object_inner(state, namespace, key, is_head, integrity).await;
     let elapsed_ms = get_start.elapsed().as_millis() as u64;
     let tool = namespace.into();
 
@@ -158,6 +166,7 @@ pub(crate) async fn get_or_head_kv_object_inner(
     namespace: KvNamespace,
     key: &str,
     is_head: bool,
+    integrity: Option<KvBlobIntegrity>,
 ) -> Result<Response, RegistryError> {
     let scoped_key = namespace.scoped_key(key);
     kv_trace(namespace, &scoped_key, "start");
@@ -174,21 +183,15 @@ pub(crate) async fn get_or_head_kv_object_inner(
     };
     kv_trace(namespace, &scoped_key, "after-pending");
 
-    if let Some((blob, path)) = local {
-        if bazel_cas_blob_matches(namespace, key, &blob) {
-            kv_trace(namespace, &scoped_key, "serve-local");
-            match serve_local_blob(&blob, &path, is_head).await {
-                Ok(response) => return Ok(response),
-                Err(e) => {
-                    log::warn!("KV local blob read failed, falling back to backend: {e:?}");
-                }
+    if let Some((blob, path)) = local
+        && blob_matches_integrity(integrity, "local", key, &blob)
+    {
+        kv_trace(namespace, &scoped_key, "serve-local");
+        match serve_local_blob(&blob, &path, is_head).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                log::warn!("KV local blob read failed, falling back to backend: {e:?}");
             }
-        } else {
-            log::warn!(
-                "Bazel CAS local blob digest mismatch: key={} digest={}",
-                key,
-                blob.digest
-            );
         }
     }
 
@@ -204,21 +207,15 @@ pub(crate) async fn get_or_head_kv_object_inner(
     };
     kv_trace(namespace, &scoped_key, "after-flushing");
 
-    if let Some((blob, path)) = flushing_local {
-        if bazel_cas_blob_matches(namespace, key, &blob) {
-            kv_trace(namespace, &scoped_key, "serve-flushing");
-            match serve_local_blob(&blob, &path, is_head).await {
-                Ok(response) => return Ok(response),
-                Err(e) => {
-                    log::warn!("KV flushing blob read failed, falling through: {e:?}");
-                }
+    if let Some((blob, path)) = flushing_local
+        && blob_matches_integrity(integrity, "flushing", key, &blob)
+    {
+        kv_trace(namespace, &scoped_key, "serve-flushing");
+        match serve_local_blob(&blob, &path, is_head).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                log::warn!("KV flushing blob read failed, falling through: {e:?}");
             }
-        } else {
-            log::warn!(
-                "Bazel CAS flushing blob digest mismatch: key={} digest={}",
-                key,
-                blob.digest
-            );
         }
     }
 
@@ -226,26 +223,20 @@ pub(crate) async fn get_or_head_kv_object_inner(
 
     if let Some((blob, cache_entry_id, cached_url)) =
         lookup_published_blob(state, &scoped_key).await
+        && blob_matches_integrity(integrity, "published", key, &blob)
     {
-        if bazel_cas_blob_matches(namespace, key, &blob) {
-            kv_trace(namespace, &scoped_key, "serve-published-fast");
-            if use_miss_cache {
-                clear_kv_miss(state, &miss_key);
-            }
-            return serve_backend_blob(
-                state,
-                &cache_entry_id,
-                &blob,
-                cached_url.as_deref(),
-                is_head,
-            )
-            .await;
+        kv_trace(namespace, &scoped_key, "serve-published-fast");
+        if use_miss_cache {
+            clear_kv_miss(state, &miss_key);
         }
-        log::warn!(
-            "Bazel CAS published blob digest mismatch: key={} digest={}",
-            key,
-            blob.digest
-        );
+        return serve_backend_blob(
+            state,
+            &cache_entry_id,
+            &blob,
+            cached_url.as_deref(),
+            is_head,
+        )
+        .await;
     }
 
     if use_miss_cache && is_recent_kv_miss(state, &miss_key) {
@@ -288,26 +279,21 @@ pub(crate) async fn get_or_head_kv_object_inner(
     };
     kv_trace(namespace, &scoped_key, "lookup-flight-end");
 
-    if let Some((blob, cache_entry_id, cached_url)) = lookup_result {
-        if bazel_cas_blob_matches(namespace, key, &blob) {
-            kv_trace(namespace, &scoped_key, "serve-published-after-lookup");
-            if use_miss_cache {
-                clear_kv_miss(state, &miss_key);
-            }
-            return serve_backend_blob(
-                state,
-                &cache_entry_id,
-                &blob,
-                cached_url.as_deref(),
-                is_head,
-            )
-            .await;
+    if let Some((blob, cache_entry_id, cached_url)) = lookup_result
+        && blob_matches_integrity(integrity, "lookup", key, &blob)
+    {
+        kv_trace(namespace, &scoped_key, "serve-published-after-lookup");
+        if use_miss_cache {
+            clear_kv_miss(state, &miss_key);
         }
-        log::warn!(
-            "Bazel CAS lookup blob digest mismatch: key={} digest={}",
-            key,
-            blob.digest
-        );
+        return serve_backend_blob(
+            state,
+            &cache_entry_id,
+            &blob,
+            cached_url.as_deref(),
+            is_head,
+        )
+        .await;
     }
 
     kv_trace(namespace, &scoped_key, "not-found");

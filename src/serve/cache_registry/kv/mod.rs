@@ -162,6 +162,53 @@ impl KvNamespace {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct KvBlobIntegrity {
+    label: &'static str,
+    expected_digest_for_key: fn(&str) -> String,
+}
+
+impl KvBlobIntegrity {
+    pub(crate) fn new(label: &'static str, expected_digest_for_key: fn(&str) -> String) -> Self {
+        Self {
+            label,
+            expected_digest_for_key,
+        }
+    }
+
+    pub(crate) fn expected_digest(self, key: &str) -> String {
+        (self.expected_digest_for_key)(key)
+    }
+
+    fn blob_matches_key(self, key: &str, blob: &BlobDescriptor) -> bool {
+        blob.digest.eq_ignore_ascii_case(&self.expected_digest(key))
+    }
+
+    fn validate_put_digest(self, key: &str, blob_digest: &str) -> Result<(), RegistryError> {
+        let expected_digest = self.expected_digest(key);
+        if !blob_digest.eq_ignore_ascii_case(&expected_digest) {
+            return Err(RegistryError::new(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "{} digest mismatch: expected {expected_digest}, got {blob_digest}",
+                    self.label
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn log_mismatch(self, phase: &str, key: &str, blob: &BlobDescriptor) {
+        log::warn!(
+            "{} {} blob digest mismatch: key={} digest={}",
+            self.label,
+            phase,
+            key,
+            blob.digest
+        );
+    }
+}
+
 mod blob_read;
 mod flight;
 mod flush;
