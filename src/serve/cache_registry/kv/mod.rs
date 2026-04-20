@@ -209,6 +209,38 @@ impl KvBlobIntegrity {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct KvPutOptions {
+    integrity: Option<KvBlobIntegrity>,
+    spool_reject_status: StatusCode,
+}
+
+impl Default for KvPutOptions {
+    fn default() -> Self {
+        Self {
+            integrity: None,
+            spool_reject_status: StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+}
+
+impl KvPutOptions {
+    pub(crate) fn with_integrity(mut self, integrity: Option<KvBlobIntegrity>) -> Self {
+        self.integrity = integrity;
+        self
+    }
+
+    pub(crate) fn with_spool_reject_status(mut self, status: StatusCode) -> Self {
+        self.spool_reject_status = status;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spool_reject_status(&self) -> StatusCode {
+        self.spool_reject_status
+    }
+}
+
 mod blob_read;
 mod flight;
 mod flush;

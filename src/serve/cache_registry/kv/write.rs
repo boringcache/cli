@@ -7,7 +7,15 @@ pub(crate) async fn put_kv_object(
     body: Body,
     put_status: StatusCode,
 ) -> Result<Response, RegistryError> {
-    put_kv_object_with_integrity(state, namespace, key, body, put_status, None).await
+    put_kv_object_with_options(
+        state,
+        namespace,
+        key,
+        body,
+        put_status,
+        KvPutOptions::default(),
+    )
+    .await
 }
 
 pub(crate) async fn put_kv_object_with_integrity(
@@ -17,6 +25,25 @@ pub(crate) async fn put_kv_object_with_integrity(
     body: Body,
     put_status: StatusCode,
     integrity: Option<KvBlobIntegrity>,
+) -> Result<Response, RegistryError> {
+    put_kv_object_with_options(
+        state,
+        namespace,
+        key,
+        body,
+        put_status,
+        KvPutOptions::default().with_integrity(integrity),
+    )
+    .await
+}
+
+pub(crate) async fn put_kv_object_with_options(
+    state: &AppState,
+    namespace: KvNamespace,
+    key: &str,
+    body: Body,
+    put_status: StatusCode,
+    options: KvPutOptions,
 ) -> Result<Response, RegistryError> {
     let put_start = std::time::Instant::now();
     let scoped_key = namespace.scoped_key(key);
@@ -50,7 +77,7 @@ pub(crate) async fn put_kv_object_with_integrity(
                 put_start.elapsed().as_millis() as u64,
             );
             return Err(RegistryError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
+                options.spool_reject_status,
                 format!("KV spool budget exceeded ({KV_BACKLOG_POLICY}), try again after flush"),
             ));
         }
@@ -59,7 +86,7 @@ pub(crate) async fn put_kv_object_with_integrity(
     put_probe.stage("read_body");
     let (path, blob_size, blob_digest) = write_body_to_temp_file(state, body, &put_probe).await?;
 
-    if let Some(policy) = integrity
+    if let Some(policy) = options.integrity
         && let Err(error) = policy.validate_put_digest(key, &blob_digest)
     {
         cleanup_temp_file(&path).await;
@@ -88,7 +115,7 @@ pub(crate) async fn put_kv_object_with_integrity(
                 put_start.elapsed().as_millis() as u64,
             );
             return Err(RegistryError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
+                options.spool_reject_status,
                 format!("KV spool budget exceeded ({KV_BACKLOG_POLICY}), try again after flush"),
             ));
         }

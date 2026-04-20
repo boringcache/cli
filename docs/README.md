@@ -26,7 +26,9 @@ If you are working on the CLI repo itself:
 - [Cache session trace and OCI negative cache ADR](adr/0006-cache-session-trace-and-oci-negative-cache.md)
 - [Docker immutable run refs and alias promotion ADR](adr/0007-docker-immutable-run-refs-and-alias-promotion.md)
 - [OCI mistake ledger](oci-mistake-ledger.md)
+- [sccache mistake ledger](sccache-mistake-ledger.md)
 - [Bazel mistake ledger](bazel-mistake-ledger.md)
+- [Gradle/Maven mistake ledger](gradle-maven-mistake-ledger.md)
 - [Installation setup](../INSTALLATION.md)
 
 The website docs live at [boringcache.com/docs](https://boringcache.com/docs).

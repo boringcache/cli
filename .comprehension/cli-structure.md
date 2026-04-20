@@ -201,6 +201,7 @@ src/
     engines/
       mod.rs
       bazel.rs
+      gradle.rs
       oci/
         mod.rs
         blobs.rs
@@ -293,7 +294,7 @@ Most of the root-level namespace split is in place now, so the remaining work is
 - `src/api/models/` is already split by response family, so future API work should prefer adding files there instead of growing `mod.rs`.
 - `src/optimize/` and `src/platform/` are already real namespaces, not placeholders.
 - `src/serve/runtime/`, `src/serve/http/`, `src/serve/cache_registry/`, and `src/serve/state/` are the durable runtime namespaces; the next work is to keep their remaining hot files thin.
-- `src/serve/engines/` is the incremental engine-boundary namespace. `bazel.rs` owns Bazel AC/CAS store identity and CAS digest integrity policy; `oci/manifests.rs` owns pure OCI manifest descriptor, content-type, subject/referrers, and child-manifest classification rules; `oci/present_blobs.rs` owns descriptor proof before manifest publish; and `oci/uploads.rs` owns the OCI blob upload session state machine: start, PATCH, final PUT, mount `201`/`202`, empty finalize reuse, stale offset `416`, and streaming digest verification for one-shot upload bodies.
+- `src/serve/engines/` is the incremental engine-boundary namespace. `bazel.rs` owns Bazel AC/CAS store identity and CAS digest integrity policy; `gradle.rs` owns Gradle HTTP build-cache write-status policy, including official `413 Payload Too Large` oversized-entry behavior; `oci/manifests.rs` owns pure OCI manifest descriptor, content-type, subject/referrers, and child-manifest classification rules; `oci/present_blobs.rs` owns descriptor proof before manifest publish; and `oci/uploads.rs` owns the OCI blob upload session state machine: start, PATCH, final PUT, mount `201`/`202`, empty finalize reuse, stale offset `416`, and streaming digest verification for one-shot upload bodies.
 - `src/serve/http/handlers/` now owns the split OCI manifest, blob, and upload HTTP glue, while `handlers/mod.rs` still carries shared dispatch and proxy-status orchestration.
 - `src/serve/cache_registry/kv/` now has separate `blob_read.rs`, `prefetch.rs`, and `index.rs` helpers, while `kv/mod.rs` still carries shared KV policy, lookup-flight coordination, and pending-publish handoff types.
 - `src/telemetry.rs` remains a thin front module, while `src/progress/mod.rs` fronts the progress namespace and `src/observability/` remains the request/event metrics namespace.
@@ -305,6 +306,7 @@ These are the next sensible follow-ons from the current tree.
 
 - Insert the engine boundary described in `docs/adr/0001-engine-boundary.md` before starting snapshot-v2 or any crate/workspace split.
 - Continue the OCI engine extraction described in `docs/adr/0002-proxy-engine-plan-b.md`, moving route-handler correctness decisions into `src/serve/engines/oci/` one invariant at a time.
+- Use the adapter progress tracker in `docs/adr/0002-proxy-engine-plan-b.md` plus `docs/adapter-contract-matrix.md` before the next Gradle/Maven, Turbo/Nx, or Go adapter change.
 - Use `docs/adr/0003-runner-proxy-optimization-roadmap.md` for the next runner-proxy optimization sequence: add session trace and OCI negative cache, design immutable Docker run refs and alias promotion, remove local body-cache copy/sync, prototype large-blob stream-through, then tune cache policy and concurrency from traces.
 - Use `docs/adr/0004-oci-large-blob-stream-through.md`, `docs/adr/0005-borrowed-upload-sessions-and-blob-cache-policy.md`, `docs/adr/0006-cache-session-trace-and-oci-negative-cache.md`, and `docs/adr/0007-docker-immutable-run-refs-and-alias-promotion.md` for the concrete OCI hot-path and Docker correctness implementation tracks.
 - Split `src/serve/cache_registry/kv/flush.rs` into scheduling, refresh, and pending-publish handoff helpers.

@@ -43,6 +43,8 @@ Carry these findings into the relevant adapter rewrite plan. A rewrite is not do
 | OCI / engine boundary | OCI must not be treated as generic KV. Registry truth is manifest/blob/session/referrer shaped. | `serve::engines::oci` | Closed for the current OCI pass: uploads, manifest resolution, manifest cache entries, child-manifest staging, blob HEAD/GET, selected-ref prefetch, publish, referrers, and diagnostics live under the OCI engine. Keep `docs/oci-kv-path-audit.md` current and do not move OCI protocol decisions back into KV or HTTP handlers. |
 | Shared KV adapters | KV is justified for object-cache adapters, but only as substrate. | sccache, Gradle, Maven, Turbo, Nx, Go, and Bazel HTTP rewrites | Keep key identity, status codes, auth shape, retry/miss behavior, and binary payload ownership in the adapter row; do not add archive or OCI assumptions to shared KV. |
 | Bazel / AC-CAS boundary | Bazel AC/CAS truth should not live as Bazel-specific branches in generic KV. | `serve::engines::bazel` | Started: Bazel store identity maps `/ac/` and `/cas/` onto distinct KV namespaces, and the CAS integrity policy verifies SHA-256 body digests on writes and read sources while action-cache payloads stay opaque. KV accepts a protocol-neutral integrity hook and remains the storage substrate. |
+| Gradle / oversized writes | Gradle backlog or payload-limit rejection must not look like a generic fatal proxy error. | `serve::engines::gradle` | Started: Gradle owns a PUT option that maps spool-budget rejection to `413 Payload Too Large`, matching the official Gradle HTTP cache contract that treats oversized entries as non-error cache stores. Maven keeps the generic KV rejection status. |
+| Maven / HTTP method set | Maven HEAD support must not be treated as optional while sharing Gradle-like KV substrate. | Maven route over shared KV | Existing Maven round-trip coverage includes `PUT`, `HEAD`, and `GET`; keep HEAD behavior covered before moving Maven rules behind a richer engine boundary. |
 | Example selection | The comparison implementation must match the adapter protocol. | Per-adapter research step | Use BuildKit/containerd for OCI, sccache's own backend behavior for sccache, BuildBuddy-style behavior for Bazel AC/CAS, Develocity-style behavior for Gradle, official Turbo/Nx APIs for Turbo/Nx, Apache Maven extension behavior for Maven, and Go cacheprog source for Go. |
 | Transfer hot path | HTTP/2 and pool settings are part of adapter performance, not incidental transport defaults. | Transfer client/runtime work | Benchmark BuildKit import/export before changing pool sizing, h2 fallback, adaptive windows, connection limits, or compression behavior. |
 
@@ -94,3 +96,15 @@ Bazel is the next native adapter pass after the sccache WebDAV source/E2E alignm
 - Bazel auth docs: HTTP Basic Auth may be embedded in the remote cache URL and must be used with HTTPS when credentials are present.
 
 The first engine boundary preserves the current route behavior in `src/serve/cache_registry/bazel.rs` while moving AC/CAS store identity and CAS digest policy into `src/serve/engines/bazel.rs`. The remaining acceptance list should keep covering `/ac/<sha256>` and `/cas/<sha256>` separation, invalid digest rejection, CAS PUT digest mismatch rejection, `GET`/`HEAD`/`PUT`, unsupported methods, read-only upload behavior, warm Bazel E2E reuse, and cache-op GET records/hits.
+
+## Gradle / Maven HTTP Object Cache Next
+
+Gradle and Maven are the active HTTP object-cache pass after Bazel AC/CAS.
+
+The source-backed contract starts from:
+
+- Gradle HTTP build cache docs: `GET <cache-url>/<cache-key>` returns a `2xx` body for a hit or `404 Not Found` for a miss; `PUT <cache-url>/<cache-key>` accepts any `2xx`, and `413 Payload Too Large` is an oversized-entry signal Gradle does not treat as an error.
+- Apache Maven Build Cache Extension remote-cache docs: a shared HTTP cache server must support `PUT`, `GET`, and `HEAD`.
+- Maven portability docs: remote cache reuse depends on build/source/effective-POM comparability, so BoringCache should preserve Maven artifact bytes and diagnose misses without normalizing payloads.
+
+The first Gradle boundary keeps route handling in `src/serve/cache_registry/gradle.rs` while moving Gradle-specific write-status policy into `src/serve/engines/gradle.rs`. Maven remains on generic KV write rejection until a Maven source-code audit identifies a different required status shape. The remaining acceptance list should keep covering Gradle hit/miss/write statuses, Maven `HEAD`/`GET`/`PUT`, exact key paths, opaque payload bytes, and local Gradle/Maven E2E runs against the Rails-backed proxy.

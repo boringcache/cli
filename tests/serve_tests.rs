@@ -79,6 +79,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
     test_env::set_var("BORINGCACHE_API_URL", server.url());
     test_env::set_var("BORINGCACHE_AUTH_TOKEN", "test-token");
     test_env::set_var("BORINGCACHE_TEST_MODE", "1");
+    test_env::remove_var("BORINGCACHE_MAX_SPOOL_BYTES");
 
     let api_client =
         ApiClient::new_with_token_override(Some("test-token".to_string())).expect("API client");
@@ -6909,6 +6910,27 @@ async fn test_gradle_rejects_unsupported_method() {
 }
 
 #[tokio::test]
+async fn test_gradle_put_returns_413_when_spool_budget_exceeded() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    test_env::set_var("BORINGCACHE_MAX_SPOOL_BYTES", "1");
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/cache/oversized-entry")
+            .body(Body::from("too-large"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
 async fn test_maven_put_get_round_trip() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
@@ -7175,6 +7197,27 @@ async fn test_maven_put_get_round_trip() {
     assert_eq!(get_response.status(), StatusCode::OK);
     let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(get_body.as_ref(), payload);
+}
+
+#[tokio::test]
+async fn test_maven_put_keeps_generic_spool_rejection_status() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    test_env::set_var("BORINGCACHE_MAX_SPOOL_BYTES", "1");
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v1.1/com.example/app/abcdef1234567890/buildinfo.xml")
+            .body(Body::from("too-large"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]

@@ -241,6 +241,7 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/serve/cas_publish.rs`
 - `src/serve/engines/mod.rs`
 - `src/serve/engines/bazel.rs`
+- `src/serve/engines/gradle.rs`
 - `src/serve/engines/oci/mod.rs`
 - `src/serve/engines/oci/blobs.rs`
 - `src/serve/engines/oci/manifest_cache.rs`
