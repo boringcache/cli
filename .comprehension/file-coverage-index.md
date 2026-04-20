@@ -239,6 +239,9 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/proxy/tags.rs`
 - `src/serve/mod.rs`
 - `src/serve/cas_publish.rs`
+- `src/serve/engines/mod.rs`
+- `src/serve/engines/oci/mod.rs`
+- `src/serve/engines/oci/present_blobs.rs`
 - `src/serve/http/mod.rs`
 - `src/serve/http/error.rs`
 - `src/serve/http/oci_route.rs`
@@ -282,7 +285,7 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 Notes:
 
 - the KV section reflects the current workspace shape, with flush/publish orchestration still concentrated in `flush.rs`
-- `serve/cas_publish.rs` is shared by manifest publish handlers and KV flush publishing
+- `serve/cas_publish.rs` is shared by manifest publish handlers and KV flush publishing; the OCI tracked-blob path consumes `PresentBlob` proofs when selecting upload sessions
 
 ## Cross-cutting diagnostics, error handling, and test support
 

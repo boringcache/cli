@@ -198,6 +198,11 @@ src/
   serve/
     mod.rs
     cas_publish.rs
+    engines/
+      mod.rs
+      oci/
+        mod.rs
+        present_blobs.rs
     runtime/
       mod.rs
       listener.rs
@@ -282,6 +287,7 @@ Most of the root-level namespace split is in place now, so the remaining work is
 - `src/api/models/` is already split by response family, so future API work should prefer adding files there instead of growing `mod.rs`.
 - `src/optimize/` and `src/platform/` are already real namespaces, not placeholders.
 - `src/serve/runtime/`, `src/serve/http/`, `src/serve/cache_registry/`, and `src/serve/state/` are the durable runtime namespaces; the next work is to keep their remaining hot files thin.
+- `src/serve/engines/` is the incremental engine-boundary namespace. `oci/present_blobs.rs` currently owns the first extracted OCI invariant: manifest publish can proceed only after each descriptor is proven through a named source, with local-byte proofs carrying the exact upload session used by the publish data path.
 - `src/serve/http/handlers/` now owns the split OCI manifest, blob, and upload flows, while `handlers/mod.rs` still carries shared dispatch and proxy-status orchestration.
 - `src/serve/cache_registry/kv/` now has separate `blob_read.rs`, `prefetch.rs`, and `index.rs` helpers, while `kv/mod.rs` still carries shared KV policy, lookup-flight coordination, and pending-publish handoff types.
 - `src/telemetry.rs` remains a thin front module, while `src/progress/mod.rs` fronts the progress namespace and `src/observability/` remains the request/event metrics namespace.
@@ -292,6 +298,7 @@ Most of the root-level namespace split is in place now, so the remaining work is
 These are the next sensible follow-ons from the current tree.
 
 - Insert the engine boundary described in `docs/adr/0001-engine-boundary.md` before starting snapshot-v2 or any crate/workspace split.
+- Continue the OCI engine extraction described in `docs/adr/0002-proxy-engine-plan-b.md`, moving route-handler correctness decisions into `src/serve/engines/oci/` one invariant at a time.
 - Split `src/serve/cache_registry/kv/flush.rs` into scheduling, refresh, and pending-publish handoff helpers.
 - Trim `src/serve/cache_registry/kv/mod.rs` by moving shared KV policy, lookup-flight coordination, and pending-publish handoff types into focused helpers.
 - Revisit `src/api/client/mod.rs` for capability discovery, publish/pending polling, and error parsing helpers.
@@ -360,6 +367,11 @@ src/
       listener.rs
       maintenance.rs
       shutdown.rs
+    engines/
+      mod.rs
+      oci/
+        mod.rs
+        present_blobs.rs
     http/
       mod.rs
       routes.rs
@@ -414,6 +426,7 @@ src/
 
 | Current path | Target path | Status |
 | --- | --- | --- |
+| `src/serve/http/handlers/manifest.rs` descriptor availability and upload-session proof logic | `src/serve/engines/oci/present_blobs.rs` | started |
 | `src/serve/mod.rs` | `src/serve/runtime/{mod,listener,maintenance,shutdown}.rs` | done |
 | `src/serve/http/handlers.rs` | `src/serve/http/handlers/{mod,manifest,blobs,uploads}.rs` | done |
 | `src/serve/cache_registry/kv/lookup.rs` | `src/serve/cache_registry/kv/{lookup,blob_read,prefetch,index}.rs` | done |

@@ -2,13 +2,14 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::api::models::cache::{BlobDescriptor, ConfirmRequest, SaveRequest};
 use crate::cas_oci;
 use crate::cas_transport::upload_payload;
+use crate::serve::engines::oci::{PresentBlob, ensure_manifest_blobs_present};
 use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
 use crate::serve::http::oci_route::insert_header;
@@ -18,7 +19,7 @@ use crate::serve::http::oci_tags::{
 };
 use crate::serve::state::{
     AppState, BlobLocatorEntry, OCI_MANIFEST_CACHE_TTL, OciManifestCacheEntry, UploadSession,
-    digest_tag,
+    diagnostics_enabled, digest_tag,
 };
 
 use super::uploads::has_non_empty_local_blob;
@@ -42,6 +43,7 @@ struct PersistManifestEntryInput<'a> {
     manifest_body: Vec<u8>,
     content_type: String,
     blob_descriptors: Vec<BlobDescriptor>,
+    present_blobs: Vec<PresentBlob>,
     configured_human_tags: &'a [String],
     additional_aliases: &'a [AliasBinding],
 }
@@ -251,7 +253,8 @@ pub(super) async fn put_manifest(
 
     let blob_descriptors = expand_manifest_blob_descriptors_impl(&state, &name, &parsed).await?;
     stage_manifest_reference_uploads_impl(&state, &name, &blob_descriptors, &parsed).await?;
-    validate_manifest_blob_availability(&state, &name, &blob_descriptors).await?;
+    let present_blobs = ensure_manifest_blobs_present(&state, &name, &blob_descriptors).await?;
+    log_manifest_blob_sources(&name, &reference, &present_blobs);
 
     let write_scope_tag = scoped_write_scope_tag(&state.tag_resolver, &name, &reference)?;
     let tag = if reference.starts_with("sha256:") {
@@ -290,6 +293,7 @@ pub(super) async fn put_manifest(
             manifest_body: manifest_body.clone(),
             content_type: content_type.clone(),
             blob_descriptors: blob_descriptors.clone(),
+            present_blobs: present_blobs.clone(),
             configured_human_tags: &state.configured_human_tags,
             additional_aliases: &additional_aliases,
         })
@@ -313,7 +317,7 @@ pub(super) async fn put_manifest(
     }
     .await;
 
-    cleanup_blob_sessions(&state, &name, &blob_descriptors).await;
+    cleanup_present_blob_sessions(&state, &present_blobs).await;
     let mut degraded_fallback = false;
     let mut subject_processed = false;
 
@@ -658,64 +662,6 @@ async fn prefetch_manifest_blob_download_urls(
     }
 }
 
-async fn validate_manifest_blob_availability(
-    state: &AppState,
-    name: &str,
-    blob_descriptors: &[BlobDescriptor],
-) -> Result<(), OciError> {
-    if blob_descriptors.is_empty() {
-        return Ok(());
-    }
-
-    let missing_remote_check = {
-        let sessions = state.upload_sessions.read().await;
-        blob_descriptors
-            .iter()
-            .filter(|descriptor| {
-                sessions
-                    .find_by_name_and_digest(name, &descriptor.digest)
-                    .is_none()
-            })
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    if missing_remote_check.is_empty() {
-        return Ok(());
-    }
-
-    let check = tokio::time::timeout(
-        OCI_API_CALL_TIMEOUT,
-        state
-            .api_client
-            .check_blobs_verified(&state.workspace, &missing_remote_check),
-    )
-    .await
-    .map_err(|_| {
-        OciError::internal(format!(
-            "Blob verification timed out after {}s",
-            OCI_API_CALL_TIMEOUT.as_secs()
-        ))
-    })?
-    .map_err(|e| OciError::internal(format!("Blob verification failed: {e}")))?;
-
-    let available: HashSet<&str> = check
-        .results
-        .iter()
-        .filter(|result| result.exists)
-        .map(|result| result.digest.as_str())
-        .collect();
-    let missing = missing_remote_check
-        .iter()
-        .filter(|descriptor| !available.contains(descriptor.digest.as_str()))
-        .map(|descriptor| descriptor.digest.clone())
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        return Ok(());
-    }
-
-    Err(OciError::blob_unknown_upload(missing))
-}
-
 async fn cache_blob_locator_entries(
     state: &AppState,
     name: &str,
@@ -763,6 +709,33 @@ async fn cache_blob_locator_entries(
     }
 }
 
+fn log_manifest_blob_sources(name: &str, reference: &str, present_blobs: &[PresentBlob]) {
+    if present_blobs.is_empty() || !diagnostics_enabled() {
+        return;
+    }
+
+    let mut sources: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut total_bytes = 0u64;
+    let mut digest_sample = Vec::new();
+    for blob in present_blobs {
+        *sources.entry(blob.source.as_str()).or_insert(0) += 1;
+        total_bytes = total_bytes.saturating_add(blob.size_bytes);
+        if digest_sample.len() < 3 {
+            digest_sample.push(blob.digest.as_str());
+        }
+    }
+
+    log::debug!(
+        "OCI manifest blob sources: name={} reference={} blobs={} bytes={} sources={:?} sample={:?}",
+        name,
+        reference,
+        present_blobs.len(),
+        total_bytes,
+        sources,
+        digest_sample
+    );
+}
+
 fn lookup_oci_manifest_cache(
     state: &AppState,
     tags: &[String],
@@ -798,6 +771,7 @@ async fn persist_manifest_entry(
         manifest_body,
         content_type,
         blob_descriptors,
+        present_blobs,
         configured_human_tags,
         additional_aliases,
     } = input;
@@ -877,7 +851,7 @@ async fn persist_manifest_entry(
     let blob_state = state.clone();
     let manifest_state = state.clone();
     let confirm_state = state.clone();
-    let publish_blob_descriptors = blob_descriptors.clone();
+    let publish_present_blobs = present_blobs.clone();
     let publish_pointer_bytes = pointer_bytes.clone();
     let confirm_tag = primary_tag.clone();
     let confirm_write_scope_tag = write_scope_tag.clone();
@@ -885,7 +859,10 @@ async fn persist_manifest_entry(
     let confirm_manifest_digest = manifest_root_digest.clone();
     let confirm_manifest_size = pointer_bytes.len() as u64;
     let confirm_file_count = request_blob_count.min(u32::MAX as u64) as u32;
-    let all_blob_digests: Vec<String> = blob_descriptors.iter().map(|b| b.digest.clone()).collect();
+    let all_blob_digests: Vec<String> = present_blobs
+        .iter()
+        .map(|blob| blob.digest.clone())
+        .collect();
     crate::serve::cas_publish::publish_after_save(
         &state.api_client,
         &state.workspace,
@@ -895,16 +872,16 @@ async fn persist_manifest_entry(
         Some(all_blob_digests),
         move |save_response| {
             let state = blob_state.clone();
-            let blob_descriptors = publish_blob_descriptors.clone();
+            let present_blobs = publish_present_blobs.clone();
             let cache_entry_id = save_response.cache_entry_id.clone();
             async move {
                 crate::serve::cas_publish::upload_tracked_blobs(
                     &state.api_client,
                     &state.workspace,
                     &cache_entry_id,
-                    &blob_descriptors,
+                    &present_blobs,
                     &state.upload_sessions,
-                    adaptive_blob_upload_concurrency_impl(blob_descriptors.len()),
+                    adaptive_blob_upload_concurrency_impl(present_blobs.len()),
                     OCI_TRANSFER_CALL_TIMEOUT,
                 )
                 .await
@@ -1088,6 +1065,7 @@ async fn persist_referrers_manifest(
         manifest_body: referrers_body,
         content_type: OCI_IMAGE_INDEX_CONTENT_TYPE.to_string(),
         blob_descriptors: Vec::new(),
+        present_blobs: Vec::new(),
         configured_human_tags: &[],
         additional_aliases: &[],
     })
@@ -1615,13 +1593,11 @@ async fn stage_manifest_reference_upload(
     Ok(())
 }
 
-async fn cleanup_blob_sessions(state: &AppState, name: &str, blob_descriptors: &[BlobDescriptor]) {
+async fn cleanup_present_blob_sessions(state: &AppState, present_blobs: &[PresentBlob]) {
     let mut sessions = state.upload_sessions.write().await;
-    for blob in blob_descriptors {
-        if let Some(session) = sessions
-            .find_by_name_and_digest(name, &blob.digest)
-            .map(|s| s.id.clone())
-            && let Some(removed) = sessions.remove(&session)
+    for blob in present_blobs {
+        if let Some(session_id) = blob.upload_session_id.as_deref()
+            && let Some(removed) = sessions.remove(session_id)
         {
             let _ = tokio::fs::remove_file(&removed.temp_path).await;
         }

@@ -352,8 +352,10 @@ fn best_effort_oci_read_response(route: &OciRoute) -> Result<Response, OciError>
 mod tests {
     use super::*;
     use crate::api::client::ApiClient;
+    use crate::api::models::cache::BlobDescriptor;
     use crate::git::GitContext;
     use crate::platform::Platform;
+    use crate::serve::engines::oci::{PresentBlobSource, ensure_manifest_blobs_present};
     use crate::serve::state::{
         BlobLocatorCache, BlobReadCache, BlobReadMetrics, KvPendingStore, KvPublishedIndex,
         UploadSessionStore, ref_tag_for_input,
@@ -696,6 +698,71 @@ mod tests {
                 .expect("mounted copy"),
             payload
         );
+    }
+
+    #[tokio::test]
+    async fn manifest_availability_stages_local_body_cache_for_publish() {
+        let state = test_state();
+        let payload = b"local-body-cache-publish";
+        let digest = cas_oci::prefixed_sha256_digest(payload);
+        state
+            .blob_read_cache
+            .insert(&digest, payload)
+            .await
+            .expect("insert local body cache blob");
+
+        let present = ensure_manifest_blobs_present(
+            &state,
+            "cache",
+            &[BlobDescriptor {
+                digest: digest.clone(),
+                size_bytes: payload.len() as u64,
+            }],
+        )
+        .await
+        .expect("local body cache should prove descriptor availability");
+
+        assert_eq!(present.len(), 1);
+        assert_eq!(present[0].source, PresentBlobSource::LocalBodyCache);
+
+        let target_path = {
+            let sessions = state.upload_sessions.read().await;
+            sessions
+                .find_by_name_and_digest("cache", &digest)
+                .expect("local body cache should be staged as upload session")
+                .temp_path
+                .clone()
+        };
+        assert_eq!(
+            tokio::fs::read(&target_path).await.expect("staged copy"),
+            payload
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_availability_rejects_local_body_cache_size_mismatch() {
+        let state = test_state();
+        let payload = b"wrong-size-local-body-cache";
+        let digest = cas_oci::prefixed_sha256_digest(payload);
+        state
+            .blob_read_cache
+            .insert(&digest, payload)
+            .await
+            .expect("insert local body cache blob");
+
+        let error = ensure_manifest_blobs_present(
+            &state,
+            "cache",
+            &[BlobDescriptor {
+                digest: digest.clone(),
+                size_bytes: payload.len() as u64 + 1,
+            }],
+        )
+        .await
+        .expect_err("descriptor size mismatch should fail");
+
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert!(error.message().contains("descriptor size mismatch"));
     }
 
     #[tokio::test]

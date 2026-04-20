@@ -5,13 +5,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::api::ApiClient;
-use crate::api::models::cache::{BlobReceipt, SaveResponse};
+use crate::api::models::cache::{
+    BlobDescriptor, BlobReceipt, BlobUploadUrlsResponse, SaveResponse,
+};
 use crate::cache::receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
 use crate::multipart_upload::upload_via_single_url;
+use crate::serve::engines::oci::PresentBlob;
 use crate::serve::error::OciError;
 use crate::serve::state::UploadSessionStore;
 use tokio::sync::{RwLock, Semaphore};
 
+#[derive(Debug)]
 struct TrackedBlobUploadJob {
     digest: String,
     temp_path: PathBuf,
@@ -82,22 +86,23 @@ pub(crate) async fn upload_tracked_blobs(
     api_client: &ApiClient,
     workspace: &str,
     cache_entry_id: &str,
-    blob_descriptors: &[crate::api::models::cache::BlobDescriptor],
+    present_blobs: &[PresentBlob],
     upload_sessions: &Arc<RwLock<UploadSessionStore>>,
     max_concurrent: usize,
     transfer_timeout: Duration,
 ) -> Result<Vec<BlobReceipt>, OciError> {
-    if blob_descriptors.is_empty() {
+    if present_blobs.is_empty() {
         return Ok(Vec::new());
     }
 
     let batch_started_at = Instant::now();
-    let requested_blob_count = blob_descriptors.len();
-    let requested_blob_bytes = blob_descriptors
+    let requested_blob_count = present_blobs.len();
+    let requested_blob_bytes = present_blobs
         .iter()
         .fold(0u64, |sum, blob| sum.saturating_add(blob.size_bytes));
+    let blob_descriptors = present_blob_descriptors(present_blobs);
     let upload_plan = api_client
-        .blob_upload_urls(workspace, cache_entry_id, blob_descriptors)
+        .blob_upload_urls(workspace, cache_entry_id, &blob_descriptors)
         .await
         .map_err(|e| OciError::internal(format!("blob_upload_urls failed: {e}")))?;
     crate::observability::emit(
@@ -119,32 +124,8 @@ pub(crate) async fn upload_tracked_blobs(
         .with_workspace(Some(workspace.to_string()))
         .with_cache_entry_id(Some(cache_entry_id.to_string())),
     );
-    let size_by_digest: HashMap<&str, u64> = blob_descriptors
-        .iter()
-        .map(|blob| (blob.digest.as_str(), blob.size_bytes))
-        .collect();
-    let mut upload_jobs = {
-        let sessions = upload_sessions.read().await;
-        let mut jobs = Vec::with_capacity(upload_plan.upload_urls.len());
-        for upload_url_info in &upload_plan.upload_urls {
-            let session = sessions
-                .find_by_digest(&upload_url_info.digest)
-                .ok_or_else(|| {
-                    OciError::blob_unknown_upload(vec![upload_url_info.digest.clone()])
-                })?;
-            jobs.push(TrackedBlobUploadJob {
-                digest: upload_url_info.digest.clone(),
-                temp_path: session.temp_path.clone(),
-                url: upload_url_info.url.clone(),
-                headers: upload_url_info.headers.clone(),
-                size_bytes: size_by_digest
-                    .get(upload_url_info.digest.as_str())
-                    .copied()
-                    .unwrap_or(0),
-            });
-        }
-        jobs
-    };
+    let mut upload_jobs =
+        tracked_blob_upload_jobs(&upload_plan, present_blobs, upload_sessions).await?;
 
     upload_jobs.sort_by(|left, right| {
         left.size_bytes
@@ -334,4 +315,166 @@ pub(crate) async fn upload_tracked_blobs(
     );
 
     Ok(receipts)
+}
+
+fn present_blob_descriptors(present_blobs: &[PresentBlob]) -> Vec<BlobDescriptor> {
+    present_blobs
+        .iter()
+        .map(|blob| BlobDescriptor {
+            digest: blob.digest.clone(),
+            size_bytes: blob.size_bytes,
+        })
+        .collect()
+}
+
+async fn tracked_blob_upload_jobs(
+    upload_plan: &BlobUploadUrlsResponse,
+    present_blobs: &[PresentBlob],
+    upload_sessions: &Arc<RwLock<UploadSessionStore>>,
+) -> Result<Vec<TrackedBlobUploadJob>, OciError> {
+    let proofs_by_digest: HashMap<&str, &PresentBlob> = present_blobs
+        .iter()
+        .map(|blob| (blob.digest.as_str(), blob))
+        .collect();
+
+    let sessions = upload_sessions.read().await;
+    let mut jobs = Vec::with_capacity(upload_plan.upload_urls.len());
+    for upload_url_info in &upload_plan.upload_urls {
+        let proof = proofs_by_digest
+            .get(upload_url_info.digest.as_str())
+            .ok_or_else(|| {
+                OciError::internal(format!(
+                    "Blob upload plan returned unproven digest {}",
+                    upload_url_info.digest
+                ))
+            })?;
+        let session_id = proof.upload_session_id.as_deref().ok_or_else(|| {
+            OciError::internal(format!(
+                "Blob upload plan requested {} from {} proof without local bytes",
+                proof.digest,
+                proof.source.as_str()
+            ))
+        })?;
+        let session = sessions.get(session_id).ok_or_else(|| {
+            OciError::internal(format!(
+                "Blob upload proof session {session_id} for {} is missing",
+                proof.digest
+            ))
+        })?;
+        if session.finalized_digest.as_deref() != Some(proof.digest.as_str()) {
+            return Err(OciError::internal(format!(
+                "Blob upload proof session {session_id} digest mismatch for {}",
+                proof.digest
+            )));
+        }
+        let session_size = session.finalized_size.unwrap_or(session.bytes_received);
+        if session_size != proof.size_bytes {
+            return Err(OciError::digest_invalid(format!(
+                "descriptor size mismatch for {} from {} proof: expected {}, got {}",
+                proof.digest,
+                proof.source.as_str(),
+                proof.size_bytes,
+                session_size
+            )));
+        }
+
+        jobs.push(TrackedBlobUploadJob {
+            digest: upload_url_info.digest.clone(),
+            temp_path: session.temp_path.clone(),
+            url: upload_url_info.url.clone(),
+            headers: upload_url_info.headers.clone(),
+            size_bytes: proof.size_bytes,
+        });
+    }
+
+    Ok(jobs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::models::cache::BlobUploadUrl;
+    use crate::serve::engines::oci::PresentBlobSource;
+    use crate::serve::state::{UploadSession, UploadSessionStore};
+    use axum::http::StatusCode;
+    use tokio::sync::Mutex;
+
+    fn upload_plan_for(digest: &str) -> BlobUploadUrlsResponse {
+        BlobUploadUrlsResponse {
+            upload_urls: vec![BlobUploadUrl {
+                digest: digest.to_string(),
+                url: "https://example.com/upload".to_string(),
+                headers: HashMap::new(),
+            }],
+            already_present: Vec::new(),
+            upload_session_id: None,
+            upload_state: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_blob_upload_jobs_use_present_blob_session_id() {
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let proof_path = PathBuf::from("proof-session");
+        let unrelated_path = PathBuf::from("unrelated-session");
+        let mut sessions = UploadSessionStore::default();
+        sessions.create(UploadSession {
+            id: "proof-session".to_string(),
+            name: "cache".to_string(),
+            temp_path: proof_path.clone(),
+            write_lock: Arc::new(Mutex::new(())),
+            bytes_received: 5,
+            finalized_digest: Some(digest.to_string()),
+            finalized_size: Some(5),
+            created_at: Instant::now(),
+        });
+        sessions.create(UploadSession {
+            id: "unrelated-session".to_string(),
+            name: "other".to_string(),
+            temp_path: unrelated_path,
+            write_lock: Arc::new(Mutex::new(())),
+            bytes_received: 100,
+            finalized_digest: Some(digest.to_string()),
+            finalized_size: Some(100),
+            created_at: Instant::now(),
+        });
+        let sessions = Arc::new(RwLock::new(sessions));
+        let present_blobs = vec![PresentBlob {
+            digest: digest.to_string(),
+            size_bytes: 5,
+            source: PresentBlobSource::UploadSession,
+            upload_session_id: Some("proof-session".to_string()),
+        }];
+
+        let jobs = tracked_blob_upload_jobs(&upload_plan_for(digest), &present_blobs, &sessions)
+            .await
+            .expect("proof session should create upload job");
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].temp_path, proof_path);
+        assert_eq!(jobs[0].size_bytes, 5);
+    }
+
+    #[tokio::test]
+    async fn tracked_blob_upload_jobs_reject_remote_proof_upload_request() {
+        let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let sessions = Arc::new(RwLock::new(UploadSessionStore::default()));
+        let present_blobs = vec![PresentBlob {
+            digest: digest.to_string(),
+            size_bytes: 7,
+            source: PresentBlobSource::RemoteStorage,
+            upload_session_id: None,
+        }];
+
+        let error = tracked_blob_upload_jobs(&upload_plan_for(digest), &present_blobs, &sessions)
+            .await
+            .expect_err("remote storage proof has no upload bytes");
+
+        assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            error
+                .message()
+                .contains("remote-storage proof without local bytes")
+        );
+    }
 }

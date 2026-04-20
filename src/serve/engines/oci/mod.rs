@@ -1,0 +1,5 @@
+mod present_blobs;
+
+#[cfg(test)]
+pub(crate) use present_blobs::PresentBlobSource;
+pub(crate) use present_blobs::{PresentBlob, ensure_manifest_blobs_present};
