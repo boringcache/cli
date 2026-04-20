@@ -13,6 +13,8 @@ Use it in this order:
 7. `file-coverage-index.md`
 8. `cli-structure.md` for the namespace/tree view
 
+Use `agent-working-contract.md` when implementing CLI behavior or test changes. It holds stable rules that are intentionally kept out of `AGENTS.md`.
+
 ## Status legend
 
 - `public-primary`: direct user-facing feature wired from the `src/cli/` module tree
