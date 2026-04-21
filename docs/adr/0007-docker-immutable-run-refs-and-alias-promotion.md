@@ -218,6 +218,7 @@ The first hidden CLI/Rails slice is implemented:
 - CI-derived import refs include the legacy `buildcache` ref as a read fallback during the migration window, while promotion refs stay scoped to branch/default/PR policy;
 - explicit hidden run/import/promotion flags still override the derived plan.
 - OCI and KV alias binding now uses Rails ready-tag publish to point aliases at the confirmed root `cache_entry_id` instead of creating separate alias cache entries. This keeps the immutable/internal root and human-facing aliases attached to one logical entry for access updates and plan-limit eviction.
+- Cross-runner E2E handoff now compares the `cache_entry_id` returned by `boringcache check --json` against the proxy flush log, so the assertion uses the normal restore/read path instead of a helper-only direct pointer API call.
 
 Remaining rollout work: add a dedicated backend-backed same-alias writer E2E, wire action benchmark workflows to pass provider-neutral metadata, compare artifacts, and promote the behavior to the default action path only after proof.
 

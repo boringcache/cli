@@ -19,6 +19,10 @@ pub struct CheckResult {
     pub requested_tag: String,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_entry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_root_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compressed_size: Option<u64>,
@@ -183,6 +187,8 @@ async fn execute_inner(
                 tag: matched_tag,
                 requested_tag: requested_tag.clone(),
                 status: "hit".to_string(),
+                cache_entry_id: entry.cache_entry_id.clone(),
+                manifest_root_digest: entry.manifest_root_digest.clone(),
                 size: entry.size,
                 compressed_size: entry.compressed_size,
             });
@@ -197,6 +203,8 @@ async fn execute_inner(
                 tag: display_tag,
                 requested_tag: requested_tag.clone(),
                 status: "miss".to_string(),
+                cache_entry_id: None,
+                manifest_root_digest: None,
                 size: None,
                 compressed_size: None,
             });
@@ -324,6 +332,8 @@ mod tests {
                     tag: "deps-main".to_string(),
                     requested_tag: "deps".to_string(),
                     status: "hit".to_string(),
+                    cache_entry_id: Some("entry-123".to_string()),
+                    manifest_root_digest: Some("sha256:root".to_string()),
                     size: Some(1024),
                     compressed_size: Some(512),
                 },
@@ -331,6 +341,8 @@ mod tests {
                     tag: "deps-fallback".to_string(),
                     requested_tag: "deps-fallback".to_string(),
                     status: "miss".to_string(),
+                    cache_entry_id: None,
+                    manifest_root_digest: None,
                     size: None,
                     compressed_size: None,
                 },
@@ -341,5 +353,6 @@ mod tests {
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["workspace"], "org/demo");
         assert_eq!(value["results"][0]["status"], "hit");
+        assert_eq!(value["results"][0]["cache_entry_id"], "entry-123");
     }
 }

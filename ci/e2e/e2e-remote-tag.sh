@@ -5,7 +5,6 @@ source "${SCRIPT_DIR}/e2e-auth.sh"
 
 REMOTE_TAG_VERIFY_ATTEMPTS="${REMOTE_TAG_VERIFY_ATTEMPTS:-30}"
 REMOTE_TAG_VERIFY_SLEEP_SECS="${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}"
-BORINGCACHE_API_URL="${BORINGCACHE_API_URL:-https://api.boringcache.com}"
 
 json_summary_value() {
   local key="$1"
@@ -19,28 +18,16 @@ json_summary_value() {
   tr -d '\n' <"$file" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p" | head -n 1
 }
 
-json_string_value() {
+json_first_hit_string_value() {
   local key="$1"
   local file="$2"
 
   if command -v jq >/dev/null 2>&1; then
-    jq -r ".${key} // empty" "$file"
+    jq -r --arg key "$key" '.results[]? | select(.status == "hit") | .[$key] // empty' "$file" | head -n 1
     return 0
   fi
 
   tr -d '\n' <"$file" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" | head -n 1
-}
-
-urlencode() {
-  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
-}
-
-workspace_namespace_slug() {
-  printf '%s' "${1%%/*}"
-}
-
-workspace_name_slug() {
-  printf '%s' "${1#*/}"
 }
 
 latest_proxy_log_cache_entry_id() {
@@ -77,49 +64,6 @@ latest_proxy_log_root_tag() {
   printf '%s\n' "$line" | sed -n 's/.*tag=\([^[:space:]]*\).*/\1/p'
 }
 
-tag_pointer_check_once() {
-  local workspace="$1"
-  local tag="$2"
-  local output_dir="$3"
-  local pointer_file stderr_file namespace_slug workspace_slug encoded_tag auth_token
-
-  mkdir -p "$output_dir"
-  pointer_file="${output_dir}/tag-pointer.json"
-  stderr_file="${output_dir}/tag-pointer.stderr.txt"
-
-  auth_token="$(resolve_restore_capable_token || true)"
-  if [[ -z "${auth_token}" ]]; then
-    return 1
-  fi
-
-  if [[ "$workspace" != */* ]]; then
-    return 1
-  fi
-
-  namespace_slug="$(workspace_namespace_slug "$workspace")"
-  workspace_slug="$(workspace_name_slug "$workspace")"
-  encoded_tag="$(urlencode "$tag")"
-
-  if ! curl -fsS \
-      -H "Authorization: Bearer ${auth_token}" \
-      -H "Accept: application/json" \
-      "${BORINGCACHE_API_URL}/v2/workspaces/${namespace_slug}/${workspace_slug}/caches/tags/${encoded_tag}/pointer" \
-      >"$pointer_file" 2>"$stderr_file"; then
-    REMOTE_TAG_POINTER_ERROR_FILE="$stderr_file"
-    export REMOTE_TAG_POINTER_ERROR_FILE
-    return 1
-  fi
-
-  REMOTE_TAG_POINTER_CACHE_ENTRY_ID="$(json_string_value "cache_entry_id" "$pointer_file")"
-  REMOTE_TAG_POINTER_FILE="$pointer_file"
-  REMOTE_TAG_POINTER_STDERR_FILE="$stderr_file"
-  export \
-    REMOTE_TAG_POINTER_CACHE_ENTRY_ID \
-    REMOTE_TAG_POINTER_FILE \
-    REMOTE_TAG_POINTER_STDERR_FILE
-  return 0
-}
-
 remote_tag_check_once() {
   local binary="$1"
   local workspace="$2"
@@ -141,9 +85,11 @@ remote_tag_check_once() {
   misses="$(json_summary_value "misses" "$check_file")"
   REMOTE_TAG_CHECK_HITS="${hits:-0}"
   REMOTE_TAG_CHECK_MISSES="${misses:-0}"
+  REMOTE_TAG_CHECK_CACHE_ENTRY_ID="$(json_first_hit_string_value "cache_entry_id" "$check_file")"
   REMOTE_TAG_CHECK_FILE="$check_file"
   REMOTE_TAG_CHECK_STDERR_FILE="$stderr_file"
   export \
+    REMOTE_TAG_CHECK_CACHE_ENTRY_ID \
     REMOTE_TAG_CHECK_FILE \
     REMOTE_TAG_CHECK_HITS \
     REMOTE_TAG_CHECK_MISSES \
@@ -179,17 +125,12 @@ verify_remote_tag_visible() {
           return 0
         fi
 
-        if tag_pointer_check_once "$workspace" "$tag" "$output_dir"; then
-          echo "Remote tag pointer (${tag}): cache_entry_id=${REMOTE_TAG_POINTER_CACHE_ENTRY_ID:-}, file=${REMOTE_TAG_POINTER_FILE}"
-          if [[ "${REMOTE_TAG_POINTER_CACHE_ENTRY_ID:-}" == "$expected_cache_entry_id" ]]; then
-            return 0
-          fi
-        else
-          echo "WARNING: remote tag pointer check failed for ${tag} (attempt ${attempt}/${attempts})"
-          if [[ -n "${REMOTE_TAG_POINTER_ERROR_FILE:-}" && -f "${REMOTE_TAG_POINTER_ERROR_FILE}" ]]; then
-            cat "${REMOTE_TAG_POINTER_ERROR_FILE}" || true
-          fi
+        echo "Remote tag resolved (${tag}): cache_entry_id=${REMOTE_TAG_CHECK_CACHE_ENTRY_ID:-}"
+        if [[ "${REMOTE_TAG_CHECK_CACHE_ENTRY_ID:-}" == "$expected_cache_entry_id" ]]; then
+          return 0
         fi
+
+        echo "WARNING: remote tag ${tag} resolved to cache_entry_id=${REMOTE_TAG_CHECK_CACHE_ENTRY_ID:-none}; expected ${expected_cache_entry_id} (attempt ${attempt}/${attempts})"
       fi
     else
       echo "WARNING: remote tag check command failed for ${tag} (attempt ${attempt}/${attempts})"
@@ -205,7 +146,7 @@ verify_remote_tag_visible() {
   done
 
   if [[ -n "$expected_cache_entry_id" ]]; then
-    echo "ERROR: remote tag ${tag} did not converge to cache_entry_id=${expected_cache_entry_id} (hits=${REMOTE_TAG_CHECK_HITS:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0}, pointer_cache_entry_id=${REMOTE_TAG_POINTER_CACHE_ENTRY_ID:-})"
+    echo "ERROR: remote tag ${tag} did not converge to cache_entry_id=${expected_cache_entry_id} (hits=${REMOTE_TAG_CHECK_HITS:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0}, observed_cache_entry_id=${REMOTE_TAG_CHECK_CACHE_ENTRY_ID:-})"
   else
     echo "ERROR: remote tag ${tag} is not published (hits=${REMOTE_TAG_CHECK_HITS:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0})"
   fi
