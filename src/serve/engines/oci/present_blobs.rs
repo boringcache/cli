@@ -1,11 +1,9 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::api::models::cache::BlobDescriptor;
 use crate::serve::http::error::OciError;
-use crate::serve::state::{AppState, BlobReadHandle, UploadSession};
+use crate::serve::state::{AppState, BlobReadLease, UploadSession};
 
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -59,10 +57,10 @@ pub(crate) async fn ensure_manifest_blobs_present(
             continue;
         }
 
-        if let Some(handle) = state.blob_read_cache.get_handle(&descriptor.digest).await {
-            validate_size(descriptor, handle.size_bytes(), "local body cache")?;
+        if let Some(lease) = state.blob_read_cache.lease_handle(&descriptor.digest).await {
+            validate_size(descriptor, lease.size_bytes(), "local body cache")?;
             let upload_session_id =
-                stage_local_body_cache_session(state, name, descriptor, &handle).await?;
+                stage_local_body_cache_session(state, name, descriptor, lease).await?;
             let source = source_for_session_id(&upload_session_id);
             present[idx] = Some(PresentBlob {
                 digest: descriptor.digest.clone(),
@@ -174,91 +172,29 @@ async fn stage_local_body_cache_session(
     state: &AppState,
     name: &str,
     descriptor: &BlobDescriptor,
-    handle: &BlobReadHandle,
+    lease: BlobReadLease,
 ) -> Result<String, OciError> {
     let session_id = format!("oci-local-body-{}", uuid::Uuid::new_v4());
-    let temp_path = materialize_blob_read_handle(state, &descriptor.digest, handle).await?;
 
     let mut sessions = state.upload_sessions.write().await;
     if let Some(existing) = sessions.find_by_name_and_digest(name, &descriptor.digest) {
         let existing_id = existing.id.clone();
-        drop(sessions);
-        let _ = tokio::fs::remove_file(&temp_path).await;
         return Ok(existing_id);
     }
 
-    sessions.create(UploadSession {
-        id: session_id.clone(),
-        name: name.to_string(),
-        temp_path,
-        write_lock: Arc::new(tokio::sync::Mutex::new(())),
-        bytes_received: descriptor.size_bytes,
-        finalized_digest: Some(descriptor.digest.clone()),
-        finalized_size: Some(descriptor.size_bytes),
-        created_at: Instant::now(),
-    });
+    let size_bytes = descriptor.size_bytes;
+    sessions.create(UploadSession::borrowed_blob_read(
+        session_id.clone(),
+        name.to_string(),
+        descriptor.digest.clone(),
+        size_bytes,
+        lease,
+    ));
+    state
+        .oci_engine_diagnostics
+        .record_borrowed_upload_session(size_bytes);
 
     Ok(session_id)
-}
-
-async fn materialize_blob_read_handle(
-    state: &AppState,
-    digest: &str,
-    handle: &BlobReadHandle,
-) -> Result<PathBuf, OciError> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-
-    let digest_hex = crate::cas_oci::digest_hex_component(digest)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| {
-            crate::cas_oci::sha256_hex(format!("{digest}:{}", uuid::Uuid::new_v4()).as_bytes())
-        });
-    let temp_dir = state.oci_upload_temp_dir.join("local-body");
-    tokio::fs::create_dir_all(&temp_dir)
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to create local body temp dir: {e}")))?;
-    let temp_path = temp_dir.join(format!(
-        "blob-{}-{}",
-        &digest_hex[..digest_hex.len().min(16)],
-        uuid::Uuid::new_v4()
-    ));
-
-    let mut source = tokio::fs::File::open(handle.path()).await.map_err(|e| {
-        OciError::internal(format!(
-            "Failed to open local body source {}: {e}",
-            handle.path().display()
-        ))
-    })?;
-    if handle.offset() > 0 {
-        source
-            .seek(std::io::SeekFrom::Start(handle.offset()))
-            .await
-            .map_err(|e| OciError::internal(format!("Failed to seek local body source: {e}")))?;
-    }
-
-    let mut dest = tokio::fs::File::create(&temp_path)
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to create local body copy: {e}")))?;
-    let mut limited = source.take(handle.size_bytes());
-    let copied = tokio::io::copy(&mut limited, &mut dest)
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to copy local body: {e}")))?;
-    if copied != handle.size_bytes() {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(OciError::internal(format!(
-            "Local body copy was incomplete for {digest}: expected {} bytes, copied {}",
-            handle.size_bytes(),
-            copied
-        )));
-    }
-    dest.flush()
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to flush local body copy: {e}")))?;
-    dest.sync_data()
-        .await
-        .map_err(|e| OciError::internal(format!("Failed to sync local body copy: {e}")))?;
-
-    Ok(temp_path)
 }
 
 fn validate_size(

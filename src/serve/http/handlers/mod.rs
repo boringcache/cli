@@ -365,7 +365,7 @@ mod tests {
     use crate::serve::engines::oci::{PresentBlobSource, ensure_manifest_blobs_present};
     use crate::serve::state::{
         BlobLocatorCache, BlobReadCache, BlobReadMetrics, KvPendingStore, KvPublishedIndex,
-        UploadSessionStore, ref_tag_for_input,
+        UploadSessionBody, UploadSessionStore, ref_tag_for_input,
     };
     use crate::tag_utils::TagResolver;
     use axum::body::Bytes;
@@ -454,6 +454,24 @@ mod tests {
         let path = dir.join("blob.bin");
         tokio::fs::write(&path, contents).await.expect("temp file");
         path
+    }
+
+    async fn read_upload_session_body(session: &UploadSession) -> Vec<u8> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        let mut file = tokio::fs::File::open(session.body_path())
+            .await
+            .expect("open upload session body");
+        if session.body_offset() > 0 {
+            file.seek(std::io::SeekFrom::Start(session.body_offset()))
+                .await
+                .expect("seek upload session body");
+        }
+        let mut bytes = vec![0u8; session.body_size() as usize];
+        file.read_exact(&mut bytes)
+            .await
+            .expect("read upload session body");
+        bytes
     }
 
     #[test]
@@ -587,6 +605,7 @@ mod tests {
                 id: "filled-session".to_string(),
                 name: "cache".to_string(),
                 temp_path: filled_path.clone(),
+                body: UploadSessionBody::OwnedTempFile,
                 write_lock: Arc::new(tokio::sync::Mutex::new(())),
                 bytes_received: 16,
                 finalized_digest: Some(digest.clone()),
@@ -597,6 +616,7 @@ mod tests {
                 id: "empty-session".to_string(),
                 name: "cache".to_string(),
                 temp_path: empty_path.clone(),
+                body: UploadSessionBody::OwnedTempFile,
                 write_lock: Arc::new(tokio::sync::Mutex::new(())),
                 bytes_received: 0,
                 finalized_digest: None,
@@ -639,6 +659,7 @@ mod tests {
                 id: "filled-session".to_string(),
                 name: "cache".to_string(),
                 temp_path: filled_path.clone(),
+                body: UploadSessionBody::OwnedTempFile,
                 write_lock: Arc::new(tokio::sync::Mutex::new(())),
                 bytes_received: 14,
                 finalized_digest: Some(digest.clone()),
@@ -724,12 +745,48 @@ mod tests {
             .find_by_name_and_digest("cache", &digest)
             .expect("mount should create publish session");
         assert_eq!(mounted.finalized_size, Some(payload.len() as u64));
-        assert_eq!(
-            tokio::fs::read(&mounted.temp_path)
-                .await
-                .expect("mounted copy"),
-            payload
-        );
+        assert_eq!(read_upload_session_body(mounted).await, payload);
+        assert!(!mounted.owns_temp_file());
+    }
+
+    #[tokio::test]
+    async fn delete_upload_releases_borrowed_session_without_deleting_cache_body() {
+        let state = test_state();
+        let payload = b"borrowed-delete";
+        let digest = cas_oci::prefixed_sha256_digest(payload);
+        state
+            .blob_read_cache
+            .insert(&digest, payload)
+            .await
+            .expect("insert prefetched blob");
+
+        let mut params = HashMap::new();
+        params.insert("mount".to_string(), digest.clone());
+        params.insert("from".to_string(), "cache".to_string());
+        let response = start_upload(state.clone(), "cache".to_string(), params, Body::empty())
+            .await
+            .expect("start upload mount should reuse prefetched blob");
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let (session_id, body_path) = {
+            let sessions = state.upload_sessions.read().await;
+            let session = sessions
+                .find_by_name_and_digest("cache", &digest)
+                .expect("borrowed session");
+            assert!(!session.owns_temp_file());
+            (session.id.clone(), session.body_path().to_path_buf())
+        };
+
+        let response = delete_upload(state.clone(), session_id.clone())
+            .await
+            .expect("delete borrowed session");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let sessions = state.upload_sessions.read().await;
+        assert!(sessions.get(&session_id).is_none());
+        drop(sessions);
+        assert!(tokio::fs::metadata(&body_path).await.is_ok());
+        assert!(state.blob_read_cache.get_handle(&digest).await.is_some());
     }
 
     #[tokio::test]
@@ -757,18 +814,15 @@ mod tests {
         assert_eq!(present.len(), 1);
         assert_eq!(present[0].source, PresentBlobSource::LocalBodyCache);
 
-        let target_path = {
+        let staged_body = {
             let sessions = state.upload_sessions.read().await;
-            sessions
+            let session = sessions
                 .find_by_name_and_digest("cache", &digest)
-                .expect("local body cache should be staged as upload session")
-                .temp_path
-                .clone()
+                .expect("local body cache should be staged as upload session");
+            assert!(!session.owns_temp_file());
+            read_upload_session_body(session).await
         };
-        assert_eq!(
-            tokio::fs::read(&target_path).await.expect("staged copy"),
-            payload
-        );
+        assert_eq!(staged_body, payload);
     }
 
     #[tokio::test]
@@ -810,6 +864,7 @@ mod tests {
                 id: "source-session".to_string(),
                 name: "source".to_string(),
                 temp_path: source_path.clone(),
+                body: UploadSessionBody::OwnedTempFile,
                 write_lock: Arc::new(tokio::sync::Mutex::new(())),
                 bytes_received: payload.len() as u64,
                 finalized_digest: Some(digest.clone()),
@@ -876,36 +931,16 @@ mod tests {
             assert_eq!(response.status(), StatusCode::CREATED);
         }
 
-        let target_path = {
+        let staged_body = {
             let sessions = state.upload_sessions.read().await;
             let mounted = sessions
                 .find_by_name_and_digest("cache", &digest)
                 .expect("mount should stage target session");
             assert_eq!(mounted.finalized_size, Some(payload.len() as u64));
-            mounted.temp_path.clone()
+            assert!(!mounted.owns_temp_file());
+            read_upload_session_body(mounted).await
         };
-        assert_eq!(
-            tokio::fs::read(&target_path).await.expect("mounted copy"),
-            payload
-        );
-
-        let mounts_dir = state.oci_upload_temp_dir.join("mounts");
-        let mut mounted_files = 0;
-        let mut entries = tokio::fs::read_dir(&mounts_dir)
-            .await
-            .expect("mount temp dir");
-        while let Some(entry) = entries.next_entry().await.expect("mount temp entry") {
-            if entry
-                .file_type()
-                .await
-                .expect("mount temp file type")
-                .is_file()
-            {
-                mounted_files += 1;
-                let _ = tokio::fs::remove_file(entry.path()).await;
-            }
-        }
-        assert_eq!(mounted_files, 1);
+        assert_eq!(staged_body, payload);
     }
 
     #[tokio::test]
@@ -921,6 +956,7 @@ mod tests {
                 id: "delayed-session".to_string(),
                 name: "cache".to_string(),
                 temp_path: delayed_path.clone(),
+                body: UploadSessionBody::OwnedTempFile,
                 write_lock: Arc::new(tokio::sync::Mutex::new(())),
                 bytes_received: 0,
                 finalized_digest: None,
@@ -931,6 +967,7 @@ mod tests {
                 id: "empty-session".to_string(),
                 name: "cache".to_string(),
                 temp_path: empty_path.clone(),
+                body: UploadSessionBody::OwnedTempFile,
                 write_lock: Arc::new(tokio::sync::Mutex::new(())),
                 bytes_received: 0,
                 finalized_digest: None,
@@ -983,6 +1020,7 @@ mod tests {
                 id: "stream-error-session".to_string(),
                 name: "cache".to_string(),
                 temp_path: path.clone(),
+                body: UploadSessionBody::OwnedTempFile,
                 write_lock: Arc::new(tokio::sync::Mutex::new(())),
                 bytes_received: 0,
                 finalized_digest: None,

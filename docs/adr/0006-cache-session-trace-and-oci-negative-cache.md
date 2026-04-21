@@ -1,6 +1,6 @@
 # ADR 0006: Cache Session Trace And OCI Negative Cache
 
-Status: proposed
+Status: accepted as first-party insight baseline; backend/action enrichment pending
 Date: 2026-04-20
 
 ## Context
@@ -63,6 +63,23 @@ The trace should be one JSON object with stable top-level sections:
 ```
 
 Exact field names may follow current `request_metrics_summary` naming, but the shape must keep these categories separate.
+
+## First-Party Insight Contract
+
+This ADR is not only a performance trace. It is the first-party insight spine for platform decisions, support, cost control, and default rollout choices.
+
+Every session summary should preserve correlation fields whenever the runner, action, or backend knows them:
+
+- workspace and cache entry identity;
+- adapter and mode;
+- session id;
+- CLI version and release ref when known;
+- CI provider, provider run uid, attempt, branch/ref, PR number, commit SHA, and run timestamps when known;
+- immutable run ref, import aliases, promotion aliases, and promotion result when ADR 0007 is active;
+- storage provider/mode and object-store region when known;
+- benchmark run id, scenario, and classification when the harness enriches the trace.
+
+Facts that affect product defaults should be backend-visible eventually, not only local JSONL. The CLI can emit the first summary, but Rails/action/benchmark enrichment should make it possible to answer: which cache plane was slow, which alias/root was used, which blobs were reused, what it cost, and whether the run was fresh, reseed, steady, or unknown.
 
 ## Required Fields
 
@@ -234,6 +251,64 @@ The first CLI baseline is implemented:
 - `ci/e2e/request-metrics-summary.py` promotes session summary fields plus new status snapshot keys into artifact env output.
 
 Remaining trace depth belongs in later passes: Rails p50/p95 rollups from request metrics, full upload-session materialization counters from ADR 0005, richer BuildKit enrichment from the action/harness, and metadata-only Docker E2E artifact validation.
+
+## Proof Status
+
+Documentation and the first CLI baseline are aligned as of 2026-04-21. The trace is accepted as the platform insight spine; backend persistence, Rails percentile rollups, action enrichment, benchmark artifact validation, and operator reporting remain follow-up work.
+
+Testing and proof are intentionally deferred until the ADR set is aligned. The later proof bundle must attach:
+
+- a metadata-only Docker E2E artifact containing `cache_session_summary`;
+- status snapshots plus request metrics for phase-level debugging;
+- a backend-visible or artifact-promoted summary that keeps Rails, storage, OCI, singleflight, local cache, and BuildKit sections distinct;
+- evidence that confirmed OCI misses are cached briefly and invalidated by local writes/publish;
+- examples where unknown BuildKit fields stay `unknown` instead of guessed.
+
+## Incident Tracking: OCI `blob unknown` After Export-Time Misses
+
+On 2026-04-21, a PostHog Docker benchmark using `boringcache/one@v1` failed during BuildKit cache export. BuildKit reached manifest commit, then the local registry proxy returned:
+
+```text
+PUT /v2/cache/manifests/buildcache -> 400 Bad Request
+unknown: blob unknown to registry
+```
+
+The proxy log shape matters:
+
+- startup used `OCI hydration: metadata-only`;
+- startup indexed the selected `cache@buildcache` manifest and locators, but did not hydrate bodies eagerly;
+- during export, BuildKit issued many `HEAD /v2/cache/blobs/<digest>` requests that returned `404 Not Found`;
+- the final session summary showed OCI reads but `bytes_written=0 B`;
+- manifest commit failed after the export-time `HEAD` misses instead of proving the referenced blobs through upload sessions, local body cache, or backend receipts.
+
+This is a correctness issue until a clean local reproduction proves otherwise. The main suspected failure mode for ADR 0006 is a stale OCI negative-cache entry or locator miss surviving a local write/mount/publish transition:
+
+```text
+HEAD blob -> confirmed miss -> negative cache insert
+same digest becomes locally present through upload or mounted/present blob proof
+manifest PUT validates descriptors
+validation still observes the stale miss
+registry returns blob unknown
+```
+
+Release status as observed for the failed benchmark:
+
+- `boringcache/one@v1` pointed at action release `v1.12.59`;
+- `v1.12.59` pinned CLI release `v1.12.41`;
+- local CLI commits after `v1.12.41` include OCI negative-cache tracing and invalidation work;
+- therefore the failing benchmark did not exercise all local OCI fixes.
+
+The required local proof is a focused OCI protocol E2E, not a benchmark-only assertion:
+
+1. create an OCI blob miss through `HEAD`;
+2. make that same digest present through a proxy upload, mount, or present-blob proof;
+3. publish a manifest referencing the digest;
+4. assert manifest publish succeeds and the negative cache is invalidated;
+5. assert diagnostics record the miss, invalidation source, upload proof source, and final manifest status.
+
+The concurrent variant should run two same-tag writers against one proxy/backend root and prove that one writer's export-time `HEAD` miss cannot poison the other writer's later upload or manifest publish.
+
+Do not classify this as runner noise. Until the protocol E2E and release check are green, benchmark failures with `blob unknown` after export-time `HEAD` misses should be treated as OCI publish correctness failures.
 
 ## Acceptance Gates
 

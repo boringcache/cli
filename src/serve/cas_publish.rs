@@ -9,7 +9,7 @@ use crate::api::models::cache::{
     BlobDescriptor, BlobReceipt, BlobUploadUrlsResponse, SaveResponse,
 };
 use crate::cache::receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
-use crate::multipart_upload::upload_via_single_url;
+use crate::multipart_upload::upload_via_single_url_range;
 use crate::serve::engines::oci::PresentBlob;
 use crate::serve::error::OciError;
 use crate::serve::state::UploadSessionStore;
@@ -18,7 +18,8 @@ use tokio::sync::{RwLock, Semaphore};
 #[derive(Debug)]
 struct TrackedBlobUploadJob {
     digest: String,
-    temp_path: PathBuf,
+    source_path: PathBuf,
+    source_offset: u64,
     url: String,
     headers: HashMap<String, String>,
     size_bytes: u64,
@@ -149,7 +150,8 @@ pub(crate) async fn upload_tracked_blobs(
                 .map_err(|e| OciError::internal(format!("Blob upload semaphore closed: {e}")))?;
             let progress = crate::progress::TransferProgress::new_noop();
             let digest = upload_job.digest;
-            let temp_path = upload_job.temp_path;
+            let source_path = upload_job.source_path;
+            let source_offset = upload_job.source_offset;
             let url = upload_job.url;
             let headers = upload_job.headers;
             let size_bytes = upload_job.size_bytes;
@@ -157,8 +159,10 @@ pub(crate) async fn upload_tracked_blobs(
 
             match tokio::time::timeout(
                 transfer_timeout,
-                upload_via_single_url(
-                    temp_path.as_path(),
+                upload_via_single_url_range(
+                    source_path.as_path(),
+                    source_offset,
+                    size_bytes,
                     &url,
                     &progress,
                     &transfer_client,
@@ -380,7 +384,8 @@ async fn tracked_blob_upload_jobs(
 
         jobs.push(TrackedBlobUploadJob {
             digest: upload_url_info.digest.clone(),
-            temp_path: session.temp_path.clone(),
+            source_path: session.body_path().to_path_buf(),
+            source_offset: session.body_offset(),
             url: upload_url_info.url.clone(),
             headers: upload_url_info.headers.clone(),
             size_bytes: proof.size_bytes,
@@ -395,9 +400,8 @@ mod tests {
     use super::*;
     use crate::api::models::cache::BlobUploadUrl;
     use crate::serve::engines::oci::PresentBlobSource;
-    use crate::serve::state::{UploadSession, UploadSessionStore};
+    use crate::serve::state::{BlobReadCache, UploadSession, UploadSessionStore};
     use axum::http::StatusCode;
-    use tokio::sync::Mutex;
 
     fn upload_plan_for(digest: &str) -> BlobUploadUrlsResponse {
         BlobUploadUrlsResponse {
@@ -418,26 +422,22 @@ mod tests {
         let proof_path = PathBuf::from("proof-session");
         let unrelated_path = PathBuf::from("unrelated-session");
         let mut sessions = UploadSessionStore::default();
-        sessions.create(UploadSession {
-            id: "proof-session".to_string(),
-            name: "cache".to_string(),
-            temp_path: proof_path.clone(),
-            write_lock: Arc::new(Mutex::new(())),
-            bytes_received: 5,
-            finalized_digest: Some(digest.to_string()),
-            finalized_size: Some(5),
-            created_at: Instant::now(),
-        });
-        sessions.create(UploadSession {
-            id: "unrelated-session".to_string(),
-            name: "other".to_string(),
-            temp_path: unrelated_path,
-            write_lock: Arc::new(Mutex::new(())),
-            bytes_received: 100,
-            finalized_digest: Some(digest.to_string()),
-            finalized_size: Some(100),
-            created_at: Instant::now(),
-        });
+        sessions.create(UploadSession::owned_temp_file(
+            "proof-session".to_string(),
+            "cache".to_string(),
+            proof_path.clone(),
+            5,
+            Some(digest.to_string()),
+            Some(5),
+        ));
+        sessions.create(UploadSession::owned_temp_file(
+            "unrelated-session".to_string(),
+            "other".to_string(),
+            unrelated_path,
+            100,
+            Some(digest.to_string()),
+            Some(100),
+        ));
         let sessions = Arc::new(RwLock::new(sessions));
         let present_blobs = vec![PresentBlob {
             digest: digest.to_string(),
@@ -451,8 +451,48 @@ mod tests {
             .expect("proof session should create upload job");
 
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].temp_path, proof_path);
+        assert_eq!(jobs[0].source_path, proof_path);
+        assert_eq!(jobs[0].source_offset, 0);
         assert_eq!(jobs[0].size_bytes, 5);
+    }
+
+    #[tokio::test]
+    async fn tracked_blob_upload_jobs_preserve_borrowed_body_offset() {
+        let digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let payload = b"borrowed upload body";
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache = BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 1024 * 1024)
+            .expect("blob cache");
+        cache.insert(digest, payload).await.expect("insert blob");
+        let lease = cache.lease_handle(digest).await.expect("leased blob");
+        let source_path = lease.path().to_path_buf();
+        let source_offset = lease.offset();
+        assert!(source_offset > 0, "test should exercise segment offsets");
+
+        let mut sessions = UploadSessionStore::default();
+        sessions.create(UploadSession::borrowed_blob_read(
+            "borrowed-session".to_string(),
+            "cache".to_string(),
+            digest.to_string(),
+            payload.len() as u64,
+            lease,
+        ));
+        let sessions = Arc::new(RwLock::new(sessions));
+        let present_blobs = vec![PresentBlob {
+            digest: digest.to_string(),
+            size_bytes: payload.len() as u64,
+            source: PresentBlobSource::LocalBodyCache,
+            upload_session_id: Some("borrowed-session".to_string()),
+        }];
+
+        let jobs = tracked_blob_upload_jobs(&upload_plan_for(digest), &present_blobs, &sessions)
+            .await
+            .expect("borrowed proof session should create upload job");
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].source_path, source_path);
+        assert_eq!(jobs[0].source_offset, source_offset);
+        assert_eq!(jobs[0].size_bytes, payload.len() as u64);
     }
 
     #[tokio::test]

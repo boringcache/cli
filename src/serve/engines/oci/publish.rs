@@ -353,6 +353,7 @@ pub(crate) async fn cleanup_present_blob_sessions(state: &AppState, present_blob
     for blob in present_blobs {
         if let Some(session_id) = blob.upload_session_id.as_deref()
             && let Some(removed) = sessions.remove(session_id)
+            && removed.owns_temp_file()
         {
             let _ = tokio::fs::remove_file(&removed.temp_path).await;
         }

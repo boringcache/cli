@@ -1,14 +1,89 @@
 use super::*;
 
+pub enum UploadSessionBody {
+    OwnedTempFile,
+    BorrowedBlobRead { lease: BlobReadLease },
+}
+
 pub struct UploadSession {
     pub id: String,
     pub name: String,
     pub temp_path: PathBuf,
+    pub body: UploadSessionBody,
     pub write_lock: Arc<Mutex<()>>,
     pub bytes_received: u64,
     pub finalized_digest: Option<String>,
     pub finalized_size: Option<u64>,
     pub created_at: Instant,
+}
+
+impl UploadSession {
+    pub fn owned_temp_file(
+        id: String,
+        name: String,
+        temp_path: PathBuf,
+        bytes_received: u64,
+        finalized_digest: Option<String>,
+        finalized_size: Option<u64>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            temp_path,
+            body: UploadSessionBody::OwnedTempFile,
+            write_lock: Arc::new(Mutex::new(())),
+            bytes_received,
+            finalized_digest,
+            finalized_size,
+            created_at: Instant::now(),
+        }
+    }
+
+    pub fn borrowed_blob_read(
+        id: String,
+        name: String,
+        digest: String,
+        size_bytes: u64,
+        lease: BlobReadLease,
+    ) -> Self {
+        let temp_path = lease.path().to_path_buf();
+        Self {
+            id,
+            name,
+            temp_path,
+            body: UploadSessionBody::BorrowedBlobRead { lease },
+            write_lock: Arc::new(Mutex::new(())),
+            bytes_received: size_bytes,
+            finalized_digest: Some(digest),
+            finalized_size: Some(size_bytes),
+            created_at: Instant::now(),
+        }
+    }
+
+    pub fn body_path(&self) -> &Path {
+        match &self.body {
+            UploadSessionBody::OwnedTempFile => self.temp_path.as_path(),
+            UploadSessionBody::BorrowedBlobRead { lease } => lease.path(),
+        }
+    }
+
+    pub fn body_offset(&self) -> u64 {
+        match &self.body {
+            UploadSessionBody::OwnedTempFile => 0,
+            UploadSessionBody::BorrowedBlobRead { lease } => lease.offset(),
+        }
+    }
+
+    pub fn body_size(&self) -> u64 {
+        match &self.body {
+            UploadSessionBody::OwnedTempFile => self.finalized_size.unwrap_or(self.bytes_received),
+            UploadSessionBody::BorrowedBlobRead { lease } => lease.size_bytes(),
+        }
+    }
+
+    pub fn owns_temp_file(&self) -> bool {
+        matches!(self.body, UploadSessionBody::OwnedTempFile)
+    }
 }
 
 #[derive(Default)]

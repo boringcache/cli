@@ -1,6 +1,6 @@
 # ADR 0005: Borrowed Upload Sessions And Blob Cache Policy
 
-Status: proposed
+Status: accepted for hidden implementation; cache-policy rollout pending benchmark proof
 Date: 2026-04-20
 
 ## Context
@@ -155,6 +155,47 @@ Required policy metrics:
 7. Keep remote-storage proof behavior unchanged.
 8. Add cache policy metrics.
 9. Tune large-blob admission only after benchmark data shows the right threshold.
+
+## Implementation Progress
+
+The first borrowed-session slice is implemented.
+
+Current behavior:
+
+- `UploadSession` now has an explicit body source: owned temp file or borrowed `BlobReadCache` lease;
+- local body-cache proof sessions borrow verified blob-cache handles instead of copying into a fresh temp upload file;
+- cross-repository mount reuse borrows from `BlobReadCache` when the source is a verified cached body;
+- mount reuse from an existing mutable upload session still materializes a separate owned temp file;
+- borrowed cleanup drops the lease and does not delete the cache file;
+- owned cleanup still deletes the owned temp file;
+- `BlobReadCache` leases pin legacy files and segment files against eviction while borrowed sessions or upload jobs reference them;
+- tracked blob upload jobs now read from `path + offset + size`, so segment-backed cache bodies can upload without materializing a standalone file;
+- the single-URL upload transport can seek to an offset and stream exactly the requested byte count;
+- materialization count, byte, copy-duration, sync-duration, borrowed-session count, and borrowed-session byte metrics are exposed through `OciEngineDiagnostics`.
+
+Intentionally not changed yet:
+
+- mutable upload sessions are not borrowed into other sessions;
+- large-blob admission and eviction policy are not tuned;
+- borrowed-session behavior does not assume a specific storage provider or CI provider.
+
+## Proof Status
+
+Documentation and the first borrowed-session implementation slice are aligned as of 2026-04-21. The borrowed proof-session model is accepted; cache admission and eviction policy changes remain proof-gated.
+
+Evidence now available:
+
+- unit tests cover borrowed cleanup, segment-backed offset upload sources, and lease-protected eviction;
+- the Rails-backed local Docker BuildKit E2E passed against a managed workspace provisioned through Rails/Tigris;
+- that E2E recorded borrowed upload-session counters in status snapshots and session summaries, including `oci_engine_borrowed_upload_session_count=9` and `oci_engine_borrowed_upload_session_bytes=6430` by the alias-warm status snapshot.
+
+Benchmark proof and policy proof are still pending before cache admission changes. The later proof bundle must attach:
+
+- Docker registry publish evidence that borrowed sessions remove materialization copy/sync bytes for cached bodies on a large-layer workload;
+- eviction/pin evidence showing borrowed legacy-file and segment-backed cache bodies cannot disappear while referenced;
+- tracked upload evidence showing `path + offset + size` reads the exact descriptor bytes;
+- session summary fields for materialization count/bytes/duration, borrowed count/bytes, pinned bytes, and upload bytes by source;
+- before/after artifacts that keep stream-through effects separate from cache-admission effects.
 
 ## Acceptance Gates
 

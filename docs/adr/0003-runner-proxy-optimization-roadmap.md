@@ -1,6 +1,6 @@
 # ADR 0003: Runner Proxy Optimization Roadmap
 
-Status: proposed
+Status: accepted roadmap; sub-ADR rollout remains proof-gated
 Date: 2026-04-20
 
 ## Context
@@ -69,6 +69,17 @@ This roadmap is implemented through narrower ADRs:
 - ADR 0007 owns Docker immutable run refs and atomic alias promotion across CLI/action/Rails.
 
 ADR 0002 remains the source-backed OCI protocol contract. ADR 0003 does not replace it; it defines the next optimization sequence after the first OCI engine extraction.
+
+## Current Alignment
+
+As of 2026-04-21, this roadmap is documentation-aligned for hidden/internal implementation. It is not benchmark-proof-complete.
+
+- ADR 0006 is the first-party insight spine: session trace, singleflight counters, negative cache, and later backend/action enrichment.
+- ADR 0007 is the correctness and control-plane spine: immutable run refs, alias promotion, and stale-writer visibility.
+- ADR 0005 is the local disk-efficiency spine: borrowed upload-session bodies, cache leases, and later admission policy.
+- ADR 0004 is the large-body latency spine: stream-through for eligible OCI blob GET misses, default-off until benchmarked.
+
+Testing and proof work may be deferred, but it must stay explicit. A sub-ADR is doc-ready when it names implementation progress, remaining rollout gates, and the artifacts needed before user-visible defaults change.
 
 ## Required Metrics Before Behavior Claims
 

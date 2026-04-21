@@ -1,4 +1,4 @@
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
@@ -11,7 +11,9 @@ use crate::api::models::cache::BlobDescriptor;
 use crate::cas_oci;
 use crate::serve::engines::oci::uploads::{find_local_uploaded_blob, has_remote_blob};
 use crate::serve::http::error::OciError;
-use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
+use crate::serve::http::flight::{
+    Flight, FlightGuard, await_flight, begin_flight, clear_flight_entry,
+};
 use crate::serve::http::oci_route::{insert_digest_etag, insert_header};
 use crate::serve::state::{AppState, BlobLocatorEntry, BlobReadHandle, OciNegativeCacheReason};
 
@@ -20,6 +22,7 @@ const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 const OCI_BLOB_DOWNLOAD_MAX_ATTEMPTS: usize = 4;
 const OCI_BLOB_DOWNLOAD_RETRY_BASE_MS: u64 = 500;
+const OCI_STREAM_THROUGH_MIN_BYTES_ENV: &str = "BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BlobRange {
@@ -238,20 +241,7 @@ pub(crate) async fn get_blob(
             &state.singleflight_metrics,
             "oci-blob",
         ) {
-            Flight::Leader(_guard) => {
-                if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
-                    let blob_response =
-                        local_blob_response(&method, headers, &digest, &handle).await?;
-                    record_local_blob_response(&state, &blob_response, request_started_at);
-                    return Ok(blob_response.response);
-                }
-
-                let _permit = state
-                    .blob_download_semaphore
-                    .acquire()
-                    .await
-                    .map_err(|_| OciError::internal("Blob download semaphore closed"))?;
-
+            Flight::Leader(guard) => {
                 if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
                     let blob_response =
                         local_blob_response(&method, headers, &digest, &handle).await?;
@@ -279,6 +269,42 @@ pub(crate) async fn get_blob(
                     .await?;
                     (url, false)
                 };
+                if should_stream_through_blob(&method, headers, size_bytes) {
+                    let permit = state
+                        .blob_download_semaphore
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| OciError::internal("Blob download semaphore closed"))?;
+                    return stream_oci_blob_to_client(
+                        state,
+                        cache_entry_id,
+                        blob_desc,
+                        name,
+                        digest,
+                        download_url,
+                        from_cache,
+                        request_started_at,
+                        guard,
+                        permit,
+                    )
+                    .await;
+                }
+
+                let _flight_guard = guard;
+                let _permit = state
+                    .blob_download_semaphore
+                    .acquire()
+                    .await
+                    .map_err(|_| OciError::internal("Blob download semaphore closed"))?;
+
+                if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
+                    let blob_response =
+                        local_blob_response(&method, headers, &digest, &handle).await?;
+                    record_local_blob_response(&state, &blob_response, request_started_at);
+                    return Ok(blob_response.response);
+                }
+
                 let handle = download_oci_blob_to_cache(
                     &state,
                     &cache_entry_id,
@@ -701,6 +727,25 @@ fn parse_byte_range(value: &str, size_bytes: u64) -> Result<BlobRangeSelection, 
     Ok(BlobRangeSelection::Partial(BlobRange { start, end }))
 }
 
+fn should_stream_through_blob(method: &Method, headers: &HeaderMap, size_bytes: u64) -> bool {
+    if *method != Method::GET || headers.get(header::RANGE).is_some() {
+        return false;
+    }
+    let Some(min_bytes) = stream_through_min_bytes() else {
+        return false;
+    };
+    size_bytes >= min_bytes
+}
+
+fn stream_through_min_bytes() -> Option<u64> {
+    let value = std::env::var(OCI_STREAM_THROUGH_MIN_BYTES_ENV).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<u64>().ok()
+}
+
 pub(crate) async fn resolve_oci_download_url(
     state: &AppState,
     cache_entry_id: &str,
@@ -776,6 +821,310 @@ async fn cached_blob_body(
     }
     let stream = ReaderStream::new(file.take(size_bytes));
     Ok(Body::from_stream(stream))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_oci_blob_to_client(
+    state: AppState,
+    cache_entry_id: String,
+    blob_desc: BlobDescriptor,
+    name: String,
+    digest: String,
+    mut download_url: String,
+    mut from_cached_url: bool,
+    request_started_at: std::time::Instant,
+    flight_guard: FlightGuard,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<Response, OciError> {
+    let digest_hex = crate::cas_file::sha256_hex(digest.as_bytes());
+    let temp_dir = state.runtime_temp_dir.join("oci-downloads");
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| OciError::internal(format!("Failed to create temp dir: {e}")))?;
+
+    let max_attempts = OCI_BLOB_DOWNLOAD_MAX_ATTEMPTS + usize::from(from_cached_url);
+    let mut last_error = None;
+    for attempt in 1..=max_attempts {
+        let storage_get_started_at = std::time::Instant::now();
+        let response = match tokio::time::timeout(
+            OCI_TRANSFER_CALL_TIMEOUT,
+            state.api_client.transfer_client().get(&download_url).send(),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                let message = format!("Failed to stream blob: {error}");
+                if attempt < max_attempts {
+                    log_oci_blob_download_retry(&digest, attempt, max_attempts, &message);
+                    sleep_oci_blob_download_retry(attempt).await;
+                    continue;
+                }
+                return Err(OciError::internal(message));
+            }
+            Err(_) => {
+                let message = format!(
+                    "Timed out streaming blob after {}s",
+                    OCI_TRANSFER_CALL_TIMEOUT.as_secs()
+                );
+                if attempt < max_attempts {
+                    log_oci_blob_download_retry(&digest, attempt, max_attempts, &message);
+                    sleep_oci_blob_download_retry(attempt).await;
+                    continue;
+                }
+                return Err(OciError::internal(message));
+            }
+        };
+
+        if from_cached_url
+            && (response.status() == StatusCode::FORBIDDEN
+                || response.status() == StatusCode::NOT_FOUND)
+        {
+            let mut locator = state.blob_locator.write().await;
+            if let Some(entry) = locator.get_mut(&name, &digest) {
+                entry.download_url = None;
+                entry.download_url_cached_at = None;
+            }
+            drop(locator);
+            download_url =
+                resolve_oci_download_url(&state, &cache_entry_id, &blob_desc, &name, &digest)
+                    .await?;
+            from_cached_url = false;
+            last_error = Some(format!(
+                "Cached OCI blob URL returned {}",
+                response.status()
+            ));
+            continue;
+        }
+
+        if !from_cached_url && response.status() == StatusCode::NOT_FOUND {
+            state.oci_negative_cache.insert_remote_blob_miss(
+                &state.workspace,
+                &state.registry_root_tag,
+                &name,
+                &digest,
+            );
+            state
+                .oci_engine_diagnostics
+                .record_negative_cache_insert(OciNegativeCacheReason::RemoteBlob);
+            state.oci_engine_diagnostics.record_miss("remote-blob");
+            return Err(OciError::blob_unknown(format!("{name}@{digest}")));
+        }
+
+        if is_retryable_oci_blob_storage_status(response.status()) && attempt < max_attempts {
+            let message = format!("Blob storage returned {}", response.status());
+            log_oci_blob_download_retry(&digest, attempt, max_attempts, &message);
+            sleep_oci_blob_download_retry(attempt).await;
+            continue;
+        }
+
+        let response = response
+            .error_for_status()
+            .map_err(|e| OciError::internal(format!("Blob storage returned error: {e}")))?;
+        let temp_path = temp_dir.join(format!(
+            "blob-{}-{}",
+            &digest_hex[..16],
+            uuid::Uuid::new_v4()
+        ));
+        let file = tokio::fs::File::create(&temp_path)
+            .await
+            .map_err(|e| OciError::internal(format!("Failed to create temp blob file: {e}")))?;
+
+        let mut headers = blob_headers(&digest, blob_desc.size_bytes)?;
+        insert_header(
+            &mut headers,
+            "Content-Length",
+            &blob_desc.size_bytes.to_string(),
+        )?;
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+        tokio::spawn(stream_oci_blob_body(
+            state.clone(),
+            name,
+            digest.clone(),
+            download_url,
+            from_cached_url,
+            blob_desc.size_bytes,
+            response,
+            file,
+            temp_path,
+            storage_get_started_at,
+            request_started_at,
+            tx,
+            flight_guard,
+            permit,
+        ));
+        return Ok((
+            StatusCode::OK,
+            headers,
+            Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        )
+            .into_response());
+    }
+
+    Err(OciError::internal(format!(
+        "Blob stream-through failed after {} attempts: {}",
+        max_attempts,
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_oci_blob_body(
+    state: AppState,
+    name: String,
+    digest: String,
+    download_url: String,
+    from_cached_url: bool,
+    expected_size: u64,
+    response: reqwest::Response,
+    mut file: tokio::fs::File,
+    temp_path: std::path::PathBuf,
+    storage_get_started_at: std::time::Instant,
+    request_started_at: std::time::Instant,
+    tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+    _flight_guard: FlightGuard,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    let mut stream = response.bytes_stream();
+    let mut hasher = Sha256::new();
+    let mut written = 0u64;
+    let mut first_chunk_ms = None;
+    let body_started_at = std::time::Instant::now();
+    let mut spool_write_duration_ms = 0u64;
+    let mut previous_chunk: Option<Bytes> = None;
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = match chunk_result {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                let _ = tx
+                    .send(Err(std::io::Error::other(format!(
+                        "Failed to read blob stream: {error}"
+                    ))))
+                    .await;
+                return;
+            }
+        };
+        if chunk.is_empty() {
+            continue;
+        }
+        if first_chunk_ms.is_none() {
+            first_chunk_ms = Some(storage_get_started_at.elapsed().as_millis() as u64);
+        }
+        let write_started_at = std::time::Instant::now();
+        if let Err(error) = file.write_all(&chunk).await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            let _ = tx
+                .send(Err(std::io::Error::other(format!(
+                    "Failed to write temp blob file: {error}"
+                ))))
+                .await;
+            return;
+        }
+        spool_write_duration_ms =
+            spool_write_duration_ms.saturating_add(write_started_at.elapsed().as_millis() as u64);
+        hasher.update(&chunk);
+        written = written.saturating_add(chunk.len() as u64);
+
+        if let Some(previous) = previous_chunk.replace(chunk)
+            && tx.send(Ok(previous)).await.is_err()
+        {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return;
+        }
+    }
+
+    if let Err(error) = file.flush().await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        let _ = tx
+            .send(Err(std::io::Error::other(format!(
+                "Failed to flush temp blob file: {error}"
+            ))))
+            .await;
+        return;
+    }
+
+    let verify_started_at = std::time::Instant::now();
+    let actual_digest = format!("sha256:{:x}", hasher.finalize());
+    let verify_duration_ms = verify_started_at.elapsed().as_millis() as u64;
+    state.oci_engine_diagnostics.record_storage_get(
+        written,
+        first_chunk_ms.unwrap_or_else(|| storage_get_started_at.elapsed().as_millis() as u64),
+        body_started_at.elapsed().as_millis() as u64,
+        spool_write_duration_ms,
+        verify_duration_ms,
+    );
+
+    if actual_digest != digest {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        state.oci_engine_diagnostics.record_digest_verify_failure();
+        state
+            .oci_engine_diagnostics
+            .record_stream_through_verify_failure();
+        let _ = tx
+            .send(Err(std::io::Error::other(format!(
+                "Downloaded blob digest mismatch for {digest}: got {actual_digest}"
+            ))))
+            .await;
+        return;
+    }
+
+    if written != expected_size {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        state
+            .oci_engine_diagnostics
+            .record_stream_through_verify_failure();
+        let _ = tx
+            .send(Err(std::io::Error::other(format!(
+                "Downloaded blob size mismatch for {digest}: expected {expected_size}, got {written}"
+            ))))
+            .await;
+        return;
+    }
+
+    if !from_cached_url {
+        let mut locator = state.blob_locator.write().await;
+        if let Some(entry) = locator.get_mut(&name, &digest) {
+            entry.download_url = Some(download_url);
+            entry.download_url_cached_at = Some(std::time::Instant::now());
+        }
+    }
+
+    let promote_started_at = std::time::Instant::now();
+    let cache_promotion_ok = match state
+        .blob_read_cache
+        .promote(&digest, &temp_path, written)
+        .await
+    {
+        Ok(_) => true,
+        Err(error) => {
+            log::warn!("OCI blob stream-through cache promote failed for {digest}: {error}");
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            false
+        }
+    };
+    let promotion_duration_ms = promote_started_at.elapsed().as_millis() as u64;
+    state
+        .oci_engine_diagnostics
+        .record_cache_promotion(promotion_duration_ms, cache_promotion_ok);
+    state.oci_engine_diagnostics.record_stream_through(
+        written,
+        verify_duration_ms,
+        cache_promotion_ok,
+    );
+    state
+        .oci_body_metrics
+        .record_remote(written, request_started_at.elapsed().as_millis() as u64);
+    state
+        .oci_engine_diagnostics
+        .record_remote_blob_read(written, written, false);
+
+    if let Some(final_chunk) = previous_chunk {
+        let _ = tx.send(Ok(final_chunk)).await;
+    }
 }
 
 async fn download_oci_blob_to_cache(

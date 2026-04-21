@@ -1,6 +1,6 @@
 # ADR 0007: Docker Immutable Run Refs And Alias Promotion
 
-Status: proposed
+Status: accepted for hidden contract; default rollout pending concurrent-writer proof
 Date: 2026-04-20
 
 ## Context
@@ -103,8 +103,10 @@ Required backend concepts:
 
 - immutable cache root id;
 - root digest and manifest digest;
-- source ref/branch/PR metadata;
-- run id and attempt;
+- provider-neutral source ref/branch/PR metadata;
+- CI provider name when known;
+- provider run uid and attempt when known;
+- explicit client-generated run uid when no CI provider exists;
 - commit SHA when available;
 - run started/completed timestamps;
 - alias pointer version;
@@ -124,6 +126,8 @@ This can be represented by new endpoints or by extending the existing tag publis
 - alias promotion is compare-and-swap or equivalent atomic update;
 - a promotion conflict does not delete or corrupt the root;
 - clients can distinguish promoted, conflicted, ignored, and failed.
+
+The Rails contract must not mention GitHub-specific field names. GitHub Actions is only the first metadata adapter because the action can provide clean run metadata and benchmark artifacts. Other CI systems and local runs use the same contract by passing an explicit provider name plus run uid/attempt/timestamps, or by letting the CLI generate a local run uid when no provider metadata exists.
 
 ## Promotion Policy
 
@@ -203,6 +207,69 @@ The first hidden CLI/Rails slice is implemented:
 - Rails tag publish responses now expose `promotion_status`, `promotion_reason`, and `requested_cache_entry_id` so stale/ignored alias promotion is visible without deleting the immutable root.
 
 Remaining rollout work: derive run refs and aliases automatically from CI/action metadata, add a dedicated concurrent same-alias writer E2E, wire action benchmark workflows to the hidden controls, and promote the behavior to the default only after artifact comparison.
+
+The concurrent writer E2E should stay provider-neutral. It should simulate two provider contexts, not GitHub-only environment variables:
+
+```text
+run A -> immutable ref A -> promote branch/main
+run B -> immutable ref B -> promote branch/main
+```
+
+Expected assertions:
+
+- both immutable roots remain readable;
+- exactly one root owns `branch/main` according to promotion policy;
+- the stale loser reports `ignored_stale` or conflict metadata;
+- session trace records the requested aliases, promotion outcome, and immutable root.
+
+## Proof Status
+
+Documentation and the first hidden CLI/Rails contract slice are aligned as of 2026-04-21. Immutable run refs and alias promotion are accepted as the correctness model; automatic CI/action planning and default rollout remain proof-gated.
+
+Benchmark and E2E proof are intentionally deferred until the ADR set is aligned. The later proof bundle must attach:
+
+- a provider-neutral concurrent same-alias writer E2E with two immutable refs;
+- API/session evidence that both roots remain readable after one alias winner is selected;
+- stale/conflict promotion evidence in both Rails response fields and session trace fields;
+- Docker dry-run/action artifacts showing derived run refs, import aliases, and promotion aliases;
+- real-project benchmark artifacts that classify alias conflicts separately from cache misses.
+
+## Incident Tracking: Same-Tag PostHog Writer Overlap
+
+The 2026-04-21 PostHog Docker benchmark also exposed the same-tag risk this ADR is meant to remove. A manual rolling run overlapped with another PostHog writer for the same logical cache tag. The failed BoringCache run reached cache export, then manifest commit returned `400 blob unknown`.
+
+The exact root cause is still tracked under ADR 0006 because the immediate failure is descriptor validation seeing a missing blob after export-time `HEAD` misses. The concurrency relevance is that both writers used the same mutable BuildKit registry ref as the read and write identity. That makes the failure harder to interpret:
+
+- one writer can observe a miss while another writer is still uploading or publishing;
+- export-time `HEAD` misses may be cached locally for a digest that becomes present moments later;
+- the visible tag can move while another writer is validating its manifest;
+- benchmark artifacts can confuse an alias race with a true cache miss or storage failure.
+
+This incident strengthens the rollout requirement for immutable run refs:
+
+```text
+cache-to:   immutable run ref for this CI attempt
+cache-from: branch/default aliases and optional previous run refs
+promote:   branch/default aliases only after successful export
+```
+
+Release status matters for incident review:
+
+- the failed benchmark used the released action path, `boringcache/one@v1`;
+- that action currently resolves to action `v1.12.59`, which pins CLI `v1.12.41`;
+- local CLI and Rails work for negative-cache invalidation, borrowed upload sessions, and alias-promotion diagnostics is not fully represented by that released path;
+- no benchmark should be used as release evidence for this incident unless the artifact records the action ref, CLI version, immutable run ref state, promotion status, and session trace.
+
+The tracking proof for this ADR is a provider-neutral E2E:
+
+1. run A writes immutable OCI run ref A and requests promotion to one branch alias;
+2. run B writes immutable OCI run ref B and requests promotion to the same branch alias;
+3. both roots remain readable by digest/ref regardless of alias winner;
+4. one alias promotion wins according to policy and the loser is reported as stale/conflict, not as corruption;
+5. no manifest publish returns `blob unknown` because of the other writer's misses or tag movement;
+6. diagnostics link each manifest PUT to run ref, import aliases, promotion aliases, CLI version, and action/ref metadata.
+
+Until this E2E exists, concurrent same-tag Docker benchmark runs are useful for finding bugs but should not be used as clean performance comparisons.
 
 ## Acceptance Gates
 

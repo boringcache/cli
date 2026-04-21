@@ -812,16 +812,14 @@ async fn stage_manifest_reference_upload(
         return Ok(());
     }
 
-    sessions.create(UploadSession {
-        id: session_id,
-        name: name.to_string(),
+    sessions.create(UploadSession::owned_temp_file(
+        session_id,
+        name.to_string(),
         temp_path,
-        write_lock: Arc::new(tokio::sync::Mutex::new(())),
-        bytes_received: actual_size,
-        finalized_digest: Some(descriptor.digest.clone()),
-        finalized_size: Some(actual_size),
-        created_at: Instant::now(),
-    });
+        actual_size,
+        Some(descriptor.digest.clone()),
+        Some(actual_size),
+    ));
 
     Ok(())
 }

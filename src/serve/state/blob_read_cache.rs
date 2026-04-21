@@ -48,6 +48,14 @@ impl BlobReadHandle {
         }
     }
 
+    pub fn from_file_range(path: PathBuf, offset: u64, size_bytes: u64) -> Self {
+        Self {
+            path,
+            offset,
+            size_bytes,
+        }
+    }
+
     pub fn path(&self) -> &Path {
         self.path.as_path()
     }
@@ -58,6 +66,37 @@ impl BlobReadHandle {
 
     pub fn size_bytes(&self) -> u64 {
         self.size_bytes
+    }
+}
+
+#[derive(Debug)]
+pub struct BlobReadLease {
+    key: String,
+    handle: BlobReadHandle,
+    pins: Arc<DashMap<String, AtomicU64>>,
+}
+
+impl BlobReadLease {
+    pub fn handle(&self) -> &BlobReadHandle {
+        &self.handle
+    }
+
+    pub fn path(&self) -> &Path {
+        self.handle.path()
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.handle.offset()
+    }
+
+    pub fn size_bytes(&self) -> u64 {
+        self.handle.size_bytes()
+    }
+}
+
+impl Drop for BlobReadLease {
+    fn drop(&mut self) {
+        BlobReadCache::decrement_pin(&self.pins, &self.key);
     }
 }
 
@@ -94,6 +133,7 @@ pub struct BlobReadCache {
     max_bytes: u64,
     pub(super) inflight: Arc<DashMap<String, Arc<Notify>>>,
     storage_index: Arc<DashMap<String, BlobReadStorageEntry>>,
+    pins: Arc<DashMap<String, AtomicU64>>,
     segment_entry_keys: Arc<DashMap<u64, Vec<String>>>,
     segment_state: Arc<Mutex<BlobReadSegmentState>>,
     append_lock: Arc<Mutex<()>>,
@@ -135,6 +175,7 @@ impl BlobReadCache {
             max_bytes: max_bytes.max(1),
             inflight: Arc::new(DashMap::new()),
             storage_index,
+            pins: Arc::new(DashMap::new()),
             segment_entry_keys: Arc::new(segment_entry_keys),
             segment_state: Arc::new(Mutex::new(segment_state)),
             append_lock: Arc::new(Mutex::new(())),
@@ -248,10 +289,35 @@ impl BlobReadCache {
         None
     }
 
+    pub async fn lease_handle(&self, digest: &str) -> Option<BlobReadLease> {
+        let key = Self::normalize_digest_hex(digest)?;
+        {
+            let pin = self
+                .pins
+                .entry(key.clone())
+                .or_insert_with(|| AtomicU64::new(0));
+            pin.fetch_add(1, Ordering::AcqRel);
+        }
+
+        let Some(handle) = self.get_handle(&key).await else {
+            Self::decrement_pin(&self.pins, &key);
+            return None;
+        };
+
+        Some(BlobReadLease {
+            key,
+            handle,
+            pins: Arc::clone(&self.pins),
+        })
+    }
+
     pub async fn remove(&self, digest: &str) {
         let Some(key) = Self::normalize_digest_hex(digest) else {
             return;
         };
+        if self.is_pinned(&key) {
+            return;
+        }
         let Some((_, entry)) = self.storage_index.remove(&key) else {
             return;
         };
@@ -534,6 +600,9 @@ impl BlobReadCache {
             if total <= self.max_bytes {
                 break;
             }
+            if self.is_pinned(&digest) {
+                continue;
+            }
             if tokio::fs::remove_file(&path).await.is_ok() {
                 self.storage_index.remove(&digest);
                 total = total.saturating_sub(size_bytes);
@@ -553,6 +622,9 @@ impl BlobReadCache {
                 if total <= self.max_bytes {
                     break;
                 }
+                if self.segment_has_pins(segment_id) {
+                    continue;
+                }
                 let Some(meta) = state.segments.remove(&segment_id) else {
                     continue;
                 };
@@ -569,6 +641,24 @@ impl BlobReadCache {
 
         self.total_bytes.store(total, Ordering::Release);
         Ok(())
+    }
+
+    fn is_pinned(&self, key: &str) -> bool {
+        self.pins
+            .get(key)
+            .is_some_and(|pin| pin.load(Ordering::Acquire) > 0)
+    }
+
+    fn segment_has_pins(&self, segment_id: u64) -> bool {
+        self.segment_entry_keys
+            .get(&segment_id)
+            .is_some_and(|keys| keys.iter().any(|key| self.is_pinned(key)))
+    }
+
+    fn decrement_pin(pins: &DashMap<String, AtomicU64>, key: &str) {
+        if let Some(pin) = pins.get(key) {
+            pin.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 
     fn scan_storage(

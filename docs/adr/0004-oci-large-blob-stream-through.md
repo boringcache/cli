@@ -1,6 +1,6 @@
 # ADR 0004: OCI Large Blob Stream-Through
 
-Status: proposed
+Status: accepted for hidden prototype; default rollout pending benchmark proof
 Date: 2026-04-20
 
 ## Context
@@ -153,6 +153,49 @@ Exact names can change to match the current `OciEngineDiagnostics` style, but th
 5. Preserve existing response headers: `Docker-Content-Digest`, digest `ETag`, `Content-Type`, `Content-Length`, `Accept-Ranges`, and distribution API version.
 6. Add unit tests for threshold selection, final-chunk verification failure, temp cleanup, and non-eligible fallback.
 7. Add an integration/E2E comparison for metadata-only Docker warm/reseed behavior.
+
+## Implementation Progress
+
+The first hidden CLI slice is implemented behind `BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES`.
+
+Current behavior:
+
+- default behavior is unchanged because the threshold is unset by default;
+- only full-body OCI `GET` misses are eligible;
+- `HEAD`, ranged `GET`, local hits, upload-session hits, and small blobs stay on the existing paths;
+- the leader streams remote bytes to the client while teeing to a temp file and hashing;
+- the final chunk is held until digest and size verification pass, so a mismatched remote body cannot complete as a successful client body;
+- verified temp files are promoted into `BlobReadCache`;
+- digest or size failures remove the temp file and do not populate the local cache;
+- followers keep using the existing singleflight wait-and-serve-from-cache behavior.
+
+Implemented status metric names follow `OciEngineDiagnostics` style:
+
+- `oci_engine_stream_through_count`;
+- `oci_engine_stream_through_bytes`;
+- `oci_engine_stream_through_verify_duration_ms`;
+- `oci_engine_stream_through_verify_failures`;
+- `oci_engine_stream_through_cache_promotion_failures`.
+
+The remaining rollout item is benchmarking: compare client first-byte wait and total remote body wait for large Docker layers before enabling any nonzero default.
+
+## Proof Status
+
+Documentation and the hidden CLI prototype are aligned as of 2026-04-21. The stream-through threshold remains a hidden engineering control and is unset by default.
+
+Evidence now available:
+
+- unit/integration tests cover successful stream-through promotion, digest mismatch temp cleanup, and no local-cache population after a bad body;
+- the Rails-backed local Docker BuildKit E2E passed against a managed workspace provisioned through Rails/Tigris with `OCI_HYDRATION=metadata-only` and `BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES=1`;
+- that E2E recorded stream-through counters in status snapshots and session summaries, including `oci_engine_stream_through_count=5` and `oci_engine_stream_through_bytes=3953` in the first cache-registry session summary.
+
+Benchmark proof is still pending before any default change. The later proof bundle must attach:
+
+- a default-off metadata-only Docker E2E artifact for the same workload and ref class;
+- a stream-through-enabled artifact for the same workload and ref class;
+- client first-byte wait, upstream TTFB, upstream body duration, verification duration, cache-promotion result, and follower-wait counters;
+- digest-mismatch and mid-stream-failure evidence showing no local cache population;
+- a run classification that separates fresh, reseed, and steady warm behavior.
 
 ## Acceptance Gates
 

@@ -149,6 +149,7 @@ mod tests {
             id: "empty".to_string(),
             name: "img".to_string(),
             temp_path: PathBuf::from("/tmp/empty"),
+            body: UploadSessionBody::OwnedTempFile,
             write_lock: Arc::new(Mutex::new(())),
             bytes_received: 0,
             finalized_digest: Some("sha256:abc".to_string()),
@@ -160,6 +161,7 @@ mod tests {
             id: "filled".to_string(),
             name: "img".to_string(),
             temp_path: PathBuf::from("/tmp/filled"),
+            body: UploadSessionBody::OwnedTempFile,
             write_lock: Arc::new(Mutex::new(())),
             bytes_received: 0,
             finalized_digest: Some("sha256:abc".to_string()),
@@ -332,6 +334,49 @@ mod tests {
             .expect("insert call");
         assert!(!inserted);
         assert!(cache.get_handle("not-a-digest").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn blob_read_cache_lease_prevents_segment_eviction() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache =
+            BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 90).expect("blob cache");
+        let digest_a = format!("sha256:{}", "1".repeat(64));
+        let digest_b = format!("sha256:{}", "2".repeat(64));
+        let digest_c = format!("sha256:{}", "3".repeat(64));
+
+        assert!(
+            cache
+                .insert(&digest_a, b"aaaaaaaa")
+                .await
+                .expect("insert a")
+        );
+        let lease = cache.lease_handle(&digest_a).await.expect("lease a");
+        assert!(lease.offset() > 0);
+
+        assert!(
+            cache
+                .insert(&digest_b, b"bbbbbbbb")
+                .await
+                .expect("insert b")
+        );
+        assert!(
+            cache.get_handle(&digest_a).await.is_some(),
+            "leased segment entry should survive eviction"
+        );
+
+        drop(lease);
+        assert!(
+            cache
+                .insert(&digest_c, b"cccccccc")
+                .await
+                .expect("insert c")
+        );
+        assert!(
+            cache.get_handle(&digest_a).await.is_none(),
+            "released segment entry should become evictable"
+        );
+        assert!(cache.get_handle(&digest_c).await.is_some());
     }
 
     #[test]

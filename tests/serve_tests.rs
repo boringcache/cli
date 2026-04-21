@@ -10,8 +10,8 @@ use boring_cache_cli::manifest::EntryType;
 use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
     AppState, BlobLocatorCache, BlobLocatorEntry, BlobReadCache, BlobReadMetrics, KvPendingStore,
-    KvPublishedIndex, OciManifestCacheEntry, UploadSession, UploadSessionStore, digest_tag,
-    ref_tag,
+    KvPublishedIndex, OciManifestCacheEntry, UploadSession, UploadSessionBody, UploadSessionStore,
+    digest_tag, ref_tag,
 };
 use boring_cache_cli::tag_utils::TagResolver;
 use boring_cache_cli::test_env;
@@ -80,6 +80,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
     test_env::set_var("BORINGCACHE_AUTH_TOKEN", "test-token");
     test_env::set_var("BORINGCACHE_TEST_MODE", "1");
     test_env::remove_var("BORINGCACHE_MAX_SPOOL_BYTES");
+    test_env::remove_var("BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES");
 
     let api_client =
         ApiClient::new_with_token_override(Some("test-token".to_string())).expect("API client");
@@ -2230,6 +2231,7 @@ async fn test_blob_head_and_get_return_local_finalized_upload_session() {
             id: "upload-local".to_string(),
             name: "my-cache".to_string(),
             temp_path,
+            body: UploadSessionBody::OwnedTempFile,
             write_lock: Arc::new(Mutex::new(())),
             bytes_received: blob_content.len() as u64,
             finalized_digest: Some(blob_digest.clone()),
@@ -2293,6 +2295,7 @@ async fn test_blob_get_range_returns_partial_content_from_local_upload_session()
             id: "upload-range-local".to_string(),
             name: "my-cache".to_string(),
             temp_path,
+            body: UploadSessionBody::OwnedTempFile,
             write_lock: Arc::new(Mutex::new(())),
             bytes_received: blob_content.len() as u64,
             finalized_digest: Some(blob_digest.clone()),
@@ -2767,6 +2770,169 @@ async fn test_blob_get_after_manifest_resolution() {
         .unwrap()
         .to_bytes();
     assert_eq!(&second_body[..], blob_content);
+}
+
+#[tokio::test]
+async fn test_blob_get_stream_through_promotes_verified_remote_body() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    test_env::set_var("BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES", "1");
+
+    let blob_content = b"stream-through-remote-blob";
+    let blob_digest = cas_oci::prefixed_sha256_digest(blob_content);
+    {
+        let mut locator = state.blob_locator.write().await;
+        locator.insert(
+            "img",
+            &blob_digest,
+            BlobLocatorEntry {
+                cache_entry_id: "entry-stream-through".to_string(),
+                size_bytes: blob_content.len() as u64,
+                download_url: Some(format!("{}/blobs/{}", server.url(), blob_digest)),
+                download_url_cached_at: Some(Instant::now()),
+            },
+        );
+    }
+
+    let blob_mock = server
+        .mock("GET", format!("/blobs/{}", blob_digest).as_str())
+        .with_status(200)
+        .with_body(blob_content)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state.clone()),
+        Request::builder()
+            .uri(format!("/v2/img/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_digest_etag(response.headers(), &blob_digest);
+    assert_eq!(
+        response.headers().get("Content-Length").unwrap(),
+        &blob_content.len().to_string()
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], blob_content);
+
+    assert!(
+        state
+            .blob_read_cache
+            .get_handle(&blob_digest)
+            .await
+            .is_some()
+    );
+    let diagnostics = state
+        .oci_engine_diagnostics
+        .metadata_hints(state.oci_hydration_policy.as_str());
+    assert_eq!(
+        diagnostics.get("oci_engine_stream_through_count"),
+        Some(&"1".to_string())
+    );
+    assert_eq!(
+        diagnostics.get("oci_engine_stream_through_bytes"),
+        Some(&blob_content.len().to_string())
+    );
+
+    let second_response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .uri(format!("/v2/img/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_body = second_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(&second_body[..], blob_content);
+
+    blob_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_blob_get_stream_through_digest_mismatch_cleans_temp_and_skips_cache() {
+    let mut server = Server::new_async().await;
+    let (state, temp_home, _guard) = setup(&server).await;
+    test_env::set_var("BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES", "1");
+
+    let expected_body = b"aaaaaaaaaaaa";
+    let remote_body = b"bbbbbbbbbbbb";
+    let blob_digest = cas_oci::prefixed_sha256_digest(expected_body);
+    {
+        let mut locator = state.blob_locator.write().await;
+        locator.insert(
+            "img",
+            &blob_digest,
+            BlobLocatorEntry {
+                cache_entry_id: "entry-stream-through-bad-digest".to_string(),
+                size_bytes: expected_body.len() as u64,
+                download_url: Some(format!("{}/blobs/{}", server.url(), blob_digest)),
+                download_url_cached_at: Some(Instant::now()),
+            },
+        );
+    }
+
+    let blob_mock = server
+        .mock("GET", format!("/blobs/{}", blob_digest).as_str())
+        .with_status(200)
+        .with_body(remote_body)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state.clone()),
+        Request::builder()
+            .uri(format!("/v2/img/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.into_body().collect().await.is_err());
+    assert!(
+        state
+            .blob_read_cache
+            .get_handle(&blob_digest)
+            .await
+            .is_none()
+    );
+
+    let downloads_dir = temp_home.path().join("proxy-runtime/oci-downloads");
+    if let Ok(mut entries) = tokio::fs::read_dir(&downloads_dir).await {
+        assert!(
+            entries.next_entry().await.unwrap().is_none(),
+            "failed stream-through temp file should be removed"
+        );
+    }
+
+    let diagnostics = state
+        .oci_engine_diagnostics
+        .metadata_hints(state.oci_hydration_policy.as_str());
+    assert_eq!(
+        diagnostics.get("oci_engine_stream_through_verify_failures"),
+        Some(&"1".to_string())
+    );
+    assert_eq!(
+        diagnostics.get("oci_engine_digest_verify_failures"),
+        Some(&"1".to_string())
+    );
+
+    blob_mock.assert_async().await;
 }
 
 #[tokio::test]

@@ -387,6 +387,17 @@ pub struct OciEngineDiagnostics {
     cache_promotion_count: AtomicU64,
     cache_promotion_duration_ms: AtomicU64,
     cache_promotion_failures: AtomicU64,
+    upload_session_materialization_count: AtomicU64,
+    upload_session_materialization_bytes: AtomicU64,
+    upload_session_materialization_copy_duration_ms: AtomicU64,
+    upload_session_materialization_sync_duration_ms: AtomicU64,
+    borrowed_upload_session_count: AtomicU64,
+    borrowed_upload_session_bytes: AtomicU64,
+    stream_through_count: AtomicU64,
+    stream_through_bytes: AtomicU64,
+    stream_through_verify_duration_ms: AtomicU64,
+    stream_through_verify_failures: AtomicU64,
+    stream_through_cache_promotion_failures: AtomicU64,
     alias_promotion_promoted: AtomicU64,
     alias_promotion_unchanged: AtomicU64,
     alias_promotion_ignored_stale: AtomicU64,
@@ -451,6 +462,17 @@ impl OciEngineDiagnostics {
             cache_promotion_count: AtomicU64::new(0),
             cache_promotion_duration_ms: AtomicU64::new(0),
             cache_promotion_failures: AtomicU64::new(0),
+            upload_session_materialization_count: AtomicU64::new(0),
+            upload_session_materialization_bytes: AtomicU64::new(0),
+            upload_session_materialization_copy_duration_ms: AtomicU64::new(0),
+            upload_session_materialization_sync_duration_ms: AtomicU64::new(0),
+            borrowed_upload_session_count: AtomicU64::new(0),
+            borrowed_upload_session_bytes: AtomicU64::new(0),
+            stream_through_count: AtomicU64::new(0),
+            stream_through_bytes: AtomicU64::new(0),
+            stream_through_verify_duration_ms: AtomicU64::new(0),
+            stream_through_verify_failures: AtomicU64::new(0),
+            stream_through_cache_promotion_failures: AtomicU64::new(0),
             alias_promotion_promoted: AtomicU64::new(0),
             alias_promotion_unchanged: AtomicU64::new(0),
             alias_promotion_ignored_stale: AtomicU64::new(0),
@@ -596,6 +618,50 @@ impl OciEngineDiagnostics {
         if !ok {
             self.cache_promotion_failures.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    pub fn record_upload_session_materialization(
+        &self,
+        bytes: u64,
+        copy_duration_ms: u64,
+        sync_duration_ms: u64,
+    ) {
+        self.upload_session_materialization_count
+            .fetch_add(1, Ordering::AcqRel);
+        self.upload_session_materialization_bytes
+            .fetch_add(bytes, Ordering::AcqRel);
+        self.upload_session_materialization_copy_duration_ms
+            .fetch_add(copy_duration_ms, Ordering::AcqRel);
+        self.upload_session_materialization_sync_duration_ms
+            .fetch_add(sync_duration_ms, Ordering::AcqRel);
+    }
+
+    pub fn record_borrowed_upload_session(&self, bytes: u64) {
+        self.borrowed_upload_session_count
+            .fetch_add(1, Ordering::AcqRel);
+        self.borrowed_upload_session_bytes
+            .fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    pub fn record_stream_through(
+        &self,
+        bytes: u64,
+        verify_duration_ms: u64,
+        cache_promotion_ok: bool,
+    ) {
+        self.stream_through_count.fetch_add(1, Ordering::AcqRel);
+        self.stream_through_bytes.fetch_add(bytes, Ordering::AcqRel);
+        self.stream_through_verify_duration_ms
+            .fetch_add(verify_duration_ms, Ordering::AcqRel);
+        if !cache_promotion_ok {
+            self.stream_through_cache_promotion_failures
+                .fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn record_stream_through_verify_failure(&self) {
+        self.stream_through_verify_failures
+            .fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn record_alias_promotion(&self, status: Option<&str>) {
@@ -848,6 +914,61 @@ impl OciEngineDiagnostics {
             &mut hints,
             "oci_engine_cache_promotion_failures",
             &self.cache_promotion_failures,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_session_materialization_count",
+            &self.upload_session_materialization_count,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_session_materialization_bytes",
+            &self.upload_session_materialization_bytes,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_session_materialization_copy_duration_ms",
+            &self.upload_session_materialization_copy_duration_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_session_materialization_sync_duration_ms",
+            &self.upload_session_materialization_sync_duration_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_borrowed_upload_session_count",
+            &self.borrowed_upload_session_count,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_borrowed_upload_session_bytes",
+            &self.borrowed_upload_session_bytes,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_stream_through_count",
+            &self.stream_through_count,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_stream_through_bytes",
+            &self.stream_through_bytes,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_stream_through_verify_duration_ms",
+            &self.stream_through_verify_duration_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_stream_through_verify_failures",
+            &self.stream_through_verify_failures,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_stream_through_cache_promotion_failures",
+            &self.stream_through_cache_promotion_failures,
         );
         self.insert_counter(
             &mut hints,

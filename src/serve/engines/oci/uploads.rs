@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::api::models::cache::BlobDescriptor;
 use crate::serve::http::error::OciError;
-use crate::serve::state::{AppState, BlobReadHandle, UploadSession};
+use crate::serve::state::{AppState, BlobReadHandle, BlobReadLease, UploadSession};
 
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS: usize = 20;
@@ -68,6 +68,20 @@ struct WrittenBody {
     digest: String,
 }
 
+enum ExistingMountedBlob {
+    UploadSession(BlobReadHandle),
+    BlobReadCache(BlobReadLease),
+}
+
+impl ExistingMountedBlob {
+    fn size_bytes(&self) -> u64 {
+        match self {
+            Self::UploadSession(handle) => handle.size_bytes(),
+            Self::BlobReadCache(lease) => lease.size_bytes(),
+        }
+    }
+}
+
 pub(crate) async fn find_local_uploaded_blob(
     state: &AppState,
     name: &str,
@@ -79,8 +93,9 @@ pub(crate) async fn find_local_uploaded_blob(
     if size_bytes == 0 {
         return None;
     }
-    Some(BlobReadHandle::from_file(
-        session.temp_path.clone(),
+    Some(BlobReadHandle::from_file_range(
+        session.body_path().to_path_buf(),
+        session.body_offset(),
         size_bytes,
     ))
 }
@@ -421,7 +436,9 @@ pub(crate) async fn put_upload(
 
 pub(crate) async fn delete_upload(state: &AppState, uuid: &str) {
     let mut sessions = state.upload_sessions.write().await;
-    if let Some(session) = sessions.remove(uuid) {
+    if let Some(session) = sessions.remove(uuid)
+        && session.owns_temp_file()
+    {
         let _ = tokio::fs::remove_file(&session.temp_path).await;
     }
 }
@@ -484,6 +501,11 @@ async fn session_path_and_lock(
     let session = sessions
         .get(uuid)
         .ok_or_else(|| OciError::blob_upload_unknown(format!("upload {uuid}")))?;
+    if !session.owns_temp_file() {
+        return Err(OciError::blob_upload_unknown(format!(
+            "upload {uuid} is finalized"
+        )));
+    }
     Ok((session.temp_path.clone(), session.write_lock.clone()))
 }
 
@@ -505,16 +527,14 @@ async fn create_upload_session(
     finalized_size: Option<u64>,
 ) {
     let mut sessions = state.upload_sessions.write().await;
-    sessions.create(UploadSession {
-        id: session_id,
-        name: name.to_string(),
+    sessions.create(UploadSession::owned_temp_file(
+        session_id,
+        name.to_string(),
         temp_path,
-        write_lock: Arc::new(tokio::sync::Mutex::new(())),
         bytes_received,
         finalized_digest,
         finalized_size,
-        created_at: Instant::now(),
-    });
+    ));
 }
 
 async fn stage_mounted_blob_session(
@@ -529,28 +549,47 @@ async fn stage_mounted_blob_session(
         }
     }
 
-    if let Some(handle) = existing_mounted_blob_handle(state, name, digest).await {
+    if let Some(existing) = existing_mounted_blob_handle(state, name, digest).await {
         let session_id = format!("oci-mount-{}", uuid::Uuid::new_v4());
-        let temp_path = materialize_mounted_blob(state, digest, &handle).await?;
-        let size_bytes = handle.size_bytes();
+        let size_bytes = existing.size_bytes();
 
         let mut sessions = state.upload_sessions.write().await;
         if sessions.find_by_name_and_digest(name, digest).is_some() {
-            drop(sessions);
-            let _ = tokio::fs::remove_file(&temp_path).await;
             return Ok(true);
         }
 
-        sessions.create(UploadSession {
-            id: session_id,
-            name: name.to_string(),
-            temp_path,
-            write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            bytes_received: size_bytes,
-            finalized_digest: Some(digest.to_string()),
-            finalized_size: Some(size_bytes),
-            created_at: Instant::now(),
-        });
+        match existing {
+            ExistingMountedBlob::UploadSession(handle) => {
+                drop(sessions);
+                let temp_path = materialize_mounted_blob(state, digest, &handle).await?;
+                let mut sessions = state.upload_sessions.write().await;
+                if sessions.find_by_name_and_digest(name, digest).is_some() {
+                    drop(sessions);
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    return Ok(true);
+                }
+                sessions.create(UploadSession::owned_temp_file(
+                    session_id,
+                    name.to_string(),
+                    temp_path,
+                    size_bytes,
+                    Some(digest.to_string()),
+                    Some(size_bytes),
+                ));
+            }
+            ExistingMountedBlob::BlobReadCache(lease) => {
+                sessions.create(UploadSession::borrowed_blob_read(
+                    session_id,
+                    name.to_string(),
+                    digest.to_string(),
+                    size_bytes,
+                    lease,
+                ));
+                state
+                    .oci_engine_diagnostics
+                    .record_borrowed_upload_session(size_bytes);
+            }
+        }
         state.oci_negative_cache.invalidate_blob(name, digest);
         return Ok(true);
     }
@@ -562,30 +601,40 @@ async fn existing_mounted_blob_handle(
     state: &AppState,
     name: &str,
     digest: &str,
-) -> Option<BlobReadHandle> {
+) -> Option<ExistingMountedBlob> {
     {
         let sessions = state.upload_sessions.read().await;
         if let Some(session) = sessions.find_by_name_and_digest(name, digest) {
             let size_bytes = session.finalized_size.unwrap_or(session.bytes_received);
             if size_bytes > 0 {
-                return Some(BlobReadHandle::from_file(
-                    session.temp_path.clone(),
-                    size_bytes,
+                return Some(ExistingMountedBlob::UploadSession(
+                    BlobReadHandle::from_file_range(
+                        session.body_path().to_path_buf(),
+                        session.body_offset(),
+                        size_bytes,
+                    ),
                 ));
             }
         }
         if let Some(session) = sessions.find_by_digest(digest) {
             let size_bytes = session.finalized_size.unwrap_or(session.bytes_received);
             if size_bytes > 0 {
-                return Some(BlobReadHandle::from_file(
-                    session.temp_path.clone(),
-                    size_bytes,
+                return Some(ExistingMountedBlob::UploadSession(
+                    BlobReadHandle::from_file_range(
+                        session.body_path().to_path_buf(),
+                        session.body_offset(),
+                        size_bytes,
+                    ),
                 ));
             }
         }
     }
 
-    state.blob_read_cache.get_handle(digest).await
+    state
+        .blob_read_cache
+        .lease_handle(digest)
+        .await
+        .map(ExistingMountedBlob::BlobReadCache)
 }
 
 async fn materialize_mounted_blob(
@@ -626,10 +675,12 @@ async fn materialize_mounted_blob(
     let mut dest = tokio::fs::File::create(&temp_path)
         .await
         .map_err(|e| OciError::internal(format!("Failed to create mounted blob copy: {e}")))?;
+    let copy_started_at = Instant::now();
     let mut limited = source.take(handle.size_bytes());
     let copied = tokio::io::copy(&mut limited, &mut dest)
         .await
         .map_err(|e| OciError::internal(format!("Failed to copy mounted blob: {e}")))?;
+    let copy_duration_ms = copy_started_at.elapsed().as_millis() as u64;
     if copied != handle.size_bytes() {
         let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(OciError::internal(format!(
@@ -638,12 +689,17 @@ async fn materialize_mounted_blob(
             copied
         )));
     }
+    let sync_started_at = Instant::now();
     dest.flush()
         .await
         .map_err(|e| OciError::internal(format!("Failed to flush mounted blob copy: {e}")))?;
     dest.sync_data()
         .await
         .map_err(|e| OciError::internal(format!("Failed to sync mounted blob copy: {e}")))?;
+    let sync_duration_ms = sync_started_at.elapsed().as_millis() as u64;
+    state
+        .oci_engine_diagnostics
+        .record_upload_session_materialization(copied, copy_duration_ms, sync_duration_ms);
 
     Ok(temp_path)
 }

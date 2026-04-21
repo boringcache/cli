@@ -40,4 +40,5 @@ Use `crate::test_env` for process environment mutation in tests.
 
 - Update the relevant `.comprehension` file before handoff when command surface, flags, env/config behavior, cache lifecycle, proxy/adapters, release workflows, module ownership, support reachability, or file coverage changes.
 - If CLI changes alter Rails API expectations, update `/Users/gaurav/boringcache/web/.comprehension` too.
+- If CLI work implements, validates, supersedes, or rejects an ADR-tracked decision, update the relevant ADR before handoff with progress, evidence, and remaining gates.
 - For release, action tag, base-image, or benchmark dispatch work, load `/Users/gaurav/boringcache/skills/categories/release-operations/release-paths/SKILL.md` first.

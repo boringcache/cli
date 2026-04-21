@@ -56,11 +56,53 @@ pub async fn upload_via_single_url(
         .with_context(|| format!("Failed to read archive metadata {}", archive_path.display()))?
         .len();
 
+    upload_via_single_url_range(
+        archive_path,
+        0,
+        file_size,
+        upload_url,
+        progress,
+        client,
+        upload_headers,
+    )
+    .await
+}
+
+pub async fn upload_via_single_url_range(
+    archive_path: &Path,
+    offset: u64,
+    size: u64,
+    upload_url: &str,
+    progress: &TransferProgress,
+    client: &Client,
+    upload_headers: &HashMap<String, String>,
+) -> Result<(Option<String>, StorageMetrics)> {
+    let file_size = tokio::fs::metadata(archive_path)
+        .await
+        .with_context(|| format!("Failed to read archive metadata {}", archive_path.display()))?
+        .len();
+    anyhow::ensure!(
+        offset <= file_size && size <= file_size.saturating_sub(offset),
+        "upload source range {}+{} exceeds file size {} for {}",
+        offset,
+        size,
+        file_size,
+        archive_path.display()
+    );
+
     let response = send_transfer_request_with_retry("Archive upload", || async {
         let file = File::open(archive_path)
             .await
             .with_context(|| format!("Failed to open archive {}", archive_path.display()))?;
-        let reader = ReaderStream::with_capacity(file, STREAM_CHUNK_SIZE);
+        let mut reader = tokio::io::BufReader::with_capacity(STREAM_CHUNK_SIZE, file);
+        if offset > 0 {
+            reader
+                .seek(tokio::io::SeekFrom::Start(offset))
+                .await
+                .context("Failed to seek archive for upload")?;
+        }
+        let reader = reader.take(size);
+        let reader = ReaderStream::with_capacity(reader, STREAM_CHUNK_SIZE);
         let progress_clone = progress.clone();
         let stream = reader.map(move |chunk_result| match chunk_result {
             Ok(chunk) => {
@@ -78,7 +120,7 @@ pub async fn upload_via_single_url(
             request = request.header("content-type", "application/octet-stream");
         }
         if !has_header(upload_headers, "content-length") {
-            request = request.header("content-length", file_size.to_string());
+            request = request.header("content-length", size.to_string());
         }
 
         for (key, value) in upload_headers {
@@ -365,7 +407,10 @@ fn calculate_upload_concurrency() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::is_missing_multipart_upload_response;
+    use super::{is_missing_multipart_upload_response, upload_via_single_url_range};
+    use crate::progress::TransferProgress;
+    use mockito::{Matcher, Server};
+    use std::collections::HashMap;
 
     #[test]
     fn detects_missing_multipart_upload_response() {
@@ -385,5 +430,40 @@ mod tests {
             reqwest::StatusCode::SERVICE_UNAVAILABLE,
             "<Error><Code>NoSuchUpload</Code></Error>"
         ));
+    }
+
+    #[tokio::test]
+    async fn single_url_range_upload_reads_only_requested_source_slice() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut server = Server::new_async().await;
+        let upload_mock = server
+            .mock("PUT", "/range-upload")
+            .match_header("content-length", "4")
+            .match_body(Matcher::Exact("cdef".to_string()))
+            .with_status(200)
+            .with_header("etag", "range-etag")
+            .create_async()
+            .await;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let source_path = temp_dir.path().join("source.bin");
+        tokio::fs::write(&source_path, b"abcdefghi")
+            .await
+            .expect("source write");
+
+        let (etag, _metrics) = upload_via_single_url_range(
+            &source_path,
+            2,
+            4,
+            &format!("{}/range-upload", server.url()),
+            &TransferProgress::new_noop(),
+            &reqwest::Client::new(),
+            &HashMap::new(),
+        )
+        .await
+        .expect("range upload");
+
+        assert_eq!(etag.as_deref(), Some("range-etag"));
+        upload_mock.assert_async().await;
     }
 }
