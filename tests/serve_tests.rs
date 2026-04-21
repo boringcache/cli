@@ -216,6 +216,20 @@ fn make_kv_pointer(entries: &[(String, String, u64)]) -> Vec<u8> {
     serde_json::to_vec(&pointer).unwrap()
 }
 
+async fn mock_empty_cache_restore(server: &mut Server, expected_calls: usize) -> mockito::Mock {
+    server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .expect(expected_calls)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create_async()
+        .await
+}
+
 #[tokio::test]
 async fn test_startup_manifest_warm_runs_by_default() {
     let mut server = Server::new_async().await;
@@ -6339,6 +6353,31 @@ async fn test_sccache_rejects_unsupported_method() {
 }
 
 #[tokio::test]
+async fn test_sccache_head_miss_returns_not_found_without_body() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+    let key_path =
+        "cache-prefix/0/1/2/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/{key_path}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.is_empty());
+    restore_mock.assert_async().await;
+}
+
+#[tokio::test]
 async fn test_sccache_miss_is_temporarily_cached_to_reduce_backend_lookups() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
@@ -6697,6 +6736,31 @@ async fn test_bazel_rejects_unsupported_method() {
 }
 
 #[tokio::test]
+async fn test_bazel_ac_and_cas_misses_return_not_found() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+    let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    for path in [format!("/ac/{digest}"), format!("/cas/{digest}")] {
+        let response = tower::ServiceExt::oneshot(
+            build_router(state.clone()),
+            Request::builder()
+                .method(Method::GET)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    restore_mock.assert_async().await;
+}
+
+#[tokio::test]
 async fn test_gradle_put_get_round_trip() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
@@ -6907,6 +6971,27 @@ async fn test_gradle_rejects_unsupported_method() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn test_gradle_get_miss_returns_not_found() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::GET)
+            .uri("/cache/missing-gradle-key")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    restore_mock.assert_async().await;
 }
 
 #[tokio::test]
@@ -7221,6 +7306,47 @@ async fn test_maven_put_keeps_generic_spool_rejection_status() {
 }
 
 #[tokio::test]
+async fn test_maven_get_and_head_misses_return_not_found() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+    let uri = "/v1.1/com.example/app/abcdef1234567890/buildinfo.xml";
+
+    let get_response = tower::ServiceExt::oneshot(
+        build_router(state.clone()),
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+
+    let head_response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(head_response.status(), StatusCode::NOT_FOUND);
+    let head_body = head_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert!(head_body.is_empty());
+
+    restore_mock.assert_async().await;
+}
+
+#[tokio::test]
 async fn test_maven_rejects_unsupported_method() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
@@ -7377,6 +7503,28 @@ async fn test_nx_query_returns_misses() {
 }
 
 #[tokio::test]
+async fn test_nx_artifact_get_miss_returns_not_found() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v1/cache/missinghash")
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    restore_mock.assert_async().await;
+}
+
+#[tokio::test]
 async fn test_go_cache_put_head_get_round_trip() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
@@ -7432,6 +7580,28 @@ async fn test_go_cache_put_head_get_round_trip() {
     assert_eq!(get_response.status(), StatusCode::OK);
     let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(get_body.as_ref(), payload);
+}
+
+#[tokio::test]
+async fn test_go_cache_get_miss_returns_not_found() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+    let action = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/gocache/{action}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    restore_mock.assert_async().await;
 }
 
 #[tokio::test]
@@ -7882,6 +8052,28 @@ async fn test_turborepo_artifact_rejects_unsupported_method() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn test_turborepo_artifact_get_miss_returns_not_found() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v8/artifacts/aabbcc")
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    restore_mock.assert_async().await;
 }
 
 #[tokio::test]

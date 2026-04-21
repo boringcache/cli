@@ -20,6 +20,7 @@ This matrix records adapter behavior from primary sources. The implementation sh
 - If a source says a miss has a special non-error status, preserve it.
 - If a source says local file paths are part of the protocol, do not stream-only the implementation.
 - If an adapter source is silent, add tests against the real tool before making product policy.
+- Keep `docs/adapter-spec-guardrails.md` current so every supported adapter route has a source, a hit guardrail, a miss/error guardrail, and a real-tool E2E status.
 
 ## Adapter Research Checklist
 

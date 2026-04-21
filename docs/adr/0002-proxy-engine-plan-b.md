@@ -100,16 +100,16 @@ OCI goes first because it is the only current adapter where manifest graphs, blo
 
 ## Adapter Progress Tracker
 
-Status date: 2026-04-20.
+Status date: 2026-04-21.
 
 | Adapter | Status | Official-source comparison | Current guardrail |
 | --- | --- | --- | --- |
-| OCI / Docker BuildKit registry cache | Engine boundary established; optimization ADRs 0003-0007 track next hot-path and alias work | OCI Distribution/Image specs plus Docker/BuildKit registry cache behavior remain the contract | OCI manifest/blob/upload/publish tests, Docker BuildKit E2E, `docs/oci-kv-path-audit.md`, and `docs/oci-mistake-ledger.md` |
-| sccache / WebDAV | Source alignment pass complete; engine boundary waits until a WebDAV-specific rule needs a home | sccache WebDAV/OpenDAL source behavior defines key prefix, `.sccache_check`, `MKCOL`, auth, and miss handling | `docs/sccache-mistake-ledger.md`, route tests, and sccache E2E env hygiene |
-| Bazel AC/CAS | First engine boundary complete in `serve::engines::bazel` | Bazel HTTP remote-cache docs split `/ac/` action metadata from `/cas/` SHA-256 blobs | `docs/bazel-mistake-ledger.md`, AC/CAS namespace tests, CAS write/read integrity tests, and local Bazel E2E |
-| Gradle / Maven HTTP object caches | Active adapter pass | Gradle HTTP cache docs define `GET` hit/miss and `PUT` success/oversized statuses; Maven extension docs require HTTP `GET`/`HEAD`/`PUT` remote storage | `docs/gradle-maven-mistake-ledger.md`, Gradle 413 spool rejection test, Maven HEAD/GET/PUT round trip, and local Gradle/Maven E2E |
-| Turborepo / Nx remote cache APIs | Pending source reread | Official OpenAPI/API docs control artifact routes, bearer auth, batch/query/event behavior, and archive payload ownership | Matrix row only; add ledger rows before moving code |
-| Go GOCACHEPROG | Pending source reread | Go `cacheprog` source controls line-oriented JSON, request IDs, command set, and local file lifetime | Matrix row only; add subprocess acceptance tests before moving code |
+| OCI / Docker BuildKit registry cache | Engine boundary established; optimization ADRs 0003-0007 track next hot-path and alias work | OCI Distribution/Image specs plus Docker/BuildKit registry cache behavior remain the contract | OCI manifest/blob/upload/publish tests, Docker BuildKit E2E, `docs/oci-kv-path-audit.md`, `docs/oci-mistake-ledger.md`, and `docs/adapter-spec-guardrails.md` |
+| sccache / WebDAV | Source alignment pass complete; engine boundary waits until a WebDAV-specific rule needs a home | sccache WebDAV/OpenDAL source behavior defines key prefix, `.sccache_check`, `MKCOL`, auth, and miss handling | `docs/sccache-mistake-ledger.md`, route tests, sccache E2E env hygiene, and `docs/adapter-spec-guardrails.md` |
+| Bazel AC/CAS | First engine boundary complete in `serve::engines::bazel` | Bazel HTTP remote-cache docs split `/ac/` action metadata from `/cas/` SHA-256 blobs | `docs/bazel-mistake-ledger.md`, AC/CAS namespace tests, CAS write/read integrity tests, local Bazel E2E, and `docs/adapter-spec-guardrails.md` |
+| Gradle / Maven HTTP object caches | Active adapter pass | Gradle HTTP cache docs define `GET` hit/miss and `PUT` success/oversized statuses; Maven extension docs require HTTP `GET`/`HEAD`/`PUT` remote storage | `docs/gradle-maven-mistake-ledger.md`, explicit Gradle/Maven miss tests, Gradle 413 spool rejection test, Maven HEAD/GET/PUT round trip, local Gradle/Maven E2E, and `docs/adapter-spec-guardrails.md` |
+| Turborepo / Nx remote cache APIs | Guardrail coverage recorded; richer engine boundary pending | Official OpenAPI/API docs control artifact routes, bearer auth, batch/query/event behavior, and archive payload ownership | Auth, hit, miss, query/event tests and `docs/adapter-spec-guardrails.md`; add adapter-specific ledgers before moving code |
+| Go GOCACHEPROG | Guardrail coverage recorded for helper protocol and HTTP backing route | Go `cacheprog` source controls line-oriented JSON, request IDs, command set, and local file lifetime | go-cacheprog unit tests, HTTP backing route hit/miss tests, Go E2E, and `docs/adapter-spec-guardrails.md` |
 
 ## OCI First-Principles Contract
 

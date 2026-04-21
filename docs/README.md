@@ -17,6 +17,7 @@ If you are working on the CLI repo itself:
 - [Development](development.md)
 - [Adapter cache profiles](adapter-cache-profiles.md)
 - [Adapter contract matrix](adapter-contract-matrix.md)
+- [Adapter spec guardrails](adapter-spec-guardrails.md)
 - [Performance learning log](performance-learning-log.md)
 - [Engine boundary ADR](adr/0001-engine-boundary.md)
 - [Proxy engine Plan B ADR](adr/0002-proxy-engine-plan-b.md)
