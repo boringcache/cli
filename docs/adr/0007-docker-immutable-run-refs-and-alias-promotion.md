@@ -290,7 +290,8 @@ Release status matters for incident review:
 
 - the failed benchmark used the released action path, `boringcache/one@v1`;
 - that action currently resolves to action `v1.12.59`, which pins CLI `v1.12.41`;
-- CLI `origin/main` now includes the first negative-cache and alias-promotion proof commits; `c28a7c1` has green CLI CI, Docker BuildKit E2E, and Cross-Runner Verify evidence, but the full E2E workflow still fails in Prefetch Smoke and local release-prep removes the verifier-side convergence loop before release tagging;
+- CLI `origin/main` now includes the first negative-cache and alias-promotion proof commits plus receipt-strict E2E handoff checks. Commit `83e547e` clears the required E2E workflow, including Docker BuildKit, Prefetch Smoke, and Cross-Runner Verify, without verifier-side blob URL convergence polling;
+- current remote `boringcache/one@v1` still defaults `verify=wait` and pins CLI `v1.12.41`, so CLI CI/release/E2E workflow uses of `one@v1` that are only cache accelerators must pass `verify: none` explicitly until the action release is promoted;
 - active borrowed-session follow-up work, including owned upload-session body promotion into the local blob cache, is not represented by a released CLI/action path yet;
 - no benchmark should be used as release evidence for this incident unless the artifact records the action ref, CLI version, immutable run ref state, promotion status, and session trace.
 

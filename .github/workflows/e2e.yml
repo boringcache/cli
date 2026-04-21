@@ -62,6 +62,7 @@ jobs:
         uses: boringcache/one@v1
         with:
           setup: none
+          verify: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
           rust-version: ${{ steps.rust-version.outputs.version }}
@@ -505,6 +506,7 @@ jobs:
         uses: boringcache/one@v1
         with:
           setup: none
+          verify: none
           mode: rust-sccache
           workspace: ${{ github.repository }}
           rust-version: ${{ steps.rust-version.outputs.version }}
