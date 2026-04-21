@@ -347,6 +347,24 @@ def main() -> int:
         "local_cache": {"count": 0, "bytes": 0, "durations": []},
         "remote_fetch": {"count": 0, "bytes": 0, "durations": []},
     }
+    oci_upload_plan = {
+        "events": 0,
+        "requested_blobs": 0,
+        "upload_urls": 0,
+        "already_present": 0,
+        "requested_bytes": 0,
+        "new_blob_count": 0,
+        "derived_new_blob_count": 0,
+        "mismatches": 0,
+    }
+    latest_oci_upload_plan = {
+        "requested_blobs": 0,
+        "upload_urls": 0,
+        "already_present": 0,
+        "requested_bytes": 0,
+        "new_blob_count": 0,
+        "derived_new_blob_count": 0,
+    }
     session_summaries = []
     for item in records:
         status = item.get("status")
@@ -364,6 +382,31 @@ def main() -> int:
 
         if item.get("operation") == "cache_session_summary":
             session_summaries.append(item)
+
+        if item.get("operation") == "oci_blob_upload_plan":
+            details = parse_details(item.get("details"))
+            requested_blobs = parse_u64(details.get("requested_blobs")) or 0
+            upload_urls = parse_u64(details.get("upload_urls")) or 0
+            already_present = parse_u64(details.get("already_present")) or 0
+            requested_bytes = parse_u64(details.get("requested_bytes")) or 0
+            derived_new_blob_count = max(0, requested_blobs - already_present)
+
+            oci_upload_plan["events"] += 1
+            oci_upload_plan["requested_blobs"] += requested_blobs
+            oci_upload_plan["upload_urls"] += upload_urls
+            oci_upload_plan["already_present"] += already_present
+            oci_upload_plan["requested_bytes"] += requested_bytes
+            oci_upload_plan["new_blob_count"] += upload_urls
+            oci_upload_plan["derived_new_blob_count"] += derived_new_blob_count
+            if upload_urls != derived_new_blob_count:
+                oci_upload_plan["mismatches"] += 1
+
+            latest_oci_upload_plan["requested_blobs"] = requested_blobs
+            latest_oci_upload_plan["upload_urls"] = upload_urls
+            latest_oci_upload_plan["already_present"] = already_present
+            latest_oci_upload_plan["requested_bytes"] = requested_bytes
+            latest_oci_upload_plan["new_blob_count"] = upload_urls
+            latest_oci_upload_plan["derived_new_blob_count"] = derived_new_blob_count
 
         if item.get("operation") == "cache_ops_record":
             cache_ops_records_total += 1
@@ -435,6 +478,41 @@ def main() -> int:
     )
     print(f"request_metrics_prefetch_cycles={prefetch_cycles}")
     print(f"request_metrics_cache_session_summaries={len(session_summaries)}")
+    print(f"request_metrics_oci_upload_plan_events={oci_upload_plan['events']}")
+    print(f"request_metrics_oci_upload_requested_blobs={oci_upload_plan['requested_blobs']}")
+    print(f"request_metrics_oci_upload_upload_urls={oci_upload_plan['upload_urls']}")
+    print(f"request_metrics_oci_upload_already_present={oci_upload_plan['already_present']}")
+    print(f"request_metrics_oci_upload_requested_bytes={oci_upload_plan['requested_bytes']}")
+    print(f"request_metrics_oci_new_blob_count={oci_upload_plan['new_blob_count']}")
+    print(
+        "request_metrics_oci_derived_new_blob_count="
+        f"{oci_upload_plan['derived_new_blob_count']}"
+    )
+    print(f"request_metrics_oci_upload_plan_mismatches={oci_upload_plan['mismatches']}")
+    print(
+        "request_metrics_oci_latest_upload_requested_blobs="
+        f"{latest_oci_upload_plan['requested_blobs']}"
+    )
+    print(
+        "request_metrics_oci_latest_upload_upload_urls="
+        f"{latest_oci_upload_plan['upload_urls']}"
+    )
+    print(
+        "request_metrics_oci_latest_upload_already_present="
+        f"{latest_oci_upload_plan['already_present']}"
+    )
+    print(
+        "request_metrics_oci_latest_upload_requested_bytes="
+        f"{latest_oci_upload_plan['requested_bytes']}"
+    )
+    print(
+        "request_metrics_oci_latest_new_blob_count="
+        f"{latest_oci_upload_plan['new_blob_count']}"
+    )
+    print(
+        "request_metrics_oci_latest_derived_new_blob_count="
+        f"{latest_oci_upload_plan['derived_new_blob_count']}"
+    )
     if session_summaries:
         flattened_summary = {}
         latest_summary = session_summaries[-1]

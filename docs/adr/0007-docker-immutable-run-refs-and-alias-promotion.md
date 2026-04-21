@@ -211,8 +211,9 @@ The first hidden CLI/Rails slice is implemented:
 - read-only Docker runs still omit `--cache-to` and promotion refs;
 - the proxy carries planned OCI alias promotion refs into manifest publish and records alias-promotion counters in session diagnostics;
 - Rails tag publish responses now expose `promotion_status`, `promotion_reason`, and `requested_cache_entry_id` so stale/ignored alias promotion is visible without deleting the immutable root.
+- focused proxy tests now simulate two immutable run refs requesting promotion to the same provider-neutral alias, proving both run refs remain readable and diagnostics distinguish `promoted` from `ignored_stale`.
 
-Remaining rollout work: derive run refs and aliases automatically from CI/action metadata, add a dedicated concurrent same-alias writer E2E, wire action benchmark workflows to the hidden controls, and promote the behavior to the default only after artifact comparison.
+Remaining rollout work: derive run refs and aliases automatically from CI/action metadata, add a dedicated backend-backed same-alias writer E2E, wire action benchmark workflows to the hidden controls, and promote the behavior to the default only after artifact comparison.
 
 The concurrent writer E2E should stay provider-neutral. It should simulate two provider contexts, not GitHub-only environment variables:
 
@@ -230,9 +231,15 @@ Expected assertions:
 
 ## Proof Status
 
-Documentation and the first hidden CLI/Rails contract slice are aligned as of 2026-04-21. Immutable run refs and alias promotion are accepted as the correctness model; automatic CI/action planning and default rollout remain proof-gated.
+Documentation, hidden CLI/Rails contract fields, and focused proxy proof are aligned as of 2026-04-21. Immutable run refs and alias promotion are accepted as the correctness model; automatic CI/action planning, backend-backed same-alias E2E proof, and default rollout remain proof-gated.
 
-Benchmark and E2E proof are intentionally deferred until the ADR set is aligned. The later proof bundle must attach:
+Focused evidence now available:
+
+- `test_two_immutable_run_refs_promote_same_alias_without_losing_roots` runs two proxy manifest publishes for immutable refs `run-a` and `run-b`, both promoting `branch-main`;
+- both immutable primary refs remain locally readable after the alias updates;
+- alias diagnostics record one `promoted`, one `ignored_stale`, and no failed promotion.
+
+Benchmark and backend E2E proof are still pending. The later proof bundle must attach:
 
 - a provider-neutral concurrent same-alias writer E2E with two immutable refs;
 - API/session evidence that both roots remain readable after one alias winner is selected;

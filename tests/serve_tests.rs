@@ -177,6 +177,18 @@ fn make_pointer(index_json: &[u8], blobs: &[(&str, u64)]) -> Vec<u8> {
     serde_json::to_vec(&pointer).unwrap()
 }
 
+fn make_oci_publish_pointer(manifest_body: &[u8]) -> Vec<u8> {
+    let pointer = cas_oci::OciPointer {
+        format_version: 1,
+        adapter: "oci-v1".to_string(),
+        manifest_content_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
+        index_json_base64: STANDARD.encode(manifest_body),
+        oci_layout_base64: STANDARD.encode(br#"{"imageLayoutVersion":"1.0.0"}"#),
+        blobs: Vec::new(),
+    };
+    serde_json::to_vec(&pointer).unwrap()
+}
+
 fn make_file_pointer(blob_digest: &str, size_bytes: u64) -> Vec<u8> {
     let pointer = cas_file::FilePointer {
         format_version: 1,
@@ -3516,6 +3528,383 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
 }
 
 #[tokio::test]
+async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.oci_alias_promotion_refs = vec!["branch-main".to_string()];
+
+    struct PublishCase {
+        reference: &'static str,
+        manifest_body: Vec<u8>,
+        primary_tag: String,
+    }
+
+    let branch_alias_tag = scoped_ref_tag("cache", "branch-main");
+    let branch_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&branch_alias_tag)
+    );
+    let mut mocks = vec![
+        server
+            .mock("GET", branch_pointer_path.as_str())
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "version": "branch-version",
+                    "cache_entry_id": "entry-branch-current",
+                    "status": "ready"
+                })
+                .to_string(),
+            )
+            .expect(2)
+            .create_async()
+            .await,
+    ];
+    let mut cases = Vec::new();
+
+    for (reference, entry_prefix, branch_status, branch_reason) in [
+        ("run-a", "entry-run-a", "promoted", "accepted"),
+        (
+            "run-b",
+            "entry-run-b",
+            "ignored_stale",
+            "newer_run_already_promoted",
+        ),
+    ] {
+        let manifest_body = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "annotations": {
+                "org.opencontainers.image.ref.name": reference
+            }
+        }))
+        .unwrap();
+        let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
+        let manifest_root_digest =
+            cas_oci::prefixed_sha256_digest(&make_oci_publish_pointer(&manifest_body));
+        let primary_tag = scoped_ref_tag("cache", reference);
+        let digest_alias_tag = digest_tag(&manifest_digest);
+
+        let primary_save_mock = server
+            .mock("POST", "/v2/workspaces/org/repo/caches")
+            .match_header("authorization", "Bearer test-token")
+            .match_body(Matcher::PartialJson(json!({
+                "cache": {
+                    "tag": primary_tag,
+                    "manifest_root_digest": manifest_root_digest
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "tag": primary_tag,
+                    "cache_entry_id": entry_prefix,
+                    "exists": false,
+                    "storage_mode": "cas",
+                    "blob_count": 1,
+                    "blob_total_size_bytes": 1,
+                    "cas_layout": "oci-v1",
+                    "manifest_upload_url": format!("{}/uploads/{entry_prefix}-manifest", server.url()),
+                    "archive_urls": [],
+                    "upload_headers": {}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(primary_save_mock);
+
+        let pointer_upload_mock = server
+            .mock("PUT", format!("/uploads/{entry_prefix}-manifest").as_str())
+            .with_status(200)
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(pointer_upload_mock);
+
+        let primary_pointer_path = format!(
+            "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+            urlencoding::encode(&primary_tag)
+        );
+        let primary_pointer_mock = server
+            .mock("GET", primary_pointer_path.as_str())
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "version": format!("{entry_prefix}-primary-version"),
+                    "cache_entry_id": entry_prefix,
+                    "status": "ready"
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(primary_pointer_mock);
+
+        let primary_publish_path = format!(
+            "/v2/workspaces/org/repo/caches/tags/{}/publish",
+            urlencoding::encode(&primary_tag)
+        );
+        let primary_confirm_mock = server
+            .mock("PUT", primary_publish_path.as_str())
+            .match_header("authorization", "Bearer test-token")
+            .match_body(Matcher::PartialJson(json!({
+                "cache_entry_id": entry_prefix,
+                "cache": {
+                    "manifest_digest": manifest_root_digest
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "version": format!("{entry_prefix}-primary-version"),
+                    "status": "ok",
+                    "cache_entry_id": entry_prefix
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(primary_confirm_mock);
+
+        let digest_entry_id = format!("{entry_prefix}-digest");
+        let digest_alias_save_mock = server
+            .mock("POST", "/v2/workspaces/org/repo/caches")
+            .match_header("authorization", "Bearer test-token")
+            .match_body(Matcher::PartialJson(json!({
+                "cache": {
+                    "tag": digest_alias_tag,
+                    "manifest_root_digest": manifest_root_digest
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "tag": digest_alias_tag,
+                    "cache_entry_id": digest_entry_id,
+                    "exists": false,
+                    "storage_mode": "cas",
+                    "blob_count": 1,
+                    "blob_total_size_bytes": 1,
+                    "cas_layout": "oci-v1",
+                    "archive_urls": [],
+                    "upload_headers": {}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(digest_alias_save_mock);
+
+        let digest_pointer_path = format!(
+            "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+            urlencoding::encode(&digest_alias_tag)
+        );
+        let digest_pointer_mock = server
+            .mock("GET", digest_pointer_path.as_str())
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "version": format!("{entry_prefix}-digest-version"),
+                    "cache_entry_id": digest_entry_id,
+                    "status": "ready"
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(digest_pointer_mock);
+
+        let digest_publish_path = format!(
+            "/v2/workspaces/org/repo/caches/tags/{}/publish",
+            urlencoding::encode(&digest_alias_tag)
+        );
+        let digest_alias_confirm_mock = server
+            .mock("PUT", digest_publish_path.as_str())
+            .match_header("authorization", "Bearer test-token")
+            .match_body(Matcher::PartialJson(json!({
+                "cache_entry_id": digest_entry_id,
+                "cache": {
+                    "manifest_digest": manifest_root_digest
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "version": format!("{entry_prefix}-digest-version"),
+                    "status": "ok",
+                    "cache_entry_id": digest_entry_id,
+                    "promotion_status": "unchanged",
+                    "requested_cache_entry_id": digest_entry_id
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(digest_alias_confirm_mock);
+
+        let branch_entry_id = format!("{entry_prefix}-branch");
+        let branch_alias_save_mock = server
+            .mock("POST", "/v2/workspaces/org/repo/caches")
+            .match_header("authorization", "Bearer test-token")
+            .match_body(Matcher::PartialJson(json!({
+                "cache": {
+                    "tag": branch_alias_tag,
+                    "write_scope_tag": "cache:branch-main",
+                    "manifest_root_digest": manifest_root_digest
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "tag": branch_alias_tag,
+                    "cache_entry_id": branch_entry_id,
+                    "exists": false,
+                    "storage_mode": "cas",
+                    "blob_count": 1,
+                    "blob_total_size_bytes": 1,
+                    "cas_layout": "oci-v1",
+                    "archive_urls": [],
+                    "upload_headers": {}
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(branch_alias_save_mock);
+
+        let branch_publish_path = format!(
+            "/v2/workspaces/org/repo/caches/tags/{}/publish",
+            urlencoding::encode(&branch_alias_tag)
+        );
+        let branch_alias_confirm_mock = server
+            .mock("PUT", branch_publish_path.as_str())
+            .match_header("authorization", "Bearer test-token")
+            .match_header("if-match", "branch-version")
+            .match_body(Matcher::PartialJson(json!({
+                "cache_entry_id": branch_entry_id,
+                "write_scope_tag": "cache:branch-main",
+                "cache": {
+                    "manifest_digest": manifest_root_digest
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "version": "branch-version",
+                    "status": "ok",
+                    "cache_entry_id": branch_entry_id,
+                    "promotion_status": branch_status,
+                    "promotion_reason": branch_reason,
+                    "requested_cache_entry_id": branch_entry_id
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(branch_alias_confirm_mock);
+
+        cases.push(PublishCase {
+            reference,
+            manifest_body,
+            primary_tag,
+        });
+    }
+
+    let publish_a = tower::ServiceExt::oneshot(
+        build_router(state.clone()),
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v2/cache/manifests/{}", cases[0].reference))
+            .body(Body::from(cases[0].manifest_body.clone()))
+            .unwrap(),
+    );
+    let publish_b = tower::ServiceExt::oneshot(
+        build_router(state.clone()),
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v2/cache/manifests/{}", cases[1].reference))
+            .body(Body::from(cases[1].manifest_body.clone()))
+            .unwrap(),
+    );
+    let (response_a, response_b) = tokio::join!(publish_a, publish_b);
+    assert_eq!(response_a.unwrap().status(), StatusCode::CREATED);
+    assert_eq!(response_b.unwrap().status(), StatusCode::CREATED);
+
+    for case in &cases {
+        let response = tower::ServiceExt::oneshot(
+            build_router(state.clone()),
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/v2/cache/manifests/{}", case.reference))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), case.manifest_body.as_slice());
+        assert!(
+            state.oci_manifest_cache.get(&case.primary_tag).is_some(),
+            "primary run ref {} should stay cached",
+            case.reference
+        );
+    }
+
+    for mock in mocks {
+        mock.assert_async().await;
+    }
+
+    let diagnostics = state
+        .oci_engine_diagnostics
+        .metadata_hints(state.oci_hydration_policy.as_str());
+    assert_eq!(
+        diagnostics
+            .get("oci_engine_alias_promotion_promoted")
+            .map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        diagnostics
+            .get("oci_engine_alias_promotion_ignored_stale")
+            .map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        diagnostics
+            .get("oci_engine_alias_promotion_unchanged")
+            .map(String::as_str),
+        Some("2")
+    );
+    assert_eq!(
+        diagnostics
+            .get("oci_engine_alias_promotion_failed")
+            .map(String::as_str),
+        None
+    );
+}
+
+#[tokio::test]
 async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
@@ -5534,6 +5923,285 @@ async fn test_manifest_put_uses_remote_proof_after_empty_finalize_reuse() {
     pointer_upload_mock.assert_async().await;
     primary_pointer_mock.assert_async().await;
     primary_confirm_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.fail_on_cache_error = false;
+
+    let blob_data = b"blob-present-after-head-miss";
+    let blob_digest = cas_oci::prefixed_sha256_digest(blob_data);
+    let descriptor_size = blob_data.len() as u64;
+    {
+        let mut locator = state.blob_locator.write().await;
+        locator.insert(
+            "my-cache",
+            &blob_digest,
+            BlobLocatorEntry {
+                cache_entry_id: "entry-existing".to_string(),
+                size_bytes: descriptor_size,
+                download_url: None,
+                download_url_cached_at: None,
+            },
+        );
+    }
+
+    let remote_miss_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true,
+            "blobs": [{
+                "digest": blob_digest,
+                "size_bytes": 0
+            }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": blob_digest,
+                    "exists": false
+                }]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let head_miss = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/v2/my-cache/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(head_miss.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        state
+            .oci_negative_cache
+            .metadata_hints()
+            .get("oci_negative_remote_blob_entries")
+            .map(String::as_str),
+        Some("1")
+    );
+
+    let app = build_router(state.clone());
+    let upload_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/v2/my-cache/blobs/uploads/?digest={blob_digest}"))
+            .body(Body::from(blob_data.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(upload_response.status(), StatusCode::CREATED);
+    assert!(
+        !state
+            .oci_negative_cache
+            .metadata_hints()
+            .contains_key("oci_negative_remote_blob_entries")
+    );
+
+    let manifest_body = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": blob_digest,
+            "size": descriptor_size
+        },
+        "layers": []
+    })
+    .to_string();
+    let primary_tag = scoped_ref_tag("my-cache", "main");
+    let primary_save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": primary_tag,
+                "blob_count": 1,
+                "blob_total_size_bytes": descriptor_size
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": primary_tag,
+                "cache_entry_id": "entry-primary",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": descriptor_size,
+                "cas_layout": "oci-v1",
+                "manifest_upload_url": format!("{}/uploads/entry-primary-manifest", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let blob_stage_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/stage")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary",
+            "blobs": [{
+                "digest": blob_digest,
+                "size_bytes": descriptor_size
+            }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_urls": [],
+                "already_present": [blob_digest]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let pointer_upload_mock = server
+        .mock("PUT", "/uploads/entry-primary-manifest")
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let primary_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&primary_tag)
+    );
+    let primary_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&primary_tag)
+    );
+    let primary_pointer_mock = server
+        .mock("GET", primary_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "3",
+                "cache_entry_id": "entry-primary",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let primary_confirm_mock = server
+        .mock("PUT", primary_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "3")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "3",
+                "status": "ok",
+                "cache_entry_id": "entry-primary"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let publish_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v2/my-cache/manifests/main")
+            .header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+            .body(Body::from(manifest_body))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(publish_response.status(), StatusCode::CREATED);
+    assert!(
+        state
+            .upload_sessions
+            .read()
+            .await
+            .find_by_name_and_digest("my-cache", &blob_digest)
+            .is_none()
+    );
+
+    let remote_present_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true,
+            "blobs": [{
+                "digest": blob_digest,
+                "size_bytes": 0
+            }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": blob_digest,
+                    "exists": true
+                }]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let head_after_publish = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/v2/my-cache/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(head_after_publish.status(), StatusCode::OK);
+
+    remote_miss_mock.assert_async().await;
+    primary_save_mock.assert_async().await;
+    blob_stage_mock.assert_async().await;
+    pointer_upload_mock.assert_async().await;
+    primary_pointer_mock.assert_async().await;
+    primary_confirm_mock.assert_async().await;
+    remote_present_mock.assert_async().await;
+    let diagnostics = state
+        .oci_engine_diagnostics
+        .metadata_hints(state.oci_hydration_policy.as_str());
+    assert_eq!(
+        diagnostics
+            .get("oci_engine_negative_cache_hit_remote_blob")
+            .map(String::as_str),
+        None
+    );
 }
 
 #[tokio::test]

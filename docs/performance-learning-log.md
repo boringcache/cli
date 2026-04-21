@@ -2,6 +2,14 @@
 
 This log captures regressions, root causes, and guardrails for cache-registry performance/correctness.
 
+## 2026-04-21 - PostHog blob-unknown release check
+
+- The `blob unknown` incident is not fixed in any released path yet. `boringcache/one@v1` resolves through action `v1.12.59`, which still pins CLI `v1.12.41`; the OCI negative-cache invalidation and ADR 0004/0005 fixes are local CLI commits only.
+- Local main now carries a focused OCI regression test for the suspected failure shape: a blob `HEAD` miss creates a negative-cache entry, the same digest is uploaded locally, manifest publish succeeds, the upload session is cleaned up, and a later `HEAD` is not blocked by the stale miss.
+- Local main also carries focused proxy coverage for the ADR 0007 alias shape: two immutable run refs promote the same branch alias, both run refs remain readable, and alias diagnostics distinguish the accepted promotion from the stale ignored promotion.
+- The request-metrics summary now promotes OCI upload-plan reuse fields directly, including `request_metrics_oci_new_blob_count` and `request_metrics_oci_latest_new_blob_count`. Use those fields in rolling cohorts instead of inferring steady state from total wall time.
+- PostHog remains excluded from compatibility proof until the local fixes are released through the action/CLI path and at least one same-ref cohort records zero new blobs, low remote fetches, short export, and no registry 4xx/5xx or digest failures.
+
 ## 2026-04-20 - OCI metadata-only release and PostHog benchmark interpretation
 
 - Release:
