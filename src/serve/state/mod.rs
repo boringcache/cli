@@ -45,6 +45,7 @@ pub struct AppState {
     pub tag_resolver: TagResolver,
     pub configured_human_tags: Vec<String>,
     pub registry_root_tag: String,
+    pub oci_alias_promotion_refs: Vec<String>,
     pub fail_on_cache_error: bool,
     pub oci_hydration_policy: crate::serve::OciHydrationPolicy,
     pub blob_locator: Arc<RwLock<BlobLocatorCache>>,

@@ -79,6 +79,12 @@ struct TagPointer {
     status: Option<String>,
     #[serde(default)]
     uploaded_at: Option<String>,
+    #[serde(default)]
+    promotion_status: Option<String>,
+    #[serde(default)]
+    promotion_reason: Option<String>,
+    #[serde(default)]
+    requested_cache_entry_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -244,6 +250,9 @@ fn cache_confirm_response_from_tag_pointer(
         uploaded_at: response.uploaded_at,
         tag: None,
         tag_status: response.status,
+        promotion_status: response.promotion_status,
+        promotion_reason: response.promotion_reason,
+        requested_cache_entry_id: response.requested_cache_entry_id,
         signature: None,
         signing_public_key: None,
         signed_at: None,

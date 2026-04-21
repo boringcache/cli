@@ -15,15 +15,35 @@ const DEFAULT_CACHE_REF_TAG: &str = "buildcache";
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct OciCachePlan {
     pub registry_ref: String,
+    #[serde(skip)]
+    pub cache_from_ref_tags: Vec<String>,
+    pub cache_from_refs: Vec<String>,
     pub cache_from: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_to: Option<String>,
     pub ref_tag: String,
+    pub cache_to_ref_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub immutable_run_ref_tag: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub promotion_ref_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct ResolvedDockerPlan {
     pub oci_cache: OciCachePlan,
+}
+
+pub(super) struct ResolveDockerPlanInput<'a> {
+    pub raw_tag: &'a str,
+    pub explicit_cache_ref_tag: Option<&'a str>,
+    pub explicit_cache_run_ref_tag: Option<&'a str>,
+    pub explicit_cache_from_ref_tags: &'a [String],
+    pub explicit_cache_promote_ref_tags: &'a [String],
+    pub endpoint_host: &'a str,
+    pub port: u16,
+    pub cache_mode: &'a str,
+    pub read_only: bool,
 }
 
 pub(super) fn validate_cache_mode(value: &str) -> Result<()> {
@@ -34,14 +54,19 @@ pub(super) fn validate_cache_mode(value: &str) -> Result<()> {
     }
 }
 
-pub(super) fn resolve_docker_plan(
-    raw_tag: &str,
-    explicit_cache_ref_tag: Option<&str>,
-    endpoint_host: &str,
-    port: u16,
-    cache_mode: &str,
-    read_only: bool,
-) -> Result<ResolvedDockerPlan> {
+pub(super) fn resolve_docker_plan(input: ResolveDockerPlanInput<'_>) -> Result<ResolvedDockerPlan> {
+    let ResolveDockerPlanInput {
+        raw_tag,
+        explicit_cache_ref_tag,
+        explicit_cache_run_ref_tag,
+        explicit_cache_from_ref_tags,
+        explicit_cache_promote_ref_tags,
+        endpoint_host,
+        port,
+        cache_mode,
+        read_only,
+    } = input;
+
     let tag_input = raw_tag.trim();
     if tag_input.is_empty() {
         anyhow::bail!("Missing proxy tag.");
@@ -59,21 +84,64 @@ pub(super) fn resolve_docker_plan(
 
     let explicit_ref_tag = trim_non_empty(explicit_cache_ref_tag);
     let ref_tag = validate_cache_ref_tag(explicit_ref_tag.unwrap_or(DEFAULT_CACHE_REF_TAG))?;
+    let immutable_run_ref_tag = trim_non_empty(explicit_cache_run_ref_tag)
+        .map(validate_cache_ref_tag)
+        .transpose()?;
+    let cache_from_ref_tags = normalize_ref_tag_list(explicit_cache_from_ref_tags)?;
+    let promotion_ref_tags = normalize_ref_tag_list(explicit_cache_promote_ref_tags)?;
 
-    let registry_ref = format!("{endpoint_host}:{port}/cache:{ref_tag}");
-    let cache_from = format!("type=registry,ref={registry_ref}");
-    let cache_to = if read_only {
+    let import_ref_tags = if cache_from_ref_tags.is_empty() {
+        vec![ref_tag.clone()]
+    } else {
+        cache_from_ref_tags
+    };
+    let cache_to_ref_tag = if read_only {
         None
     } else {
-        Some(format!("{cache_from},mode={cache_mode}"))
+        Some(
+            immutable_run_ref_tag
+                .clone()
+                .unwrap_or_else(|| ref_tag.clone()),
+        )
     };
+    let effective_promotion_ref_tags = if read_only || immutable_run_ref_tag.is_none() {
+        Vec::new()
+    } else if promotion_ref_tags.is_empty() {
+        vec![ref_tag.clone()]
+    } else {
+        promotion_ref_tags
+    };
+
+    let cache_from_refs = import_ref_tags
+        .iter()
+        .map(|tag| format!("type=registry,ref={endpoint_host}:{port}/cache:{tag}"))
+        .collect::<Vec<_>>();
+    let cache_from = cache_from_refs
+        .first()
+        .cloned()
+        .expect("docker cache imports always include at least one ref");
+    let cache_to = cache_to_ref_tag.as_deref().map(|cache_to_ref_tag| {
+        format!(
+            "type=registry,ref={endpoint_host}:{port}/cache:{cache_to_ref_tag},mode={cache_mode}"
+        )
+    });
+    let registry_ref = cache_to_ref_tag
+        .as_ref()
+        .or_else(|| import_ref_tags.first())
+        .map(|tag| format!("{endpoint_host}:{port}/cache:{tag}"))
+        .expect("docker cache plan requires an import or export ref");
 
     Ok(ResolvedDockerPlan {
         oci_cache: OciCachePlan {
             registry_ref,
+            cache_from_ref_tags: import_ref_tags,
+            cache_from_refs,
             cache_from,
             cache_to,
             ref_tag,
+            cache_to_ref_tag,
+            immutable_run_ref_tag,
+            promotion_ref_tags: effective_promotion_ref_tags,
         },
     })
 }
@@ -89,6 +157,7 @@ fn prepare_command(
         &options.cache_ref_tag,
         &options.cache_mode,
         options.read_only,
+        options.docker_oci_cache.as_ref(),
     )
 }
 
@@ -98,6 +167,7 @@ fn inject_docker_cache_flags(
     cache_ref_tag: &str,
     cache_mode: &str,
     read_only: bool,
+    oci_cache: Option<&OciCachePlan>,
 ) -> Result<Vec<String>> {
     if proxy_context.is_none() {
         return Ok(command.to_vec());
@@ -126,17 +196,27 @@ fn inject_docker_cache_flags(
     }
 
     let context = proxy_context.expect("checked above");
-    let registry_ref = format!(
+    let fallback_cache_from = format!(
         "type=registry,ref={}:{}/cache:{}",
         context.endpoint_host, context.port, cache_ref_tag
     );
+    let cache_from_refs = oci_cache
+        .map(|plan| plan.cache_from_refs.as_slice())
+        .filter(|refs| !refs.is_empty())
+        .unwrap_or(std::slice::from_ref(&fallback_cache_from));
     let mut prepared = command.to_vec();
     let insert_at = prepared.len() - 1;
-    prepared.insert(insert_at, format!("--cache-from={registry_ref}"));
+    for (offset, cache_from) in cache_from_refs.iter().enumerate() {
+        prepared.insert(insert_at + offset, format!("--cache-from={cache_from}"));
+    }
     if !read_only {
+        let cache_to = oci_cache
+            .and_then(|plan| plan.cache_to.as_deref())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("{fallback_cache_from},mode={cache_mode}"));
         prepared.insert(
-            insert_at + 1,
-            format!("--cache-to={registry_ref},mode={cache_mode}"),
+            insert_at + cache_from_refs.len(),
+            format!("--cache-to={cache_to}"),
         );
     }
     Ok(prepared)
@@ -162,6 +242,21 @@ fn validate_cache_ref_tag(value: &str) -> Result<String> {
     }
 
     Ok(trimmed.to_string())
+}
+
+fn normalize_ref_tag_list(values: &[String]) -> Result<Vec<String>> {
+    let mut tags = Vec::new();
+    for value in values.iter().flat_map(|value| value.split(',')) {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let tag = validate_cache_ref_tag(trimmed)?;
+        if !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    Ok(tags)
 }
 
 fn trim_non_empty(value: Option<&str>) -> Option<&str> {
@@ -194,6 +289,7 @@ mod tests {
             "buildcache",
             "max",
             false,
+            None,
         )
         .unwrap();
 
@@ -223,6 +319,7 @@ mod tests {
             "buildcache",
             "max",
             true,
+            None,
         )
         .unwrap();
 
@@ -236,14 +333,17 @@ mod tests {
 
     #[test]
     fn resolve_docker_plan_rejects_embedded_ref_tag_syntax() {
-        let error = resolve_docker_plan(
-            "docker-main:cache-main",
-            None,
-            "127.0.0.1",
-            5000,
-            "max",
-            false,
-        )
+        let error = resolve_docker_plan(ResolveDockerPlanInput {
+            raw_tag: "docker-main:cache-main",
+            explicit_cache_ref_tag: None,
+            explicit_cache_run_ref_tag: None,
+            explicit_cache_from_ref_tags: &[],
+            explicit_cache_promote_ref_tags: &[],
+            endpoint_host: "127.0.0.1",
+            port: 5000,
+            cache_mode: "max",
+            read_only: false,
+        })
         .unwrap_err();
 
         assert!(error.to_string().contains(

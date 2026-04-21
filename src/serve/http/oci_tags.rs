@@ -177,8 +177,13 @@ pub(crate) async fn bind_alias_tag(
         .confirm_with_retry(&state.workspace, &response.cache_entry_id, &confirm_request)
         .await
     {
-        Ok(_) => {}
+        Ok(response) => {
+            state
+                .oci_engine_diagnostics
+                .record_alias_promotion(response.promotion_status.as_deref());
+        }
         Err(error) => {
+            state.oci_engine_diagnostics.record_alias_promotion(None);
             return Err(format!("confirm failed: {error}"));
         }
     }

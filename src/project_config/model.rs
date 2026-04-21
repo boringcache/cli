@@ -86,6 +86,26 @@ pub struct AdapterConfig {
     #[serde(rename = "cache-ref-tag", skip_serializing_if = "Option::is_none")]
     pub cache_ref_tag: Option<String>,
     #[serde(
+        rename = "cache-run-ref-tag",
+        alias = "cache_run_ref_tag",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cache_run_ref_tag: Option<String>,
+    #[serde(
+        default,
+        rename = "cache-from-ref-tags",
+        alias = "cache_from_ref_tags",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub cache_from_ref_tags: Vec<String>,
+    #[serde(
+        default,
+        rename = "cache-promote-ref-tags",
+        alias = "cache_promote_ref_tags",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub cache_promote_ref_tags: Vec<String>,
+    #[serde(
         rename = "sccache-key-prefix",
         alias = "sccache_key_prefix",
         skip_serializing_if = "Option::is_none"

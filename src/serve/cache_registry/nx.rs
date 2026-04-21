@@ -5,8 +5,12 @@ use axum::response::{IntoResponse, Response};
 use crate::serve::state::AppState;
 
 use super::error::RegistryError;
-use super::kv::{KvNamespace, get_or_head_kv_object, put_kv_object, resolve_kv_entries};
+use super::kv::{
+    KvNamespace, get_or_head_kv_object, put_kv_object, put_kv_object_with_options,
+    resolve_kv_entries,
+};
 use super::turborepo;
+use crate::serve::engines::nx::nx_artifact_put_options;
 
 pub(crate) async fn handle_artifact(
     state: &AppState,
@@ -18,7 +22,15 @@ pub(crate) async fn handle_artifact(
     turborepo::ensure_proxy_bearer_header(headers)?;
     match method {
         Method::PUT => {
-            let _ = put_kv_object(state, KvNamespace::Nx, hash, body, StatusCode::OK).await?;
+            let _ = put_kv_object_with_options(
+                state,
+                KvNamespace::Nx,
+                hash,
+                body,
+                StatusCode::OK,
+                nx_artifact_put_options(),
+            )
+            .await?;
             Ok((StatusCode::OK, Body::empty()).into_response())
         }
         Method::GET | Method::HEAD => {

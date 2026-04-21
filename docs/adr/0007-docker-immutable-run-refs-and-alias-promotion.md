@@ -191,6 +191,19 @@ This is required so benchmark artifacts can explain whether a same-tag race affe
 7. Enable in `one@v1` Docker mode after benchmark artifacts prove compatibility.
 8. Keep old same-ref behavior as fallback for at least one release window.
 
+## Implementation Progress
+
+The first hidden CLI/Rails slice is implemented:
+
+- `boringcache docker` accepts hidden `--cache-run-ref-tag`, repeatable `--cache-from-ref-tag`, and repeatable `--cache-promote-ref-tag`;
+- dry-run JSON reports immutable run ref, import refs, and promotion refs;
+- Docker command injection can emit multiple `--cache-from` refs and a distinct run-ref `--cache-to`;
+- read-only Docker runs still omit `--cache-to` and promotion refs;
+- the proxy carries planned OCI alias promotion refs into manifest publish and records alias-promotion counters in session diagnostics;
+- Rails tag publish responses now expose `promotion_status`, `promotion_reason`, and `requested_cache_entry_id` so stale/ignored alias promotion is visible without deleting the immutable root.
+
+Remaining rollout work: derive run refs and aliases automatically from CI/action metadata, add a dedicated concurrent same-alias writer E2E, wire action benchmark workflows to the hidden controls, and promote the behavior to the default only after artifact comparison.
+
 ## Acceptance Gates
 
 Before enabling in benchmarks:

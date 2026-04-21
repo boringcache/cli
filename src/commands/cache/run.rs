@@ -499,6 +499,7 @@ pub async fn execute(
             startup_warm,
             fail_on_cache_error,
             effective_proxy_read_only,
+            Vec::new(),
         )
         .await
         .map_err(|error| ExitCodeError::with_message(EXIT_CONFIG, format!("{:#}", error)))?;

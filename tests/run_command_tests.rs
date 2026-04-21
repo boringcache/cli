@@ -1436,6 +1436,101 @@ fn test_docker_dry_run_json_injects_cache_flags() {
 }
 
 #[test]
+fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .args([
+            "docker",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "docker-main",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--cache-run-ref-tag",
+            "run-123-attempt-1",
+            "--cache-from-ref-tag",
+            "branch-main",
+            "--cache-from-ref-tag",
+            "default",
+            "--cache-promote-ref-tag",
+            "branch-main",
+            "--dry-run",
+            "--json",
+            "--",
+            "docker",
+            "buildx",
+            "build",
+            ".",
+        ])
+        .output()
+        .expect("Failed to execute docker immutable dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(
+        parsed["oci_cache"]["registry_ref"],
+        "host.docker.internal:5000/cache:run-123-attempt-1"
+    );
+    assert_eq!(
+        parsed["oci_cache"]["cache_from_refs"],
+        serde_json::json!([
+            "type=registry,ref=host.docker.internal:5000/cache:branch-main",
+            "type=registry,ref=host.docker.internal:5000/cache:default"
+        ])
+    );
+    assert_eq!(
+        parsed["oci_cache"]["cache_to"],
+        "type=registry,ref=host.docker.internal:5000/cache:run-123-attempt-1,mode=max"
+    );
+    assert_eq!(
+        parsed["oci_cache"]["immutable_run_ref_tag"],
+        "run-123-attempt-1"
+    );
+    assert_eq!(
+        parsed["oci_cache"]["promotion_ref_tags"],
+        serde_json::json!(["branch-main"])
+    );
+    assert_eq!(
+        parsed["proxy"]["oci_prefetch_refs"],
+        serde_json::json!(["cache@branch-main", "cache@default"])
+    );
+    assert_eq!(
+        parsed["proxy"]["metadata_hints"]["docker_immutable_run_ref"],
+        "run-123-attempt-1"
+    );
+    assert_eq!(
+        parsed["proxy"]["metadata_hints"]["docker_alias_promotion_refs"],
+        "branch-main"
+    );
+
+    let command = parsed["command"]
+        .as_array()
+        .expect("command array")
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(
+        command.contains(
+            &"--cache-from=type=registry,ref=host.docker.internal:5000/cache:branch-main"
+        )
+    );
+    assert!(
+        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:default")
+    );
+    assert!(command.contains(
+        &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:run-123-attempt-1,mode=max"
+    ));
+}
+
+#[test]
 fn test_docker_read_only_dry_run_json_uses_on_demand_proxy_mode() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);

@@ -175,6 +175,7 @@ pub async fn execute(
         tag_resolver,
         configured_human_tags,
         registry_root_tag,
+        Vec::new(),
         proxy_metadata_hints,
         startup_warm,
         oci_prefetch_refs,
@@ -201,6 +202,7 @@ pub async fn start_proxy_background(
     startup_warm: bool,
     fail_on_cache_error: bool,
     read_only: bool,
+    oci_alias_promotion_refs: Vec<String>,
 ) -> Result<ProxyServerHandle> {
     ensure!(
         workspace.contains('/'),
@@ -236,6 +238,7 @@ pub async fn start_proxy_background(
         tag_resolver,
         configured_human_tags,
         registry_root_tag,
+        oci_alias_promotion_refs,
         proxy_metadata_hints,
         startup_warm,
         oci_prefetch_refs,
@@ -590,6 +593,7 @@ mod tests {
             true,
             true,
             false,
+            Vec::new(),
         ));
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -649,6 +653,7 @@ mod tests {
             false,
             true,
             false,
+            Vec::new(),
         ));
 
         let proxy_handle = tokio::time::timeout(Duration::from_secs(1), start_task)

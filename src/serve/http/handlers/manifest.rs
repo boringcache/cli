@@ -159,7 +159,7 @@ pub(super) async fn put_manifest(
             &reference,
         )?
     };
-    let additional_aliases = if reference.starts_with("sha256:") {
+    let mut additional_aliases = if reference.starts_with("sha256:") {
         vec![AliasBinding {
             tag: scoped_save_tag(
                 &state.tag_resolver,
@@ -176,6 +176,7 @@ pub(super) async fn put_manifest(
     } else {
         Vec::new()
     };
+    additional_aliases.extend(planned_alias_promotion_bindings(&state, &name)?);
     let persist_result: Result<bool, OciError> = async {
         persist_manifest_entry(PersistManifestEntryInput {
             state: &state,
@@ -349,6 +350,31 @@ fn log_manifest_blob_sources(name: &str, reference: &str, present_blobs: &[Prese
         sources,
         digest_sample
     );
+}
+
+fn planned_alias_promotion_bindings(
+    state: &AppState,
+    name: &str,
+) -> Result<Vec<AliasBinding>, OciError> {
+    state
+        .oci_alias_promotion_refs
+        .iter()
+        .map(|reference| {
+            Ok(AliasBinding {
+                tag: scoped_save_tag(
+                    &state.tag_resolver,
+                    &state.registry_root_tag,
+                    name,
+                    reference,
+                )?,
+                write_scope_tag: Some(scoped_write_scope_tag(
+                    &state.tag_resolver,
+                    name,
+                    reference,
+                )?),
+            })
+        })
+        .collect()
 }
 
 fn referrers_response(

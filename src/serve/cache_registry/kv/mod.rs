@@ -213,6 +213,7 @@ impl KvBlobIntegrity {
 pub(crate) struct KvPutOptions {
     integrity: Option<KvBlobIntegrity>,
     spool_reject_status: StatusCode,
+    existing_reject_status: Option<StatusCode>,
 }
 
 impl Default for KvPutOptions {
@@ -220,6 +221,7 @@ impl Default for KvPutOptions {
         Self {
             integrity: None,
             spool_reject_status: StatusCode::SERVICE_UNAVAILABLE,
+            existing_reject_status: None,
         }
     }
 }
@@ -235,9 +237,19 @@ impl KvPutOptions {
         self
     }
 
+    pub(crate) fn with_existing_reject_status(mut self, status: StatusCode) -> Self {
+        self.existing_reject_status = Some(status);
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn spool_reject_status(&self) -> StatusCode {
         self.spool_reject_status
+    }
+
+    #[cfg(test)]
+    pub(crate) fn existing_reject_status(&self) -> Option<StatusCode> {
+        self.existing_reject_status
     }
 }
 
@@ -300,6 +312,7 @@ mod tests {
             tag_resolver: TagResolver::new(None, GitContext::default(), false),
             configured_human_tags: Vec::new(),
             registry_root_tag: "registry".to_string(),
+            oci_alias_promotion_refs: Vec::new(),
             fail_on_cache_error: true,
             oci_hydration_policy: crate::serve::OciHydrationPolicy::MetadataOnly,
             blob_locator: std::sync::Arc::new(RwLock::new(BlobLocatorCache::default())),

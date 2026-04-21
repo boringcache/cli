@@ -60,6 +60,20 @@ pub(crate) async fn put_kv_object_with_options(
         return Ok((put_status, Body::empty()).into_response());
     }
 
+    if let Some(status) = options.existing_reject_status {
+        match kv_object_exists_for_write(state, namespace, key).await {
+            Ok(true) => {
+                record_put_error(state, namespace, put_start, 0);
+                return Err(existing_object_error(status));
+            }
+            Ok(false) => {}
+            Err(error) => {
+                record_put_error(state, namespace, put_start, 0);
+                return Err(error);
+            }
+        }
+    }
+
     let use_miss_cache = use_kv_miss_cache(namespace);
     let put_probe = super::super::PutProbeGuard::start(&scoped_key);
     put_probe.stage("precheck_spool");
@@ -68,14 +82,7 @@ pub(crate) async fn put_kv_object_with_options(
         let pending = state.kv_pending.read().await;
         if pending.total_spool_bytes() >= spool_limit {
             state.kv_backlog_rejects.fetch_add(1, Ordering::AcqRel);
-            state.cache_ops.record(
-                namespace.into(),
-                super::super::cache_ops::Op::Put,
-                super::super::cache_ops::OpResult::Error,
-                false,
-                0,
-                put_start.elapsed().as_millis() as u64,
-            );
+            record_put_error(state, namespace, put_start, 0);
             return Err(RegistryError::new(
                 options.spool_reject_status,
                 format!("KV spool budget exceeded ({KV_BACKLOG_POLICY}), try again after flush"),
@@ -96,42 +103,42 @@ pub(crate) async fn put_kv_object_with_options(
     let miss_key = kv_miss_cache_key(state, &state.registry_root_tag, &scoped_key);
 
     put_probe.stage("pending_lock");
-    let (redundant, should_flush) = {
-        let mut pending = state.kv_pending.write().await;
-        let digest_exists = pending.blob_path(&blob_digest).is_some();
-        let projected_spool = pending
-            .total_spool_bytes()
-            .saturating_add(if digest_exists { 0 } else { blob_size });
-        if projected_spool > spool_limit {
-            drop(pending);
-            let _ = tokio::fs::remove_file(&path).await;
-            state.kv_backlog_rejects.fetch_add(1, Ordering::AcqRel);
-            state.cache_ops.record(
-                namespace.into(),
-                super::super::cache_ops::Op::Put,
-                super::super::cache_ops::OpResult::Error,
-                false,
-                0,
-                put_start.elapsed().as_millis() as u64,
-            );
-            return Err(RegistryError::new(
-                options.spool_reject_status,
-                format!("KV spool budget exceeded ({KV_BACKLOG_POLICY}), try again after flush"),
-            ));
-        }
+    let mut pending = state.kv_pending.write().await;
+    if let Some(status) = options.existing_reject_status
+        && pending.get(&scoped_key).is_some()
+    {
+        drop(pending);
+        cleanup_temp_file(&path).await;
+        record_put_error(state, namespace, put_start, 0);
+        return Err(existing_object_error(status));
+    }
 
-        let redundant = pending.insert(
-            scoped_key.clone(),
-            BlobDescriptor {
-                digest: blob_digest.clone(),
-                size_bytes: blob_size,
-            },
-            path,
-        );
-        let should_flush = pending.blob_count() >= crate::serve::state::flush_blob_threshold()
-            || pending.total_spool_bytes() >= crate::serve::state::FLUSH_SIZE_THRESHOLD;
-        (redundant, should_flush)
-    };
+    let digest_exists = pending.blob_path(&blob_digest).is_some();
+    let projected_spool = pending
+        .total_spool_bytes()
+        .saturating_add(if digest_exists { 0 } else { blob_size });
+    if projected_spool > spool_limit {
+        drop(pending);
+        let _ = tokio::fs::remove_file(&path).await;
+        state.kv_backlog_rejects.fetch_add(1, Ordering::AcqRel);
+        record_put_error(state, namespace, put_start, 0);
+        return Err(RegistryError::new(
+            options.spool_reject_status,
+            format!("KV spool budget exceeded ({KV_BACKLOG_POLICY}), try again after flush"),
+        ));
+    }
+
+    let redundant = pending.insert(
+        scoped_key.clone(),
+        BlobDescriptor {
+            digest: blob_digest.clone(),
+            size_bytes: blob_size,
+        },
+        path,
+    );
+    let should_flush = pending.blob_count() >= crate::serve::state::flush_blob_threshold()
+        || pending.total_spool_bytes() >= crate::serve::state::FLUSH_SIZE_THRESHOLD;
+    drop(pending);
     put_probe.stage("pending_updated");
     if use_miss_cache {
         put_probe.stage("recent_miss_remove_wait");
@@ -165,6 +172,26 @@ pub(crate) async fn put_kv_object_with_options(
     put_probe.stage("respond");
     log::debug!("KV PUT {scoped_key}: queued ({blob_size} bytes, digest={blob_digest})");
     Ok((put_status, Body::empty()).into_response())
+}
+
+fn record_put_error(
+    state: &AppState,
+    namespace: KvNamespace,
+    put_start: std::time::Instant,
+    bytes: u64,
+) {
+    state.cache_ops.record(
+        namespace.into(),
+        super::super::cache_ops::Op::Put,
+        super::super::cache_ops::OpResult::Error,
+        false,
+        bytes,
+        put_start.elapsed().as_millis() as u64,
+    );
+}
+
+fn existing_object_error(status: StatusCode) -> RegistryError {
+    RegistryError::new(status, "Cache object already exists")
 }
 
 pub(crate) fn enqueue_replication_flush_hint(

@@ -45,6 +45,7 @@ mod tests {
                 cache_ref_tag: "buildcache".to_string(),
                 cache_mode: "max".to_string(),
                 read_only: false,
+                docker_oci_cache: None,
                 sccache_key_prefix: None,
             },
         );
@@ -73,6 +74,7 @@ mod tests {
                 cache_ref_tag: "buildcache".to_string(),
                 cache_mode: "max".to_string(),
                 read_only: false,
+                docker_oci_cache: None,
                 sccache_key_prefix: Some("rust/ci".to_string()),
             },
         );

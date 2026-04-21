@@ -15,7 +15,7 @@ LOG_DIR="${LOG_DIR:-${LOG_ROOT}/${RUN_ID}}"
 RAILS_PIDFILE="${RAILS_PIDFILE:-${LOG_DIR}/rails-server.pid}"
 TMP_DIR="${LOG_DIR}/tmp"
 SUMMARY_FILE="${LOG_DIR}/summary.txt"
-LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-gradle,maven,turbo,nx,go,bazel,sccache}"
+LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-docker,gradle,maven,turbo,nx,go,bazel,sccache}"
 JAVA_TOOL_VERSION="${JAVA_TOOL_VERSION:-java@21.0.2}"
 MAVEN_TOOL_VERSION="${MAVEN_TOOL_VERSION:-maven@3.9.14}"
 
@@ -672,6 +672,47 @@ run_maven_e2e() {
   pass_tool "maven" "required runtime e2e passed"
 }
 
+run_docker_e2e() {
+  command -v docker >/dev/null 2>&1 || {
+    skip_tool "docker" "docker not installed"
+    return 0
+  }
+  if ! docker info >/dev/null 2>&1; then
+    skip_tool "docker" "docker daemon unavailable"
+    return 0
+  fi
+
+  local tool_log_root="${LOG_DIR}/docker-buildkit-runtime"
+  local docker_port="${DOCKER_PROXY_PORT:-5318}"
+  local registry_host="${DOCKER_REGISTRY_HOST:-localhost}"
+  local proxy_host="${DOCKER_PROXY_HOST:-127.0.0.1}"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    registry_host="${DOCKER_REGISTRY_HOST:-host.docker.internal}"
+    proxy_host="${DOCKER_PROXY_HOST:-0.0.0.0}"
+  fi
+  mkdir -p "${tool_log_root}"
+
+  note "Docker BuildKit registry E2E"
+  LOG_DIR="${tool_log_root}" \
+  PORT="${docker_port}" \
+  PROXY_PORT="${docker_port}" \
+  REGISTRY_PORT="${docker_port}" \
+  REGISTRY_HOST="${registry_host}" \
+  PROXY_HOST="${proxy_host}" \
+  E2E_TAG_PREFIX="local-adapter-${RUN_ID}" \
+  GITHUB_RUN_ID="${RUN_ID}" \
+  GITHUB_RUN_ATTEMPT="1" \
+  BINARY="${BINARY}" \
+  WORKSPACE="${WORKSPACE}" \
+  BORINGCACHE_API_URL="${API_URL}" \
+  BORINGCACHE_ADMIN_TOKEN="${TOKEN}" \
+  BORINGCACHE_SAVE_TOKEN="${TOKEN}" \
+  BORINGCACHE_RESTORE_TOKEN="${TOKEN}" \
+    bash "${SCRIPT_DIR}/required/e2e-docker-buildkit-registry-test.sh"
+
+  pass_tool "docker" "required BuildKit registry e2e passed"
+}
+
 run_bazel_e2e() {
   local bazel_cmd=""
   if command -v bazelisk >/dev/null 2>&1; then
@@ -906,6 +947,7 @@ main() {
 
   run_selected_tool "gradle" run_gradle_e2e
   run_selected_tool "maven" run_maven_e2e
+  run_selected_tool "docker" run_docker_e2e
   run_selected_tool "turbo" run_turbo_e2e
   run_selected_tool "nx" run_nx_e2e
   run_selected_tool "go" run_go_e2e

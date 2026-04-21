@@ -23,6 +23,7 @@ pub(super) fn emit_cache_session_summary(state: &AppState) {
         "read_only": state.read_only,
         "fail_on_cache_error": state.fail_on_cache_error,
         "blob_download_max_concurrency": state.blob_download_max_concurrency,
+        "oci_alias_promotion_refs": &state.oci_alias_promotion_refs,
     });
     let rails = serde_json::json!({
         "request_metrics": "see_jsonl",

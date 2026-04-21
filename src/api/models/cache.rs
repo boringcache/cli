@@ -342,6 +342,15 @@ pub struct CacheConfirmResponse {
     pub tag_status: Option<String>,
 
     #[serde(default)]
+    pub promotion_status: Option<String>,
+
+    #[serde(default)]
+    pub promotion_reason: Option<String>,
+
+    #[serde(default)]
+    pub requested_cache_entry_id: Option<String>,
+
+    #[serde(default)]
     pub signature: Option<String>,
 
     #[serde(default)]

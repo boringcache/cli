@@ -62,6 +62,37 @@ pub(crate) async fn get_or_head_kv_object(
     get_or_head_kv_object_with_integrity(state, namespace, key, is_head, None).await
 }
 
+pub(crate) async fn kv_object_exists_for_write(
+    state: &AppState,
+    namespace: KvNamespace,
+    key: &str,
+) -> Result<bool, RegistryError> {
+    let scoped_key = namespace.scoped_key(key);
+
+    {
+        let pending = state.kv_pending.read().await;
+        if pending.get(&scoped_key).is_some() {
+            return Ok(true);
+        }
+    }
+
+    {
+        let flushing = state.kv_flushing.read().await;
+        if flushing
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.get(&scoped_key).is_some())
+        {
+            return Ok(true);
+        }
+    }
+
+    if lookup_published_blob(state, &scoped_key).await.is_some() {
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 pub(crate) async fn get_or_head_kv_object_with_integrity(
     state: &AppState,
     namespace: KvNamespace,

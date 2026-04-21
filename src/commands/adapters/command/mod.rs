@@ -55,6 +55,7 @@ struct AdapterCommandOptions {
     cache_ref_tag: String,
     cache_mode: String,
     read_only: bool,
+    docker_oci_cache: Option<docker::OciCachePlan>,
     sccache_key_prefix: Option<String>,
 }
 
@@ -299,7 +300,8 @@ pub async fn adapter_execute(
     let effective_read_only = cache_registry::effective_proxy_read_only(configured_read_only);
     let docker_read_only_on_demand = kind == AdapterKind::Docker && effective_read_only;
     let startup_warm = !(args.on_demand || docker_read_only_on_demand);
-    let proxy_metadata_hints = cache_registry::resolve_proxy_metadata_hints(&metadata_hint_args)?;
+    let mut proxy_metadata_hints =
+        cache_registry::resolve_proxy_metadata_hints(&metadata_hint_args)?;
     let effective_skip_save = skip_save || effective_read_only;
     let docker_cache_mode = project_config::prefer_cli_scalar(
         adapter_config.cache_mode.clone(),
@@ -308,28 +310,72 @@ pub async fn adapter_execute(
     .unwrap_or_else(|| "max".to_string());
     docker::validate_cache_mode(&docker_cache_mode)?;
     let docker_plan = if kind == AdapterKind::Docker {
-        let plan = docker::resolve_docker_plan(
-            &raw_tag,
-            project_config::prefer_cli_scalar(
+        let cache_from_ref_tags = project_config::prefer_cli_list(
+            &adapter_config.cache_from_ref_tags,
+            &args.cache_from_ref_tag,
+            |value| value.trim().to_string(),
+        );
+        let cache_promote_ref_tags = project_config::prefer_cli_list(
+            &adapter_config.cache_promote_ref_tags,
+            &args.cache_promote_ref_tag,
+            |value| value.trim().to_string(),
+        );
+        let plan = docker::resolve_docker_plan(docker::ResolveDockerPlanInput {
+            raw_tag: &raw_tag,
+            explicit_cache_ref_tag: project_config::prefer_cli_scalar(
                 adapter_config.cache_ref_tag.as_deref(),
                 args.cache_ref_tag.as_deref(),
             ),
-            &advertised_endpoint_host,
+            explicit_cache_run_ref_tag: project_config::prefer_cli_scalar(
+                adapter_config.cache_run_ref_tag.as_deref(),
+                args.cache_run_ref_tag.as_deref(),
+            ),
+            explicit_cache_from_ref_tags: &cache_from_ref_tags,
+            explicit_cache_promote_ref_tags: &cache_promote_ref_tags,
+            endpoint_host: &advertised_endpoint_host,
             port,
-            &docker_cache_mode,
-            effective_read_only,
-        )?;
+            cache_mode: &docker_cache_mode,
+            read_only: effective_read_only,
+        })?;
         Some(plan)
     } else {
         None
     };
+    if let Some(plan) = &docker_plan {
+        proxy_metadata_hints.insert(
+            "docker_cache_ref_tag".to_string(),
+            plan.oci_cache.ref_tag.clone(),
+        );
+        if let Some(run_ref) = plan.oci_cache.immutable_run_ref_tag.as_deref() {
+            proxy_metadata_hints
+                .insert("docker_immutable_run_ref".to_string(), run_ref.to_string());
+        }
+        if !plan.oci_cache.cache_from_refs.is_empty() {
+            proxy_metadata_hints.insert(
+                "docker_cache_from_refs".to_string(),
+                plan.oci_cache.cache_from_refs.join(","),
+            );
+        }
+        if !plan.oci_cache.promotion_ref_tags.is_empty() {
+            proxy_metadata_hints.insert(
+                "docker_alias_promotion_refs".to_string(),
+                plan.oci_cache.promotion_ref_tags.join(","),
+            );
+        }
+    }
     if startup_warm && let Some(plan) = &docker_plan {
-        let docker_ref = ("cache".to_string(), plan.oci_cache.ref_tag.clone());
-        if !oci_prefetch_refs
+        for ref_tag in plan
+            .oci_cache
+            .cache_from_ref_tags
             .iter()
-            .any(|existing| existing == &docker_ref)
+            .map(|tag| ("cache".to_string(), tag.clone()))
         {
-            oci_prefetch_refs.push(docker_ref);
+            if !oci_prefetch_refs
+                .iter()
+                .any(|existing| existing == &ref_tag)
+            {
+                oci_prefetch_refs.push(ref_tag);
+            }
         }
     }
     let oci_prefetch_ref_specs = oci_prefetch_refs
@@ -351,6 +397,7 @@ pub async fn adapter_execute(
         cache_ref_tag: docker_cache_ref_tag,
         cache_mode: docker_cache_mode,
         read_only: effective_read_only,
+        docker_oci_cache: docker_plan.as_ref().map(|plan| plan.oci_cache.clone()),
         sccache_key_prefix: trim_non_empty(adapter_config.sccache_key_prefix.as_deref())
             .map(ToOwned::to_owned),
     };
@@ -502,6 +549,10 @@ pub async fn adapter_execute(
         startup_warm,
         fail_on_cache_error,
         effective_read_only,
+        docker_plan
+            .as_ref()
+            .map(|plan| plan.oci_cache.promotion_ref_tags.clone())
+            .unwrap_or_default(),
     )
     .await
     .map_err(|error| ExitCodeError::with_message(EXIT_CONFIG, format!("{:#}", error)))?;

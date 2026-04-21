@@ -93,6 +93,29 @@ pub struct AdapterArgs {
     #[arg(long, help = "Docker registry cache tag (default: buildcache)")]
     pub cache_ref_tag: Option<String>,
 
+    #[arg(
+        long = "cache-run-ref-tag",
+        hide = true,
+        help = "Expert: immutable Docker registry cache ref tag for this run"
+    )]
+    pub cache_run_ref_tag: Option<String>,
+
+    #[arg(
+        long = "cache-from-ref-tag",
+        value_name = "TAG",
+        hide = true,
+        help = "Expert: Docker registry cache ref tag to import (repeatable)"
+    )]
+    pub cache_from_ref_tag: Vec<String>,
+
+    #[arg(
+        long = "cache-promote-ref-tag",
+        value_name = "TAG",
+        hide = true,
+        help = "Expert: Docker registry cache alias ref tag to promote after export (repeatable)"
+    )]
+    pub cache_promote_ref_tag: Vec<String>,
+
     #[arg(long, help = "Print the resolved execution plan without running")]
     pub dry_run: bool,
 

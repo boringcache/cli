@@ -98,6 +98,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         tag_resolver: TagResolver::new(None, GitContext::default(), false),
         configured_human_tags: Vec::new(),
         registry_root_tag: "registry".to_string(),
+        oci_alias_promotion_refs: Vec::new(),
         fail_on_cache_error: true,
         oci_hydration_policy: boring_cache_cli::serve::OciHydrationPolicy::MetadataOnly,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
@@ -258,6 +259,7 @@ async fn test_startup_manifest_warm_runs_by_default() {
         TagResolver::new(None, GitContext::default(), false),
         vec!["main".to_string()],
         "registry".to_string(),
+        Vec::new(),
         BTreeMap::new(),
         true,
         Vec::new(),
@@ -309,6 +311,7 @@ async fn test_command_proxy_start_continues_when_warmup_fails() {
         true,
         true,
         false,
+        Vec::new(),
     )
     .await
     .expect("start proxy");
@@ -548,6 +551,7 @@ async fn test_startup_prefetch_hydrates_full_tag_before_ready() {
         TagResolver::new(None, GitContext::default(), false),
         Vec::new(),
         "registry".to_string(),
+        Vec::new(),
         BTreeMap::new(),
         true,
         Vec::new(),
@@ -707,6 +711,7 @@ async fn test_startup_prefetch_partial_blob_failure_does_not_block_readiness() {
         TagResolver::new(None, GitContext::default(), false),
         Vec::new(),
         "registry".to_string(),
+        Vec::new(),
         BTreeMap::new(),
         true,
         Vec::new(),
@@ -844,6 +849,7 @@ async fn test_oci_prefetch_ref_indexes_manifest_before_ready() {
         TagResolver::new(None, GitContext::default(), false),
         Vec::new(),
         "registry".to_string(),
+        Vec::new(),
         BTreeMap::new(),
         true,
         vec![("img".to_string(), "v1".to_string())],
@@ -1005,6 +1011,7 @@ async fn test_oci_prefetch_ref_can_hydrate_bodies_before_ready() {
         TagResolver::new(None, GitContext::default(), false),
         Vec::new(),
         "registry".to_string(),
+        Vec::new(),
         BTreeMap::new(),
         true,
         vec![("img".to_string(), "v1".to_string())],
@@ -7505,6 +7512,59 @@ async fn test_nx_put_head_get_round_trip() {
 }
 
 #[tokio::test]
+async fn test_nx_artifact_put_returns_conflict_for_existing_record() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let hash = "nxhashconflict";
+    let first_payload = b"nx-first-payload";
+
+    let app = build_router(state.clone());
+    let put_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v1/cache/{hash}"))
+            .header("authorization", "Bearer token")
+            .body(Body::from(first_payload.to_vec()))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put_response.status(), StatusCode::OK);
+
+    let app = build_router(state.clone());
+    let conflict_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/v1/cache/{hash}"))
+            .header("authorization", "Bearer token")
+            .body(Body::from("second-payload"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(conflict_response.status(), StatusCode::CONFLICT);
+
+    let app = build_router(state);
+    let get_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v1/cache/{hash}"))
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = get_response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(get_body.as_ref(), first_payload);
+}
+
+#[tokio::test]
 async fn test_nx_query_returns_misses() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
@@ -7578,6 +7638,49 @@ async fn test_nx_artifact_get_miss_returns_not_found() {
     .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    restore_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_nx_terminal_output_get_and_head_misses_return_not_found() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+    let uri = "/v1/cache/missinghash/terminalOutputs";
+
+    let get_response = tower::ServiceExt::oneshot(
+        build_router(state.clone()),
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+
+    let head_response = tower::ServiceExt::oneshot(
+        build_router(state),
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(uri)
+            .header("authorization", "Bearer token")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(head_response.status(), StatusCode::NOT_FOUND);
+    let head_body = head_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert!(head_body.is_empty());
+
     restore_mock.assert_async().await;
 }
 

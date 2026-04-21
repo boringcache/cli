@@ -387,6 +387,10 @@ pub struct OciEngineDiagnostics {
     cache_promotion_count: AtomicU64,
     cache_promotion_duration_ms: AtomicU64,
     cache_promotion_failures: AtomicU64,
+    alias_promotion_promoted: AtomicU64,
+    alias_promotion_unchanged: AtomicU64,
+    alias_promotion_ignored_stale: AtomicU64,
+    alias_promotion_failed: AtomicU64,
 }
 
 impl OciEngineDiagnostics {
@@ -447,6 +451,10 @@ impl OciEngineDiagnostics {
             cache_promotion_count: AtomicU64::new(0),
             cache_promotion_duration_ms: AtomicU64::new(0),
             cache_promotion_failures: AtomicU64::new(0),
+            alias_promotion_promoted: AtomicU64::new(0),
+            alias_promotion_unchanged: AtomicU64::new(0),
+            alias_promotion_ignored_stale: AtomicU64::new(0),
+            alias_promotion_failed: AtomicU64::new(0),
         }
     }
 
@@ -588,6 +596,16 @@ impl OciEngineDiagnostics {
         if !ok {
             self.cache_promotion_failures.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    pub fn record_alias_promotion(&self, status: Option<&str>) {
+        match status.unwrap_or("unknown") {
+            "promoted" => &self.alias_promotion_promoted,
+            "unchanged" => &self.alias_promotion_unchanged,
+            "ignored_stale" => &self.alias_promotion_ignored_stale,
+            _ => &self.alias_promotion_failed,
+        }
+        .fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn metadata_hints(&self, hydration_policy: &str) -> BTreeMap<String, String> {
@@ -830,6 +848,26 @@ impl OciEngineDiagnostics {
             &mut hints,
             "oci_engine_cache_promotion_failures",
             &self.cache_promotion_failures,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_alias_promotion_promoted",
+            &self.alias_promotion_promoted,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_alias_promotion_unchanged",
+            &self.alias_promotion_unchanged,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_alias_promotion_ignored_stale",
+            &self.alias_promotion_ignored_stale,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_alias_promotion_failed",
+            &self.alias_promotion_failed,
         );
 
         hints
