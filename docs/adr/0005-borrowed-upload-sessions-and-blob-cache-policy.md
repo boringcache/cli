@@ -67,6 +67,14 @@ Internal sessions that may become borrowed:
 - `oci-mount-*` sessions when the mount source is a `BlobReadCache` handle;
 - future manifest-reference sessions if they prove a cached body and need local bytes.
 
+## Web API Ownership
+
+This ADR owns CLI/proxy local body-source behavior. If Rails later accepts "already verified/present" proofs, idempotent upload intents, richer blob states, or object-store conditional-write policy, the canonical API decision lives in:
+
+- `web/docs/adr/0001-cache-control-plane-roots-aliases-and-session-insight.md`
+
+Do not let this CLI ADR become the source of truth for Rails upload-session schema or blob state transitions.
+
 ## Cache Lease Requirement
 
 A borrowed body must not point at data that can be evicted before upload finishes.

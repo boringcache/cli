@@ -129,6 +129,12 @@ This can be represented by new endpoints or by extending the existing tag publis
 
 The Rails contract must not mention GitHub-specific field names. GitHub Actions is only the first metadata adapter because the action can provide clean run metadata and benchmark artifacts. Other CI systems and local runs use the same contract by passing an explicit provider name plus run uid/attempt/timestamps, or by letting the CLI generate a local run uid when no provider metadata exists.
 
+The canonical Rails/API decision for immutable roots, alias promotion, provider-neutral run metadata, stale promotion visibility, and future schema/API migration work lives in:
+
+- `web/docs/adr/0001-cache-control-plane-roots-aliases-and-session-insight.md`
+
+This CLI ADR owns Docker/BuildKit planning and proxy diagnostics. The web ADR owns API semantics and persistence.
+
 ## Promotion Policy
 
 Initial policy should be conservative and easy to explain.
@@ -257,7 +263,7 @@ Release status matters for incident review:
 
 - the failed benchmark used the released action path, `boringcache/one@v1`;
 - that action currently resolves to action `v1.12.59`, which pins CLI `v1.12.41`;
-- local CLI and Rails work for negative-cache invalidation, borrowed upload sessions, and alias-promotion diagnostics is not fully represented by that released path;
+- local CLI work for negative-cache invalidation, borrowed upload sessions, large-blob stream-through, and alias-promotion diagnostics is not represented by that released path or by CLI `origin/main` yet;
 - no benchmark should be used as release evidence for this incident unless the artifact records the action ref, CLI version, immutable run ref state, promotion status, and session trace.
 
 The tracking proof for this ADR is a provider-neutral E2E:

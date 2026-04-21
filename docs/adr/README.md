@@ -2,6 +2,16 @@
 
 These ADRs are living decision records. When ADR-tracked work lands, update the relevant ADR before handoff with implementation progress, evidence, and remaining gates.
 
+## Cross-Repo Ownership
+
+CLI ADRs own runner, proxy, adapter, local cache, and BuildKit-facing behavior.
+
+Web/API control-plane decisions live in the web repo. The canonical counterpart for the current cache-root, alias-promotion, session-insight, blob-truth, and restore-policy direction is:
+
+- `web/docs/adr/0001-cache-control-plane-roots-aliases-and-session-insight.md`
+
+When a CLI ADR needs Rails schema, endpoint, or state-machine behavior, describe the CLI requirement here and update the web ADR as the API source of truth.
+
 ## Status Rules
 
 - `accepted` means the decision guides current work.

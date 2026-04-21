@@ -70,6 +70,12 @@ This roadmap is implemented through narrower ADRs:
 
 ADR 0002 remains the source-backed OCI protocol contract. ADR 0003 does not replace it; it defines the next optimization sequence after the first OCI engine extraction.
 
+Web/API control-plane decisions implied by this roadmap are canonical in the web repo ADR:
+
+- `web/docs/adr/0001-cache-control-plane-roots-aliases-and-session-insight.md`
+
+This CLI ADR owns runner/proxy ordering. The web ADR owns Rails schema, API, state-machine, session-ingestion, and operator insight decisions.
+
 ## Current Alignment
 
 As of 2026-04-21, this roadmap is documentation-aligned for hidden/internal implementation. It is not benchmark-proof-complete.

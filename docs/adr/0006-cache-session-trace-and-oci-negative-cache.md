@@ -81,6 +81,12 @@ Every session summary should preserve correlation fields whenever the runner, ac
 
 Facts that affect product defaults should be backend-visible eventually, not only local JSONL. The CLI can emit the first summary, but Rails/action/benchmark enrichment should make it possible to answer: which cache plane was slow, which alias/root was used, which blobs were reused, what it cost, and whether the run was fresh, reseed, steady, or unknown.
 
+The canonical web/API decision for session-summary ingestion, backend persistence, rollups, and operator insight lives in:
+
+- `web/docs/adr/0001-cache-control-plane-roots-aliases-and-session-insight.md`
+
+This CLI ADR owns emitted runner/proxy fields and local negative-cache behavior. The web ADR owns backend storage, reporting, API shape, and product/operator visibility.
+
 ## Required Fields
 
 ### Rails/API
@@ -248,17 +254,19 @@ The first CLI baseline is implemented:
 - confirmed OCI miss paths insert negative-cache entries, and locator population, upload finalize, mount reuse, and manifest publish invalidate relevant entries;
 - OCI blob hydrate-then-serve records storage GET bytes, first body wait, body duration, local spool write duration, digest verification duration/failure, and cache-promotion timing/failure;
 - proxy shutdown emits a `cache_session_summary` JSONL event with proxy, storage, OCI, singleflight, local-cache, and BuildKit sections;
-- `ci/e2e/request-metrics-summary.py` promotes session summary fields plus new status snapshot keys into artifact env output.
+- `ci/e2e/request-metrics-summary.py` promotes session summary fields, OCI upload-plan reuse counts, and new status snapshot keys into artifact env output;
+- the OCI protocol tests cover the PostHog-shaped transition where a blob `HEAD` miss is followed by local upload, manifest publish, negative-cache invalidation, and a later successful `HEAD`.
 
-Remaining trace depth belongs in later passes: Rails p50/p95 rollups from request metrics, full upload-session materialization counters from ADR 0005, richer BuildKit enrichment from the action/harness, and metadata-only Docker E2E artifact validation.
+Remaining trace depth belongs in later passes: Rails p50/p95 rollups from request metrics, richer BuildKit enrichment from the action/harness, and release-path Docker E2E artifact validation.
 
 ## Proof Status
 
 Documentation and the first CLI baseline are aligned as of 2026-04-21. The trace is accepted as the platform insight spine; backend persistence, Rails percentile rollups, action enrichment, benchmark artifact validation, and operator reporting remain follow-up work.
 
-Testing and proof are intentionally deferred until the ADR set is aligned. The later proof bundle must attach:
+Focused CLI tests now cover negative-cache invalidation after local writes. Release proof is still pending because the fixes are not in the released action/CLI path yet. The later proof bundle must attach:
 
 - a metadata-only Docker E2E artifact containing `cache_session_summary`;
+- promoted upload-plan fields including `request_metrics_oci_new_blob_count` and `request_metrics_oci_latest_new_blob_count`;
 - status snapshots plus request metrics for phase-level debugging;
 - a backend-visible or artifact-promoted summary that keeps Rails, storage, OCI, singleflight, local cache, and BuildKit sections distinct;
 - evidence that confirmed OCI misses are cached briefly and invalidated by local writes/publish;
@@ -295,8 +303,9 @@ Release status as observed for the failed benchmark:
 
 - `boringcache/one@v1` pointed at action release `v1.12.59`;
 - `v1.12.59` pinned CLI release `v1.12.41`;
-- local CLI commits after `v1.12.41` include OCI negative-cache tracing and invalidation work;
-- therefore the failing benchmark did not exercise all local OCI fixes.
+- local CLI commits after `v1.12.41` include OCI negative-cache tracing, invalidation work, borrowed upload-session bodies, and large-blob stream-through;
+- those local commits are not in CLI `origin/main`, any CLI tag, or the released `boringcache/one@v1` path yet;
+- therefore the failing benchmark did not exercise the local OCI fixes and the incident is not cleared by any released path.
 
 The required local proof is a focused OCI protocol E2E, not a benchmark-only assertion:
 
