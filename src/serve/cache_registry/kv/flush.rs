@@ -88,6 +88,12 @@ pub(crate) fn classify_flush_error(error: &anyhow::Error, context: &str) -> Flus
         return FlushError::Conflict(message);
     }
 
+    let storage_verification_pending = lower.contains("not yet verified in storage")
+        || lower.contains("retry after upload completes");
+    if storage_verification_pending {
+        return FlushError::Permanent(message);
+    }
+
     let transient_status = has_status_code(&lower, 429)
         || has_status_code(&lower, 500)
         || has_status_code(&lower, 502)
@@ -106,8 +112,7 @@ pub(crate) fn classify_flush_error(error: &anyhow::Error, context: &str) -> Flus
         || lower.contains("connection reset")
         || lower.contains("unexpected eof")
         || lower.contains("unexpected-eof")
-        || lower.contains("close_notify")
-        || is_blob_verification_pending_message(&lower);
+        || lower.contains("close_notify");
     if transient_status || transient_hint {
         return FlushError::Transient(message);
     }
@@ -154,13 +159,12 @@ pub(crate) async fn confirm_kv_flush(
         match result {
             Ok(outcome) => return Ok(outcome),
             Err(error) => {
-                let message = format!("confirm failed: {error}");
                 let classified = classify_flush_error(&error, "confirm failed");
-                if started_at.elapsed() < KV_CONFIRM_VERIFICATION_RETRY_TIMEOUT
-                    && let Some(reason) = confirm_retry_reason(&message, &classified)
+                if started_at.elapsed() < KV_CONFIRM_RETRY_TIMEOUT
+                    && let Some(reason) = confirm_retry_reason(&classified)
                 {
                     attempt = attempt.saturating_add(1);
-                    let delay = kv_confirm_verification_retry_delay(attempt);
+                    let delay = kv_confirm_retry_delay(attempt);
                     eprintln!(
                         "KV confirm: {reason} for cache entry {cache_entry_id}; retrying in {:.1}s (attempt {attempt})",
                         delay.as_secs_f32()
@@ -175,11 +179,7 @@ pub(crate) async fn confirm_kv_flush(
     }
 }
 
-pub(crate) fn confirm_retry_reason(message: &str, classified: &FlushError) -> Option<&'static str> {
-    if is_blob_verification_pending_message(message) {
-        return Some("blob verification pending");
-    }
-
+pub(crate) fn confirm_retry_reason(classified: &FlushError) -> Option<&'static str> {
     if matches!(classified, FlushError::Transient(_)) {
         return Some("transient backend error");
     }
@@ -614,7 +614,7 @@ pub(crate) async fn do_flush(
     let upload_stats_holder = Arc::new(std::sync::Mutex::new(BlobUploadStats::default()));
     let publish_upload_stats = upload_stats_holder.clone();
     let all_blob_digests: Vec<String> = blobs.iter().map(|b| b.digest.clone()).collect();
-    crate::serve::cas_publish::publish_after_save(
+    crate::serve::cas_publish::publish_after_save_requiring_receipts(
         &state.api_client,
         &state.workspace,
         &save_response,
@@ -705,6 +705,7 @@ pub(crate) async fn do_flush(
 
             confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request, flush_mode).await
         },
+        |message| FlushError::Transient(format!("receipt commit failed: {message}")),
     )
     .await?;
     let upload_stats = upload_stats_holder.lock().unwrap().clone();

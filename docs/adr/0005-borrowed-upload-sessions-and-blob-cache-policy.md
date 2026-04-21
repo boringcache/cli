@@ -199,16 +199,18 @@ Evidence now available:
 - the Rails-backed local Docker BuildKit E2E passed against a managed workspace provisioned through Rails/Tigris;
 - that E2E recorded borrowed upload-session counters in status snapshots and session summaries, including `oci_engine_borrowed_upload_session_count=9` and `oci_engine_borrowed_upload_session_bytes=6430` by the alias-warm status snapshot.
 
-Release-path proof is partially complete. The 2026-04-21 `1.12.42` push at CLI commit `14c1dc2` passed CLI CI but failed required registry E2E legs with manifests/indices visible before all referenced blobs had verified download URLs. Follow-up commit `6fa1a52` promoted owned upload-session bodies into the local blob cache for same-proxy readers, and `c28a7c1` aligned the fresh-runner verifier with backend blob visibility lag.
+Release-path proof is partially complete. The 2026-04-21 `1.12.42` push at CLI commit `14c1dc2` passed CLI CI but failed required registry E2E legs with manifests/indices visible before all referenced blobs had verified download URLs. Follow-up commit `6fa1a52` promoted owned upload-session bodies into the local blob cache for same-proxy readers.
 
-Current remote evidence for `c28a7c1`:
+The follow-up direction is not to add publish-readiness polling. Rails is meant to trust completed upload-session receipts on the hot path: blob receipt commit marks blobs storage-verified, manifest receipt commit links attested blobs and marks the CAS entry storage-verified, and tag publish stays optimistic. If receipt commit fails, the proxy should fail the publish/export instead of publishing a root that depends on the async verifier before fresh readers can fetch bodies. Retries for request timeouts, transient network failures, or stale download URLs remain normal read/transport retry behavior; they are not server-side publish-readiness polling.
+
+Current remote evidence after `c28a7c1`:
 
 - CLI CI passed.
 - `Registry / Docker BuildKit` passed, so the same-proxy Docker half now has release-path E2E evidence.
-- `Cache Registry / Cross-Runner Verify` passed, so the fresh-runner CAS read path now waits through backend visibility lag.
-- The overall E2E workflow still failed in `Registry / Prefetch Smoke`: `boringcache check` reported the tag hit, but the tag-pointer helper did not expose a `cache_entry_id`, so the test never reached the blob download-url convergence or fresh-cache prefetch phases.
+- `Cache Registry / Cross-Runner Verify` passed, but the verifier-level blob URL convergence loop from that commit is not the product contract and is being removed.
+- The overall E2E workflow still failed in `Registry / Prefetch Smoke`: `boringcache check` reported the tag hit, but the tag-pointer helper did not expose a `cache_entry_id` before the added convergence check. The real gate is a fresh-cache prefetch/read proof without a post-publish blob URL readiness sleep.
 
-That means the borrowed-session fix has meaningful release-path evidence, but the full registry E2E gate remains blocked by the Prefetch Smoke pointer/cache-entry-id gap.
+That means the borrowed-session fix has meaningful same-proxy evidence, but full registry release proof remains blocked until the required E2E workflow is green without publish-readiness polling.
 
 Benchmark proof and policy proof are still pending before cache admission changes. The later proof bundle must attach:
 

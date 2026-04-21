@@ -8,7 +8,7 @@ use crate::api::ApiClient;
 use crate::api::models::cache::{
     BlobDescriptor, BlobReceipt, BlobUploadUrlsResponse, SaveResponse,
 };
-use crate::cache::receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
+use crate::cache::receipts::{try_commit_blob_receipts, try_commit_manifest_receipt};
 use crate::multipart_upload::upload_via_single_url_range;
 use crate::serve::engines::oci::PresentBlob;
 use crate::serve::error::OciError;
@@ -26,7 +26,7 @@ struct TrackedBlobUploadJob {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn publish_after_save<
+pub(crate) async fn publish_after_save_requiring_receipts<
     C,
     E,
     UploadBlobs,
@@ -35,6 +35,7 @@ pub(crate) async fn publish_after_save<
     UploadManifestFuture,
     Confirm,
     ConfirmFuture,
+    MapReceiptError,
 >(
     api_client: &ApiClient,
     workspace: &str,
@@ -45,6 +46,7 @@ pub(crate) async fn publish_after_save<
     upload_blobs: UploadBlobs,
     upload_manifest: UploadManifest,
     confirm: Confirm,
+    map_receipt_error: MapReceiptError,
 ) -> Result<C, E>
 where
     UploadBlobs: FnOnce(&SaveResponse) -> UploadBlobsFuture,
@@ -53,21 +55,70 @@ where
     UploadManifestFuture: Future<Output = Result<Option<String>, E>>,
     Confirm: FnOnce(Option<String>) -> ConfirmFuture,
     ConfirmFuture: Future<Output = Result<C, E>>,
+    MapReceiptError: Fn(String) -> E,
+{
+    publish_after_save_inner(
+        api_client,
+        workspace,
+        save_response,
+        manifest_digest,
+        manifest_size,
+        blob_digests,
+        upload_blobs,
+        upload_manifest,
+        confirm,
+        map_receipt_error,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_after_save_inner<
+    C,
+    E,
+    UploadBlobs,
+    UploadBlobsFuture,
+    UploadManifest,
+    UploadManifestFuture,
+    Confirm,
+    ConfirmFuture,
+    MapReceiptError,
+>(
+    api_client: &ApiClient,
+    workspace: &str,
+    save_response: &SaveResponse,
+    manifest_digest: String,
+    manifest_size: u64,
+    blob_digests: Option<Vec<String>>,
+    upload_blobs: UploadBlobs,
+    upload_manifest: UploadManifest,
+    confirm: Confirm,
+    map_receipt_error: MapReceiptError,
+) -> Result<C, E>
+where
+    UploadBlobs: FnOnce(&SaveResponse) -> UploadBlobsFuture,
+    UploadBlobsFuture: Future<Output = Result<Vec<BlobReceipt>, E>>,
+    UploadManifest: FnOnce(&SaveResponse) -> UploadManifestFuture,
+    UploadManifestFuture: Future<Output = Result<Option<String>, E>>,
+    Confirm: FnOnce(Option<String>) -> ConfirmFuture,
+    ConfirmFuture: Future<Output = Result<C, E>>,
+    MapReceiptError: Fn(String) -> E,
 {
     let manifest_etag = if save_response.should_skip_existing_uploads() {
         None
     } else {
         let blob_receipts = upload_blobs(save_response).await?;
-        maybe_commit_blob_receipts(
+        commit_blob_receipts_for_publish(
             api_client,
             workspace,
             save_response.upload_session_id.as_deref(),
             blob_receipts,
+            &map_receipt_error,
         )
-        .await;
+        .await?;
 
         let manifest_etag = upload_manifest(save_response).await?;
-        maybe_commit_manifest_receipt(
+        commit_manifest_receipt_for_publish(
             api_client,
             workspace,
             save_response.upload_session_id.as_deref(),
@@ -75,12 +126,85 @@ where
             manifest_size,
             manifest_etag.clone(),
             blob_digests,
+            &map_receipt_error,
         )
-        .await;
+        .await?;
         manifest_etag
     };
 
     confirm(manifest_etag).await
+}
+
+async fn commit_blob_receipts_for_publish<E, MapReceiptError>(
+    api_client: &ApiClient,
+    workspace: &str,
+    upload_session_id: Option<&str>,
+    receipts: Vec<BlobReceipt>,
+    map_receipt_error: &MapReceiptError,
+) -> Result<(), E>
+where
+    MapReceiptError: Fn(String) -> E,
+{
+    let receipt_count = receipts.len();
+    if receipt_count == 0 {
+        return Ok(());
+    }
+    let Some(upload_session_id) = upload_session_id else {
+        log::warn!(
+            "Skipping {receipt_count} blob receipt commits because save response did not include upload_session_id"
+        );
+        return Ok(());
+    };
+    let session_label = upload_session_id;
+    if let Err(error) =
+        try_commit_blob_receipts(api_client, workspace, Some(upload_session_id), receipts).await
+    {
+        let message = format!(
+            "Failed to commit {receipt_count} blob receipts for upload_session_id={session_label}: {error:#}"
+        );
+        return Err(map_receipt_error(message));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn commit_manifest_receipt_for_publish<E, MapReceiptError>(
+    api_client: &ApiClient,
+    workspace: &str,
+    upload_session_id: Option<&str>,
+    manifest_digest: String,
+    manifest_size: u64,
+    manifest_etag: Option<String>,
+    blob_digests: Option<Vec<String>>,
+    map_receipt_error: &MapReceiptError,
+) -> Result<(), E>
+where
+    MapReceiptError: Fn(String) -> E,
+{
+    let Some(upload_session_id) = upload_session_id else {
+        log::warn!(
+            "Skipping manifest receipt commit because save response did not include upload_session_id"
+        );
+        return Ok(());
+    };
+    let session_label = upload_session_id;
+    if let Err(error) = try_commit_manifest_receipt(
+        api_client,
+        workspace,
+        Some(upload_session_id),
+        manifest_digest,
+        manifest_size,
+        manifest_etag,
+        blob_digests,
+    )
+    .await
+    {
+        let message = format!(
+            "Failed to commit manifest receipt for upload_session_id={session_label}: {error:#}"
+        );
+        return Err(map_receipt_error(message));
+    }
+    Ok(())
 }
 
 pub(crate) async fn upload_tracked_blobs(

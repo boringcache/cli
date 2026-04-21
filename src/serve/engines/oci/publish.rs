@@ -154,7 +154,7 @@ async fn persist_manifest_entry_inner(
         .iter()
         .map(|blob| blob.digest.clone())
         .collect();
-    crate::serve::cas_publish::publish_after_save(
+    crate::serve::cas_publish::publish_after_save_requiring_receipts(
         &state.api_client,
         &state.workspace,
         &save_response,
@@ -259,6 +259,7 @@ async fn persist_manifest_entry_inner(
                 result
             }
         },
+        |message| OciError::internal(format!("receipt commit failed: {message}")),
     )
     .await?;
 

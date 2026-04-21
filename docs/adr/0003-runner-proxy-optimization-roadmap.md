@@ -87,6 +87,8 @@ As of 2026-04-21, this roadmap is documentation-aligned for hidden/internal impl
 
 Testing and proof work may be deferred, but it must stay explicit. A sub-ADR is doc-ready when it names implementation progress, remaining rollout gates, and the artifacts needed before user-visible defaults change.
 
+Current release proof gap: the required registry E2E must be green without verifier-side publish-readiness polling. The intended product contract is receipt-strict publish when Rails returns an upload session: completed blob and manifest receipts make a root safe to expose, and receipt failures or backend "blob not yet verified" confirm responses fail publish/export instead of relying on a post-publish blob download-url convergence loop. Normal API/storage retries for timeouts and transient network or URL failures are still valid retry behavior.
+
 ## Required Metrics Before Behavior Claims
 
 Add metrics that can distinguish storage, proxy, and BuildKit wait:

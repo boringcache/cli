@@ -253,9 +253,10 @@ Benchmark and backend E2E proof are still pending. The later proof bundle must a
 - API/session evidence that both roots remain readable after one alias winner is selected;
 - stale/conflict promotion evidence in both Rails response fields and session trace fields;
 - Docker dry-run/action artifacts showing derived run refs, import aliases, and promotion aliases;
+- receipt-strict publish evidence showing alias/root visibility does not depend on verifier-side post-publish readiness polling;
 - real-project benchmark artifacts that classify alias conflicts separately from cache misses.
 
-The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` did not clear this gate. CLI CI passed, but the required registry E2E workflow failed before a release tag because Docker BuildKit and fresh-runner blob reads could observe visible cache roots whose referenced blobs were not yet downloadable. Follow-up `c28a7c1` cleared the Docker BuildKit and Cross-Runner Verify legs, but the overall E2E workflow still failed in Prefetch Smoke before blob download-url and fresh-cache prefetch proof. Immutable-root/promotion default rollout therefore remains pending.
+The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` did not clear this gate. CLI CI passed, but the required registry E2E workflow failed before a release tag because Docker BuildKit and fresh-runner blob reads could observe visible cache roots whose referenced blobs were not yet downloadable. Follow-up `c28a7c1` cleared the Docker BuildKit and Cross-Runner Verify legs, but it did so with verifier-side blob URL convergence polling. That polling is not part of the product contract. Immutable-root/promotion default rollout remains pending until required E2E is green with receipt-strict publish and no post-publish blob URL readiness sleep.
 
 ## Incident Tracking: Same-Tag PostHog Writer Overlap
 
@@ -280,7 +281,7 @@ Release status matters for incident review:
 
 - the failed benchmark used the released action path, `boringcache/one@v1`;
 - that action currently resolves to action `v1.12.59`, which pins CLI `v1.12.41`;
-- CLI `origin/main` now includes the first negative-cache and alias-promotion proof commits; `c28a7c1` has green CLI CI, Docker BuildKit E2E, and Cross-Runner Verify evidence, but the full E2E workflow still fails in Prefetch Smoke before release tagging;
+- CLI `origin/main` now includes the first negative-cache and alias-promotion proof commits; `c28a7c1` has green CLI CI, Docker BuildKit E2E, and Cross-Runner Verify evidence, but the full E2E workflow still fails in Prefetch Smoke and the verifier-side convergence loop is being removed before release tagging;
 - active borrowed-session follow-up work, including owned upload-session body promotion into the local blob cache, is not represented by a released CLI/action path yet;
 - no benchmark should be used as release evidence for this incident unless the artifact records the action ref, CLI version, immutable run ref state, promotion status, and session trace.
 

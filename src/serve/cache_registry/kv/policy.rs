@@ -80,16 +80,11 @@ pub(crate) fn transient_backoff_window(message: &str) -> (u64, u64) {
     }
 }
 
-pub(crate) fn is_blob_verification_pending_message(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("not yet verified in storage") || lower.contains("retry after upload completes")
-}
-
-pub(crate) fn kv_confirm_verification_retry_delay(attempt: u32) -> std::time::Duration {
+pub(crate) fn kv_confirm_retry_delay(attempt: u32) -> std::time::Duration {
     let exponent = attempt.saturating_sub(1).min(6);
     let multiplier = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
-    let delay_ms = KV_CONFIRM_VERIFICATION_RETRY_BASE_MS
+    let delay_ms = KV_CONFIRM_RETRY_BASE_MS
         .saturating_mul(multiplier)
-        .min(KV_CONFIRM_VERIFICATION_RETRY_MAX_MS);
+        .min(KV_CONFIRM_RETRY_MAX_MS);
     std::time::Duration::from_millis(delay_ms)
 }

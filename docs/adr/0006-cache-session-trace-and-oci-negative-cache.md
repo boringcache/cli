@@ -257,7 +257,7 @@ The first CLI baseline is implemented:
 - `ci/e2e/request-metrics-summary.py` promotes session summary fields, OCI upload-plan reuse counts, and new status snapshot keys into artifact env output;
 - the OCI protocol tests cover the PostHog-shaped transition where a blob `HEAD` miss is followed by local upload, manifest publish, negative-cache invalidation, and a later successful `HEAD`.
 - Docker adapter planning now carries provider-neutral CI run metadata into dry-run JSON and proxy metadata hints, including provider, run uid/attempt, ref type/name, default branch, PR number, commit SHA, immutable run ref, import refs, and promotion aliases when ADR 0007 derivation is active.
-- startup prefetch download-url preload now has a startup-readiness retry policy while ordinary callers remain one-shot; focused tests cover the startup-only policy selection.
+- startup download-url preload uses the normal API request retry path, and startup blob body warm retries transient URL/storage failures; these are read/transport retries, not publish-readiness polling.
 
 Remaining trace depth belongs in later passes: Rails p50/p95 rollups from request metrics, richer BuildKit enrichment from the action/harness, and release-path Docker E2E artifact validation.
 
@@ -272,10 +272,10 @@ Release proof is partially updated. The 2026-04-21 `1.12.42` release-prep push a
 Follow-up commits changed that status:
 
 - `6fa1a52` promotes successfully published owned upload-session bodies into the local blob cache for same-proxy readers.
-- `c28a7c1` makes the cross-runner verifier wait through backend visibility lag.
+- `c28a7c1` made the cross-runner verifier poll through backend visibility lag; that is not the desired product contract and is being superseded by receipt-strict proxy publish plus no post-publish blob URL convergence loop.
 - On the `c28a7c1` remote run, CLI CI passed and E2E proved `Registry / Docker BuildKit` plus `Cache Registry / Cross-Runner Verify`.
 
-The remaining failed E2E leg is `Registry / Prefetch Smoke`. It stopped after the remote tag hit check because the tag-pointer helper did not expose a `cache_entry_id` for the published tag. Current CLI work adds startup download-url retry behavior, but that is not release evidence until the Prefetch Smoke harness reaches the convergence and fresh-cache prefetch phases and returns a green artifact.
+The remaining failed E2E leg is `Registry / Prefetch Smoke`. It stopped after the remote tag hit check because the tag-pointer helper did not expose a `cache_entry_id` before the added blob URL convergence check. The corrected proof should remove that publish-readiness check and prove fresh-cache prefetch/read behavior directly. If receipts cannot make the root immediately readable, publish should fail and surface the receipt commit error instead of sleeping for async verification. Normal retries for API timeouts, transient network failures, or stale download URLs remain valid.
 
 The later proof bundle must attach:
 
@@ -284,6 +284,7 @@ The later proof bundle must attach:
 - status snapshots plus request metrics for phase-level debugging;
 - a backend-visible or artifact-promoted summary that keeps Rails, storage, OCI, singleflight, local cache, and BuildKit sections distinct;
 - evidence that confirmed OCI misses are cached briefly and invalidated by local writes/publish;
+- evidence that blob and manifest receipt commit failures fail publish instead of exposing a root that depends on asynchronous storage verification;
 - examples where unknown BuildKit fields stay `unknown` instead of guessed.
 
 ## Incident Tracking: OCI `blob unknown` After Export-Time Misses
@@ -317,8 +318,8 @@ Release status as observed after follow-up work:
 
 - `boringcache/one@v1` pointed at action release `v1.12.59`;
 - `v1.12.59` pinned CLI release `v1.12.41`;
-- CLI `origin/main` now includes OCI negative-cache tracing, invalidation work, borrowed upload-session bodies, owned upload-session body promotion into `BlobReadCache`, and fresh-runner backend visibility waiting;
-- current local work adds startup download-url retry and Docker CI-derived run refs, but neither is represented by a CLI tag or released action until the next signed release;
+- CLI `origin/main` now includes OCI negative-cache tracing, invalidation work, borrowed upload-session bodies, owned upload-session body promotion into `BlobReadCache`, and the verifier-side backend visibility polling that should be superseded before release;
+- current local work adds receipt-strict publish behavior and removes the verifier-side convergence loop, while CLI `a910e4c` adds Docker CI-derived run refs; neither is represented by a CLI tag or released action until the next signed release;
 - therefore the failed benchmark did not exercise the follow-up OCI fixes, and the incident is not cleared by any released path.
 
 The required proof is a focused OCI protocol E2E plus release-path registry E2E, not a benchmark-only assertion:

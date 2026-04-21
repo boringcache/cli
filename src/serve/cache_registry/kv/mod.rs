@@ -37,10 +37,9 @@ const KV_TRANSIENT_BACKOFF_MS: u64 = 2_000;
 const KV_TRANSIENT_JITTER_MS: u64 = 2_000;
 const KV_TRANSIENT_WRITE_PATH_BACKOFF_MS: u64 = 20_000;
 const KV_TRANSIENT_WRITE_PATH_JITTER_MS: u64 = 5_000;
-const KV_CONFIRM_VERIFICATION_RETRY_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(90);
-const KV_CONFIRM_VERIFICATION_RETRY_BASE_MS: u64 = 1_000;
-const KV_CONFIRM_VERIFICATION_RETRY_MAX_MS: u64 = 5_000;
+const KV_CONFIRM_RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const KV_CONFIRM_RETRY_BASE_MS: u64 = 1_000;
+const KV_CONFIRM_RETRY_MAX_MS: u64 = 5_000;
 const KV_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_EMPTY_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(12);
 const KV_PENDING_REFRESH_SUPPRESSION_WINDOW: std::time::Duration =
@@ -410,15 +409,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_flush_error_treats_blob_verification_pending_as_transient() {
-        let error = anyhow::anyhow!(
-            "Server returned 400 Bad Request: 714 blob(s) not yet verified in storage — retry after upload completes"
-        );
-        let classified = classify_flush_error(&error, "confirm failed");
-        assert!(matches!(classified, FlushError::Transient(_)));
-    }
-
-    #[test]
     fn classify_flush_error_treats_tls_unexpected_eof_as_transient() {
         let error = anyhow::anyhow!(
             "blob upload failed: client error (SendRequest): connection error: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof"
@@ -450,17 +440,17 @@ mod tests {
     }
 
     #[test]
-    fn kv_confirm_verification_retry_delay_is_capped() {
+    fn kv_confirm_retry_delay_is_capped() {
         assert_eq!(
-            kv_confirm_verification_retry_delay(1),
+            kv_confirm_retry_delay(1),
             std::time::Duration::from_millis(1_000)
         );
         assert_eq!(
-            kv_confirm_verification_retry_delay(3),
+            kv_confirm_retry_delay(3),
             std::time::Duration::from_millis(4_000)
         );
         assert_eq!(
-            kv_confirm_verification_retry_delay(6),
+            kv_confirm_retry_delay(6),
             std::time::Duration::from_millis(5_000)
         );
     }
@@ -469,24 +459,17 @@ mod tests {
     fn confirm_retry_reason_retries_transient_server_errors() {
         let error = anyhow::anyhow!("Server error (500). Please try again later.");
         let classified = classify_flush_error(&error, "confirm failed");
-        let reason = confirm_retry_reason(
-            "confirm failed: Server error (500). Please try again later.",
-            &classified,
-        );
+        let reason = confirm_retry_reason(&classified);
         assert_eq!(reason, Some("transient backend error"));
     }
 
     #[test]
-    fn confirm_retry_reason_prefers_blob_verification_pending() {
+    fn classify_flush_error_treats_blob_verification_pending_as_permanent() {
         let error = anyhow::anyhow!(
             "Server returned 400 Bad Request: 714 blob(s) not yet verified in storage — retry after upload completes"
         );
         let classified = classify_flush_error(&error, "confirm failed");
-        let reason = confirm_retry_reason(
-            "confirm failed: Server returned 400 Bad Request: 714 blob(s) not yet verified in storage — retry after upload completes",
-            &classified,
-        );
-        assert_eq!(reason, Some("blob verification pending"));
+        assert!(matches!(classified, FlushError::Permanent(_)));
     }
 
     #[test]
