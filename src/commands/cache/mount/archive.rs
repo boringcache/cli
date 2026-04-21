@@ -536,6 +536,14 @@ pub(super) async fn sync_to_remote_archive(
         force: Some(true),
         use_multipart: Some(use_multipart),
         ci_provider: Some(ci_provider),
+        ci_run_uid: None,
+        ci_run_attempt: None,
+        ci_ref_type: None,
+        ci_ref_name: None,
+        ci_default_branch: None,
+        ci_pr_number: None,
+        ci_commit_sha: None,
+        ci_run_started_at: None,
         encrypted: if encrypt { Some(true) } else { None },
         encryption_algorithm: if encrypt {
             Some(crate::encryption::ENCRYPTION_ALGORITHM_AGE_X25519.to_string())

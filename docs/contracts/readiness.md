@@ -46,13 +46,16 @@ JSON body fields:
 - `warming`: the proxy is up, but startup warming has not completed yet
 - `ready`: startup warming has completed and shutdown has not started
 - `error`: startup warming failed in strict mode; operations should fail fast
-- `draining`: shutdown has started and the proxy may still be flushing or waiting for tag visibility
+- `draining`: shutdown has started and the proxy may still be flushing local pending writes
 
 `phase=ready` is the HTTP readiness gate for external lifecycle inspection.
 
 ## Publish settlement
 
 `publish_settled=true` means a fresh reader should be able to observe published tags now.
+It is a diagnostic assertion for explicit lifecycle checks, not a hidden shutdown
+gate; shutdown trusts successful Rails publish responses after local pending flush
+completion.
 
 The current implementation computes that from all of these being true:
 

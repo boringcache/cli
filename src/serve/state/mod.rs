@@ -46,6 +46,7 @@ pub struct AppState {
     pub configured_human_tags: Vec<String>,
     pub registry_root_tag: String,
     pub oci_alias_promotion_refs: Vec<String>,
+    pub proxy_metadata_hints: BTreeMap<String, String>,
     pub fail_on_cache_error: bool,
     pub oci_hydration_policy: crate::serve::OciHydrationPolicy,
     pub blob_locator: Arc<RwLock<BlobLocatorCache>>,
@@ -86,6 +87,20 @@ pub struct AppState {
     pub prefetch_complete: Arc<AtomicBool>,
     pub prefetch_complete_notify: Arc<Notify>,
     pub prefetch_error: Arc<RwLock<Option<String>>>,
+}
+
+impl AppState {
+    pub fn proxy_metadata_hint(&self, key: &str) -> Option<String> {
+        self.proxy_metadata_hints
+            .get(key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    pub fn proxy_metadata_hint_u32(&self, key: &str) -> Option<u32> {
+        self.proxy_metadata_hint(key)
+            .and_then(|value| value.parse::<u32>().ok())
+    }
 }
 
 #[cfg(test)]

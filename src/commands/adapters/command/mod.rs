@@ -396,6 +396,10 @@ pub async fn adapter_execute(
             if let Some(commit_sha) = run_metadata.commit_sha.as_deref() {
                 proxy_metadata_hints.insert("ci_commit_sha".to_string(), commit_sha.to_string());
             }
+            if let Some(run_started_at) = run_metadata.run_started_at.as_deref() {
+                proxy_metadata_hints
+                    .insert("ci_run_started_at".to_string(), run_started_at.to_string());
+            }
         }
     }
     if startup_warm && let Some(plan) = &docker_plan {

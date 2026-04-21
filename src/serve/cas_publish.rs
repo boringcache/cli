@@ -149,12 +149,11 @@ where
     if receipt_count == 0 {
         return Ok(());
     }
-    let Some(upload_session_id) = upload_session_id else {
-        log::warn!(
-            "Skipping {receipt_count} blob receipt commits because save response did not include upload_session_id"
-        );
-        return Ok(());
-    };
+    let upload_session_id = receipt_upload_session_id(
+        upload_session_id,
+        &format!("{receipt_count} blob"),
+        map_receipt_error,
+    )?;
     let session_label = upload_session_id;
     if let Err(error) =
         try_commit_blob_receipts(api_client, workspace, Some(upload_session_id), receipts).await
@@ -181,12 +180,8 @@ async fn commit_manifest_receipt_for_publish<E, MapReceiptError>(
 where
     MapReceiptError: Fn(String) -> E,
 {
-    let Some(upload_session_id) = upload_session_id else {
-        log::warn!(
-            "Skipping manifest receipt commit because save response did not include upload_session_id"
-        );
-        return Ok(());
-    };
+    let upload_session_id =
+        receipt_upload_session_id(upload_session_id, "manifest", map_receipt_error)?;
     let session_label = upload_session_id;
     if let Err(error) = try_commit_manifest_receipt(
         api_client,
@@ -205,6 +200,23 @@ where
         return Err(map_receipt_error(message));
     }
     Ok(())
+}
+
+fn receipt_upload_session_id<'a, E, MapReceiptError>(
+    upload_session_id: Option<&'a str>,
+    receipt_kind: &str,
+    map_receipt_error: &MapReceiptError,
+) -> Result<&'a str, E>
+where
+    MapReceiptError: Fn(String) -> E,
+{
+    upload_session_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            map_receipt_error(format!(
+                "Server did not return upload_session_id; cannot commit {receipt_kind} receipts for receipt-strict publish"
+            ))
+        })
 }
 
 pub(crate) async fn upload_tracked_blobs(
@@ -527,6 +539,10 @@ mod tests {
     use crate::serve::state::{BlobReadCache, UploadSession, UploadSessionStore};
     use axum::http::StatusCode;
 
+    fn string_error(message: String) -> String {
+        message
+    }
+
     fn upload_plan_for(digest: &str) -> BlobUploadUrlsResponse {
         BlobUploadUrlsResponse {
             upload_urls: vec![BlobUploadUrl {
@@ -538,6 +554,23 @@ mod tests {
             upload_session_id: None,
             upload_state: None,
         }
+    }
+
+    #[test]
+    fn receipt_strict_publish_requires_upload_session_id() {
+        let error = receipt_upload_session_id(None, "manifest", &string_error)
+            .expect_err("missing upload session must fail receipt-strict publish");
+
+        assert!(error.contains("Server did not return upload_session_id"));
+        assert!(error.contains("manifest receipts"));
+    }
+
+    #[test]
+    fn receipt_strict_publish_rejects_blank_upload_session_id() {
+        let error = receipt_upload_session_id(Some("  "), "2 blob", &string_error)
+            .expect_err("blank upload session must fail receipt-strict publish");
+
+        assert!(error.contains("2 blob receipts"));
     }
 
     #[tokio::test]

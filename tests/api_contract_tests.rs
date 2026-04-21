@@ -27,6 +27,14 @@ mod request_validation {
             force: None,
             use_multipart: None,
             ci_provider: Some("github-actions".to_string()),
+            ci_run_uid: Some("123456789".to_string()),
+            ci_run_attempt: Some("2".to_string()),
+            ci_ref_type: Some("branch".to_string()),
+            ci_ref_name: Some("main".to_string()),
+            ci_default_branch: Some("main".to_string()),
+            ci_pr_number: None,
+            ci_commit_sha: Some("abcdef1234567890".to_string()),
+            ci_run_started_at: Some("2026-04-21T10:00:00Z".to_string()),
             encrypted: None,
             encryption_algorithm: None,
             encryption_recipient_hint: None,
@@ -45,6 +53,9 @@ mod request_validation {
 
         assert!(json.get("force").is_none());
         assert!(json.get("use_multipart").is_none());
+        assert_eq!(json["ci_provider"], "github-actions");
+        assert_eq!(json["ci_run_uid"], "123456789");
+        assert_eq!(json["ci_run_started_at"], "2026-04-21T10:00:00Z");
     }
 
     #[test]
@@ -68,6 +79,14 @@ mod request_validation {
             force: None,
             use_multipart: None,
             ci_provider: None,
+            ci_run_uid: None,
+            ci_run_attempt: None,
+            ci_ref_type: None,
+            ci_ref_name: None,
+            ci_default_branch: None,
+            ci_pr_number: None,
+            ci_commit_sha: None,
+            ci_run_started_at: None,
             encrypted: None,
             encryption_algorithm: None,
             encryption_recipient_hint: None,

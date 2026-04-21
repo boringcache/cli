@@ -10,8 +10,6 @@ PROXY_PORT="${PROXY_PORT:-5050}"
 WORK_DIR="$(mktemp -d)"
 PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
 PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
-VERIFY_ATTEMPTS="${VERIFY_ATTEMPTS:-30}"
-VERIFY_SLEEP_SECS="${VERIFY_SLEEP_SECS:-3}"
 PROXY_LOG="${WORK_DIR}/proxy.log"
 PROXY_PID=""
 PROXY_READY_FILE="${WORK_DIR}/proxy.ready"
@@ -64,34 +62,25 @@ fetch_and_verify_blob() {
   local path="$2"
   local expected_digest="$3"
   local output_path="$4"
-  local status actual attempt
+  local status actual
 
-  for attempt in $(seq 1 "${VERIFY_ATTEMPTS}"); do
-    rm -f "${output_path}"
-    status="$(
-      curl -sS --max-time 30 -o "${output_path}" -w "%{http_code}" "${PROXY_URL}${path}" \
-        || printf '000'
-    )"
-    if [[ "${status}" == "200" ]]; then
-      actual="$(sha256sum "${output_path}" | awk '{print $1}')"
-      if [[ "${actual}" != "${expected_digest}" ]]; then
-        echo "ERROR: ${label} content mismatch (expected=${expected_digest} actual=${actual})"
-        exit 1
-      fi
-      echo "${label} blob verified: digest matches"
-      return 0
-    fi
+  rm -f "${output_path}"
+  status="$(
+    curl -sS --max-time 30 -o "${output_path}" -w "%{http_code}" "${PROXY_URL}${path}" \
+      || printf '000'
+  )"
+  if [[ "${status}" != "200" ]]; then
+    echo "ERROR: ${label} GET returned ${status} on first fresh-reader attempt (expected 200)"
+    tail -n 80 "${PROXY_LOG}"
+    exit 1
+  fi
 
-    if (( attempt < VERIFY_ATTEMPTS )); then
-      echo "${label} GET returned ${status}; waiting for backend visibility (${attempt}/${VERIFY_ATTEMPTS})"
-      sleep "${VERIFY_SLEEP_SECS}"
-      continue
-    fi
-  done
-
-  echo "ERROR: ${label} GET returned ${status} after ${VERIFY_ATTEMPTS} attempt(s) (expected 200)"
-  tail -n 80 "${PROXY_LOG}"
-  exit 1
+  actual="$(sha256sum "${output_path}" | awk '{print $1}')"
+  if [[ "${actual}" != "${expected_digest}" ]]; then
+    echo "ERROR: ${label} content mismatch (expected=${expected_digest} actual=${actual})"
+    exit 1
+  fi
+  echo "${label} blob verified: digest matches"
 }
 
 for dep in cmp curl sha256sum; do

@@ -246,6 +246,9 @@ Focused evidence now available:
 - `detects_provider_neutral_run_context` and `detects_github_actions_run_context` cover provider-neutral and GitHub Actions run metadata detection;
 - `resolve_docker_plan_derives_branch_aliases_from_ci_run_context` covers default-branch import/promotion alias planning;
 - `test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases` proves dry-run JSON and injected Docker flags for a GitHub Actions PR context: immutable run ref, PR/head/default imports, PR promotion, and CI metadata hints.
+- CLI save/publish request models now carry provider-neutral run metadata (`ci_run_uid`, attempt, ref type/name, default branch, PR number, commit SHA, and run start time) so Rails can order alias promotions without knowing which CI produced the build.
+- Rails local tests prove `ci_run_started_at` beats upload completion time for alias promotion, so an older run that finishes later does not replace a newer run's branch alias.
+- `boringcache/one` local release-prep surfaces Docker cache run refs, import refs, promotion refs, and provider-neutral CI metadata as action outputs.
 
 Benchmark and backend E2E proof are still pending. The later proof bundle must attach:
 
@@ -256,7 +259,7 @@ Benchmark and backend E2E proof are still pending. The later proof bundle must a
 - receipt-strict publish evidence showing alias/root visibility does not depend on verifier-side post-publish readiness polling;
 - real-project benchmark artifacts that classify alias conflicts separately from cache misses.
 
-The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` did not clear this gate. CLI CI passed, but the required registry E2E workflow failed before a release tag because Docker BuildKit and fresh-runner blob reads could observe visible cache roots whose referenced blobs were not yet downloadable. Follow-up `c28a7c1` cleared the Docker BuildKit and Cross-Runner Verify legs, but it did so with verifier-side blob URL convergence polling. That polling is not part of the product contract. Immutable-root/promotion default rollout remains pending until required E2E is green with receipt-strict publish and no post-publish blob URL readiness sleep.
+The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` did not clear this gate. CLI CI passed, but the required registry E2E workflow failed before a release tag because Docker BuildKit and fresh-runner blob reads could observe visible cache roots whose referenced blobs were not yet downloadable. Follow-up `c28a7c1` cleared the Docker BuildKit and Cross-Runner Verify legs, but it did so with verifier-side blob URL convergence polling. That polling is not part of the product contract. Local release-prep now removes that verifier wait, removes proxy shutdown tag-convergence polling, and keeps publish receipt-strict. Immutable-root/promotion default rollout remains pending until required E2E is green with receipt-strict publish and no post-publish blob URL readiness sleep.
 
 ## Incident Tracking: Same-Tag PostHog Writer Overlap
 
@@ -281,7 +284,7 @@ Release status matters for incident review:
 
 - the failed benchmark used the released action path, `boringcache/one@v1`;
 - that action currently resolves to action `v1.12.59`, which pins CLI `v1.12.41`;
-- CLI `origin/main` now includes the first negative-cache and alias-promotion proof commits; `c28a7c1` has green CLI CI, Docker BuildKit E2E, and Cross-Runner Verify evidence, but the full E2E workflow still fails in Prefetch Smoke and the verifier-side convergence loop is being removed before release tagging;
+- CLI `origin/main` now includes the first negative-cache and alias-promotion proof commits; `c28a7c1` has green CLI CI, Docker BuildKit E2E, and Cross-Runner Verify evidence, but the full E2E workflow still fails in Prefetch Smoke and local release-prep removes the verifier-side convergence loop before release tagging;
 - active borrowed-session follow-up work, including owned upload-session body promotion into the local blob cache, is not represented by a released CLI/action path yet;
 - no benchmark should be used as release evidence for this incident unless the artifact records the action ref, CLI version, immutable run ref state, promotion status, and session trace.
 

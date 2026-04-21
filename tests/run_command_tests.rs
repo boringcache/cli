@@ -1516,6 +1516,10 @@ fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
         ])
     );
     assert_eq!(
+        parsed["oci_cache"]["cache_from_ref_tags"],
+        serde_json::json!(["branch-main", "default"])
+    );
+    assert_eq!(
         parsed["oci_cache"]["cache_to"],
         "type=registry,ref=host.docker.internal:5000/cache:run-123-attempt-1,mode=max"
     );
@@ -1611,6 +1615,15 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
             "type=registry,ref=host.docker.internal:5000/cache:branch-feature-docker-cache",
             "type=registry,ref=host.docker.internal:5000/cache:default",
             "type=registry,ref=host.docker.internal:5000/cache:buildcache"
+        ])
+    );
+    assert_eq!(
+        parsed["oci_cache"]["cache_from_ref_tags"],
+        serde_json::json!([
+            "pr-42",
+            "branch-feature-docker-cache",
+            "default",
+            "buildcache"
         ])
     );
     assert_eq!(

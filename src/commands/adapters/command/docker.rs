@@ -16,7 +16,7 @@ const DEFAULT_CACHE_REF_TAG: &str = "buildcache";
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct OciCachePlan {
     pub registry_ref: String,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub cache_from_ref_tags: Vec<String>,
     pub cache_from_refs: Vec<String>,
     pub cache_from: String,
@@ -568,6 +568,7 @@ mod tests {
                 default_branch: Some("main".to_string()),
                 pull_request_number: None,
                 commit_sha: Some("abcdef".to_string()),
+                run_started_at: Some("2026-04-21T10:00:00Z".to_string()),
             }),
         })
         .unwrap();
@@ -613,6 +614,7 @@ mod tests {
                 default_branch: Some("main".to_string()),
                 pull_request_number: Some(7),
                 commit_sha: None,
+                run_started_at: None,
             }),
         })
         .unwrap();

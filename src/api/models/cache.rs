@@ -35,6 +35,22 @@ pub struct SaveRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_run_uid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_run_attempt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_ref_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_ref_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_default_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_pr_number: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_commit_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_run_started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encryption_algorithm: Option<String>,

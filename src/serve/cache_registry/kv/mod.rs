@@ -312,6 +312,7 @@ mod tests {
             configured_human_tags: Vec::new(),
             registry_root_tag: "registry".to_string(),
             oci_alias_promotion_refs: Vec::new(),
+            proxy_metadata_hints: std::collections::BTreeMap::new(),
             fail_on_cache_error: true,
             oci_hydration_policy: crate::serve::OciHydrationPolicy::MetadataOnly,
             blob_locator: std::sync::Arc::new(RwLock::new(BlobLocatorCache::default())),

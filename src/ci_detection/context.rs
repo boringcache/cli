@@ -81,6 +81,8 @@ pub struct CiRunContext {
     pub pull_request_number: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_started_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

@@ -86,6 +86,7 @@ pub(super) async fn build_server_runtime(
         configured_human_tags,
         registry_root_tag,
         oci_alias_promotion_refs,
+        proxy_metadata_hints: proxy_metadata_hints.clone(),
         fail_on_cache_error,
         oci_hydration_policy,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),

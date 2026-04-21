@@ -106,6 +106,7 @@ fn detect_provider_neutral_run_context() -> Option<CiRunContext> {
         pull_request_number: env_trimmed("BORINGCACHE_CI_PR_NUMBER")
             .and_then(|value| value.parse::<u32>().ok()),
         commit_sha: env_trimmed("BORINGCACHE_CI_SHA"),
+        run_started_at: env_trimmed("BORINGCACHE_CI_RUN_STARTED_AT"),
     })
 }
 
@@ -150,6 +151,7 @@ fn detect_github_actions_run_context() -> Option<CiRunContext> {
         default_branch: env_trimmed("GITHUB_DEFAULT_BRANCH").or(base_ref),
         pull_request_number,
         commit_sha: env_trimmed("GITHUB_SHA"),
+        run_started_at: env_trimmed("BORINGCACHE_CI_RUN_STARTED_AT"),
     })
 }
 

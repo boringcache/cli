@@ -100,6 +100,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         configured_human_tags: Vec::new(),
         registry_root_tag: "registry".to_string(),
         oci_alias_promotion_refs: Vec::new(),
+        proxy_metadata_hints: std::collections::BTreeMap::new(),
         fail_on_cache_error: true,
         oci_hydration_policy: boring_cache_cli::serve::OciHydrationPolicy::MetadataOnly,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
@@ -453,7 +454,6 @@ async fn test_startup_prefetch_hydrates_full_tag_before_ready() {
         ),
     ];
     let pointer_bytes = make_kv_pointer(&pointer_entries);
-    let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
 
     let restore_mock = server
         .mock(
@@ -541,18 +541,7 @@ async fn test_startup_prefetch_hydrates_full_tag_before_ready() {
             "GET",
             Matcher::Regex(r"^/v2/workspaces/org/repo/caches/tags/registry/pointer".to_string()),
         )
-        .expect_at_least(1)
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            serde_json::to_string(&json!({
-                "tag": "registry",
-                "cache_entry_id": "entry-full-hydration",
-                "manifest_root_digest": pointer_digest,
-                "version": "1"
-            }))
-            .unwrap(),
-        )
+        .expect(0)
         .create_async()
         .await;
 
@@ -1262,7 +1251,7 @@ async fn test_proxy_status_reports_pending_when_entries_buffered() {
 }
 
 #[tokio::test]
-async fn test_proxy_status_reports_draining_until_tags_are_visible() {
+async fn test_proxy_status_reports_diagnostic_tag_visibility_while_draining() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
     state
@@ -3047,6 +3036,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
                 "blob_count": 0,
                 "blob_total_size_bytes": 0,
                 "cas_layout": "oci-v1",
+                "upload_session_id": "session-entry-primary",
                 "manifest_upload_url": format!("{}/uploads/entry-primary-manifest", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -3243,6 +3233,7 @@ async fn test_manifest_put_degrades_when_primary_confirm_is_locked() {
                 "blob_count": 0,
                 "blob_total_size_bytes": 0,
                 "cas_layout": "oci-v1",
+                "upload_session_id": "session-entry-primary",
                 "manifest_upload_url": format!("{}/uploads/entry-primary-manifest", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -3368,6 +3359,7 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
                 "blob_count": 0,
                 "blob_total_size_bytes": 0,
                 "cas_layout": "oci-v1",
+                "upload_session_id": "session-entry-primary",
                 "manifest_upload_url": format!("{}/uploads/entry-primary-manifest", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -3606,6 +3598,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
                     "blob_count": 1,
                     "blob_total_size_bytes": 1,
                     "cas_layout": "oci-v1",
+                    "upload_session_id": format!("session-{entry_prefix}"),
                     "manifest_upload_url": format!("{}/uploads/{entry_prefix}-manifest", server.url()),
                     "archive_urls": [],
                     "upload_headers": {}
@@ -3948,6 +3941,7 @@ async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers()
                 "blob_count": 0,
                 "blob_total_size_bytes": 0,
                 "cas_layout": "oci-v1",
+                "upload_session_id": "session-entry-primary-subject",
                 "manifest_upload_url": format!("{}/uploads/entry-primary-subject-manifest", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -4045,6 +4039,7 @@ async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers()
                 "blob_count": 0,
                 "blob_total_size_bytes": 0,
                 "cas_layout": "oci-v1",
+                "upload_session_id": "session-entry-referrers",
                 "manifest_upload_url": format!("{}/uploads/entry-referrers-manifest", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -4203,6 +4198,7 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
                 "blob_count": 0,
                 "blob_total_size_bytes": 0,
                 "cas_layout": "oci-v1",
+                "upload_session_id": "session-entry-primary",
                 "manifest_upload_url": format!("{}/uploads/entry-primary-manifest", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -4612,6 +4608,7 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
                 "blob_count": 0,
                 "blob_total_size_bytes": 0,
                 "cas_layout": "oci-v1",
+                "upload_session_id": "session-entry-primary",
                 "manifest_upload_url": format!("{}/uploads/entry-primary-manifest", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -4759,6 +4756,7 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
                 "blob_count": 0,
                 "blob_total_size_bytes": 0,
                 "cas_layout": "oci-v1",
+                "upload_session_id": "session-entry-primary",
                 "manifest_upload_url": format!("{}/uploads/entry-primary-manifest", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -5809,6 +5807,7 @@ async fn test_manifest_put_uses_remote_proof_after_empty_finalize_reuse() {
                 "blob_count": 1,
                 "blob_total_size_bytes": descriptor_size,
                 "cas_layout": "oci-v1",
+                "upload_session_id": "session-entry-primary",
                 "manifest_upload_url": format!("{}/uploads/entry-primary-manifest", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -6048,6 +6047,7 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
                 "blob_count": 1,
                 "blob_total_size_bytes": descriptor_size,
                 "cas_layout": "oci-v1",
+                "upload_session_id": "session-entry-primary",
                 "manifest_upload_url": format!("{}/uploads/entry-primary-manifest", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -6528,6 +6528,7 @@ async fn test_bazel_cas_put_head_get_round_trip() {
                 "blob_count": 1,
                 "blob_total_size_bytes": payload.len(),
                 "cas_layout": "file-v1",
+                "upload_session_id": "session-entry-bazel-kv",
                 "manifest_upload_url": format!("{}/manifest-upload", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -6825,6 +6826,7 @@ async fn test_sccache_put_head_get_round_trip() {
                 "blob_count": 1,
                 "blob_total_size_bytes": payload.len(),
                 "cas_layout": "file-v1",
+                "upload_session_id": "session-entry-sccache-kv",
                 "manifest_upload_url": format!("{}/manifest-upload-sccache", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -7740,6 +7742,7 @@ async fn test_gradle_put_get_round_trip() {
                 "blob_count": 1,
                 "blob_total_size_bytes": payload.len(),
                 "cas_layout": "file-v1",
+                "upload_session_id": "session-entry-gradle-kv",
                 "manifest_upload_url": format!("{}/manifest-upload-gradle", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -7995,6 +7998,7 @@ async fn test_maven_put_get_round_trip() {
                 "blob_count": 1,
                 "blob_total_size_bytes": payload.len(),
                 "cas_layout": "file-v1",
+                "upload_session_id": "session-entry-maven-kv",
                 "manifest_upload_url": format!("{}/manifest-upload-maven", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}
@@ -8832,6 +8836,7 @@ async fn test_turborepo_put_head_get_round_trip() {
                 "blob_count": 1,
                 "blob_total_size_bytes": payload.len(),
                 "cas_layout": "file-v1",
+                "upload_session_id": "session-entry-turbo-kv",
                 "manifest_upload_url": format!("{}/manifest-upload-turbo", server.url()),
                 "archive_urls": [],
                 "upload_headers": {}

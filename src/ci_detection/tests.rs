@@ -47,6 +47,7 @@ fn clear_ci_env_vars() {
         "BORINGCACHE_CI_DEFAULT_BRANCH",
         "BORINGCACHE_CI_PR_NUMBER",
         "BORINGCACHE_CI_SHA",
+        "BORINGCACHE_CI_RUN_STARTED_AT",
     ];
 
     for var in &ci_vars {
@@ -65,6 +66,7 @@ fn detects_provider_neutral_run_context() {
     test_env::set_var("BORINGCACHE_CI_PR_NUMBER", "17");
     test_env::set_var("BORINGCACHE_CI_HEAD_REF", "feature/docker-cache");
     test_env::set_var("BORINGCACHE_CI_DEFAULT_BRANCH", "main");
+    test_env::set_var("BORINGCACHE_CI_RUN_STARTED_AT", "2026-04-21T10:00:00Z");
 
     let context = detect_ci_context();
     let run = context.run_context().expect("provider-neutral run context");
@@ -76,6 +78,7 @@ fn detects_provider_neutral_run_context() {
     assert_eq!(run.pull_request_number, Some(17));
     assert_eq!(run.head_ref_name.as_deref(), Some("feature/docker-cache"));
     assert_eq!(run.default_branch.as_deref(), Some("main"));
+    assert_eq!(run.run_started_at.as_deref(), Some("2026-04-21T10:00:00Z"));
 
     clear_ci_env_vars();
 }

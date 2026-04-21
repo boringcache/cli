@@ -272,8 +272,9 @@ Release proof is partially updated. The 2026-04-21 `1.12.42` release-prep push a
 Follow-up commits changed that status:
 
 - `6fa1a52` promotes successfully published owned upload-session bodies into the local blob cache for same-proxy readers.
-- `c28a7c1` made the cross-runner verifier poll through backend visibility lag; that is not the desired product contract and is being superseded by receipt-strict proxy publish plus no post-publish blob URL convergence loop.
+- `c28a7c1` made the cross-runner verifier poll through backend visibility lag; that is not the desired product contract. Local release-prep now makes the fresh-runner verifier fail on the first blob GET miss instead of sleeping for backend visibility.
 - On the `c28a7c1` remote run, CLI CI passed and E2E proved `Registry / Docker BuildKit` plus `Cache Registry / Cross-Runner Verify`.
+- Proxy shutdown now waits only for local pending flush completion and does not poll tag pointers after a successful publish. Rails receipt/publish success is the visibility contract; post-publish polling belongs only in explicit diagnostic checks.
 
 The remaining failed E2E leg is `Registry / Prefetch Smoke`. It stopped after the remote tag hit check because the tag-pointer helper did not expose a `cache_entry_id` before the added blob URL convergence check. The corrected proof should remove that publish-readiness check and prove fresh-cache prefetch/read behavior directly. If receipts cannot make the root immediately readable, publish should fail and surface the receipt commit error instead of sleeping for async verification. Normal retries for API timeouts, transient network failures, or stale download URLs remain valid.
 
@@ -318,8 +319,8 @@ Release status as observed after follow-up work:
 
 - `boringcache/one@v1` pointed at action release `v1.12.59`;
 - `v1.12.59` pinned CLI release `v1.12.41`;
-- CLI `origin/main` now includes OCI negative-cache tracing, invalidation work, borrowed upload-session bodies, owned upload-session body promotion into `BlobReadCache`, and the verifier-side backend visibility polling that should be superseded before release;
-- current local work adds receipt-strict publish behavior and removes the verifier-side convergence loop, while CLI `a910e4c` adds Docker CI-derived run refs; neither is represented by a CLI tag or released action until the next signed release;
+- CLI `origin/main` now includes OCI negative-cache tracing, invalidation work, borrowed upload-session bodies, and owned upload-session body promotion into `BlobReadCache`;
+- current local work adds receipt-strict publish behavior, removes the verifier-side convergence loop, and carries provider-neutral Docker CI run metadata through save/publish requests; none of that is represented by a CLI tag or released action until the next signed release;
 - therefore the failed benchmark did not exercise the follow-up OCI fixes, and the incident is not cleared by any released path.
 
 The required proof is a focused OCI protocol E2E plus release-path registry E2E, not a benchmark-only assertion:
