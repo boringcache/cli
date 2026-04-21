@@ -56,6 +56,7 @@ You can still override a configured adapter from the workflow when needed:
 ```
 
 Use `boringcache/one@v1` when you want the action to keep owning tool setup such as Bazel rc files, Maven or Gradle cache config, buildx setup, or container networking.
+When you run `boringcache docker` directly in GitHub Actions, the CLI derives Docker registry-cache run refs and aliases from GitHub metadata automatically. The action path should pass the same provider-neutral metadata so Docker cache artifacts can report the immutable run ref, import aliases, and promotion aliases.
 
 Keep the proxy story simple in CI too:
 

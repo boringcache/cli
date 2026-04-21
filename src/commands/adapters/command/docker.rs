@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use super::{AdapterCommandOptions, AdapterRunner, no_extra_proxy_env};
+use crate::ci_detection::{CiRunContext, CiSourceRefType};
 use crate::proxy;
 
 pub(super) const RUNNER: AdapterRunner = AdapterRunner {
@@ -27,6 +28,8 @@ pub(super) struct OciCachePlan {
     pub immutable_run_ref_tag: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub promotion_ref_tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_metadata: Option<CiRunContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +47,14 @@ pub(super) struct ResolveDockerPlanInput<'a> {
     pub port: u16,
     pub cache_mode: &'a str,
     pub read_only: bool,
+    pub run_context: Option<CiRunContext>,
+}
+
+#[derive(Debug, Clone)]
+struct DerivedCacheRefs {
+    run_ref_tag: String,
+    import_ref_tags: Vec<String>,
+    promotion_ref_tags: Vec<String>,
 }
 
 pub(super) fn validate_cache_mode(value: &str) -> Result<()> {
@@ -65,6 +76,7 @@ pub(super) fn resolve_docker_plan(input: ResolveDockerPlanInput<'_>) -> Result<R
         port,
         cache_mode,
         read_only,
+        run_context,
     } = input;
 
     let tag_input = raw_tag.trim();
@@ -84,14 +96,26 @@ pub(super) fn resolve_docker_plan(input: ResolveDockerPlanInput<'_>) -> Result<R
 
     let explicit_ref_tag = trim_non_empty(explicit_cache_ref_tag);
     let ref_tag = validate_cache_ref_tag(explicit_ref_tag.unwrap_or(DEFAULT_CACHE_REF_TAG))?;
-    let immutable_run_ref_tag = trim_non_empty(explicit_cache_run_ref_tag)
+    let explicit_immutable_run_ref_tag = trim_non_empty(explicit_cache_run_ref_tag)
         .map(validate_cache_ref_tag)
         .transpose()?;
     let cache_from_ref_tags = normalize_ref_tag_list(explicit_cache_from_ref_tags)?;
     let promotion_ref_tags = normalize_ref_tag_list(explicit_cache_promote_ref_tags)?;
+    let derived_cache_refs = run_context
+        .as_ref()
+        .map(|context| derive_cache_refs(context, &ref_tag))
+        .transpose()?;
+    let immutable_run_ref_tag = explicit_immutable_run_ref_tag.clone().or_else(|| {
+        derived_cache_refs
+            .as_ref()
+            .map(|derived| derived.run_ref_tag.clone())
+    });
 
     let import_ref_tags = if cache_from_ref_tags.is_empty() {
-        vec![ref_tag.clone()]
+        derived_cache_refs
+            .as_ref()
+            .map(|derived| derived.import_ref_tags.clone())
+            .unwrap_or_else(|| vec![ref_tag.clone()])
     } else {
         cache_from_ref_tags
     };
@@ -106,10 +130,12 @@ pub(super) fn resolve_docker_plan(input: ResolveDockerPlanInput<'_>) -> Result<R
     };
     let effective_promotion_ref_tags = if read_only || immutable_run_ref_tag.is_none() {
         Vec::new()
-    } else if promotion_ref_tags.is_empty() {
-        vec![ref_tag.clone()]
-    } else {
+    } else if !promotion_ref_tags.is_empty() {
         promotion_ref_tags
+    } else if let Some(derived) = &derived_cache_refs {
+        derived.promotion_ref_tags.clone()
+    } else {
+        vec![ref_tag.clone()]
     };
 
     let cache_from_refs = import_ref_tags
@@ -142,8 +168,173 @@ pub(super) fn resolve_docker_plan(input: ResolveDockerPlanInput<'_>) -> Result<R
             cache_to_ref_tag,
             immutable_run_ref_tag,
             promotion_ref_tags: effective_promotion_ref_tags,
+            run_metadata: run_context,
         },
     })
+}
+
+fn derive_cache_refs(context: &CiRunContext, fallback_ref_tag: &str) -> Result<DerivedCacheRefs> {
+    let run_ref_tag = validate_cache_ref_tag(&run_ref_tag(context)?)?;
+    let mut import_ref_tags = Vec::new();
+    let mut promotion_ref_tags = Vec::new();
+
+    match context.source_ref_type {
+        CiSourceRefType::PullRequest => {
+            if let Some(pr_number) = context.pull_request_number {
+                push_tag(&mut import_ref_tags, pr_alias(pr_number)?);
+                push_tag(&mut promotion_ref_tags, pr_alias(pr_number)?);
+            }
+            if let Some(head_ref) = context
+                .head_ref_name
+                .as_deref()
+                .or(context.source_ref_name.as_deref())
+            {
+                push_tag(&mut import_ref_tags, branch_alias(head_ref)?);
+            }
+            push_tag(&mut import_ref_tags, "default".to_string());
+        }
+        CiSourceRefType::Branch => {
+            if let Some(branch) = context.source_ref_name.as_deref() {
+                let branch_alias = branch_alias(branch)?;
+                push_tag(&mut import_ref_tags, branch_alias.clone());
+                push_tag(&mut promotion_ref_tags, branch_alias);
+                if is_default_branch(branch, context.default_branch.as_deref()) {
+                    push_tag(&mut promotion_ref_tags, "default".to_string());
+                }
+            }
+            push_tag(&mut import_ref_tags, "default".to_string());
+        }
+        CiSourceRefType::Tag | CiSourceRefType::Other => {
+            push_tag(&mut import_ref_tags, "default".to_string());
+        }
+    }
+
+    push_tag(&mut import_ref_tags, fallback_ref_tag.to_string());
+    let import_ref_tags = validate_ref_tag_list(import_ref_tags)?;
+    let promotion_ref_tags = validate_ref_tag_list(promotion_ref_tags)?;
+
+    Ok(DerivedCacheRefs {
+        run_ref_tag,
+        import_ref_tags,
+        promotion_ref_tags,
+    })
+}
+
+fn run_ref_tag(context: &CiRunContext) -> Result<String> {
+    let provider = provider_tag_component(&context.provider);
+    let run_uid = tag_component(&context.run_uid, 96);
+    let candidate = if let Some(attempt) = context.run_attempt.as_deref() {
+        let attempt = tag_component(attempt, 24);
+        format!("run-{provider}-{run_uid}-attempt-{attempt}")
+    } else {
+        format!("run-{provider}-{run_uid}")
+    };
+
+    shorten_tag(candidate)
+}
+
+fn provider_tag_component(provider: &str) -> String {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "github-actions" | "github" | "gha" => "gha".to_string(),
+        other => tag_component(other, 24),
+    }
+}
+
+fn branch_alias(branch: &str) -> Result<String> {
+    prefixed_tag("branch", branch)
+}
+
+fn pr_alias(number: u32) -> Result<String> {
+    validate_cache_ref_tag(&format!("pr-{number}"))
+}
+
+fn prefixed_tag(prefix: &str, value: &str) -> Result<String> {
+    let available = 128usize.saturating_sub(prefix.len() + 1);
+    validate_cache_ref_tag(&format!("{prefix}-{}", tag_component(value, available)))
+}
+
+fn validate_ref_tag_list(values: Vec<String>) -> Result<Vec<String>> {
+    values
+        .into_iter()
+        .map(|value| validate_cache_ref_tag(&value))
+        .collect()
+}
+
+fn tag_component(value: &str, max_len: usize) -> String {
+    let mut component = String::with_capacity(value.len().min(max_len));
+    let mut last_was_separator = false;
+
+    for ch in value.trim().chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else if matches!(ch, '_' | '.' | '-') {
+            ch
+        } else {
+            '-'
+        };
+
+        if matches!(mapped, '-' | '.') {
+            if last_was_separator {
+                continue;
+            }
+            last_was_separator = true;
+        } else {
+            last_was_separator = false;
+        }
+
+        component.push(mapped);
+    }
+
+    let component = component
+        .trim_matches(|ch| matches!(ch, '-' | '.'))
+        .to_string();
+    let component = if component.is_empty() {
+        "unknown".to_string()
+    } else {
+        component
+    };
+
+    if component.len() <= max_len {
+        component
+    } else {
+        shorten_component(&component, max_len)
+    }
+}
+
+fn shorten_component(component: &str, max_len: usize) -> String {
+    let hash = crate::cas_oci::sha256_hex(component.as_bytes());
+    let hash_len = 12usize.min(hash.len());
+    let prefix_len = max_len.saturating_sub(hash_len + 1);
+    if prefix_len == 0 {
+        hash[..max_len.min(hash.len())].to_string()
+    } else {
+        format!("{}-{}", &component[..prefix_len], &hash[..hash_len])
+    }
+}
+
+fn shorten_tag(candidate: String) -> Result<String> {
+    if candidate.len() <= 128 {
+        return validate_cache_ref_tag(&candidate);
+    }
+
+    let hash = crate::cas_oci::sha256_hex(candidate.as_bytes());
+    let keep = 128usize.saturating_sub(13);
+    validate_cache_ref_tag(&format!("{}-{}", &candidate[..keep], &hash[..12]))
+}
+
+fn push_tag(tags: &mut Vec<String>, tag: String) {
+    if !tags.contains(&tag) {
+        tags.push(tag);
+    }
+}
+
+fn is_default_branch(branch: &str, default_branch: Option<&str>) -> bool {
+    let branch = tag_component(branch, 128);
+    if let Some(default_branch) = default_branch {
+        branch == tag_component(default_branch, 128)
+    } else {
+        matches!(branch.as_str(), "main" | "master")
+    }
 }
 
 fn prepare_command(
@@ -343,11 +534,94 @@ mod tests {
             port: 5000,
             cache_mode: "max",
             read_only: false,
+            run_context: None,
         })
         .unwrap_err();
 
         assert!(error.to_string().contains(
             "Use --tag for the proxy cache tag and --cache-ref-tag for the OCI cache tag"
         ));
+    }
+
+    #[test]
+    fn resolve_docker_plan_derives_branch_aliases_from_ci_run_context() {
+        let plan = resolve_docker_plan(ResolveDockerPlanInput {
+            raw_tag: "docker-main",
+            explicit_cache_ref_tag: None,
+            explicit_cache_run_ref_tag: None,
+            explicit_cache_from_ref_tags: &[],
+            explicit_cache_promote_ref_tags: &[],
+            endpoint_host: "127.0.0.1",
+            port: 5000,
+            cache_mode: "max",
+            read_only: false,
+            run_context: Some(CiRunContext {
+                provider: "github-actions".to_string(),
+                run_uid: "12345".to_string(),
+                run_attempt: Some("1".to_string()),
+                repository: Some("acme/widgets".to_string()),
+                source_ref_type: CiSourceRefType::Branch,
+                source_ref: Some("refs/heads/main".to_string()),
+                source_ref_name: Some("main".to_string()),
+                head_ref_name: None,
+                base_ref_name: None,
+                default_branch: Some("main".to_string()),
+                pull_request_number: None,
+                commit_sha: Some("abcdef".to_string()),
+            }),
+        })
+        .unwrap();
+
+        assert_eq!(
+            plan.oci_cache.immutable_run_ref_tag.as_deref(),
+            Some("run-gha-12345-attempt-1")
+        );
+        assert_eq!(
+            plan.oci_cache.cache_from_ref_tags,
+            ["branch-main", "default", "buildcache"]
+        );
+        assert_eq!(
+            plan.oci_cache.promotion_ref_tags,
+            ["branch-main", "default"]
+        );
+    }
+
+    #[test]
+    fn resolve_docker_plan_keeps_explicit_alias_overrides() {
+        let from_refs = vec!["manual-from".to_string()];
+        let promote_refs = vec!["manual-promote".to_string()];
+        let plan = resolve_docker_plan(ResolveDockerPlanInput {
+            raw_tag: "docker-main",
+            explicit_cache_ref_tag: None,
+            explicit_cache_run_ref_tag: Some("manual-run"),
+            explicit_cache_from_ref_tags: &from_refs,
+            explicit_cache_promote_ref_tags: &promote_refs,
+            endpoint_host: "127.0.0.1",
+            port: 5000,
+            cache_mode: "max",
+            read_only: false,
+            run_context: Some(CiRunContext {
+                provider: "github-actions".to_string(),
+                run_uid: "12345".to_string(),
+                run_attempt: Some("1".to_string()),
+                repository: None,
+                source_ref_type: CiSourceRefType::PullRequest,
+                source_ref: Some("refs/pull/7/merge".to_string()),
+                source_ref_name: Some("feature/cache".to_string()),
+                head_ref_name: Some("feature/cache".to_string()),
+                base_ref_name: Some("main".to_string()),
+                default_branch: Some("main".to_string()),
+                pull_request_number: Some(7),
+                commit_sha: None,
+            }),
+        })
+        .unwrap();
+
+        assert_eq!(
+            plan.oci_cache.immutable_run_ref_tag.as_deref(),
+            Some("manual-run")
+        );
+        assert_eq!(plan.oci_cache.cache_from_ref_tags, ["manual-from"]);
+        assert_eq!(plan.oci_cache.promotion_ref_tags, ["manual-promote"]);
     }
 }

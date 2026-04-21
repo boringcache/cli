@@ -1,6 +1,6 @@
 # ADR 0007: Docker Immutable Run Refs And Alias Promotion
 
-Status: accepted for hidden contract; default rollout pending concurrent-writer proof
+Status: accepted; CI derivation implemented, default rollout pending backend E2E and benchmark proof
 Date: 2026-04-20
 
 ## Context
@@ -176,6 +176,8 @@ For `boringcache docker`, multiple `--cache-from` flags are allowed. The current
 
 Read-only Docker adapter runs should only inject `--cache-from` refs and must not promote aliases.
 
+The CLI accepts provider-neutral run metadata through `BORINGCACHE_CI_*` environment variables. The GitHub Actions adapter is the first built-in mapper into that contract. Normal local Docker runs do not auto-generate run refs; they keep the existing `buildcache` behavior unless explicit hidden flags or provider-neutral metadata are supplied.
+
 ## Session Trace Requirements
 
 ADR 0006 session trace should include:
@@ -212,8 +214,11 @@ The first hidden CLI/Rails slice is implemented:
 - the proxy carries planned OCI alias promotion refs into manifest publish and records alias-promotion counters in session diagnostics;
 - Rails tag publish responses now expose `promotion_status`, `promotion_reason`, and `requested_cache_entry_id` so stale/ignored alias promotion is visible without deleting the immutable root.
 - focused proxy tests now simulate two immutable run refs requesting promotion to the same provider-neutral alias, proving both run refs remain readable and diagnostics distinguish `promoted` from `ignored_stale`.
+- `boringcache docker` now derives immutable run refs, branch/default/PR import aliases, and promotion aliases from provider-neutral `BORINGCACHE_CI_*` metadata, with GitHub Actions `GITHUB_*` metadata as the first built-in mapper;
+- CI-derived import refs include the legacy `buildcache` ref as a read fallback during the migration window, while promotion refs stay scoped to branch/default/PR policy;
+- explicit hidden run/import/promotion flags still override the derived plan.
 
-Remaining rollout work: derive run refs and aliases automatically from CI/action metadata, add a dedicated backend-backed same-alias writer E2E, wire action benchmark workflows to the hidden controls, and promote the behavior to the default only after artifact comparison.
+Remaining rollout work: add a dedicated backend-backed same-alias writer E2E, wire action benchmark workflows to pass provider-neutral metadata, compare artifacts, and promote the behavior to the default action path only after proof.
 
 The concurrent writer E2E should stay provider-neutral. It should simulate two provider contexts, not GitHub-only environment variables:
 
@@ -231,13 +236,16 @@ Expected assertions:
 
 ## Proof Status
 
-Documentation, hidden CLI/Rails contract fields, and focused proxy proof are aligned as of 2026-04-21. Immutable run refs and alias promotion are accepted as the correctness model; automatic CI/action planning, backend-backed same-alias E2E proof, and default rollout remain proof-gated.
+Documentation, hidden CLI/Rails contract fields, automatic CLI-side CI derivation, and focused proxy proof are aligned as of 2026-04-21. Immutable run refs and alias promotion are accepted as the correctness model; backend-backed same-alias E2E proof, action workflow wiring, benchmark artifact comparison, and default rollout remain proof-gated.
 
 Focused evidence now available:
 
 - `test_two_immutable_run_refs_promote_same_alias_without_losing_roots` runs two proxy manifest publishes for immutable refs `run-a` and `run-b`, both promoting `branch-main`;
 - both immutable primary refs remain locally readable after the alias updates;
 - alias diagnostics record one `promoted`, one `ignored_stale`, and no failed promotion.
+- `detects_provider_neutral_run_context` and `detects_github_actions_run_context` cover provider-neutral and GitHub Actions run metadata detection;
+- `resolve_docker_plan_derives_branch_aliases_from_ci_run_context` covers default-branch import/promotion alias planning;
+- `test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases` proves dry-run JSON and injected Docker flags for a GitHub Actions PR context: immutable run ref, PR/head/default imports, PR promotion, and CI metadata hints.
 
 Benchmark and backend E2E proof are still pending. The later proof bundle must attach:
 
@@ -247,7 +255,7 @@ Benchmark and backend E2E proof are still pending. The later proof bundle must a
 - Docker dry-run/action artifacts showing derived run refs, import aliases, and promotion aliases;
 - real-project benchmark artifacts that classify alias conflicts separately from cache misses.
 
-The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` did not clear this gate. CLI CI passed, but the required registry E2E workflow failed before a release tag because Docker BuildKit and fresh-runner blob reads could observe visible cache roots whose referenced blobs were not yet downloadable. That failure is tracked primarily by ADR 0005/0006; for this ADR it means immutable-root/promotion release evidence remains pending.
+The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` did not clear this gate. CLI CI passed, but the required registry E2E workflow failed before a release tag because Docker BuildKit and fresh-runner blob reads could observe visible cache roots whose referenced blobs were not yet downloadable. Follow-up `c28a7c1` cleared the Docker BuildKit and Cross-Runner Verify legs, but the overall E2E workflow still failed in Prefetch Smoke before blob download-url and fresh-cache prefetch proof. Immutable-root/promotion default rollout therefore remains pending.
 
 ## Incident Tracking: Same-Tag PostHog Writer Overlap
 
@@ -272,7 +280,7 @@ Release status matters for incident review:
 
 - the failed benchmark used the released action path, `boringcache/one@v1`;
 - that action currently resolves to action `v1.12.59`, which pins CLI `v1.12.41`;
-- CLI `origin/main` now includes the first negative-cache and alias-promotion proof commits, but the `1.12.42` release-prep push at `14c1dc2` still failed required registry E2E before tagging;
+- CLI `origin/main` now includes the first negative-cache and alias-promotion proof commits; `c28a7c1` has green CLI CI, Docker BuildKit E2E, and Cross-Runner Verify evidence, but the full E2E workflow still fails in Prefetch Smoke before release tagging;
 - active borrowed-session follow-up work, including owned upload-session body promotion into the local blob cache, is not represented by a released CLI/action path yet;
 - no benchmark should be used as release evidence for this incident unless the artifact records the action ref, CLI version, immutable run ref state, promotion status, and session trace.
 
@@ -301,6 +309,7 @@ Before making it default:
 
 - Docker BuildKit E2E covers concurrent same-alias writers;
 - real-project benchmark uses immutable run refs and classifies alias conflicts separately from cache misses;
+- first-party action workflows pass provider-neutral metadata and record the derived plan in artifacts;
 - CLI/action docs explain the visible behavior without exposing internal root IDs as ordinary user ceremony;
 - Rails and CLI comprehension maps are updated.
 

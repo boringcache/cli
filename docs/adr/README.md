@@ -29,9 +29,9 @@ Docs-ready is not the same as rollout-ready. If testing or benchmark proof is de
 | [0002](0002-proxy-engine-plan-b.md) | accepted | Source-backed native adapter engine boundary | Adapter-specific source contract and E2E evidence |
 | [0003](0003-runner-proxy-optimization-roadmap.md) | accepted roadmap; sub-ADR rollout remains proof-gated | Orders the runner proxy optimization and insight roadmap | Sub-ADR proof bundles before behavior claims |
 | [0004](0004-oci-large-blob-stream-through.md) | accepted for hidden prototype; default rollout pending benchmark proof | Large OCI blob stream-through | First-byte/body-wait comparison artifacts before default threshold |
-| [0005](0005-borrowed-upload-sessions-and-blob-cache-policy.md) | accepted for hidden implementation; cache-policy rollout pending benchmark proof | Borrowed upload-session bodies and later blob-cache policy | Large-layer disk-copy and cache-policy reuse evidence |
-| [0006](0006-cache-session-trace-and-oci-negative-cache.md) | accepted as first-party insight baseline; backend/action enrichment pending | Session trace, negative cache, and platform insight spine | Local OCI `HEAD` miss -> upload/publish E2E plus metadata-only Docker artifact evidence |
-| [0007](0007-docker-immutable-run-refs-and-alias-promotion.md) | accepted for hidden contract; default rollout pending concurrent-writer proof | Immutable Docker run refs and atomic alias promotion | Provider-neutral concurrent same-alias writer E2E with no `blob unknown` publish failure |
+| [0005](0005-borrowed-upload-sessions-and-blob-cache-policy.md) | accepted for hidden implementation; cache-policy rollout pending benchmark proof | Borrowed upload-session bodies and later blob-cache policy | Large-layer disk-copy/cache-policy evidence; full E2E green after Prefetch Smoke pointer gap is fixed |
+| [0006](0006-cache-session-trace-and-oci-negative-cache.md) | accepted as first-party insight baseline; backend/action enrichment pending | Session trace, negative cache, and platform insight spine | Metadata-only Docker artifact plus Prefetch Smoke pointer/cache-entry-id convergence |
+| [0007](0007-docker-immutable-run-refs-and-alias-promotion.md) | accepted; CI derivation implemented, default rollout pending backend E2E and benchmark proof | Immutable Docker run refs and atomic alias promotion | Provider-neutral concurrent same-alias writer E2E with no `blob unknown` publish failure |
 
 ## Handoff Rule
 

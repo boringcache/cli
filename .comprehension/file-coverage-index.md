@@ -156,7 +156,7 @@ Owner: cache lifecycle support (`support-primary`)
 
 Notes:
 
-- `ci_detection.rs` is active through save/mount/CAS publish telemetry tagging
+- `ci_detection` is active through save/mount/CAS publish telemetry tagging and Docker run-ref planning; it owns provider-neutral `BORINGCACHE_CI_*` run metadata plus GitHub Actions mapping
 - `signing/policy.rs` is restore/check/mount verification support, warn-only by default
 
 ## API transport and data models

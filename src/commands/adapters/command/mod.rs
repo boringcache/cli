@@ -320,6 +320,9 @@ pub async fn adapter_execute(
             &args.cache_promote_ref_tag,
             |value| value.trim().to_string(),
         );
+        let run_context = crate::ci_detection::detect_ci_context()
+            .run_context()
+            .cloned();
         let plan = docker::resolve_docker_plan(docker::ResolveDockerPlanInput {
             raw_tag: &raw_tag,
             explicit_cache_ref_tag: project_config::prefer_cli_scalar(
@@ -336,6 +339,7 @@ pub async fn adapter_execute(
             port,
             cache_mode: &docker_cache_mode,
             read_only: effective_read_only,
+            run_context,
         })?;
         Some(plan)
     } else {
@@ -361,6 +365,37 @@ pub async fn adapter_execute(
                 "docker_alias_promotion_refs".to_string(),
                 plan.oci_cache.promotion_ref_tags.join(","),
             );
+        }
+        if let Some(run_metadata) = plan.oci_cache.run_metadata.as_ref() {
+            proxy_metadata_hints.insert("ci_provider".to_string(), run_metadata.provider.clone());
+            proxy_metadata_hints.insert("ci_run_uid".to_string(), run_metadata.run_uid.clone());
+            if let Some(attempt) = run_metadata.run_attempt.as_deref() {
+                proxy_metadata_hints.insert("ci_run_attempt".to_string(), attempt.to_string());
+            }
+            proxy_metadata_hints.insert(
+                "ci_ref_type".to_string(),
+                match run_metadata.source_ref_type {
+                    crate::ci_detection::CiSourceRefType::Branch => "branch",
+                    crate::ci_detection::CiSourceRefType::Tag => "tag",
+                    crate::ci_detection::CiSourceRefType::PullRequest => "pull-request",
+                    crate::ci_detection::CiSourceRefType::Other => "other",
+                }
+                .to_string(),
+            );
+            if let Some(source_ref_name) = run_metadata.source_ref_name.as_deref() {
+                proxy_metadata_hints.insert("ci_ref_name".to_string(), source_ref_name.to_string());
+            }
+            if let Some(default_branch) = run_metadata.default_branch.as_deref() {
+                proxy_metadata_hints
+                    .insert("ci_default_branch".to_string(), default_branch.to_string());
+            }
+            if let Some(pull_request_number) = run_metadata.pull_request_number {
+                proxy_metadata_hints
+                    .insert("ci_pr_number".to_string(), pull_request_number.to_string());
+            }
+            if let Some(commit_sha) = run_metadata.commit_sha.as_deref() {
+                proxy_metadata_hints.insert("ci_commit_sha".to_string(), commit_sha.to_string());
+            }
         }
     }
     if startup_warm && let Some(plan) = &docker_plan {

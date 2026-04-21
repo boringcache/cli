@@ -199,7 +199,16 @@ Evidence now available:
 - the Rails-backed local Docker BuildKit E2E passed against a managed workspace provisioned through Rails/Tigris;
 - that E2E recorded borrowed upload-session counters in status snapshots and session summaries, including `oci_engine_borrowed_upload_session_count=9` and `oci_engine_borrowed_upload_session_bytes=6430` by the alias-warm status snapshot.
 
-Release-path proof is not complete. The 2026-04-21 `1.12.42` push at CLI commit `14c1dc2` passed CLI CI but failed required registry E2E legs with manifests/indices visible before all referenced blobs had verified download URLs. The owned-body cache promotion is the follow-up fix for the same-proxy BuildKit half of that failure; it still needs a green Docker BuildKit E2E artifact before it counts as release evidence.
+Release-path proof is partially complete. The 2026-04-21 `1.12.42` push at CLI commit `14c1dc2` passed CLI CI but failed required registry E2E legs with manifests/indices visible before all referenced blobs had verified download URLs. Follow-up commit `6fa1a52` promoted owned upload-session bodies into the local blob cache for same-proxy readers, and `c28a7c1` aligned the fresh-runner verifier with backend blob visibility lag.
+
+Current remote evidence for `c28a7c1`:
+
+- CLI CI passed.
+- `Registry / Docker BuildKit` passed, so the same-proxy Docker half now has release-path E2E evidence.
+- `Cache Registry / Cross-Runner Verify` passed, so the fresh-runner CAS read path now waits through backend visibility lag.
+- The overall E2E workflow still failed in `Registry / Prefetch Smoke`: `boringcache check` reported the tag hit, but the tag-pointer helper did not expose a `cache_entry_id`, so the test never reached the blob download-url convergence or fresh-cache prefetch phases.
+
+That means the borrowed-session fix has meaningful release-path evidence, but the full registry E2E gate remains blocked by the Prefetch Smoke pointer/cache-entry-id gap.
 
 Benchmark proof and policy proof are still pending before cache admission changes. The later proof bundle must attach:
 

@@ -4,6 +4,32 @@ use std::process::Command;
 use tempfile::TempDir;
 
 const DUMMY_API_URL: &str = "http://127.0.0.1:65535";
+const CI_RUN_ENV_VARS: &[&str] = &[
+    "BORINGCACHE_CI_PROVIDER",
+    "BORINGCACHE_CI_RUN_ID",
+    "BORINGCACHE_CI_RUN_ATTEMPT",
+    "BORINGCACHE_CI_REPOSITORY",
+    "BORINGCACHE_CI_REF",
+    "BORINGCACHE_CI_REF_NAME",
+    "BORINGCACHE_CI_REF_TYPE",
+    "BORINGCACHE_CI_HEAD_REF",
+    "BORINGCACHE_CI_BASE_REF",
+    "BORINGCACHE_CI_DEFAULT_BRANCH",
+    "BORINGCACHE_CI_PR_NUMBER",
+    "BORINGCACHE_CI_SHA",
+    "GITHUB_ACTIONS",
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_REPOSITORY",
+    "GITHUB_REF",
+    "GITHUB_REF_NAME",
+    "GITHUB_REF_TYPE",
+    "GITHUB_HEAD_REF",
+    "GITHUB_BASE_REF",
+    "GITHUB_DEFAULT_BRANCH",
+    "GITHUB_EVENT_PATH",
+    "GITHUB_SHA",
+];
 
 fn cli_binary() -> PathBuf {
     std::env::var_os("CARGO_BIN_EXE_boringcache")
@@ -24,6 +50,9 @@ fn apply_test_env(cmd: &mut Command) -> &mut Command {
         .env_remove("BORINGCACHE_REQUIRE_SERVER_SIGNATURE")
         .env_remove("BORINGCACHE_RESTORE_TOKEN")
         .env_remove("BORINGCACHE_SAVE_TOKEN");
+    for name in CI_RUN_ENV_VARS {
+        cmd.env_remove(name);
+    }
     cmd
 }
 
@@ -1527,6 +1556,135 @@ fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
     );
     assert!(command.contains(
         &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:run-123-attempt-1,mode=max"
+    ));
+}
+
+#[test]
+fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_RUN_ID", "123456789")
+        .env("GITHUB_RUN_ATTEMPT", "2")
+        .env("GITHUB_REPOSITORY", "acme/widgets")
+        .env("GITHUB_REF", "refs/pull/42/merge")
+        .env("GITHUB_REF_NAME", "42/merge")
+        .env("GITHUB_HEAD_REF", "Feature/Docker Cache")
+        .env("GITHUB_BASE_REF", "main")
+        .env("GITHUB_SHA", "abcdef1234567890")
+        .args([
+            "docker",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "docker-main",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--dry-run",
+            "--json",
+            "--",
+            "docker",
+            "buildx",
+            "build",
+            ".",
+        ])
+        .output()
+        .expect("Failed to execute docker GitHub Actions dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(
+        parsed["oci_cache"]["registry_ref"],
+        "host.docker.internal:5000/cache:run-gha-123456789-attempt-2"
+    );
+    assert_eq!(
+        parsed["oci_cache"]["cache_from_refs"],
+        serde_json::json!([
+            "type=registry,ref=host.docker.internal:5000/cache:pr-42",
+            "type=registry,ref=host.docker.internal:5000/cache:branch-feature-docker-cache",
+            "type=registry,ref=host.docker.internal:5000/cache:default",
+            "type=registry,ref=host.docker.internal:5000/cache:buildcache"
+        ])
+    );
+    assert_eq!(
+        parsed["oci_cache"]["cache_to"],
+        "type=registry,ref=host.docker.internal:5000/cache:run-gha-123456789-attempt-2,mode=max"
+    );
+    assert_eq!(
+        parsed["oci_cache"]["immutable_run_ref_tag"],
+        "run-gha-123456789-attempt-2"
+    );
+    assert_eq!(
+        parsed["oci_cache"]["promotion_ref_tags"],
+        serde_json::json!(["pr-42"])
+    );
+    assert_eq!(
+        parsed["oci_cache"]["run_metadata"]["provider"],
+        "github-actions"
+    );
+    assert_eq!(
+        parsed["oci_cache"]["run_metadata"]["source_ref_type"],
+        "pull-request"
+    );
+    assert_eq!(
+        parsed["oci_cache"]["run_metadata"]["source_ref_name"],
+        "Feature/Docker Cache"
+    );
+    assert_eq!(
+        parsed["proxy"]["oci_prefetch_refs"],
+        serde_json::json!([
+            "cache@pr-42",
+            "cache@branch-feature-docker-cache",
+            "cache@default",
+            "cache@buildcache"
+        ])
+    );
+    assert_eq!(
+        parsed["proxy"]["metadata_hints"]["docker_immutable_run_ref"],
+        "run-gha-123456789-attempt-2"
+    );
+    assert_eq!(
+        parsed["proxy"]["metadata_hints"]["docker_alias_promotion_refs"],
+        "pr-42"
+    );
+    assert_eq!(
+        parsed["proxy"]["metadata_hints"]["ci_provider"],
+        "github-actions"
+    );
+    assert_eq!(
+        parsed["proxy"]["metadata_hints"]["ci_ref_type"],
+        "pull-request"
+    );
+    assert_eq!(parsed["proxy"]["metadata_hints"]["ci_pr_number"], "42");
+
+    let command = parsed["command"]
+        .as_array()
+        .expect("command array")
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(
+        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:pr-42")
+    );
+    assert!(command.contains(
+        &"--cache-from=type=registry,ref=host.docker.internal:5000/cache:branch-feature-docker-cache"
+    ));
+    assert!(
+        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:default")
+    );
+    assert!(
+        command
+            .contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache")
+    );
+    assert!(command.contains(
+        &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:run-gha-123456789-attempt-2,mode=max"
     ));
 }
 

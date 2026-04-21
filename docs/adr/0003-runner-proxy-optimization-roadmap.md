@@ -15,9 +15,9 @@ Current code evidence:
 
 - `cache-registry` is the runner-local proxy and the Docker adapter starts it for BuildKit.
 - Docker's product default is OCI `metadata-only`: resolve selected manifest/index state and locator URLs, then let BuildKit request bodies on demand.
-- OCI blob GET currently downloads a remote blob fully, writes it to disk, verifies digest/size, promotes it into `BlobReadCache`, reopens the local handle, then serves the response.
-- Local body-cache and mounted-blob reuse currently materialize cached bodies into upload-session temp files before publish can upload them.
-- The proxy exposes status snapshots and JSONL request metrics, but it does not yet emit one end-of-run cache session trace that directly explains remote blob client wait, Tigris TTFB, digest verification, local spool, and local reread time.
+- The default OCI blob GET path still hydrates then serves for ordinary misses, but the hidden ADR 0004 stream-through prototype can serve eligible full-body misses while teeing, hashing, and promoting verified bytes.
+- Local body-cache and blob-cache-backed mount proof sessions now borrow verified `BlobReadCache` handles with leases; mutable upload-session reuse still materializes owned temp files.
+- The proxy emits status snapshots, JSONL request metrics, and a `cache_session_summary` event with proxy, storage, OCI, singleflight, local-cache, and BuildKit sections. Rails percentile rollups, action enrichment, and operator reporting remain follow-up work.
 
 ## Source Grounding
 
@@ -48,12 +48,12 @@ Relevant source facts:
 
 Optimize the existing runner-local proxy first. Do not build an on-demand edge server, custom global proxy fleet, or mandatory daemon before the runner proxy proves where the remaining tail latency is.
 
-The next work lands in this order:
+The roadmap lands in this order:
 
-1. Add a per-session cache trace, singleflight metrics, and OCI negative-cache behavior.
-2. Design immutable Docker run refs and atomic alias promotion across CLI/action/Rails.
-3. Remove avoidable local copy/sync when cached blobs are reused for OCI publish.
-4. Prototype large OCI blob stream-through with tee-to-cache and end-of-stream verification.
+1. Add a per-session cache trace, singleflight metrics, and OCI negative-cache behavior. First CLI slice done; backend/action enrichment pending.
+2. Design immutable Docker run refs and atomic alias promotion across CLI/action/Rails. Hidden CLI/Rails slice and CI-side derivation done; backend same-alias E2E/action rollout pending.
+3. Remove avoidable local copy/sync when cached blobs are reused for OCI publish. Borrowed cache-body sessions done; cache-policy proof pending.
+4. Prototype large OCI blob stream-through with tee-to-cache and end-of-stream verification. Hidden threshold prototype done; benchmark proof pending.
 5. Tune blob-cache admission and eviction using measured reuse by object size.
 6. Add adaptive transfer control only after the metrics show fixed concurrency is a real bottleneck.
 

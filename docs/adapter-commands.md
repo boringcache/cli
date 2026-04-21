@@ -146,5 +146,6 @@ Override precedence:
 | Metadata hints | repo config and CLI merge; CLI wins on duplicate keys |
 
 For Docker, `--tag` is always the proxy cache tag. Use `--cache-ref-tag` for the OCI cache tag.
+In GitHub Actions, the Docker adapter derives an immutable run ref plus PR/branch/default cache aliases from CI metadata. Local Docker runs keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
 
 Use [Tool guides](tool-guides.md) for per-tool examples and local endpoint setup.
