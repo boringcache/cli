@@ -254,6 +254,7 @@ src/
       kv_pending.rs
       kv_published_index.rs
       metrics.rs
+      oci_negative_cache.rs
       upload_sessions.rs
   signing/
     mod.rs
@@ -424,6 +425,7 @@ src/
       kv_pending.rs
       kv_published_index.rs
       metrics.rs
+      oci_negative_cache.rs
       upload_sessions.rs
 ```
 

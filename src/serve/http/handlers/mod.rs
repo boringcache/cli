@@ -64,6 +64,8 @@ struct ProxyStatusResponse {
     startup_prefetch: BTreeMap<String, String>,
     oci_body: BTreeMap<String, String>,
     oci_engine: BTreeMap<String, String>,
+    oci_negative_cache: BTreeMap<String, String>,
+    singleflight: BTreeMap<String, String>,
     shutdown_requested: bool,
     cache_entry_id: Option<String>,
     tags_visible: bool,
@@ -83,6 +85,8 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
     let oci_engine = state
         .oci_engine_diagnostics
         .metadata_hints(state.oci_hydration_policy.as_str());
+    let oci_negative_cache = state.oci_negative_cache.metadata_hints();
+    let singleflight = state.singleflight_metrics.metadata_hints();
     let shutdown_requested = state
         .shutdown_requested
         .load(std::sync::atomic::Ordering::Acquire);
@@ -137,6 +141,8 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
             startup_prefetch,
             oci_body,
             oci_engine,
+            oci_negative_cache,
+            singleflight,
             shutdown_requested,
             cache_entry_id,
             tags_visible,
@@ -380,6 +386,7 @@ mod tests {
             api_client: ApiClient::new_with_token_override(Some("test-token".to_string()))
                 .expect("api client"),
             workspace: "boringcache/benchmarks".to_string(),
+            started_at: Instant::now(),
             runtime_temp_dir: runtime_temp_dir.clone(),
             kv_blob_temp_dir: runtime_temp_dir.join("kv-blobs"),
             oci_upload_temp_dir: runtime_temp_dir.join("oci-uploads"),
@@ -395,6 +402,8 @@ mod tests {
             kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
             kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
             oci_lookup_inflight: Arc::new(dashmap::DashMap::new()),
+            oci_negative_cache: Arc::new(crate::serve::state::OciNegativeCache::new()),
+            singleflight_metrics: Arc::new(crate::serve::state::SingleflightMetrics::new()),
             kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             kv_replication_enqueue_deferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),

@@ -12,7 +12,9 @@ use crate::serve::engines::oci::uploads::has_non_empty_local_blob;
 use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
 use crate::serve::http::oci_tags::{scoped_restore_tags, scoped_save_tag, scoped_write_scope_tag};
-use crate::serve::state::{AppState, BlobLocatorEntry, UploadSession, digest_tag};
+use crate::serve::state::{
+    AppState, BlobLocatorEntry, OciNegativeCacheReason, UploadSession, digest_tag,
+};
 
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_POINTER_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -37,9 +39,39 @@ pub(crate) async fn resolve_manifest(
         return cached_manifest_response(state, cached).await;
     }
 
+    if state.oci_negative_cache.contains_manifest_ref_miss(
+        &state.workspace,
+        &state.registry_root_tag,
+        name,
+        reference,
+    ) {
+        state
+            .oci_engine_diagnostics
+            .record_negative_cache_hit(OciNegativeCacheReason::ManifestRef);
+        state.oci_engine_diagnostics.record_miss("manifest");
+        return Err(OciError::manifest_unknown(format!("{name}:{reference}")));
+    }
+
     let flight_key = manifest_flight_key(&tags);
     loop {
-        match begin_flight(&state.oci_lookup_inflight, flight_key.clone()) {
+        if state.oci_negative_cache.contains_manifest_ref_miss(
+            &state.workspace,
+            &state.registry_root_tag,
+            name,
+            reference,
+        ) {
+            state
+                .oci_engine_diagnostics
+                .record_negative_cache_hit(OciNegativeCacheReason::ManifestRef);
+            state.oci_engine_diagnostics.record_miss("manifest");
+            return Err(OciError::manifest_unknown(format!("{name}:{reference}")));
+        }
+        match begin_flight(
+            &state.oci_lookup_inflight,
+            flight_key.clone(),
+            &state.singleflight_metrics,
+            "oci-manifest",
+        ) {
             Flight::Leader(_guard) => {
                 if let Some(cached) = lookup_oci_manifest_cache(state, &tags) {
                     return cached_manifest_response(state, cached).await;
@@ -48,12 +80,26 @@ pub(crate) async fn resolve_manifest(
                     .await;
             }
             Flight::Follower(notified) => {
-                if !await_flight("oci-manifest", &flight_key, notified).await {
+                if !await_flight(
+                    &state.singleflight_metrics,
+                    "oci-manifest",
+                    &flight_key,
+                    notified,
+                )
+                .await
+                {
+                    state.singleflight_metrics.record_takeover("oci-manifest");
                     clear_flight_entry(&state.oci_lookup_inflight, &flight_key);
                 }
                 if let Some(cached) = lookup_oci_manifest_cache(state, &tags) {
+                    state
+                        .singleflight_metrics
+                        .record_post_flight_local_hit("oci-manifest");
                     return cached_manifest_response(state, cached).await;
                 }
+                state
+                    .singleflight_metrics
+                    .record_post_flight_retry_miss("oci-manifest");
             }
         }
     }
@@ -363,6 +409,15 @@ async fn resolve_manifest_remote(
             .find(|entry| entry.status == "hit");
     }
     let entry = selected.ok_or_else(|| {
+        state.oci_negative_cache.insert_manifest_ref_miss(
+            &state.workspace,
+            &state.registry_root_tag,
+            name,
+            reference,
+        );
+        state
+            .oci_engine_diagnostics
+            .record_negative_cache_insert(OciNegativeCacheReason::ManifestRef);
         state.oci_engine_diagnostics.record_miss("manifest");
         OciError::manifest_unknown(format!("{name}:{reference}"))
     })?;
@@ -512,6 +567,25 @@ async fn verified_manifest_blob_download_urls(
         return Ok(HashMap::new());
     }
 
+    if let Some(cached_miss) = blob_descriptors.iter().find(|descriptor| {
+        state.oci_negative_cache.contains_download_url_miss(
+            &state.workspace,
+            &state.registry_root_tag,
+            name,
+            &descriptor.digest,
+            cache_entry_id,
+        )
+    }) {
+        state
+            .oci_engine_diagnostics
+            .record_negative_cache_hit(OciNegativeCacheReason::DownloadUrl);
+        state.oci_engine_diagnostics.record_miss("download-url");
+        return Err(OciError::manifest_unknown(format!(
+            "{name}:{reference} references missing blob {}",
+            cached_miss.digest
+        )));
+    }
+
     let resolved = crate::serve::blob_download_urls::resolve_verified_blob_download_urls(
         state,
         cache_entry_id,
@@ -526,6 +600,18 @@ async fn verified_manifest_blob_download_urls(
     })?;
 
     if !resolved.missing.is_empty() {
+        for digest in &resolved.missing {
+            state.oci_negative_cache.insert_download_url_miss(
+                &state.workspace,
+                &state.registry_root_tag,
+                name,
+                digest,
+                cache_entry_id,
+            );
+            state
+                .oci_engine_diagnostics
+                .record_negative_cache_insert(OciNegativeCacheReason::DownloadUrl);
+        }
         state.oci_engine_diagnostics.record_miss("download-url");
         log::warn!(
             "OCI manifest {}:{} references {} missing blob(s): {}",
@@ -594,6 +680,7 @@ async fn cache_blob_locator_entries(
                 download_url_cached_at,
             },
         );
+        state.oci_negative_cache.invalidate_blob(name, &blob.digest);
     }
 }
 

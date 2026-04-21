@@ -190,6 +190,7 @@ pub(super) async fn put_manifest(
             additional_aliases: &additional_aliases,
         })
         .await?;
+        state.oci_negative_cache.invalidate_all();
 
         if let Some(subject_digest) = subject_digest.as_deref() {
             let referrers_started_at = Instant::now();

@@ -168,6 +168,169 @@ impl Default for OciBodyMetrics {
     }
 }
 
+pub struct SingleflightMetrics {
+    kinds: DashMap<String, Arc<SingleflightKindMetrics>>,
+}
+
+struct SingleflightKindMetrics {
+    leaders: AtomicU64,
+    followers: AtomicU64,
+    follower_timeouts: AtomicU64,
+    takeovers: AtomicU64,
+    post_flight_local_hits: AtomicU64,
+    post_flight_retry_misses: AtomicU64,
+    follower_wait_samples_ms: StdMutex<Vec<u64>>,
+}
+
+impl SingleflightMetrics {
+    pub fn new() -> Self {
+        Self {
+            kinds: DashMap::new(),
+        }
+    }
+
+    pub fn record_leader(&self, kind: &str) {
+        self.kind(kind).leaders.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_follower(&self, kind: &str) {
+        self.kind(kind).followers.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_follower_wait(&self, kind: &str, duration_ms: u64, completed: bool) {
+        let metrics = self.kind(kind);
+        if !completed {
+            metrics.follower_timeouts.fetch_add(1, Ordering::AcqRel);
+        }
+        if let Ok(mut samples) = metrics.follower_wait_samples_ms.lock() {
+            samples.push(duration_ms);
+        }
+    }
+
+    pub fn record_takeover(&self, kind: &str) {
+        self.kind(kind).takeovers.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_post_flight_local_hit(&self, kind: &str) {
+        self.kind(kind)
+            .post_flight_local_hits
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_post_flight_retry_miss(&self, kind: &str) {
+        self.kind(kind)
+            .post_flight_retry_misses
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn metadata_hints(&self) -> BTreeMap<String, String> {
+        let mut hints = BTreeMap::new();
+        for entry in &self.kinds {
+            let kind = entry.key();
+            let slug = metric_slug(kind);
+            let metrics = entry.value();
+            insert_counter(
+                &mut hints,
+                &format!("singleflight_{slug}_leaders"),
+                &metrics.leaders,
+            );
+            insert_counter(
+                &mut hints,
+                &format!("singleflight_{slug}_followers"),
+                &metrics.followers,
+            );
+            insert_counter(
+                &mut hints,
+                &format!("singleflight_{slug}_follower_timeouts"),
+                &metrics.follower_timeouts,
+            );
+            insert_counter(
+                &mut hints,
+                &format!("singleflight_{slug}_takeovers"),
+                &metrics.takeovers,
+            );
+            insert_counter(
+                &mut hints,
+                &format!("singleflight_{slug}_post_flight_local_hits"),
+                &metrics.post_flight_local_hits,
+            );
+            insert_counter(
+                &mut hints,
+                &format!("singleflight_{slug}_post_flight_retry_misses"),
+                &metrics.post_flight_retry_misses,
+            );
+            if let Ok(samples) = metrics.follower_wait_samples_ms.lock()
+                && !samples.is_empty()
+            {
+                hints.insert(
+                    format!("singleflight_{slug}_follower_wait_p50_ms"),
+                    percentile(&samples, 50).to_string(),
+                );
+                hints.insert(
+                    format!("singleflight_{slug}_follower_wait_p95_ms"),
+                    percentile(&samples, 95).to_string(),
+                );
+            }
+        }
+        hints
+    }
+
+    fn kind(&self, kind: &str) -> Arc<SingleflightKindMetrics> {
+        self.kinds
+            .entry(kind.to_string())
+            .or_insert_with(|| Arc::new(SingleflightKindMetrics::new()))
+            .clone()
+    }
+}
+
+impl Default for SingleflightMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SingleflightKindMetrics {
+    fn new() -> Self {
+        Self {
+            leaders: AtomicU64::new(0),
+            followers: AtomicU64::new(0),
+            follower_timeouts: AtomicU64::new(0),
+            takeovers: AtomicU64::new(0),
+            post_flight_local_hits: AtomicU64::new(0),
+            post_flight_retry_misses: AtomicU64::new(0),
+            follower_wait_samples_ms: StdMutex::new(Vec::new()),
+        }
+    }
+}
+
+fn insert_counter(hints: &mut BTreeMap<String, String>, name: &str, counter: &AtomicU64) {
+    let value = counter.load(Ordering::Acquire);
+    if value > 0 {
+        hints.insert(name.to_string(), value.to_string());
+    }
+}
+
+fn metric_slug(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_ascii_lowercase()
+}
+
+fn percentile(samples: &[u64], pct: u64) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let index = (((pct as f64 / 100.0) * sorted.len() as f64).ceil() as usize)
+        .saturating_sub(1)
+        .min(sorted.len() - 1);
+    sorted[index]
+}
+
 pub struct OciEngineDiagnostics {
     proof_total: AtomicU64,
     proof_bytes: AtomicU64,
@@ -205,6 +368,25 @@ pub struct OciEngineDiagnostics {
     miss_remote_blob: AtomicU64,
     miss_manifest: AtomicU64,
     miss_download_url: AtomicU64,
+    negative_cache_hit_manifest_ref: AtomicU64,
+    negative_cache_hit_blob_locator: AtomicU64,
+    negative_cache_hit_download_url: AtomicU64,
+    negative_cache_hit_remote_blob: AtomicU64,
+    negative_cache_insert_manifest_ref: AtomicU64,
+    negative_cache_insert_blob_locator: AtomicU64,
+    negative_cache_insert_download_url: AtomicU64,
+    negative_cache_insert_remote_blob: AtomicU64,
+    storage_get_count: AtomicU64,
+    storage_get_ttfb_ms: AtomicU64,
+    storage_get_body_duration_ms: AtomicU64,
+    storage_get_bytes: AtomicU64,
+    local_spool_bytes: AtomicU64,
+    local_spool_write_duration_ms: AtomicU64,
+    digest_verify_duration_ms: AtomicU64,
+    digest_verify_failures: AtomicU64,
+    cache_promotion_count: AtomicU64,
+    cache_promotion_duration_ms: AtomicU64,
+    cache_promotion_failures: AtomicU64,
 }
 
 impl OciEngineDiagnostics {
@@ -246,6 +428,25 @@ impl OciEngineDiagnostics {
             miss_remote_blob: AtomicU64::new(0),
             miss_manifest: AtomicU64::new(0),
             miss_download_url: AtomicU64::new(0),
+            negative_cache_hit_manifest_ref: AtomicU64::new(0),
+            negative_cache_hit_blob_locator: AtomicU64::new(0),
+            negative_cache_hit_download_url: AtomicU64::new(0),
+            negative_cache_hit_remote_blob: AtomicU64::new(0),
+            negative_cache_insert_manifest_ref: AtomicU64::new(0),
+            negative_cache_insert_blob_locator: AtomicU64::new(0),
+            negative_cache_insert_download_url: AtomicU64::new(0),
+            negative_cache_insert_remote_blob: AtomicU64::new(0),
+            storage_get_count: AtomicU64::new(0),
+            storage_get_ttfb_ms: AtomicU64::new(0),
+            storage_get_body_duration_ms: AtomicU64::new(0),
+            storage_get_bytes: AtomicU64::new(0),
+            local_spool_bytes: AtomicU64::new(0),
+            local_spool_write_duration_ms: AtomicU64::new(0),
+            digest_verify_duration_ms: AtomicU64::new(0),
+            digest_verify_failures: AtomicU64::new(0),
+            cache_promotion_count: AtomicU64::new(0),
+            cache_promotion_duration_ms: AtomicU64::new(0),
+            cache_promotion_failures: AtomicU64::new(0),
         }
     }
 
@@ -333,6 +534,60 @@ impl OciEngineDiagnostics {
             _ => return,
         }
         .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_negative_cache_hit(&self, reason: OciNegativeCacheReason) {
+        match reason {
+            OciNegativeCacheReason::ManifestRef => &self.negative_cache_hit_manifest_ref,
+            OciNegativeCacheReason::BlobLocator => &self.negative_cache_hit_blob_locator,
+            OciNegativeCacheReason::DownloadUrl => &self.negative_cache_hit_download_url,
+            OciNegativeCacheReason::RemoteBlob => &self.negative_cache_hit_remote_blob,
+        }
+        .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_negative_cache_insert(&self, reason: OciNegativeCacheReason) {
+        match reason {
+            OciNegativeCacheReason::ManifestRef => &self.negative_cache_insert_manifest_ref,
+            OciNegativeCacheReason::BlobLocator => &self.negative_cache_insert_blob_locator,
+            OciNegativeCacheReason::DownloadUrl => &self.negative_cache_insert_download_url,
+            OciNegativeCacheReason::RemoteBlob => &self.negative_cache_insert_remote_blob,
+        }
+        .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_storage_get(
+        &self,
+        bytes: u64,
+        ttfb_ms: u64,
+        body_duration_ms: u64,
+        spool_write_duration_ms: u64,
+        verify_duration_ms: u64,
+    ) {
+        self.storage_get_count.fetch_add(1, Ordering::AcqRel);
+        self.storage_get_bytes.fetch_add(bytes, Ordering::AcqRel);
+        self.storage_get_ttfb_ms
+            .fetch_add(ttfb_ms, Ordering::AcqRel);
+        self.storage_get_body_duration_ms
+            .fetch_add(body_duration_ms, Ordering::AcqRel);
+        self.local_spool_bytes.fetch_add(bytes, Ordering::AcqRel);
+        self.local_spool_write_duration_ms
+            .fetch_add(spool_write_duration_ms, Ordering::AcqRel);
+        self.digest_verify_duration_ms
+            .fetch_add(verify_duration_ms, Ordering::AcqRel);
+    }
+
+    pub fn record_digest_verify_failure(&self) {
+        self.digest_verify_failures.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_cache_promotion(&self, duration_ms: u64, ok: bool) {
+        self.cache_promotion_count.fetch_add(1, Ordering::AcqRel);
+        self.cache_promotion_duration_ms
+            .fetch_add(duration_ms, Ordering::AcqRel);
+        if !ok {
+            self.cache_promotion_failures.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     pub fn metadata_hints(&self, hydration_policy: &str) -> BTreeMap<String, String> {
@@ -480,6 +735,101 @@ impl OciEngineDiagnostics {
             &mut hints,
             "oci_engine_miss_download_url",
             &self.miss_download_url,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_negative_cache_hit_manifest_ref",
+            &self.negative_cache_hit_manifest_ref,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_negative_cache_hit_blob_locator",
+            &self.negative_cache_hit_blob_locator,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_negative_cache_hit_download_url",
+            &self.negative_cache_hit_download_url,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_negative_cache_hit_remote_blob",
+            &self.negative_cache_hit_remote_blob,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_negative_cache_insert_manifest_ref",
+            &self.negative_cache_insert_manifest_ref,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_negative_cache_insert_blob_locator",
+            &self.negative_cache_insert_blob_locator,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_negative_cache_insert_download_url",
+            &self.negative_cache_insert_download_url,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_negative_cache_insert_remote_blob",
+            &self.negative_cache_insert_remote_blob,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_storage_get_count",
+            &self.storage_get_count,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_storage_get_bytes",
+            &self.storage_get_bytes,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_storage_get_ttfb_ms",
+            &self.storage_get_ttfb_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_storage_get_body_duration_ms",
+            &self.storage_get_body_duration_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_local_spool_bytes",
+            &self.local_spool_bytes,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_local_spool_write_duration_ms",
+            &self.local_spool_write_duration_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_digest_verify_duration_ms",
+            &self.digest_verify_duration_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_digest_verify_failures",
+            &self.digest_verify_failures,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_cache_promotion_count",
+            &self.cache_promotion_count,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_cache_promotion_duration_ms",
+            &self.cache_promotion_duration_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_cache_promotion_failures",
+            &self.cache_promotion_failures,
         );
 
         hints

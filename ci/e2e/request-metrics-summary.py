@@ -5,7 +5,13 @@ from pathlib import Path
 import sys
 
 
-STATUS_NUMERIC_SECTIONS = ("startup_prefetch", "oci_body", "oci_engine")
+STATUS_NUMERIC_SECTIONS = (
+    "startup_prefetch",
+    "oci_body",
+    "oci_engine",
+    "oci_negative_cache",
+    "singleflight",
+)
 STATUS_POLICY_FIELDS = (
     ("startup_prefetch", "startup_prefetch_oci_hydration"),
     ("oci_engine", "oci_engine_hydration_policy"),
@@ -59,6 +65,78 @@ STATUS_SNAPSHOT_KEYS = (
     "oci_engine_miss_remote_blob",
     "oci_engine_miss_manifest",
     "oci_engine_miss_download_url",
+    "oci_engine_negative_cache_hit_manifest_ref",
+    "oci_engine_negative_cache_hit_blob_locator",
+    "oci_engine_negative_cache_hit_download_url",
+    "oci_engine_negative_cache_hit_remote_blob",
+    "oci_engine_negative_cache_insert_manifest_ref",
+    "oci_engine_negative_cache_insert_blob_locator",
+    "oci_engine_negative_cache_insert_download_url",
+    "oci_engine_negative_cache_insert_remote_blob",
+    "oci_engine_storage_get_count",
+    "oci_engine_storage_get_bytes",
+    "oci_engine_storage_get_ttfb_ms",
+    "oci_engine_storage_get_body_duration_ms",
+    "oci_engine_local_spool_bytes",
+    "oci_engine_local_spool_write_duration_ms",
+    "oci_engine_digest_verify_duration_ms",
+    "oci_engine_digest_verify_failures",
+    "oci_engine_cache_promotion_count",
+    "oci_engine_cache_promotion_duration_ms",
+    "oci_engine_cache_promotion_failures",
+    "oci_negative_manifest_ref_entries",
+    "oci_negative_blob_locator_entries",
+    "oci_negative_download_url_entries",
+    "oci_negative_remote_blob_entries",
+    "oci_negative_generation",
+    "singleflight_oci_blob_leaders",
+    "singleflight_oci_blob_followers",
+    "singleflight_oci_blob_follower_timeouts",
+    "singleflight_oci_blob_takeovers",
+    "singleflight_oci_blob_post_flight_local_hits",
+    "singleflight_oci_blob_post_flight_retry_misses",
+    "singleflight_oci_blob_follower_wait_p50_ms",
+    "singleflight_oci_blob_follower_wait_p95_ms",
+    "singleflight_oci_manifest_leaders",
+    "singleflight_oci_manifest_followers",
+    "singleflight_oci_manifest_follower_timeouts",
+    "singleflight_oci_manifest_takeovers",
+    "singleflight_oci_manifest_post_flight_local_hits",
+    "singleflight_oci_manifest_post_flight_retry_misses",
+    "singleflight_oci_manifest_follower_wait_p50_ms",
+    "singleflight_oci_manifest_follower_wait_p95_ms",
+    "singleflight_kv_lookup_leaders",
+    "singleflight_kv_lookup_followers",
+    "singleflight_kv_lookup_follower_timeouts",
+    "singleflight_kv_lookup_takeovers",
+    "singleflight_kv_lookup_post_flight_local_hits",
+    "singleflight_kv_lookup_post_flight_retry_misses",
+    "singleflight_kv_lookup_follower_wait_p50_ms",
+    "singleflight_kv_lookup_follower_wait_p95_ms",
+    "singleflight_kv_download_leaders",
+    "singleflight_kv_download_followers",
+    "singleflight_kv_download_follower_timeouts",
+    "singleflight_kv_download_takeovers",
+    "singleflight_kv_download_post_flight_local_hits",
+    "singleflight_kv_download_post_flight_retry_misses",
+    "singleflight_kv_download_follower_wait_p50_ms",
+    "singleflight_kv_download_follower_wait_p95_ms",
+    "singleflight_kv_url_leaders",
+    "singleflight_kv_url_followers",
+    "singleflight_kv_url_follower_timeouts",
+    "singleflight_kv_url_takeovers",
+    "singleflight_kv_url_post_flight_local_hits",
+    "singleflight_kv_url_post_flight_retry_misses",
+    "singleflight_kv_url_follower_wait_p50_ms",
+    "singleflight_kv_url_follower_wait_p95_ms",
+    "singleflight_kv_size_leaders",
+    "singleflight_kv_size_followers",
+    "singleflight_kv_size_follower_timeouts",
+    "singleflight_kv_size_takeovers",
+    "singleflight_kv_size_post_flight_local_hits",
+    "singleflight_kv_size_post_flight_retry_misses",
+    "singleflight_kv_size_follower_wait_p50_ms",
+    "singleflight_kv_size_follower_wait_p95_ms",
 )
 OCI_ENGINE_SUMMARY_KEYS = tuple(
     key for key in STATUS_SNAPSHOT_KEYS if key.startswith("oci_engine_")
@@ -95,6 +173,21 @@ def by_operation(records, operation):
         for item in records
         if item.get("operation") == operation and isinstance(item.get("duration_ms"), (int, float))
     ]
+
+
+def flatten_summary(prefix, value, out):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                continue
+            child_prefix = f"{prefix}_{env_slug(key)}" if prefix else env_slug(key)
+            flatten_summary(child_prefix, child, out)
+        return
+    parsed = parse_u64(value)
+    if parsed is not None:
+        out[prefix] = str(parsed)
+    elif isinstance(value, str) and value.strip():
+        out[prefix] = env_slug(value) or "unknown"
 
 
 def parse_u64(value):
@@ -239,6 +332,7 @@ def main() -> int:
         "local_cache": {"count": 0, "bytes": 0, "durations": []},
         "remote_fetch": {"count": 0, "bytes": 0, "durations": []},
     }
+    session_summaries = []
     for item in records:
         status = item.get("status")
         if item.get("error") is not None:
@@ -252,6 +346,9 @@ def main() -> int:
 
         if item.get("operation") == "blob_prefetch_cycle":
             prefetch_cycles += 1
+
+        if item.get("operation") == "cache_session_summary":
+            session_summaries.append(item)
 
         if item.get("operation") == "cache_ops_record":
             cache_ops_records_total += 1
@@ -322,6 +419,26 @@ def main() -> int:
         f"request_metrics_publish_p95_ms={percentile(by_operation(records, 'cache_finalize_publish'), 95)}"
     )
     print(f"request_metrics_prefetch_cycles={prefetch_cycles}")
+    print(f"request_metrics_cache_session_summaries={len(session_summaries)}")
+    if session_summaries:
+        flattened_summary = {}
+        latest_summary = session_summaries[-1]
+        for section in (
+            "schema",
+            "mode",
+            "adapter",
+            "proxy",
+            "rails",
+            "storage",
+            "oci",
+            "singleflight",
+            "local_cache",
+            "buildkit",
+        ):
+            if section in latest_summary:
+                flatten_summary(section, latest_summary.get(section), flattened_summary)
+        for key in sorted(flattened_summary):
+            print(f"request_metrics_cache_session_{key}={flattened_summary[key]}")
     print(
         f"request_metrics_prefetch_cycle_p95_ms={percentile(by_operation(records, 'blob_prefetch_cycle'), 95)}"
     )

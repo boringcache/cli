@@ -49,6 +49,8 @@ pub(super) async fn build_server_runtime(
     let blob_read_metrics = Arc::new(BlobReadMetrics::new());
     let oci_body_metrics = Arc::new(state::OciBodyMetrics::new());
     let oci_engine_diagnostics = Arc::new(state::OciEngineDiagnostics::new());
+    let oci_negative_cache = Arc::new(state::OciNegativeCache::new());
+    let singleflight_metrics = Arc::new(state::SingleflightMetrics::new());
     let prefetch_metrics = Arc::new(state::PrefetchMetrics::new());
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
     let (prefetch_concurrency, prefetch_from_env) = blob_prefetch_concurrency(dl_concurrency);
@@ -74,6 +76,7 @@ pub(super) async fn build_server_runtime(
     let state = AppState {
         api_client,
         workspace: workspace.clone(),
+        started_at: std::time::Instant::now(),
         runtime_temp_dir,
         kv_blob_temp_dir,
         oci_upload_temp_dir,
@@ -89,6 +92,8 @@ pub(super) async fn build_server_runtime(
         kv_flush_lock: Arc::new(tokio::sync::Mutex::new(())),
         kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
         oci_lookup_inflight: Arc::new(dashmap::DashMap::new()),
+        oci_negative_cache,
+        singleflight_metrics,
         kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_replication_enqueue_deferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),

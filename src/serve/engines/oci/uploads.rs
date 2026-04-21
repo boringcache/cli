@@ -180,6 +180,7 @@ pub(crate) async fn start_upload(
             Some(body_size),
         )
         .await;
+        state.oci_negative_cache.invalidate_blob(name, digest_param);
 
         return Ok(StartUploadOutcome::Completed {
             uuid: session_id,
@@ -409,6 +410,9 @@ pub(crate) async fn put_upload(
         session.finalized_digest = Some(digest_param.clone());
         session.finalized_size = Some(finalized_size);
     }
+    state
+        .oci_negative_cache
+        .invalidate_blob(name, &digest_param);
 
     Ok(PutUploadOutcome::Completed {
         digest: digest_param,
@@ -547,6 +551,7 @@ async fn stage_mounted_blob_session(
             finalized_size: Some(size_bytes),
             created_at: Instant::now(),
         });
+        state.oci_negative_cache.invalidate_blob(name, digest);
         return Ok(true);
     }
 

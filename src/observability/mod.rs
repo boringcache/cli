@@ -1,6 +1,7 @@
 mod request_metrics;
 
 use serde::Serialize;
+use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, OnceLock};
@@ -37,6 +38,26 @@ pub(crate) struct ObservabilityEvent {
     pub cache_entry_id: Option<String>,
     pub error: Option<String>,
     pub details: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rails: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oci: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub singleflight: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_cache: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buildkit: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +132,16 @@ impl ObservabilityEvent {
             cache_entry_id: None,
             error: None,
             details: None,
+            schema: None,
+            mode: None,
+            adapter: None,
+            proxy: None,
+            rails: None,
+            storage: None,
+            oci: None,
+            singleflight: None,
+            local_cache: None,
+            buildkit: None,
         }
     }
 
@@ -148,6 +179,16 @@ impl ObservabilityEvent {
             cache_entry_id: None,
             error: Some(error),
             details: None,
+            schema: None,
+            mode: None,
+            adapter: None,
+            proxy: None,
+            rails: None,
+            storage: None,
+            oci: None,
+            singleflight: None,
+            local_cache: None,
+            buildkit: None,
         }
     }
 
@@ -183,6 +224,66 @@ impl ObservabilityEvent {
             cache_entry_id: None,
             error: None,
             details: Some(details),
+            schema: None,
+            mode: None,
+            adapter: None,
+            proxy: None,
+            rails: None,
+            storage: None,
+            oci: None,
+            singleflight: None,
+            local_cache: None,
+            buildkit: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cache_session_summary(
+        workspace: String,
+        duration_ms: u64,
+        proxy: Value,
+        rails: Value,
+        storage: Value,
+        oci: Value,
+        singleflight: Value,
+        local_cache: Value,
+        buildkit: Value,
+    ) -> Self {
+        let ctx = default_context();
+        Self {
+            ts_ms: now_ms(),
+            run_id: ctx.run_id.clone(),
+            session_id: ctx.session_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            request_id: None,
+            source: "cache_registry",
+            operation: "cache_session_summary",
+            method: "SUMMARY",
+            path: "/_boringcache/session".to_string(),
+            status: None,
+            status_class: None,
+            duration_ms,
+            request_bytes: None,
+            response_bytes: None,
+            batch_index: None,
+            batch_count: None,
+            batch_size: None,
+            retry_count: None,
+            workspace: Some(workspace),
+            tag: None,
+            cache_entry_id: None,
+            error: None,
+            details: None,
+            schema: Some("cache-session-v1"),
+            mode: Some("docker-registry"),
+            adapter: Some("oci"),
+            proxy: Some(proxy),
+            rails: Some(rails),
+            storage: Some(storage),
+            oci: Some(oci),
+            singleflight: Some(singleflight),
+            local_cache: Some(local_cache),
+            buildkit: Some(buildkit),
         }
     }
 
@@ -217,6 +318,13 @@ pub(crate) fn queue_depth() -> u64 {
 
 pub(crate) fn dropped_events_total() -> u64 {
     hub().dropped_events_total()
+}
+
+pub(crate) fn flush_for(timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while queue_depth() > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 struct Hub {

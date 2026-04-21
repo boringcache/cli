@@ -182,9 +182,10 @@ pub(crate) async fn maybe_refresh_published_index_for_lookup(
     }
 
     let flight_key = LOOKUP_REFRESH_FLIGHT_KEY.to_string();
-    match begin_lookup_flight(state, flight_key.clone()) {
+    match begin_lookup_flight(state, flight_key.clone(), "kv-lookup") {
         LookupFlight::Follower(notified) => {
-            if !await_flight("refresh", &flight_key, notified).await {
+            if !await_flight(state, "kv-lookup", &flight_key, notified).await {
+                state.singleflight_metrics.record_takeover("kv-lookup");
                 clear_lookup_flight_entry(state, &flight_key);
                 if should_refresh_published_index_for_lookup(state).await {
                     refresh_published_index_for_lookup_with_timeout(state).await?;

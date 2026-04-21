@@ -13,7 +13,7 @@ use crate::serve::engines::oci::uploads::{find_local_uploaded_blob, has_remote_b
 use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
 use crate::serve::http::oci_route::{insert_digest_etag, insert_header};
-use crate::serve::state::{AppState, BlobLocatorEntry, BlobReadHandle};
+use crate::serve::state::{AppState, BlobLocatorEntry, BlobReadHandle, OciNegativeCacheReason};
 
 const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -94,6 +94,19 @@ pub(crate) async fn get_blob(
         return Ok(blob_response.response);
     }
 
+    if state.oci_negative_cache.contains_blob_locator_miss(
+        &state.workspace,
+        &state.registry_root_tag,
+        &name,
+        &digest,
+    ) {
+        state
+            .oci_engine_diagnostics
+            .record_negative_cache_hit(OciNegativeCacheReason::BlobLocator);
+        state.oci_engine_diagnostics.record_miss("blob-locator");
+        return Err(OciError::blob_unknown(format!("{name}@{digest}")));
+    }
+
     let Some((cache_entry_id, size_bytes, cached_download_url)) = ({
         let locator_start = std::time::Instant::now();
         let locator = state.blob_locator.read().await;
@@ -114,13 +127,34 @@ pub(crate) async fn get_blob(
             )
         })
     }) else {
+        state.oci_negative_cache.insert_blob_locator_miss(
+            &state.workspace,
+            &state.registry_root_tag,
+            &name,
+            &digest,
+        );
+        state
+            .oci_engine_diagnostics
+            .record_negative_cache_insert(OciNegativeCacheReason::BlobLocator);
         state.oci_engine_diagnostics.record_miss("blob-locator");
         return Err(OciError::blob_unknown(format!("{name}@{digest}")));
     };
 
     if method == Method::HEAD {
+        let mut negative_cache_hit = false;
         let blob_exists = if cached_download_url.is_some() {
             true
+        } else if state.oci_negative_cache.contains_remote_blob_miss(
+            &state.workspace,
+            &state.registry_root_tag,
+            &name,
+            &digest,
+        ) {
+            negative_cache_hit = true;
+            state
+                .oci_engine_diagnostics
+                .record_negative_cache_hit(OciNegativeCacheReason::RemoteBlob);
+            false
         } else {
             match has_remote_blob(&state, &digest).await {
                 Ok(exists) => exists,
@@ -136,10 +170,34 @@ pub(crate) async fn get_blob(
             }
         };
         if !blob_exists {
+            if !negative_cache_hit {
+                state.oci_negative_cache.insert_remote_blob_miss(
+                    &state.workspace,
+                    &state.registry_root_tag,
+                    &name,
+                    &digest,
+                );
+                state
+                    .oci_engine_diagnostics
+                    .record_negative_cache_insert(OciNegativeCacheReason::RemoteBlob);
+            }
             state.oci_engine_diagnostics.record_miss("remote-blob");
             return Err(OciError::blob_unknown(format!("{name}@{digest}")));
         }
         return blob_head_response(&digest, size_bytes);
+    }
+
+    if state.oci_negative_cache.contains_remote_blob_miss(
+        &state.workspace,
+        &state.registry_root_tag,
+        &name,
+        &digest,
+    ) {
+        state
+            .oci_engine_diagnostics
+            .record_negative_cache_hit(OciNegativeCacheReason::RemoteBlob);
+        state.oci_engine_diagnostics.record_miss("remote-blob");
+        return Err(OciError::blob_unknown(format!("{name}@{digest}")));
     }
 
     if matches!(
@@ -162,7 +220,24 @@ pub(crate) async fn get_blob(
     };
     let flight_key = format!("blob:{digest}");
     loop {
-        match begin_flight(&state.oci_lookup_inflight, flight_key.clone()) {
+        if state.oci_negative_cache.contains_remote_blob_miss(
+            &state.workspace,
+            &state.registry_root_tag,
+            &name,
+            &digest,
+        ) {
+            state
+                .oci_engine_diagnostics
+                .record_negative_cache_hit(OciNegativeCacheReason::RemoteBlob);
+            state.oci_engine_diagnostics.record_miss("remote-blob");
+            return Err(OciError::blob_unknown(format!("{name}@{digest}")));
+        }
+        match begin_flight(
+            &state.oci_lookup_inflight,
+            flight_key.clone(),
+            &state.singleflight_metrics,
+            "oci-blob",
+        ) {
             Flight::Leader(_guard) => {
                 if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
                     let blob_response =
@@ -232,15 +307,29 @@ pub(crate) async fn get_blob(
                 return Ok(blob_response.response);
             }
             Flight::Follower(notified) => {
-                if !await_flight("oci-blob", &flight_key, notified).await {
+                if !await_flight(
+                    &state.singleflight_metrics,
+                    "oci-blob",
+                    &flight_key,
+                    notified,
+                )
+                .await
+                {
+                    state.singleflight_metrics.record_takeover("oci-blob");
                     clear_flight_entry(&state.oci_lookup_inflight, &flight_key);
                 }
                 if let Some(handle) = state.blob_read_cache.get_handle(&digest).await {
+                    state
+                        .singleflight_metrics
+                        .record_post_flight_local_hit("oci-blob");
                     let blob_response =
                         local_blob_response(&method, headers, &digest, &handle).await?;
                     record_local_blob_response(&state, &blob_response, request_started_at);
                     return Ok(blob_response.response);
                 }
+                state
+                    .singleflight_metrics
+                    .record_post_flight_retry_miss("oci-blob");
             }
         }
     }
@@ -619,6 +708,22 @@ pub(crate) async fn resolve_oci_download_url(
     name: &str,
     digest: &str,
 ) -> Result<String, OciError> {
+    if state.oci_negative_cache.contains_download_url_miss(
+        &state.workspace,
+        &state.registry_root_tag,
+        name,
+        digest,
+        cache_entry_id,
+    ) {
+        state
+            .oci_engine_diagnostics
+            .record_negative_cache_hit(OciNegativeCacheReason::DownloadUrl);
+        state.oci_engine_diagnostics.record_miss("download-url");
+        return Err(OciError::blob_unknown(format!(
+            "No download URL for {digest}"
+        )));
+    }
+
     let url = crate::serve::blob_download_urls::resolve_verified_blob_download_url(
         state,
         cache_entry_id,
@@ -628,6 +733,16 @@ pub(crate) async fn resolve_oci_download_url(
     .await
     .map_err(|error| OciError::internal(format!("Failed to get blob download URL: {error}")))?
     .ok_or_else(|| {
+        state.oci_negative_cache.insert_download_url_miss(
+            &state.workspace,
+            &state.registry_root_tag,
+            name,
+            digest,
+            cache_entry_id,
+        );
+        state
+            .oci_engine_diagnostics
+            .record_negative_cache_insert(OciNegativeCacheReason::DownloadUrl);
         state.oci_engine_diagnostics.record_miss("download-url");
         OciError::blob_unknown(format!("No download URL for {digest}"))
     })?;
@@ -683,6 +798,7 @@ async fn download_oci_blob_to_cache(
     let max_attempts = OCI_BLOB_DOWNLOAD_MAX_ATTEMPTS + usize::from(from_cached_url);
     let mut last_error = None;
     for attempt in 1..=max_attempts {
+        let storage_get_started_at = std::time::Instant::now();
         let response = match tokio::time::timeout(
             OCI_TRANSFER_CALL_TIMEOUT,
             state.api_client.transfer_client().get(&download_url).send(),
@@ -733,6 +849,20 @@ async fn download_oci_blob_to_cache(
             continue;
         }
 
+        if !from_cached_url && response.status() == StatusCode::NOT_FOUND {
+            state.oci_negative_cache.insert_remote_blob_miss(
+                &state.workspace,
+                &state.registry_root_tag,
+                name,
+                digest,
+            );
+            state
+                .oci_engine_diagnostics
+                .record_negative_cache_insert(OciNegativeCacheReason::RemoteBlob);
+            state.oci_engine_diagnostics.record_miss("remote-blob");
+            return Err(OciError::blob_unknown(format!("{name}@{digest}")));
+        }
+
         if is_retryable_oci_blob_storage_status(response.status()) && attempt < max_attempts {
             let message = format!("Blob storage returned {}", response.status());
             log_oci_blob_download_retry(digest, attempt, max_attempts, &message);
@@ -756,6 +886,9 @@ async fn download_oci_blob_to_cache(
         let mut stream = response.bytes_stream();
         let mut hasher = Sha256::new();
         let mut written = 0u64;
+        let mut first_chunk_ms = None;
+        let mut spool_write_duration_ms = 0u64;
+        let body_started_at = std::time::Instant::now();
         let mut stream_error = None;
         loop {
             let next_chunk = stream.next().await;
@@ -769,10 +902,16 @@ async fn download_oci_blob_to_cache(
                     break;
                 }
             };
+            if first_chunk_ms.is_none() {
+                first_chunk_ms = Some(storage_get_started_at.elapsed().as_millis() as u64);
+            }
+            let write_started_at = std::time::Instant::now();
             if let Err(error) = file.write_all(&chunk).await {
                 stream_error = Some(format!("Failed to write temp blob file: {error}"));
                 break;
             }
+            spool_write_duration_ms = spool_write_duration_ms
+                .saturating_add(write_started_at.elapsed().as_millis() as u64);
             hasher.update(&chunk);
             written = written.saturating_add(chunk.len() as u64);
         }
@@ -790,9 +929,19 @@ async fn download_oci_blob_to_cache(
             .await
             .map_err(|e| OciError::internal(format!("Failed to flush temp blob file: {e}")))?;
 
+        let verify_started_at = std::time::Instant::now();
         let actual_digest = format!("sha256:{:x}", hasher.finalize());
+        let verify_duration_ms = verify_started_at.elapsed().as_millis() as u64;
+        state.oci_engine_diagnostics.record_storage_get(
+            written,
+            first_chunk_ms.unwrap_or_else(|| storage_get_started_at.elapsed().as_millis() as u64),
+            body_started_at.elapsed().as_millis() as u64,
+            spool_write_duration_ms,
+            verify_duration_ms,
+        );
         if actual_digest != digest {
             let _ = tokio::fs::remove_file(&temp_path).await;
+            state.oci_engine_diagnostics.record_digest_verify_failure();
             return Err(OciError::digest_invalid(format!(
                 "Downloaded blob digest mismatch for {digest}: got {actual_digest}"
             )));
@@ -821,13 +970,27 @@ async fn download_oci_blob_to_cache(
             }
         }
 
-        if written > 0
-            && let Err(error) = state
+        if written > 0 {
+            let promote_started_at = std::time::Instant::now();
+            match state
                 .blob_read_cache
                 .promote(digest, &temp_path, written)
                 .await
-        {
-            log::warn!("OCI blob read cache promote failed for {digest}: {error}");
+            {
+                Ok(_) => {
+                    state.oci_engine_diagnostics.record_cache_promotion(
+                        promote_started_at.elapsed().as_millis() as u64,
+                        true,
+                    );
+                }
+                Err(error) => {
+                    state.oci_engine_diagnostics.record_cache_promotion(
+                        promote_started_at.elapsed().as_millis() as u64,
+                        false,
+                    );
+                    log::warn!("OCI blob read cache promote failed for {digest}: {error}");
+                }
+            }
         }
 
         if let Some(handle) = state.blob_read_cache.get_handle(digest).await {

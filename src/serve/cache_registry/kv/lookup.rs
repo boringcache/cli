@@ -245,14 +245,25 @@ pub(crate) async fn get_or_head_kv_object_inner(
     }
 
     kv_trace(namespace, &scoped_key, "lookup-flight-begin");
-    let lookup_result = match begin_lookup_flight(state, miss_key.clone()) {
+    let lookup_result = match begin_lookup_flight(state, miss_key.clone(), "kv-lookup") {
         LookupFlight::Follower(notified) => {
             kv_trace(namespace, &scoped_key, "lookup-flight-follower-wait");
-            if !await_flight("kv", &miss_key, notified).await {
+            if !await_flight(state, "kv-lookup", &miss_key, notified).await {
+                state.singleflight_metrics.record_takeover("kv-lookup");
                 clear_lookup_flight_entry(state, &miss_key);
             }
             kv_trace(namespace, &scoped_key, "lookup-flight-follower-after-wait");
-            lookup_published_blob(state, &scoped_key).await
+            let result = lookup_published_blob(state, &scoped_key).await;
+            if result.is_some() {
+                state
+                    .singleflight_metrics
+                    .record_post_flight_local_hit("kv-lookup");
+            } else {
+                state
+                    .singleflight_metrics
+                    .record_post_flight_retry_miss("kv-lookup");
+            }
+            result
         }
         LookupFlight::Leader(_lookup_guard) => {
             if use_miss_cache && is_recent_kv_miss(state, &miss_key) {
@@ -389,12 +400,22 @@ pub(crate) async fn resolve_kv_entries_inner(
     }
 
     let sizes_key = lookup_flight_key_for_sizes(&scoped_keys);
-    match begin_lookup_flight(state, sizes_key.clone()) {
+    match begin_lookup_flight(state, sizes_key.clone(), "kv-size") {
         LookupFlight::Follower(notified) => {
-            if !await_flight("sizes", &sizes_key, notified).await {
+            if !await_flight(state, "kv-size", &sizes_key, notified).await {
+                state.singleflight_metrics.record_takeover("kv-size");
                 clear_lookup_flight_entry(state, &sizes_key);
             }
             populate_sizes_from_published(state, &scoped_keys, &mut sizes).await;
+            if sizes.len() == scoped_keys.len() {
+                state
+                    .singleflight_metrics
+                    .record_post_flight_local_hit("kv-size");
+            } else {
+                state
+                    .singleflight_metrics
+                    .record_post_flight_retry_miss("kv-size");
+            }
             Ok(sizes)
         }
         LookupFlight::Leader(_lookup_flight) => {

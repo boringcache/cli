@@ -16,6 +16,7 @@ mod blob_read_cache;
 mod kv_pending;
 mod kv_published_index;
 mod metrics;
+mod oci_negative_cache;
 mod upload_sessions;
 
 pub use blob_locator::*;
@@ -23,6 +24,7 @@ pub use blob_read_cache::*;
 pub use kv_pending::*;
 pub use kv_published_index::*;
 pub use metrics::*;
+pub use oci_negative_cache::*;
 pub use upload_sessions::*;
 
 pub use crate::serve::engines::oci::manifest_cache::OciManifestCacheEntry;
@@ -35,6 +37,7 @@ pub fn diagnostics_enabled() -> bool {
 pub struct AppState {
     pub api_client: ApiClient,
     pub workspace: String,
+    pub started_at: Instant,
     pub runtime_temp_dir: PathBuf,
     pub kv_blob_temp_dir: PathBuf,
     pub oci_upload_temp_dir: PathBuf,
@@ -50,6 +53,8 @@ pub struct AppState {
     pub kv_flush_lock: Arc<Mutex<()>>,
     pub kv_lookup_inflight: Arc<DashMap<String, Arc<Notify>>>,
     pub oci_lookup_inflight: Arc<DashMap<String, Arc<Notify>>>,
+    pub oci_negative_cache: Arc<OciNegativeCache>,
+    pub singleflight_metrics: Arc<SingleflightMetrics>,
     pub kv_last_put: Arc<AtomicU64>,
     pub kv_backlog_rejects: Arc<AtomicU64>,
     pub kv_replication_enqueue_deferred: Arc<AtomicU64>,

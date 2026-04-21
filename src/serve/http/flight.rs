@@ -2,6 +2,8 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+use crate::serve::state::SingleflightMetrics;
+
 pub(crate) struct FlightGuard {
     key: String,
     notify: Arc<Notify>,
@@ -24,6 +26,7 @@ const FLIGHT_WAIT_WARN_THRESHOLD: std::time::Duration = std::time::Duration::fro
 const FLIGHT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(crate) async fn await_flight(
+    metrics: &SingleflightMetrics,
     kind: &str,
     key: &str,
     notified: std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>,
@@ -32,6 +35,7 @@ pub(crate) async fn await_flight(
     match tokio::time::timeout(FLIGHT_WAIT_TIMEOUT, notified).await {
         Ok(()) => {
             let elapsed = started.elapsed();
+            metrics.record_follower_wait(kind, elapsed.as_millis() as u64, true);
             if elapsed >= FLIGHT_WAIT_WARN_THRESHOLD {
                 log::warn!(
                     "flight follower waited {}ms: kind={} key={}",
@@ -43,6 +47,7 @@ pub(crate) async fn await_flight(
             true
         }
         Err(_) => {
+            metrics.record_follower_wait(kind, started.elapsed().as_millis() as u64, false);
             log::warn!(
                 "flight follower timed out after {}ms: kind={} key={}",
                 started.elapsed().as_millis(),
@@ -54,14 +59,21 @@ pub(crate) async fn await_flight(
     }
 }
 
-pub(crate) fn begin_flight(inflight: &Arc<DashMap<String, Arc<Notify>>>, key: String) -> Flight {
+pub(crate) fn begin_flight(
+    inflight: &Arc<DashMap<String, Arc<Notify>>>,
+    key: String,
+    metrics: &SingleflightMetrics,
+    kind: &str,
+) -> Flight {
     match inflight.entry(key.clone()) {
         dashmap::mapref::entry::Entry::Occupied(existing) => {
+            metrics.record_follower(kind);
             let mut notified = Box::pin(existing.get().clone().notified_owned());
             notified.as_mut().enable();
             Flight::Follower(notified)
         }
         dashmap::mapref::entry::Entry::Vacant(entry) => {
+            metrics.record_leader(kind);
             let notify = Arc::new(Notify::new());
             entry.insert(notify.clone());
             Flight::Leader(FlightGuard {

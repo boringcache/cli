@@ -59,16 +59,23 @@ pub(crate) async fn resolve_blob_url(
     }
 
     let flight_key = format!("url:{}", blob.digest);
-    match begin_lookup_flight(state, flight_key.clone()) {
+    match begin_lookup_flight(state, flight_key.clone(), "kv-url") {
         LookupFlight::Follower(notified) => {
-            if !await_flight("url", &flight_key, notified).await {
+            if !await_flight(state, "kv-url", &flight_key, notified).await {
+                state.singleflight_metrics.record_takeover("kv-url");
                 clear_lookup_flight_entry(state, &flight_key);
             }
             let published = state.kv_published_index.read().await;
             if let Some(url) = published.download_url(&blob.digest) {
+                state
+                    .singleflight_metrics
+                    .record_post_flight_local_hit("kv-url");
                 return Ok((url.to_string(), true));
             }
             drop(published);
+            state
+                .singleflight_metrics
+                .record_post_flight_retry_miss("kv-url");
             let resolved = resolve_download_url(state, cache_entry_id, blob).await?;
             {
                 let mut published = state.kv_published_index.write().await;
@@ -319,7 +326,7 @@ async fn download_blob_to_cache_internal(
     let flight_key = format!("dl:{}", blob.digest);
     let mut attempted_takeover = false;
     loop {
-        match begin_lookup_flight(state, flight_key.clone()) {
+        match begin_lookup_flight(state, flight_key.clone(), "kv-download") {
             LookupFlight::Leader(_dl_guard) => {
                 if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
                     emit_blob_read_elapsed_metric(
@@ -338,8 +345,12 @@ async fn download_blob_to_cache_internal(
                 return Ok(cache_handle);
             }
             LookupFlight::Follower(notified) => {
-                let flight_completed = await_flight("dl", &flight_key, notified).await;
+                let flight_completed =
+                    await_flight(state, "kv-download", &flight_key, notified).await;
                 if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
+                    state
+                        .singleflight_metrics
+                        .record_post_flight_local_hit("kv-download");
                     emit_blob_read_elapsed_metric(
                         state,
                         cache_entry_id,
@@ -362,6 +373,12 @@ async fn download_blob_to_cache_internal(
                     )));
                 }
 
+                if !flight_completed {
+                    state.singleflight_metrics.record_takeover("kv-download");
+                }
+                state
+                    .singleflight_metrics
+                    .record_post_flight_retry_miss("kv-download");
                 clear_lookup_flight_entry(state, &flight_key);
                 attempted_takeover = true;
             }

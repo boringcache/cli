@@ -110,6 +110,7 @@ pub async fn run_server(
 
     eprintln!("Shutdown: flushing pending KV entries");
     shutdown::flush_pending_on_shutdown(&state).await;
+    shutdown::emit_cache_session_summary(&state);
     shutdown::cleanup_runtime_temp_dir(&state).await;
 
     Ok(())
@@ -175,6 +176,7 @@ pub async fn start_server_background(
 
         eprintln!("Shutdown: flushing pending KV entries");
         shutdown::flush_pending_on_shutdown(&server_state).await;
+        shutdown::emit_cache_session_summary(&server_state);
         shutdown::cleanup_runtime_temp_dir(&server_state).await;
         Ok(())
     });

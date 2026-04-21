@@ -269,6 +269,7 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/serve/state/kv_pending.rs`
 - `src/serve/state/kv_published_index.rs`
 - `src/serve/state/metrics.rs`
+- `src/serve/state/oci_negative_cache.rs`
 - `src/serve/state/upload_sessions.rs`
 - `src/serve/cache_registry/mod.rs`
 - `src/serve/cache_registry/bazel.rs`

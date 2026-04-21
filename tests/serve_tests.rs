@@ -90,6 +90,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
     let state = AppState {
         api_client,
         workspace: "org/repo".to_string(),
+        started_at: Instant::now(),
         runtime_temp_dir: temp_home.path().join("proxy-runtime"),
         kv_blob_temp_dir: temp_home.path().join("proxy-runtime/kv-blobs"),
         oci_upload_temp_dir: temp_home.path().join("proxy-runtime/oci-uploads"),
@@ -105,6 +106,8 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         kv_flush_lock: Arc::new(Mutex::new(())),
         kv_lookup_inflight: Arc::new(dashmap::DashMap::new()),
         oci_lookup_inflight: Arc::new(dashmap::DashMap::new()),
+        oci_negative_cache: Arc::new(boring_cache_cli::serve::state::OciNegativeCache::new()),
+        singleflight_metrics: Arc::new(boring_cache_cli::serve::state::SingleflightMetrics::new()),
         kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_replication_enqueue_deferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1915,6 +1918,60 @@ async fn test_manifest_miss_returns_404() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(parsed["errors"][0]["code"], "MANIFEST_UNKNOWN");
+}
+
+#[tokio::test]
+async fn test_manifest_negative_cache_suppresses_repeated_restore_miss() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let tag = ref_tag("my-cache", "missing");
+    let restore_body = json!([{
+        "tag": tag,
+        "status": "miss",
+    }]);
+
+    let restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(restore_body.to_string())
+        .create_async()
+        .await;
+
+    for _ in 0..2 {
+        let response = tower::ServiceExt::oneshot(
+            build_router(state.clone()),
+            Request::builder()
+                .uri("/v2/my-cache/manifests/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    restore_mock.assert_async().await;
+    let diagnostics = state
+        .oci_engine_diagnostics
+        .metadata_hints(state.oci_hydration_policy.as_str());
+    assert_eq!(
+        diagnostics
+            .get("oci_engine_negative_cache_insert_manifest_ref")
+            .map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        diagnostics
+            .get("oci_engine_negative_cache_hit_manifest_ref")
+            .map(String::as_str),
+        Some("1")
+    );
 }
 
 #[tokio::test]

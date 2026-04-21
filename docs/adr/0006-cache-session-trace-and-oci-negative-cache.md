@@ -222,6 +222,19 @@ Invalidate negative cache entries when:
 7. Teach `ci/e2e/request-metrics-summary.py` to promote the session summary fields into artifacts.
 8. Only then evaluate adaptive concurrency.
 
+## Implementation Progress
+
+The first CLI baseline is implemented:
+
+- shared singleflight metrics record leaders, followers, follower wait percentiles, timeouts, takeovers, and post-flight local-hit/retry-miss counts for OCI and KV lookup/download helpers;
+- `AppState` owns a short-lived OCI negative cache for manifest-ref, blob-locator, download-url, and remote-blob misses;
+- confirmed OCI miss paths insert negative-cache entries, and locator population, upload finalize, mount reuse, and manifest publish invalidate relevant entries;
+- OCI blob hydrate-then-serve records storage GET bytes, first body wait, body duration, local spool write duration, digest verification duration/failure, and cache-promotion timing/failure;
+- proxy shutdown emits a `cache_session_summary` JSONL event with proxy, storage, OCI, singleflight, local-cache, and BuildKit sections;
+- `ci/e2e/request-metrics-summary.py` promotes session summary fields plus new status snapshot keys into artifact env output.
+
+Remaining trace depth belongs in later passes: Rails p50/p95 rollups from request metrics, full upload-session materialization counters from ADR 0005, richer BuildKit enrichment from the action/harness, and metadata-only Docker E2E artifact validation.
+
 ## Acceptance Gates
 
 Before claiming trace coverage:

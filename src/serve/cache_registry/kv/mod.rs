@@ -275,6 +275,7 @@ mod tests {
     use crate::tag_utils::TagResolver;
     use crate::test_env;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
     use tokio::sync::{Mutex as TokioMutex, RwLock};
 
     #[tokio::test]
@@ -291,6 +292,7 @@ mod tests {
         let state = AppState {
             api_client,
             workspace: "org/repo".to_string(),
+            started_at: Instant::now(),
             runtime_temp_dir: runtime_temp_dir.clone(),
             kv_blob_temp_dir: runtime_temp_dir.join("kv-blobs"),
             oci_upload_temp_dir: runtime_temp_dir.join("oci-uploads"),
@@ -306,6 +308,10 @@ mod tests {
             kv_flush_lock: std::sync::Arc::new(TokioMutex::new(())),
             kv_lookup_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
             oci_lookup_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
+            oci_negative_cache: std::sync::Arc::new(crate::serve::state::OciNegativeCache::new()),
+            singleflight_metrics: std::sync::Arc::new(
+                crate::serve::state::SingleflightMetrics::new(),
+            ),
             kv_last_put: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             kv_backlog_rejects: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             kv_replication_enqueue_deferred: std::sync::Arc::new(

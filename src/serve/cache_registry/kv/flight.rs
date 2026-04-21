@@ -29,6 +29,7 @@ const FLIGHT_WAIT_WARN_THRESHOLD: std::time::Duration = std::time::Duration::fro
 const FLIGHT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub(crate) async fn await_flight(
+    state: &AppState,
     kind: &str,
     key: &str,
     notified: std::pin::Pin<Box<tokio::sync::futures::OwnedNotified>>,
@@ -37,6 +38,9 @@ pub(crate) async fn await_flight(
     match tokio::time::timeout(FLIGHT_WAIT_TIMEOUT, notified).await {
         Ok(()) => {
             let elapsed = started.elapsed();
+            state
+                .singleflight_metrics
+                .record_follower_wait(kind, elapsed.as_millis() as u64, true);
             if elapsed >= FLIGHT_WAIT_WARN_THRESHOLD {
                 log::warn!(
                     "flight follower waited {}ms: kind={} key={}",
@@ -48,6 +52,11 @@ pub(crate) async fn await_flight(
             true
         }
         Err(_) => {
+            state.singleflight_metrics.record_follower_wait(
+                kind,
+                started.elapsed().as_millis() as u64,
+                false,
+            );
             log::warn!(
                 "flight follower timed out after {}ms: kind={} key={}",
                 started.elapsed().as_millis(),
@@ -59,14 +68,16 @@ pub(crate) async fn await_flight(
     }
 }
 
-pub(crate) fn begin_lookup_flight(state: &AppState, key: String) -> LookupFlight {
+pub(crate) fn begin_lookup_flight(state: &AppState, key: String, kind: &str) -> LookupFlight {
     match state.kv_lookup_inflight.entry(key.clone()) {
         dashmap::mapref::entry::Entry::Occupied(existing) => {
+            state.singleflight_metrics.record_follower(kind);
             let mut notified = Box::pin(existing.get().clone().notified_owned());
             notified.as_mut().enable();
             LookupFlight::Follower(notified)
         }
         dashmap::mapref::entry::Entry::Vacant(entry) => {
+            state.singleflight_metrics.record_leader(kind);
             let notify = Arc::new(tokio::sync::Notify::new());
             entry.insert(notify.clone());
             LookupFlight::Leader(LookupFlightGuard {
