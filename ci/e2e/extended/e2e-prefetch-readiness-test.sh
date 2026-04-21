@@ -29,6 +29,8 @@ VERIFY_CONCURRENCY="${VERIFY_CONCURRENCY:-64}"
 BUDGET_PREFETCH_FAILURES_MAX="${BUDGET_PREFETCH_FAILURES_MAX:-0}"
 BUDGET_VERIFY_FAILURES_MAX="${BUDGET_VERIFY_FAILURES_MAX:-0}"
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
+REMOTE_BLOB_URL_VERIFY_ATTEMPTS="${REMOTE_BLOB_URL_VERIFY_ATTEMPTS:-30}"
+REMOTE_BLOB_URL_VERIFY_SLEEP_SECS="${REMOTE_BLOB_URL_VERIFY_SLEEP_SECS:-2}"
 
 PROXY_PID=""
 TAG=""
@@ -131,6 +133,117 @@ wait_for_publish_settled() {
   echo "ERROR: timed out waiting for publish settled (${SEED_FLUSH_TIMEOUT_SECS}s)"
   tail -n 200 "$PROXY_LOG" || true
   exit 1
+}
+
+write_blob_download_url_request() {
+  local digests_file="$1"
+  local blob_size_bytes="$2"
+  local cache_entry_id="$3"
+  local request_file="$4"
+
+  python3 - "$digests_file" "$blob_size_bytes" "$cache_entry_id" >"$request_file" <<'PY'
+import json
+import sys
+
+digests_file, blob_size_bytes, cache_entry_id = sys.argv[1:]
+with open(digests_file, encoding="utf-8") as handle:
+    digests = [line.strip() for line in handle if line.strip()]
+
+json.dump({
+    "cache_entry_id": cache_entry_id,
+    "verify_storage": True,
+    "blobs": [
+        {"digest": digest, "size_bytes": int(blob_size_bytes)}
+        for digest in digests
+    ],
+}, sys.stdout)
+PY
+}
+
+blob_download_url_count() {
+  local response_file="$1"
+
+  python3 - "$response_file" <<'PY'
+import json
+import sys
+
+try:
+    body = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    print("0 0")
+    raise SystemExit(0)
+
+download_urls = body.get("download_urls") or []
+missing = body.get("missing") or []
+print(f"{len(download_urls)} {len(missing)}")
+PY
+}
+
+wait_for_remote_blob_download_urls() {
+  local cache_entry_id="$1"
+  local digests_file="$2"
+  local blob_size_bytes="$3"
+  local output_dir="$4"
+  local attempts="${5:-$REMOTE_BLOB_URL_VERIFY_ATTEMPTS}"
+  local sleep_secs="${6:-$REMOTE_BLOB_URL_VERIFY_SLEEP_SECS}"
+  local auth_token namespace_slug workspace_slug endpoint request_file response_file stderr_file expected_count
+  local attempt status resolved missing
+
+  auth_token="$(resolve_restore_capable_token || true)"
+  if [[ -z "$auth_token" ]]; then
+    echo "ERROR: restore-capable token unavailable for blob URL visibility check"
+    return 1
+  fi
+  if [[ "$WORKSPACE" != */* ]]; then
+    echo "ERROR: workspace must be namespace/name for blob URL visibility check"
+    return 1
+  fi
+
+  mkdir -p "$output_dir"
+  namespace_slug="$(workspace_namespace_slug "$WORKSPACE")"
+  workspace_slug="$(workspace_name_slug "$WORKSPACE")"
+  endpoint="${BORINGCACHE_API_URL}/v2/workspaces/${namespace_slug}/${workspace_slug}/caches/blobs/download-urls"
+  request_file="${output_dir}/blob-download-urls-request.json"
+  response_file="${output_dir}/blob-download-urls-response.json"
+  stderr_file="${output_dir}/blob-download-urls.stderr.txt"
+  expected_count="$(wc -l < "$digests_file" | tr -d ' ')"
+
+  write_blob_download_url_request "$digests_file" "$blob_size_bytes" "$cache_entry_id" "$request_file"
+
+  for attempt in $(seq 1 "$attempts"); do
+    status="$(
+      curl -sS \
+        -X POST \
+        -H "Authorization: Bearer ${auth_token}" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        --data-binary "@${request_file}" \
+        -o "$response_file" \
+        -w "%{http_code}" \
+        "$endpoint" 2>"$stderr_file" || printf '000'
+    )"
+    if [[ "$status" == "200" ]]; then
+      read -r resolved missing <<<"$(blob_download_url_count "$response_file")"
+      echo "Remote blob URL check: resolved=${resolved}/${expected_count} missing=${missing} file=${response_file}"
+      if (( resolved >= expected_count )); then
+        return 0
+      fi
+    else
+      echo "WARNING: blob URL check returned ${status} (attempt ${attempt}/${attempts})"
+      cat "$stderr_file" || true
+    fi
+
+    if (( attempt < attempts )); then
+      echo "  waiting for remote blob URLs to verify... (${attempt}/${attempts})"
+      sleep "$sleep_secs"
+    fi
+  done
+
+  echo "ERROR: remote blob download URLs did not converge for ${cache_entry_id}"
+  if [[ -f "$response_file" ]]; then
+    cat "$response_file" || true
+  fi
+  return 1
 }
 
 stop_proxy() {
@@ -249,6 +362,17 @@ if ! verify_remote_tag_visible "$BINARY" "$WORKSPACE" "$TAG" "$LOG_DIR" "$BUDGET
 fi
 REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"
 REMOTE_TAG_MISSES="${REMOTE_TAG_CHECK_MISSES:-0}"
+REMOTE_CACHE_ENTRY_ID="${REMOTE_TAG_POINTER_CACHE_ENTRY_ID:-}"
+if [[ -z "$REMOTE_CACHE_ENTRY_ID" ]]; then
+  echo "ERROR: remote tag pointer did not expose a cache entry id for ${TAG}"
+  exit 1
+fi
+
+echo ""
+echo "=== Phase 1c: Wait for remote blob download URLs ==="
+if ! wait_for_remote_blob_download_urls "$REMOTE_CACHE_ENTRY_ID" "$DIGESTS_FILE" "$BLOB_SIZE_BYTES" "$LOG_DIR/blob-url-check"; then
+  exit 1
+fi
 
 echo ""
 echo "=== Phase 2: Restart proxy on fresh disk cache, verify readiness gates on prefetch ==="

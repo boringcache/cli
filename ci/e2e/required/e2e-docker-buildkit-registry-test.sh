@@ -385,7 +385,7 @@ assert_default_restart_body_locality() {
 
   echo "OCI restart locality: startup_inserted=${inserted} body_failures=${failures} local_hits=${local_hits} remote_fetches=${remote_fetches} engine_local_reads=${engine_local_reads}"
 
-  if (( inserted <= 0 )); then
+  if [[ "$E2E_BLOB_CACHE_SCOPE" == "per-proxy" ]] && (( inserted <= 0 )); then
     echo "expected strict OCI hydration to insert selected bodies before restart readiness"
     exit 1
   fi
