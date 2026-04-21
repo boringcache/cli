@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use super::error::OciError;
-use crate::api::models::cache::SaveRequest;
 use crate::serve::state::{AppState, digest_tag, ref_tag_for_input};
 use crate::tag_utils::TagResolver;
 
@@ -75,15 +74,6 @@ pub(crate) struct AliasBinding {
     pub write_scope_tag: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct AliasTagManifest {
-    pub manifest_root_digest: String,
-    pub manifest_size: u64,
-    pub blob_count: u64,
-    pub blob_total_size_bytes: u64,
-    pub total_size_bytes: u64,
-}
-
 pub(crate) fn alias_tags_for_manifest(
     primary_tag: &str,
     manifest_digest: &str,
@@ -124,65 +114,17 @@ pub(crate) async fn bind_alias_tag(
     state: &AppState,
     alias_tag: &str,
     write_scope_tag: Option<&str>,
-    manifest: &AliasTagManifest,
+    cache_entry_id: &str,
 ) -> Result<(), String> {
-    let alias_request = SaveRequest {
-        tag: alias_tag.to_string(),
-        write_scope_tag: write_scope_tag.map(ToOwned::to_owned),
-        manifest_root_digest: manifest.manifest_root_digest.clone(),
-        compression_algorithm: "zstd".to_string(),
-        storage_mode: Some("cas".to_string()),
-        blob_count: Some(manifest.blob_count),
-        blob_total_size_bytes: Some(manifest.blob_total_size_bytes),
-        cas_layout: Some("oci-v1".to_string()),
-        manifest_format_version: Some(1),
-        total_size_bytes: manifest.total_size_bytes,
-        uncompressed_size: None,
-        compressed_size: None,
-        file_count: Some(manifest.blob_count.min(u32::MAX as u64) as u32),
-        expected_manifest_digest: Some(manifest.manifest_root_digest.clone()),
-        expected_manifest_size: Some(manifest.manifest_size),
-        force: None,
-        use_multipart: None,
-        ci_provider: state.proxy_metadata_hint("ci_provider"),
-        ci_run_uid: state.proxy_metadata_hint("ci_run_uid"),
-        ci_run_attempt: state.proxy_metadata_hint("ci_run_attempt"),
-        ci_ref_type: state.proxy_metadata_hint("ci_ref_type"),
-        ci_ref_name: state.proxy_metadata_hint("ci_ref_name"),
-        ci_default_branch: state.proxy_metadata_hint("ci_default_branch"),
-        ci_pr_number: state.proxy_metadata_hint_u32("ci_pr_number"),
-        ci_commit_sha: state.proxy_metadata_hint("ci_commit_sha"),
-        ci_run_started_at: state.proxy_metadata_hint("ci_run_started_at"),
-        encrypted: None,
-        encryption_algorithm: None,
-        encryption_recipient_hint: None,
-    };
-
-    let response = state
-        .api_client
-        .save_entry(&state.workspace, &alias_request)
-        .await
-        .map_err(|e| format!("save_entry failed: {e}"))?;
-
-    let confirm_request = crate::api::models::cache::ConfirmRequest {
-        manifest_digest: manifest.manifest_root_digest.clone(),
-        manifest_size: manifest.manifest_size,
-        manifest_etag: None,
-        archive_size: None,
-        archive_etag: None,
-        blob_count: Some(manifest.blob_count),
-        blob_total_size_bytes: Some(manifest.blob_total_size_bytes),
-        file_count: Some(manifest.blob_count.min(u32::MAX as u64) as u32),
-        uncompressed_size: None,
-        compressed_size: None,
-        storage_mode: Some("cas".to_string()),
-        tag: Some(alias_tag.to_string()),
-        write_scope_tag: write_scope_tag.map(ToOwned::to_owned),
-    };
-
     match state
         .api_client
-        .confirm_with_retry(&state.workspace, &response.cache_entry_id, &confirm_request)
+        .publish_ready_tag(
+            &state.workspace,
+            alias_tag,
+            cache_entry_id,
+            write_scope_tag.map(ToOwned::to_owned),
+            "cas",
+        )
         .await
     {
         Ok(response) => {

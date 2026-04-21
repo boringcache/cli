@@ -278,6 +278,8 @@ Follow-up commits changed that status:
 
 The remaining failed E2E leg is `Registry / Prefetch Smoke`. It stopped after the remote tag hit check because the tag-pointer helper did not expose a `cache_entry_id` before the added blob URL convergence check. The corrected proof should remove that publish-readiness check and prove fresh-cache prefetch/read behavior directly. If receipts cannot make the root immediately readable, publish should fail and surface the receipt commit error instead of sleeping for async verification. Normal retries for API timeouts, transient network failures, or stale download URLs remain valid.
 
+The subsequent Cross-Runner Verify failure after the web deploy was not evidence for blob download lag by itself: the seed runner had proved the human tag, while the fresh reader could not resolve the internal registry root tag. That is tracked under ADR 0007 as an alias/root duplicate-entry issue. The local CLI fix binds aliases to the confirmed root entry and adds seed-side internal-root visibility proof so later failures can be classified as either root visibility, blob download, or negative-cache problems instead of being collapsed into one "fresh reader missed" symptom.
+
 The later proof bundle must attach:
 
 - a metadata-only Docker E2E artifact containing `cache_session_summary`;

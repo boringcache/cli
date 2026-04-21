@@ -57,7 +57,7 @@ wait_for_proxy_ready() {
   exit 1
 }
 
-for dep in base64 cmp curl dd sha256sum; do
+for dep in base64 cmp curl date dd sha256sum; do
   if ! command -v "${dep}" >/dev/null 2>&1; then
     echo "ERROR: required dependency not found: ${dep}"
     exit 1
@@ -72,7 +72,12 @@ fi
 export_resolved_cli_tokens admin
 unset BORINGCACHE_API_TOKEN
 
-TAG="${TAG:-gha-cross-runner-cas-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}}"
+if [[ -z "${TAG:-}" ]]; then
+  RUN_ID="${GITHUB_RUN_ID:-${BORINGCACHE_E2E_RUN_ID:-local}}"
+  RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-${BORINGCACHE_E2E_RUN_ATTEMPT:-1}}"
+  TAG_NONCE="${BORINGCACHE_E2E_TAG_NONCE:-$(date +%s)-${RANDOM}}"
+  TAG="gha-cross-runner-cas-${RUN_ID}-${RUN_ATTEMPT}-${TAG_NONCE}"
+fi
 CAS_PAYLOAD="${WORK_DIR}/cas-payload.bin"
 AC_PAYLOAD="${WORK_DIR}/ac-payload.bin"
 
@@ -114,6 +119,23 @@ wait "${PROXY_PID}" 2>/dev/null || true
 PROXY_PID=""
 
 echo "Waiting for published remote tag before handing off to fresh runner..."
+ROOT_TAG="$(latest_proxy_log_root_tag "${PROXY_LOG}" || true)"
+if [[ -z "${ROOT_TAG}" ]]; then
+  echo "ERROR: proxy log did not include KV root publish"
+  cat "${PROXY_LOG}"
+  exit 1
+fi
+
+verify_remote_tag_visible \
+  "${BINARY}" \
+  "${WORKSPACE}" \
+  "${ROOT_TAG}" \
+  "${WORK_DIR}/root-publish-check" \
+  1 \
+  "${REMOTE_TAG_VERIFY_ATTEMPTS}" \
+  "${REMOTE_TAG_VERIFY_SLEEP_SECS}" \
+  "${PROXY_LOG}"
+
 verify_remote_tag_visible \
   "${BINARY}" \
   "${WORKSPACE}" \

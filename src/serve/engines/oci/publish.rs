@@ -7,9 +7,7 @@ use crate::cas_transport::upload_payload;
 use crate::serve::engines::oci::PresentBlob;
 use crate::serve::engines::oci::manifest_cache::OciManifestCacheEntry;
 use crate::serve::http::error::OciError;
-use crate::serve::http::oci_tags::{
-    AliasBinding, AliasTagManifest, alias_tags_for_manifest, bind_alias_tag,
-};
+use crate::serve::http::oci_tags::{AliasBinding, alias_tags_for_manifest, bind_alias_tag};
 use crate::serve::state::{AppState, digest_tag};
 
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -87,13 +85,7 @@ async fn persist_manifest_entry_inner(
         pointer_bytes.len() as u64,
     );
     let total_size_bytes = blob_total_size_bytes + manifest_body.len() as u64;
-    let alias_manifest = AliasTagManifest {
-        manifest_root_digest: manifest_root_digest.clone(),
-        manifest_size: pointer_bytes.len() as u64,
-        blob_count: request_blob_count,
-        blob_total_size_bytes: request_blob_total_size_bytes,
-        total_size_bytes,
-    };
+    let manifest_size = pointer_bytes.len() as u64;
 
     let save_request = SaveRequest {
         tag: primary_tag.clone(),
@@ -110,7 +102,7 @@ async fn persist_manifest_entry_inner(
         compressed_size: None,
         file_count: Some(request_blob_count.min(u32::MAX as u64) as u32),
         expected_manifest_digest: Some(manifest_root_digest.clone()),
-        expected_manifest_size: Some(alias_manifest.manifest_size),
+        expected_manifest_size: Some(manifest_size),
         force: None,
         use_multipart: None,
         ci_provider: state.proxy_metadata_hint("ci_provider"),
@@ -162,7 +154,7 @@ async fn persist_manifest_entry_inner(
         .iter()
         .map(|blob| blob.digest.clone())
         .collect();
-    crate::serve::cas_publish::publish_after_save_requiring_receipts(
+    let publish_response = crate::serve::cas_publish::publish_after_save_requiring_receipts(
         &state.api_client,
         &state.workspace,
         &save_response,
@@ -258,7 +250,7 @@ async fn persist_manifest_entry_inner(
                     .confirm_with_retry(&state.workspace, &cache_entry_id, &confirm_request)
                     .await
                 {
-                    Ok(_) => Ok(()),
+                    Ok(response) => Ok(response),
                     Err(error) => Err(OciError::internal(format!("confirm failed: {error}"))),
                 };
                 state
@@ -270,6 +262,10 @@ async fn persist_manifest_entry_inner(
         |message| OciError::internal(format!("receipt commit failed: {message}")),
     )
     .await?;
+    let alias_cache_entry_id = publish_response
+        .cache_entry_id
+        .clone()
+        .unwrap_or_else(|| save_response.cache_entry_id.clone());
 
     let cached = std::sync::Arc::new(OciManifestCacheEntry {
         index_json: manifest_body,
@@ -301,7 +297,7 @@ async fn persist_manifest_entry_inner(
                 state,
                 &alias.tag,
                 alias.write_scope_tag.as_deref(),
-                &alias_manifest,
+                &alias_cache_entry_id,
             )
             .await
             {

@@ -61,6 +61,22 @@ latest_proxy_log_cache_entry_id() {
   printf '%s\n' "$line" | sed -n 's/.*cache_entry_id=\([^[:space:]]*\).*/\1/p'
 }
 
+latest_proxy_log_root_tag() {
+  local proxy_log="$1"
+  local line
+
+  [[ -f "$proxy_log" ]] || return 1
+
+  line="$(
+    grep -F "KV flush root publish:" "$proxy_log" \
+      | tail -n 1 || true
+  )"
+
+  [[ -n "$line" ]] || return 1
+
+  printf '%s\n' "$line" | sed -n 's/.*tag=\([^[:space:]]*\).*/\1/p'
+}
+
 tag_pointer_check_once() {
   local workspace="$1"
   local tag="$2"

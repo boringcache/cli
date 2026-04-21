@@ -1,5 +1,31 @@
 use super::*;
 
+#[derive(Serialize)]
+struct PublishFinalizePayload {
+    manifest_digest: String,
+    manifest_size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest_etag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive_etag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blob_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blob_total_size_bytes: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct PublishPayload {
+    cache_entry_id: String,
+    publish_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    write_scope_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache: Option<PublishFinalizePayload>,
+}
+
 impl ApiClient {
     async fn get_capabilities(&self) -> CapabilityFlags {
         if let Some(flags) = self.capabilities.read().await.clone() {
@@ -581,33 +607,52 @@ impl ApiClient {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("Confirm request is missing tag for publish"))?;
 
-        #[derive(Serialize)]
-        struct PublishFinalizePayload {
-            manifest_digest: String,
-            manifest_size: u64,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            manifest_etag: Option<String>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            archive_size: Option<u64>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            archive_etag: Option<String>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            blob_count: Option<u64>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            blob_total_size_bytes: Option<u64>,
-        }
+        let publish_payload = PublishPayload {
+            cache_entry_id: cache_entry_id.to_string(),
+            publish_mode: determine_publish_mode(request).to_string(),
+            write_scope_tag: request.write_scope_tag.clone(),
+            cache: Some(PublishFinalizePayload {
+                manifest_digest: request.manifest_digest.clone(),
+                manifest_size: request.manifest_size,
+                manifest_etag: request.manifest_etag.clone(),
+                archive_size: request.archive_size,
+                archive_etag: request.archive_etag.clone(),
+                blob_count: request.blob_count,
+                blob_total_size_bytes: request.blob_total_size_bytes,
+            }),
+        };
 
-        #[derive(Serialize)]
-        struct PublishPayload {
-            cache_entry_id: String,
-            publish_mode: String,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            write_scope_tag: Option<String>,
-            cache: PublishFinalizePayload,
-        }
+        self.publish_tag_pointer_with_retry(workspace, tag, &publish_payload)
+            .await
+    }
 
+    pub async fn publish_ready_tag(
+        &self,
+        workspace: &str,
+        tag: &str,
+        cache_entry_id: &str,
+        write_scope_tag: Option<String>,
+        publish_mode: &str,
+    ) -> Result<crate::api::models::cache::CacheConfirmResponse> {
+        let publish_payload = PublishPayload {
+            cache_entry_id: cache_entry_id.to_string(),
+            publish_mode: publish_mode.to_string(),
+            write_scope_tag,
+            cache: None,
+        };
+
+        self.publish_tag_pointer_with_retry(workspace, tag, &publish_payload)
+            .await
+    }
+
+    async fn publish_tag_pointer_with_retry(
+        &self,
+        workspace: &str,
+        tag: &str,
+        publish_payload: &PublishPayload,
+    ) -> Result<crate::api::models::cache::CacheConfirmResponse> {
         let capabilities = self.get_capabilities().await;
-        let publish_mode = determine_publish_mode(request);
+        let publish_mode = publish_payload.publish_mode.as_str();
         let if_match = if publish_mode == "cas" {
             match self.tag_pointer_v2(workspace, tag).await? {
                 Some(pointer) => Some(pointer.version),
@@ -625,20 +670,6 @@ impl ApiClient {
         let encoded_tag = urlencoding::encode(tag);
         let endpoint =
             self.workspace_endpoint(workspace, &format!("caches/tags/{encoded_tag}/publish"))?;
-        let publish_payload = PublishPayload {
-            cache_entry_id: cache_entry_id.to_string(),
-            publish_mode: publish_mode.to_string(),
-            write_scope_tag: request.write_scope_tag.clone(),
-            cache: PublishFinalizePayload {
-                manifest_digest: request.manifest_digest.clone(),
-                manifest_size: request.manifest_size,
-                manifest_etag: request.manifest_etag.clone(),
-                archive_size: request.archive_size,
-                archive_etag: request.archive_etag.clone(),
-                blob_count: request.blob_count,
-                blob_total_size_bytes: request.blob_total_size_bytes,
-            },
-        };
         let started_at = Instant::now();
         let mut transient_publish_errors = 0u32;
 
@@ -646,7 +677,7 @@ impl ApiClient {
             let publish_result = self
                 .put_v2_with_if_match(
                     &endpoint,
-                    &publish_payload,
+                    publish_payload,
                     if_match.as_deref(),
                     CACHE_METRIC_ENDPOINT_OPERATION_CONFIRM_PUBLISH,
                 )

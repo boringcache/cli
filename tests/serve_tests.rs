@@ -3105,23 +3105,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
                 "tag": alias_tag
             }
         })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "tag": alias_tag,
-                "cache_entry_id": "entry-alias",
-                "exists": true,
-                "storage_mode": "cas",
-                "blob_count": 0,
-                "blob_total_size_bytes": 0,
-                "cas_layout": "oci-v1",
-                "archive_urls": [],
-                "upload_headers": {}
-            })
-            .to_string(),
-        )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
 
@@ -3153,14 +3137,17 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
         .mock("PUT", alias_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
         .match_header("if-match", "5")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary",
+            "publish_mode": "cas"
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
-                "version": "5",
+                "version": "6",
                 "status": "ok",
-                "cache_entry_id": "entry-alias"
+                "cache_entry_id": "entry-primary"
             })
             .to_string(),
         )
@@ -3428,23 +3415,7 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
                 "tag": alias_tag
             }
         })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "tag": alias_tag,
-                "cache_entry_id": "entry-alias",
-                "exists": false,
-                "storage_mode": "cas",
-                "blob_count": 0,
-                "blob_total_size_bytes": 0,
-                "cas_layout": "oci-v1",
-                "archive_urls": [],
-                "upload_headers": {}
-            })
-            .to_string(),
-        )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
 
@@ -3476,7 +3447,10 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
         .mock("PUT", alias_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
         .match_header("if-match", "5")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary",
+            "publish_mode": "cas"
+        })))
         .with_status(423)
         .with_header("content-type", "application/json")
         .with_body(
@@ -3668,7 +3642,6 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
             .await;
         mocks.push(primary_confirm_mock);
 
-        let digest_entry_id = format!("{entry_prefix}-digest");
         let digest_alias_save_mock = server
             .mock("POST", "/v2/workspaces/org/repo/caches")
             .match_header("authorization", "Bearer test-token")
@@ -3678,23 +3651,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
                     "manifest_root_digest": manifest_root_digest
                 }
             })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                json!({
-                    "tag": digest_alias_tag,
-                    "cache_entry_id": digest_entry_id,
-                    "exists": false,
-                    "storage_mode": "cas",
-                    "blob_count": 1,
-                    "blob_total_size_bytes": 1,
-                    "cas_layout": "oci-v1",
-                    "archive_urls": [],
-                    "upload_headers": {}
-                })
-                .to_string(),
-            )
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
         mocks.push(digest_alias_save_mock);
@@ -3711,7 +3668,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
             .with_body(
                 json!({
                     "version": format!("{entry_prefix}-digest-version"),
-                    "cache_entry_id": digest_entry_id,
+                    "cache_entry_id": format!("{entry_prefix}-digest-current"),
                     "status": "ready"
                 })
                 .to_string(),
@@ -3728,11 +3685,13 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
         let digest_alias_confirm_mock = server
             .mock("PUT", digest_publish_path.as_str())
             .match_header("authorization", "Bearer test-token")
+            .match_header(
+                "if-match",
+                format!("{entry_prefix}-digest-version").as_str(),
+            )
             .match_body(Matcher::PartialJson(json!({
-                "cache_entry_id": digest_entry_id,
-                "cache": {
-                    "manifest_digest": manifest_root_digest
-                }
+                "cache_entry_id": entry_prefix,
+                "publish_mode": "cas"
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -3740,9 +3699,9 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
                 json!({
                     "version": format!("{entry_prefix}-digest-version"),
                     "status": "ok",
-                    "cache_entry_id": digest_entry_id,
+                    "cache_entry_id": entry_prefix,
                     "promotion_status": "unchanged",
-                    "requested_cache_entry_id": digest_entry_id
+                    "requested_cache_entry_id": entry_prefix
                 })
                 .to_string(),
             )
@@ -3751,7 +3710,6 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
             .await;
         mocks.push(digest_alias_confirm_mock);
 
-        let branch_entry_id = format!("{entry_prefix}-branch");
         let branch_alias_save_mock = server
             .mock("POST", "/v2/workspaces/org/repo/caches")
             .match_header("authorization", "Bearer test-token")
@@ -3762,23 +3720,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
                     "manifest_root_digest": manifest_root_digest
                 }
             })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                json!({
-                    "tag": branch_alias_tag,
-                    "cache_entry_id": branch_entry_id,
-                    "exists": false,
-                    "storage_mode": "cas",
-                    "blob_count": 1,
-                    "blob_total_size_bytes": 1,
-                    "cas_layout": "oci-v1",
-                    "archive_urls": [],
-                    "upload_headers": {}
-                })
-                .to_string(),
-            )
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
         mocks.push(branch_alias_save_mock);
@@ -3792,11 +3734,9 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
             .match_header("authorization", "Bearer test-token")
             .match_header("if-match", "branch-version")
             .match_body(Matcher::PartialJson(json!({
-                "cache_entry_id": branch_entry_id,
+                "cache_entry_id": entry_prefix,
                 "write_scope_tag": "cache:branch-main",
-                "cache": {
-                    "manifest_digest": manifest_root_digest
-                }
+                "publish_mode": "cas"
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -3804,10 +3744,10 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
                 json!({
                     "version": "branch-version",
                     "status": "ok",
-                    "cache_entry_id": branch_entry_id,
+                    "cache_entry_id": entry_prefix,
                     "promotion_status": branch_status,
                     "promotion_reason": branch_reason,
-                    "requested_cache_entry_id": branch_entry_id
+                    "requested_cache_entry_id": entry_prefix
                 })
                 .to_string(),
             )
@@ -4267,23 +4207,7 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
                 "tag": latest_alias_tag
             }
         })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "tag": latest_alias_tag,
-                "cache_entry_id": "entry-latest",
-                "exists": true,
-                "storage_mode": "cas",
-                "blob_count": 0,
-                "blob_total_size_bytes": 0,
-                "cas_layout": "oci-v1",
-                "archive_urls": [],
-                "upload_headers": {}
-            })
-            .to_string(),
-        )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
 
@@ -4315,14 +4239,17 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
         .mock("PUT", latest_alias_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
         .match_header("if-match", "4")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary",
+            "publish_mode": "cas"
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
-                "version": "4",
+                "version": "5",
                 "status": "ok",
-                "cache_entry_id": "entry-latest"
+                "cache_entry_id": "entry-primary"
             })
             .to_string(),
         )
@@ -4575,7 +4502,8 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
         .with_body(
             json!({
                 "features": {
-                    "tag_publish_v2": true
+                    "tag_publish_v2": true,
+                    "cas_publish_bootstrap_if_match": "0"
                 }
             })
             .to_string(),
@@ -4669,13 +4597,30 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
         .create_async()
         .await;
 
-    let digest_alias_save_error_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches")
+    let digest_alias_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&digest_alias_tag)
+    );
+    let digest_alias_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&digest_alias_tag)
+    );
+    let digest_alias_pointer_mock = server
+        .mock("GET", digest_alias_pointer_path.as_str())
         .match_header("authorization", "Bearer test-token")
+        .with_status(404)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
+        .expect(1)
+        .create_async()
+        .await;
+    let digest_alias_publish_error_mock = server
+        .mock("PUT", digest_alias_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "0")
         .match_body(Matcher::PartialJson(json!({
-            "cache": {
-                "tag": digest_alias_tag
-            }
+            "cache_entry_id": "entry-primary",
+            "publish_mode": "cas"
         })))
         .with_status(500)
         .with_header("content-type", "application/json")
@@ -4705,7 +4650,8 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
     pointer_upload_mock.assert_async().await;
     primary_pointer_mock.assert_async().await;
     primary_confirm_mock.assert_async().await;
-    digest_alias_save_error_mock.assert_async().await;
+    digest_alias_pointer_mock.assert_async().await;
+    digest_alias_publish_error_mock.assert_async().await;
     capabilities_mock.assert_async().await;
 }
 
@@ -4723,7 +4669,8 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
         .with_body(
             json!({
                 "features": {
-                    "tag_publish_v2": true
+                    "tag_publish_v2": true,
+                    "cas_publish_bootstrap_if_match": "0"
                 }
             })
             .to_string(),
@@ -4817,13 +4764,30 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
         .create_async()
         .await;
 
-    let digest_alias_save_error_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches")
+    let digest_alias_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&digest_alias_tag)
+    );
+    let digest_alias_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&digest_alias_tag)
+    );
+    let digest_alias_pointer_mock = server
+        .mock("GET", digest_alias_pointer_path.as_str())
         .match_header("authorization", "Bearer test-token")
+        .with_status(404)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
+        .expect(1)
+        .create_async()
+        .await;
+    let digest_alias_publish_error_mock = server
+        .mock("PUT", digest_alias_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "0")
         .match_body(Matcher::PartialJson(json!({
-            "cache": {
-                "tag": digest_alias_tag
-            }
+            "cache_entry_id": "entry-primary",
+            "publish_mode": "cas"
         })))
         .with_status(500)
         .with_header("content-type", "application/json")
@@ -4841,23 +4805,7 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
                 "tag": human_alias_tag
             }
         })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "tag": human_alias_tag,
-                "cache_entry_id": "entry-human-alias",
-                "exists": true,
-                "storage_mode": "cas",
-                "blob_count": 0,
-                "blob_total_size_bytes": 0,
-                "cas_layout": "oci-v1",
-                "archive_urls": [],
-                "upload_headers": {}
-            })
-            .to_string(),
-        )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let human_alias_publish_path = format!(
@@ -4888,14 +4836,17 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
         .mock("PUT", human_alias_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
         .match_header("if-match", "5")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary",
+            "publish_mode": "cas"
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
-                "version": "5",
+                "version": "6",
                 "status": "ok",
-                "cache_entry_id": "entry-human-alias"
+                "cache_entry_id": "entry-primary"
             })
             .to_string(),
         )
@@ -4921,7 +4872,8 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
     pointer_upload_mock.assert_async().await;
     primary_pointer_mock.assert_async().await;
     primary_confirm_mock.assert_async().await;
-    digest_alias_save_error_mock.assert_async().await;
+    digest_alias_pointer_mock.assert_async().await;
+    digest_alias_publish_error_mock.assert_async().await;
     human_alias_save_mock.assert_async().await;
     human_alias_pointer_mock.assert_async().await;
     human_alias_confirm_mock.assert_async().await;
@@ -6137,23 +6089,7 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
                 "blob_total_size_bytes": descriptor_size
             }
         })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "tag": alias_tag,
-                "cache_entry_id": "entry-alias",
-                "exists": true,
-                "storage_mode": "cas",
-                "blob_count": 1,
-                "blob_total_size_bytes": descriptor_size,
-                "cas_layout": "oci-v1",
-                "archive_urls": [],
-                "upload_headers": {}
-            })
-            .to_string(),
-        )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let alias_publish_path = format!(
@@ -6184,14 +6120,17 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
         .mock("PUT", alias_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
         .match_header("if-match", "5")
-        .match_body(Matcher::Any)
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary",
+            "publish_mode": "cas"
+        })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
-                "version": "5",
+                "version": "6",
                 "status": "ok",
-                "cache_entry_id": "entry-alias"
+                "cache_entry_id": "entry-primary"
             })
             .to_string(),
         )

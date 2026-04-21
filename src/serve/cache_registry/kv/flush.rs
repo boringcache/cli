@@ -14,8 +14,8 @@ pub(crate) enum FlushError {
     Permanent(String),
 }
 
-pub(crate) enum KvConfirmOutcome {
-    Published,
+pub(crate) struct KvConfirmOutcome {
+    pub(crate) cache_entry_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -154,7 +154,11 @@ pub(crate) async fn confirm_kv_flush(
             .api_client
             .confirm_with_retry(&state.workspace, cache_entry_id, confirm_request)
             .await
-            .map(|_| KvConfirmOutcome::Published);
+            .map(|response| KvConfirmOutcome {
+                cache_entry_id: response
+                    .cache_entry_id
+                    .unwrap_or_else(|| cache_entry_id.to_string()),
+            });
 
         match result {
             Ok(outcome) => return Ok(outcome),
@@ -588,25 +592,17 @@ pub(crate) async fn do_flush(
             tag: Some(confirm_tag.clone()),
             write_scope_tag: confirm_write_scope_tag.clone(),
         };
-        confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request, flush_mode).await?;
-        let alias_count = bind_kv_alias_tags(
-            state,
-            &manifest_root_digest,
-            expected_manifest_size,
-            blob_count,
-            blob_total_size_bytes,
-            file_count,
-            flush_mode,
-        )
-        .await?;
+        let confirm_outcome =
+            confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request, flush_mode).await?;
+        let alias_count = bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id).await?;
         eprintln!(
             "KV flush root publish: tag={} cache_entry_id={} state=published alias_tags={}",
-            tag, save_response.cache_entry_id, alias_count
+            tag, confirm_outcome.cache_entry_id, alias_count
         );
         if alias_count > 0 {
             eprintln!(
                 "KV alias publish completed: cache_entry_id={} alias_tags={}",
-                save_response.cache_entry_id, alias_count
+                confirm_outcome.cache_entry_id, alias_count
             );
         }
 
@@ -622,7 +618,7 @@ pub(crate) async fn do_flush(
     let upload_stats_holder = Arc::new(std::sync::Mutex::new(BlobUploadStats::default()));
     let publish_upload_stats = upload_stats_holder.clone();
     let all_blob_digests: Vec<String> = blobs.iter().map(|b| b.digest.clone()).collect();
-    crate::serve::cas_publish::publish_after_save_requiring_receipts(
+    let confirm_outcome = crate::serve::cas_publish::publish_after_save_requiring_receipts(
         &state.api_client,
         &state.workspace,
         &save_response,
@@ -718,25 +714,16 @@ pub(crate) async fn do_flush(
     .await?;
     let upload_stats = upload_stats_holder.lock().unwrap().clone();
 
-    let alias_count = bind_kv_alias_tags(
-        state,
-        &manifest_root_digest,
-        expected_manifest_size,
-        blob_count,
-        blob_total_size_bytes,
-        file_count,
-        flush_mode,
-    )
-    .await?;
+    let alias_count = bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id).await?;
     eprintln!(
         "KV flush root publish: tag={} cache_entry_id={} state=published alias_tags={}",
-        tag, save_response.cache_entry_id, alias_count
+        tag, confirm_outcome.cache_entry_id, alias_count
     );
 
     if alias_count > 0 {
         eprintln!(
             "KV alias publish completed: cache_entry_id={} alias_tags={}",
-            save_response.cache_entry_id, alias_count
+            confirm_outcome.cache_entry_id, alias_count
         );
     }
 
@@ -814,99 +801,28 @@ pub(crate) fn filter_pending_entries_with_local_blobs(
 pub(crate) async fn bind_kv_alias_tag(
     state: &AppState,
     alias_tag: &str,
-    manifest_root_digest: &str,
-    manifest_size: u64,
-    blob_count: u64,
-    blob_total_size_bytes: u64,
-    file_count: u32,
-    flush_mode: FlushMode,
+    cache_entry_id: &str,
 ) -> anyhow::Result<()> {
-    let alias_request = SaveRequest {
-        tag: alias_tag.to_string(),
-        write_scope_tag: None,
-        manifest_root_digest: manifest_root_digest.to_string(),
-        compression_algorithm: "zstd".to_string(),
-        storage_mode: Some("cas".to_string()),
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        cas_layout: Some("file-v1".to_string()),
-        manifest_format_version: Some(1),
-        total_size_bytes: blob_total_size_bytes,
-        uncompressed_size: None,
-        compressed_size: None,
-        file_count: Some(file_count),
-        expected_manifest_digest: Some(manifest_root_digest.to_string()),
-        expected_manifest_size: Some(manifest_size),
-        force: None,
-        use_multipart: None,
-        ci_provider: None,
-        ci_run_uid: None,
-        ci_run_attempt: None,
-        ci_ref_type: None,
-        ci_ref_name: None,
-        ci_default_branch: None,
-        ci_pr_number: None,
-        ci_commit_sha: None,
-        ci_run_started_at: None,
-        encrypted: None,
-        encryption_algorithm: None,
-        encryption_recipient_hint: None,
-    };
-
-    let alias_save = state
+    state
         .api_client
-        .save_entry(&state.workspace, &alias_request)
-        .await?;
-
-    let alias_confirm = ConfirmRequest {
-        manifest_digest: manifest_root_digest.to_string(),
-        manifest_size,
-        manifest_etag: None,
-        archive_size: None,
-        archive_etag: None,
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        file_count: Some(file_count),
-        uncompressed_size: None,
-        compressed_size: None,
-        storage_mode: Some("cas".to_string()),
-        tag: Some(alias_tag.to_string()),
-        write_scope_tag: None,
-    };
-
-    confirm_kv_flush(
-        state,
-        &alias_save.cache_entry_id,
-        &alias_confirm,
-        flush_mode,
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!("alias confirm failed: {:?}", error))
-    .map(|_| ())
+        .publish_ready_tag(
+            &state.workspace,
+            alias_tag,
+            cache_entry_id,
+            kv_primary_write_scope_tag(state),
+            "cas",
+        )
+        .await
+        .map(|_| ())
 }
 
 pub(crate) async fn bind_kv_alias_tags(
     state: &AppState,
-    manifest_root_digest: &str,
-    manifest_size: u64,
-    blob_count: u64,
-    blob_total_size_bytes: u64,
-    file_count: u32,
-    flush_mode: FlushMode,
+    cache_entry_id: &str,
 ) -> Result<usize, FlushError> {
     let mut alias_count = 0usize;
     for alias_tag in kv_alias_tags(state) {
-        let bind_result = bind_kv_alias_tag(
-            state,
-            &alias_tag,
-            manifest_root_digest,
-            manifest_size,
-            blob_count,
-            blob_total_size_bytes,
-            file_count,
-            flush_mode,
-        )
-        .await;
+        let bind_result = bind_kv_alias_tag(state, &alias_tag, cache_entry_id).await;
         match bind_result {
             Ok(()) => {
                 alias_count = alias_count.saturating_add(1);

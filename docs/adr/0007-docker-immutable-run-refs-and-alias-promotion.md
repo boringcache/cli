@@ -1,6 +1,6 @@
 # ADR 0007: Docker Immutable Run Refs And Alias Promotion
 
-Status: accepted; CI derivation implemented, default rollout pending backend E2E and benchmark proof
+Status: accepted; CI derivation and alias-root binding implemented, default rollout pending backend E2E and benchmark proof
 Date: 2026-04-20
 
 ## Context
@@ -217,6 +217,7 @@ The first hidden CLI/Rails slice is implemented:
 - `boringcache docker` now derives immutable run refs, branch/default/PR import aliases, and promotion aliases from provider-neutral `BORINGCACHE_CI_*` metadata, with GitHub Actions `GITHUB_*` metadata as the first built-in mapper;
 - CI-derived import refs include the legacy `buildcache` ref as a read fallback during the migration window, while promotion refs stay scoped to branch/default/PR policy;
 - explicit hidden run/import/promotion flags still override the derived plan.
+- OCI and KV alias binding now uses Rails ready-tag publish to point aliases at the confirmed root `cache_entry_id` instead of creating separate alias cache entries. This keeps the immutable/internal root and human-facing aliases attached to one logical entry for access updates and plan-limit eviction.
 
 Remaining rollout work: add a dedicated backend-backed same-alias writer E2E, wire action benchmark workflows to pass provider-neutral metadata, compare artifacts, and promote the behavior to the default action path only after proof.
 
@@ -259,7 +260,11 @@ Benchmark and backend E2E proof are still pending. The later proof bundle must a
 - receipt-strict publish evidence showing alias/root visibility does not depend on verifier-side post-publish readiness polling;
 - real-project benchmark artifacts that classify alias conflicts separately from cache misses.
 
-The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` did not clear this gate. CLI CI passed, but the required registry E2E workflow failed before a release tag because Docker BuildKit and fresh-runner blob reads could observe visible cache roots whose referenced blobs were not yet downloadable. Follow-up `c28a7c1` cleared the Docker BuildKit and Cross-Runner Verify legs, but it did so with verifier-side blob URL convergence polling. That polling is not part of the product contract. Local release-prep now removes that verifier wait, removes proxy shutdown tag-convergence polling, and keeps publish receipt-strict. Immutable-root/promotion default rollout remains pending until required E2E is green with receipt-strict publish and no post-publish blob URL readiness sleep.
+The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` did not clear this gate. CLI CI passed, but the required registry E2E workflow failed before a release tag because Docker BuildKit and fresh-runner blob reads could observe visible cache roots whose referenced blobs were not yet downloadable. Follow-up `c28a7c1` cleared the Docker BuildKit and Cross-Runner Verify legs, but it did so with verifier-side blob URL convergence polling. That polling is not part of the product contract. Local release-prep now removes that verifier wait, removes proxy shutdown tag-convergence polling, and keeps publish receipt-strict.
+
+A later Cross-Runner Verify attempt after the web deploy exposed a distinct alias/root split: the seed runner proved the human tag, but a fresh reader could not resolve the internal registry root tag. The likely cause was duplicate cache rows for one logical root: root publish created the internal root entry, then alias binding created another ready entry for the human alias. Workspace limit enforcement evicts by oldest ready entry, so the older internal root could be pruned while the newer alias row still existed. The local fix binds aliases to the confirmed root entry with Rails tag publish and adds seed-side internal-root visibility proof before handoff.
+
+Immutable-root/promotion default rollout remains pending until required E2E is green with receipt-strict publish, alias/root single-entry binding, and no post-publish blob URL readiness sleep.
 
 ## Incident Tracking: Same-Tag PostHog Writer Overlap
 
