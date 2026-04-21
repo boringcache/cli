@@ -349,13 +349,42 @@ pub(crate) fn adaptive_blob_upload_concurrency(operation_count: usize) -> usize 
 }
 
 pub(crate) async fn cleanup_present_blob_sessions(state: &AppState, present_blobs: &[PresentBlob]) {
+    let mut owned_bodies = Vec::new();
     let mut sessions = state.upload_sessions.write().await;
     for blob in present_blobs {
         if let Some(session_id) = blob.upload_session_id.as_deref()
             && let Some(removed) = sessions.remove(session_id)
             && removed.owns_temp_file()
         {
-            let _ = tokio::fs::remove_file(&removed.temp_path).await;
+            owned_bodies.push((
+                blob.digest.clone(),
+                removed.temp_path.clone(),
+                removed.body_size(),
+            ));
+        }
+    }
+    drop(sessions);
+
+    for (digest, path, size_bytes) in owned_bodies {
+        let promote_started_at = Instant::now();
+        match state
+            .blob_read_cache
+            .promote(&digest, &path, size_bytes)
+            .await
+        {
+            Ok(_) => {
+                state
+                    .oci_engine_diagnostics
+                    .record_cache_promotion(promote_started_at.elapsed().as_millis() as u64, true);
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+            Err(error) => {
+                state
+                    .oci_engine_diagnostics
+                    .record_cache_promotion(promote_started_at.elapsed().as_millis() as u64, false);
+                log::warn!("OCI published blob cache promote failed for {digest}: {error}");
+                let _ = tokio::fs::remove_file(&path).await;
+            }
         }
     }
 }

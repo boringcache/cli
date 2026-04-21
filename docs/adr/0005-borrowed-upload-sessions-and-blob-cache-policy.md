@@ -176,6 +176,7 @@ Current behavior:
 - mount reuse from an existing mutable upload session still materializes a separate owned temp file;
 - borrowed cleanup drops the lease and does not delete the cache file;
 - owned cleanup still deletes the owned temp file;
+- after a successful OCI manifest publish, owned upload-session bodies are promoted into `BlobReadCache` before session cleanup, so immediate same-proxy BuildKit readers can use local digest-verified bodies without waiting for backend download-url verification;
 - `BlobReadCache` leases pin legacy files and segment files against eviction while borrowed sessions or upload jobs reference them;
 - tracked blob upload jobs now read from `path + offset + size`, so segment-backed cache bodies can upload without materializing a standalone file;
 - the single-URL upload transport can seek to an offset and stream exactly the requested byte count;
@@ -194,8 +195,11 @@ Documentation and the first borrowed-session implementation slice are aligned as
 Evidence now available:
 
 - unit tests cover borrowed cleanup, segment-backed offset upload sources, and lease-protected eviction;
+- `published_owned_upload_session_is_promoted_to_body_cache` proves successful owned upload-session bodies move into `BlobReadCache` during manifest-publish cleanup, so same-proxy readers can use local digest-verified bodies while backend download URLs settle;
 - the Rails-backed local Docker BuildKit E2E passed against a managed workspace provisioned through Rails/Tigris;
 - that E2E recorded borrowed upload-session counters in status snapshots and session summaries, including `oci_engine_borrowed_upload_session_count=9` and `oci_engine_borrowed_upload_session_bytes=6430` by the alias-warm status snapshot.
+
+Release-path proof is not complete. The 2026-04-21 `1.12.42` push at CLI commit `14c1dc2` passed CLI CI but failed required registry E2E legs with manifests/indices visible before all referenced blobs had verified download URLs. The owned-body cache promotion is the follow-up fix for the same-proxy BuildKit half of that failure; it still needs a green Docker BuildKit E2E artifact before it counts as release evidence.
 
 Benchmark proof and policy proof are still pending before cache admission changes. The later proof bundle must attach:
 

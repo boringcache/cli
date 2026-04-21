@@ -10,6 +10,8 @@ PROXY_PORT="${PROXY_PORT:-5050}"
 WORK_DIR="$(mktemp -d)"
 PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
 PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
+VERIFY_ATTEMPTS="${VERIFY_ATTEMPTS:-30}"
+VERIFY_SLEEP_SECS="${VERIFY_SLEEP_SECS:-3}"
 PROXY_LOG="${WORK_DIR}/proxy.log"
 PROXY_PID=""
 PROXY_READY_FILE="${WORK_DIR}/proxy.ready"
@@ -57,6 +59,41 @@ wait_for_proxy_ready() {
   exit 1
 }
 
+fetch_and_verify_blob() {
+  local label="$1"
+  local path="$2"
+  local expected_digest="$3"
+  local output_path="$4"
+  local status actual attempt
+
+  for attempt in $(seq 1 "${VERIFY_ATTEMPTS}"); do
+    rm -f "${output_path}"
+    status="$(
+      curl -sS --max-time 30 -o "${output_path}" -w "%{http_code}" "${PROXY_URL}${path}" \
+        || printf '000'
+    )"
+    if [[ "${status}" == "200" ]]; then
+      actual="$(sha256sum "${output_path}" | awk '{print $1}')"
+      if [[ "${actual}" != "${expected_digest}" ]]; then
+        echo "ERROR: ${label} content mismatch (expected=${expected_digest} actual=${actual})"
+        exit 1
+      fi
+      echo "${label} blob verified: digest matches"
+      return 0
+    fi
+
+    if (( attempt < VERIFY_ATTEMPTS )); then
+      echo "${label} GET returned ${status}; waiting for backend visibility (${attempt}/${VERIFY_ATTEMPTS})"
+      sleep "${VERIFY_SLEEP_SECS}"
+      continue
+    fi
+  done
+
+  echo "ERROR: ${label} GET returned ${status} after ${VERIFY_ATTEMPTS} attempt(s) (expected 200)"
+  tail -n 80 "${PROXY_LOG}"
+  exit 1
+}
+
 for dep in cmp curl sha256sum; do
   if ! command -v "${dep}" >/dev/null 2>&1; then
     echo "ERROR: required dependency not found: ${dep}"
@@ -83,30 +120,7 @@ PROXY_PID=$!
 wait_for_proxy_ready
 
 echo "Proxy ready on fresh runner, verifying CAS blobs..."
-CAS_STATUS="$(curl -sS --max-time 30 -o "${WORK_DIR}/cas-restored.bin" -w "%{http_code}" "${PROXY_URL}/cas/${CAS_DIGEST}")"
-if [[ "${CAS_STATUS}" != "200" ]]; then
-  echo "ERROR: CAS GET returned ${CAS_STATUS} (expected 200)"
-  tail -n 60 "${PROXY_LOG}"
-  exit 1
-fi
-CAS_ACTUAL="$(sha256sum "${WORK_DIR}/cas-restored.bin" | awk '{print $1}')"
-if [[ "${CAS_ACTUAL}" != "${CAS_DIGEST}" ]]; then
-  echo "ERROR: CAS content mismatch (expected=${CAS_DIGEST} actual=${CAS_ACTUAL})"
-  exit 1
-fi
-echo "CAS blob verified: digest matches"
-
-AC_STATUS="$(curl -sS --max-time 30 -o "${WORK_DIR}/ac-restored.bin" -w "%{http_code}" "${PROXY_URL}/ac/${AC_DIGEST}")"
-if [[ "${AC_STATUS}" != "200" ]]; then
-  echo "ERROR: AC GET returned ${AC_STATUS} (expected 200)"
-  tail -n 60 "${PROXY_LOG}"
-  exit 1
-fi
-AC_ACTUAL="$(sha256sum "${WORK_DIR}/ac-restored.bin" | awk '{print $1}')"
-if [[ "${AC_ACTUAL}" != "${AC_DIGEST}" ]]; then
-  echo "ERROR: AC content mismatch (expected=${AC_DIGEST} actual=${AC_ACTUAL})"
-  exit 1
-fi
-echo "AC blob verified: digest matches"
+fetch_and_verify_blob "CAS" "/cas/${CAS_DIGEST}" "${CAS_DIGEST}" "${WORK_DIR}/cas-restored.bin"
+fetch_and_verify_blob "AC" "/ac/${AC_DIGEST}" "${AC_DIGEST}" "${WORK_DIR}/ac-restored.bin"
 
 echo "Cross-runner CAS persistence verified"

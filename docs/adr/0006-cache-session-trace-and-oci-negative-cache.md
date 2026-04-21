@@ -263,7 +263,11 @@ Remaining trace depth belongs in later passes: Rails p50/p95 rollups from reques
 
 Documentation and the first CLI baseline are aligned as of 2026-04-21. The trace is accepted as the platform insight spine; backend persistence, Rails percentile rollups, action enrichment, benchmark artifact validation, and operator reporting remain follow-up work.
 
-Focused CLI tests now cover negative-cache invalidation after local writes. Release proof is still pending because the fixes are not in the released action/CLI path yet. The later proof bundle must attach:
+Focused CLI tests now cover negative-cache invalidation after local writes.
+
+Release proof is still pending. The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` exercised the current `origin/main` CLI path and passed CLI CI, but required registry E2E failed in `Registry / Docker BuildKit`, `Registry / Prefetch Smoke`, and `Cache Registry / Cross-Runner Verify`. The failure shape was consistent: published manifests/indices were visible, but verified blob download URL coverage was `0/N`, and downstream BuildKit/CAS reads returned missing blobs or `404`. Active follow-up work promotes successfully published owned upload-session bodies into the local blob cache for same-proxy readers and makes the cross-runner verifier wait through backend visibility lag; neither is release proof until the required E2E workflow is green.
+
+The later proof bundle must attach:
 
 - a metadata-only Docker E2E artifact containing `cache_session_summary`;
 - promoted upload-plan fields including `request_metrics_oci_new_blob_count` and `request_metrics_oci_latest_new_blob_count`;

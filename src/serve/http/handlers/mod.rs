@@ -40,7 +40,7 @@ use crate::cas_oci;
 use crate::serve::cache_registry;
 use crate::serve::state::{AppState, diagnostics_enabled};
 #[cfg(test)]
-use crate::serve::state::{OciManifestCacheEntry, UploadSession, digest_tag};
+use crate::serve::state::{OciManifestCacheEntry, digest_tag};
 
 const OCI_DEGRADED_HEADER: &str = "X-BoringCache-Cache-Degraded";
 const OCI_PREFETCH_STATE_HEADER: &str = "X-BoringCache-Prefetch-State";
@@ -362,10 +362,12 @@ mod tests {
     use crate::api::models::cache::BlobDescriptor;
     use crate::git::GitContext;
     use crate::platform::Platform;
-    use crate::serve::engines::oci::{PresentBlobSource, ensure_manifest_blobs_present};
+    use crate::serve::engines::oci::{
+        PresentBlob, PresentBlobSource, ensure_manifest_blobs_present,
+    };
     use crate::serve::state::{
         BlobLocatorCache, BlobReadCache, BlobReadMetrics, KvPendingStore, KvPublishedIndex,
-        UploadSessionBody, UploadSessionStore, ref_tag_for_input,
+        UploadSession, UploadSessionBody, UploadSessionStore, ref_tag_for_input,
     };
     use crate::tag_utils::TagResolver;
     use axum::body::Bytes;
@@ -787,6 +789,62 @@ mod tests {
         drop(sessions);
         assert!(tokio::fs::metadata(&body_path).await.is_ok());
         assert!(state.blob_read_cache.get_handle(&digest).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn published_owned_upload_session_is_promoted_to_body_cache() {
+        let state = test_state();
+        let payload = b"published-upload-body";
+        let digest = cas_oci::prefixed_sha256_digest(payload);
+        let temp_path = write_temp_upload_file(payload).await;
+        let session_id = "upload-session-promote".to_string();
+
+        {
+            let mut sessions = state.upload_sessions.write().await;
+            sessions.create(UploadSession::owned_temp_file(
+                session_id.clone(),
+                "cache".to_string(),
+                temp_path,
+                payload.len() as u64,
+                Some(digest.clone()),
+                Some(payload.len() as u64),
+            ));
+        }
+
+        crate::serve::engines::oci::publish::cleanup_present_blob_sessions(
+            &state,
+            &[PresentBlob {
+                digest: digest.clone(),
+                size_bytes: payload.len() as u64,
+                source: PresentBlobSource::UploadSession,
+                upload_session_id: Some(session_id.clone()),
+            }],
+        )
+        .await;
+
+        let sessions = state.upload_sessions.read().await;
+        assert!(sessions.get(&session_id).is_none());
+        drop(sessions);
+
+        let handle = state
+            .blob_read_cache
+            .get_handle(&digest)
+            .await
+            .expect("published body should be promoted to read cache");
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let mut file = tokio::fs::File::open(handle.path())
+            .await
+            .expect("open promoted body");
+        if handle.offset() > 0 {
+            file.seek(std::io::SeekFrom::Start(handle.offset()))
+                .await
+                .expect("seek promoted body");
+        }
+        let mut restored = vec![0; handle.size_bytes() as usize];
+        file.read_exact(&mut restored)
+            .await
+            .expect("read promoted body");
+        assert_eq!(restored, payload);
     }
 
     #[tokio::test]

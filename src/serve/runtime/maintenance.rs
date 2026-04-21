@@ -154,7 +154,9 @@ pub(super) fn spawn_maintenance_tasks(
                 sessions.cleanup_expired(std::time::Duration::from_secs(1800))
             };
             for session in expired {
-                let _ = tokio::fs::remove_file(&session.temp_path).await;
+                if session.owns_temp_file() {
+                    let _ = tokio::fs::remove_file(&session.temp_path).await;
+                }
             }
         }
     });

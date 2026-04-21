@@ -247,6 +247,8 @@ Benchmark and backend E2E proof are still pending. The later proof bundle must a
 - Docker dry-run/action artifacts showing derived run refs, import aliases, and promotion aliases;
 - real-project benchmark artifacts that classify alias conflicts separately from cache misses.
 
+The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` did not clear this gate. CLI CI passed, but the required registry E2E workflow failed before a release tag because Docker BuildKit and fresh-runner blob reads could observe visible cache roots whose referenced blobs were not yet downloadable. That failure is tracked primarily by ADR 0005/0006; for this ADR it means immutable-root/promotion release evidence remains pending.
+
 ## Incident Tracking: Same-Tag PostHog Writer Overlap
 
 The 2026-04-21 PostHog Docker benchmark also exposed the same-tag risk this ADR is meant to remove. A manual rolling run overlapped with another PostHog writer for the same logical cache tag. The failed BoringCache run reached cache export, then manifest commit returned `400 blob unknown`.
@@ -270,7 +272,8 @@ Release status matters for incident review:
 
 - the failed benchmark used the released action path, `boringcache/one@v1`;
 - that action currently resolves to action `v1.12.59`, which pins CLI `v1.12.41`;
-- local CLI work for negative-cache invalidation, borrowed upload sessions, large-blob stream-through, and alias-promotion diagnostics is not represented by that released path or by CLI `origin/main` yet;
+- CLI `origin/main` now includes the first negative-cache and alias-promotion proof commits, but the `1.12.42` release-prep push at `14c1dc2` still failed required registry E2E before tagging;
+- active borrowed-session follow-up work, including owned upload-session body promotion into the local blob cache, is not represented by a released CLI/action path yet;
 - no benchmark should be used as release evidence for this incident unless the artifact records the action ref, CLI version, immutable run ref state, promotion status, and session trace.
 
 The tracking proof for this ADR is a provider-neutral E2E:

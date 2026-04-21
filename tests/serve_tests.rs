@@ -6024,7 +6024,9 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
         "layers": []
     })
     .to_string();
+    let manifest_digest = cas_oci::prefixed_sha256_digest(manifest_body.as_bytes());
     let primary_tag = scoped_ref_tag("my-cache", "main");
+    let alias_tag = digest_tag(&manifest_digest);
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
         .match_header("authorization", "Bearer test-token")
@@ -6125,6 +6127,77 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
         .expect(1)
         .create_async()
         .await;
+    let alias_save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": alias_tag,
+                "blob_count": 1,
+                "blob_total_size_bytes": descriptor_size
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": alias_tag,
+                "cache_entry_id": "entry-alias",
+                "exists": true,
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": descriptor_size,
+                "cas_layout": "oci-v1",
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let alias_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&alias_tag)
+    );
+    let alias_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&alias_tag)
+    );
+    let alias_pointer_mock = server
+        .mock("GET", alias_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "5",
+                "cache_entry_id": "entry-alias",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let alias_confirm_mock = server
+        .mock("PUT", alias_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "5")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "5",
+                "status": "ok",
+                "cache_entry_id": "entry-alias"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
 
     let app = build_router(state.clone());
     let publish_response = tower::ServiceExt::oneshot(
@@ -6148,31 +6221,6 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
             .is_none()
     );
 
-    let remote_present_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
-        .match_header("authorization", "Bearer test-token")
-        .match_body(Matcher::PartialJson(json!({
-            "verify_storage": true,
-            "blobs": [{
-                "digest": blob_digest,
-                "size_bytes": 0
-            }]
-        })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "results": [{
-                    "digest": blob_digest,
-                    "exists": true
-                }]
-            })
-            .to_string(),
-        )
-        .expect(1)
-        .create_async()
-        .await;
-
     let app = build_router(state.clone());
     let head_after_publish = tower::ServiceExt::oneshot(
         app,
@@ -6185,6 +6233,13 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
     .await
     .unwrap();
     assert_eq!(head_after_publish.status(), StatusCode::OK);
+    assert!(
+        state
+            .blob_read_cache
+            .get_handle(&blob_digest)
+            .await
+            .is_some()
+    );
 
     remote_miss_mock.assert_async().await;
     primary_save_mock.assert_async().await;
@@ -6192,7 +6247,9 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
     pointer_upload_mock.assert_async().await;
     primary_pointer_mock.assert_async().await;
     primary_confirm_mock.assert_async().await;
-    remote_present_mock.assert_async().await;
+    alias_save_mock.assert_async().await;
+    alias_pointer_mock.assert_async().await;
+    alias_confirm_mock.assert_async().await;
     let diagnostics = state
         .oci_engine_diagnostics
         .metadata_hints(state.oci_hydration_policy.as_str());
