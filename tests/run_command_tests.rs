@@ -60,6 +60,37 @@ fn assert_schema_version(parsed: &Value) {
     assert_eq!(parsed["schema_version"], 1);
 }
 
+fn assert_proxy_metadata_hints_are_cli_replayable(parsed: &Value) {
+    let hints = parsed["proxy"]["metadata_hints"]
+        .as_object()
+        .expect("metadata_hints object");
+    assert!(
+        hints.len() <= 8,
+        "metadata_hints must be replayable as command line --metadata-hint flags: {hints:?}"
+    );
+    for (key, value) in hints {
+        let value = value.as_str().expect("metadata hint value");
+        assert!(key.len() <= 32, "metadata hint key too long: {key}");
+        assert!(
+            key.chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'),
+            "metadata hint key is not command-line-safe: {key}"
+        );
+        assert!(
+            !value.is_empty() && value.len() <= 64,
+            "metadata hint value length is not command-line-safe: {key}={value}"
+        );
+        assert!(
+            value.chars().all(|ch| {
+                ch.is_ascii_lowercase()
+                    || ch.is_ascii_digit()
+                    || matches!(ch, '_' | '-' | '.' | ':' | '/')
+            }),
+            "metadata hint value is not command-line-safe: {key}={value}"
+        );
+    }
+}
+
 #[test]
 fn test_run_propagates_child_exit_code() {
     let child = cli_binary();
@@ -1485,6 +1516,8 @@ fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
             "default",
             "--cache-promote-ref-tag",
             "branch-main",
+            "--cache-promote-ref-tag",
+            "default",
             "--dry-run",
             "--json",
             "--",
@@ -1504,6 +1537,7 @@ fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
     assert_schema_version(&parsed);
+    assert_proxy_metadata_hints_are_cli_replayable(&parsed);
     assert_eq!(
         parsed["oci_cache"]["registry_ref"],
         "host.docker.internal:5000/cache:run-123-attempt-1"
@@ -1529,7 +1563,7 @@ fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
     );
     assert_eq!(
         parsed["oci_cache"]["promotion_ref_tags"],
-        serde_json::json!(["branch-main"])
+        serde_json::json!(["branch-main", "default"])
     );
     assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
@@ -1541,7 +1575,11 @@ fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
     );
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["docker_alias_promotion_refs"],
-        "branch-main"
+        "branch-main/default"
+    );
+    assert_eq!(
+        parsed["proxy"]["metadata_hints"]["docker_cache_from_refs"],
+        Value::Null
     );
 
     let command = parsed["command"]
@@ -1604,6 +1642,7 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
 
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
     assert_schema_version(&parsed);
+    assert_proxy_metadata_hints_are_cli_replayable(&parsed);
     assert_eq!(
         parsed["oci_cache"]["registry_ref"],
         "host.docker.internal:5000/cache:run-gha-123456789-attempt-2"
@@ -1666,6 +1705,10 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["docker_alias_promotion_refs"],
         "pr-42"
+    );
+    assert_eq!(
+        parsed["proxy"]["metadata_hints"]["docker_cache_from_refs"],
+        Value::Null
     );
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["ci_provider"],

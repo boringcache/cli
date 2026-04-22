@@ -219,6 +219,7 @@ The first hidden CLI/Rails slice is implemented:
 - explicit hidden run/import/promotion flags still override the derived plan.
 - OCI and KV alias binding now uses Rails ready-tag publish to point aliases at the confirmed root `cache_entry_id` instead of creating separate alias cache entries. This keeps the immutable/internal root and human-facing aliases attached to one logical entry for access updates and plan-limit eviction.
 - Cross-runner E2E handoff now compares the `cache_entry_id` returned by `boringcache check --json` against the proxy flush log, so the assertion uses the normal restore/read path instead of a helper-only direct pointer API call.
+- Docker dry-run JSON now keeps full BuildKit `--cache-from` strings in `oci_cache` only. `proxy.metadata_hints` is capped and normalized to values that can be replayed as `cache-registry --metadata-hint`, with multi-alias promotion hints encoded as slash-separated labels instead of comma lists.
 
 Remaining rollout work: add a dedicated backend-backed same-alias writer E2E, wire action benchmark workflows to pass provider-neutral metadata, compare artifacts, and promote the behavior to the default action path only after proof.
 

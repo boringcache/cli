@@ -302,6 +302,7 @@ pub async fn adapter_execute(
     let startup_warm = !(args.on_demand || docker_read_only_on_demand);
     let mut proxy_metadata_hints =
         cache_registry::resolve_proxy_metadata_hints(&metadata_hint_args)?;
+    let mut generated_proxy_metadata_hints = Vec::new();
     let effective_skip_save = skip_save || effective_read_only;
     let docker_cache_mode = project_config::prefer_cli_scalar(
         adapter_config.cache_mode.clone(),
@@ -346,34 +347,25 @@ pub async fn adapter_execute(
         None
     };
     if let Some(plan) = &docker_plan {
-        proxy_metadata_hints.insert(
-            "docker_cache_ref_tag".to_string(),
-            plan.oci_cache.ref_tag.clone(),
-        );
+        generated_proxy_metadata_hints
+            .push(("docker_cache_ref_tag", plan.oci_cache.ref_tag.clone()));
         if let Some(run_ref) = plan.oci_cache.immutable_run_ref_tag.as_deref() {
-            proxy_metadata_hints
-                .insert("docker_immutable_run_ref".to_string(), run_ref.to_string());
-        }
-        if !plan.oci_cache.cache_from_refs.is_empty() {
-            proxy_metadata_hints.insert(
-                "docker_cache_from_refs".to_string(),
-                plan.oci_cache.cache_from_refs.join(","),
-            );
+            generated_proxy_metadata_hints.push(("docker_immutable_run_ref", run_ref.to_string()));
         }
         if !plan.oci_cache.promotion_ref_tags.is_empty() {
-            proxy_metadata_hints.insert(
-                "docker_alias_promotion_refs".to_string(),
-                plan.oci_cache.promotion_ref_tags.join(","),
-            );
+            generated_proxy_metadata_hints.push((
+                "docker_alias_promotion_refs",
+                plan.oci_cache.promotion_ref_tags.join("/"),
+            ));
         }
         if let Some(run_metadata) = plan.oci_cache.run_metadata.as_ref() {
-            proxy_metadata_hints.insert("ci_provider".to_string(), run_metadata.provider.clone());
-            proxy_metadata_hints.insert("ci_run_uid".to_string(), run_metadata.run_uid.clone());
+            generated_proxy_metadata_hints.push(("ci_provider", run_metadata.provider.clone()));
+            generated_proxy_metadata_hints.push(("ci_run_uid", run_metadata.run_uid.clone()));
             if let Some(attempt) = run_metadata.run_attempt.as_deref() {
-                proxy_metadata_hints.insert("ci_run_attempt".to_string(), attempt.to_string());
+                generated_proxy_metadata_hints.push(("ci_run_attempt", attempt.to_string()));
             }
-            proxy_metadata_hints.insert(
-                "ci_ref_type".to_string(),
+            generated_proxy_metadata_hints.push((
+                "ci_ref_type",
                 match run_metadata.source_ref_type {
                     crate::ci_detection::CiSourceRefType::Branch => "branch",
                     crate::ci_detection::CiSourceRefType::Tag => "tag",
@@ -381,25 +373,32 @@ pub async fn adapter_execute(
                     crate::ci_detection::CiSourceRefType::Other => "other",
                 }
                 .to_string(),
-            );
-            if let Some(source_ref_name) = run_metadata.source_ref_name.as_deref() {
-                proxy_metadata_hints.insert("ci_ref_name".to_string(), source_ref_name.to_string());
-            }
-            if let Some(default_branch) = run_metadata.default_branch.as_deref() {
-                proxy_metadata_hints
-                    .insert("ci_default_branch".to_string(), default_branch.to_string());
-            }
+            ));
             if let Some(pull_request_number) = run_metadata.pull_request_number {
-                proxy_metadata_hints
-                    .insert("ci_pr_number".to_string(), pull_request_number.to_string());
+                generated_proxy_metadata_hints
+                    .push(("ci_pr_number", pull_request_number.to_string()));
+            }
+            if let Some(source_ref_name) = run_metadata.source_ref_name.as_deref() {
+                generated_proxy_metadata_hints.push(("ci_ref_name", source_ref_name.to_string()));
             }
             if let Some(commit_sha) = run_metadata.commit_sha.as_deref() {
-                proxy_metadata_hints.insert("ci_commit_sha".to_string(), commit_sha.to_string());
+                generated_proxy_metadata_hints.push(("ci_commit_sha", commit_sha.to_string()));
+            }
+            if let Some(default_branch) = run_metadata.default_branch.as_deref() {
+                generated_proxy_metadata_hints
+                    .push(("ci_default_branch", default_branch.to_string()));
             }
             if let Some(run_started_at) = run_metadata.run_started_at.as_deref() {
-                proxy_metadata_hints
-                    .insert("ci_run_started_at".to_string(), run_started_at.to_string());
+                generated_proxy_metadata_hints
+                    .push(("ci_run_started_at", run_started_at.to_string()));
             }
+        }
+        for (key, value) in generated_proxy_metadata_hints.drain(..) {
+            cache_registry::insert_replayable_proxy_metadata_hint(
+                &mut proxy_metadata_hints,
+                key,
+                &value,
+            );
         }
     }
     if startup_warm && let Some(plan) = &docker_plan {

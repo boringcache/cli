@@ -410,6 +410,30 @@ fn parse_proxy_metadata_hint(raw_hint: &str, source: &str) -> Result<(String, St
     Ok((key, value))
 }
 
+pub(crate) fn normalize_proxy_metadata_hint(
+    raw_key: &str,
+    raw_value: &str,
+) -> Option<(String, String)> {
+    let key = normalize_proxy_metadata_hint_key(raw_key)?;
+    let value = normalize_proxy_metadata_hint_value(raw_value)?;
+    Some((key, value))
+}
+
+pub(crate) fn insert_replayable_proxy_metadata_hint(
+    hints: &mut BTreeMap<String, String>,
+    raw_key: &str,
+    raw_value: &str,
+) -> bool {
+    let Some((key, value)) = normalize_proxy_metadata_hint(raw_key, raw_value) else {
+        return false;
+    };
+    if !hints.contains_key(&key) && hints.len() >= MAX_PROXY_METADATA_HINTS {
+        return false;
+    }
+    hints.insert(key, value);
+    true
+}
+
 fn normalize_proxy_metadata_hint_key(raw_key: &str) -> Option<String> {
     let normalized = raw_key.trim().to_lowercase().replace('-', "_");
     if normalized.is_empty() || normalized.len() > MAX_PROXY_METADATA_HINT_KEY_BYTES {
