@@ -148,6 +148,7 @@ Override precedence:
 For Docker, `--tag` is always the proxy cache tag. Use `--cache-ref-tag` for the OCI cache tag.
 In GitHub Actions, the Docker adapter derives an immutable run ref plus PR/branch/default cache aliases from CI metadata.
 The CLI plans the full BuildKit import fallback chain and injects every planned `--cache-from` ref before the run-scoped `--cache-to` ref.
+On restore-only PR runs, the PR-scoped ref may not exist yet and may return 404; BuildKit should then continue with branch/default/stable imports. Enable PR saves only when you intentionally want PR-scoped writes.
 Local Docker runs keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
 
 A Docker cache has two tag concepts:

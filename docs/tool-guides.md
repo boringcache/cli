@@ -28,7 +28,8 @@ boringcache docker --tag docker-cache -- docker buildx build .
 
 `boringcache docker` injects `--cache-from` and `--cache-to` for you.
 Do not pass those flags yourself.
-Use `--cache-ref-tag` and `--cache-mode` when you need to override the OCI cache ref or export mode.
+Use `--cache-ref-tag` and `--cache-mode` only when you need to override the OCI cache ref or export mode.
+
 Docker has two cache tag concepts:
 
 - `--tag docker-cache` selects the BoringCache proxy cache family.
@@ -46,6 +47,7 @@ It plans the full BuildKit import fallback chain and injects every planned `--ca
 ```
 
 Passing `--cache-ref-tag customcache` only changes the final stable fallback from `buildcache` to `customcache`.
+On restore-only PR runs, the PR-scoped ref may not exist yet and may return 404. That is expected; BuildKit should continue with the remaining branch, default, and stable fallback refs. Enable PR saves only when you intentionally want PR-scoped writes.
 Local Docker runs without CI metadata keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
 Keep BoringCache outside the Dockerfile for normal Docker builds.
 Do not add `boringcache restore`, `boringcache save`, or a bind-mounted `boringcache-bin` helper to `RUN` steps; BuildKit cache mounts and image layers should stay native to BuildKit, while BoringCache backs the outer registry cache.
