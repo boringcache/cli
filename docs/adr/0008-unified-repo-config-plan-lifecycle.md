@@ -95,6 +95,26 @@ Each benchmark bundle must record:
 
 Do not reuse artifacts from old Dockerfile-helper experiments or invalid same-branch reseeds as launch proof.
 
+Evidence note, 2026-04-22: post-fix Docker artifacts prove that benchmark
+diagnostics can now retain `cache_session_summary` after the harness flushes
+the action-owned proxy before artifact upload. Downloaded BoringCache artifacts
+include summaries for PostHog fresh `24795871449`, PostHog rolling
+`24795877370`, Hugo fresh `24796205506`, Hugo rolling `24796211023`, Immich
+rolling `24796581326`, and Mastodon rolling `24796581317`. The bundle is still
+partial launch evidence only: it used `boringcache/one@v1` at
+`c7bf06c1b6753a50890a78204e38acbaeec3c2b8` with CLI `v1.12.46`, records cache
+mode `max` and OCI hydration `metadata-only`, but does not include web
+`APP_REVISION` or `product_refs`; Immich and Mastodon still need post-fix
+fresh+warm artifacts.
+
+Follow-up implementation on 2026-04-22 adds the launch-proof field shape for
+future benchmark artifacts: web `/v2/health` reports nullable `revision`, and
+the benchmark artifact contract should emit `product_refs` with CLI, action,
+web revision, and API URL fields. This is harness readiness only; the checked
+post-fix artifacts still did not contain those fields, and the release/default
+claim gate still needs fresh artifacts produced by the intended released
+action/CLI path.
+
 ## Legacy And Cleanup
 
 `serve` and `docker-registry` are not active command aliases. Tests currently reject both. Public docs and product facts must not advertise them.

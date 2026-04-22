@@ -295,6 +295,30 @@ The trace and negative-cache baseline therefore has required registry E2E eviden
 
 On 2026-04-22, the fresh launch benchmark artifacts downloaded before this status-snapshot and Rails-persistence change still did not clear the `cache_session_summary` artifact gate: several successful jobs captured request metrics before proxy shutdown, and gRPC/Zed diagnostics did not fetch the proxy status endpoint. The code path is now shaped so status snapshots and Rails `cache_sessions` can carry the summary, but release/default claims still need a rerun on the released action/CLI path and archived evidence from that rerun.
 
+Later on 2026-04-22, the Docker benchmark workflows were rerun after the
+benchmark harness explicitly flushed the action-owned proxy before uploading
+diagnostics. The downloaded post-fix artifacts now contain archived
+`cache_session_summary` evidence for PostHog fresh `24795871449`, PostHog
+rolling `24795877370`, Hugo fresh `24796205506`, Hugo rolling `24796211023`,
+Immich rolling `24796581326`, and Mastodon rolling `24796581317`. All checked
+BoringCache seed jobs used `boringcache/one@v1` at action SHA
+`c7bf06c1b6753a50890a78204e38acbaeec3c2b8`, CLI `v1.12.46`, Docker registry
+cache `mode=max`, and OCI hydration `metadata-only`. This clears the
+proxy-shutdown artifact plumbing issue for the checked Docker workflow shapes,
+but it is not a launch-wide proof: the CLI/action path is still older than the
+intended launch path, the artifacts still do not record web `APP_REVISION` or
+`product_refs`, and Immich/Mastodon still need post-fix fresh+warm artifacts
+before broad claims.
+
+Follow-up implementation on 2026-04-22 closes the next local
+artifact-schema gap for future runs: the web health endpoint now exposes
+`revision` from `APP_REVISION` or `GIT_SHA`, and the benchmark artifact writer
+contract should emit a `product_refs` object with `cli_version`, `action_ref`,
+`action_sha`, `web_revision`, and `api_url`. The checked runs above remain old
+evidence because their downloaded artifacts did not contain those fields;
+launch proof still needs fresh released-path artifacts that actually capture
+them.
+
 The later proof bundle must attach:
 
 - a metadata-only Docker E2E artifact containing `cache_session_summary`;

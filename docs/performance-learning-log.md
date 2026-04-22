@@ -2,6 +2,50 @@
 
 This log captures regressions, root causes, and guardrails for cache-registry performance/correctness.
 
+## 2026-04-22 - Docker benchmark diagnostics after proxy flush
+
+- Post-fix benchmark artifacts now prove the diagnostics ordering fix beyond
+  the first PostHog rerun: BoringCache seed diagnostics contain structured
+  `cache_session_summary` for PostHog fresh `24795871449`, PostHog rolling
+  `24795877370`, Hugo fresh `24796205506`, Hugo rolling `24796211023`,
+  Immich rolling `24796581326`, and Mastodon rolling `24796581317`.
+- Run refs: PostHog used benchmark repo commit
+  `9df5d523ac58db3b221f222e043aeaf23f965bf9` and upstream
+  `a92bc03bf9a9f74d1aaf2653e3e8abc46a20c686`; Hugo used
+  `010b43e0b480080f2c075e1635d27bd2b432a446` and upstream
+  `79f030be5bdb31e014c2996da7464898df750801`; Immich rolling used
+  `06e79e4ac213e1cd08b0b52ff8188e465b3ae9a8` and upstream
+  `f0835d06f8d63887cc58142f079e49b586116923`; Mastodon rolling used
+  `d1796634991a77189fa29f462c6102e81e30dd42` and upstream
+  `c4eec632b92c800ae38dba111c4c76e63bb1c0de`.
+- All checked BoringCache seed jobs used `boringcache/one@v1` at
+  `c7bf06c1b6753a50890a78204e38acbaeec3c2b8`, CLI `v1.12.46`, Docker
+  registry cache `mode=max`, and OCI hydration `metadata-only`.
+- Fresh lanes: PostHog completed cold+warm with `cold_seconds=845`,
+  `warm1_seconds=10`, `export_seconds=430.9`, and summary
+  `duration_ms=838102`, `oci_engine_graph_descriptors=85`,
+  `oci_engine_proof_bytes=6302509102`, `oci_engine_publish_total_duration_ms=10607`.
+  Hugo completed cold+warm with `cold_seconds=173`, `warm1_seconds=9`,
+  `export_seconds=24.4`, and summary `duration_ms=167601`,
+  `oci_engine_graph_descriptors=20`, `oci_engine_proof_bytes=356114210`,
+  `oci_engine_publish_total_duration_ms=3610`.
+- Rolling lanes are reseed samples, not steady-state samples: PostHog had
+  `new_blob_count=31`, `body_remote_fetches=52`, `body_remote_bytes=2181928865`,
+  and `export_seconds=323.1`; Hugo had `new_blob_count=14` and
+  `export_seconds=26.9`; Immich had `new_blob_count=55` and
+  `export_seconds=156.4`; Mastodon had `new_blob_count=38` and
+  `export_seconds=66.8`.
+- Actions Cache comparison artifacts completed for PostHog fresh/rolling and
+  Hugo fresh/rolling, but the evidence above should not be turned into a broad
+  claim: Immich and Mastodon still need post-fix fresh+warm artifacts, the
+  latest duplicate PostHog AC rolling dispatch `24796916343` was still running
+  when checked, and all checked artifacts are still on the old CLI/action path.
+- Evidence gap: downloaded artifacts still do not include `APP_REVISION`,
+  `web_revision`, or a `product_refs` object. Web `/v2/health` has a nullable
+  `revision` field ready for future runs, but these benchmark bundles did not
+  capture it, so launch claims remain blocked on released-path artifacts with
+  CLI/action/web refs in the artifact payload.
+
 ## 2026-04-22 - Stream-through local activation proof
 
 - Local Colima/BuildKit E2E was run with `OCI_HYDRATION=metadata-only`, per-proxy blob-cache isolation, and random payloads so restart warm had to read selected blob bodies through the proxy instead of reusing an old local cache.
