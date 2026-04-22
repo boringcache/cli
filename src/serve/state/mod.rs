@@ -99,30 +99,22 @@ impl AppState {
             .filter(|value| !value.is_empty())
     }
 
-    pub fn proxy_metadata_hint_u32(&self, key: &str) -> Option<u32> {
-        self.proxy_metadata_hint(key)
-            .and_then(|value| value.parse::<u32>().ok())
-    }
-
     pub fn ci_provider(&self) -> Option<String> {
         self.proxy_ci_run_context
             .as_ref()
             .map(|context| context.provider.clone())
-            .or_else(|| self.proxy_metadata_hint("ci_provider"))
     }
 
     pub fn ci_run_uid(&self) -> Option<String> {
         self.proxy_ci_run_context
             .as_ref()
             .map(|context| context.run_uid.clone())
-            .or_else(|| self.proxy_metadata_hint("ci_run_uid"))
     }
 
     pub fn ci_run_attempt(&self) -> Option<String> {
         self.proxy_ci_run_context
             .as_ref()
             .and_then(|context| context.run_attempt.clone())
-            .or_else(|| self.proxy_metadata_hint("ci_run_attempt"))
     }
 
     pub fn ci_ref_type(&self) -> Option<String> {
@@ -134,42 +126,36 @@ impl AppState {
                 CiSourceRefType::PullRequest => "pull-request".to_string(),
                 CiSourceRefType::Other => "other".to_string(),
             })
-            .or_else(|| self.proxy_metadata_hint("ci_ref_type"))
     }
 
     pub fn ci_ref_name(&self) -> Option<String> {
         self.proxy_ci_run_context
             .as_ref()
             .and_then(|context| context.source_ref_name.clone())
-            .or_else(|| self.proxy_metadata_hint("ci_ref_name"))
     }
 
     pub fn ci_default_branch(&self) -> Option<String> {
         self.proxy_ci_run_context
             .as_ref()
             .and_then(|context| context.default_branch.clone())
-            .or_else(|| self.proxy_metadata_hint("ci_default_branch"))
     }
 
     pub fn ci_pr_number(&self) -> Option<u32> {
         self.proxy_ci_run_context
             .as_ref()
             .and_then(|context| context.pull_request_number)
-            .or_else(|| self.proxy_metadata_hint_u32("ci_pr_number"))
     }
 
     pub fn ci_commit_sha(&self) -> Option<String> {
         self.proxy_ci_run_context
             .as_ref()
             .and_then(|context| context.commit_sha.clone())
-            .or_else(|| self.proxy_metadata_hint("ci_commit_sha"))
     }
 
     pub fn ci_run_started_at(&self) -> Option<String> {
         self.proxy_ci_run_context
             .as_ref()
             .and_then(|context| context.run_started_at.clone())
-            .or_else(|| self.proxy_metadata_hint("ci_run_started_at"))
     }
 }
 
