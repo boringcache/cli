@@ -188,6 +188,10 @@ Evidence now available:
 - unit/integration tests cover successful stream-through promotion, digest mismatch temp cleanup, and no local-cache population after a bad body;
 - the Rails-backed local Docker BuildKit E2E passed against a managed workspace provisioned through Rails/Tigris with `OCI_HYDRATION=metadata-only` and `BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES=1`;
 - that E2E recorded stream-through counters in status snapshots and session summaries, including `oci_engine_stream_through_count=5` and `oci_engine_stream_through_bytes=3953` in the first cache-registry session summary.
+- local Colima/BuildKit A/B on 2026-04-22 proved hidden-threshold activation without changing the default: a 16 MiB random payload run fetched about `16.78 MB` remotely on restart warm with `stream_through_count=0` when unset, and streamed the same large blob with `stream_through_count=1`, `stream_through_bytes=16782486`, and `stream_through_verify_failures=0` when `BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES=16777216`;
+- the same local A/B with a more realistic multi-layer graph (`2,8,20,28 MiB` random payload layers plus six small file layers, per-proxy blob cache, metadata-only hydration) fetched about `60.84 MB` remotely on restart warm in both variants; the unset run recorded `stream_through_count=0`, while the 16 MiB threshold run streamed exactly the two larger layers with `stream_through_count=2`, `stream_through_bytes=50347369`, and `stream_through_verify_failures=0`.
+
+This is activation and correctness evidence, not default-readiness proof. The local harness does not yet record client first-byte wait, upstream TTFB, or upstream body duration for the streamed blobs, and one 16 MiB-threshold multi-layer warm export hit a transient BuildKit `HEAD` timeout/retry unrelated to stream verification.
 
 Benchmark proof is still pending before any default change. The later proof bundle must attach:
 

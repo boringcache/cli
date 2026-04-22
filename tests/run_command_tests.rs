@@ -17,6 +17,7 @@ const CI_RUN_ENV_VARS: &[&str] = &[
     "BORINGCACHE_CI_DEFAULT_BRANCH",
     "BORINGCACHE_CI_PR_NUMBER",
     "BORINGCACHE_CI_SHA",
+    "BORINGCACHE_CI_RUN_STARTED_AT",
     "GITHUB_ACTIONS",
     "GITHUB_RUN_ID",
     "GITHUB_RUN_ATTEMPT",
@@ -1615,6 +1616,7 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
         .env("GITHUB_HEAD_REF", "Feature/Docker Cache")
         .env("GITHUB_BASE_REF", "main")
         .env("GITHUB_SHA", "abcdef1234567890")
+        .env("BORINGCACHE_CI_RUN_STARTED_AT", "2026-04-21T10:00:00Z")
         .args([
             "docker",
             "--workspace",
@@ -1690,6 +1692,10 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
         "Feature/Docker Cache"
     );
     assert_eq!(
+        parsed["oci_cache"]["run_metadata"]["run_started_at"],
+        "2026-04-21T10:00:00Z"
+    );
+    assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
         serde_json::json!([
             "cache@pr-42",
@@ -1713,6 +1719,10 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["ci_provider"],
         "github-actions"
+    );
+    assert_eq!(
+        parsed["proxy"]["metadata_hints"]["ci_run_started_at"],
+        "2026-04-21t10:00:00z"
     );
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["ci_ref_type"],

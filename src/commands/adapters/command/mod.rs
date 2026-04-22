@@ -361,8 +361,9 @@ pub async fn adapter_execute(
         if let Some(run_metadata) = plan.oci_cache.run_metadata.as_ref() {
             generated_proxy_metadata_hints.push(("ci_provider", run_metadata.provider.clone()));
             generated_proxy_metadata_hints.push(("ci_run_uid", run_metadata.run_uid.clone()));
-            if let Some(attempt) = run_metadata.run_attempt.as_deref() {
-                generated_proxy_metadata_hints.push(("ci_run_attempt", attempt.to_string()));
+            if let Some(run_started_at) = run_metadata.run_started_at.as_deref() {
+                generated_proxy_metadata_hints
+                    .push(("ci_run_started_at", run_started_at.to_string()));
             }
             generated_proxy_metadata_hints.push((
                 "ci_ref_type",
@@ -378,6 +379,9 @@ pub async fn adapter_execute(
                 generated_proxy_metadata_hints
                     .push(("ci_pr_number", pull_request_number.to_string()));
             }
+            if let Some(attempt) = run_metadata.run_attempt.as_deref() {
+                generated_proxy_metadata_hints.push(("ci_run_attempt", attempt.to_string()));
+            }
             if let Some(source_ref_name) = run_metadata.source_ref_name.as_deref() {
                 generated_proxy_metadata_hints.push(("ci_ref_name", source_ref_name.to_string()));
             }
@@ -387,10 +391,6 @@ pub async fn adapter_execute(
             if let Some(default_branch) = run_metadata.default_branch.as_deref() {
                 generated_proxy_metadata_hints
                     .push(("ci_default_branch", default_branch.to_string()));
-            }
-            if let Some(run_started_at) = run_metadata.run_started_at.as_deref() {
-                generated_proxy_metadata_hints
-                    .push(("ci_run_started_at", run_started_at.to_string()));
             }
         }
         for (key, value) in generated_proxy_metadata_hints.drain(..) {

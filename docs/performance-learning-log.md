@@ -2,6 +2,15 @@
 
 This log captures regressions, root causes, and guardrails for cache-registry performance/correctness.
 
+## 2026-04-22 - Stream-through local activation proof
+
+- Local Colima/BuildKit E2E was run with `OCI_HYDRATION=metadata-only`, per-proxy blob-cache isolation, and random payloads so restart warm had to read selected blob bodies through the proxy instead of reusing an old local cache.
+- A single large-payload A/B proved the hidden threshold path activates without changing default behavior. With `BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES` unset, restart warm fetched about `16.78 MB` remotely and recorded `stream_through_count=0`. With the threshold set to `16777216`, the same shape recorded `stream_through_count=1`, `stream_through_bytes=16782486`, and `stream_through_verify_failures=0`; restart warm wall time stayed about `3s` in this small local harness.
+- A more diverse graph used random payload layers of `2,8,20,28 MiB` plus six small file layers. The default-off run fetched `60840983` bytes remotely on restart warm with `stream_through_count=0`; phase seconds were `18,10,10,7,5,6,4,8` across the eight harness builds.
+- The same diverse graph with the 16 MiB threshold fetched `60841012` bytes remotely and streamed the two larger layers only: `stream_through_count=2`, `stream_through_bytes=50347369`, `stream_through_verify_failures=0`, `upload_session_materialization_bytes=0`, and borrowed upload-session bytes stayed around `121.68 MB`. Phase seconds were `14,6,6,9,7,37,5,3`; the `37s` implicit-warm phase included a transient BuildKit `HEAD` timeout and retry, so do not read it as a stream-through regression without a rerun.
+- This proves threshold selection, digest verification, and cache-promotion behavior on real Docker traffic. It does not prove a default threshold yet because the artifact still lacks blob-level client first-byte wait, storage TTFB, storage body duration, and a repeated real-project matrix at `16/32/64/128 MiB`.
+- Cleanup after the run pruned Docker images/volumes, stopped and deleted Colima, removed the leftover Colima data disk, and left `~/.colima` at `24K` with Docker daemon unreachable.
+
 ## 2026-04-21 - PostHog blob-unknown release check
 
 - The `blob unknown` incident is not fixed in any released path yet. `boringcache/one@v1` resolves through action `v1.12.59`, which still pins CLI `v1.12.41`; the OCI negative-cache invalidation and ADR 0004/0005 fixes are local CLI commits only.
@@ -9,7 +18,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
 - Local main also carries focused proxy coverage for the ADR 0007 alias shape: two immutable run refs promote the same branch alias, both run refs remain readable, and alias diagnostics distinguish the accepted promotion from the stale ignored promotion.
 - Commit `83e547e` cleared the required registry E2E workflow, including Docker BuildKit, Prefetch Smoke, and Cross-Runner Verify, without verifier-side blob URL convergence polling. Commit `801dcc1` made CLI CI/E2E/release workflows use `boringcache/one@v1` with `verify: none` while the action release still pins the older CLI path.
 - The required E2E matrix now includes a provider-neutral OCI same-alias writer leg. It uses the standalone proxy's hidden alias-promotion hook with two live writer proxies, publishes a newer immutable ref before an older ref, requires promoted and `ignored_stale` alias results with zero promotion failures, and verifies both immutable refs plus the winning alias through a fresh proxy.
-- Local Rails-backed direct OCI same-alias writer E2E passed on 2026-04-22 after keeping proxy metadata hints within the replayable 8-key cap. The updated dual-writer version passed via `LOCAL_ADAPTER_TOOLS=oci-same-alias` with logs under `/tmp/boringcache-local-adapter-e2e/oci-same-alias-final-20260422`. Docker/OCI full-build local E2E was not rerun because the local Docker daemon was unavailable in that environment.
+- Local Rails-backed direct OCI same-alias writer E2E passed on 2026-04-22 after keeping proxy metadata hints within the replayable 8-key cap. The updated dual-writer version passed via `LOCAL_ADAPTER_TOOLS=oci-same-alias` with logs under `/tmp/boringcache-local-adapter-e2e/oci-same-alias-final-20260422`. Docker/OCI full-build local E2E was later rerun through Colima for the ADR 0004 stream-through activation checks above.
 - The request-metrics summary now promotes OCI upload-plan reuse fields directly, including `request_metrics_oci_new_blob_count` and `request_metrics_oci_latest_new_blob_count`. Use those fields in rolling cohorts instead of inferring steady state from total wall time.
 - PostHog remains excluded from compatibility proof until the local fixes are released through the action/CLI path and at least one same-ref cohort records zero new blobs, low remote fetches, short export, and no registry 4xx/5xx or digest failures.
 
@@ -49,8 +58,8 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Docker benchmark workflows now label `oci.new_blob_bytes` from actual `oci_blob_upload` event bytes after the latest upload plan, not from the upload plan's full `requested_bytes` graph size.
   - Older artifacts before this fix are misleading when `new_blob_count=0` or `1`, because they can still report the full requested descriptor graph size. Recompute from `oci_blob_upload` events when reviewing those runs.
 - Docker benchmark graph fix:
-  - Docker benchmark workflows now pass `docker-internal-cache: manual` to `boringcache/one`. Omitting the input would default to `off`, which disables helper writes but still adds disabled `BORINGCACHE_INTERNAL_*` build args. `manual` keeps the benchmark on the upstream Dockerfile/context with no BoringCache Dockerfile helper surface.
-  - Keep BoringCache restore/save tokens only on the outer action/proxy and storage-probe steps. Do not pass BoringCache tokens, helper paths, or helper binaries into Dockerfile `RUN` steps for these OCI registry-cache benchmarks.
+  - The Dockerfile-internal helper input surface has been removed from `boringcache/one`. Benchmark workflows should not pass `docker-internal-cache`, `docker-helper-path`, or any `BORINGCACHE_INTERNAL_*` build args.
+  - Keep BoringCache restore/save tokens only on the outer action/proxy and storage-probe steps. Do not pass BoringCache tokens, helper paths, helper binaries, or BoringCache-specific build args into Dockerfile `RUN` steps for these OCI registry-cache benchmarks.
 - Guardrails:
   - Rolling comparisons must use the same upstream ref and the same workflow graph. The first run after an upstream, Dockerfile, action, CLI, cache tag, or hydration-policy change is allowed to reseed.
   - A valid Docker steady-state sample needs cache import success, high cached-step count, `new_blob_count == 0`, short BuildKit export, no widespread import-time remote body reads, no startup body failures, and no registry 4xx/5xx or digest failures.

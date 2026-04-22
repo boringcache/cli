@@ -1,6 +1,6 @@
 # ADR 0007: Docker Immutable Run Refs And Alias Promotion
 
-Status: accepted; CI derivation, alias-root binding, and same-alias E2E implemented, default rollout pending release/action/benchmark proof
+Status: accepted; CI derivation, metadata transport, alias-root binding, and same-alias E2E implemented; default rollout pending released-path benchmark proof
 Date: 2026-04-20
 
 ## Context
@@ -222,8 +222,11 @@ The first hidden CLI/Rails slice is implemented:
 - `cache-registry` now has a hidden `--oci-alias-promotion-ref` proof hook so required E2E can exercise planned OCI alias promotion refs directly through the standalone proxy.
 - `ci/e2e/required/e2e-oci-same-alias-writer-test.sh` is wired into the required E2E matrix. It now runs two live standalone writer proxies against the same backend, uploads both writers' OCI blobs, commits the newer immutable run ref before the older ref, requires promoted plus ignored-stale alias diagnostics with zero promotion failures, and verifies through a fresh read-only proxy that both immutable refs remain readable while the branch alias resolves to the newer run. The direct proof leg passes the provider-neutral CI fields Rails needs for ordering.
 - Docker dry-run JSON now keeps full BuildKit `--cache-from` strings in `oci_cache` only. `proxy.metadata_hints` is capped and normalized to values that can be replayed as `cache-registry --metadata-hint`, with multi-alias promotion hints encoded as slash-separated labels instead of comma lists.
+- `cache-registry` stores a detected provider-neutral `CiRunContext` on `AppState` once at proxy start. OCI manifest publish and KV flush save requests populate dedicated CI fields from that context first, then fall back to normalized metadata hints only for compatibility.
+- Generic local runs and generic `CI=true` without a provider/run id do not create run context, so local/non-CI paths keep the old single-ref behavior unless explicit hidden flags are used.
+- `boringcache/one` now generates a single GitHub Actions run-start timestamp when needed, passes it to CLI dry-run planning, preserves it for the proxy process, and prioritizes `ci_run_started_at` under the 8-key metadata-hint cap for replay/debug labels.
 
-Remaining rollout work: release the post-`v1.12.42` CLI mainline if the same-alias harness is part of the release gate, make action/proxy metadata transport preserve `ci_run_started_at` and other ordering fields under the replayable metadata-hint cap, wire action benchmark workflows to pass provider-neutral metadata, compare artifacts, and promote the behavior to the default action path only after proof.
+Remaining rollout work: release the post-`v1.12.42` CLI mainline if the same-alias harness is part of the release gate, capture released action-path artifacts showing the same run uid/start time in the CLI plan, Rails entry, and promotion response, compare benchmark artifacts, and promote the behavior to the default action path only after proof.
 
 The concurrent writer E2E should stay provider-neutral. It should simulate two provider contexts, not GitHub-only environment variables:
 
@@ -241,7 +244,7 @@ Expected assertions:
 
 ## Proof Status
 
-Documentation, hidden CLI/Rails contract fields, automatic CLI-side CI derivation, focused proxy proof, and the backend-backed dual-writer same-alias E2E harness are aligned as of 2026-04-22. Immutable run refs and alias promotion are accepted as the correctness model; the backend-backed same-alias E2E passes locally with two live writer proxies plus a fresh verifier and in public CLI E2E run `24767673291` at `5fd0203`. Action workflow metadata transport, benchmark artifact comparison, a signed release for post-`v1.12.42` CLI mainline changes if required, and default rollout remain proof-gated.
+Documentation, hidden CLI/Rails contract fields, automatic CLI-side CI derivation, local action/proxy metadata transport, focused proxy proof, and the backend-backed dual-writer same-alias E2E harness are aligned as of 2026-04-22. Immutable run refs and alias promotion are accepted as the correctness model; the backend-backed same-alias E2E passes locally with two live writer proxies plus a fresh verifier and in public CLI E2E run `24767673291` at `5fd0203`. Released action workflow evidence, benchmark artifact comparison, a signed release for post-`v1.12.42` CLI mainline changes if required, and default rollout remain proof-gated.
 
 Focused evidence now available:
 
@@ -249,11 +252,12 @@ Focused evidence now available:
 - both immutable primary refs remain locally readable after the alias updates;
 - alias diagnostics record one `promoted`, one `ignored_stale`, and no failed promotion.
 - `detects_provider_neutral_run_context` and `detects_github_actions_run_context` cover provider-neutral and GitHub Actions run metadata detection;
+- `does_not_create_run_context_for_local_or_generic_ci_without_run_identity` proves local runs and generic CI labels do not create first-class run metadata without a provider/run id;
 - `resolve_docker_plan_derives_branch_aliases_from_ci_run_context` covers default-branch import/promotion alias planning;
 - `test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases` proves dry-run JSON and injected Docker flags for a GitHub Actions PR context: immutable run ref, PR/head/default imports, PR promotion, and CI metadata hints.
-- CLI save/publish request models now carry provider-neutral run metadata (`ci_run_uid`, attempt, ref type/name, default branch, PR number, commit SHA, and run start time) so Rails can order alias promotions without knowing which CI produced the build.
+- CLI save/publish request models now carry provider-neutral run metadata (`ci_run_uid`, attempt, ref type/name, default branch, PR number, commit SHA, and run start time) from detected run context first, not from capped hints as the primary path, so Rails can order alias promotions without knowing which CI produced the build.
 - Rails local tests prove `ci_run_started_at` beats upload completion time for alias promotion, so an older run that finishes later does not replace a newer run's branch alias.
-- `boringcache/one` local release-prep surfaces Docker cache run refs, import refs, promotion refs, and provider-neutral CI metadata as action outputs.
+- `boringcache/one` local release-prep surfaces Docker cache run refs, import refs, promotion refs, and provider-neutral CI metadata as action outputs, and unit coverage proves a generated GitHub run-start timestamp is shared by the CLI dry-run and proxy process.
 - The required E2E matrix now includes `Registry / OCI Same-Alias Writer`, a provider-neutral direct-OCI proof leg that runs two live writer proxies, checks `promoted` and `ignored_stale` session-summary counters, rejects any alias-promotion failure counter, and verifies immutable refs plus the winning alias through a fresh proxy.
 - Local E2E evidence on 2026-04-22: `ci/e2e/required/e2e-oci-same-alias-writer-test.sh` passed against local Rails using the hidden standalone proxy alias-promotion hook, with two live writer proxies uploading blobs, newer then older immutable refs publishing to the same alias, stale alias diagnostics observed, zero alias-promotion failures required, and both immutable refs plus the winning alias read through a fresh read-only proxy.
 - CI evidence on 2026-04-22: CLI E2E run `24767673291` passed at `5fd0203`, and job `E2E / Registry / OCI Same-Alias Writer` (`72466357831`) succeeded with the provider-neutral dual-writer harness.

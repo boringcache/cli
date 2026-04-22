@@ -40,6 +40,7 @@ This file covers the archive/CAS lifecycle and the read/admin/reporting commands
 
 - Upload-session blob and manifest receipt commits use the API request-metrics path, so JSONL diagnostics include status, duration, request id, workspace, and receipt batch size for those phases.
 - Proxy OCI/KV CAS publish emits observability events for blob upload URL planning, individual blob uploads, and the overall blob upload batch. Upload jobs can now stream from offset-limited file sources, which lets borrowed OCI blob-cache bodies upload without first copying segment slices into standalone temp files. When Rails returns an upload session, proxy publish paths require blob and manifest receipt commits to succeed before confirm/publish; use these events with `cache_finalize_publish` to distinguish URL planning, blob transfer, receipt commit, manifest transfer, manifest receipt, and confirm bottlenecks.
+- Launch performance claims must use current benchmark artifacts, not old helper-based Docker runs. Required evidence includes CLI version/ref, action ref when applicable, benchmark repo/ref, cold/warm or rolling classification, `cache_session_summary`, OCI blob counts/bytes, upload-requested versus already-present blobs, cache-root publish/promotion status, and relevant BuildKit import/export timings.
 
 ## Strongly used vs thinner
 

@@ -11,7 +11,7 @@ This is the shortest whole-system view of the CLI.
 5. Shared execution logic lives in:
    - `src/cache/**` for archive and CAS lifecycle work
    - `src/proxy/**` and `src/serve/**` for the local cache-registry
-   - `src/project_config/**` for `.boringcache.toml` planning
+   - `src/project_config/**` for `.boringcache.toml` planning; ADR 0008 treats that file as the durable repo cache plan across local and CI
    - `src/api/**` for server transport and models
    - `src/command_support/**` for workspace, spec parsing, concurrency, and save helpers
 
@@ -40,6 +40,8 @@ This is the shortest whole-system view of the CLI.
 | `run --archive-path`, `--archive-tag-prefix`, `--archive-restore-prefix`, `--cache-tag`, `--tool-tag-suffix` | planner-only dry-run surface | `hidden-internal` |
 | `cache-registry --ready-file PATH` | detached orchestration readiness handoff | `hidden-internal` |
 | `cache-registry --oci-alias-promotion-ref REF` | internal ADR 0007 E2E/proof hook for planned OCI alias promotion refs | `hidden-internal` |
+
+`serve` and `docker-registry` are not retained aliases for `cache-registry`; tests reject both names. Do not reintroduce them in docs or action examples without a new compatibility decision.
 
 ## Current hotspots
 

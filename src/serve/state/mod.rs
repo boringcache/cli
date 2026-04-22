@@ -1,6 +1,7 @@
 use crate::api::client::ApiClient;
 use crate::api::models::cache::BlobDescriptor;
 use crate::cas_oci::sha256_hex;
+use crate::ci_detection::{CiRunContext, CiSourceRefType};
 use crate::tag_utils::TagResolver;
 use dashmap::DashMap;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -47,6 +48,7 @@ pub struct AppState {
     pub registry_root_tag: String,
     pub oci_alias_promotion_refs: Vec<String>,
     pub proxy_metadata_hints: BTreeMap<String, String>,
+    pub proxy_ci_run_context: Option<CiRunContext>,
     pub fail_on_cache_error: bool,
     pub oci_hydration_policy: crate::serve::OciHydrationPolicy,
     pub blob_locator: Arc<RwLock<BlobLocatorCache>>,
@@ -100,6 +102,74 @@ impl AppState {
     pub fn proxy_metadata_hint_u32(&self, key: &str) -> Option<u32> {
         self.proxy_metadata_hint(key)
             .and_then(|value| value.parse::<u32>().ok())
+    }
+
+    pub fn ci_provider(&self) -> Option<String> {
+        self.proxy_ci_run_context
+            .as_ref()
+            .map(|context| context.provider.clone())
+            .or_else(|| self.proxy_metadata_hint("ci_provider"))
+    }
+
+    pub fn ci_run_uid(&self) -> Option<String> {
+        self.proxy_ci_run_context
+            .as_ref()
+            .map(|context| context.run_uid.clone())
+            .or_else(|| self.proxy_metadata_hint("ci_run_uid"))
+    }
+
+    pub fn ci_run_attempt(&self) -> Option<String> {
+        self.proxy_ci_run_context
+            .as_ref()
+            .and_then(|context| context.run_attempt.clone())
+            .or_else(|| self.proxy_metadata_hint("ci_run_attempt"))
+    }
+
+    pub fn ci_ref_type(&self) -> Option<String> {
+        self.proxy_ci_run_context
+            .as_ref()
+            .map(|context| match context.source_ref_type {
+                CiSourceRefType::Branch => "branch".to_string(),
+                CiSourceRefType::Tag => "tag".to_string(),
+                CiSourceRefType::PullRequest => "pull-request".to_string(),
+                CiSourceRefType::Other => "other".to_string(),
+            })
+            .or_else(|| self.proxy_metadata_hint("ci_ref_type"))
+    }
+
+    pub fn ci_ref_name(&self) -> Option<String> {
+        self.proxy_ci_run_context
+            .as_ref()
+            .and_then(|context| context.source_ref_name.clone())
+            .or_else(|| self.proxy_metadata_hint("ci_ref_name"))
+    }
+
+    pub fn ci_default_branch(&self) -> Option<String> {
+        self.proxy_ci_run_context
+            .as_ref()
+            .and_then(|context| context.default_branch.clone())
+            .or_else(|| self.proxy_metadata_hint("ci_default_branch"))
+    }
+
+    pub fn ci_pr_number(&self) -> Option<u32> {
+        self.proxy_ci_run_context
+            .as_ref()
+            .and_then(|context| context.pull_request_number)
+            .or_else(|| self.proxy_metadata_hint_u32("ci_pr_number"))
+    }
+
+    pub fn ci_commit_sha(&self) -> Option<String> {
+        self.proxy_ci_run_context
+            .as_ref()
+            .and_then(|context| context.commit_sha.clone())
+            .or_else(|| self.proxy_metadata_hint("ci_commit_sha"))
+    }
+
+    pub fn ci_run_started_at(&self) -> Option<String> {
+        self.proxy_ci_run_context
+            .as_ref()
+            .and_then(|context| context.run_started_at.clone())
+            .or_else(|| self.proxy_metadata_hint("ci_run_started_at"))
     }
 }
 

@@ -23,6 +23,7 @@ OCI_HYDRATION="${OCI_HYDRATION:-bodies-before-ready}"
 E2E_LAYER_COUNT="${E2E_LAYER_COUNT:-12}"
 E2E_PAYLOAD_MB="${E2E_PAYLOAD_MB:-6}"
 E2E_PAYLOAD_MODE="${E2E_PAYLOAD_MODE:-zero}"
+E2E_LAYER_PAYLOAD_MB_LIST="${E2E_LAYER_PAYLOAD_MB_LIST:-}"
 E2E_BLOB_CACHE_SCOPE="${E2E_BLOB_CACHE_SCOPE:-shared}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-0}"
 BUILD_RETRY_ATTEMPTS="${BUILD_RETRY_ATTEMPTS:-1}"
@@ -81,6 +82,11 @@ require_positive "PROXY_READY_POLL_SECS" "$PROXY_READY_POLL_SECS"
 require_positive "PROXY_READY_WARN_SECS" "$PROXY_READY_WARN_SECS"
 require_positive "E2E_LAYER_COUNT" "$E2E_LAYER_COUNT"
 require_positive "E2E_PAYLOAD_MB" "$E2E_PAYLOAD_MB"
+if [[ -n "$E2E_LAYER_PAYLOAD_MB_LIST" ]]; then
+  for payload_mb in ${E2E_LAYER_PAYLOAD_MB_LIST//,/ }; do
+    require_positive "E2E_LAYER_PAYLOAD_MB_LIST item" "$payload_mb"
+  done
+fi
 case "$E2E_PAYLOAD_MODE" in
   zero|random) ;;
   *)
@@ -680,14 +686,26 @@ echo "Proxy shutdown wait: ${PROXY_SHUTDOWN_WAIT_SECS}s"
 echo "OCI hydration: ${OCI_HYDRATION}"
 echo "Registry host: ${REGISTRY_HOST}:${REGISTRY_PORT}"
 echo "BuildKit config: ${BUILDKITD_CONFIG_FILE:-default}"
-echo "Graph shape: ${E2E_LAYER_COUNT} file layers, ${E2E_PAYLOAD_MB} MiB ${E2E_PAYLOAD_MODE} payload"
+if [[ -n "$E2E_LAYER_PAYLOAD_MB_LIST" ]]; then
+  echo "Graph shape: payload layers ${E2E_LAYER_PAYLOAD_MB_LIST} MiB (${E2E_PAYLOAD_MODE}), plus ${E2E_LAYER_COUNT} small file layers"
+else
+  echo "Graph shape: ${E2E_LAYER_COUNT} file layers, ${E2E_PAYLOAD_MB} MiB ${E2E_PAYLOAD_MODE} payload"
+fi
 echo "Blob cache scope: ${E2E_BLOB_CACHE_SCOPE}"
 echo "Logs: ${LOG_DIR}"
 
 mkdir -p e2e-context
 {
   echo "FROM scratch"
-  echo "COPY payload.bin /payload.bin"
+  if [[ -n "$E2E_LAYER_PAYLOAD_MB_LIST" ]]; then
+    layer_index=1
+    for _payload_mb in ${E2E_LAYER_PAYLOAD_MB_LIST//,/ }; do
+      printf 'COPY payload-%02d.bin /payload-%02d.bin\n' "$layer_index" "$layer_index"
+      layer_index=$((layer_index + 1))
+    done
+  else
+    echo "COPY payload.bin /payload.bin"
+  fi
   for i in $(seq -w 1 "${E2E_LAYER_COUNT}"); do
     echo "COPY f${i}.txt /f${i}.txt"
   done
@@ -695,14 +713,27 @@ mkdir -p e2e-context
 for i in $(seq -w 1 "${E2E_LAYER_COUNT}"); do
   printf 'layer-%s\n' "${i}" > "e2e-context/f${i}.txt"
 done
-case "$E2E_PAYLOAD_MODE" in
-  zero)
-    dd if=/dev/zero of=e2e-context/payload.bin bs=1M count="${E2E_PAYLOAD_MB}" status=none
-    ;;
-  random)
-    dd if=/dev/urandom of=e2e-context/payload.bin bs=1M count="${E2E_PAYLOAD_MB}" status=none
-    ;;
-esac
+write_payload_file() {
+  local path="$1"
+  local size_mb="$2"
+  case "$E2E_PAYLOAD_MODE" in
+    zero)
+      dd if=/dev/zero of="$path" bs=1M count="$size_mb" status=none
+      ;;
+    random)
+      dd if=/dev/urandom of="$path" bs=1M count="$size_mb" status=none
+      ;;
+  esac
+}
+if [[ -n "$E2E_LAYER_PAYLOAD_MB_LIST" ]]; then
+  layer_index=1
+  for payload_mb in ${E2E_LAYER_PAYLOAD_MB_LIST//,/ }; do
+    write_payload_file "$(printf 'e2e-context/payload-%02d.bin' "$layer_index")" "$payload_mb"
+    layer_index=$((layer_index + 1))
+  done
+else
+  write_payload_file e2e-context/payload.bin "$E2E_PAYLOAD_MB"
+fi
 
 phase_metadata_hints() {
   local phase="$1"

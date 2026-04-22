@@ -114,6 +114,24 @@ fn detects_github_actions_run_context() {
 }
 
 #[test]
+fn does_not_create_run_context_for_local_or_generic_ci_without_run_identity() {
+    let _guard = test_env::lock();
+    clear_ci_env_vars();
+
+    let local_context = detect_ci_context();
+    assert!(!local_context.is_ci());
+    assert!(local_context.run_context().is_none());
+
+    test_env::set_var("CI", "true");
+    let generic_context = detect_ci_context();
+    assert!(generic_context.is_ci());
+    assert_eq!(generic_context.label(), "generic-ci");
+    assert!(generic_context.run_context().is_none());
+
+    clear_ci_env_vars();
+}
+
+#[test]
 #[ignore]
 fn test_github_actions_detection() {
     let _guard = test_env::lock();

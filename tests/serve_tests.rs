@@ -101,6 +101,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         registry_root_tag: "registry".to_string(),
         oci_alias_promotion_refs: Vec::new(),
         proxy_metadata_hints: std::collections::BTreeMap::new(),
+        proxy_ci_run_context: None,
         fail_on_cache_error: true,
         oci_hydration_policy: boring_cache_cli::serve::OciHydrationPolicy::MetadataOnly,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),

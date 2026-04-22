@@ -31,7 +31,18 @@ Docs-ready is not the same as rollout-ready. If testing or benchmark proof is de
 | [0004](0004-oci-large-blob-stream-through.md) | accepted for hidden prototype; default rollout pending benchmark proof | Large OCI blob stream-through | First-byte/body-wait comparison artifacts before default threshold |
 | [0005](0005-borrowed-upload-sessions-and-blob-cache-policy.md) | accepted for hidden implementation; cache-policy rollout pending benchmark proof | Borrowed upload-session bodies and later blob-cache policy | Large-layer disk-copy/cache-policy evidence; required registry E2E is green through CLI main `5fd0203` without post-publish blob URL readiness polling |
 | [0006](0006-cache-session-trace-and-oci-negative-cache.md) | accepted as first-party insight baseline; backend/action enrichment pending | Session trace, negative cache, and platform insight spine | Backend/action enrichment and artifact validation after CLI E2E run `24767673291`; web still needs rich session-summary persistence |
-| [0007](0007-docker-immutable-run-refs-and-alias-promotion.md) | accepted; CI derivation, alias-root binding, and required dual-writer same-alias E2E implemented; default rollout pending release/action/benchmark proof | Immutable Docker run refs and atomic alias promotion | Provider-neutral same-alias writer E2E is green locally and in CLI E2E run `24767673291`; next gates are signed CLI release if required, action default path proof, full metadata transport, and benchmark artifacts |
+| [0007](0007-docker-immutable-run-refs-and-alias-promotion.md) | accepted; CI derivation, metadata transport, alias-root binding, and required dual-writer same-alias E2E implemented; default rollout pending released-path benchmark proof | Immutable Docker run refs and atomic alias promotion | Provider-neutral same-alias writer E2E is green locally and in CLI E2E run `24767673291`; next gates are signed CLI release if required, released action-path proof, and benchmark artifacts |
+| [0008](0008-unified-repo-config-plan-lifecycle.md) | accepted launch-readiness decision | `.boringcache.toml` as durable repo cache plan, with CLI-owned planning and doctor/audit maintenance | Version dry-run schemas, add drift checks where needed, and keep action/web/copy aligned on the same setup path |
+
+## Launch ADR Review
+
+Before launch, finish or explicitly defer these CLI ADR gates:
+
+- ADR 0007: released action-path proof for provider run metadata and alias promotion, plus benchmark artifacts that show immutable run refs improve rolling Docker behavior.
+- ADR 0006: backend/action enrichment proof with persisted `cache_session_summary` diagnostics and artifact validation.
+- ADR 0005: keep hidden implementation guarded unless large-layer disk-copy/cache-policy evidence supports broader rollout.
+- ADR 0004: keep stream-through hidden unless first-byte/body-wait comparison artifacts support a default threshold.
+- ADR 0008: version dry-run schemas enough for action/docs stability, add drift checks if launch copy says rescan/lint, and keep the removed Dockerfile-helper boundary aligned with action ADR 0001.
 
 ## Handoff Rule
 
