@@ -185,7 +185,16 @@ start_proxy_instance() {
     proxy_cmd+=(--fail-on-cache-error)
   fi
 
+  # BORINGCACHE_CI_* fields are the save/promotion ordering contract.
+  # Metadata hints above stay as replayable diagnostics only.
   RUST_LOG="${RUST_LOG:-info}" \
+  BORINGCACHE_CI_PROVIDER="boringcache-e2e" \
+  BORINGCACHE_CI_RUN_ID="${run_uid}" \
+  BORINGCACHE_CI_RUN_ATTEMPT="1" \
+  BORINGCACHE_CI_REF_TYPE="branch" \
+  BORINGCACHE_CI_REF_NAME="main" \
+  BORINGCACHE_CI_DEFAULT_BRANCH="main" \
+  BORINGCACHE_CI_RUN_STARTED_AT="${run_started_at}" \
   BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
   BORINGCACHE_OBSERVABILITY_JSONL_PATH="${proxy_metrics}" \
     "${proxy_cmd[@]}" >"${proxy_log}" 2>&1 &
