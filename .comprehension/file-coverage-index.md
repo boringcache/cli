@@ -291,15 +291,23 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/serve/cache_registry/tool_routes/turborepo.rs`
 - `src/serve/cache_registry/kv/mod.rs`
 - `src/serve/cache_registry/kv/blob_read.rs`
+- `src/serve/cache_registry/kv/confirm.rs`
+- `src/serve/cache_registry/kv/flight.rs`
 - `src/serve/cache_registry/kv/flush.rs`
+- `src/serve/cache_registry/kv/handoff.rs`
 - `src/serve/cache_registry/kv/index.rs`
+- `src/serve/cache_registry/kv/instrumentation.rs`
 - `src/serve/cache_registry/kv/lookup.rs`
+- `src/serve/cache_registry/kv/policy.rs`
 - `src/serve/cache_registry/kv/prefetch.rs`
+- `src/serve/cache_registry/kv/refresh.rs`
+- `src/serve/cache_registry/kv/schedule.rs`
+- `src/serve/cache_registry/kv/types.rs`
 - `src/serve/cache_registry/kv/write.rs`
 
 Notes:
 
-- the KV section reflects the current workspace shape, with flush/publish orchestration still concentrated in `flush.rs`
+- the KV section reflects the current workspace shape, with scheduling, confirm classification, cleanup handoff, shared KV types, lookup, refresh, read-cache, and write helpers split out while publish orchestration remains in `flush.rs`
 - `serve/cas_publish.rs` is shared by manifest publish handlers and KV flush publishing; the OCI tracked-blob path consumes `PresentBlob` proofs when selecting upload sessions
 
 ## Cross-cutting diagnostics, error handling, and test support

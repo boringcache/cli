@@ -71,207 +71,34 @@ const KV_VERSION_REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::fr
 const LOOKUP_REFRESH_FLIGHT_KEY: &str = "lookup_refresh";
 static KV_BLOB_DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BlobReadSource {
-    LocalCache,
-    RemoteFetch,
-}
-
-impl BlobReadSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::LocalCache => "local_cache",
-            Self::RemoteFetch => "remote_fetch",
-        }
-    }
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub(crate) struct StartupPrefetchCandidates {
-    ordered_blobs: Vec<BlobDescriptor>,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct DownloadUrlPreloadStats {
-    requested: usize,
-    resolved: usize,
-    missing: usize,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct StartupPrefetchTarget {
-    blob: BlobDescriptor,
-    cached_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct StartupPrefetchTargetSummary {
-    cached_url_count: usize,
-    unresolved_url_count: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum KvNamespace {
-    BazelAc,
-    BazelCas,
-    Gradle,
-    Maven,
-    Nx,
-    NxTerminalOutput,
-    Turborepo,
-    TurborepoMeta,
-    Sccache,
-    GoCache,
-}
-
-impl KvNamespace {
-    pub(crate) fn normalize_key(self, key: &str) -> String {
-        match self {
-            KvNamespace::BazelAc
-            | KvNamespace::BazelCas
-            | KvNamespace::Gradle
-            | KvNamespace::GoCache => key.to_ascii_lowercase(),
-            KvNamespace::Maven
-            | KvNamespace::Nx
-            | KvNamespace::NxTerminalOutput
-            | KvNamespace::Turborepo
-            | KvNamespace::TurborepoMeta
-            | KvNamespace::Sccache => key.to_string(),
-        }
-    }
-
-    fn namespace_prefix(self) -> &'static str {
-        match self {
-            KvNamespace::BazelAc => "bazel_ac",
-            KvNamespace::BazelCas => "bazel_cas",
-            KvNamespace::Gradle => "gradle",
-            KvNamespace::Maven => "maven",
-            KvNamespace::Nx => "nx",
-            KvNamespace::NxTerminalOutput => "nx_terminal",
-            KvNamespace::Turborepo => "turbo",
-            KvNamespace::TurborepoMeta => "turbo_meta",
-            KvNamespace::Sccache => "sccache",
-            KvNamespace::GoCache => "go_cache",
-        }
-    }
-
-    pub(crate) fn scoped_key(self, key: &str) -> String {
-        format!("{}/{}", self.namespace_prefix(), self.normalize_key(key))
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct KvBlobIntegrity {
-    label: &'static str,
-    expected_digest_for_key: fn(&str) -> String,
-}
-
-impl KvBlobIntegrity {
-    pub(crate) fn new(label: &'static str, expected_digest_for_key: fn(&str) -> String) -> Self {
-        Self {
-            label,
-            expected_digest_for_key,
-        }
-    }
-
-    pub(crate) fn expected_digest(self, key: &str) -> String {
-        (self.expected_digest_for_key)(key)
-    }
-
-    fn blob_matches_key(self, key: &str, blob: &BlobDescriptor) -> bool {
-        blob.digest.eq_ignore_ascii_case(&self.expected_digest(key))
-    }
-
-    fn validate_put_digest(self, key: &str, blob_digest: &str) -> Result<(), RegistryError> {
-        let expected_digest = self.expected_digest(key);
-        if !blob_digest.eq_ignore_ascii_case(&expected_digest) {
-            return Err(RegistryError::new(
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "{} digest mismatch: expected {expected_digest}, got {blob_digest}",
-                    self.label
-                ),
-            ));
-        }
-        Ok(())
-    }
-
-    fn log_mismatch(self, phase: &str, key: &str, blob: &BlobDescriptor) {
-        log::warn!(
-            "{} {} blob digest mismatch: key={} digest={}",
-            self.label,
-            phase,
-            key,
-            blob.digest
-        );
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct KvPutOptions {
-    integrity: Option<KvBlobIntegrity>,
-    spool_reject_status: StatusCode,
-    existing_reject_status: Option<StatusCode>,
-}
-
-impl Default for KvPutOptions {
-    fn default() -> Self {
-        Self {
-            integrity: None,
-            spool_reject_status: StatusCode::SERVICE_UNAVAILABLE,
-            existing_reject_status: None,
-        }
-    }
-}
-
-impl KvPutOptions {
-    pub(crate) fn with_integrity(mut self, integrity: Option<KvBlobIntegrity>) -> Self {
-        self.integrity = integrity;
-        self
-    }
-
-    pub(crate) fn with_spool_reject_status(mut self, status: StatusCode) -> Self {
-        self.spool_reject_status = status;
-        self
-    }
-
-    pub(crate) fn with_existing_reject_status(mut self, status: StatusCode) -> Self {
-        self.existing_reject_status = Some(status);
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn spool_reject_status(&self) -> StatusCode {
-        self.spool_reject_status
-    }
-
-    #[cfg(test)]
-    pub(crate) fn existing_reject_status(&self) -> Option<StatusCode> {
-        self.existing_reject_status
-    }
-}
-
 mod blob_read;
+mod confirm;
 mod flight;
 mod flush;
+mod handoff;
 mod index;
 mod instrumentation;
 mod lookup;
 mod policy;
 mod prefetch;
 mod refresh;
+mod schedule;
+mod types;
 mod write;
 
 pub(crate) use blob_read::*;
+pub(crate) use confirm::*;
 pub(crate) use flight::*;
 pub(crate) use flush::*;
+pub(crate) use handoff::*;
 pub(crate) use index::*;
 pub(crate) use instrumentation::*;
 pub(crate) use lookup::*;
 pub(crate) use policy::*;
 pub(crate) use prefetch::*;
 pub(crate) use refresh::*;
+pub(crate) use schedule::*;
+pub(crate) use types::*;
 pub(crate) use write::*;
 
 #[cfg(test)]

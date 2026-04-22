@@ -48,10 +48,10 @@ These are the biggest orchestration files and usually the first places to revisi
 | Path | Approx. size | Why it matters |
 | --- | ---: | --- |
 | `src/api/client/mod.rs` | 2089 lines | API transport, capability negotiation, error parsing, publish polling |
-| `src/serve/cache_registry/kv/mod.rs` | 2071 lines | KV proxy policy, refresh/load behavior, blob flow, pending publish handoff |
 | `src/commands/workspace/onboard.rs` | 1468 lines | auth handoff, repo scan, optimization request/review, local edits |
-| `src/commands/workspace/dashboard.rs` | 1353 lines | TUI orchestration, rendering, polling, status composition |
 | `src/commands/cache/restore/mod.rs` | 1376 lines | restore preflight, retries, transfer and verification |
+| `src/commands/workspace/dashboard.rs` | 1353 lines | TUI orchestration, rendering, polling, status composition |
+| `src/serve/cache_registry/kv/mod.rs` | 923 lines | KV env tuning constants, root re-exports, and test scaffolding |
 | `src/commands/cache/run.rs` | 1023 lines | `run` planning, proxy integration, dry-run JSON, save/restore orchestration |
 | `src/encryption/mod.rs` + `src/encryption/**` | 365 lines across focused modules | lifecycle encryption, identity handling, passphrase flow |
 

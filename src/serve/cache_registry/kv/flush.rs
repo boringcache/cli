@@ -7,256 +7,10 @@ pub(crate) enum FlushResult {
     Permanent,
 }
 
-#[derive(Debug)]
-pub(crate) enum FlushError {
-    Conflict(String),
-    Transient(String),
-    Permanent(String),
-}
-
-pub(crate) struct KvConfirmOutcome {
-    pub(crate) cache_entry_id: String,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FlushMode {
     Normal,
     Shutdown,
-}
-
-pub(crate) struct FlushScheduleGuard {
-    flag: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl Drop for FlushScheduleGuard {
-    fn drop(&mut self) {
-        self.flag.store(false, Ordering::Release);
-    }
-}
-
-pub(crate) fn try_schedule_flush(state: &AppState) -> Option<FlushScheduleGuard> {
-    if state
-        .kv_flush_scheduled
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return None;
-    }
-
-    Some(FlushScheduleGuard {
-        flag: state.kv_flush_scheduled.clone(),
-    })
-}
-
-pub(crate) fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
-    let message = format!("{context}: {error}");
-    let lower = message.to_ascii_lowercase();
-
-    if let Some(bc_error) = error.downcast_ref::<BoringCacheError>() {
-        match bc_error {
-            BoringCacheError::CacheConflict { .. } => {
-                return FlushError::Conflict(message);
-            }
-            BoringCacheError::CachePending => {
-                if context.contains("confirm") {
-                    return FlushError::Transient(message);
-                }
-                return FlushError::Conflict(message);
-            }
-            BoringCacheError::NetworkError(_) | BoringCacheError::ConnectionError(_) => {
-                return FlushError::Transient(message);
-            }
-            BoringCacheError::ConfigNotFound
-            | BoringCacheError::TokenNotFound
-            | BoringCacheError::RequestConfiguration(_)
-            | BoringCacheError::WorkspaceNotFound(_)
-            | BoringCacheError::AuthenticationFailed(_) => {
-                return FlushError::Permanent(message);
-            }
-            _ => {}
-        }
-    }
-
-    let is_conflict = lower.contains("another cache upload is in progress");
-    let conflict_status = has_status_code(&lower, 409)
-        || has_status_code(&lower, 412)
-        || has_status_code(&lower, 423);
-    let conflict_hint = lower.contains("precondition failed")
-        || lower.contains("etag mismatch")
-        || lower.contains("manifest digest mismatch");
-    if is_conflict || conflict_status || conflict_hint {
-        return FlushError::Conflict(message);
-    }
-
-    let storage_verification_pending = lower.contains("not yet verified in storage")
-        || lower.contains("retry after upload completes");
-    if storage_verification_pending {
-        return FlushError::Permanent(message);
-    }
-
-    let transient_status = has_status_code(&lower, 429)
-        || has_status_code(&lower, 500)
-        || has_status_code(&lower, 502)
-        || has_status_code(&lower, 503)
-        || has_status_code(&lower, 504);
-    let transient_hint = lower.contains("transient error")
-        || lower.contains("timeout")
-        || lower.contains("timed out")
-        || lower.contains("deadline has elapsed")
-        || lower.contains("connect error")
-        || lower.contains("temporarily unavailable")
-        || lower.contains("rate limit exceeded")
-        || lower.contains("cannot connect")
-        || lower.contains("connection refused")
-        || lower.contains("broken pipe")
-        || lower.contains("connection reset")
-        || lower.contains("unexpected eof")
-        || lower.contains("unexpected-eof")
-        || lower.contains("close_notify");
-    if transient_status || transient_hint {
-        return FlushError::Transient(message);
-    }
-
-    let permanent_status = has_status_code(&lower, 400)
-        || has_status_code(&lower, 401)
-        || has_status_code(&lower, 403)
-        || has_status_code(&lower, 404)
-        || has_status_code(&lower, 405)
-        || has_status_code(&lower, 410)
-        || has_status_code(&lower, 411)
-        || has_status_code(&lower, 413)
-        || has_status_code(&lower, 414)
-        || has_status_code(&lower, 415)
-        || has_status_code(&lower, 422);
-    let permanent_hint = lower.contains("authentication failed")
-        || lower.contains("invalid or expired token")
-        || lower.contains("access forbidden")
-        || lower.contains("workspace not found")
-        || lower.contains("unprocessable");
-    if permanent_status || permanent_hint {
-        return FlushError::Permanent(message);
-    }
-
-    FlushError::Transient(message)
-}
-
-pub(crate) async fn confirm_kv_flush(
-    state: &AppState,
-    cache_entry_id: &str,
-    confirm_request: &ConfirmRequest,
-    _flush_mode: FlushMode,
-) -> Result<KvConfirmOutcome, FlushError> {
-    let started_at = std::time::Instant::now();
-    let mut attempt = 0u32;
-
-    loop {
-        let result: Result<KvConfirmOutcome, anyhow::Error> = state
-            .api_client
-            .confirm_with_retry(&state.workspace, cache_entry_id, confirm_request)
-            .await
-            .map(|response| KvConfirmOutcome {
-                cache_entry_id: response
-                    .cache_entry_id
-                    .unwrap_or_else(|| cache_entry_id.to_string()),
-            });
-
-        match result {
-            Ok(outcome) => return Ok(outcome),
-            Err(error) => {
-                let classified = classify_flush_error(&error, "confirm failed");
-                if started_at.elapsed() < KV_CONFIRM_RETRY_TIMEOUT
-                    && let Some(reason) = confirm_retry_reason(&classified)
-                {
-                    attempt = attempt.saturating_add(1);
-                    let delay = kv_confirm_retry_delay(attempt);
-                    eprintln!(
-                        "KV confirm: {reason} for cache entry {cache_entry_id}; retrying in {:.1}s (attempt {attempt})",
-                        delay.as_secs_f32()
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-
-                return Err(classified);
-            }
-        }
-    }
-}
-
-pub(crate) fn confirm_retry_reason(classified: &FlushError) -> Option<&'static str> {
-    if matches!(classified, FlushError::Transient(_)) {
-        return Some("transient backend error");
-    }
-
-    None
-}
-
-pub(crate) fn has_status_code(lower: &str, code: u16) -> bool {
-    let code = code.to_string();
-    lower.contains(&format!("http {code}"))
-        || lower.contains(&format!("status {code}"))
-        || lower.contains(&format!("({code})"))
-}
-
-pub(crate) async fn set_next_flush_at_with_jitter(state: &AppState, base_ms: u64, jitter_ms: u64) {
-    let jitter = if jitter_ms == 0 {
-        0
-    } else {
-        rand::thread_rng().gen_range(0..jitter_ms)
-    };
-    let backoff = std::time::Duration::from_millis(base_ms + jitter);
-    let mut next = state.kv_next_flush_at.write().await;
-    *next = Some(std::time::Instant::now() + backoff);
-}
-
-pub(crate) async fn cleanup_blob_files(paths: &HashMap<String, PathBuf>) {
-    let removals = paths.values().map(tokio::fs::remove_file);
-    for result in join_all(removals).await {
-        if let Err(error) = result {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                continue;
-            }
-            log::warn!("KV cleanup: failed to remove blob temp file: {error}");
-        }
-    }
-}
-
-pub(crate) async fn cleanup_paths(paths: Vec<PathBuf>) {
-    let removals = paths.into_iter().map(tokio::fs::remove_file);
-    for result in join_all(removals).await {
-        if let Err(error) = result {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                continue;
-            }
-            log::warn!("KV cleanup: failed to remove temp file: {error}");
-        }
-    }
-}
-
-pub(crate) async fn promote_pending_blobs_to_read_cache(
-    state: &AppState,
-    pending_entries: &BTreeMap<String, BlobDescriptor>,
-    pending_blob_paths: &HashMap<String, PathBuf>,
-) -> usize {
-    let mut blob_sizes = HashMap::new();
-    for blob in pending_entries.values() {
-        blob_sizes
-            .entry(blob.digest.clone())
-            .or_insert(blob.size_bytes);
-    }
-
-    let mut promoted = 0usize;
-    for (digest, path) in pending_blob_paths {
-        let size = blob_sizes.get(digest).copied().unwrap_or(0);
-        match state.blob_read_cache.promote(digest, path, size).await {
-            Ok(true) => promoted = promoted.saturating_add(1),
-            Ok(false) => {}
-            Err(error) => {
-                log::warn!("KV blob read cache promote failed for {digest}: {error}");
-            }
-        }
-    }
-    promoted
 }
 
 pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
@@ -372,7 +126,7 @@ pub(crate) async fn do_flush(
     state: &AppState,
     pending_entries: &BTreeMap<String, BlobDescriptor>,
     pending_blob_paths: &HashMap<String, PathBuf>,
-    flush_mode: FlushMode,
+    _flush_mode: FlushMode,
 ) -> Result<
     (
         BTreeMap<String, BlobDescriptor>,
@@ -593,7 +347,7 @@ pub(crate) async fn do_flush(
             write_scope_tag: confirm_write_scope_tag.clone(),
         };
         let confirm_outcome =
-            confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request, flush_mode).await?;
+            confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request).await?;
         let alias_count = bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id).await?;
         eprintln!(
             "KV flush root publish: tag={} cache_entry_id={} state=published alias_tags={}",
@@ -707,7 +461,7 @@ pub(crate) async fn do_flush(
                 write_scope_tag: confirm_write_scope_tag.clone(),
             };
 
-            confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request, flush_mode).await
+            confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request).await
         },
         |message| FlushError::Transient(format!("receipt commit failed: {message}")),
     )
