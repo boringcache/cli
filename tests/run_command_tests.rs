@@ -1677,7 +1677,7 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
     );
     assert_eq!(
         parsed["oci_cache"]["promotion_ref_tags"],
-        serde_json::json!(["pr-42"])
+        serde_json::json!(["pr-42", "buildcache"])
     );
     assert_eq!(
         parsed["oci_cache"]["run_metadata"]["provider"],
@@ -1710,7 +1710,7 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
     );
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["docker_alias_promotion_refs"],
-        "pr-42"
+        "pr-42/buildcache"
     );
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["docker_cache_from_refs"],

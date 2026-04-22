@@ -210,6 +210,7 @@ fn derive_cache_refs(context: &CiRunContext, fallback_ref_tag: &str) -> Result<D
     }
 
     push_tag(&mut import_ref_tags, fallback_ref_tag.to_string());
+    push_tag(&mut promotion_ref_tags, fallback_ref_tag.to_string());
     let import_ref_tags = validate_ref_tag_list(import_ref_tags)?;
     let promotion_ref_tags = validate_ref_tag_list(promotion_ref_tags)?;
 
@@ -583,7 +584,7 @@ mod tests {
         );
         assert_eq!(
             plan.oci_cache.promotion_ref_tags,
-            ["branch-main", "default"]
+            ["branch-main", "default", "buildcache"]
         );
     }
 
