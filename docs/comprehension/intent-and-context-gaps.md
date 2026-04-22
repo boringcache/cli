@@ -38,7 +38,7 @@ The current ADR set is aligned on implementation direction. Public CLI `main` at
 - Rails v2 CAS publish is receipt-strict locally: pending CAS roots need manifest/blob receipts before visibility, with async blob verification retained only as audit/repair;
 - E2E publish/read checks now fail fast by default: remote tag verification has one attempt, local post-save visibility checks do not poll, prefetch seed does not wait for publish-settled before shutdown, Docker registry export retries are opt-in, and any retry must be an explicit diagnostic override rather than a hidden correctness dependency;
 - first-party action and benchmark workflows still need to artifact provider-neutral Docker run metadata, immutable run ref state, import aliases, promotion aliases, promotion status, CLI version, action ref, and session trace;
-- action/proxy metadata transport now preserves `ci_run_started_at` or another Rails ordering field through first-class CLI proxy save request fields; capped metadata hints remain replay/debug labels and do not create ordering fields by themselves;
+- action/proxy/save metadata transport now preserves `ci_run_started_at` or another Rails ordering field through first-class CLI save request fields when a full provider-neutral run context is detected; capped metadata hints remain replay/debug labels and do not create ordering fields by themselves;
 - stream-through now has local Docker activation proof for single-large-layer and multi-layer graphs, but stream-through and cache-admission changes remain benchmark-gated before any default threshold or policy change.
 
 ### 2. Machine-Readable Output Contracts

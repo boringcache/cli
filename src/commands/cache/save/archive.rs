@@ -11,11 +11,11 @@ use crate::api::models::cache::{
     ConfirmRequest, ManifestCheckRequest, ManifestCheckResult, SaveRequest,
 };
 use crate::cache::archive::{TarArchiveInfo, create_tar_archive};
-use crate::ci_detection::detect_ci_environment;
 use crate::command_support::save_support::{
-    archive_cache_root_digest, build_manifest_bytes, complete_skipped_step, format_phase_duration,
-    format_phase_duration_ms, manifest_files_from_draft, progress_info, progress_warning,
-    upload_archive_file, upload_archive_multipart, upload_manifest,
+    apply_detected_ci_context, archive_cache_root_digest, build_manifest_bytes,
+    complete_skipped_step, format_phase_duration, format_phase_duration_ms,
+    manifest_files_from_draft, progress_info, progress_warning, upload_archive_file,
+    upload_archive_multipart, upload_manifest,
 };
 use crate::manifest::diff::compute_digest_from_draft;
 use crate::manifest::{EntryType, ManifestBuilder};
@@ -441,8 +441,7 @@ pub(super) async fn save_single_archive_entry(
 
     let use_multipart = crate::cache::archive::should_use_multipart_upload(total_compressed_size);
 
-    let ci_provider = detect_ci_environment();
-    let request = SaveRequest {
+    let mut request = SaveRequest {
         tag: tag.clone(),
         write_scope_tag: None,
         manifest_root_digest: manifest_root_digest.clone(),
@@ -460,7 +459,7 @@ pub(super) async fn save_single_archive_entry(
         expected_manifest_size: Some(expected_manifest_size),
         force: if force { Some(true) } else { None },
         use_multipart: Some(use_multipart),
-        ci_provider: Some(ci_provider),
+        ci_provider: None,
         ci_run_uid: None,
         ci_run_attempt: None,
         ci_ref_type: None,
@@ -477,6 +476,7 @@ pub(super) async fn save_single_archive_entry(
         },
         encryption_recipient_hint: recipient_str.map(crate::encryption::recipient_hint),
     };
+    apply_detected_ci_context(&mut request);
 
     let create_step = session.start_step(
         "Creating cache entry".to_string(),

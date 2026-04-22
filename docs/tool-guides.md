@@ -29,8 +29,24 @@ boringcache docker --tag docker-cache -- docker buildx build .
 `boringcache docker` injects `--cache-from` and `--cache-to` for you.
 Do not pass those flags yourself.
 Use `--cache-ref-tag` and `--cache-mode` when you need to override the OCI cache ref or export mode.
-In GitHub Actions, the adapter derives an immutable run ref plus PR/branch/default cache aliases from CI metadata.
-Local Docker runs keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
+Docker has two cache tag concepts:
+
+- `--tag docker-cache` selects the BoringCache proxy cache family.
+- `--cache-ref-tag buildcache` selects the stable BuildKit OCI ref tag under that family, such as `/cache:buildcache`. You can omit it when you want `buildcache`, because that is the default.
+
+In GitHub Actions or another CI environment that provides BoringCache CI metadata, the adapter derives an immutable run ref plus PR/branch/default cache aliases.
+It plans the full BuildKit import fallback chain and injects every planned `--cache-from` ref before the run-scoped `--cache-to` ref:
+
+```text
+--cache-from .../cache:pr-3208
+--cache-from .../cache:branch-feature-docker-cache
+--cache-from .../cache:default
+--cache-from .../cache:buildcache
+--cache-to   .../cache:run-gha-24771923434-attempt-1
+```
+
+Passing `--cache-ref-tag customcache` only changes the final stable fallback from `buildcache` to `customcache`.
+Local Docker runs without CI metadata keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
 Keep BoringCache outside the Dockerfile for normal Docker builds.
 Do not add `boringcache restore`, `boringcache save`, or a bind-mounted `boringcache-bin` helper to `RUN` steps; BuildKit cache mounts and image layers should stay native to BuildKit, while BoringCache backs the outer registry cache.
 By default the Docker path warms the selected OCI manifest, blob URLs, and blob bodies before BuildKit starts.

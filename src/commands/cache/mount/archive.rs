@@ -5,8 +5,7 @@ use std::sync::{Arc, Mutex};
 use crate::api::ApiClient;
 use crate::api::models::cache::{ConfirmRequest, SaveRequest};
 use crate::cache::archive::create_tar_archive;
-use crate::ci_detection::detect_ci_environment;
-use crate::command_support::save_support::archive_cache_root_digest;
+use crate::command_support::save_support::{apply_detected_ci_context, archive_cache_root_digest};
 use crate::manifest::{EntryType, ManifestBuilder};
 use crate::signing::policy::verify_restore_signature;
 use crate::transfer::{send_manifest_request_with_retry, send_transfer_request_with_retry};
@@ -516,8 +515,7 @@ pub(super) async fn sync_to_remote_archive(
     let expected_manifest_digest = crate::manifest::io::compute_manifest_digest(&manifest_bytes);
     let use_multipart = crate::cache::archive::should_use_multipart_upload(final_compressed_size);
 
-    let ci_provider = detect_ci_environment();
-    let request = SaveRequest {
+    let mut request = SaveRequest {
         tag: resolved_tag.to_string(),
         write_scope_tag: None,
         manifest_root_digest: manifest_root_digest.clone(),
@@ -535,7 +533,7 @@ pub(super) async fn sync_to_remote_archive(
         expected_manifest_size: Some(manifest_bytes.len() as u64),
         force: Some(true),
         use_multipart: Some(use_multipart),
-        ci_provider: Some(ci_provider),
+        ci_provider: None,
         ci_run_uid: None,
         ci_run_attempt: None,
         ci_ref_type: None,
@@ -552,6 +550,7 @@ pub(super) async fn sync_to_remote_archive(
         },
         encryption_recipient_hint: recipient_str.map(crate::encryption::recipient_hint),
     };
+    apply_detected_ci_context(&mut request);
 
     if verbose {
         ui::info("  Requesting upload URLs...");

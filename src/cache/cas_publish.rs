@@ -3,7 +3,7 @@ use crate::api::models::cache::{
     BlobDescriptor, BlobReceipt, BlobUploadUrlsResponse, ConfirmRequest, SaveRequest, SaveResponse,
 };
 use crate::cache::receipts::{maybe_commit_blob_receipts, maybe_commit_manifest_receipt};
-use crate::ci_detection::detect_ci_environment;
+use crate::command_support::save_support::apply_detected_ci_context;
 use crate::progress::TransferProgress;
 use crate::telemetry::StorageMetrics;
 use anyhow::{Context, Result, anyhow};
@@ -210,7 +210,7 @@ pub(crate) fn build_save_request(
     confirm_spec: &CasConfirmSpec,
     force: bool,
 ) -> SaveRequest {
-    SaveRequest {
+    let mut request = SaveRequest {
         tag,
         write_scope_tag: None,
         manifest_root_digest,
@@ -228,7 +228,7 @@ pub(crate) fn build_save_request(
         expected_manifest_size: Some(confirm_spec.manifest_size),
         force: force.then_some(true),
         use_multipart: None,
-        ci_provider: Some(detect_ci_environment()),
+        ci_provider: None,
         ci_run_uid: None,
         ci_run_attempt: None,
         ci_ref_type: None,
@@ -240,7 +240,9 @@ pub(crate) fn build_save_request(
         encrypted: None,
         encryption_algorithm: None,
         encryption_recipient_hint: None,
-    }
+    };
+    apply_detected_ci_context(&mut request);
+    request
 }
 
 pub(crate) async fn confirm_upload(

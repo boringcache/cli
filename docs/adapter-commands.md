@@ -146,6 +146,22 @@ Override precedence:
 | Metadata hints | repo config and CLI merge; CLI wins on duplicate keys |
 
 For Docker, `--tag` is always the proxy cache tag. Use `--cache-ref-tag` for the OCI cache tag.
-In GitHub Actions, the Docker adapter derives an immutable run ref plus PR/branch/default cache aliases from CI metadata. Local Docker runs keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
+In GitHub Actions, the Docker adapter derives an immutable run ref plus PR/branch/default cache aliases from CI metadata.
+The CLI plans the full BuildKit import fallback chain and injects every planned `--cache-from` ref before the run-scoped `--cache-to` ref.
+Local Docker runs keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
+
+A Docker cache has two tag concepts:
+
+- `--tag docker-cache` selects the BoringCache proxy cache family.
+- `--cache-ref-tag buildcache` selects the stable BuildKit OCI ref tag under that family, such as `/cache:buildcache`. Omit it when you want the default `buildcache` fallback.
+
+So the common Docker command can stay short:
+
+```bash
+boringcache docker \
+  --workspace my-org/my-project \
+  --tag docker-cache \
+  -- docker buildx build .
+```
 
 Use [Tool guides](tool-guides.md) for per-tool examples and local endpoint setup.

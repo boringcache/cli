@@ -3,7 +3,8 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 use crate::api::ApiClient;
-use crate::api::models::cache::CompleteMultipartRequest;
+use crate::api::models::cache::{CompleteMultipartRequest, SaveRequest};
+use crate::ci_detection::{CiRunContext, CiSourceRefType, detect_ci_context};
 use crate::manifest::ManifestFile;
 use crate::multipart_upload::{upload_via_part_urls, upload_via_single_url};
 use crate::progress::{ProgressSession, Summary, TransferProgress};
@@ -31,6 +32,38 @@ pub(crate) fn save_summary(
         file_count,
         digest: Some(digest),
         path: Some(path),
+    }
+}
+
+pub(crate) fn apply_detected_ci_context(request: &mut SaveRequest) {
+    let context = detect_ci_context();
+    request.ci_provider = Some(context.label());
+
+    let Some(run_context) = context.run_context() else {
+        return;
+    };
+
+    apply_ci_run_context(request, run_context);
+}
+
+fn apply_ci_run_context(request: &mut SaveRequest, run_context: &CiRunContext) {
+    request.ci_provider = Some(run_context.provider.clone());
+    request.ci_run_uid = Some(run_context.run_uid.clone());
+    request.ci_run_attempt = run_context.run_attempt.clone();
+    request.ci_ref_type = Some(ci_source_ref_type_name(run_context.source_ref_type).to_string());
+    request.ci_ref_name = run_context.source_ref_name.clone();
+    request.ci_default_branch = run_context.default_branch.clone();
+    request.ci_pr_number = run_context.pull_request_number;
+    request.ci_commit_sha = run_context.commit_sha.clone();
+    request.ci_run_started_at = run_context.run_started_at.clone();
+}
+
+fn ci_source_ref_type_name(ref_type: CiSourceRefType) -> &'static str {
+    match ref_type {
+        CiSourceRefType::Branch => "branch",
+        CiSourceRefType::Tag => "tag",
+        CiSourceRefType::PullRequest => "pull-request",
+        CiSourceRefType::Other => "other",
     }
 }
 
@@ -294,5 +327,153 @@ pub(crate) fn format_phase_duration_ms(ms: u64) -> String {
         format!("{:.1}s", ms as f64 / 1000.0)
     } else {
         format!("{}ms", ms)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_env;
+
+    const CI_ENV_KEYS: &[&str] = &[
+        "CI",
+        "GITHUB_ACTIONS",
+        "GITHUB_RUN_ID",
+        "GITHUB_RUN_ATTEMPT",
+        "GITHUB_REPOSITORY",
+        "GITHUB_REF",
+        "GITHUB_REF_NAME",
+        "GITHUB_REF_TYPE",
+        "GITHUB_HEAD_REF",
+        "GITHUB_BASE_REF",
+        "GITHUB_DEFAULT_BRANCH",
+        "GITHUB_SHA",
+        "GITHUB_EVENT_PATH",
+        "BORINGCACHE_CI_PROVIDER",
+        "BORINGCACHE_CI_RUN_ID",
+        "BORINGCACHE_CI_RUN_ATTEMPT",
+        "BORINGCACHE_CI_REPOSITORY",
+        "BORINGCACHE_CI_REF",
+        "BORINGCACHE_CI_REF_NAME",
+        "BORINGCACHE_CI_REF_TYPE",
+        "BORINGCACHE_CI_HEAD_REF",
+        "BORINGCACHE_CI_BASE_REF",
+        "BORINGCACHE_CI_DEFAULT_BRANCH",
+        "BORINGCACHE_CI_PR_NUMBER",
+        "BORINGCACHE_CI_SHA",
+        "BORINGCACHE_CI_RUN_STARTED_AT",
+    ];
+
+    fn clear_ci_env() {
+        for key in CI_ENV_KEYS {
+            test_env::remove_var(key);
+        }
+    }
+
+    fn base_save_request() -> SaveRequest {
+        SaveRequest {
+            tag: "example".to_string(),
+            write_scope_tag: None,
+            manifest_root_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            compression_algorithm: "zstd".to_string(),
+            storage_mode: None,
+            blob_count: None,
+            blob_total_size_bytes: None,
+            cas_layout: None,
+            manifest_format_version: Some(1),
+            total_size_bytes: 1,
+            uncompressed_size: Some(1),
+            compressed_size: Some(1),
+            file_count: Some(1),
+            expected_manifest_digest: Some(
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_string(),
+            ),
+            expected_manifest_size: Some(1),
+            force: None,
+            use_multipart: Some(false),
+            ci_provider: None,
+            ci_run_uid: None,
+            ci_run_attempt: None,
+            ci_ref_type: None,
+            ci_ref_name: None,
+            ci_default_branch: None,
+            ci_pr_number: None,
+            ci_commit_sha: None,
+            ci_run_started_at: None,
+            encrypted: None,
+            encryption_algorithm: None,
+            encryption_recipient_hint: None,
+        }
+    }
+
+    #[test]
+    fn detected_ci_context_keeps_local_saves_out_of_run_ordering() {
+        let _guard = test_env::lock();
+        clear_ci_env();
+
+        let mut request = base_save_request();
+        apply_detected_ci_context(&mut request);
+
+        assert_eq!(request.ci_provider.as_deref(), Some("local"));
+        assert_eq!(request.ci_run_uid, None);
+        assert_eq!(request.ci_run_started_at, None);
+
+        clear_ci_env();
+    }
+
+    #[test]
+    fn detected_ci_context_does_not_invent_ordering_for_generic_ci() {
+        let _guard = test_env::lock();
+        clear_ci_env();
+        test_env::set_var("CI", "true");
+
+        let mut request = base_save_request();
+        apply_detected_ci_context(&mut request);
+
+        assert_eq!(request.ci_provider.as_deref(), Some("generic-ci"));
+        assert_eq!(request.ci_run_uid, None);
+        assert_eq!(request.ci_run_started_at, None);
+
+        clear_ci_env();
+    }
+
+    #[test]
+    fn detected_ci_context_applies_provider_neutral_run_fields() {
+        let _guard = test_env::lock();
+        clear_ci_env();
+        test_env::set_var("BORINGCACHE_CI_PROVIDER", "gitlab");
+        test_env::set_var("BORINGCACHE_CI_RUN_ID", "pipeline-987");
+        test_env::set_var("BORINGCACHE_CI_RUN_ATTEMPT", "2");
+        test_env::set_var("BORINGCACHE_CI_REF_TYPE", "branch");
+        test_env::set_var("BORINGCACHE_CI_REF_NAME", "main");
+        test_env::set_var("BORINGCACHE_CI_DEFAULT_BRANCH", "main");
+        test_env::set_var(
+            "BORINGCACHE_CI_SHA",
+            "1234567890abcdef1234567890abcdef12345678",
+        );
+        test_env::set_var("BORINGCACHE_CI_RUN_STARTED_AT", "2026-04-22T09:00:00Z");
+
+        let mut request = base_save_request();
+        apply_detected_ci_context(&mut request);
+
+        assert_eq!(request.ci_provider.as_deref(), Some("gitlab"));
+        assert_eq!(request.ci_run_uid.as_deref(), Some("pipeline-987"));
+        assert_eq!(request.ci_run_attempt.as_deref(), Some("2"));
+        assert_eq!(request.ci_ref_type.as_deref(), Some("branch"));
+        assert_eq!(request.ci_ref_name.as_deref(), Some("main"));
+        assert_eq!(request.ci_default_branch.as_deref(), Some("main"));
+        assert_eq!(
+            request.ci_commit_sha.as_deref(),
+            Some("1234567890abcdef1234567890abcdef12345678")
+        );
+        assert_eq!(
+            request.ci_run_started_at.as_deref(),
+            Some("2026-04-22T09:00:00Z")
+        );
+
+        clear_ci_env();
     }
 }
