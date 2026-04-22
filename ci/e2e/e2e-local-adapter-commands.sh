@@ -15,7 +15,7 @@ LOG_DIR="${LOG_DIR:-${LOG_ROOT}/${RUN_ID}}"
 RAILS_PIDFILE="${RAILS_PIDFILE:-${LOG_DIR}/rails-server.pid}"
 TMP_DIR="${LOG_DIR}/tmp"
 SUMMARY_FILE="${LOG_DIR}/summary.txt"
-LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-docker,gradle,maven,turbo,nx,go,bazel,sccache}"
+LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-docker,oci-same-alias,gradle,maven,turbo,nx,go,bazel,sccache}"
 JAVA_TOOL_VERSION="${JAVA_TOOL_VERSION:-java@21.0.2}"
 MAVEN_TOOL_VERSION="${MAVEN_TOOL_VERSION:-maven@3.9.14}"
 
@@ -150,15 +150,12 @@ wait_for_local_server() {
 wait_for_tag_visibility() {
   local tag="$1"
   local log_file="${LOG_DIR}/check-${tag}.log"
-  for _ in $(seq 1 20); do
-    if "${BINARY}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${tag}" \
-      > "${log_file}" 2>&1; then
-      return 0
-    fi
-    sleep 1
-  done
+  if "${BINARY}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${tag}" \
+    > "${log_file}" 2>&1; then
+    return 0
+  fi
   cat "${log_file}" || true
-  fail "tag did not become visible: ${tag}"
+  fail "tag was not visible immediately after publish: ${tag}"
 }
 
 delete_tag() {
@@ -713,6 +710,30 @@ run_docker_e2e() {
   pass_tool "docker" "required BuildKit registry e2e passed"
 }
 
+run_oci_same_alias_e2e() {
+  local tool_log_root="${LOG_DIR}/oci-same-alias-runtime"
+  mkdir -p "${tool_log_root}"
+
+  note "OCI same-alias writer runtime E2E"
+  LOG_DIR="${tool_log_root}" \
+  PROXY_PORT="${OCI_SAME_ALIAS_PROXY_PORT:-5319}" \
+  PROXY_PORT_A="${OCI_SAME_ALIAS_PROXY_PORT_A:-5319}" \
+  PROXY_PORT_B="${OCI_SAME_ALIAS_PROXY_PORT_B:-5320}" \
+  PROXY_PORT_VERIFY="${OCI_SAME_ALIAS_PROXY_PORT_VERIFY:-5321}" \
+  TAG="local-oci-same-alias-${RUN_ID}" \
+  GITHUB_RUN_ID="${RUN_ID}" \
+  GITHUB_RUN_ATTEMPT="1" \
+  BINARY="${BINARY}" \
+  WORKSPACE="${WORKSPACE}" \
+  BORINGCACHE_API_URL="${API_URL}" \
+  BORINGCACHE_ADMIN_TOKEN="${TOKEN}" \
+  BORINGCACHE_SAVE_TOKEN="${TOKEN}" \
+  BORINGCACHE_RESTORE_TOKEN="${TOKEN}" \
+    bash "${SCRIPT_DIR}/required/e2e-oci-same-alias-writer-test.sh"
+
+  pass_tool "oci-same-alias" "dual-proxy same-alias writer e2e passed"
+}
+
 run_bazel_e2e() {
   local bazel_cmd=""
   if command -v bazelisk >/dev/null 2>&1; then
@@ -948,6 +969,7 @@ main() {
   run_selected_tool "gradle" run_gradle_e2e
   run_selected_tool "maven" run_maven_e2e
   run_selected_tool "docker" run_docker_e2e
+  run_selected_tool "oci-same-alias" run_oci_same_alias_e2e
   run_selected_tool "turbo" run_turbo_e2e
   run_selected_tool "nx" run_nx_e2e
   run_selected_tool "go" run_go_e2e

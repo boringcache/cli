@@ -25,6 +25,7 @@ E2E_PAYLOAD_MB="${E2E_PAYLOAD_MB:-6}"
 E2E_PAYLOAD_MODE="${E2E_PAYLOAD_MODE:-zero}"
 E2E_BLOB_CACHE_SCOPE="${E2E_BLOB_CACHE_SCOPE:-shared}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-0}"
+BUILD_RETRY_ATTEMPTS="${BUILD_RETRY_ATTEMPTS:-1}"
 BUILD_HEARTBEAT_SECS="${BUILD_HEARTBEAT_SECS:-30}"
 BUILD_CLEANUP_WAIT_SECS="${BUILD_CLEANUP_WAIT_SECS:-20}"
 BUILD_FAILURE_TAIL_LINES="${BUILD_FAILURE_TAIL_LINES:-120}"
@@ -71,6 +72,7 @@ require_positive() {
 }
 
 require_numeric "BUILD_TIMEOUT_SECS" "$BUILD_TIMEOUT_SECS"
+require_positive "BUILD_RETRY_ATTEMPTS" "$BUILD_RETRY_ATTEMPTS"
 require_positive "BUILD_HEARTBEAT_SECS" "$BUILD_HEARTBEAT_SECS"
 require_positive "BUILD_CLEANUP_WAIT_SECS" "$BUILD_CLEANUP_WAIT_SECS"
 require_positive "BUILD_FAILURE_TAIL_LINES" "$BUILD_FAILURE_TAIL_LINES"
@@ -495,14 +497,14 @@ is_transient_registry_export_error() {
 run_build_with_retry() {
   local log_file="$1"
   shift
-  local attempts=4
+  local attempts="${BUILD_RETRY_ATTEMPTS}"
   local attempt
   for attempt in $(seq 1 "${attempts}"); do
     if run_build "${log_file}" "$@"; then
       return 0
     fi
     if [[ "${attempt}" -lt "${attempts}" ]] && is_transient_registry_export_error "${log_file}"; then
-      echo "transient registry export error on attempt ${attempt}/${attempts}; retrying..."
+      echo "transient registry export error on attempt ${attempt}/${attempts}; retrying because BUILD_RETRY_ATTEMPTS=${BUILD_RETRY_ATTEMPTS}"
       sleep $((attempt * 3))
       continue
     fi
@@ -620,28 +622,32 @@ manifest_reference_is_readable() {
 fetch_manifest_with_retry() {
   local reference="$1"
   local manifest_file="$2"
-  local attempts="${3:-20}"
+  local attempts="${3:-1}"
   local url="http://${PROXY_STATUS_HOST}:${PROXY_PORT}/v2/boringcache-e2e/cache/manifests/${reference}"
   local accept_header="Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
 
-  for _ in $(seq 1 "${attempts}"); do
+  local attempt
+  for attempt in $(seq 1 "${attempts}"); do
     if curl -fsS -H "${accept_header}" "${url}" -o "${manifest_file}"; then
       return 0
     fi
-    sleep 1
+    if (( attempt < attempts )); then
+      sleep 1
+    fi
   done
 
-  echo "manifest did not become readable for reference ${reference} after ${attempts}s"
+  echo "manifest was not readable immediately for reference ${reference}"
   return 1
 }
 
 resolve_manifest_digest_with_retry() {
   local reference="$1"
-  local attempts="${2:-20}"
+  local attempts="${2:-1}"
   local url="http://${PROXY_STATUS_HOST}:${PROXY_PORT}/v2/boringcache-e2e/cache/manifests/${reference}"
   local accept_header="Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
 
-  for _ in $(seq 1 "${attempts}"); do
+  local attempt
+  for attempt in $(seq 1 "${attempts}"); do
     local digest
     digest=$(
       curl -fsS -I -H "${accept_header}" "${url}" 2>/dev/null \
@@ -653,10 +659,12 @@ resolve_manifest_digest_with_retry() {
       echo "${digest}"
       return 0
     fi
-    sleep 1
+    if (( attempt < attempts )); then
+      sleep 1
+    fi
   done
 
-  echo "manifest digest header did not become readable for reference ${reference} after ${attempts}s" >&2
+  echo "manifest digest header was not readable immediately for reference ${reference}" >&2
   return 1
 }
 
@@ -666,6 +674,7 @@ reset_builder
 
 echo "=== Docker Buildkit Registry Adapter E2E ==="
 echo "Build timeout: ${BUILD_TIMEOUT_SECS}s (0 disables)"
+echo "Build retry attempts: ${BUILD_RETRY_ATTEMPTS}"
 echo "Build heartbeat: ${BUILD_HEARTBEAT_SECS}s"
 echo "Proxy shutdown wait: ${PROXY_SHUTDOWN_WAIT_SECS}s"
 echo "OCI hydration: ${OCI_HYDRATION}"

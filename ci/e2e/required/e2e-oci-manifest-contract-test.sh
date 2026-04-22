@@ -124,8 +124,6 @@ assert_status "${FILTER_HEADERS}" 200
 assert_header "${FILTER_HEADERS}" "OCI-Filters-Applied" "artifactType"
 check_referrers_body "${FILTER_BODY}" "${MANIFEST_DIGEST}" "${ARTIFACT_TYPE}"
 
-wait_for_proxy_publish_settled "${PROXY_PORT}"
-
 echo "=== Phase 2: Restart proxy and verify persisted referrers ==="
 stop_proxy
 start_proxy "${BINARY}" "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" "${PROXY_PORT}" "${PROXY_RESTART_LOG}" "--fail-on-cache-error"

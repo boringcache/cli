@@ -3,8 +3,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/e2e-auth.sh"
 
-REMOTE_TAG_VERIFY_ATTEMPTS="${REMOTE_TAG_VERIFY_ATTEMPTS:-30}"
-REMOTE_TAG_VERIFY_SLEEP_SECS="${REMOTE_TAG_VERIFY_SLEEP_SECS:-2}"
+REMOTE_TAG_VERIFY_ATTEMPTS="${REMOTE_TAG_VERIFY_ATTEMPTS:-1}"
+REMOTE_TAG_VERIFY_SLEEP_SECS="${REMOTE_TAG_VERIFY_SLEEP_SECS:-0}"
 
 json_summary_value() {
   local key="$1"
@@ -140,7 +140,7 @@ verify_remote_tag_visible() {
     fi
 
     if (( attempt < attempts )); then
-      echo "  waiting for remote tag ${tag} to publish... (${attempt}/${attempts})"
+      echo "  retrying remote tag ${tag}; publish should already be visible (${attempt}/${attempts})"
       sleep "$sleep_secs"
     fi
   done

@@ -20,7 +20,6 @@ PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-210}"
 PROXY_SHUTDOWN_WAIT_MIN_SECS=210
 HTTP_CONNECT_TIMEOUT_SECS="${HTTP_CONNECT_TIMEOUT_SECS:-5}"
 HTTP_REQUEST_TIMEOUT_SECS="${HTTP_REQUEST_TIMEOUT_SECS:-30}"
-SEED_FLUSH_TIMEOUT_SECS="${SEED_FLUSH_TIMEOUT_SECS:-180}"
 
 BLOB_COUNT="${BLOB_COUNT:-20000}"
 BLOB_SIZE_BYTES="${BLOB_SIZE_BYTES:-4096}"
@@ -99,36 +98,6 @@ wait_for_proxy_ready() {
   done
 
   echo "ERROR: timed out waiting for proxy readiness (${PROXY_READY_TIMEOUT_SECS}s)"
-  tail -n 200 "$PROXY_LOG" || true
-  exit 1
-}
-
-wait_for_publish_settled() {
-  local waited=0
-
-  while (( waited < SEED_FLUSH_TIMEOUT_SECS )); do
-    local probe status phase publish_state
-    probe="$(http_proxy_status_probe)"
-    read -r status phase publish_state <<<"$probe"
-    if [[ "$status" == "200" && "$publish_state" == "settled" ]]; then
-      echo "  proxy reports publish settled"
-      return 0
-    fi
-
-    if [[ -n "${PROXY_PID:-}" ]] && ! kill -0 "$PROXY_PID" >/dev/null 2>&1; then
-      echo "ERROR: proxy exited before publish settled"
-      tail -n 200 "$PROXY_LOG" || true
-      exit 1
-    fi
-
-    sleep 2
-    waited=$((waited + 2))
-    if (( waited % 10 == 0 )); then
-      echo "  waiting for publish settled... (phase=${phase:-unknown}, publish=${publish_state:-unknown}, ${waited}s)"
-    fi
-  done
-
-  echo "ERROR: timed out waiting for publish settled (${SEED_FLUSH_TIMEOUT_SECS}s)"
   tail -n 200 "$PROXY_LOG" || true
   exit 1
 }
@@ -234,9 +203,6 @@ if (( SEED_COUNT < BLOB_COUNT )); then
   echo "ERROR: only seeded ${SEED_COUNT}/${BLOB_COUNT} blobs"
   exit 1
 fi
-
-echo "  waiting for proxy publish-settled state..."
-wait_for_publish_settled
 
 echo "  flushing proxy..."
 stop_proxy

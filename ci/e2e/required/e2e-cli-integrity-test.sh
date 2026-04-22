@@ -90,15 +90,12 @@ compute_sha256() {
 wait_for_visibility() {
   local tag="$1"
   local log_file="$2"
-  for _ in $(seq 1 15); do
-    if "${CLI}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${tag}" \
-      > "${log_file}" 2>&1; then
-      return 0
-    fi
-    sleep 1
-  done
+  if "${CLI}" check --no-platform --no-git --fail-on-miss "${WORKSPACE}" "${tag}" \
+    > "${log_file}" 2>&1; then
+    return 0
+  fi
 
-  echo "tag did not become visible in time: ${tag}"
+  echo "tag was not visible immediately after publish: ${tag}"
   cat "${log_file}"
   exit 1
 }

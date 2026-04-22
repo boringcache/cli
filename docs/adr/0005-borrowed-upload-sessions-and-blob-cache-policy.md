@@ -199,24 +199,17 @@ Evidence now available:
 - the Rails-backed local Docker BuildKit E2E passed against a managed workspace provisioned through Rails/Tigris;
 - that E2E recorded borrowed upload-session counters in status snapshots and session summaries, including `oci_engine_borrowed_upload_session_count=9` and `oci_engine_borrowed_upload_session_bytes=6430` by the alias-warm status snapshot.
 
-Release-path proof is partially complete. The 2026-04-21 `1.12.42` push at CLI commit `14c1dc2` passed CLI CI but failed required registry E2E legs with manifests/indices visible before all referenced blobs had verified download URLs. Follow-up commit `6fa1a52` promoted owned upload-session bodies into the local blob cache for same-proxy readers.
+Release-path proof has moved since the first `1.12.42` release-prep attempt. The 2026-04-21 `1.12.42` push at CLI commit `14c1dc2` passed CLI CI but failed required registry E2E legs with manifests/indices visible before all referenced blobs had verified download URLs. Follow-up commits promoted owned upload-session bodies into the local blob cache, removed verifier-side publish-readiness polling from the proof path, and made handoff checks use normal `boringcache check --json` cache-entry ids.
 
 The follow-up direction is not to add publish-readiness polling. Rails is meant to trust completed upload-session receipts on the hot path: blob receipt commit marks blobs storage-verified, manifest receipt commit links attested blobs and marks the CAS entry storage-verified, and tag publish stays optimistic. If Rails omits the upload session id or any receipt commit fails, the proxy should fail the publish/export instead of publishing a root that depends on the async verifier before fresh readers can fetch bodies. Retries for request timeouts, transient network failures, or stale download URLs remain normal read/transport retry behavior; they are not server-side publish-readiness polling.
 
-Remote evidence after `c28a7c1`:
+Remote evidence now available:
 
-- CLI CI passed.
-- `Registry / Docker BuildKit` passed, so the same-proxy Docker half now has release-path E2E evidence.
-- `Cache Registry / Cross-Runner Verify` passed, but the verifier-level blob URL convergence loop from that commit was not the product contract. Local release-prep has removed that loop so a fresh-reader blob GET must succeed on the first attempt after the root is visible.
-- Local release-prep also removes the proxy shutdown tag-convergence loop: shutdown waits for pending local flushes to finish, then trusts the successful Rails publish response instead of polling tag pointers after publish.
-- The overall E2E workflow still failed in `Registry / Prefetch Smoke`: `boringcache check` reported the tag hit, but the tag-pointer helper did not expose a `cache_entry_id` before the added convergence check. The real gate was a fresh-cache prefetch/read proof without a post-publish blob URL readiness sleep.
+- `83e547e` cleared the required E2E workflow, including Docker BuildKit, Prefetch Smoke, and Cross-Runner Verify, without verifier-side blob URL convergence polling.
+- `801dcc1` released CLI `v1.12.42`; public `boringcache/one` `v1.12.60` now defaults to CLI `v1.12.42` and `verify: none`.
+- Public CLI `main` at `5fd0203` is versioned for unreleased `v1.12.43` and has a green E2E run `24767673291`, including the OCI Same-Alias Writer leg.
 
-Later local and remote release-prep changed the gate:
-
-- `83e547e` made the handoff checks use `boringcache check --json` cache-entry ids instead of a helper-only pointer API and cleared the required E2E workflow, including Docker BuildKit, Prefetch Smoke, and Cross-Runner Verify, without verifier-side blob URL convergence polling.
-- `801dcc1` made CLI CI/E2E/release workflow uses of `boringcache/one@v1` pass `verify: none` while the released action still defaults to wait-style verification and pins the older CLI.
-
-That means the borrowed-session fix now has required registry E2E evidence for receipt-strict publish and same/fresh-reader handoff. It is still not release-complete through the public action path until the action/CLI release is promoted, and it is not cache-policy proof: large-layer admission, eviction, and benchmark evidence remain pending before changing cache admission defaults.
+That means the borrowed-session fix has required registry E2E evidence for receipt-strict proxy behavior and same/fresh-reader handoff. It is now released through CLI `v1.12.42` and the public action default, but it is still not cache-policy proof: large-layer admission, eviction, and benchmark evidence remain pending before changing cache admission defaults. Rails also still needs to enforce the receipt-strict publish invariant for the legacy/no-receipt CAS path; the current CLI proxy fails publish on receipt errors, but the backend can still publish a pending CAS entry without manifest receipts when called through the older permissive API shape.
 
 Benchmark proof and policy proof are still pending before cache admission changes. The later proof bundle must attach:
 

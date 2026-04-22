@@ -263,16 +263,8 @@ printf 'cli-e2e-file-%s\n' "${RUN_ATTEMPT}" > "${SINGLE_FILE}"
 
 echo "=== Phase 1: Save/restore/delete (archive cache path) ==="
 "${CLI}" save "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${TAG_DIR}:${SRC_DIR},${TAG_FILE}:${SINGLE_FILE}" > "${CLI_LOG_DIR}/save.log"
-save_visible=0
-for _ in $(seq 1 10); do
-  if "${CLI}" check "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-miss "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/check-hit.log" 2>&1; then
-    save_visible=1
-    break
-  fi
-  sleep 1
-done
-if [[ "${save_visible}" != "1" ]]; then
-  echo "saved tags did not become visible in time"
+if ! "${CLI}" check "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-miss "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/check-hit.log" 2>&1; then
+  echo "saved tags were not visible immediately after publish"
   cat "${CLI_LOG_DIR}/check-hit.log"
   exit 1
 fi
@@ -302,17 +294,8 @@ if ! grep -q "Cache miss for tags" "${CLI_LOG_DIR}/restore-miss.log"; then
 fi
 
 "${CLI}" delete "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/delete.log"
-deleted_confirmed=0
-for _ in $(seq 1 10); do
-  if "${CLI}" check "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-miss "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/check-after-delete.log" 2>&1; then
-    sleep 1
-    continue
-  fi
-  deleted_confirmed=1
-  break
-done
-if [[ "${deleted_confirmed}" != "1" ]]; then
-  echo "deleted tags were still visible after retries"
+if "${CLI}" check "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-miss "${WORKSPACE}" "${TAG_DIR},${TAG_FILE}" > "${CLI_LOG_DIR}/check-after-delete.log" 2>&1; then
+  echo "deleted tags were still visible immediately after delete"
   cat "${CLI_LOG_DIR}/check-after-delete.log"
   exit 1
 fi
@@ -332,17 +315,8 @@ echo "=== Phase 2: run command cache integration ==="
 mkdir -p "${RUN_SEED_DIR}"
 printf 'run-warm-cache-%s\n' "${RUN_SHA}" > "${RUN_SEED_DIR}/restored.txt"
 "${CLI}" save "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${RUN_TAG}:${RUN_SEED_DIR}" > "${CLI_LOG_DIR}/run-seed-save.log"
-
-run_seed_visible=0
-for _ in $(seq 1 10); do
-  if "${CLI}" check "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-miss "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-seed-check.log" 2>&1; then
-    run_seed_visible=1
-    break
-  fi
-  sleep 1
-done
-if [[ "${run_seed_visible}" != "1" ]]; then
-  echo "run seed tag did not become visible in time"
+if ! "${CLI}" check "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-miss "${WORKSPACE}" "${RUN_TAG}" > "${CLI_LOG_DIR}/run-seed-check.log" 2>&1; then
+  echo "run seed tag was not visible immediately after publish"
   cat "${CLI_LOG_DIR}/run-seed-check.log"
   exit 1
 fi
@@ -357,18 +331,10 @@ EOF
 chmod +x "${RUN_ARCHIVE_SCRIPT}"
 "${CLI}" run "${E2E_TAG_SCOPE_FLAGS[@]}" --force --fail-on-cache-error "${WORKSPACE}" "${RUN_TAG}:${RUN_TARGET_DIR}" -- sh "${RUN_ARCHIVE_SCRIPT}" "${RUN_TARGET_DIR}" > "${CLI_LOG_DIR}/run-archive.log"
 
-run_verify_visible=0
-for _ in $(seq 1 15); do
-  rm -rf "${RUN_VERIFY_DIR}"
-  if "${CLI}" restore "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${RUN_TAG}:${RUN_VERIFY_DIR}" > "${CLI_LOG_DIR}/run-verify-restore.log" 2>&1 \
-    && [[ -f "${RUN_VERIFY_DIR}/generated.txt" ]] \
-    && grep -q "run-generated-${RUN_ID}" "${RUN_VERIFY_DIR}/generated.txt"; then
-    run_verify_visible=1
-    break
-  fi
-  sleep 1
-done
-if [[ "${run_verify_visible}" != "1" ]]; then
+rm -rf "${RUN_VERIFY_DIR}"
+if ! "${CLI}" restore "${E2E_TAG_SCOPE_FLAGS[@]}" "${WORKSPACE}" "${RUN_TAG}:${RUN_VERIFY_DIR}" > "${CLI_LOG_DIR}/run-verify-restore.log" 2>&1 \
+  || [[ ! -f "${RUN_VERIFY_DIR}/generated.txt" ]] \
+  || ! grep -q "run-generated-${RUN_ID}" "${RUN_VERIFY_DIR}/generated.txt"; then
   if [[ ! -f "${RUN_VERIFY_DIR}/generated.txt" ]]; then
     echo "run verify restore is missing generated.txt"
     cat "${CLI_LOG_DIR}/run-verify-restore.log"
@@ -496,24 +462,20 @@ printf 'mount-initial-%s\n' "${RUN_SHA}" > "${MOUNT_SRC_DIR}/file.txt"
 encrypted_visible=0
 mount_tag_visible=0
 mount_tag_ready=0
-for _ in $(seq 1 30); do
-  "${CLI}" ls "${WORKSPACE}" --limit 500 --json > "${CLI_LOG_DIR}/ls-after-encryption.json"
-  if jq -e --arg tag "${TAG_MOUNT}" '.entries[]? | select(.tag == $tag)' "${CLI_LOG_DIR}/ls-after-encryption.json" >/dev/null; then
-    mount_tag_visible=1
+"${CLI}" ls "${WORKSPACE}" --limit 500 --json > "${CLI_LOG_DIR}/ls-after-encryption.json"
+if jq -e --arg tag "${TAG_MOUNT}" '.entries[]? | select(.tag == $tag)' "${CLI_LOG_DIR}/ls-after-encryption.json" >/dev/null; then
+  mount_tag_visible=1
+fi
+if jq -e --arg tag "${TAG_MOUNT}" '.entries[]? | select(.tag == $tag and .encrypted == true)' "${CLI_LOG_DIR}/ls-after-encryption.json" >/dev/null; then
+  encrypted_visible=1
+fi
+if [[ "${mount_tag_visible}" == "1" ]]; then
+  rm -rf "${MOUNT_READINESS_DIR}"
+  mkdir -p "${MOUNT_READINESS_DIR}"
+  if "${CLI}" restore "${E2E_TAG_SCOPE_FLAGS[@]}" --identity "${IDENTITY_FILE}" --lookup-only --fail-on-cache-miss "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_READINESS_DIR}" > "${MOUNT_READINESS_LOG}" 2>&1; then
+    mount_tag_ready=1
   fi
-  if jq -e --arg tag "${TAG_MOUNT}" '.entries[]? | select(.tag == $tag and .encrypted == true)' "${CLI_LOG_DIR}/ls-after-encryption.json" >/dev/null; then
-    encrypted_visible=1
-    break
-  fi
-  if [[ "${mount_tag_visible}" == "1" ]]; then
-    rm -rf "${MOUNT_READINESS_DIR}"
-    mkdir -p "${MOUNT_READINESS_DIR}"
-    if "${CLI}" restore "${E2E_TAG_SCOPE_FLAGS[@]}" --identity "${IDENTITY_FILE}" --lookup-only --fail-on-cache-miss "${WORKSPACE}" "${TAG_MOUNT}:${MOUNT_READINESS_DIR}" > "${MOUNT_READINESS_LOG}" 2>&1; then
-      mount_tag_ready=1
-    fi
-  fi
-  sleep 1
-done
+fi
 if [[ "${encrypted_visible}" != "1" ]]; then
   if [[ "${mount_tag_visible}" == "1" ]]; then
     if [[ "${mount_tag_ready}" == "1" ]]; then

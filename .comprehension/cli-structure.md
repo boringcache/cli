@@ -293,8 +293,8 @@ These are the main files that still carry multiple concerns and should be split 
 
 | Path | Concern mix |
 | --- | --- |
-| `src/api/client/mod.rs` | client construction, capability discovery, error parsing, publish polling, batching policy, and large in-module tests still meet in one root module |
-| `src/serve/cache_registry/kv/mod.rs` | KV env tuning constants, root re-exports, and KV-specific test scaffolding still meet in one root module |
+| `src/api/client/mod.rs` | client construction, capability discovery, error parsing, publish polling, and batching policy still meet in one root module; tests are split to `src/api/client/tests.rs` |
+| `src/serve/cache_registry/kv/mod.rs` | KV env tuning constants and root re-exports still meet in one root module; tests are split to `src/serve/cache_registry/kv/tests.rs` |
 | `src/serve/cache_registry/kv/flush.rs` | KV save/upload/confirm orchestration and shutdown result handling still share one file, after scheduling, confirm classification, and cleanup handoff moved out |
 | `src/commands/workspace/onboard.rs` | repo scan, optimize requests, diff/review, auth handoff, and file mutation still live together |
 | `src/commands/workspace/dashboard.rs` | terminal lifecycle, input handling, API fetch orchestration, view-model formatting, and layout/render helpers still live together |
@@ -313,7 +313,7 @@ Most of the root-level namespace split is in place now, so the remaining work is
 - `src/serve/engines/` is the incremental engine-boundary namespace. `bazel.rs` owns Bazel AC/CAS method dispatch, store identity, and CAS digest integrity policy; `gradle.rs` owns Gradle HTTP build-cache write-status policy, including official `413 Payload Too Large` oversized-entry behavior; `maven.rs` owns Maven `GET`/`HEAD`/`PUT` method dispatch while preserving generic KV write rejection; `nx.rs` owns Nx bearer checks, artifact upload `Content-Length`, artifact/terminal-output/query method handling, and duplicate artifact upload conflict policy; `sccache.rs` owns WebDAV probe, `MKCOL`, object method/status behavior, and read timeout policy; `turborepo.rs` owns Turbo bearer auth, status, artifact hash and upload metadata validation, query, and event API shape; `go_cache.rs` owns the local HTTP backing route for the Go cacheprog helper; `oci/manifests.rs` owns pure OCI manifest descriptor, content-type, subject/referrers, and child-manifest classification rules; `oci/present_blobs.rs` owns descriptor proof before manifest publish; and `oci/uploads.rs` owns the OCI blob upload session state machine: start, PATCH, final PUT, mount `201`/`202`, empty finalize reuse, stale offset `416`, and streaming digest verification for one-shot upload bodies.
 - `src/serve/http/handlers/` now owns the split OCI manifest, blob, and upload HTTP glue, while `handlers/mod.rs` still carries shared dispatch and proxy-status orchestration.
 - `src/serve/cache_registry/tool_routes/` owns the thin non-OCI route shims that adapt detected registry routes into engine calls; adapter protocol rules stay in `src/serve/engines/`.
-- `src/serve/cache_registry/kv/` now has separate `blob_read.rs`, `confirm.rs`, `flight.rs`, `handoff.rs`, `index.rs`, `instrumentation.rs`, `lookup.rs`, `policy.rs`, `prefetch.rs`, `refresh.rs`, `schedule.rs`, `types.rs`, and `write.rs` helpers. `flush.rs` remains the publish orchestrator, and `kv/mod.rs` still carries constants, re-exports, and KV-specific test scaffolding.
+- `src/serve/cache_registry/kv/` now has separate `blob_read.rs`, `confirm.rs`, `flight.rs`, `handoff.rs`, `index.rs`, `instrumentation.rs`, `lookup.rs`, `policy.rs`, `prefetch.rs`, `refresh.rs`, `schedule.rs`, `tests.rs`, `types.rs`, and `write.rs` helpers. `flush.rs` remains the publish orchestrator, and `kv/mod.rs` now carries constants plus root module wiring/re-exports.
 - `src/telemetry.rs` remains a thin front module, while `src/progress/mod.rs` fronts the progress namespace and `src/observability/` remains the request/event metrics namespace.
 - `src/ui.rs` is the front module for `src/ui/`, and `src/test_env.rs` remains a dedicated test-only support module.
 
@@ -327,13 +327,12 @@ These are the next sensible follow-ons from the current tree.
 - Use `docs/adr/0003-runner-proxy-optimization-roadmap.md` for the runner-proxy optimization sequence. Session trace, OCI negative cache, borrowed upload sessions, hidden stream-through, and Docker immutable-ref planning now have first slices; the remaining work is proof, action wiring, cache policy, and concurrency tuning from trace artifacts.
 - Use `docs/adr/0004-oci-large-blob-stream-through.md`, `docs/adr/0005-borrowed-upload-sessions-and-blob-cache-policy.md`, `docs/adr/0006-cache-session-trace-and-oci-negative-cache.md`, and `docs/adr/0007-docker-immutable-run-refs-and-alias-promotion.md` for the concrete OCI hot-path and Docker correctness implementation tracks.
 - ADR 0007 first slice is hidden behind Docker adapter controls: `--cache-run-ref-tag` selects immutable `--cache-to`, repeatable `--cache-from-ref-tag` selects import aliases, and repeatable `--cache-promote-ref-tag` asks the proxy to bind OCI alias refs after publish. Docker now also derives those refs from provider-neutral `BORINGCACHE_CI_*` run metadata, with GitHub Actions `GITHUB_*` as the first built-in mapper. Local runs without CI metadata preserve the old single-ref behavior.
-- Focused ADR 0007 proxy coverage now proves two immutable run refs can request the same promotion alias, remain readable by their run refs, and record promoted vs ignored-stale alias diagnostics. A backend-backed concurrent writer E2E is still the rollout gate.
-- Continue trimming `src/serve/cache_registry/kv/mod.rs` by moving remaining constants or test scaffolding into focused helpers when the next behavior change needs it.
+- Focused ADR 0007 proxy coverage proves two immutable run refs can request the same promotion alias, remain readable by their run refs, and record promoted vs ignored-stale alias diagnostics. The backend-backed same-alias E2E now runs two live writer proxies plus a fresh verifier locally; CI evidence is still the rollout gate.
+- Continue trimming `src/serve/cache_registry/kv/mod.rs` by moving remaining constants into focused helpers when the next behavior change needs it.
 - Split `src/serve/cache_registry/kv/flush.rs` further only if save/upload/confirm orchestration grows; scheduling, confirm classification, and cleanup handoff are already isolated.
 - Revisit `src/api/client/mod.rs` for capability discovery, publish/pending polling, and error parsing helpers.
-- Revisit `src/commands/workspace/onboard.rs` for scan, diff/review, auth handoff, and apply helpers.
-- Revisit `src/commands/workspace/dashboard.rs` for terminal lifecycle, fetch orchestration, formatting, and render helpers.
-- Revisit `src/api/client/mod.rs` for capability discovery, publish/pending polling, and error parsing helpers.
+- Revisit `src/commands/workspace/onboard.rs` for scan, diff/review, auth handoff, and apply helpers; tests are already split to `src/commands/workspace/onboard_tests.rs`.
+- Revisit `src/commands/workspace/dashboard.rs` for terminal lifecycle, fetch orchestration, formatting, and render helpers; tests are already split to `src/commands/workspace/dashboard_tests.rs`.
 
 ## Command Surface Review
 
@@ -481,10 +480,10 @@ src/
 | `src/serve/http/handlers.rs` | `src/serve/http/handlers/{mod,manifest,blobs,uploads}.rs` | done |
 | `src/serve/cache_registry/kv/lookup.rs` | `src/serve/cache_registry/kv/{lookup,blob_read,prefetch,index}.rs` | done |
 | `src/serve/cache_registry/kv/flush.rs` | `src/serve/cache_registry/kv/{flush,confirm,schedule,handoff,refresh}.rs` | started; scheduling, confirm classification, and cleanup handoff are split out |
-| `src/serve/cache_registry/kv/mod.rs` | `src/serve/cache_registry/kv/{mod,policy,flight,instrumentation,types}.rs` or nearby helpers | started; policy, flight, instrumentation, and types helpers exist, but constants and tests still live in the root module |
-| `src/api/client/mod.rs` | `src/api/client/{error,pending,publish}.rs` | next |
-| `src/commands/workspace/onboard.rs` | `src/commands/workspace/onboard/{mod,scan,review,apply,auth}.rs` or sibling helpers | next |
-| `src/commands/workspace/dashboard.rs` | `src/commands/workspace/dashboard/{mod,app,input,render,format}.rs` or sibling helpers | later |
+| `src/serve/cache_registry/kv/mod.rs` | `src/serve/cache_registry/kv/{mod,constants,policy,flight,instrumentation,types}.rs` or nearby helpers | started; policy, flight, instrumentation, types, and tests helpers exist, but constants still live in the root module |
+| `src/api/client/mod.rs` | `src/api/client/{error,pending,publish}.rs` | started; tests are split, behavior helpers still need extraction |
+| `src/commands/workspace/onboard.rs` | `src/commands/workspace/onboard/{mod,scan,review,apply,auth}.rs` or sibling helpers | started; tests are split, scan/review/auth/apply still live together |
+| `src/commands/workspace/dashboard.rs` | `src/commands/workspace/dashboard/{mod,app,input,render,format}.rs` or sibling helpers | started; tests are split, terminal/app/render concerns still live together |
 | `src/config.rs` | `src/config/{mod,model,store}.rs` | done |
 | `src/progress.rs` | `src/progress/{mod,reporter,system}.rs` | done |
 | `src/retry_resume.rs` | `src/retry_resume/{mod,config,policy}.rs` | done |
@@ -496,10 +495,9 @@ src/
 
 ## Recommended Refactor Order
 
-1. Trim `src/serve/cache_registry/kv/mod.rs` when the next KV behavior change needs it; constants and test scaffolding are now the main root-module weight.
+1. Trim `src/serve/cache_registry/kv/mod.rs` when the next KV behavior change needs it; constants are now the main root-module weight.
 2. Revisit `src/api/client/mod.rs` once the serve-side boundaries are stable.
 3. Revisit `src/commands/workspace/onboard.rs`, then `src/commands/workspace/dashboard.rs`, as the remaining mixed-role command hotspots.
-4. Revisit `src/commands/workspace/dashboard.rs` after the serve/API hotspots unless a command-surface refactor becomes urgent.
 
 ## Notes For Current Worktree
 

@@ -86,8 +86,10 @@ Owner: workspace/account/setup family (`public-primary` unless noted otherwise)
 - `src/commands/config/setup_encryption.rs`
 - `src/commands/workspace/audit.rs`
 - `src/commands/workspace/dashboard.rs`
+- `src/commands/workspace/dashboard_tests.rs`
 - `src/commands/workspace/doctor.rs`
 - `src/commands/workspace/onboard.rs`
+- `src/commands/workspace/onboard_tests.rs`
 - `src/commands/workspace/use_workspace.rs`
 - `src/commands/workspace/workspaces.rs`
 
@@ -169,6 +171,7 @@ Owner: transport/model layer (`support-primary`)
 - `src/api/client/cache.rs`
 - `src/api/client/http.rs`
 - `src/api/client/metrics.rs`
+- `src/api/client/tests.rs`
 - `src/api/client/workspace.rs`
 - `src/api/models/mod.rs`
 - `src/api/models/cache.rs`
@@ -302,12 +305,13 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/serve/cache_registry/kv/prefetch.rs`
 - `src/serve/cache_registry/kv/refresh.rs`
 - `src/serve/cache_registry/kv/schedule.rs`
+- `src/serve/cache_registry/kv/tests.rs`
 - `src/serve/cache_registry/kv/types.rs`
 - `src/serve/cache_registry/kv/write.rs`
 
 Notes:
 
-- the KV section reflects the current workspace shape, with scheduling, confirm classification, cleanup handoff, shared KV types, lookup, refresh, read-cache, and write helpers split out while publish orchestration remains in `flush.rs`
+- the KV section reflects the current workspace shape, with scheduling, confirm classification, cleanup handoff, shared KV types, lookup, refresh, read-cache, tests, and write helpers split out while publish orchestration remains in `flush.rs`
 - `serve/cas_publish.rs` is shared by manifest publish handlers and KV flush publishing; the OCI tracked-blob path consumes `PresentBlob` proofs when selecting upload sessions
 
 ## Cross-cutting diagnostics, error handling, and test support

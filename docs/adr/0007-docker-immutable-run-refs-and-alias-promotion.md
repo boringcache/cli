@@ -1,6 +1,6 @@
 # ADR 0007: Docker Immutable Run Refs And Alias Promotion
 
-Status: accepted; CI derivation and alias-root binding implemented, default rollout pending backend E2E and benchmark proof
+Status: accepted; CI derivation, alias-root binding, and same-alias E2E implemented, default rollout pending release/action/benchmark proof
 Date: 2026-04-20
 
 ## Context
@@ -220,10 +220,10 @@ The first hidden CLI/Rails slice is implemented:
 - OCI and KV alias binding now uses Rails ready-tag publish to point aliases at the confirmed root `cache_entry_id` instead of creating separate alias cache entries. This keeps the immutable/internal root and human-facing aliases attached to one logical entry for access updates and plan-limit eviction.
 - Cross-runner E2E handoff now compares the `cache_entry_id` returned by `boringcache check --json` against the proxy flush log, so the assertion uses the normal restore/read path instead of a helper-only direct pointer API call.
 - `cache-registry` now has a hidden `--oci-alias-promotion-ref` proof hook so required E2E can exercise planned OCI alias promotion refs directly through the standalone proxy.
-- `ci/e2e/required/e2e-oci-same-alias-writer-test.sh` is wired into the required E2E matrix. It publishes a newer immutable OCI run ref first, then an older run ref with the same provider-neutral branch alias, and verifies through a fresh proxy that both immutable refs remain readable while the branch alias resolves to the newer run. The standalone proxy leg keeps metadata hints within the replayable 8-key `--metadata-hint` cap while preserving the provider-neutral CI fields Rails needs for ordering.
+- `ci/e2e/required/e2e-oci-same-alias-writer-test.sh` is wired into the required E2E matrix. It now runs two live standalone writer proxies against the same backend, uploads both writers' OCI blobs, commits the newer immutable run ref before the older ref, requires promoted plus ignored-stale alias diagnostics with zero promotion failures, and verifies through a fresh read-only proxy that both immutable refs remain readable while the branch alias resolves to the newer run. The direct proof leg passes the provider-neutral CI fields Rails needs for ordering.
 - Docker dry-run JSON now keeps full BuildKit `--cache-from` strings in `oci_cache` only. `proxy.metadata_hints` is capped and normalized to values that can be replayed as `cache-registry --metadata-hint`, with multi-alias promotion hints encoded as slash-separated labels instead of comma lists.
 
-Remaining rollout work: get the new backend-backed same-alias writer E2E green in CI, wire action benchmark workflows to pass provider-neutral metadata, compare artifacts, and promote the behavior to the default action path only after proof.
+Remaining rollout work: release the post-`v1.12.42` CLI mainline if the same-alias harness is part of the release gate, make action/proxy metadata transport preserve `ci_run_started_at` and other ordering fields under the replayable metadata-hint cap, wire action benchmark workflows to pass provider-neutral metadata, compare artifacts, and promote the behavior to the default action path only after proof.
 
 The concurrent writer E2E should stay provider-neutral. It should simulate two provider contexts, not GitHub-only environment variables:
 
@@ -241,7 +241,7 @@ Expected assertions:
 
 ## Proof Status
 
-Documentation, hidden CLI/Rails contract fields, automatic CLI-side CI derivation, focused proxy proof, and the first backend-backed same-alias writer E2E harness are aligned as of 2026-04-22. Immutable run refs and alias promotion are accepted as the correctness model; the backend-backed same-alias E2E now passes locally against Rails, while CI evidence, action workflow wiring, benchmark artifact comparison, and default rollout remain proof-gated.
+Documentation, hidden CLI/Rails contract fields, automatic CLI-side CI derivation, focused proxy proof, and the backend-backed dual-writer same-alias E2E harness are aligned as of 2026-04-22. Immutable run refs and alias promotion are accepted as the correctness model; the backend-backed same-alias E2E passes locally with two live writer proxies plus a fresh verifier. CI evidence for the hardened dual-writer harness, action workflow metadata transport, benchmark artifact comparison, and default rollout remain proof-gated.
 
 Focused evidence now available:
 
@@ -254,15 +254,18 @@ Focused evidence now available:
 - CLI save/publish request models now carry provider-neutral run metadata (`ci_run_uid`, attempt, ref type/name, default branch, PR number, commit SHA, and run start time) so Rails can order alias promotions without knowing which CI produced the build.
 - Rails local tests prove `ci_run_started_at` beats upload completion time for alias promotion, so an older run that finishes later does not replace a newer run's branch alias.
 - `boringcache/one` local release-prep surfaces Docker cache run refs, import refs, promotion refs, and provider-neutral CI metadata as action outputs.
-- The required E2E matrix now includes `Registry / OCI Same-Alias Writer`, a provider-neutral direct-OCI proof leg that checks `promoted` and `ignored_stale` session-summary counters and verifies immutable refs plus the winning alias through a fresh proxy.
-- Local E2E evidence on 2026-04-22: `ci/e2e/required/e2e-oci-same-alias-writer-test.sh` passed against local Rails using the hidden standalone proxy alias-promotion hook, publishing newer then older immutable refs, observing the stale alias result, and reading both immutable refs plus the winning alias through a fresh read-only proxy.
+- The required E2E matrix now includes `Registry / OCI Same-Alias Writer`, a provider-neutral direct-OCI proof leg that runs two live writer proxies, checks `promoted` and `ignored_stale` session-summary counters, rejects any alias-promotion failure counter, and verifies immutable refs plus the winning alias through a fresh proxy.
+- Local E2E evidence on 2026-04-22: `ci/e2e/required/e2e-oci-same-alias-writer-test.sh` passed against local Rails using the hidden standalone proxy alias-promotion hook, with two live writer proxies uploading blobs, newer then older immutable refs publishing to the same alias, stale alias diagnostics observed, zero alias-promotion failures required, and both immutable refs plus the winning alias read through a fresh read-only proxy.
+- Prior CI evidence on 2026-04-22: CLI E2E run `24767673291` passed at `5fd0203`, and job `E2E / Registry / OCI Same-Alias Writer` (`72466357831`) succeeded before the local dual-writer hardening in this ADR update. Re-run CI for the hardened harness before treating it as release evidence.
+- Public `boringcache/one` `v1.12.60` now exposes Docker cache run refs, import refs, promotion refs, and provider-neutral CI metadata outputs while defaulting to CLI `v1.12.42` and `verify: none`.
 
-Benchmark and CI same-alias E2E proof are still pending until that new leg is green in CI. This remains the next release proof after the local Rails run. The later proof bundle must attach:
+CI, benchmark, and action-path same-alias proof are still pending for the hardened dual-writer harness. The later proof bundle must attach:
 
-- a provider-neutral concurrent same-alias writer E2E with two immutable refs;
+- a provider-neutral same-alias writer E2E with two live writer proxies and two immutable refs;
 - API/session evidence that both roots remain readable after one alias winner is selected;
 - stale/conflict promotion evidence in both Rails response fields and session trace fields;
 - Docker dry-run/action artifacts showing derived run refs, import aliases, and promotion aliases;
+- action/proxy metadata evidence showing the Rails ordering field `ci_run_started_at` survives the replayable metadata-hint cap or moves through a dedicated publish field instead of being dropped;
 - receipt-strict publish evidence showing alias/root visibility does not depend on verifier-side post-publish readiness polling;
 - real-project benchmark artifacts that classify alias conflicts separately from cache misses.
 
@@ -270,7 +273,7 @@ The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` did not clear
 
 A later Cross-Runner Verify attempt after the web deploy exposed a distinct alias/root split: the seed runner proved the human tag, while a fresh reader could not resolve the internal registry root tag. The likely cause was duplicate cache rows for one logical root: root publish created the internal root entry, then alias binding created another ready entry for the human alias. Workspace limit enforcement evicts by oldest ready entry, so the older internal root could be pruned while the newer alias row still existed. The local fix binds aliases to the confirmed root entry with Rails tag publish and adds seed-side internal-root visibility proof before handoff.
 
-Immutable-root/promotion default rollout remains pending until the provider-neutral same-alias writer E2E is green with receipt-strict publish, alias/root single-entry binding, and no post-publish blob URL readiness sleep, then backed by real-project benchmark artifacts.
+Immutable-root/promotion default rollout remains pending until the provider-neutral dual-writer same-alias proof is exercised through the released action/CLI path with receipt-strict publish, alias/root single-entry binding, full ordering metadata, and no post-publish blob URL readiness sleep. The required E2E harness now also makes remote tag and local post-save visibility fail fast by default, avoids pre-shutdown publish-settled polling, and disables Docker registry export retries unless explicitly overridden, so delayed alias/root visibility should be classified as a Rails/API correctness bug rather than hidden by workflow polling. Default promotion still needs real-project benchmark artifacts.
 
 ## Incident Tracking: Same-Tag PostHog Writer Overlap
 
@@ -294,10 +297,9 @@ promote:   branch/default aliases only after successful export
 Release status matters for incident review:
 
 - the failed benchmark used the released action path, `boringcache/one@v1`;
-- that action currently resolves to action `v1.12.59`, which pins CLI `v1.12.41`;
-- CLI `origin/main` now includes the first negative-cache and alias-promotion proof commits plus receipt-strict E2E handoff checks. Commit `83e547e` clears the required E2E workflow, including Docker BuildKit, Prefetch Smoke, and Cross-Runner Verify, without verifier-side blob URL convergence polling;
-- current remote `boringcache/one@v1` still defaults `verify=wait` and pins CLI `v1.12.41`, so CLI CI/release/E2E workflow uses of `one@v1` that are only cache accelerators must pass `verify: none` explicitly until the action release is promoted;
-- active borrowed-session follow-up work, including owned upload-session body promotion into the local blob cache, is not represented by a released CLI/action path yet;
+- that action now resolves to signed action release `v1.12.60`, which defaults to CLI `v1.12.42` and `verify: none`;
+- CLI `origin/main` at `5fd0203` includes negative-cache, alias-promotion, receipt-strict E2E handoff checks, and the green provider-neutral same-alias writer CI leg. Commit `83e547e` cleared Docker BuildKit, Prefetch Smoke, and Cross-Runner Verify without verifier-side blob URL convergence polling; run `24767673291` later cleared the same-alias writer leg as well;
+- active same-alias E2E and adapter-engine follow-up work after `v1.12.42` is not represented by a signed CLI release until `v1.12.43` or a later tag is published;
 - no benchmark should be used as release evidence for this incident unless the artifact records the action ref, CLI version, immutable run ref state, promotion status, and session trace.
 
 The tracking proof for this ADR is a provider-neutral E2E:

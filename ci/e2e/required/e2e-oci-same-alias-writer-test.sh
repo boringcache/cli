@@ -9,7 +9,9 @@ WORKSPACE="${WORKSPACE:-${GITHUB_REPOSITORY:-}}"
 TAG="${TAG:-}"
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-5000}"
-PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}"
+PROXY_PORT_A="${PROXY_PORT_A:-${PROXY_PORT}}"
+PROXY_PORT_B="${PROXY_PORT_B:-$((PROXY_PORT_A + 1))}"
+PROXY_PORT_VERIFY="${PROXY_PORT_VERIFY:-$((PROXY_PORT_A + 2))}"
 PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-210}"
@@ -23,10 +25,9 @@ RUN_A_STARTED_AT="${RUN_A_STARTED_AT:-2026-04-21T10:00:00Z}"
 RUN_B_STARTED_AT="${RUN_B_STARTED_AT:-2026-04-21T10:05:00Z}"
 
 WORK_DIR="$(mktemp -d)"
-PROXY_PID=""
-PROXY_READY_FILE=""
-PROXY_LOG=""
-PROXY_METRICS=""
+declare -a PROXY_PIDS=()
+declare -a PROXY_READY_FILES=()
+declare -a PROXY_LOGS=()
 
 mkdir -p "${LOG_DIR}"
 
@@ -48,6 +49,20 @@ sha256_file_hex() {
   fi
 }
 
+require_port() {
+  local name="$1"
+  local value="$2"
+  if ! [[ "${value}" =~ ^[1-9][0-9]*$ ]] || (( value > 65535 )); then
+    echo "ERROR: ${name} must be an integer between 1 and 65535"
+    exit 1
+  fi
+}
+
+proxy_url() {
+  local port="$1"
+  printf 'http://%s:%s' "${PROXY_HOST}" "${port}"
+}
+
 dump_logs() {
   set +e
   echo "=== OCI same-alias E2E debug logs ==="
@@ -60,74 +75,97 @@ dump_logs() {
   echo "=== End OCI same-alias E2E debug logs ==="
 }
 
-stop_proxy() {
-  if [[ -z "${PROXY_PID:-}" ]]; then
+tail_proxy_logs() {
+  local log_file
+  for log_file in "${PROXY_LOGS[@]}"; do
+    [[ -f "${log_file}" ]] || continue
+    echo "--- ${log_file} ---"
+    tail -n 120 "${log_file}" || true
+  done
+}
+
+stop_proxy_pid() {
+  local proxy_pid="$1"
+  local ready_file="$2"
+
+  if [[ -z "${proxy_pid:-}" ]]; then
     return 0
   fi
 
-  if kill -0 "${PROXY_PID}" >/dev/null 2>&1; then
-    kill "${PROXY_PID}" >/dev/null 2>&1 || true
+  if kill -0 "${proxy_pid}" >/dev/null 2>&1; then
+    kill "${proxy_pid}" >/dev/null 2>&1 || true
     local deadline=$((SECONDS + PROXY_SHUTDOWN_WAIT_SECS))
-    while kill -0 "${PROXY_PID}" >/dev/null 2>&1; do
+    while kill -0 "${proxy_pid}" >/dev/null 2>&1; do
       if (( SECONDS >= deadline )); then
-        echo "WARNING: proxy ${PROXY_PID} did not exit after ${PROXY_SHUTDOWN_WAIT_SECS}s, sending SIGKILL"
-        kill -9 "${PROXY_PID}" >/dev/null 2>&1 || true
+        echo "WARNING: proxy ${proxy_pid} did not exit after ${PROXY_SHUTDOWN_WAIT_SECS}s, sending SIGKILL"
+        kill -9 "${proxy_pid}" >/dev/null 2>&1 || true
         break
       fi
       sleep 1
     done
   fi
 
-  wait "${PROXY_PID}" >/dev/null 2>&1 || true
-  PROXY_PID=""
-  rm -f "${PROXY_READY_FILE:-}" >/dev/null 2>&1 || true
-  PROXY_READY_FILE=""
+  wait "${proxy_pid}" >/dev/null 2>&1 || true
+  rm -f "${ready_file:-}" >/dev/null 2>&1 || true
+}
+
+stop_all_proxies() {
+  local i
+  for ((i = ${#PROXY_PIDS[@]} - 1; i >= 0; i--)); do
+    stop_proxy_pid "${PROXY_PIDS[$i]}" "${PROXY_READY_FILES[$i]}"
+  done
+  PROXY_PIDS=()
+  PROXY_READY_FILES=()
 }
 
 cleanup() {
   set +e
-  stop_proxy
+  stop_all_proxies
   rm -rf "${WORK_DIR}"
 }
 trap dump_logs ERR
 trap cleanup EXIT
 
 wait_for_proxy_ready() {
+  local proxy_pid="$1"
+  local ready_file="$2"
+  local proxy_log="$3"
   local attempts="${PROXY_READY_TIMEOUT_SECS}"
   for _ in $(seq 1 "${attempts}"); do
-    if [[ -f "${PROXY_READY_FILE}" ]]; then
+    if [[ -f "${ready_file}" ]]; then
       return 0
     fi
-    if ! kill -0 "${PROXY_PID}" >/dev/null 2>&1; then
+    if ! kill -0 "${proxy_pid}" >/dev/null 2>&1; then
       echo "ERROR: proxy exited during startup"
-      tail -n 120 "${PROXY_LOG}" || true
+      tail -n 120 "${proxy_log}" || true
       exit 1
     fi
     sleep 1
   done
 
   echo "ERROR: proxy did not become ready"
-  tail -n 120 "${PROXY_LOG}" || true
+  tail -n 120 "${proxy_log}" || true
   exit 1
 }
 
-start_proxy() {
+start_proxy_instance() {
   local label="$1"
-  local run_uid="$2"
-  local run_started_at="$3"
-  local read_only="${4:-false}"
+  local port="$2"
+  local run_uid="$3"
+  local run_started_at="$4"
+  local read_only="${5:-false}"
+  local proxy_log="${LOG_DIR}/proxy-${label}.log"
+  local proxy_metrics="${LOG_DIR}/metrics-${label}.jsonl"
+  local ready_file
+  ready_file="$(mktemp "${LOG_DIR}/proxy-ready-${label}.XXXXXX")"
 
-  stop_proxy
-  PROXY_LOG="${LOG_DIR}/proxy-${label}.log"
-  PROXY_METRICS="${LOG_DIR}/metrics-${label}.jsonl"
-  PROXY_READY_FILE="$(mktemp "${LOG_DIR}/proxy-ready-${label}.XXXXXX")"
-  rm -f "${PROXY_READY_FILE}"
+  rm -f "${ready_file}"
 
   local -a proxy_cmd=(
     "${BINARY}" cache-registry "${WORKSPACE}" "${TAG}"
     --host "${PROXY_HOST}"
-    --port "${PROXY_PORT}"
-    --ready-file "${PROXY_READY_FILE}"
+    --port "${port}"
+    --ready-file "${ready_file}"
     --no-platform
     --no-git
     --on-demand
@@ -149,10 +187,13 @@ start_proxy() {
 
   RUST_LOG="${RUST_LOG:-info}" \
   BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
-  BORINGCACHE_OBSERVABILITY_JSONL_PATH="${PROXY_METRICS}" \
-    "${proxy_cmd[@]}" >"${PROXY_LOG}" 2>&1 &
-  PROXY_PID=$!
-  wait_for_proxy_ready
+  BORINGCACHE_OBSERVABILITY_JSONL_PATH="${proxy_metrics}" \
+    "${proxy_cmd[@]}" >"${proxy_log}" 2>&1 &
+  local proxy_pid=$!
+  PROXY_PIDS+=("${proxy_pid}")
+  PROXY_READY_FILES+=("${ready_file}")
+  PROXY_LOGS+=("${proxy_log}")
+  wait_for_proxy_ready "${proxy_pid}" "${ready_file}" "${proxy_log}"
 }
 
 write_manifest() {
@@ -217,42 +258,61 @@ assert_status() {
     echo "ERROR: ${label} returned ${status}; expected ${expected}"
     cat "${headers_file}" || true
     cat "${body_file}" || true
-    tail -n 120 "${PROXY_LOG}" || true
+    tail_proxy_logs
     exit 1
   fi
 }
 
-publish_run_ref() {
+prepare_run_ref() {
   local label="$1"
   local run_ref="$2"
-  local run_started_at="$3"
   local payload_file="${WORK_DIR}/${label}-payload.bin"
   local manifest_file="${WORK_DIR}/${label}-manifest.json"
-  local headers_file="${LOG_DIR}/${label}.headers"
-  local body_file="${WORK_DIR}/${label}.body"
-  local blob_digest manifest_digest status
+  local blob_digest manifest_digest
 
   printf 'same-alias %s %s\n' "${label}" "${run_ref}" >"${payload_file}"
   blob_digest="$(write_manifest "${run_ref}" "${payload_file}" "${manifest_file}")"
+  printf '%s\n' "${blob_digest}" >"${WORK_DIR}/${label}-blob.digest"
   manifest_digest="sha256:$(sha256_file_hex "${manifest_file}")"
   printf '%s\n' "${manifest_digest}" >"${WORK_DIR}/${label}-manifest.digest"
+}
 
-  start_proxy "${label}" "${label}" "${run_started_at}" false
+upload_blob_for_run() {
+  local label="$1"
+  local proxy_url="$2"
+  local payload_file="${WORK_DIR}/${label}-payload.bin"
+  local headers_file="${LOG_DIR}/${label}-blob.headers"
+  local body_file="${WORK_DIR}/${label}-blob.body"
+  local blob_digest status
+
+  blob_digest="$(cat "${WORK_DIR}/${label}-blob.digest")"
 
   status="$(
     http_request \
       POST \
-      "${PROXY_URL}/v2/cache/blobs/uploads/?digest=${blob_digest}" \
+      "${proxy_url}/v2/cache/blobs/uploads/?digest=${blob_digest}" \
       "${payload_file}" \
       "${body_file}" \
       "${headers_file}"
   )"
   assert_status "${status}" "201" "${label} blob upload" "${headers_file}" "${body_file}"
+}
+
+publish_manifest_for_run() {
+  local label="$1"
+  local proxy_url="$2"
+  local run_ref="$3"
+  local manifest_file="${WORK_DIR}/${label}-manifest.json"
+  local headers_file="${LOG_DIR}/${label}-manifest.headers"
+  local body_file="${WORK_DIR}/${label}-manifest.body"
+  local manifest_digest status
+
+  manifest_digest="$(cat "${WORK_DIR}/${label}-manifest.digest")"
 
   status="$(
     http_request \
       PUT \
-      "${PROXY_URL}/v2/cache/manifests/${run_ref}" \
+      "${proxy_url}/v2/cache/manifests/${run_ref}" \
       "${manifest_file}" \
       "${body_file}" \
       "${headers_file}" \
@@ -269,8 +329,6 @@ publish_run_ref() {
     cat "${headers_file}"
     exit 1
   fi
-
-  stop_proxy
 }
 
 write_metrics_summary() {
@@ -304,16 +362,32 @@ assert_summary_positive() {
   fi
 }
 
+assert_summary_zero() {
+  local summary_file="$1"
+  local key="$2"
+  local value
+  value="$(summary_value "${summary_file}" "${key}")"
+  if [[ -z "${value}" ]]; then
+    value="0"
+  fi
+  if ! [[ "${value}" =~ ^[0-9]+$ ]] || (( value != 0 )); then
+    echo "ERROR: expected ${key} == 0 in ${summary_file}; got ${value}"
+    cat "${summary_file}"
+    exit 1
+  fi
+}
+
 fetch_manifest_once() {
   local reference="$1"
-  local output_file="$2"
-  local headers_file="$3"
+  local proxy_url="$2"
+  local output_file="$3"
+  local headers_file="$4"
   local status
 
   status="$(
     http_request \
       GET \
-      "${PROXY_URL}/v2/cache/manifests/${reference}" \
+      "${proxy_url}/v2/cache/manifests/${reference}" \
       "" \
       "${output_file}" \
       "${headers_file}" \
@@ -347,6 +421,13 @@ if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1
   echo "ERROR: required dependency not found: sha256sum or shasum"
   exit 1
 fi
+require_port "PROXY_PORT_A" "${PROXY_PORT_A}"
+require_port "PROXY_PORT_B" "${PROXY_PORT_B}"
+require_port "PROXY_PORT_VERIFY" "${PROXY_PORT_VERIFY}"
+if [[ "${PROXY_PORT_A}" == "${PROXY_PORT_B}" || "${PROXY_PORT_A}" == "${PROXY_PORT_VERIFY}" || "${PROXY_PORT_B}" == "${PROXY_PORT_VERIFY}" ]]; then
+  echo "ERROR: PROXY_PORT_A, PROXY_PORT_B, and PROXY_PORT_VERIFY must be distinct"
+  exit 1
+fi
 
 require_save_capable_token
 export_resolved_cli_tokens admin
@@ -357,34 +438,55 @@ echo "Workspace: ${WORKSPACE}"
 echo "Tag family: ${TAG}"
 echo "Run refs: older=${RUN_A_REF} newer=${RUN_B_REF}"
 echo "Alias ref: ${ALIAS_REF}"
+echo "Proxy ports: older=${PROXY_PORT_A} newer=${PROXY_PORT_B} verify=${PROXY_PORT_VERIFY}"
 
 echo
-echo "=== Phase 1: newer writer publishes first and promotes alias ==="
-publish_run_ref "run-b" "${RUN_B_REF}" "${RUN_B_STARTED_AT}"
+echo "=== Phase 1: two live writer proxies upload OCI blobs ==="
+prepare_run_ref "run-a" "${RUN_A_REF}"
+prepare_run_ref "run-b" "${RUN_B_REF}"
+start_proxy_instance "run-a" "${PROXY_PORT_A}" "run-a" "${RUN_A_STARTED_AT}" false
+start_proxy_instance "run-b" "${PROXY_PORT_B}" "run-b" "${RUN_B_STARTED_AT}" false
+
+upload_blob_for_run "run-a" "$(proxy_url "${PROXY_PORT_A}")" &
+upload_a_pid=$!
+upload_blob_for_run "run-b" "$(proxy_url "${PROXY_PORT_B}")" &
+upload_b_pid=$!
+wait "${upload_a_pid}"
+wait "${upload_b_pid}"
+
+echo
+echo "=== Phase 2: newer writer commits first and older writer is stale ==="
+publish_manifest_for_run "run-b" "$(proxy_url "${PROXY_PORT_B}")" "${RUN_B_REF}"
+publish_manifest_for_run "run-a" "$(proxy_url "${PROXY_PORT_A}")" "${RUN_A_REF}"
+stop_all_proxies
+
 write_metrics_summary "run-b"
 assert_summary_positive \
   "${LOG_DIR}/summary-run-b.env" \
   "request_metrics_cache_session_oci_oci_engine_alias_promotion_promoted"
-
-echo
-echo "=== Phase 2: older writer finishes second and must not replace alias ==="
-publish_run_ref "run-a" "${RUN_A_REF}" "${RUN_A_STARTED_AT}"
+assert_summary_zero \
+  "${LOG_DIR}/summary-run-b.env" \
+  "request_metrics_cache_session_oci_oci_engine_alias_promotion_failed"
 write_metrics_summary "run-a"
 assert_summary_positive \
   "${LOG_DIR}/summary-run-a.env" \
   "request_metrics_cache_session_oci_oci_engine_alias_promotion_ignored_stale"
+assert_summary_zero \
+  "${LOG_DIR}/summary-run-a.env" \
+  "request_metrics_cache_session_oci_oci_engine_alias_promotion_failed"
 
 echo
 echo "=== Phase 3: fresh proxy reads both immutable refs and winning alias ==="
-start_proxy "verify" "verify" "${RUN_B_STARTED_AT}" true
-fetch_manifest_once "${RUN_A_REF}" "${WORK_DIR}/verify-run-a.json" "${LOG_DIR}/verify-run-a.headers"
-fetch_manifest_once "${RUN_B_REF}" "${WORK_DIR}/verify-run-b.json" "${LOG_DIR}/verify-run-b.headers"
-fetch_manifest_once "${ALIAS_REF}" "${WORK_DIR}/verify-alias.json" "${LOG_DIR}/verify-alias.headers"
+start_proxy_instance "verify" "${PROXY_PORT_VERIFY}" "verify" "${RUN_B_STARTED_AT}" true
+VERIFY_PROXY_URL="$(proxy_url "${PROXY_PORT_VERIFY}")"
+fetch_manifest_once "${RUN_A_REF}" "${VERIFY_PROXY_URL}" "${WORK_DIR}/verify-run-a.json" "${LOG_DIR}/verify-run-a.headers"
+fetch_manifest_once "${RUN_B_REF}" "${VERIFY_PROXY_URL}" "${WORK_DIR}/verify-run-b.json" "${LOG_DIR}/verify-run-b.headers"
+fetch_manifest_once "${ALIAS_REF}" "${VERIFY_PROXY_URL}" "${WORK_DIR}/verify-alias.json" "${LOG_DIR}/verify-alias.headers"
 
 assert_same_file "${WORK_DIR}/run-a-manifest.json" "${WORK_DIR}/verify-run-a.json" "older immutable run ref"
 assert_same_file "${WORK_DIR}/run-b-manifest.json" "${WORK_DIR}/verify-run-b.json" "newer immutable run ref"
 assert_same_file "${WORK_DIR}/run-b-manifest.json" "${WORK_DIR}/verify-alias.json" "same-alias winner"
-stop_proxy
+stop_all_proxies
 
 BAD_PATTERN_LOG="${WORK_DIR}/e2e-oci-same-alias-bad-pattern.log"
 if grep -E -n 'blob unknown|MANIFEST_BLOB_UNKNOWN|unexpected status from PUT request.*400 Bad Request' "${LOG_DIR}"/*.log >"${BAD_PATTERN_LOG}" 2>/dev/null; then

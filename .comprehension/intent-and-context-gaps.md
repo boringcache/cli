@@ -32,8 +32,9 @@ This file tracks only product intent that is not fully settled by the current co
 The current ADR set is aligned on implementation direction, and the first receipt-strict registry proof is done: commit `83e547e` cleared Docker BuildKit, Prefetch Smoke, and Cross-Runner Verify without verifier-side blob URL readiness polling. These gates still block release/default claims:
 
 - receipt commit failure, including a backend "blob not yet verified" confirm response, should continue to fail OCI/KV publish instead of waiting for asynchronous storage verification;
+- E2E publish/read checks now fail fast by default: remote tag verification has one attempt, local post-save visibility checks do not poll, prefetch seed does not wait for publish-settled before shutdown, Docker registry export retries are opt-in, and any retry must be an explicit diagnostic override rather than a hidden correctness dependency;
 - first-party action workflows still need to pass and artifact provider-neutral Docker run metadata;
-- backend-backed same-alias writer E2E is the selected ADR 0007 proof gate; the required direct-OCI harness is locally green against Rails with immutable refs, stale alias promotion, and fresh-proxy reads proven, and CI still needs to carry that evidence;
+- backend-backed same-alias writer E2E is the selected ADR 0007 proof gate; the required direct-OCI harness is locally green against Rails with two live writer proxies, immutable refs, stale alias promotion, zero alias-promotion failures, and fresh-proxy reads proven, and CI still needs to carry that evidence;
 - stream-through and cache-admission changes remain benchmark-gated before any default threshold or policy change.
 
 ### 2. Machine-Readable Output Contracts

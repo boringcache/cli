@@ -335,8 +335,8 @@ EOF
       ;;
     oci-same-alias-writer)
       cat <<'EOF'
-=== Phase 1: newer writer publishes first and promotes alias ===
-=== Phase 2: older writer finishes second and must not replace alias ===
+=== Phase 1: two live writer proxies upload OCI blobs ===
+=== Phase 2: newer writer commits first and older writer is stale ===
 === Phase 3: fresh proxy reads both immutable refs and winning alias ===
 OCI same-alias writer e2e passed
 EOF

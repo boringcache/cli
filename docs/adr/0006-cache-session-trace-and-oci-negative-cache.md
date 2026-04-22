@@ -263,11 +263,11 @@ Remaining trace depth belongs in later passes: Rails p50/p95 rollups from reques
 
 ## Proof Status
 
-Documentation and the first CLI baseline are aligned as of 2026-04-21. The trace is accepted as the platform insight spine; backend persistence, Rails percentile rollups, action enrichment, benchmark artifact validation, and operator reporting remain follow-up work.
+Documentation and the first CLI baseline are aligned as of 2026-04-22. The trace is accepted as the platform insight spine; backend persistence, Rails percentile rollups, action enrichment, benchmark artifact validation, and operator reporting remain follow-up work.
 
 Focused CLI tests now cover negative-cache invalidation after local writes.
 
-Release proof is updated through the first receipt-strict E2E gate. The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` exercised the then-current `origin/main` CLI path and passed CLI CI, but required registry E2E failed in `Registry / Docker BuildKit`, `Registry / Prefetch Smoke`, and `Cache Registry / Cross-Runner Verify`. The failure shape was consistent: published manifests/indices were visible, but verified blob download URL coverage was `0/N`, and downstream BuildKit/CAS reads returned missing blobs or `404`.
+Release proof is updated through the first receipt-strict E2E gate and the first provider-neutral same-alias writer CI gate. The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` exercised the then-current `origin/main` CLI path and passed CLI CI, but required registry E2E failed in `Registry / Docker BuildKit`, `Registry / Prefetch Smoke`, and `Cache Registry / Cross-Runner Verify`. The failure shape was consistent: published manifests/indices were visible, but verified blob download URL coverage was `0/N`, and downstream BuildKit/CAS reads returned missing blobs or `404`.
 
 Follow-up commits changed that status:
 
@@ -283,9 +283,12 @@ The subsequent Cross-Runner Verify failure after the web deploy was not evidence
 Remote proof after those corrections:
 
 - `83e547e` cleared the required E2E workflow, including Docker BuildKit, Prefetch Smoke, and Cross-Runner Verify, without verifier-side blob URL convergence polling.
-- `801dcc1` changed CLI CI/E2E/release workflows to call `boringcache/one@v1` with `verify: none` for cache-accelerator setup while the public action still pins the older CLI.
+- `801dcc1` released CLI `v1.12.42`.
+- Public `boringcache/one` `v1.12.60` now defaults to CLI `v1.12.42` and `verify: none`; the signed `v1` tag points at that action release.
+- The E2E harness now defaults remote tag verification to one attempt and makes local post-save visibility checks fail immediately. The extended prefetch readiness test no longer waits for proxy publish-settled before shutdown, Docker registry export retries default to one attempt, and hidden retries can still be enabled explicitly for diagnostics. Required workflows no longer treat delayed Rails visibility as normal product behavior.
+- Public CLI `main` at `5fd0203` is versioned for unreleased `v1.12.43` and has a green E2E run `24767673291`, including the earlier `Registry / OCI Same-Alias Writer` harness.
 
-The trace and negative-cache baseline therefore has required registry E2E evidence for receipt-strict publish. The new ADR 0007 provider-neutral same-alias writer leg is locally green against Rails; the remaining release/default gaps are backend/action enrichment, artifact validation, public action promotion, and CI evidence for that same leg.
+The trace and negative-cache baseline therefore has required registry E2E evidence for receipt-strict proxy publish. The ADR 0007 provider-neutral same-alias writer leg is locally green after the dual-writer harness hardening; CI still needs to rerun that hardened harness. The remaining release/default gaps are backend/action enrichment, benchmark artifact validation, a signed CLI release for the post-`v1.12.42` mainline, and web-side rich session-summary persistence.
 
 The later proof bundle must attach:
 
@@ -324,13 +327,13 @@ validation still observes the stale miss
 registry returns blob unknown
 ```
 
-Release status as observed after follow-up work:
+Release status after follow-up work:
 
-- `boringcache/one@v1` pointed at action release `v1.12.59`;
-- `v1.12.59` pinned CLI release `v1.12.41`;
-- CLI `origin/main` now includes OCI negative-cache tracing, invalidation work, borrowed upload-session bodies, owned upload-session body promotion into `BlobReadCache`, receipt-strict publish behavior, verifier-loop removal, and provider-neutral Docker CI run metadata through save/publish requests;
-- none of that is represented by a CLI tag or released action until the next signed release;
-- therefore the failed benchmark did not exercise the follow-up OCI fixes, and the incident is not cleared by any released path.
+- `boringcache/one@v1` points at signed action release `v1.12.60`;
+- `v1.12.60` defaults to CLI release `v1.12.42` and `verify: none`;
+- public CLI `main` is at `5fd0203`, versioned as unreleased `v1.12.43`, and includes same-alias E2E/adapter-engine follow-ups after the `v1.12.42` tag;
+- the failed PostHog benchmark did not exercise the follow-up OCI fixes available on the later released action/CLI pair, so it should not be used as proof against the current released default;
+- future benchmark claims still need artifacts that record action ref, CLI version, cache mode, OCI hydration mode, immutable run ref state, alias promotion status, and `cache_session_summary`.
 
 The required proof is a focused OCI protocol E2E plus release-path registry E2E, not a benchmark-only assertion:
 
@@ -342,7 +345,7 @@ The required proof is a focused OCI protocol E2E plus release-path registry E2E,
 
 The concurrent variant should run two same-tag writers against one proxy/backend root and prove that one writer's export-time `HEAD` miss cannot poison the other writer's later upload or manifest publish.
 
-Do not classify this as runner noise in released-path reviews. Local main has protocol and required registry E2E evidence for the receipt-strict fix, but released `boringcache/one@v1` still pins the older CLI path until the action/CLI release is promoted. Benchmark failures with `blob unknown` after export-time `HEAD` misses on the released action should still be treated as OCI publish correctness failures unless the artifact records a fixed CLI/action ref.
+Do not classify this as runner noise in released-path reviews. Current released `one@v1`/CLI `v1.12.42` has the first receipt-strict proxy fixes, and public CLI `main` has additional same-alias proof. Benchmark failures with `blob unknown` after export-time `HEAD` misses should still be treated as OCI publish correctness failures unless the artifact records the action ref, CLI version, and session trace needed to prove which code path ran.
 
 ## Acceptance Gates
 

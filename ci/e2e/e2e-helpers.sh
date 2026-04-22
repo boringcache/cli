@@ -353,42 +353,6 @@ wait_for_proxy() {
   wait_for_proxy_phase "ready" "$port" "$pid" "$log_file"
 }
 
-wait_for_proxy_publish_settled() {
-  local port="${1:-${PROXY_PORT:-5050}}"
-  local pid="${2:-${_HELPER_PROXY_PID:-}}"
-  local log_file="${3:-${_HELPER_PROXY_LOG:-/dev/null}}"
-  local attempts start_ts next_warn now waited
-  local probe status phase publish_state
-  attempts="$((PROXY_READY_TIMEOUT_SECS / PROXY_READY_POLL_SECS))"
-  if (( attempts < 1 )); then
-    attempts=1
-  fi
-  start_ts="$(date +%s)"
-  next_warn=$((start_ts + PROXY_READY_WARN_SECS))
-  for _ in $(seq 1 "$attempts"); do
-    probe="$(proxy_status_probe "$port")"
-    read -r status phase publish_state <<<"$probe"
-    if [[ "$status" == "200" && "$publish_state" == "settled" ]]; then
-      return 0
-    fi
-    now="$(date +%s)"
-    if (( now >= next_warn )); then
-      waited="$((now - start_ts))"
-      echo "WARNING: proxy publish still waiting after ${waited}s (phase=${phase:-unknown} publish=${publish_state:-unknown})"
-      next_warn=$((now + PROXY_READY_WARN_SECS))
-    fi
-    if [[ -n "${pid:-}" ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
-      echo "ERROR: proxy exited before publish settled"
-      tail -n 80 "${log_file}" || true
-      exit 1
-    fi
-    sleep "$PROXY_READY_POLL_SECS"
-  done
-  echo "ERROR: proxy publish did not settle within ${PROXY_READY_TIMEOUT_SECS}s"
-  tail -n 80 "${log_file}" || true
-  exit 1
-}
-
 stop_proxy() {
   if [[ -n "${_HELPER_PROXY_PID:-}" ]]; then
     stop_pid_tree "$_HELPER_PROXY_PID" "proxy" "$PROXY_SHUTDOWN_WAIT_SECS"
@@ -458,16 +422,12 @@ wait_for_visibility() {
   local binary="$1"
   local workspace="$2"
   local tag="$3"
-  local attempts="${4:-15}"
   local log_file="${LOG_DIR:-.}/visibility-${tag}.log"
-  for _ in $(seq 1 "$attempts"); do
-    if "$binary" check "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-miss "$workspace" "$tag" \
-      > "$log_file" 2>&1; then
-      return 0
-    fi
-    sleep 1
-  done
-  echo "ERROR: tag did not become visible in time: ${tag}"
+  if "$binary" check "${E2E_TAG_SCOPE_FLAGS[@]}" --fail-on-miss "$workspace" "$tag" \
+    > "$log_file" 2>&1; then
+    return 0
+  fi
+  echo "ERROR: tag was not visible immediately after publish: ${tag}"
   cat "$log_file"
   exit 1
 }
