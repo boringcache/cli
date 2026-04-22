@@ -29,12 +29,13 @@ This file tracks only product intent that is not fully settled by the current co
 
 ### 1. ADR Release Proof Gaps
 
-The current ADR set is aligned on implementation direction, and the first receipt-strict registry proof is done: commit `83e547e` cleared Docker BuildKit, Prefetch Smoke, and Cross-Runner Verify without verifier-side blob URL readiness polling. These gates still block release/default claims:
+The current ADR set is aligned on implementation direction. Public CLI `main` at `5fd0203` has green CLI CI plus E2E run `24767673291`, including Docker BuildKit, Prefetch Smoke, Cross-Runner Verify, and the provider-neutral OCI Same-Alias Writer harness without verifier-side blob URL readiness polling. Public CLI release is still `v1.12.42`; `main` is versioned for unreleased `v1.12.43`. Public `boringcache/one@v1` points at signed action `v1.12.60`, defaults to CLI `v1.12.42`, and defaults `verify` to `none`. These gates still block broader release/default claims:
 
 - receipt commit failure, including a backend "blob not yet verified" confirm response, should continue to fail OCI/KV publish instead of waiting for asynchronous storage verification;
+- Rails still has a legacy-compatible no-receipt CAS publish path, so the web ADR tracks making v2 CAS publish receipt-strict before treating backend publish success as the durable product contract;
 - E2E publish/read checks now fail fast by default: remote tag verification has one attempt, local post-save visibility checks do not poll, prefetch seed does not wait for publish-settled before shutdown, Docker registry export retries are opt-in, and any retry must be an explicit diagnostic override rather than a hidden correctness dependency;
-- first-party action workflows still need to pass and artifact provider-neutral Docker run metadata;
-- backend-backed same-alias writer E2E is the selected ADR 0007 proof gate; the required direct-OCI harness is locally green against Rails with two live writer proxies, immutable refs, stale alias promotion, zero alias-promotion failures, and fresh-proxy reads proven, and CI still needs to carry that evidence;
+- first-party action and benchmark workflows still need to artifact provider-neutral Docker run metadata, immutable run ref state, import aliases, promotion aliases, promotion status, CLI version, action ref, and session trace;
+- action/proxy metadata transport must preserve `ci_run_started_at` or another Rails ordering field when alias promotion is active, despite the replayable metadata-hint cap;
 - stream-through and cache-admission changes remain benchmark-gated before any default threshold or policy change.
 
 ### 2. Machine-Readable Output Contracts

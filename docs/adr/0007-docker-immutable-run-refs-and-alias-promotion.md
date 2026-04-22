@@ -241,7 +241,7 @@ Expected assertions:
 
 ## Proof Status
 
-Documentation, hidden CLI/Rails contract fields, automatic CLI-side CI derivation, focused proxy proof, and the backend-backed dual-writer same-alias E2E harness are aligned as of 2026-04-22. Immutable run refs and alias promotion are accepted as the correctness model; the backend-backed same-alias E2E passes locally with two live writer proxies plus a fresh verifier. CI evidence for the hardened dual-writer harness, action workflow metadata transport, benchmark artifact comparison, and default rollout remain proof-gated.
+Documentation, hidden CLI/Rails contract fields, automatic CLI-side CI derivation, focused proxy proof, and the backend-backed dual-writer same-alias E2E harness are aligned as of 2026-04-22. Immutable run refs and alias promotion are accepted as the correctness model; the backend-backed same-alias E2E passes locally with two live writer proxies plus a fresh verifier and in public CLI E2E run `24767673291` at `5fd0203`. Action workflow metadata transport, benchmark artifact comparison, a signed release for post-`v1.12.42` CLI mainline changes if required, and default rollout remain proof-gated.
 
 Focused evidence now available:
 
@@ -256,10 +256,10 @@ Focused evidence now available:
 - `boringcache/one` local release-prep surfaces Docker cache run refs, import refs, promotion refs, and provider-neutral CI metadata as action outputs.
 - The required E2E matrix now includes `Registry / OCI Same-Alias Writer`, a provider-neutral direct-OCI proof leg that runs two live writer proxies, checks `promoted` and `ignored_stale` session-summary counters, rejects any alias-promotion failure counter, and verifies immutable refs plus the winning alias through a fresh proxy.
 - Local E2E evidence on 2026-04-22: `ci/e2e/required/e2e-oci-same-alias-writer-test.sh` passed against local Rails using the hidden standalone proxy alias-promotion hook, with two live writer proxies uploading blobs, newer then older immutable refs publishing to the same alias, stale alias diagnostics observed, zero alias-promotion failures required, and both immutable refs plus the winning alias read through a fresh read-only proxy.
-- Prior CI evidence on 2026-04-22: CLI E2E run `24767673291` passed at `5fd0203`, and job `E2E / Registry / OCI Same-Alias Writer` (`72466357831`) succeeded before the local dual-writer hardening in this ADR update. Re-run CI for the hardened harness before treating it as release evidence.
+- CI evidence on 2026-04-22: CLI E2E run `24767673291` passed at `5fd0203`, and job `E2E / Registry / OCI Same-Alias Writer` (`72466357831`) succeeded with the provider-neutral dual-writer harness.
 - Public `boringcache/one` `v1.12.60` now exposes Docker cache run refs, import refs, promotion refs, and provider-neutral CI metadata outputs while defaulting to CLI `v1.12.42` and `verify: none`.
 
-CI, benchmark, and action-path same-alias proof are still pending for the hardened dual-writer harness. The later proof bundle must attach:
+Benchmark and action-path same-alias proof are still pending for the released/default path. The later proof bundle must attach:
 
 - a provider-neutral same-alias writer E2E with two live writer proxies and two immutable refs;
 - API/session evidence that both roots remain readable after one alias winner is selected;

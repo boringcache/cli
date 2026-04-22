@@ -51,7 +51,7 @@ Optimize the existing runner-local proxy first. Do not build an on-demand edge s
 The roadmap lands in this order:
 
 1. Add a per-session cache trace, singleflight metrics, and OCI negative-cache behavior. First CLI slice done; backend/action enrichment pending.
-2. Design immutable Docker run refs and atomic alias promotion across CLI/action/Rails. Hidden CLI/Rails slice and CI-side derivation done; backend same-alias E2E/action rollout pending.
+2. Design immutable Docker run refs and atomic alias promotion across CLI/action/Rails. Hidden CLI/Rails slice, CI-side derivation, alias/root binding, and backend same-alias E2E proof are done; released action/default rollout is still pending.
 3. Remove avoidable local copy/sync when cached blobs are reused for OCI publish. Borrowed cache-body sessions done; cache-policy proof pending.
 4. Prototype large OCI blob stream-through with tee-to-cache and end-of-stream verification. Hidden threshold prototype done; benchmark proof pending.
 5. Tune blob-cache admission and eviction using measured reuse by object size.

@@ -288,7 +288,7 @@ Remote proof after those corrections:
 - The E2E harness now defaults remote tag verification to one attempt and makes local post-save visibility checks fail immediately. The extended prefetch readiness test no longer waits for proxy publish-settled before shutdown, Docker registry export retries default to one attempt, and hidden retries can still be enabled explicitly for diagnostics. Required workflows no longer treat delayed Rails visibility as normal product behavior.
 - Public CLI `main` at `5fd0203` is versioned for unreleased `v1.12.43` and has a green E2E run `24767673291`, including the earlier `Registry / OCI Same-Alias Writer` harness.
 
-The trace and negative-cache baseline therefore has required registry E2E evidence for receipt-strict proxy publish. The ADR 0007 provider-neutral same-alias writer leg is locally green after the dual-writer harness hardening; CI still needs to rerun that hardened harness. The remaining release/default gaps are backend/action enrichment, benchmark artifact validation, a signed CLI release for the post-`v1.12.42` mainline, and web-side rich session-summary persistence.
+The trace and negative-cache baseline therefore has required registry E2E evidence for receipt-strict proxy publish and provider-neutral same-alias writer proof. The remaining release/default gaps are backend/action enrichment, benchmark artifact validation, a signed CLI release for the post-`v1.12.42` mainline, action/proxy metadata transport proof for Rails ordering fields, and web-side rich session-summary persistence.
 
 The later proof bundle must attach:
 
