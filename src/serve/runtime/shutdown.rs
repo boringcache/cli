@@ -36,7 +36,7 @@ pub(super) async fn cleanup_runtime_temp_dir(state: &AppState) {
 }
 
 pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
-    super::maintenance::flush_cache_ops(state).await;
+    super::maintenance::flush_cache_ops_on_shutdown(state).await;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
 

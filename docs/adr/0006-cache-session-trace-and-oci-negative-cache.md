@@ -243,7 +243,8 @@ Invalidate negative cache entries when:
 5. Add current-path session trace counters for Rails, storage GET/PUT, hydrate-then-serve, local cache, and materialization.
 6. Emit a `cache_session_summary` observability event at proxy shutdown and, where applicable, action/harness finalization.
 7. Teach `ci/e2e/request-metrics-summary.py` to promote the session summary fields into artifacts.
-8. Only then evaluate adaptive concurrency.
+8. Persist a stable proxy summary session to Rails through the existing `cache-rollups` ingestion path.
+9. Only then evaluate adaptive concurrency.
 
 ## Implementation Progress
 
@@ -255,6 +256,7 @@ The first CLI baseline is implemented:
 - OCI blob hydrate-then-serve records storage GET bytes, first body wait, body duration, local spool write duration, digest verification duration/failure, and cache-promotion timing/failure;
 - proxy shutdown emits a `cache_session_summary` JSONL event with proxy, storage, OCI, singleflight, local-cache, and BuildKit sections;
 - `/_boringcache/status` exposes the same live session-summary snapshot under `session_summary`, and proxy shutdown reuses that builder for the JSONL event, so diagnostics do not need to control proxy lifecycle just to capture the summary shape;
+- cache-ops flush now adds a stable `proxy-summary-*` `oci` session with `summary_schema` and `summary_json` to the existing Rails `cache-rollups` batch, and shutdown forces one final summary upsert even when there are no fresh flat rollups;
 - `ci/e2e/request-metrics-summary.py` promotes session summary fields, OCI upload-plan reuse counts, and new status snapshot keys into artifact env output;
 - the OCI protocol tests cover the PostHog-shaped transition where a blob `HEAD` miss is followed by local upload, manifest publish, negative-cache invalidation, and a later successful `HEAD`.
 - Docker adapter planning now carries provider-neutral CI run metadata into dry-run JSON and proxy metadata hints, including provider, run uid/attempt, ref type/name, default branch, PR number, commit SHA, immutable run ref, import refs, and promotion aliases when ADR 0007 derivation is active.
@@ -264,7 +266,7 @@ Remaining trace depth belongs in later passes: Rails p50/p95 rollups from reques
 
 ## Proof Status
 
-Documentation and the first CLI baseline are aligned as of 2026-04-22. The trace is accepted as the platform insight spine; backend persistence, Rails percentile rollups, action enrichment, benchmark artifact validation, and operator reporting remain follow-up work.
+Documentation and the first CLI baseline are aligned as of 2026-04-22. The trace is accepted as the platform insight spine; CLI-to-Rails summary persistence is implemented locally through `cache-rollups`; Rails percentile rollups, action enrichment, benchmark artifact validation, release-path proof, and broader operator reporting remain follow-up work.
 
 Focused CLI tests now cover negative-cache invalidation after local writes.
 
@@ -289,16 +291,16 @@ Remote proof after those corrections:
 - The E2E harness now defaults remote tag verification to one attempt and makes local post-save visibility checks fail immediately. The extended prefetch readiness test no longer waits for proxy publish-settled before shutdown, Docker registry export retries default to one attempt, and hidden retries can still be enabled explicitly for diagnostics. Required workflows no longer treat delayed Rails visibility as normal product behavior.
 - Public CLI `main` at `5fd0203` is versioned for unreleased `v1.12.43` and has a green E2E run `24767673291`, including the earlier `Registry / OCI Same-Alias Writer` harness.
 
-The trace and negative-cache baseline therefore has required registry E2E evidence for receipt-strict proxy publish and provider-neutral same-alias writer proof. The remaining release/default gaps are backend/action enrichment, benchmark artifact validation, a signed CLI release for the post-`v1.12.42` mainline, action/proxy metadata transport proof for Rails ordering fields, and web-side rich session-summary persistence.
+The trace and negative-cache baseline therefore has required registry E2E evidence for receipt-strict proxy publish and provider-neutral same-alias writer proof. The remaining release/default gaps are backend/action enrichment, benchmark artifact validation, a signed CLI release for the post-`v1.12.42` mainline, action/proxy metadata transport proof for Rails ordering fields, and released-action proof that Rails receives the structured proxy summary row.
 
-On 2026-04-22, the fresh launch benchmark artifacts downloaded before this status-snapshot change still did not clear the `cache_session_summary` artifact gate: several successful jobs captured request metrics before proxy shutdown, and gRPC/Zed diagnostics did not fetch the proxy status endpoint. The code path is now shaped so status snapshots can carry the summary, but release/default claims still need a rerun on the released action/CLI path and archived evidence from that rerun.
+On 2026-04-22, the fresh launch benchmark artifacts downloaded before this status-snapshot and Rails-persistence change still did not clear the `cache_session_summary` artifact gate: several successful jobs captured request metrics before proxy shutdown, and gRPC/Zed diagnostics did not fetch the proxy status endpoint. The code path is now shaped so status snapshots and Rails `cache_sessions` can carry the summary, but release/default claims still need a rerun on the released action/CLI path and archived evidence from that rerun.
 
 The later proof bundle must attach:
 
 - a metadata-only Docker E2E artifact containing `cache_session_summary`;
 - promoted upload-plan fields including `request_metrics_oci_new_blob_count` and `request_metrics_oci_latest_new_blob_count`;
 - status snapshots plus request metrics for phase-level debugging;
-- a backend-visible or artifact-promoted summary that keeps Rails, storage, OCI, singleflight, local cache, and BuildKit sections distinct;
+- a backend-visible summary row and artifact-promoted summary fields that keep Rails, storage, OCI, singleflight, local cache, and BuildKit sections distinct;
 - evidence that confirmed OCI misses are cached briefly and invalidated by local writes/publish;
 - evidence that blob and manifest receipt commit failures fail publish instead of exposing a root that depends on asynchronous storage verification;
 - examples where unknown BuildKit fields stay `unknown` instead of guessed.

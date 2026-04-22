@@ -92,6 +92,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         api_client,
         workspace: "org/repo".to_string(),
         started_at: Instant::now(),
+        cache_session_summary_id: "proxy-summary-test".to_string(),
         runtime_temp_dir: temp_home.path().join("proxy-runtime"),
         kv_blob_temp_dir: temp_home.path().join("proxy-runtime/kv-blobs"),
         oci_upload_temp_dir: temp_home.path().join("proxy-runtime/oci-uploads"),

@@ -279,6 +279,11 @@ mod request_validation {
                     ("project".to_string(), "zed".to_string()),
                     ("phase".to_string(), "warm".to_string()),
                 ]),
+                summary_schema: Some("cache_session_summary.v1".to_string()),
+                summary_json: Some(serde_json::json!({
+                    "proxy": { "hydration_policy": "metadata-only" },
+                    "oci": { "stream_through_count": 2 }
+                })),
                 top_missed_keys: Vec::new(),
             }],
         };
@@ -288,6 +293,12 @@ mod request_validation {
 
         assert_eq!(session["metadata_hints"]["project"], "zed");
         assert_eq!(session["metadata_hints"]["phase"], "warm");
+        assert_eq!(session["summary_schema"], "cache_session_summary.v1");
+        assert_eq!(
+            session["summary_json"]["proxy"]["hydration_policy"],
+            "metadata-only"
+        );
+        assert_eq!(session["summary_json"]["oci"]["stream_through_count"], 2);
     }
 }
 

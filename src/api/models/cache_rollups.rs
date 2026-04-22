@@ -44,6 +44,10 @@ pub struct SessionParam {
     pub bytes_written: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata_hints: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_json: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub top_missed_keys: Vec<SessionMissedKeyParam>,
 }

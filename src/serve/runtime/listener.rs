@@ -78,6 +78,7 @@ pub(super) async fn build_server_runtime(
         api_client,
         workspace: workspace.clone(),
         started_at: std::time::Instant::now(),
+        cache_session_summary_id: format!("proxy-summary-{}", uuid::Uuid::new_v4()),
         runtime_temp_dir,
         kv_blob_temp_dir,
         oci_upload_temp_dir,

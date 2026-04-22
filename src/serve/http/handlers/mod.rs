@@ -393,6 +393,7 @@ mod tests {
                 .expect("api client"),
             workspace: "boringcache/benchmarks".to_string(),
             started_at: Instant::now(),
+            cache_session_summary_id: "proxy-summary-test".to_string(),
             runtime_temp_dir: runtime_temp_dir.clone(),
             kv_blob_temp_dir: runtime_temp_dir.join("kv-blobs"),
             oci_upload_temp_dir: runtime_temp_dir.join("oci-uploads"),

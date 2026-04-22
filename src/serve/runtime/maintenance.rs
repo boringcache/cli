@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -16,6 +17,8 @@ const KV_IDLE_FLUSH_WINDOW_DEFAULT_MS: u64 = 10_000;
 const KV_IDLE_FLUSH_WINDOW_SMALL_BATCH_MS: u64 = 2_000;
 const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BLOBS: usize = 64;
 const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const CACHE_SESSION_SUMMARY_SCHEMA: &str = "cache_session_summary.v1";
+const CACHE_SESSION_SUMMARY_TOOL: &str = "oci";
 
 pub(super) fn spawn_maintenance_tasks(
     state: &AppState,
@@ -225,6 +228,14 @@ pub(super) fn spawn_maintenance_tasks(
 }
 
 pub(super) async fn flush_cache_ops(state: &AppState) {
+    flush_cache_ops_inner(state, false).await;
+}
+
+pub(super) async fn flush_cache_ops_on_shutdown(state: &AppState) {
+    flush_cache_ops_inner(state, true).await;
+}
+
+async fn flush_cache_ops_inner(state: &AppState, include_summary: bool) {
     let blob_read_hints = state.blob_read_metrics.metadata_hints();
     if !blob_read_hints.is_empty() {
         state
@@ -247,12 +258,49 @@ pub(super) async fn flush_cache_ops(state: &AppState) {
     if !prefetch_hints.is_empty() {
         state.cache_ops.merge_session_metadata_hints(prefetch_hints);
     }
-    if state.cache_ops.is_empty() {
+    let has_cache_ops = !state.cache_ops.is_empty();
+    if !has_cache_ops && !include_summary {
         return;
     }
-    let (rollups, missed_keys, sessions) = state.cache_ops.drain();
-    if rollups.is_empty() && missed_keys.is_empty() && sessions.is_empty() {
+    let (rollups, missed_keys, sessions) = if has_cache_ops {
+        state.cache_ops.drain()
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+    let include_summary =
+        include_summary || !rollups.is_empty() || !missed_keys.is_empty() || !sessions.is_empty();
+    if rollups.is_empty() && missed_keys.is_empty() && sessions.is_empty() && !include_summary {
         return;
+    }
+    let mut session_params: Vec<_> = sessions
+        .iter()
+        .map(|session| crate::api::models::cache_rollups::SessionParam {
+            session_id: session.session_id.clone(),
+            tool: session.tool.clone(),
+            session_duration_ms: session.session_duration_ms,
+            hit_count: session.hit_count,
+            miss_count: session.miss_count,
+            error_count: session.error_count,
+            bytes_read: session.bytes_read,
+            bytes_written: session.bytes_written,
+            metadata_hints: session.metadata_hints.clone(),
+            summary_schema: None,
+            summary_json: None,
+            top_missed_keys: session
+                .top_missed_keys
+                .iter()
+                .map(
+                    |miss| crate::api::models::cache_rollups::SessionMissedKeyParam {
+                        key_hash: miss.key_hash.clone(),
+                        miss_count: miss.miss_count,
+                        sampled_key_prefix: miss.sampled_key_prefix.clone(),
+                    },
+                )
+                .collect(),
+        })
+        .collect();
+    if include_summary {
+        session_params.push(build_cache_session_summary_param(state));
     }
     let batch = crate::api::models::cache_rollups::BatchParams {
         rollups: rollups
@@ -281,31 +329,7 @@ pub(super) async fn flush_cache_ops(state: &AppState) {
                 sampled_key_prefix: mk.sampled_key_prefix.clone(),
             })
             .collect(),
-        sessions: sessions
-            .iter()
-            .map(|session| crate::api::models::cache_rollups::SessionParam {
-                session_id: session.session_id.clone(),
-                tool: session.tool.clone(),
-                session_duration_ms: session.session_duration_ms,
-                hit_count: session.hit_count,
-                miss_count: session.miss_count,
-                error_count: session.error_count,
-                bytes_read: session.bytes_read,
-                bytes_written: session.bytes_written,
-                metadata_hints: session.metadata_hints.clone(),
-                top_missed_keys: session
-                    .top_missed_keys
-                    .iter()
-                    .map(
-                        |miss| crate::api::models::cache_rollups::SessionMissedKeyParam {
-                            key_hash: miss.key_hash.clone(),
-                            miss_count: miss.miss_count,
-                            sampled_key_prefix: miss.sampled_key_prefix.clone(),
-                        },
-                    )
-                    .collect(),
-            })
-            .collect(),
+        sessions: session_params,
     };
     if let Err(error) = state
         .api_client
@@ -314,6 +338,46 @@ pub(super) async fn flush_cache_ops(state: &AppState) {
     {
         state.cache_ops.restore(rollups, missed_keys, sessions);
         log::debug!("Cache ops flush failed: {error}");
+    }
+}
+
+fn build_cache_session_summary_param(
+    state: &AppState,
+) -> crate::api::models::cache_rollups::SessionParam {
+    let summary = crate::serve::state::build_cache_session_summary(state);
+    let duration_ms = summary.duration_ms;
+    let summary_json = serde_json::to_value(summary).unwrap_or_else(|error| {
+        log::debug!("Failed to serialize cache session summary: {error}");
+        serde_json::json!({})
+    });
+
+    cache_session_summary_param(
+        state.cache_session_summary_id.clone(),
+        duration_ms,
+        state.proxy_metadata_hints.clone(),
+        summary_json,
+    )
+}
+
+fn cache_session_summary_param(
+    session_id: String,
+    session_duration_ms: u64,
+    metadata_hints: BTreeMap<String, String>,
+    summary_json: serde_json::Value,
+) -> crate::api::models::cache_rollups::SessionParam {
+    crate::api::models::cache_rollups::SessionParam {
+        session_id,
+        tool: CACHE_SESSION_SUMMARY_TOOL.to_string(),
+        session_duration_ms,
+        hit_count: 0,
+        miss_count: 0,
+        error_count: 0,
+        bytes_read: 0,
+        bytes_written: 0,
+        metadata_hints,
+        summary_schema: Some(CACHE_SESSION_SUMMARY_SCHEMA.to_string()),
+        summary_json: Some(summary_json),
+        top_missed_keys: Vec::new(),
     }
 }
 
@@ -563,6 +627,46 @@ mod tests {
             &mut consecutive_failures,
         );
         assert_eq!(consecutive_failures, 0);
+    }
+
+    #[test]
+    fn cache_session_summary_param_marks_structured_proxy_summary() {
+        let param = cache_session_summary_param(
+            "proxy-summary-test".to_string(),
+            12_000,
+            BTreeMap::from([(
+                "oci_engine_hydration_policy".to_string(),
+                "metadata-only".to_string(),
+            )]),
+            serde_json::json!({
+                "schema": "cache-session-v1",
+                "proxy": { "hydration_policy": "metadata-only" },
+                "oci": { "blob_read_remote_count": 4 }
+            }),
+        );
+
+        assert_eq!(param.session_id, "proxy-summary-test");
+        assert_eq!(param.tool, "oci");
+        assert_eq!(param.session_duration_ms, 12_000);
+        assert_eq!(
+            param.summary_schema.as_deref(),
+            Some("cache_session_summary.v1")
+        );
+        assert_eq!(
+            param
+                .summary_json
+                .as_ref()
+                .and_then(|json| json.pointer("/proxy/hydration_policy"))
+                .and_then(|value| value.as_str()),
+            Some("metadata-only")
+        );
+        assert_eq!(
+            param
+                .metadata_hints
+                .get("oci_engine_hydration_policy")
+                .map(String::as_str),
+            Some("metadata-only")
+        );
     }
 
     #[test]

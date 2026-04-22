@@ -41,6 +41,7 @@ pub struct AppState {
     pub api_client: ApiClient,
     pub workspace: String,
     pub started_at: Instant,
+    pub cache_session_summary_id: String,
     pub runtime_temp_dir: PathBuf,
     pub kv_blob_temp_dir: PathBuf,
     pub oci_upload_temp_dir: PathBuf,
