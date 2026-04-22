@@ -260,6 +260,7 @@ def collect_status_snapshots(metrics_path, status_args):
     numeric_max = {}
     policies = set()
     snapshots = []
+    session_summaries = []
     count = 0
 
     for path in find_status_paths(metrics_path, status_args):
@@ -269,6 +270,9 @@ def collect_status_snapshots(metrics_path, status_args):
             continue
         if not isinstance(payload, dict):
             continue
+
+        if isinstance(payload.get("session_summary"), dict):
+            session_summaries.append(payload["session_summary"])
 
         count += 1
         snapshot = {
@@ -306,6 +310,7 @@ def collect_status_snapshots(metrics_path, status_args):
         "numeric_max": numeric_max,
         "policies": sorted(policies),
         "snapshots": snapshots,
+        "session_summaries": session_summaries,
     }
 
 
@@ -446,6 +451,8 @@ def main() -> int:
         100.0 if blob_read_total == 0 else (100.0 * local_blob_reads["count"] / blob_read_total)
     )
     status_snapshots = collect_status_snapshots(metrics_path, sys.argv[2:])
+    status_session_summaries = status_snapshots["session_summaries"]
+    summaries_for_output = session_summaries or status_session_summaries
     status_values = status_snapshots["numeric_max"]
     oci_body_local_hits = status_values.get("oci_body_local_hits", 0)
     oci_body_remote_fetches = status_values.get("oci_body_remote_fetches", 0)
@@ -477,7 +484,8 @@ def main() -> int:
         f"request_metrics_publish_p95_ms={percentile(by_operation(records, 'cache_finalize_publish'), 95)}"
     )
     print(f"request_metrics_prefetch_cycles={prefetch_cycles}")
-    print(f"request_metrics_cache_session_summaries={len(session_summaries)}")
+    print(f"request_metrics_cache_session_summaries={len(summaries_for_output)}")
+    print(f"request_metrics_status_session_summaries={len(status_session_summaries)}")
     print(f"request_metrics_oci_upload_plan_events={oci_upload_plan['events']}")
     print(f"request_metrics_oci_upload_requested_blobs={oci_upload_plan['requested_blobs']}")
     print(f"request_metrics_oci_upload_upload_urls={oci_upload_plan['upload_urls']}")
@@ -513,9 +521,9 @@ def main() -> int:
         "request_metrics_oci_latest_derived_new_blob_count="
         f"{latest_oci_upload_plan['derived_new_blob_count']}"
     )
-    if session_summaries:
+    if summaries_for_output:
         flattened_summary = {}
-        latest_summary = session_summaries[-1]
+        latest_summary = summaries_for_output[-1]
         for section in (
             "schema",
             "mode",

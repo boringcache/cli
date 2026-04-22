@@ -409,12 +409,10 @@ fn referrers_response(
 fn request_cas_blob_summary(
     manifest_blob_count: u64,
     manifest_blob_total_size_bytes: u64,
-    pointer_size_bytes: u64,
 ) -> (u64, u64) {
     crate::serve::engines::oci::publish::request_cas_blob_summary(
         manifest_blob_count,
         manifest_blob_total_size_bytes,
-        pointer_size_bytes,
     )
 }
 
@@ -424,22 +422,15 @@ mod tests {
 
     #[test]
     fn request_cas_blob_summary_preserves_non_zero_values() {
-        let (blob_count, blob_total_size_bytes) = request_cas_blob_summary(3, 456, 789);
+        let (blob_count, blob_total_size_bytes) = request_cas_blob_summary(3, 456);
         assert_eq!(blob_count, 3);
         assert_eq!(blob_total_size_bytes, 456);
     }
 
     #[test]
-    fn request_cas_blob_summary_minimum_blob_count_is_one() {
-        let (blob_count, blob_total_size_bytes) = request_cas_blob_summary(0, 456, 789);
-        assert_eq!(blob_count, 1);
-        assert_eq!(blob_total_size_bytes, 456);
-    }
-
-    #[test]
-    fn request_cas_blob_summary_minimum_blob_size_uses_pointer_size() {
-        let (blob_count, blob_total_size_bytes) = request_cas_blob_summary(0, 0, 789);
-        assert_eq!(blob_count, 1);
-        assert_eq!(blob_total_size_bytes, 789);
+    fn request_cas_blob_summary_allows_zero_blob_manifest() {
+        let (blob_count, blob_total_size_bytes) = request_cas_blob_summary(0, 0);
+        assert_eq!(blob_count, 0);
+        assert_eq!(blob_total_size_bytes, 0);
     }
 }

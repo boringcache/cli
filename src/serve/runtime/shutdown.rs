@@ -5,64 +5,21 @@ use tokio::sync::oneshot;
 
 use crate::observability::{self, ObservabilityEvent};
 use crate::serve::cache_registry;
-use crate::serve::state::AppState;
+use crate::serve::state::{AppState, build_cache_session_summary};
 
 pub(super) fn emit_cache_session_summary(state: &AppState) {
-    let duration_ms = state.started_at.elapsed().as_millis() as u64;
-    let oci_body = state.oci_body_metrics.metadata_hints();
-    let oci_engine = state
-        .oci_engine_diagnostics
-        .metadata_hints(state.oci_hydration_policy.as_str());
-    let oci_negative = state.oci_negative_cache.metadata_hints();
-    let singleflight = state.singleflight_metrics.metadata_hints();
-
-    let proxy = serde_json::json!({
-        "hydration_policy": state.oci_hydration_policy.as_str(),
-        "duration_ms": duration_ms,
-        "read_only": state.read_only,
-        "fail_on_cache_error": state.fail_on_cache_error,
-        "blob_download_max_concurrency": state.blob_download_max_concurrency,
-        "oci_alias_promotion_refs": &state.oci_alias_promotion_refs,
-    });
-    let rails = serde_json::json!({
-        "request_metrics": "see_jsonl",
-    });
-    let storage = map_to_json(select_metric_prefixes(
-        &oci_engine,
-        &[
-            "oci_engine_storage_",
-            "oci_engine_local_spool_",
-            "oci_engine_digest_verify_",
-            "oci_engine_cache_promotion_",
-        ],
-    ));
-    let mut oci = merged_maps_to_json(&[oci_body.clone(), oci_engine, oci_negative]);
-    if let Some(object) = oci.as_object_mut() {
-        object.insert(
-            "buildkit_enrichment".to_string(),
-            serde_json::Value::String("unknown".to_string()),
-        );
-    }
-    let local_cache = serde_json::json!({
-        "blob_read_cache_bytes": state.blob_read_cache.total_bytes(),
-        "blob_read_cache_max_bytes": state.blob_read_cache.max_bytes(),
-        "oci_body": map_to_json(oci_body),
-        "blob_read": map_to_json(state.blob_read_metrics.metadata_hints()),
-    });
-    let buildkit = serde_json::json!({
-        "run_classification": "unknown",
-    });
+    let summary = build_cache_session_summary(state);
 
     observability::emit(ObservabilityEvent::cache_session_summary(
         state.workspace.clone(),
-        duration_ms,
-        proxy,
-        rails,
-        storage,
-        oci,
-        map_to_json(singleflight),
-        local_cache,
-        buildkit,
+        summary.duration_ms,
+        summary.proxy,
+        summary.rails,
+        summary.storage,
+        summary.oci,
+        summary.singleflight,
+        summary.local_cache,
+        summary.buildkit,
     ));
     observability::flush_for(std::time::Duration::from_secs(2));
 }
@@ -210,39 +167,4 @@ pub(super) async fn shutdown_signal_with_channel(
 
     shutdown_requested.store(true, Ordering::Release);
     eprintln!("\nShutting down...");
-}
-
-fn merged_maps_to_json(maps: &[std::collections::BTreeMap<String, String>]) -> serde_json::Value {
-    let mut object = serde_json::Map::new();
-    for map in maps {
-        for (key, value) in map {
-            object.insert(key.clone(), json_metric_value(value));
-        }
-    }
-    serde_json::Value::Object(object)
-}
-
-fn map_to_json(map: std::collections::BTreeMap<String, String>) -> serde_json::Value {
-    let mut object = serde_json::Map::new();
-    for (key, value) in map {
-        object.insert(key, json_metric_value(&value));
-    }
-    serde_json::Value::Object(object)
-}
-
-fn select_metric_prefixes(
-    map: &std::collections::BTreeMap<String, String>,
-    prefixes: &[&str],
-) -> std::collections::BTreeMap<String, String> {
-    map.iter()
-        .filter(|(key, _)| prefixes.iter().any(|prefix| key.starts_with(prefix)))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
-}
-
-fn json_metric_value(value: &str) -> serde_json::Value {
-    value
-        .parse::<u64>()
-        .map(serde_json::Value::from)
-        .unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
 }

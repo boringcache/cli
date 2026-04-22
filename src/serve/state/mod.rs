@@ -18,6 +18,7 @@ mod kv_pending;
 mod kv_published_index;
 mod metrics;
 mod oci_negative_cache;
+mod session_summary;
 mod upload_sessions;
 
 pub use blob_locator::*;
@@ -26,6 +27,7 @@ pub use kv_pending::*;
 pub use kv_published_index::*;
 pub use metrics::*;
 pub use oci_negative_cache::*;
+pub use session_summary::*;
 pub use upload_sessions::*;
 
 pub use crate::serve::engines::oci::manifest_cache::OciManifestCacheEntry;

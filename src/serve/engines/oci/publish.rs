@@ -79,11 +79,8 @@ async fn persist_manifest_entry_inner(
     let pointer_bytes = serde_json::to_vec(&pointer)
         .map_err(|e| OciError::internal(format!("Failed to serialize pointer: {e}")))?;
     let manifest_root_digest = cas_oci::prefixed_sha256_digest(&pointer_bytes);
-    let (request_blob_count, request_blob_total_size_bytes) = request_cas_blob_summary(
-        blob_count,
-        blob_total_size_bytes,
-        pointer_bytes.len() as u64,
-    );
+    let (request_blob_count, request_blob_total_size_bytes) =
+        request_cas_blob_summary(blob_count, blob_total_size_bytes);
     let total_size_bytes = blob_total_size_bytes + manifest_body.len() as u64;
     let manifest_size = pointer_bytes.len() as u64;
 
@@ -329,15 +326,8 @@ async fn persist_manifest_entry_inner(
 pub(crate) fn request_cas_blob_summary(
     manifest_blob_count: u64,
     manifest_blob_total_size_bytes: u64,
-    pointer_size_bytes: u64,
 ) -> (u64, u64) {
-    let request_blob_count = manifest_blob_count.max(1);
-    let request_blob_total_size_bytes = if manifest_blob_total_size_bytes == 0 {
-        pointer_size_bytes.max(1)
-    } else {
-        manifest_blob_total_size_bytes
-    };
-    (request_blob_count, request_blob_total_size_bytes)
+    (manifest_blob_count, manifest_blob_total_size_bytes)
 }
 
 pub(crate) fn adaptive_blob_upload_concurrency(operation_count: usize) -> usize {

@@ -38,7 +38,9 @@ use super::oci_tags::{
 #[cfg(test)]
 use crate::cas_oci;
 use crate::serve::cache_registry;
-use crate::serve::state::{AppState, diagnostics_enabled};
+use crate::serve::state::{
+    AppState, CacheSessionSummarySnapshot, build_cache_session_summary, diagnostics_enabled,
+};
 #[cfg(test)]
 use crate::serve::state::{OciManifestCacheEntry, digest_tag};
 
@@ -66,6 +68,7 @@ struct ProxyStatusResponse {
     oci_engine: BTreeMap<String, String>,
     oci_negative_cache: BTreeMap<String, String>,
     singleflight: BTreeMap<String, String>,
+    session_summary: CacheSessionSummarySnapshot,
     shutdown_requested: bool,
     cache_entry_id: Option<String>,
     tags_visible: bool,
@@ -143,6 +146,7 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
             oci_engine,
             oci_negative_cache,
             singleflight,
+            session_summary: build_cache_session_summary(&state),
             shutdown_requested,
             cache_entry_id,
             tags_visible,
@@ -558,6 +562,29 @@ mod tests {
             crate::serve::cache_registry::cache_ops::OpResult::Error
         );
         assert!(!degraded);
+    }
+
+    #[tokio::test]
+    async fn proxy_status_includes_live_session_summary() {
+        let state = test_state();
+
+        let response = proxy_status(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("proxy status body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("proxy status should be JSON");
+
+        let summary = &json["session_summary"];
+        assert_eq!(summary["schema"], "cache-session-v1");
+        assert_eq!(summary["mode"], "docker-registry");
+        assert_eq!(summary["adapter"], "oci");
+        assert_eq!(summary["workspace"], "boringcache/benchmarks");
+        assert_eq!(summary["proxy"]["hydration_policy"], "metadata-only");
+        assert_eq!(summary["buildkit"]["run_classification"], "unknown");
+        assert!(summary["duration_ms"].as_u64().is_some());
     }
 
     #[tokio::test]
