@@ -189,11 +189,7 @@ fn parse_turbo_artifact_path(components: &[&str]) -> Option<String> {
     if hash.eq_ignore_ascii_case("status") || hash.eq_ignore_ascii_case("events") {
         return None;
     }
-    if !hash.is_empty() && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Some(hash.to_ascii_lowercase())
-    } else {
-        None
-    }
+    (!hash.is_empty()).then(|| hash.to_ascii_lowercase())
 }
 
 fn looks_like_sccache_key_path(components: &[&str]) -> bool {
@@ -421,9 +417,14 @@ mod tests {
     }
 
     #[test]
-    fn detect_route_rejects_non_hex_turbo_hash() {
-        let error = detect_route(&Method::GET, "v8/artifacts/hash-123").unwrap_err();
-        assert_eq!(error.status, StatusCode::NOT_FOUND);
+    fn detect_route_sends_non_hex_turbo_hash_to_engine_validation() {
+        let route = detect_route(&Method::GET, "v8/artifacts/hash-123").unwrap();
+        assert_eq!(
+            route,
+            RegistryRoute::TurborepoArtifact {
+                hash: "hash-123".to_string()
+            }
+        );
     }
 
     #[test]

@@ -201,15 +201,21 @@ src/
     engines/
       mod.rs
       bazel.rs
+      go_cache.rs
       gradle.rs
+      maven.rs
+      nx.rs
       oci/
         mod.rs
         blobs.rs
+        manifest_cache.rs
         manifests.rs
         present_blobs.rs
         prefetch.rs
         publish.rs
         uploads.rs
+      sccache.rs
+      turborepo.rs
     runtime/
       mod.rs
       listener.rs
@@ -295,7 +301,7 @@ Most of the root-level namespace split is in place now, so the remaining work is
 - `src/api/models/` is already split by response family, so future API work should prefer adding files there instead of growing `mod.rs`.
 - `src/optimize/` and `src/platform/` are already real namespaces, not placeholders.
 - `src/serve/runtime/`, `src/serve/http/`, `src/serve/cache_registry/`, and `src/serve/state/` are the durable runtime namespaces; the next work is to keep their remaining hot files thin.
-- `src/serve/engines/` is the incremental engine-boundary namespace. `bazel.rs` owns Bazel AC/CAS store identity and CAS digest integrity policy; `gradle.rs` owns Gradle HTTP build-cache write-status policy, including official `413 Payload Too Large` oversized-entry behavior; `nx.rs` owns Nx artifact duplicate-upload conflict policy; `oci/manifests.rs` owns pure OCI manifest descriptor, content-type, subject/referrers, and child-manifest classification rules; `oci/present_blobs.rs` owns descriptor proof before manifest publish; and `oci/uploads.rs` owns the OCI blob upload session state machine: start, PATCH, final PUT, mount `201`/`202`, empty finalize reuse, stale offset `416`, and streaming digest verification for one-shot upload bodies.
+- `src/serve/engines/` is the incremental engine-boundary namespace. `bazel.rs` owns Bazel AC/CAS method dispatch, store identity, and CAS digest integrity policy; `gradle.rs` owns Gradle HTTP build-cache write-status policy, including official `413 Payload Too Large` oversized-entry behavior; `maven.rs` owns Maven `GET`/`HEAD`/`PUT` method dispatch while preserving generic KV write rejection; `nx.rs` owns Nx bearer checks, artifact upload `Content-Length`, artifact/terminal-output/query method handling, and duplicate artifact upload conflict policy; `sccache.rs` owns WebDAV probe, `MKCOL`, object method/status behavior, and read timeout policy; `turborepo.rs` owns Turbo bearer auth, status, artifact hash and upload metadata validation, query, and event API shape; `go_cache.rs` owns the local HTTP backing route for the Go cacheprog helper; `oci/manifests.rs` owns pure OCI manifest descriptor, content-type, subject/referrers, and child-manifest classification rules; `oci/present_blobs.rs` owns descriptor proof before manifest publish; and `oci/uploads.rs` owns the OCI blob upload session state machine: start, PATCH, final PUT, mount `201`/`202`, empty finalize reuse, stale offset `416`, and streaming digest verification for one-shot upload bodies.
 - `src/serve/http/handlers/` now owns the split OCI manifest, blob, and upload HTTP glue, while `handlers/mod.rs` still carries shared dispatch and proxy-status orchestration.
 - `src/serve/cache_registry/kv/` now has separate `blob_read.rs`, `prefetch.rs`, and `index.rs` helpers, while `kv/mod.rs` still carries shared KV policy, lookup-flight coordination, and pending-publish handoff types.
 - `src/telemetry.rs` remains a thin front module, while `src/progress/mod.rs` fronts the progress namespace and `src/observability/` remains the request/event metrics namespace.
@@ -306,8 +312,8 @@ Most of the root-level namespace split is in place now, so the remaining work is
 These are the next sensible follow-ons from the current tree.
 
 - Insert the engine boundary described in `docs/adr/0001-engine-boundary.md` before starting snapshot-v2 or any crate/workspace split.
-- Continue the OCI engine extraction described in `docs/adr/0002-proxy-engine-plan-b.md`, moving route-handler correctness decisions into `src/serve/engines/oci/` one invariant at a time.
-- Use the adapter progress tracker in `docs/adr/0002-proxy-engine-plan-b.md` plus `docs/adapter-contract-matrix.md` before the next Gradle/Maven, Turbo/Nx, or Go adapter change.
+- Continue the OCI optimization and proof work described in `docs/adr/0002-proxy-engine-plan-b.md` and ADRs 0003-0007.
+- Use the adapter progress tracker in `docs/adr/0002-proxy-engine-plan-b.md` plus `docs/adapter-contract-matrix.md` before follow-up adapter changes; first-pass engine boundaries now cover Bazel, Gradle, Maven, Nx, sccache, Turborepo, and the Go HTTP backing route.
 - Use `docs/adr/0003-runner-proxy-optimization-roadmap.md` for the runner-proxy optimization sequence. Session trace, OCI negative cache, borrowed upload sessions, hidden stream-through, and Docker immutable-ref planning now have first slices; the remaining work is proof, action wiring, cache policy, and concurrency tuning from trace artifacts.
 - Use `docs/adr/0004-oci-large-blob-stream-through.md`, `docs/adr/0005-borrowed-upload-sessions-and-blob-cache-policy.md`, `docs/adr/0006-cache-session-trace-and-oci-negative-cache.md`, and `docs/adr/0007-docker-immutable-run-refs-and-alias-promotion.md` for the concrete OCI hot-path and Docker correctness implementation tracks.
 - ADR 0007 first slice is hidden behind Docker adapter controls: `--cache-run-ref-tag` selects immutable `--cache-to`, repeatable `--cache-from-ref-tag` selects import aliases, and repeatable `--cache-promote-ref-tag` asks the proxy to bind OCI alias refs after publish. Docker now also derives those refs from provider-neutral `BORINGCACHE_CI_*` run metadata, with GitHub Actions `GITHUB_*` as the first built-in mapper. Local runs without CI metadata preserve the old single-ref behavior.
@@ -447,6 +453,12 @@ src/
 | `src/serve/http/handlers/manifest.rs` descriptor availability and upload-session proof logic | `src/serve/engines/oci/present_blobs.rs` | started |
 | `src/serve/http/handlers/uploads.rs` upload session state machine | `src/serve/engines/oci/uploads.rs` | done |
 | `src/serve/cache_registry/bazel.rs` AC/CAS namespace and CAS digest policy | `src/serve/engines/bazel.rs` | started |
+| `src/serve/cache_registry/gradle.rs` Gradle method and write-status policy | `src/serve/engines/gradle.rs` | done |
+| `src/serve/cache_registry/maven.rs` Maven HTTP method dispatch | `src/serve/engines/maven.rs` | done |
+| `src/serve/cache_registry/nx.rs` Nx auth, artifact, terminal-output, and query route rules | `src/serve/engines/nx.rs` | done |
+| `src/serve/cache_registry/sccache.rs` WebDAV probe, `MKCOL`, object status, and timeout rules | `src/serve/engines/sccache.rs` | done |
+| `src/serve/cache_registry/turborepo.rs` Turbo auth, status, artifact, query, and event API rules | `src/serve/engines/turborepo.rs` | done |
+| `src/serve/cache_registry/go_cache.rs` Go cache HTTP backing route rules | `src/serve/engines/go_cache.rs` | done |
 | `src/serve/mod.rs` | `src/serve/runtime/{mod,listener,maintenance,shutdown}.rs` | done |
 | `src/serve/http/handlers.rs` | `src/serve/http/handlers/{mod,manifest,blobs,uploads}.rs` | done |
 | `src/serve/cache_registry/kv/lookup.rs` | `src/serve/cache_registry/kv/{lookup,blob_read,prefetch,index}.rs` | done |

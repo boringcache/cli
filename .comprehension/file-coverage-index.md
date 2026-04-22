@@ -241,7 +241,9 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/serve/cas_publish.rs`
 - `src/serve/engines/mod.rs`
 - `src/serve/engines/bazel.rs`
+- `src/serve/engines/go_cache.rs`
 - `src/serve/engines/gradle.rs`
+- `src/serve/engines/maven.rs`
 - `src/serve/engines/nx.rs`
 - `src/serve/engines/oci/mod.rs`
 - `src/serve/engines/oci/blobs.rs`
@@ -251,6 +253,8 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/serve/engines/oci/prefetch.rs`
 - `src/serve/engines/oci/publish.rs`
 - `src/serve/engines/oci/uploads.rs`
+- `src/serve/engines/sccache.rs`
+- `src/serve/engines/turborepo.rs`
 - `src/serve/http/mod.rs`
 - `src/serve/http/error.rs`
 - `src/serve/http/oci_route.rs`
@@ -395,6 +399,7 @@ Owner: repo operations support (`support-primary`)
 - `ci/e2e/required/e2e-cross-runner-seed.sh`
 - `ci/e2e/required/e2e-cross-runner-verify.sh`
 - `ci/e2e/required/e2e-docker-buildkit-registry-test.sh`
+- `ci/e2e/required/e2e-oci-same-alias-writer-test.sh`
 - `ci/e2e/required/e2e-security-test.sh`
 - `ci/e2e/required/e2e-tool-bazel-test.sh`
 - `ci/e2e/required/e2e-tool-gradle-test.sh`

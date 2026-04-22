@@ -45,6 +45,14 @@ pub struct CacheRegistryArgs {
     )]
     pub oci_hydration: String,
 
+    #[arg(
+        long = "oci-alias-promotion-ref",
+        value_name = "REFERENCE",
+        hide = true,
+        help = "Internal: OCI manifest ref to promote as an alias after publish (repeatable)"
+    )]
+    pub oci_alias_promotion_ref: Vec<String>,
+
     #[arg(long, help = "Skip startup warming and serve cache reads on demand")]
     pub on_demand: bool,
 

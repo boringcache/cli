@@ -8299,6 +8299,7 @@ async fn test_nx_put_head_get_round_trip() {
             .method(Method::PUT)
             .uri(format!("/v1/cache/{hash}"))
             .header("authorization", "Bearer token")
+            .header("content-length", payload.len().to_string())
             .body(Body::from(payload.to_vec()))
             .unwrap(),
     )
@@ -8360,6 +8361,7 @@ async fn test_nx_artifact_put_returns_conflict_for_existing_record() {
             .method(Method::PUT)
             .uri(format!("/v1/cache/{hash}"))
             .header("authorization", "Bearer token")
+            .header("content-length", first_payload.len().to_string())
             .body(Body::from(first_payload.to_vec()))
             .unwrap(),
     )
@@ -8374,6 +8376,7 @@ async fn test_nx_artifact_put_returns_conflict_for_existing_record() {
             .method(Method::PUT)
             .uri(format!("/v1/cache/{hash}"))
             .header("authorization", "Bearer token")
+            .header("content-length", "14")
             .body(Body::from("second-payload"))
             .unwrap(),
     )
@@ -8413,6 +8416,7 @@ async fn test_nx_query_returns_misses() {
             .method(Method::PUT)
             .uri(format!("/v1/cache/{hash}"))
             .header("authorization", "Bearer token")
+            .header("content-length", payload.len().to_string())
             .body(Body::from(payload.to_vec()))
             .unwrap(),
     )
@@ -8866,8 +8870,9 @@ async fn test_turborepo_put_head_get_round_trip() {
             .method(Method::PUT)
             .uri(format!("/v8/artifacts/{hash}"))
             .header("authorization", "Bearer token")
+            .header("content-length", payload.len().to_string())
             .header("x-artifact-duration", "123")
-            .header("x-artifact-tag", "signed-tag")
+            .header("x-artifact-tag", STANDARD.encode("signed-tag"))
             .header("x-artifact-sha", "abc123def456")
             .header("x-artifact-dirty-hash", "dirty789")
             .body(Body::from(payload.to_vec()))
@@ -9013,8 +9018,11 @@ async fn test_turborepo_put_head_get_round_trip() {
         "123"
     );
     assert_eq!(
-        get_response.headers().get("x-artifact-tag").unwrap(),
-        "signed-tag"
+        get_response
+            .headers()
+            .get("x-artifact-tag")
+            .and_then(|value| value.to_str().ok()),
+        Some(STANDARD.encode("signed-tag").as_str())
     );
     assert_eq!(
         get_response.headers().get("x-artifact-sha").unwrap(),
@@ -9085,8 +9093,9 @@ async fn test_turborepo_query_artifacts_returns_metadata_map() {
             .method(Method::PUT)
             .uri("/v8/artifacts/a1b2")
             .header("authorization", "Bearer token")
+            .header("content-length", payload_a.len().to_string())
             .header("x-artifact-duration", "55")
-            .header("x-artifact-tag", "tag-a1")
+            .header("x-artifact-tag", STANDARD.encode("tag-a1"))
             .body(Body::from(payload_a.to_vec()))
             .unwrap(),
     )
@@ -9101,8 +9110,9 @@ async fn test_turborepo_query_artifacts_returns_metadata_map() {
             .method(Method::PUT)
             .uri("/v8/artifacts/c3d4")
             .header("authorization", "Bearer token")
+            .header("content-length", payload_b.len().to_string())
             .header("x-artifact-duration", "99")
-            .header("x-artifact-tag", "tag-c3")
+            .header("x-artifact-tag", STANDARD.encode("tag-c3"))
             .body(Body::from(payload_b.to_vec()))
             .unwrap(),
     )
@@ -9136,8 +9146,34 @@ async fn test_turborepo_query_artifacts_returns_metadata_map() {
     assert_eq!(parsed["c3d4"]["size"], payload_b.len() as u64);
     assert_eq!(parsed["a1b2"]["taskDurationMs"], 55);
     assert_eq!(parsed["c3d4"]["taskDurationMs"], 99);
-    assert_eq!(parsed["a1b2"]["tag"], "tag-a1");
-    assert_eq!(parsed["c3d4"]["tag"], "tag-c3");
+    assert_eq!(parsed["a1b2"]["tag"], json!(STANDARD.encode("tag-a1")));
+    assert_eq!(parsed["c3d4"]["tag"], json!(STANDARD.encode("tag-c3")));
+}
+
+#[tokio::test]
+async fn test_turborepo_put_rejects_invalid_openapi_headers() {
+    let server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+    let app = build_router(state);
+
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::PUT)
+            .uri("/v8/artifacts/aabbcc")
+            .header("authorization", "Bearer token")
+            .header("content-length", "7")
+            .header("x-artifact-tag", "not base64")
+            .body(Body::from("payload"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_json_error(&parsed, "bad_request");
 }
 
 #[tokio::test]
@@ -9156,7 +9192,7 @@ async fn test_turborepo_events_accepts_post_with_bearer() {
             .body(Body::from(
                 json!([
                     {
-                        "sessionId": "abc",
+                        "sessionId": "018f6f74-0a8a-7c50-9d5a-4db9957982d6",
                         "source": "REMOTE",
                         "event": "HIT",
                         "hash": "hash-a",
@@ -9224,7 +9260,7 @@ async fn test_turborepo_events_rejects_get() {
 }
 
 #[tokio::test]
-async fn test_turborepo_invalid_put_path_returns_not_found() {
+async fn test_turborepo_invalid_put_path_returns_bad_request() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
     let app = build_router(state);
@@ -9234,13 +9270,18 @@ async fn test_turborepo_invalid_put_path_returns_not_found() {
         Request::builder()
             .method(Method::PUT)
             .uri("/v8/artifacts/not-a-hex-hash")
+            .header("authorization", "Bearer token")
+            .header("content-length", "7")
             .body(Body::from("payload"))
             .unwrap(),
     )
     .await
     .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_json_error(&parsed, "bad_request");
 }
 
 #[tokio::test]

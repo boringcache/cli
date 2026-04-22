@@ -446,6 +446,7 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
                 args.no_git,
                 args.oci_prefetch_ref,
                 args.oci_hydration,
+                args.oci_alias_promotion_ref,
                 args.metadata_hint,
                 !args.on_demand,
                 args.ready_file,

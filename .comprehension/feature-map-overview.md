@@ -39,6 +39,7 @@ This is the shortest whole-system view of the CLI.
 | `delete` | visible alias for `rm` | `legacy-visible-alias` |
 | `run --archive-path`, `--archive-tag-prefix`, `--archive-restore-prefix`, `--cache-tag`, `--tool-tag-suffix` | planner-only dry-run surface | `hidden-internal` |
 | `cache-registry --ready-file PATH` | detached orchestration readiness handoff | `hidden-internal` |
+| `cache-registry --oci-alias-promotion-ref REF` | internal ADR 0007 E2E/proof hook for planned OCI alias promotion refs | `hidden-internal` |
 
 ## Current hotspots
 

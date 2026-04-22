@@ -195,15 +195,25 @@ pub(crate) use kv::KV_PREFETCH_READINESS_TIMEOUT;
 pub(crate) use kv::KvBlobIntegrity;
 pub(crate) use kv::KvNamespace;
 pub(crate) use kv::KvPutOptions;
+pub(crate) use kv::await_startup_prefetch_readiness;
 pub(crate) use kv::cleanup_expired_kv_misses;
 pub(crate) use kv::count_missing_local_blobs;
+pub(crate) use kv::do_download_blob_to_cache;
 pub(crate) use kv::enqueue_replication_flush_hint;
 pub(crate) use kv::flush_kv_index;
 pub(crate) use kv::flush_kv_index_on_shutdown;
+pub(crate) use kv::get_or_head_kv_object;
+pub(crate) use kv::get_or_head_kv_object_with_integrity;
 pub(crate) use kv::kv_publish_tags_visible;
+pub(crate) use kv::lookup_published_blob;
+pub(crate) use kv::maybe_refresh_published_index_for_lookup;
 pub(crate) use kv::poll_tag_version_loop;
 pub(crate) use kv::prefetch_manifest_blobs;
+pub(crate) use kv::put_kv_object;
+pub(crate) use kv::put_kv_object_with_integrity;
+pub(crate) use kv::put_kv_object_with_options;
 pub(crate) use kv::refresh_kv_index;
+pub(crate) use kv::resolve_kv_entries;
 pub(crate) use kv::try_schedule_flush;
 
 pub async fn dispatch_root(

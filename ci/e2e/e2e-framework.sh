@@ -86,6 +86,14 @@ run_leg() {
       LOG_DIR="$log_dir" \
       bash "${REQUIRED_DIR}/e2e-oci-manifest-contract-test.sh"
       ;;
+    oci-same-alias-writer)
+      BINARY="$binary" \
+      WORKSPACE="$workspace" \
+      TAG="gha-oci-same-alias-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}" \
+      PROXY_PORT="5000" \
+      LOG_DIR="$log_dir" \
+      bash "${REQUIRED_DIR}/e2e-oci-same-alias-writer-test.sh"
+      ;;
     prefetch-smoke)
       BINARY="$binary" \
       WORKSPACE="$workspace" \
@@ -323,6 +331,14 @@ EOF
 === Phase 1: Push subject manifest and verify referrers ===
 === Phase 2: Restart proxy and verify persisted referrers ===
 OCI manifest contract e2e passed
+EOF
+      ;;
+    oci-same-alias-writer)
+      cat <<'EOF'
+=== Phase 1: newer writer publishes first and promotes alias ===
+=== Phase 2: older writer finishes second and must not replace alias ===
+=== Phase 3: fresh proxy reads both immutable refs and winning alias ===
+OCI same-alias writer e2e passed
 EOF
       ;;
     prefetch-smoke|prefetch-readiness)

@@ -100,16 +100,16 @@ OCI goes first because it is the only current adapter where manifest graphs, blo
 
 ## Adapter Progress Tracker
 
-Status date: 2026-04-21.
+Status date: 2026-04-22.
 
 | Adapter | Status | Official-source comparison | Current guardrail |
 | --- | --- | --- | --- |
 | OCI / Docker BuildKit registry cache | Engine boundary established; optimization ADRs 0003-0007 track next hot-path and alias work | OCI Distribution/Image specs plus Docker/BuildKit registry cache behavior remain the contract | OCI manifest/blob/upload/publish tests, Docker BuildKit E2E, `docs/oci-kv-path-audit.md`, `docs/oci-mistake-ledger.md`, and `docs/adapter-spec-guardrails.md` |
-| sccache / WebDAV | Source alignment pass complete; engine boundary waits until a WebDAV-specific rule needs a home | sccache WebDAV/OpenDAL source behavior defines key prefix, `.sccache_check`, `MKCOL`, auth, and miss handling | `docs/sccache-mistake-ledger.md`, route tests, sccache E2E env hygiene, and `docs/adapter-spec-guardrails.md` |
-| Bazel AC/CAS | First engine boundary complete in `serve::engines::bazel` | Bazel HTTP remote-cache docs split `/ac/` action metadata from `/cas/` SHA-256 blobs | `docs/bazel-mistake-ledger.md`, AC/CAS namespace tests, CAS write/read integrity tests, local Bazel E2E, and `docs/adapter-spec-guardrails.md` |
-| Gradle / Maven HTTP object caches | Active adapter pass | Gradle HTTP cache docs define `GET` hit/miss and `PUT` success/oversized statuses; Maven extension docs require HTTP `GET`/`HEAD`/`PUT` remote storage | `docs/gradle-maven-mistake-ledger.md`, explicit Gradle/Maven miss tests, Gradle 413 spool rejection test, Maven HEAD/GET/PUT round trip, local Gradle/Maven E2E, and `docs/adapter-spec-guardrails.md` |
-| Turborepo / Nx remote cache APIs | Nx artifact conflict policy started in `serve::engines::nx`; richer Turbo/Nx engine boundary pending | Official OpenAPI/API docs control artifact routes, bearer auth, batch/query/event behavior, duplicate upload conflict behavior, and archive payload ownership | `docs/turbo-nx-mistake-ledger.md`, auth, hit, miss, duplicate upload conflict, terminal-output miss, query/event tests, and `docs/adapter-spec-guardrails.md` |
-| Go GOCACHEPROG | Guardrail coverage recorded for helper protocol and HTTP backing route | Go `cacheprog` source controls line-oriented JSON, request IDs, command set, and local file lifetime | go-cacheprog unit tests, HTTP backing route hit/miss tests, Go E2E, and `docs/adapter-spec-guardrails.md` |
+| sccache / WebDAV | First engine boundary complete in `serve::engines::sccache`; KV remains the object substrate | sccache WebDAV/OpenDAL source behavior defines key prefix, `.sccache_check`, `MKCOL`, auth, and miss handling | `docs/sccache-mistake-ledger.md`, route tests, sccache E2E env hygiene, and `docs/adapter-spec-guardrails.md` |
+| Bazel AC/CAS | First engine boundary complete in `serve::engines::bazel`; route module is HTTP glue | Bazel HTTP remote-cache docs split `/ac/` action metadata from `/cas/` SHA-256 blobs | `docs/bazel-mistake-ledger.md`, AC/CAS namespace tests, CAS write/read integrity tests, local Bazel E2E, and `docs/adapter-spec-guardrails.md` |
+| Gradle / Maven HTTP object caches | First engine boundaries complete in `serve::engines::{gradle,maven}`; KV remains the object substrate | Gradle HTTP cache docs define `GET` hit/miss and `PUT` success/oversized statuses; Maven extension docs require HTTP `GET`/`HEAD`/`PUT` remote storage | `docs/gradle-maven-mistake-ledger.md`, explicit Gradle/Maven miss tests, Gradle 413 spool rejection test, Maven HEAD/GET/PUT round trip, local Gradle/Maven E2E, and `docs/adapter-spec-guardrails.md` |
+| Turborepo / Nx remote cache APIs | First engine boundaries complete in `serve::engines::{turborepo,nx}`; official upload/header invariants are enforced where the current OpenAPI specifies them | Turborepo OpenAPI controls status, artifact, query, event, bearer, metadata header, and JSON error behavior; Nx OpenAPI controls artifact `GET`/`PUT`, upload `Content-Length`, duplicate upload conflict behavior, and archive payload ownership; Nx query/terminal-output routes remain compatibility-only | `docs/turbo-nx-mistake-ledger.md`, auth, hit, miss, upload header, duplicate upload conflict, terminal-output miss, query/event tests, and `docs/adapter-spec-guardrails.md` |
+| Go GOCACHEPROG | HTTP backing route isolated in `serve::engines::go_cache`; subprocess helper protocol remains in the command module | Go `cacheprog` source controls line-oriented JSON, request IDs, command set, and local file lifetime | go-cacheprog unit tests, HTTP backing route hit/miss tests, Go E2E, and `docs/adapter-spec-guardrails.md` |
 
 ## OCI First-Principles Contract
 
@@ -186,7 +186,7 @@ Land the pass in small increments:
 1. Source-backed contract: keep the matrix row current for WebDAV endpoint/root, key-prefix/auth shape, normalized keys, `.sccache_check`, `MKCOL`, read-miss behavior, and opaque payload bytes.
 2. Mistake ledger: add a ledger row before or with each fix so route changes are tied to sccache/OpenDAL behavior, not generic KV convenience.
 3. Route acceptance: keep existing `MKCOL`, `.sccache_check`, `GET`/`HEAD`, `PUT`, unsupported-method, exact-key, and concurrent-read tests green before moving code.
-4. Engine boundary: introduce a `serve::engines::sccache` module only when it owns WebDAV-specific truth. Leave generic object upload/download substrate in KV/shared helpers where behavior remains protocol-neutral.
+4. Engine boundary: `serve::engines::sccache` now owns WebDAV-specific route truth while generic object upload/download substrate stays in KV/shared helpers.
 5. E2E acceptance: run the required sccache tool E2E and compare sccache stats with cache-op records so BoringCache hit/miss accounting stays aligned with the tool.
 
 ## Post-Release Telemetry Contract
