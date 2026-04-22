@@ -1,6 +1,6 @@
 [package]
 name = "boring_cache_cli"
-version = "1.12.43"
+version = "1.12.44"
 edition = "2024"
 rust-version = "1.94"
 authors = ["BoringCache Team"]
