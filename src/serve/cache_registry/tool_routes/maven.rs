@@ -4,7 +4,7 @@ use axum::response::Response;
 
 use crate::serve::state::AppState;
 
-use super::error::RegistryError;
+use crate::serve::cache_registry::RegistryError;
 
 pub(crate) async fn handle(
     state: &AppState,
@@ -12,5 +12,5 @@ pub(crate) async fn handle(
     cache_key: &str,
     body: Body,
 ) -> Result<Response, RegistryError> {
-    crate::serve::engines::gradle::handle(state, method, cache_key, body).await
+    crate::serve::engines::maven::handle(state, method, cache_key, body).await
 }

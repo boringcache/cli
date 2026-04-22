@@ -176,18 +176,12 @@ pub(crate) fn request_counters() -> (u64, u64) {
     )
 }
 
-mod bazel;
 pub mod cache_ops;
 mod error;
-mod go_cache;
-mod gradle;
 mod kv;
 mod kv_publish;
-mod maven;
-mod nx;
 mod route;
-mod sccache;
-mod turborepo;
+mod tool_routes;
 
 pub use error::RegistryError;
 pub(crate) use kv::FlushResult;
@@ -276,45 +270,69 @@ async fn dispatch_with_path(
         .scope(seq, async move {
             match route {
                 route::RegistryRoute::BazelAc { digest_hex } => {
-                    bazel::handle_ac(&route_state, method, &digest_hex, body).await
+                    tool_routes::bazel::handle_ac(&route_state, method, &digest_hex, body).await
                 }
                 route::RegistryRoute::BazelCas { digest_hex } => {
-                    bazel::handle_cas(&route_state, method, &digest_hex, body).await
+                    tool_routes::bazel::handle_cas(&route_state, method, &digest_hex, body).await
                 }
                 route::RegistryRoute::Gradle { cache_key } => {
-                    gradle::handle(&route_state, method, &cache_key, body).await
+                    tool_routes::gradle::handle(&route_state, method, &cache_key, body).await
                 }
                 route::RegistryRoute::Maven { cache_key } => {
-                    maven::handle(&route_state, method, &cache_key, body).await
+                    tool_routes::maven::handle(&route_state, method, &cache_key, body).await
                 }
                 route::RegistryRoute::NxArtifact { hash } => {
-                    nx::handle_artifact(&route_state, method, &headers, &hash, body).await
+                    tool_routes::nx::handle_artifact(&route_state, method, &headers, &hash, body)
+                        .await
                 }
                 route::RegistryRoute::NxTerminalOutput { hash } => {
-                    nx::handle_terminal_output(&route_state, method, &headers, &hash, body).await
+                    tool_routes::nx::handle_terminal_output(
+                        &route_state,
+                        method,
+                        &headers,
+                        &hash,
+                        body,
+                    )
+                    .await
                 }
                 route::RegistryRoute::NxQuery => {
-                    nx::handle_query(&route_state, method, &headers, body).await
+                    tool_routes::nx::handle_query(&route_state, method, &headers, body).await
                 }
-                route::RegistryRoute::TurborepoStatus => turborepo::handle_status(method, &headers),
+                route::RegistryRoute::TurborepoStatus => {
+                    tool_routes::turborepo::handle_status(method, &headers)
+                }
                 route::RegistryRoute::TurborepoArtifact { hash } => {
-                    turborepo::handle_artifact(&route_state, method, &headers, &hash, body).await
+                    tool_routes::turborepo::handle_artifact(
+                        &route_state,
+                        method,
+                        &headers,
+                        &hash,
+                        body,
+                    )
+                    .await
                 }
                 route::RegistryRoute::TurborepoQueryArtifacts => {
-                    turborepo::handle_query_artifacts(&route_state, method, &headers, body).await
+                    tool_routes::turborepo::handle_query_artifacts(
+                        &route_state,
+                        method,
+                        &headers,
+                        body,
+                    )
+                    .await
                 }
                 route::RegistryRoute::TurborepoEvents => {
-                    turborepo::handle_events(method, &headers, body).await
+                    tool_routes::turborepo::handle_events(method, &headers, body).await
                 }
                 route::RegistryRoute::SccacheObject { key_path } => {
-                    sccache::handle_object(&route_state, method, &key_path, body).await
+                    tool_routes::sccache::handle_object(&route_state, method, &key_path, body).await
                 }
                 route::RegistryRoute::SccacheProbe { path } => {
-                    sccache::handle_probe(method, &path).await
+                    tool_routes::sccache::handle_probe(method, &path).await
                 }
-                route::RegistryRoute::SccacheMkcol => sccache::handle_mkcol(method),
+                route::RegistryRoute::SccacheMkcol => tool_routes::sccache::handle_mkcol(method),
                 route::RegistryRoute::GoCacheObject { action_hex } => {
-                    go_cache::handle_action(&route_state, method, &action_hex, body).await
+                    tool_routes::go_cache::handle_action(&route_state, method, &action_hex, body)
+                        .await
                 }
             }
         })

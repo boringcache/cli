@@ -303,6 +303,7 @@ Most of the root-level namespace split is in place now, so the remaining work is
 - `src/serve/runtime/`, `src/serve/http/`, `src/serve/cache_registry/`, and `src/serve/state/` are the durable runtime namespaces; the next work is to keep their remaining hot files thin.
 - `src/serve/engines/` is the incremental engine-boundary namespace. `bazel.rs` owns Bazel AC/CAS method dispatch, store identity, and CAS digest integrity policy; `gradle.rs` owns Gradle HTTP build-cache write-status policy, including official `413 Payload Too Large` oversized-entry behavior; `maven.rs` owns Maven `GET`/`HEAD`/`PUT` method dispatch while preserving generic KV write rejection; `nx.rs` owns Nx bearer checks, artifact upload `Content-Length`, artifact/terminal-output/query method handling, and duplicate artifact upload conflict policy; `sccache.rs` owns WebDAV probe, `MKCOL`, object method/status behavior, and read timeout policy; `turborepo.rs` owns Turbo bearer auth, status, artifact hash and upload metadata validation, query, and event API shape; `go_cache.rs` owns the local HTTP backing route for the Go cacheprog helper; `oci/manifests.rs` owns pure OCI manifest descriptor, content-type, subject/referrers, and child-manifest classification rules; `oci/present_blobs.rs` owns descriptor proof before manifest publish; and `oci/uploads.rs` owns the OCI blob upload session state machine: start, PATCH, final PUT, mount `201`/`202`, empty finalize reuse, stale offset `416`, and streaming digest verification for one-shot upload bodies.
 - `src/serve/http/handlers/` now owns the split OCI manifest, blob, and upload HTTP glue, while `handlers/mod.rs` still carries shared dispatch and proxy-status orchestration.
+- `src/serve/cache_registry/tool_routes/` owns the thin non-OCI route shims that adapt detected registry routes into engine calls; adapter protocol rules stay in `src/serve/engines/`.
 - `src/serve/cache_registry/kv/` now has separate `blob_read.rs`, `prefetch.rs`, and `index.rs` helpers, while `kv/mod.rs` still carries shared KV policy, lookup-flight coordination, and pending-publish handoff types.
 - `src/telemetry.rs` remains a thin front module, while `src/progress/mod.rs` fronts the progress namespace and `src/observability/` remains the request/event metrics namespace.
 - `src/ui.rs` is the front module for `src/ui/`, and `src/test_env.rs` remains a dedicated test-only support module.
@@ -452,13 +453,13 @@ src/
 | `src/serve/http/handlers/manifest.rs` descriptor extraction, content-type, subject/referrers, and child-manifest classification | `src/serve/engines/oci/manifests.rs` | started |
 | `src/serve/http/handlers/manifest.rs` descriptor availability and upload-session proof logic | `src/serve/engines/oci/present_blobs.rs` | started |
 | `src/serve/http/handlers/uploads.rs` upload session state machine | `src/serve/engines/oci/uploads.rs` | done |
-| `src/serve/cache_registry/bazel.rs` AC/CAS namespace and CAS digest policy | `src/serve/engines/bazel.rs` | started |
-| `src/serve/cache_registry/gradle.rs` Gradle method and write-status policy | `src/serve/engines/gradle.rs` | done |
-| `src/serve/cache_registry/maven.rs` Maven HTTP method dispatch | `src/serve/engines/maven.rs` | done |
-| `src/serve/cache_registry/nx.rs` Nx auth, artifact, terminal-output, and query route rules | `src/serve/engines/nx.rs` | done |
-| `src/serve/cache_registry/sccache.rs` WebDAV probe, `MKCOL`, object status, and timeout rules | `src/serve/engines/sccache.rs` | done |
-| `src/serve/cache_registry/turborepo.rs` Turbo auth, status, artifact, query, and event API rules | `src/serve/engines/turborepo.rs` | done |
-| `src/serve/cache_registry/go_cache.rs` Go cache HTTP backing route rules | `src/serve/engines/go_cache.rs` | done |
+| `src/serve/cache_registry/tool_routes/bazel.rs` AC/CAS namespace and CAS digest policy | `src/serve/engines/bazel.rs` | started |
+| `src/serve/cache_registry/tool_routes/gradle.rs` Gradle method and write-status policy | `src/serve/engines/gradle.rs` | done |
+| `src/serve/cache_registry/tool_routes/maven.rs` Maven HTTP method dispatch | `src/serve/engines/maven.rs` | done |
+| `src/serve/cache_registry/tool_routes/nx.rs` Nx auth, artifact, terminal-output, and query route rules | `src/serve/engines/nx.rs` | done |
+| `src/serve/cache_registry/tool_routes/sccache.rs` WebDAV probe, `MKCOL`, object status, and timeout rules | `src/serve/engines/sccache.rs` | done |
+| `src/serve/cache_registry/tool_routes/turborepo.rs` Turbo auth, status, artifact, query, and event API rules | `src/serve/engines/turborepo.rs` | done |
+| `src/serve/cache_registry/tool_routes/go_cache.rs` Go cache HTTP backing route rules | `src/serve/engines/go_cache.rs` | done |
 | `src/serve/mod.rs` | `src/serve/runtime/{mod,listener,maintenance,shutdown}.rs` | done |
 | `src/serve/http/handlers.rs` | `src/serve/http/handlers/{mod,manifest,blobs,uploads}.rs` | done |
 | `src/serve/cache_registry/kv/lookup.rs` | `src/serve/cache_registry/kv/{lookup,blob_read,prefetch,index}.rs` | done |
@@ -474,7 +475,7 @@ src/
 | `src/ci_detection.rs` | `src/ci_detection/{mod,context,detect}.rs` | done |
 | `src/encryption.rs` | `src/encryption/{mod,crypto,identity,passphrase,errors}.rs` | done |
 | `src/cli.rs` | `src/cli/{mod,app,tests}.rs` | done |
-| `src/serve/cache_registry/{bazel,gradle,maven,nx,sccache,turborepo,go_cache}.rs` | `src/serve/cache_registry/tool_routes/*.rs` | later |
+| `src/serve/cache_registry/{bazel,gradle,maven,nx,sccache,turborepo,go_cache}.rs` | `src/serve/cache_registry/tool_routes/*.rs` | done |
 
 ## Recommended Refactor Order
 

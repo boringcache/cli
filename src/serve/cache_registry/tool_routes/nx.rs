@@ -4,7 +4,7 @@ use axum::response::Response;
 
 use crate::serve::state::AppState;
 
-use super::error::RegistryError;
+use crate::serve::cache_registry::RegistryError;
 
 pub(crate) async fn handle_artifact(
     state: &AppState,

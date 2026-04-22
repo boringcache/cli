@@ -88,7 +88,7 @@ sccache is the next native adapter pass. The source-backed contract starts from:
 - sccache `Storage` implementation: `get` reads `normalize_key(key)`, maps not found and unexpected read errors to cache misses, `put` writes `normalize_key(key)`, `check` reads and writes `.sccache_check`, and `normalize_key` maps a key to `a/b/c/<key>`.
 - OpenDAL WebDAV behavior: writes may create parent collections with `MKCOL`; some compatible servers skip or reject directory creation differently.
 
-The first engine boundary preserves the existing route behavior in `src/serve/cache_registry/sccache.rs` while moving WebDAV-specific truth into `src/serve/engines/sccache.rs`. The acceptance list should keep covering `.sccache_check`, `MKCOL`, `GET`/`HEAD` misses, `PUT` writes, unsupported methods, exact key paths, and concurrent warm reads.
+The first engine boundary preserves the existing route behavior in `src/serve/cache_registry/tool_routes/sccache.rs` while moving WebDAV-specific truth into `src/serve/engines/sccache.rs`. The acceptance list should keep covering `.sccache_check`, `MKCOL`, `GET`/`HEAD` misses, `PUT` writes, unsupported methods, exact key paths, and concurrent warm reads.
 
 ## Bazel / AC-CAS Next
 
@@ -99,7 +99,7 @@ Bazel is the next native adapter pass after the sccache WebDAV source/E2E alignm
 - Bazel remote-cache usage docs: `--remote_upload_local_results=false` makes the remote cache read-only, and writers should usually be CI-controlled.
 - Bazel auth docs: HTTP Basic Auth may be embedded in the remote cache URL and must be used with HTTPS when credentials are present.
 
-The first engine boundary preserves the current route behavior in `src/serve/cache_registry/bazel.rs` while moving AC/CAS method dispatch, store identity, and CAS digest policy into `src/serve/engines/bazel.rs`. The remaining acceptance list should keep covering `/ac/<sha256>` and `/cas/<sha256>` separation, invalid digest rejection, CAS PUT digest mismatch rejection, `GET`/`HEAD`/`PUT`, unsupported methods, read-only upload behavior, warm Bazel E2E reuse, and cache-op GET records/hits.
+The first engine boundary preserves the current route behavior in `src/serve/cache_registry/tool_routes/bazel.rs` while moving AC/CAS method dispatch, store identity, and CAS digest policy into `src/serve/engines/bazel.rs`. The remaining acceptance list should keep covering `/ac/<sha256>` and `/cas/<sha256>` separation, invalid digest rejection, CAS PUT digest mismatch rejection, `GET`/`HEAD`/`PUT`, unsupported methods, read-only upload behavior, warm Bazel E2E reuse, and cache-op GET records/hits.
 
 ## Gradle / Maven HTTP Object Cache Next
 
@@ -111,4 +111,4 @@ The source-backed contract starts from:
 - Apache Maven Build Cache Extension remote-cache docs: a shared HTTP cache server must support `PUT`, `GET`, and `HEAD`.
 - Maven portability docs: remote cache reuse depends on build/source/effective-POM comparability, so BoringCache should preserve Maven artifact bytes and diagnose misses without normalizing payloads.
 
-The first Gradle/Maven boundary keeps route handling in `src/serve/cache_registry/{gradle,maven}.rs` as glue while moving method/status ownership into `src/serve/engines/{gradle,maven}.rs`. Maven remains on generic KV write rejection until a Maven source-code audit identifies a different required status shape. The remaining acceptance list should keep covering Gradle hit/miss/write statuses, Maven `HEAD`/`GET`/`PUT`, exact key paths, opaque payload bytes, and local Gradle/Maven E2E runs against the Rails-backed proxy.
+The first Gradle/Maven boundary keeps route handling in `src/serve/cache_registry/tool_routes/{gradle,maven}.rs` as glue while moving method/status ownership into `src/serve/engines/{gradle,maven}.rs`. Maven remains on generic KV write rejection until a Maven source-code audit identifies a different required status shape. The remaining acceptance list should keep covering Gradle hit/miss/write statuses, Maven `HEAD`/`GET`/`PUT`, exact key paths, opaque payload bytes, and local Gradle/Maven E2E runs against the Rails-backed proxy.
