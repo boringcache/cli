@@ -612,11 +612,13 @@ start_proxy() {
   local metadata_hints="${5:-}"
   local metrics_file
   local ready_file_var="${pid_var/PID/READY_FILE}"
+  local ready_file
   metrics_file="$(proxy_request_metrics_path "$log_file")"
   rm -f "$metrics_file"
   stop_proxy_by_var "$pid_var" "$label"
   reclaim_stale_proxy_port "$port" "$log_file"
-  eval "${ready_file_var}=\"\$(mktemp \\\"${LOG_DIR}/cache-registry-ready.${label}.XXXXXX\\\")\""
+  ready_file="$(mktemp "${LOG_DIR}/cache-registry-ready.${label}.XXXXXX")"
+  printf -v "$ready_file_var" '%s' "$ready_file"
   rm -f "${!ready_file_var}"
   {
     echo ""

@@ -284,7 +284,7 @@ EOF
       cat <<'EOF'
 === Phase 1: Pending restore and manifest-check handling ===
 === Phase 2: Concurrent writer conflict wording ===
-=== Phase 3: Pending publish completion ===
+=== Phase 3: Optimistic publish conflict handling ===
 CLI contract e2e passed
 EOF
       ;;
