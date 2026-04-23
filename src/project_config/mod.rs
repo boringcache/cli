@@ -10,8 +10,7 @@ pub use discover::discover;
 pub use model::{
     AdapterCommandConfig, AdapterConfig, LoadedRepoConfig, RepoConfig, RepoEntryConfig,
     RepoProfileConfig, RepoProxyConfig, ResolvedAdapterConfig, ResolvedRunEntryPlan,
-    ResolvedRunPlan,
-    RunEntryRequestSource, RunEntryResolutionSource,
+    ResolvedRunPlan, RunEntryRequestSource, RunEntryResolutionSource,
 };
 pub use resolve::{prefer_cli_list, prefer_cli_scalar, resolve_adapter_config, resolve_run_plan};
 

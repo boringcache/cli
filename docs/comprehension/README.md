@@ -15,6 +15,8 @@ Use it in this order:
 
 Use `agent-working-contract.md` when implementing CLI behavior or test changes. It holds stable rules that are intentionally kept out of `AGENTS.md`.
 
+Launch review context lives in `../adr/0009-launch-maintenance-contract-and-performance-review.md`. It records the `.boringcache.toml` maintenance contract, cross-platform behavior, Docker helper boundary, action/web ownership, legacy surface review, and performance guardrails.
+
 ## Status legend
 
 - `public-primary`: direct user-facing feature wired from the `src/cli/` module tree

@@ -21,6 +21,7 @@ This file tracks only product intent that is not fully settled by the current co
 - `.boringcache.toml` is the canonical repo config filename.
 - `.boringcache.toml` is the durable repo cache plan across local and CI; the CLI is the only local planner for it.
 - `doctor` plus `audit` are the current maintenance loop after onboard. Future `lint` or `rescan` naming should wrap those planner/audit paths, not create new config truth.
+- ADR 0009 records the current launch review: keep maintenance automatic but cheap, keep cross-platform suffixing explicit, keep the action from becoming a second planner, and do not revive Dockerfile-internal helper UX.
 - `project_config/**` is intentionally the planner for `run` and adapters.
 - `mount`, `dashboard`, `doctor`, `setup-encryption`, `status`, `sessions`, `misses`, and `tags` are supported product surfaces.
 - `go-cacheprog` is supported as advanced plumbing behind the `go` adapter and manual `GOCACHEPROG` setups.
@@ -32,7 +33,7 @@ This file tracks only product intent that is not fully settled by the current co
 
 ### 1. ADR Release Proof Gaps
 
-The current ADR set is aligned on implementation direction. Public CLI `main` at `7fb37ae` has moved beyond the signed `v1.12.46` release, and public `boringcache/one@v1` points at signed action release `v1.12.64` with the released CLI aligned to `v1.12.46`. Docker launch artifacts now include post-proxy-shutdown `cache_session_summary` evidence for checked fresh/rolling runs, and same-ref rolling reruns produced useful steady-state samples. These gates still block broader release/default claims:
+The current ADR set is aligned on implementation direction. Public CLI `main` has moved beyond the last signed release, and the action repo has a pending release-alignment change from action `v1.12.64` / CLI `v1.12.46` to action `v1.12.65` / CLI `v1.12.47`. Treat that as unreleased until the signed release commit/tag and `one@v1` movement are complete. Docker launch artifacts now include post-proxy-shutdown `cache_session_summary` evidence for checked fresh/rolling runs, and same-ref rolling reruns produced useful steady-state samples. These gates still block broader release/default claims:
 
 - receipt commit failure, including a backend "blob not yet verified" confirm response, should continue to fail OCI/KV publish instead of waiting for asynchronous storage verification;
 - Rails v2 CAS publish is receipt-strict locally: pending CAS roots need manifest/blob receipts before visibility, with async blob verification retained only as audit/repair;
@@ -65,6 +66,11 @@ ADR 0008 settles the lifecycle: `.boringcache.toml` is the durable repo cache pl
 - extra env mutation such as `YARN_ENABLE_GLOBAL_CACHE=false`
 - command inference scope
 - first-match ancestor shadowing for nested `.boringcache.toml`
+- CI-friendly drift behavior: whether `audit --json` is enough for launch, or
+  whether a first-class `lint`/`rescan` command should wrap the same planner
+  and produce clearer pass/fail output
+- cross-platform warnings for entries that appear portable but keep platform
+  suffixing, and entries that look binary but opt out of platform suffixing
 
 ### 5. Adapter Merge Strategy
 

@@ -171,8 +171,10 @@ pub async fn execute(
         .context("Failed to load repo cache config")?
         .map(|loaded| loaded.config.proxy.metadata_hints)
         .unwrap_or_default();
-    let mut proxy_metadata_hints =
-        resolve_proxy_metadata_hints_with_config(&configured_proxy_metadata_hints, &metadata_hints)?;
+    let mut proxy_metadata_hints = resolve_proxy_metadata_hints_with_config(
+        &configured_proxy_metadata_hints,
+        &metadata_hints,
+    )?;
     inject_default_proxy_metadata_hints(&mut proxy_metadata_hints);
 
     crate::serve::run_server(
@@ -359,7 +361,9 @@ fn proxy_status_url(host: &str, port: u16) -> String {
     format!("http://{authority}:{port}{PROXY_STATUS_PATH}")
 }
 
-pub(crate) fn resolve_proxy_metadata_hints(raw_hints: &[String]) -> Result<BTreeMap<String, String>> {
+pub(crate) fn resolve_proxy_metadata_hints(
+    raw_hints: &[String],
+) -> Result<BTreeMap<String, String>> {
     resolve_proxy_metadata_hints_with_config(&[], raw_hints)
 }
 

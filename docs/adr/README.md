@@ -33,6 +33,7 @@ Docs-ready is not the same as rollout-ready. If testing or benchmark proof is de
 | [0006](0006-cache-session-trace-and-oci-negative-cache.md) | accepted as first-party insight baseline; backend/action enrichment pending | Session trace, negative cache, and platform insight spine | Backend/action enrichment and artifact validation after CLI E2E run `24767673291`; web still needs rich session-summary persistence |
 | [0007](0007-docker-immutable-run-refs-and-alias-promotion.md) | accepted; CI derivation, metadata transport, alias-root binding, and required dual-writer same-alias E2E implemented; default rollout pending released-path benchmark proof | Immutable Docker run refs and atomic alias promotion | Provider-neutral same-alias writer E2E is green locally and in CLI E2E run `24767673291`; next gates are signed CLI release if required, released action-path proof, and benchmark artifacts |
 | [0008](0008-unified-repo-config-plan-lifecycle.md) | accepted launch-readiness decision | `.boringcache.toml` as durable repo cache plan, with CLI-owned planning and doctor/audit maintenance | Version dry-run schemas, add drift checks where needed, and keep action/web/copy aligned on the same setup path |
+| [0009](0009-launch-maintenance-contract-and-performance-review.md) | accepted launch-readiness review | Current CLI launch audit for maintenance UX, cross-platform behavior, action/web boundaries, legacy surface review, and performance guardrails | Version JSON schemas, add drift/lint surface if needed, and reduce action per-entry planning |
 
 ## Launch ADR Review
 
@@ -43,6 +44,7 @@ Before launch, finish or explicitly defer these CLI ADR gates:
 - ADR 0005: keep hidden implementation guarded unless large-layer disk-copy/cache-policy evidence supports broader rollout.
 - ADR 0004: keep stream-through hidden unless first-byte/body-wait comparison artifacts support a default threshold.
 - ADR 0008: version dry-run schemas enough for action/docs stability, add drift checks if launch copy says rescan/lint, and keep the removed Dockerfile-helper boundary aligned with action ADR 0001.
+- ADR 0009: keep the automatic maintenance path cheap, cross-platform warnings explicit, legacy aliases out of public copy, and action planning delegated to CLI dry-run plans.
 
 ## Handoff Rule
 

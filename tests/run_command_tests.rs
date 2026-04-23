@@ -1202,7 +1202,10 @@ metadata-hints = ["project=web", "scenario=repo"]
     apply_test_env(&mut command);
     let output = command
         .current_dir(temp_dir.path())
-        .env("BORINGCACHE_PROXY_METADATA_HINTS", "phase=seed,scenario=env")
+        .env(
+            "BORINGCACHE_PROXY_METADATA_HINTS",
+            "phase=seed,scenario=env",
+        )
         .args([
             "run",
             "--proxy",
