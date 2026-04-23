@@ -107,6 +107,13 @@ mode `max` and OCI hydration `metadata-only`, but does not include web
 `APP_REVISION` or `product_refs`; Immich and Mastodon still need post-fix
 fresh+warm artifacts.
 
+Additional same-ref rolling reruns on the same artifact shape gave
+steady-state evidence for all four Docker workloads: PostHog `24796916333`,
+Hugo `24796581263`, Immich `24797097761`, and Mastodon `24797097792` all
+classified as `steady_state_candidate=true` with no new OCI blob uploads. This
+is useful for cache-behavior analysis, but still not sufficient for launch
+claims because the artifacts lack web revision and product-ref fields.
+
 Follow-up implementation on 2026-04-22 adds the launch-proof field shape for
 future benchmark artifacts: web `/v2/health` reports nullable `revision`, and
 the benchmark artifact contract should emit `product_refs` with CLI, action,

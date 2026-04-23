@@ -255,7 +255,8 @@ The first CLI baseline is implemented:
 - confirmed OCI miss paths insert negative-cache entries, and locator population, upload finalize, mount reuse, and manifest publish invalidate relevant entries;
 - OCI blob `HEAD` remote existence-check errors now stay classified as backend/storage uncertainty: strict mode returns the transient error, best-effort mode degrades to an uncached miss at the dispatch layer, and neither path inserts a `RemoteBlob` negative-cache entry;
 - OCI blob hydrate-then-serve records storage GET bytes, first body wait, body duration, local spool write duration, digest verification duration/failure, and cache-promotion timing/failure;
-- proxy shutdown emits a `cache_session_summary` JSONL event with proxy, storage, OCI, singleflight, local-cache, and BuildKit sections;
+- proxy shutdown emits a `cache_session_summary` JSONL event with proxy, Rails/API, storage, OCI, singleflight, local-cache, and BuildKit sections;
+- the Rails/API summary section embeds in-memory v2 request rollups by operation: request counts, p50/p95 duration, error counts, retry counts, and totals;
 - `/_boringcache/status` exposes the same live session-summary snapshot under `session_summary`, and proxy shutdown reuses that builder for the JSONL event, so diagnostics do not need to control proxy lifecycle just to capture the summary shape;
 - cache-ops flush now adds a stable `proxy-summary-*` `oci` session with `summary_schema` and `summary_json` to the existing Rails `cache-rollups` batch, and shutdown forces one final summary upsert even when there are no fresh flat rollups;
 - `ci/e2e/request-metrics-summary.py` promotes session summary fields, OCI upload-plan reuse counts, and new status snapshot keys into artifact env output;
@@ -263,11 +264,11 @@ The first CLI baseline is implemented:
 - Docker adapter planning now carries provider-neutral CI run metadata into dry-run JSON and proxy metadata hints, including provider, run uid/attempt, ref type/name, default branch, PR number, commit SHA, immutable run ref, import refs, and promotion aliases when ADR 0007 derivation is active.
 - startup download-url preload uses the normal API request retry path, and startup blob body warm retries transient URL/storage failures; these are read/transport retries, not publish-readiness polling.
 
-Remaining trace depth belongs in later passes: Rails p50/p95 rollups from request metrics, richer BuildKit enrichment from the action/harness, and release-path Docker E2E artifact validation.
+Remaining trace depth belongs in later passes: richer backend/action operation naming, richer BuildKit enrichment from the action/harness, and release-path Docker E2E artifact validation.
 
 ## Proof Status
 
-Documentation and the first CLI baseline are aligned as of 2026-04-22. The trace is accepted as the platform insight spine; CLI-to-Rails summary persistence is implemented locally through `cache-rollups`; Rails percentile rollups, action enrichment, benchmark artifact validation, release-path proof, and broader operator reporting remain follow-up work.
+Documentation and the first CLI baseline are aligned as of 2026-04-22. The trace is accepted as the platform insight spine; CLI-to-Rails summary persistence is implemented locally through `cache-rollups`, and the CLI now embeds Rails/API request count, p50/p95, error, and retry rollups in the structured summary. Action enrichment, benchmark artifact validation, release-path proof, and broader operator reporting remain follow-up work.
 
 Focused CLI tests now cover negative-cache invalidation after local writes and
 the remote-existence-check error path that must degrade without inserting a
@@ -312,6 +313,14 @@ but it is not a launch-wide proof: the CLI/action path is still older than the
 intended launch path, the artifacts still do not record web `APP_REVISION` or
 `product_refs`, and Immich/Mastodon still need post-fix fresh+warm artifacts
 before broad claims.
+
+Additional same-ref rolling reruns on the same artifact shape produced
+steady-state diagnostic evidence for the checked Docker workloads: PostHog
+`24796916333`, Hugo `24796581263`, Immich `24797097761`, and Mastodon
+`24797097792` all classified as `steady_state_candidate=true` with short
+BuildKit cache export times and a single small remote body fetch. These are
+useful cache-behavior artifacts, but they still predate `product_refs` and do
+not contain web revision evidence.
 
 Follow-up implementation on 2026-04-22 closes the next local
 artifact-schema gap for future runs: the web health endpoint now exposes

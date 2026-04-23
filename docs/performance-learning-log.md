@@ -35,6 +35,15 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   `export_seconds=26.9`; Immich had `new_blob_count=55` and
   `export_seconds=156.4`; Mastodon had `new_blob_count=38` and
   `export_seconds=66.8`.
+- Later same-ref rolling reruns on the same pre-product-ref artifact shape did
+  produce steady-state samples: PostHog `24796916333` finished in `19s` with
+  `export_seconds=4.2`, one `27499` byte remote body fetch, and summary
+  `duration_ms=11300`; Hugo `24796581263` finished in `10s` with
+  `export_seconds=2.4` and one `6599` byte remote body fetch; Immich
+  `24797097761` finished in `12s` with `export_seconds=2.0` and one `13693`
+  byte remote body fetch; Mastodon `24797097792` finished in `16s` with
+  `export_seconds=3.2` and one `18137` byte remote body fetch. All four
+  classified as `steady_state_candidate=true` with no new OCI blob uploads.
 - Actions Cache comparison artifacts completed for PostHog fresh/rolling and
   Hugo fresh/rolling, but the evidence above should not be turned into a broad
   claim: Immich and Mastodon still need post-fix fresh+warm artifacts, the
@@ -45,6 +54,10 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   `revision` field ready for future runs, but these benchmark bundles did not
   capture it, so launch claims remain blocked on released-path artifacts with
   CLI/action/web refs in the artifact payload.
+- Follow-up fix: the shared benchmark artifact writer was pushed after this
+  check to PostHog `bc0d7e0`, Hugo `c1636af`, Immich `20f5203`, and Mastodon
+  `1db2f3a` so future artifacts can emit `product_refs`. No benchmark artifact
+  from those commits has been accepted as evidence yet.
 
 ## 2026-04-22 - Stream-through local activation proof
 

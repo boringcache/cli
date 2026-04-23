@@ -320,6 +320,10 @@ pub(crate) fn dropped_events_total() -> u64 {
     hub().dropped_events_total()
 }
 
+pub(crate) fn rails_request_summary() -> Value {
+    request_metrics::rails_summary()
+}
+
 pub(crate) fn flush_for(timeout: std::time::Duration) {
     let deadline = std::time::Instant::now() + timeout;
     while queue_depth() > 0 && std::time::Instant::now() < deadline {
@@ -365,6 +369,8 @@ impl Hub {
     }
 
     fn emit(&self, event: ObservabilityEvent) {
+        request_metrics::record_event(&event);
+
         let Some(tx) = &self.tx else {
             dispatch_event(&event, self.human_log_enabled);
             return;

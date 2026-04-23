@@ -37,9 +37,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
         "blob_download_max_concurrency": state.blob_download_max_concurrency,
         "oci_alias_promotion_refs": &state.oci_alias_promotion_refs,
     });
-    let rails = json!({
-        "request_metrics": "see_jsonl",
-    });
+    let rails = crate::observability::rails_request_summary();
     let storage = map_to_json(select_metric_prefixes(
         &oci_engine,
         &[
