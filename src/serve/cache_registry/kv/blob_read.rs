@@ -164,11 +164,6 @@ pub(crate) async fn do_download_blob_to_cache(
         }
     };
 
-    if written == 0 {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(RegistryError::internal("Downloaded blob was empty"));
-    }
-
     match state
         .blob_read_cache
         .promote(&blob.digest, &temp_path, written)

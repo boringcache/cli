@@ -280,6 +280,39 @@ mod tests {
         assert!(!temp.path().join("vendor").exists());
     }
 
+    #[tokio::test]
+    async fn ensure_empty_target_accepts_existing_empty_directory() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let result = super::ensure_empty_target(temp.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        assert!(matches!(result, super::EnsureTargetStatus::Ready));
+    }
+
+    #[tokio::test]
+    async fn ensure_empty_target_reports_blocking_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocking_path = temp.path().join("dev.db");
+        std::fs::write(&blocking_path, b"data").unwrap();
+
+        let result = super::ensure_empty_target(temp.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        match result {
+            super::EnsureTargetStatus::Occupied {
+                existing_path,
+                blocking_path: found_blocking_path,
+            } => {
+                assert_eq!(existing_path, temp.path().display().to_string());
+                assert_eq!(found_blocking_path, blocking_path.display().to_string());
+            }
+            super::EnsureTargetStatus::Ready => panic!("expected occupied target"),
+        }
+    }
+
     #[test]
     fn test_fail_on_cache_miss_flag_logic() {
         let fail_on_cache_miss = true;
@@ -1133,7 +1166,10 @@ async fn process_restore(
 
 enum EnsureTargetStatus {
     Ready,
-    Occupied { existing_path: String },
+    Occupied {
+        existing_path: String,
+        blocking_path: String,
+    },
 }
 
 async fn ensure_empty_target(path: &str) -> Result<EnsureTargetStatus> {
@@ -1152,9 +1188,10 @@ async fn ensure_empty_target(path: &str) -> Result<EnsureTargetStatus> {
                 format!("Failed to inspect restore target: {}", target.display())
             })?;
 
-            if dir_entries.next_entry().await?.is_some() {
+            if let Some(entry) = dir_entries.next_entry().await? {
                 return Ok(EnsureTargetStatus::Occupied {
                     existing_path: target.display().to_string(),
+                    blocking_path: entry.path().display().to_string(),
                 });
             }
         }

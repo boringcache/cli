@@ -277,6 +277,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blob_read_cache_insert_and_promote_zero_byte_round_trip() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache = BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 1024 * 1024)
+            .expect("blob cache");
+        let insert_digest = format!("sha256:{}", "d".repeat(64));
+        let promote_digest = format!("sha256:{}", "e".repeat(64));
+
+        let inserted = cache.insert(&insert_digest, b"").await.expect("insert");
+        assert!(inserted);
+
+        let insert_handle = cache
+            .get_handle(&insert_digest)
+            .await
+            .expect("zero-byte insert cache hit");
+        assert_eq!(insert_handle.size_bytes(), 0);
+
+        let source_path = temp_dir.path().join("zero-byte-source");
+        tokio::fs::write(&source_path, b"")
+            .await
+            .expect("zero-byte source");
+        let promoted = cache
+            .promote(&promote_digest, &source_path, 0)
+            .await
+            .expect("promote");
+        assert!(promoted);
+        assert!(!source_path.exists());
+
+        let promote_handle = cache
+            .get_handle(&promote_digest)
+            .await
+            .expect("zero-byte promote cache hit");
+        assert_eq!(promote_handle.size_bytes(), 0);
+
+        let reloaded = BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 1024 * 1024)
+            .expect("reloaded blob cache");
+        let reloaded_insert = reloaded
+            .get_handle(&insert_digest)
+            .await
+            .expect("reloaded zero-byte insert");
+        let reloaded_promote = reloaded
+            .get_handle(&promote_digest)
+            .await
+            .expect("reloaded zero-byte promote");
+        assert_eq!(reloaded_insert.size_bytes(), 0);
+        assert_eq!(reloaded_promote.size_bytes(), 0);
+    }
+
+    #[tokio::test]
     async fn blob_read_cache_concurrent_insert_round_trip_integrity() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let cache = Arc::new(

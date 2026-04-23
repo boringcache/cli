@@ -81,7 +81,9 @@ pub struct RestoreArgs {
     #[arg(help = "Workspace name (org/project or user/project)")]
     pub workspace: String,
 
-    #[arg(help = "One or more tag:path pairs (comma-separated)")]
+    #[arg(
+        help = "One or more tag:path pairs (comma-separated); target paths may already exist if empty"
+    )]
     pub tag_path_pairs: String,
 
     #[arg(long, help = "Disable automatic platform suffix for tags")]

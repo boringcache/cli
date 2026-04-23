@@ -26,13 +26,15 @@ pub(super) async fn process_restore_file(
 ) -> Result<RestoreOutcome> {
     match ensure_empty_target(&target_path).await? {
         EnsureTargetStatus::Ready => {}
-        EnsureTargetStatus::Occupied { existing_path } => {
+        EnsureTargetStatus::Occupied {
+            existing_path,
+            blocking_path,
+        } => {
             let reason = format!(
-                "Restore target '{}' is not empty; skipping restore for {}",
-                existing_path, hit.tag
+                "Restore target '{}' is not empty (found '{}'); skipping restore for {}",
+                existing_path, blocking_path, hit.tag
             );
             let _ = reporter.warning(reason.clone());
-            ui::warn(&reason);
             return Ok(RestoreOutcome::Skipped {
                 tag: hit.tag.clone(),
                 reason,

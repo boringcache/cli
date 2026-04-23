@@ -247,7 +247,11 @@ impl BlobReadCache {
         match entry {
             BlobReadStorageEntry::LegacyFile { path, size_bytes } => {
                 let metadata = tokio::fs::metadata(&path).await.ok()?;
-                if !metadata.is_file() || metadata.len() == 0 {
+                if !metadata.is_file() {
+                    self.storage_index.remove(&key);
+                    return None;
+                }
+                if metadata.len() == 0 && size_bytes > 0 {
                     self.storage_index.remove(&key);
                     return None;
                 }
@@ -267,17 +271,11 @@ impl BlobReadCache {
                 path,
                 offset,
                 size_bytes,
-            } => {
-                if size_bytes == 0 {
-                    self.storage_index.remove(&key);
-                    return None;
-                }
-                Some(BlobReadHandle {
-                    path,
-                    offset,
-                    size_bytes,
-                })
-            }
+            } => Some(BlobReadHandle {
+                path,
+                offset,
+                size_bytes,
+            }),
         }
     }
 
@@ -328,9 +326,6 @@ impl BlobReadCache {
     }
 
     pub async fn insert(&self, digest: &str, data: &[u8]) -> io::Result<bool> {
-        if data.is_empty() {
-            return Ok(false);
-        }
         let Some(key) = Self::normalize_digest_hex(digest) else {
             return Ok(false);
         };
@@ -385,10 +380,6 @@ impl BlobReadCache {
         } else {
             src_metadata.len()
         };
-        if source_size == 0 {
-            let _ = tokio::fs::remove_file(src_path).await;
-            return Ok(false);
-        }
 
         if self.get_handle(&key).await.is_some() {
             let _ = tokio::fs::remove_file(src_path).await;
@@ -478,9 +469,6 @@ impl BlobReadCache {
         tokio::io::AsyncWriteExt::write_all(&mut dst, &header).await?;
         let mut src = tokio::fs::File::open(src_path).await?;
         let copied = tokio::io::copy(&mut src, &mut dst).await?;
-        if copied == 0 {
-            return Ok(None);
-        }
         tokio::io::AsyncWriteExt::flush(&mut dst).await?;
         drop(dst);
 
@@ -682,9 +670,7 @@ impl BlobReadCache {
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if let Some(key) = Self::legacy_digest_key_from_name(file_name)
-                && metadata.len() > 0
-            {
+            if let Some(key) = Self::legacy_digest_key_from_name(file_name) {
                 total_bytes = total_bytes.saturating_add(metadata.len());
                 entries.insert(
                     key,
@@ -770,9 +756,6 @@ impl BlobReadCache {
                     .try_into()
                     .map_err(|_| io::Error::other("invalid segment header size bytes"))?,
             );
-            if size_bytes == 0 {
-                break;
-            }
 
             let digest_bytes = &header[12..];
             if digest_bytes.len() != 64 || !digest_bytes.iter().all(|byte| byte.is_ascii_hexdigit())

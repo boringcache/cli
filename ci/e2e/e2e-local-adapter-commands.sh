@@ -9,6 +9,8 @@ BINARY="${BINARY:-${CLI_DIR}/target/debug/boringcache}"
 RAILS_HOST="${RAILS_HOST:-127.0.0.1}"
 RAILS_PORT="${RAILS_PORT:-3000}"
 API_URL="${BORINGCACHE_API_URL:-http://${RAILS_HOST}:${RAILS_PORT}}"
+RAILS_ENV_NAME="${RAILS_ENV:-development}"
+USE_MISE_FOR_RAILS="${USE_MISE_FOR_RAILS:-1}"
 LOG_ROOT="${LOG_ROOT:-${TMPDIR:-/tmp}/boringcache-local-adapter-e2e}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 LOG_DIR="${LOG_DIR:-${LOG_ROOT}/${RUN_ID}}"
@@ -16,10 +18,20 @@ RAILS_PIDFILE="${RAILS_PIDFILE:-${LOG_DIR}/rails-server.pid}"
 TMP_DIR="${LOG_DIR}/tmp"
 SUMMARY_FILE="${LOG_DIR}/summary.txt"
 LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-config-hints,docker,oci-same-alias,gradle,maven,turbo,nx,go,bazel,sccache}"
+LOCAL_ADAPTER_SKIP_BUILD="${LOCAL_ADAPTER_SKIP_BUILD:-0}"
+LOCAL_ADAPTER_CLEANUP="${LOCAL_ADAPTER_CLEANUP:-}"
 JAVA_TOOL_VERSION="${JAVA_TOOL_VERSION:-java@21.0.2}"
 MAVEN_TOOL_VERSION="${MAVEN_TOOL_VERSION:-maven@3.9.14}"
 
 mkdir -p "${LOG_DIR}" "${TMP_DIR}"
+
+if [[ -z "${LOCAL_ADAPTER_CLEANUP}" ]]; then
+  if [[ "${RAILS_ENV_NAME}" == "test" ]]; then
+    LOCAL_ADAPTER_CLEANUP="1"
+  else
+    LOCAL_ADAPTER_CLEANUP="0"
+  fi
+fi
 
 RAILS_PID=""
 WORKSPACE=""
@@ -39,6 +51,13 @@ fail() {
 require_cmd() {
   local cmd="$1"
   command -v "${cmd}" >/dev/null 2>&1 || fail "missing required command: ${cmd}"
+}
+
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 append_summary() {
@@ -67,18 +86,89 @@ should_run_tool() {
   esac
 }
 
+run_web_command() {
+  local -a env_args=("RAILS_ENV=${RAILS_ENV_NAME}")
+
+  [[ -n "${RAILS_MASTER_KEY:-}" ]] && env_args+=("RAILS_MASTER_KEY=${RAILS_MASTER_KEY}")
+  [[ -n "${DATABASE_URL:-}" ]] && env_args+=("DATABASE_URL=${DATABASE_URL}")
+  [[ -n "${SECRET_KEY_BASE:-}" ]] && env_args+=("SECRET_KEY_BASE=${SECRET_KEY_BASE}")
+
+  if is_truthy "${USE_MISE_FOR_RAILS}"; then
+    env "${env_args[@]}" mise exec -- "$@"
+  else
+    env "${env_args[@]}" "$@"
+  fi
+}
+
 run_selected_tool() {
   local tool="$1"
   shift
   if should_run_tool "${tool}"; then
+    local started_at finished_at elapsed
+    started_at="$(date +%s)"
     "$@"
+    finished_at="$(date +%s)"
+    elapsed=$((finished_at - started_at))
+    append_summary "TIME ${tool}: ${elapsed}s"
   else
     skip_tool "${tool}" "not selected by LOCAL_ADAPTER_TOOLS=${LOCAL_ADAPTER_TOOLS}"
   fi
 }
 
+cleanup_workspace() {
+  if ! is_truthy "${LOCAL_ADAPTER_CLEANUP}"; then
+    return 0
+  fi
+
+  if [[ -z "${WORKSPACE}" ]]; then
+    return 0
+  fi
+
+  note "Cleaning up local adapter workspace ${WORKSPACE}"
+  (
+    cd "${WEB_DIR}"
+    E2E_WORKSPACE="${WORKSPACE}" \
+      run_web_command bin/rails runner '
+        namespace_slug, workspace_slug = ENV.fetch("E2E_WORKSPACE").split("/", 2)
+        workspace = Workspace.unscoped.joins(:namespace).find_by(
+          namespaces: { slug: namespace_slug },
+          slug: workspace_slug
+        )
+
+        unless workspace
+          puts "WORKSPACE_CLEANUP=missing"
+          exit 0
+        end
+
+        workspace_id = workspace.id
+        workspace_path = workspace.full_path
+        workspace_slug = workspace.slug
+        namespace_id = workspace.namespace_id
+
+        if workspace.storage_type_managed? && workspace.tigris_provisioned?
+          Tigris::DeprovisioningService.new(workspace).deprovision!
+        end
+
+        Workspaces::DeletionService.new(
+          workspace_id: workspace_id,
+          workspace_path: workspace_path
+        ).delete_database_records
+
+        FriendlyId::Slug.where(
+          sluggable_type: "Workspace",
+          slug: workspace_slug,
+          scope: "namespace_id:#{namespace_id}"
+        ).delete_all
+
+        puts "WORKSPACE_CLEANUP=deleted"
+      ' > "${LOG_DIR}/rails-cleanup.log" 2>&1
+  )
+  append_summary "Workspace cleanup: complete"
+}
+
 cleanup() {
   set +e
+  cleanup_workspace || true
   if [[ -n "${RAILS_PID}" ]]; then
     kill "${RAILS_PID}" >/dev/null 2>&1 || true
     wait "${RAILS_PID}" >/dev/null 2>&1 || true
@@ -425,7 +515,7 @@ assert_workspace_storage_ready() {
   storage_output="$(
     cd "${WEB_DIR}"
     E2E_WORKSPACE="${WORKSPACE}" \
-    mise exec -- bin/rails runner '
+      run_web_command bin/rails runner '
       namespace_slug, workspace_slug = ENV.fetch("E2E_WORKSPACE").split("/", 2)
       workspace = Workspace.joins(:namespace).find_by!(namespaces: { slug: namespace_slug }, slug: workspace_slug)
 
@@ -483,7 +573,7 @@ start_local_rails() {
   note "Preparing local Rails database"
   (
     cd "${WEB_DIR}"
-    mise exec -- bin/rails db:prepare > "${LOG_DIR}/rails-db-prepare.log" 2>&1
+    run_web_command bin/rails db:prepare > "${LOG_DIR}/rails-db-prepare.log" 2>&1
   )
 
   note "Provisioning local workspace token"
@@ -493,7 +583,7 @@ start_local_rails() {
     E2E_EMAIL="cli-local-adapter-e2e@example.com" \
     E2E_NAMESPACE_SLUG="cli-local-adapter-e2e" \
     E2E_WORKSPACE_SLUG="adapter-e2e" \
-    mise exec -- bin/rails runner '
+      run_web_command bin/rails runner '
       user = User.find_or_initialize_by(email: ENV.fetch("E2E_EMAIL"))
       user.namespace ||= Namespace.new(user: user)
       if user.new_record?
@@ -513,11 +603,20 @@ start_local_rails() {
       user.namespace.allow_reserved_slug = true
       user.save!
 
-      workspace = Workspace.find_or_initialize_by(
-        namespace: user.namespace,
-        slug: ENV.fetch("E2E_WORKSPACE_SLUG")
-      )
-      if workspace.new_record?
+      workspace_slug = ENV.fetch("E2E_WORKSPACE_SLUG")
+      workspace = Workspace.find_by(namespace: user.namespace, slug: workspace_slug)
+
+      if workspace.nil?
+        FriendlyId::Slug.where(
+          sluggable_type: "Workspace",
+          slug: workspace_slug,
+          scope: "namespace_id:#{user.namespace.id}"
+        ).delete_all
+
+        workspace = Workspace.new(
+          namespace: user.namespace,
+          slug: workspace_slug
+        )
         workspace.name = "Adapter E2E"
         workspace.allow_reserved_slug = true
         workspace.save!
@@ -551,7 +650,7 @@ start_local_rails() {
   note "Starting local Rails server on ${API_URL}"
   (
     cd "${WEB_DIR}"
-    PORT="${RAILS_PORT}" mise exec -- bin/rails server -b "${RAILS_HOST}" -p "${RAILS_PORT}" \
+    PORT="${RAILS_PORT}" run_web_command bin/rails server -b "${RAILS_HOST}" -p "${RAILS_PORT}" \
       --pid "${RAILS_PIDFILE}" \
       > "${LOG_DIR}/rails-server.log" 2>&1
   ) &
@@ -559,16 +658,26 @@ start_local_rails() {
   wait_for_local_server
   append_summary "Workspace: ${WORKSPACE}"
   append_summary "API URL: ${API_URL}"
+  append_summary "Rails env: ${RAILS_ENV_NAME}"
+  append_summary "Rails launcher: $(if is_truthy "${USE_MISE_FOR_RAILS}"; then printf '%s' mise; else printf '%s' direct; fi)"
+  append_summary "Workspace cleanup enabled: ${LOCAL_ADAPTER_CLEANUP}"
   append_summary "Selected tools: ${LOCAL_ADAPTER_TOOLS}"
 }
 
 build_cli_binary() {
+  if is_truthy "${LOCAL_ADAPTER_SKIP_BUILD}"; then
+    [[ -x "${BINARY}" ]] || fail "expected prebuilt executable binary at ${BINARY}"
+    append_summary "CLI binary: ${BINARY} (prebuilt)"
+    return 0
+  fi
+
   note "Building boringcache CLI"
   (
     cd "${CLI_DIR}"
     cargo build --bin boringcache > "${LOG_DIR}/cargo-build.log" 2>&1
   )
   [[ -x "${BINARY}" ]] || fail "expected executable binary at ${BINARY}"
+  append_summary "CLI binary: ${BINARY} (built locally)"
 }
 
 realpath_py() {
@@ -1213,11 +1322,20 @@ EOF
 }
 
 main() {
+  local total_started_at total_finished_at total_elapsed
   : > "${SUMMARY_FILE}"
-  require_cmd cargo
   require_cmd curl
   require_cmd python3
-  require_cmd mise
+
+  total_started_at="$(date +%s)"
+
+  if ! is_truthy "${LOCAL_ADAPTER_SKIP_BUILD}"; then
+    require_cmd cargo
+  fi
+
+  if is_truthy "${USE_MISE_FOR_RAILS}" || should_run_tool "gradle" || should_run_tool "maven"; then
+    require_cmd mise
+  fi
 
   build_cli_binary
   start_local_rails
@@ -1233,7 +1351,11 @@ main() {
   run_selected_tool "bazel" run_bazel_e2e
   run_selected_tool "sccache" run_sccache_e2e
 
+  total_finished_at="$(date +%s)"
+  total_elapsed=$((total_finished_at - total_started_at))
+
   append_summary ""
+  append_summary "Total duration: ${total_elapsed}s"
   append_summary "Passed tools: ${PASSED_TOOLS[*]:-none}"
   if [[ "${#SKIPPED_TOOLS[@]}" -gt 0 ]]; then
     append_summary "Skipped tools:"

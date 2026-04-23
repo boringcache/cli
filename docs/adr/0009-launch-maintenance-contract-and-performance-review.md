@@ -107,6 +107,24 @@ The launch UX should be automatic, but not expensive by default.
 - Keep hidden diagnostic modes hidden until benchmark evidence justifies a
   default.
 
+## Consolidated Follow-Ups (2026-04-23)
+
+This ADR is the single launch follow-up ledger across CLI, web, docs, and
+benchmark proof. Every item below should either ship, be explicitly deferred,
+or have launch copy/docs constrained so users are not promised behavior we have
+not yet proven.
+
+| Status | Area | Follow-up | Evidence and current state | Launch expectation |
+| --- | --- | --- | --- | --- |
+| done | CLI proxy / Go adapter | Allow valid zero-byte blobs in the shared KV blob-read path | A preserved-tag manual Go warm run on 2026-04-23 previously showed `1/179` startup blob prefetch failure and `60` degraded `gocache` GET errors, matching the `sha256:e3b0...` empty digest fanout in the pointer manifest. `BlobReadCache` and KV blob download now preserve zero-byte blobs instead of treating them as corruption. The rerun warmed `179/179` blobs with `0` failures, the manual metrics dropped to `177` GET hits, `1` miss, `0` errors, and the official Go-only harness summary now reports `request_metrics_failures=0`, `request_metrics_cache_ops_gocache_get_hits=177`, `request_metrics_cache_ops_gocache_get_misses=119`, `request_metrics_cache_ops_gocache_get_errors=0`. | Ship the fix and keep Go adapter launch-safe; do not treat the earlier degraded warm run as current product evidence. |
+| done | CLI restore UX | Clarify blocked restore targets instead of implying empty directories are unsupported | Live recheck on 2026-04-23 confirmed restore into an already-created empty directory works. The real issue was blocked restores printing a vague warning. The CLI now reports the first conflicting child path and the help text explicitly says existing empty targets are valid. | Ship the clearer warning copy; do not document a nonexistent empty-directory restriction. |
+| must-fix | Web dashboard | Fresh cache traffic should update user-visible dashboard numbers quickly enough to be trusted | The local dogfood pass on 2026-04-23 recorded CLI/session values moving to `2` tagged entries, `71.64 MB`, and `417` hits while the signed-in dashboard stats frame still showed `1` entry, `574 Bytes`, and `2` hits. Current dashboard summary caching is keyed only by membership and held for ten minutes. | Either reduce/invalidate that cache before launch or label the dashboard as delayed so users are not comparing stale product UI against live CLI output. |
+| must-fix | Docker story | Remove Dockerfile-internal BoringCache examples from dogfood surfaces | CLI/web launch guidance already says BoringCache stays outside Dockerfile `RUN` steps, but the checked-in `web/Dockerfile` still advertises `docker build --secret ...` plus `boringcache run` inside `RUN` layers. | Repo examples, public docs, and product copy must tell one Docker story: external BuildKit registry cache refs only. |
+| must-fix | Public docs drift | Sweep stale or contradictory command/docs surfaces before launch | The 2026-04-23 audit found website copy drift against canonical CLI docs: GitHub Actions PR restore guidance, Bazel/Gradle/Maven adapter auto-wiring wording, container host/endpoint guidance, top-level `config` flag wording, and stale local setup instructions in the web README plus `web/bin/setup`. | One docs sweep should align public site, README, and CLI docs/help against the shipped commands and flags. |
+| must-fix | Onboard Dockerfile failure UX | Give users an actionable explanation when deterministic Dockerfile conversion is unsupported or the optimization service is unavailable | The local Dockerfile onboarding pass falls through from deterministic rejection into AI assist, and a local auth/config problem surfaces as a generic optimization service configuration error. GitHub Actions rewrite worked, but the Dockerfile step did not explain the product boundary or next step. | If Dockerfile conversion stays unsupported for launch, say that directly and point users to the supported external Docker path instead of emitting a generic service failure. |
+| validate | Docker adapter dogfood | Re-run the local Docker adapter path on Colima after freeing space and confirm the launch path end-to-end | Earlier adapter coverage skipped Docker because the daemon was unavailable. Disk cleanup and `cargo clean` recovered space on 2026-04-23, but the Docker leg still needs a fresh local pass with Colima actually running. | Do not claim full local adapter parity until the Docker path is revalidated on the current launch build. |
+| validate | Launch proof artifacts | Refresh benchmark and dogfood evidence on the released CLI/action/web pair | Existing ADR evidence still notes gaps around released-path benchmark artifacts, product refs, and operator-facing diagnostics. The 2026-04-23 dogfood pass added local proof for restore UX and Go zero-byte handling, but it is not a release-path benchmark set. | Keep performance, stale-promotion, and benchmark claims gated on fresh released-path artifacts with product refs and diagnostics attached. |
+
 ## Legacy Surface Review
 
 Active product surfaces:
@@ -136,5 +154,6 @@ or diagnostics, not as the first-run UX.
 - Reduce action archive planning that shells out per raw entry.
 - Keep benchmark and CI guidance pushing explicit `phase` labels so shared
   workspaces do not turn recurring misses into product noise.
-- Keep performance and stale-promotion claims blocked until released
-  CLI/action/web benchmark artifacts contain product refs and diagnostics.
+- Close or explicitly defer every `must-fix` or `validate` item in the
+  consolidated follow-up table above before launch copy treats the behavior as
+  complete.

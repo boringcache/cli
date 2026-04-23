@@ -90,9 +90,6 @@ pub(crate) async fn find_local_uploaded_blob(
     let sessions = state.upload_sessions.read().await;
     let session = sessions.find_by_name_and_digest(name, digest)?;
     let size_bytes = session.finalized_size.unwrap_or(session.bytes_received);
-    if size_bytes == 0 {
-        return None;
-    }
     Some(BlobReadHandle::from_file_range(
         session.body_path().to_path_buf(),
         session.body_offset(),
@@ -606,27 +603,23 @@ async fn existing_mounted_blob_handle(
         let sessions = state.upload_sessions.read().await;
         if let Some(session) = sessions.find_by_name_and_digest(name, digest) {
             let size_bytes = session.finalized_size.unwrap_or(session.bytes_received);
-            if size_bytes > 0 {
-                return Some(ExistingMountedBlob::UploadSession(
-                    BlobReadHandle::from_file_range(
-                        session.body_path().to_path_buf(),
-                        session.body_offset(),
-                        size_bytes,
-                    ),
-                ));
-            }
+            return Some(ExistingMountedBlob::UploadSession(
+                BlobReadHandle::from_file_range(
+                    session.body_path().to_path_buf(),
+                    session.body_offset(),
+                    size_bytes,
+                ),
+            ));
         }
         if let Some(session) = sessions.find_by_digest(digest) {
             let size_bytes = session.finalized_size.unwrap_or(session.bytes_received);
-            if size_bytes > 0 {
-                return Some(ExistingMountedBlob::UploadSession(
-                    BlobReadHandle::from_file_range(
-                        session.body_path().to_path_buf(),
-                        session.body_offset(),
-                        size_bytes,
-                    ),
-                ));
-            }
+            return Some(ExistingMountedBlob::UploadSession(
+                BlobReadHandle::from_file_range(
+                    session.body_path().to_path_buf(),
+                    session.body_offset(),
+                    size_bytes,
+                ),
+            ));
         }
     }
 

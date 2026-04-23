@@ -752,6 +752,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blob_get_uses_zero_byte_local_upload_session_without_locator_entry() {
+        let state = test_state();
+        let digest = cas_oci::prefixed_sha256_digest(b"");
+        let path = write_temp_upload_file(&[]).await;
+
+        {
+            let mut sessions = state.upload_sessions.write().await;
+            sessions.create(UploadSession::owned_temp_file(
+                "upload-zero-byte".to_string(),
+                "cache".to_string(),
+                path,
+                0,
+                Some(digest.clone()),
+                Some(0),
+            ));
+        }
+
+        let response = get_blob(
+            Method::GET,
+            HeaderMap::new(),
+            state,
+            "cache".to_string(),
+            digest.clone(),
+        )
+        .await
+        .expect("zero-byte local upload should be served locally");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("Docker-Content-Digest")
+                .and_then(|value| value.to_str().ok()),
+            Some(digest.as_str())
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("Content-Length")
+                .and_then(|value| value.to_str().ok()),
+            Some("0")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("collect zero-byte body");
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
     async fn start_upload_mount_reuses_prefetched_local_blob() {
         let state = test_state();
         let payload = b"prefetched-mount";
@@ -779,6 +828,42 @@ mod tests {
         assert_eq!(mounted.finalized_size, Some(payload.len() as u64));
         assert_eq!(read_upload_session_body(mounted).await, payload);
         assert!(!mounted.owns_temp_file());
+    }
+
+    #[tokio::test]
+    async fn start_upload_mount_reuses_zero_byte_local_upload_session() {
+        let state = test_state();
+        let digest = cas_oci::prefixed_sha256_digest(b"");
+        let path = write_temp_upload_file(&[]).await;
+
+        {
+            let mut sessions = state.upload_sessions.write().await;
+            sessions.create(UploadSession::owned_temp_file(
+                "upload-zero-byte-source".to_string(),
+                "other-cache".to_string(),
+                path,
+                0,
+                Some(digest.clone()),
+                Some(0),
+            ));
+        }
+
+        let mut params = HashMap::new();
+        params.insert("mount".to_string(), digest.clone());
+        params.insert("from".to_string(), "cache".to_string());
+
+        let response = start_upload(state.clone(), "cache".to_string(), params, Body::empty())
+            .await
+            .expect("start upload mount should reuse zero-byte local blob");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let sessions = state.upload_sessions.read().await;
+        let mounted = sessions
+            .find_by_name_and_digest("cache", &digest)
+            .expect("mount should create zero-byte publish session");
+        assert_eq!(mounted.finalized_size, Some(0));
+        assert_eq!(read_upload_session_body(mounted).await, b"");
     }
 
     #[tokio::test]

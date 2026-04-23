@@ -450,6 +450,121 @@ jobs:
           path: e2e-logs/${{ matrix.leg }}
           retention-days: 14
 
+  local-adapter-tigris:
+    name: E2E / Local Adapter / Tigris Critical Path
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    needs: build-cli-binary
+    timeout-minutes: 75
+    env:
+      RAILS_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/boringcache_local_adapter_test
+      SECRET_KEY_BASE: boringcache-local-adapter-e2e
+      BORINGCACHE_API_URL: http://127.0.0.1:3000
+      USE_MISE_FOR_RAILS: "0"
+      LOCAL_ADAPTER_SKIP_BUILD: "1"
+      LOCAL_ADAPTER_CLEANUP: "1"
+      LOCAL_ADAPTER_TOOLS: docker,oci-same-alias
+      WEB_DIR: ${{ github.workspace }}/web
+      LOG_DIR: ${{ github.workspace }}/e2e-logs/local-adapter-tigris
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: boringcache_local_adapter_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout CLI
+        uses: actions/checkout@v6
+
+      - name: Checkout web
+        uses: actions/checkout@v6
+        with:
+          repository: boringcache/web
+          path: web
+
+      - name: Install runner packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client libpq-dev
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 4.0.1
+          bundler-cache: false
+
+      - name: Install web dependencies
+        working-directory: web
+        run: bundle install
+
+      - name: Resolve Rust version
+        id: rust-version
+        run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust-version.outputs.version }}
+
+      - name: Ensure sccache present
+        run: |
+          set -euo pipefail
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --version
+            exit 0
+          fi
+          url="https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL "$url" | tar xz -C /tmp
+          sudo mv "/tmp/sccache-${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache
+          sudo chmod +x /usr/local/bin/sccache
+          sccache --version
+
+      - name: Download prebuilt CLI binary
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-cli-release-linux-amd64
+          path: ${{ runner.temp }}/boringcache-bin
+
+      - name: Prepare CLI binary
+        run: chmod +x "${RUNNER_TEMP}/boringcache-bin/boringcache"
+
+      - name: Run local adapter critical path
+        id: run_local_adapter
+        run: |
+          set -euo pipefail
+          mkdir -p "${LOG_DIR}"
+          BINARY="${RUNNER_TEMP}/boringcache-bin/boringcache" \
+            bash ./ci/e2e/e2e-local-adapter-commands.sh 2>&1 | tee "${LOG_DIR}/run.log"
+
+      - name: Extract local adapter metrics
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "leg='local-adapter-tigris'"
+            echo "label='Local Adapter / Tigris Critical Path'"
+            echo "status='${{ steps.run_local_adapter.outcome }}'"
+          } > "${LOG_DIR}/e2e-metrics.env"
+
+      - name: Upload local adapter artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-leg-local-adapter-tigris
+          path: e2e-logs/local-adapter-tigris
+          retention-days: 14
+
   cache-registry-benchmark:
     name: E2E / Benchmark / Cache Registry / ${{ matrix.backend_label }} / ${{ matrix.phase_label }}
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
@@ -853,6 +968,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - e2e
+      - local-adapter-tigris
       - cache-registry-benchmark
       - cross-runner-verify
     if: always()
