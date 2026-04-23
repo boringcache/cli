@@ -210,7 +210,9 @@ fn derive_cache_refs(context: &CiRunContext, fallback_ref_tag: &str) -> Result<D
     }
 
     push_tag(&mut import_ref_tags, fallback_ref_tag.to_string());
-    push_tag(&mut promotion_ref_tags, fallback_ref_tag.to_string());
+    if context.source_ref_type != CiSourceRefType::PullRequest {
+        push_tag(&mut promotion_ref_tags, fallback_ref_tag.to_string());
+    }
     let import_ref_tags = validate_ref_tag_list(import_ref_tags)?;
     let promotion_ref_tags = validate_ref_tag_list(promotion_ref_tags)?;
 
@@ -586,6 +588,43 @@ mod tests {
             plan.oci_cache.promotion_ref_tags,
             ["branch-main", "default", "buildcache"]
         );
+    }
+
+    #[test]
+    fn resolve_docker_plan_keeps_pr_fallback_restore_only_by_default() {
+        let plan = resolve_docker_plan(ResolveDockerPlanInput {
+            raw_tag: "docker-main",
+            explicit_cache_ref_tag: None,
+            explicit_cache_run_ref_tag: None,
+            explicit_cache_from_ref_tags: &[],
+            explicit_cache_promote_ref_tags: &[],
+            endpoint_host: "127.0.0.1",
+            port: 5000,
+            cache_mode: "max",
+            read_only: false,
+            run_context: Some(CiRunContext {
+                provider: "github-actions".to_string(),
+                run_uid: "12345".to_string(),
+                run_attempt: Some("1".to_string()),
+                repository: Some("acme/widgets".to_string()),
+                source_ref_type: CiSourceRefType::PullRequest,
+                source_ref: Some("refs/pull/7/merge".to_string()),
+                source_ref_name: Some("feature/cache".to_string()),
+                head_ref_name: Some("feature/cache".to_string()),
+                base_ref_name: Some("main".to_string()),
+                default_branch: Some("main".to_string()),
+                pull_request_number: Some(7),
+                commit_sha: Some("abcdef".to_string()),
+                run_started_at: Some("2026-04-21T10:00:00Z".to_string()),
+            }),
+        })
+        .unwrap();
+
+        assert_eq!(
+            plan.oci_cache.cache_from_ref_tags,
+            ["pr-7", "branch-feature-cache", "default", "buildcache"]
+        );
+        assert_eq!(plan.oci_cache.promotion_ref_tags, ["pr-7"]);
     }
 
     #[test]

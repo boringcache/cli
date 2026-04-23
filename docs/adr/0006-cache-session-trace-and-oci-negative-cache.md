@@ -253,6 +253,7 @@ The first CLI baseline is implemented:
 - shared singleflight metrics record leaders, followers, follower wait percentiles, timeouts, takeovers, and post-flight local-hit/retry-miss counts for OCI and KV lookup/download helpers;
 - `AppState` owns a short-lived OCI negative cache for manifest-ref, blob-locator, download-url, and remote-blob misses;
 - confirmed OCI miss paths insert negative-cache entries, and locator population, upload finalize, mount reuse, and manifest publish invalidate relevant entries;
+- OCI blob `HEAD` remote existence-check errors now stay classified as backend/storage uncertainty: strict mode returns the transient error, best-effort mode degrades to an uncached miss at the dispatch layer, and neither path inserts a `RemoteBlob` negative-cache entry;
 - OCI blob hydrate-then-serve records storage GET bytes, first body wait, body duration, local spool write duration, digest verification duration/failure, and cache-promotion timing/failure;
 - proxy shutdown emits a `cache_session_summary` JSONL event with proxy, storage, OCI, singleflight, local-cache, and BuildKit sections;
 - `/_boringcache/status` exposes the same live session-summary snapshot under `session_summary`, and proxy shutdown reuses that builder for the JSONL event, so diagnostics do not need to control proxy lifecycle just to capture the summary shape;
@@ -268,7 +269,9 @@ Remaining trace depth belongs in later passes: Rails p50/p95 rollups from reques
 
 Documentation and the first CLI baseline are aligned as of 2026-04-22. The trace is accepted as the platform insight spine; CLI-to-Rails summary persistence is implemented locally through `cache-rollups`; Rails percentile rollups, action enrichment, benchmark artifact validation, release-path proof, and broader operator reporting remain follow-up work.
 
-Focused CLI tests now cover negative-cache invalidation after local writes.
+Focused CLI tests now cover negative-cache invalidation after local writes and
+the remote-existence-check error path that must degrade without inserting a
+`RemoteBlob` miss.
 
 Release proof is updated through the first receipt-strict E2E gate and the first provider-neutral same-alias writer CI gate. The 2026-04-21 `1.12.42` release-prep push at CLI commit `14c1dc2` exercised the then-current `origin/main` CLI path and passed CLI CI, but required registry E2E failed in `Registry / Docker BuildKit`, `Registry / Prefetch Smoke`, and `Cache Registry / Cross-Runner Verify`. The failure shape was consistent: published manifests/indices were visible, but verified blob download URL coverage was `0/N`, and downstream BuildKit/CAS reads returned missing blobs or `404`.
 

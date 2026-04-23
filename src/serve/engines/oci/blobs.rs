@@ -163,12 +163,15 @@ pub(crate) async fn get_blob(
                 Ok(exists) => exists,
                 Err(error) => {
                     log::warn!(
-                        "OCI HEAD degraded to miss after remote blob existence check failed for {}@{} ({})",
+                        "OCI HEAD remote blob existence check failed for {}@{} ({})",
                         name,
                         digest,
                         error.message()
                     );
-                    false
+                    state
+                        .oci_engine_diagnostics
+                        .record_remote_blob_check_error();
+                    return Err(error);
                 }
             }
         };

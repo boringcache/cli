@@ -60,7 +60,7 @@ When you run `boringcache docker` directly in GitHub Actions, the CLI derives Do
 
 For Docker and BuildKit registry caches on pull requests, restore-only is the default.
 A PR-scoped ref such as `/cache:pr-3208` may be absent and return 404, but the CLI/action should still import the rest of the planned fallback chain: branch, default, and the stable fallback such as `/cache:buildcache`.
-If a workflow intentionally wants PR-scoped Docker writes, give the job a save-capable token and set `save-on-pull-request: true`; do that only when the PR write scope is isolated, not merely to make the PR ref exist.
+If a workflow intentionally wants PR-scoped Docker writes, give the job a save-capable token and set `save-on-pull-request: true`; do that only when the PR write scope is isolated, not merely to make the PR ref exist. In PR context, the derived write target is the PR alias. The stable fallback remains restore-only unless an explicit promotion override is configured.
 
 Keep the proxy story simple in CI too:
 

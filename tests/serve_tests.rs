@@ -6203,6 +6203,77 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
 }
 
 #[tokio::test]
+async fn test_head_remote_blob_check_error_does_not_insert_negative_cache() {
+    let mut server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.fail_on_cache_error = false;
+
+    let blob_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    {
+        let mut locator = state.blob_locator.write().await;
+        locator.insert(
+            "my-cache",
+            blob_digest,
+            BlobLocatorEntry {
+                cache_entry_id: "entry-existing".to_string(),
+                size_bytes: 128,
+                download_url: None,
+                download_url_cached_at: None,
+            },
+        );
+    }
+
+    let remote_check_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "verify_storage": true,
+            "blobs": [{
+                "digest": blob_digest,
+                "size_bytes": 0
+            }]
+        })))
+        .with_status(500)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":"backend unavailable"}"#)
+        .expect(3)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/v2/my-cache/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        !state
+            .oci_negative_cache
+            .metadata_hints()
+            .contains_key("oci_negative_remote_blob_entries")
+    );
+
+    let diagnostics = state
+        .oci_engine_diagnostics
+        .metadata_hints(state.oci_hydration_policy.as_str());
+    assert_eq!(
+        diagnostics
+            .get("oci_engine_remote_blob_check_errors")
+            .map(String::as_str),
+        Some("1")
+    );
+    assert!(!diagnostics.contains_key("oci_engine_negative_cache_insert_remote_blob"));
+    remote_check_mock.assert_async().await;
+}
+
+#[tokio::test]
 async fn test_blob_proxy_returns_error_on_storage_failure() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;

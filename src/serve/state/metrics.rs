@@ -368,6 +368,7 @@ pub struct OciEngineDiagnostics {
     miss_remote_blob: AtomicU64,
     miss_manifest: AtomicU64,
     miss_download_url: AtomicU64,
+    remote_blob_check_errors: AtomicU64,
     negative_cache_hit_manifest_ref: AtomicU64,
     negative_cache_hit_blob_locator: AtomicU64,
     negative_cache_hit_download_url: AtomicU64,
@@ -443,6 +444,7 @@ impl OciEngineDiagnostics {
             miss_remote_blob: AtomicU64::new(0),
             miss_manifest: AtomicU64::new(0),
             miss_download_url: AtomicU64::new(0),
+            remote_blob_check_errors: AtomicU64::new(0),
             negative_cache_hit_manifest_ref: AtomicU64::new(0),
             negative_cache_hit_blob_locator: AtomicU64::new(0),
             negative_cache_hit_download_url: AtomicU64::new(0),
@@ -584,6 +586,10 @@ impl OciEngineDiagnostics {
             OciNegativeCacheReason::RemoteBlob => &self.negative_cache_insert_remote_blob,
         }
         .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_remote_blob_check_error(&self) {
+        self.remote_blob_check_errors.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn record_storage_get(
@@ -819,6 +825,11 @@ impl OciEngineDiagnostics {
             &mut hints,
             "oci_engine_miss_download_url",
             &self.miss_download_url,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_remote_blob_check_errors",
+            &self.remote_blob_check_errors,
         );
         self.insert_counter(
             &mut hints,
