@@ -171,7 +171,7 @@ The OCI pass should land in small commits in this order:
 2. Upload engine: move start upload, PATCH, close PUT, empty finalize reuse, cross-repository mount, and `416` behavior from handlers into `serve::engines::oci::uploads`. Done in the second increment.
 3. OCI/KV path audit: before moving manifests, list every `cache_registry/kv` path touched by OCI and decide whether it is protocol-neutral substrate or OCI manifest-graph behavior that belongs in the engine. Done in `docs/oci-kv-path-audit.md`.
 4. Manifest engine: move descriptor extraction, content-type resolution, child manifest expansion, digest references, referrers descriptor construction, and missing-descriptor errors into `serve::engines::oci::manifests`. Done for the current manifest publish/read path.
-5. Blob engine: move HEAD/GET locality, blob body cache reads, remote URL refresh, range handling, and digest/size verification into `serve::engines::oci::blobs`. Done, including ranged GET, invalid ranges, `If-Range`, digest/size verification, and read-through hydration.
+5. Blob engine: move HEAD/GET locality, blob body cache reads, remote URL refresh, range handling, and digest/size verification into `serve::engines::oci::blobs`. Done, including ranged GET, invalid ranges, `If-Range`, digest/size verification, read-through hydration, and HEAD remote-check failure degradation without negative-cache poisoning.
 6. Publish engine: move save/pointer/confirm/alias/referrer orchestration into `serve::engines::oci::publish`, with handlers only parsing request bodies and returning responses. Done for the OCI publish path.
 7. Diagnostics: add an `OciEngineDiagnostics` value with proof source counts, local vs remote reads, graph expansion count, publish timings, miss causes, and hydration state. Done, exposed through status snapshots, cache-op metadata hints, and E2E summary artifacts.
 8. BuildKit acceptance: run cold, warm, proxy restart, default metadata-only read-through, hidden background/strict controls, and random body graph registry E2E. Done locally before real-project replay; release gating must keep the Docker BuildKit and OCI manifest-contract E2E legs present and green.
@@ -237,6 +237,7 @@ For OCI specifically:
 - OCI responses that represent immutable digest-addressed content include digest-valued `ETag` headers.
 - Upload digest verification hashes streaming request bodies on one-shot paths and only rereads files when resumable state makes that necessary.
 - Transfer clients keep HTTP/2 pooling and adaptive windows on by default; any change to pool sizing or protocol fallback must be benchmarked against BuildKit cache import/export.
+- Blob `HEAD` remote-existence check failures return OCI-shaped `BLOB_UNKNOWN` and do not insert remote-blob negative-cache entries, so transient backend failures do not block BuildKit upload fallback.
 - Blob engine ranged `GET` behavior remains covered before claiming full blob-path parity.
 - BuildKit E2E proves cold, warm, restart, default metadata-only read-through, hidden background/strict controls, and random-body graph behavior. Real-project replay should then prove the same default path against a normal multi-stage Dockerfile before GHA adapter rollout.
 - Manifest publish refuses descriptors that cannot be traced to a named source.

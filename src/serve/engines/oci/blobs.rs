@@ -171,7 +171,7 @@ pub(crate) async fn get_blob(
                     state
                         .oci_engine_diagnostics
                         .record_remote_blob_check_error();
-                    return Err(error);
+                    return Err(OciError::blob_unknown(format!("{name}@{digest}")));
                 }
             }
         };
