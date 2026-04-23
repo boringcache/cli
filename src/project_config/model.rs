@@ -75,11 +75,11 @@ pub struct AdapterConfig {
     pub tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<AdapterCommandConfig>,
-    #[serde(default)]
+    #[serde(default, rename = "no-platform", alias = "no_platform")]
     pub no_platform: bool,
-    #[serde(default)]
+    #[serde(default, rename = "no-git", alias = "no_git")]
     pub no_git: bool,
-    #[serde(default)]
+    #[serde(default, rename = "read-only", alias = "read_only")]
     pub read_only: bool,
     #[serde(default, rename = "fail-on-cache-error", alias = "fail_on_cache_error")]
     pub fail_on_cache_error: bool,
@@ -100,9 +100,17 @@ pub struct AdapterConfig {
     pub skip_save: bool,
     #[serde(default, rename = "save-on-failure", alias = "save_on_failure")]
     pub save_on_failure: bool,
-    #[serde(rename = "cache-mode", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "cache-mode",
+        alias = "cache_mode",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cache_mode: Option<String>,
-    #[serde(rename = "cache-ref-tag", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "cache-ref-tag",
+        alias = "cache_ref_tag",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cache_ref_tag: Option<String>,
     #[serde(
         rename = "cache-run-ref-tag",
@@ -132,7 +140,11 @@ pub struct AdapterConfig {
     pub sccache_key_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
-    #[serde(rename = "endpoint-host", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "endpoint-host",
+        alias = "endpoint_host",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub endpoint_host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,

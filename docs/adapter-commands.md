@@ -66,6 +66,7 @@ Useful adapter fields:
 
 - `tag` — cache tag for the proxy session
 - `command` — command to run when you call `boringcache <adapter>` with no args; accepts an argv array or a shell-style string
+- `no-platform`, `no-git`, `read-only` — proxy scope and write-mode defaults you would otherwise keep repeating as flags
 - `entries` / `profiles` — optional archive entries to restore before the tool runs
 - `metadata-hints` — low-cardinality session metadata
 - `host`, `endpoint-host`, `port` — local endpoint settings
@@ -115,6 +116,9 @@ Keep these hints low-cardinality and replayable. Good values are
 Use `phase=prewarm` only for a real standalone priming session.
 The normal precedence is repo config first, then
 `BORINGCACHE_PROXY_METADATA_HINTS`, then explicit CLI flags.
+Use the same kebab-case spellings in `.boringcache.toml` that you see in CLI
+flags and docs; the config reader accepts both kebab-case and snake_case for
+adapter proxy fields.
 
 `command` is repo config, not a general templating system.
 For proxy-backed commands, BoringCache only substitutes these placeholders inside command arguments:

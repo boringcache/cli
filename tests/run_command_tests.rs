@@ -955,6 +955,48 @@ fn test_turbo_dry_run_json_reports_on_demand_proxy_mode() {
 }
 
 #[test]
+fn test_turbo_dry_run_json_uses_kebab_case_proxy_flags_from_adapter_config() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.turbo]
+tag = "turbo-main"
+command = ["pnpm", "turbo", "run", "build"]
+no-platform = true
+no-git = true
+read-only = true
+metadata-hints = ["phase=warm"]
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["turbo", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute turbo dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(parsed["adapter"], "turbo");
+    assert_eq!(parsed["proxy"]["no_platform"], true);
+    assert_eq!(parsed["proxy"]["no_git"], true);
+    assert_eq!(parsed["proxy"]["read_only"], true);
+    assert_eq!(parsed["proxy"]["metadata_hints"]["phase"], "warm");
+}
+
+#[test]
 fn test_nx_dry_run_json_injects_remote_cache_env() {
     let temp_dir = TempDir::new().expect("temp dir");
     std::fs::write(

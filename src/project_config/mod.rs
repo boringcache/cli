@@ -301,12 +301,17 @@ metadata-hints = ["project=web"]
 [adapters.turbo]
 tag = "turbo-main"
 command = ["pnpm", "turbo", "run", "build"]
+no-platform = true
+no-git = true
+read-only = true
 entries = ["pnpm-store"]
 profiles = ["bundle-install"]
 metadata-hints = ["phase=warm"]
 fail-on-cache-error = true
 skip-save = true
 save-on-failure = true
+cache-mode = "min"
+cache-ref-tag = "turbo-buildcache"
 port = 5001
 endpoint-host = "host.docker.internal"
 sccache-key-prefix = "rust/ci"
@@ -321,12 +326,17 @@ sccache-key-prefix = "rust/ci"
         assert_eq!(loaded.config.workspace.as_deref(), Some("org/workspace"));
         assert_eq!(loaded.config.proxy.metadata_hints, vec!["project=web"]);
         assert_eq!(adapter.tag.as_deref(), Some("turbo-main"));
+        assert!(adapter.no_platform);
+        assert!(adapter.no_git);
+        assert!(adapter.read_only);
         assert_eq!(adapter.entries, vec!["pnpm-store"]);
         assert_eq!(adapter.profiles, vec!["bundle-install"]);
         assert_eq!(adapter.metadata_hints, vec!["phase=warm"]);
         assert!(adapter.fail_on_cache_error);
         assert!(adapter.skip_save);
         assert!(adapter.save_on_failure);
+        assert_eq!(adapter.cache_mode.as_deref(), Some("min"));
+        assert_eq!(adapter.cache_ref_tag.as_deref(), Some("turbo-buildcache"));
         assert_eq!(adapter.port, Some(5001));
         assert_eq!(
             adapter.endpoint_host.as_deref(),

@@ -15,7 +15,7 @@ LOG_DIR="${LOG_DIR:-${LOG_ROOT}/${RUN_ID}}"
 RAILS_PIDFILE="${RAILS_PIDFILE:-${LOG_DIR}/rails-server.pid}"
 TMP_DIR="${LOG_DIR}/tmp"
 SUMMARY_FILE="${LOG_DIR}/summary.txt"
-LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-docker,oci-same-alias,gradle,maven,turbo,nx,go,bazel,sccache}"
+LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-config-hints,docker,oci-same-alias,gradle,maven,turbo,nx,go,bazel,sccache}"
 JAVA_TOOL_VERSION="${JAVA_TOOL_VERSION:-java@21.0.2}"
 MAVEN_TOOL_VERSION="${MAVEN_TOOL_VERSION:-maven@3.9.14}"
 
@@ -127,6 +127,262 @@ assert_metric_gt_zero() {
   if ! [[ "${value}" =~ ^[0-9]+$ ]] || [[ "${value}" -eq 0 ]]; then
     fail "expected ${key} > 0 in ${summary_file}"
   fi
+}
+
+write_repo_config() {
+  local config_path="$1"
+  local body="$2"
+  cat > "${config_path}" <<EOF
+workspace = "${WORKSPACE}"
+
+${body}
+EOF
+}
+
+assert_recent_session_context() {
+  local label="$1"
+  local project_hint="$2"
+  local phase_hint="$3"
+  local scenario_hint="$4"
+  local tool_hint="$5"
+  local attempts="${6:-12}"
+  local sessions_file="${LOG_DIR}/${label}-sessions.json"
+  local error_file="${LOG_DIR}/${label}-sessions.err"
+
+  for _ in $(seq 1 "${attempts}"); do
+    if "${BINARY}" sessions "${WORKSPACE}" --period 1h --limit 50 --json \
+      > "${sessions_file}" 2> "${error_file}"; then
+      if python3 - "${sessions_file}" "${project_hint}" "${phase_hint}" "${scenario_hint}" "${tool_hint}" <<'PY'
+import json
+import sys
+
+path, expected_project, expected_phase, expected_scenario, expected_tool = sys.argv[1:6]
+with open(path, "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+for session in payload.get("sessions", []):
+    if expected_project and session.get("project_hint") != expected_project:
+        continue
+    if expected_phase and session.get("phase_hint") != expected_phase:
+        continue
+    hints = session.get("metadata_hints") or {}
+    if expected_scenario and hints.get("scenario") != expected_scenario:
+        continue
+    if expected_tool and hints.get("tool") != expected_tool:
+        continue
+    sys.exit(0)
+
+sys.exit(1)
+PY
+      then
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+
+  cat "${sessions_file}" 2>/dev/null || true
+  cat "${error_file}" 2>/dev/null || true
+  fail "did not find expected session context for ${label}"
+}
+
+run_gradle_proxy_round_trip() {
+  local endpoint="$1"
+  local key="$2"
+  local phase_dir="$3"
+  local payload_file="${phase_dir}/payload.bin"
+  local output_file="${phase_dir}/output.bin"
+  mkdir -p "${phase_dir}"
+
+  printf 'gradle-%s\n' "${key}" > "${payload_file}"
+  curl -fsS -X PUT --data-binary @"${payload_file}" "${endpoint}/cache/${key}" \
+    > "${phase_dir}/put.out"
+  curl -fsS "${endpoint}/cache/${key}" -o "${output_file}"
+  cmp -s "${payload_file}" "${output_file}" || fail "gradle proxy round-trip mismatch for ${key}"
+}
+
+run_config_hints_e2e() {
+  local tool_dir="${TMP_DIR}/config-hints"
+  local run_dir="${tool_dir}/run-proxy"
+  local standalone_dir="${tool_dir}/standalone-proxy"
+  local turbo_dir="${tool_dir}/turbo-adapter"
+  local run_project="config-hints-run-${RUN_ID}"
+  local standalone_project="config-hints-standalone-${RUN_ID}"
+  local turbo_project="config-hints-turbo-${RUN_ID}"
+  local run_tag="local-config-hints-run-${RUN_ID}"
+  local standalone_tag="local-config-hints-standalone-${RUN_ID}"
+  local turbo_tag="local-config-hints-turbo-${RUN_ID}"
+  local standalone_port="${CONFIG_HINTS_PROXY_PORT:-5322}"
+  local standalone_log="${standalone_dir}/proxy.log"
+  local standalone_pid=""
+  local old_pwd="${PWD}"
+
+  mkdir -p "${run_dir}" "${standalone_dir}" "${turbo_dir}/apps/app1"
+
+  note "Config hints E2E: run --proxy with repo config"
+  write_repo_config "${run_dir}/.boringcache.toml" '[proxy]
+metadata-hints = ["project='"${run_project}"'","phase=repo"]'
+  (
+    cd "${run_dir}"
+    "${BINARY}" run \
+      --proxy "${run_tag}" \
+      --skip-restore \
+      --skip-save \
+      --no-platform \
+      --no-git \
+      -- \
+      sh -c 'set -euo pipefail
+        printf "run-proxy-config\n" > payload.bin
+        curl -fsS -X PUT --data-binary @payload.bin "{ENDPOINT}/cache/run-config-key" >/dev/null
+        curl -fsS "{ENDPOINT}/cache/run-config-key" -o output.bin
+        cmp payload.bin output.bin' \
+      > "${run_dir}/run.log" 2>&1
+  )
+  wait_for_tag_visibility "${run_tag}"
+  assert_recent_session_context "config-hints-run" "${run_project}" "repo" "" ""
+  delete_tag "${run_tag}"
+
+  note "Config hints E2E: standalone cache-registry with repo config and overrides"
+  write_repo_config "${standalone_dir}/.boringcache.toml" '[proxy]
+metadata-hints = ["project='"${standalone_project}"'","scenario=repo"]'
+  cd "${standalone_dir}"
+  BORINGCACHE_PROXY_METADATA_HINTS="scenario=env" \
+    RUST_LOG="${RUST_LOG:-warn}" \
+    BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
+    BORINGCACHE_OBSERVABILITY_JSONL_PATH="${standalone_dir}/metrics.jsonl" \
+      "${BINARY}" cache-registry "${WORKSPACE}" "${standalone_tag}" \
+        --host 127.0.0.1 \
+        --port "${standalone_port}" \
+        --metadata-hint phase=flag \
+        --no-platform \
+        --no-git \
+        > "${standalone_log}" 2>&1 &
+  standalone_pid=$!
+  cd "${old_pwd}"
+  for _ in $(seq 1 60); do
+    if curl -fsS "http://127.0.0.1:${standalone_port}/_boringcache/status" >/dev/null 2>&1; then
+      break
+    fi
+    if ! kill -0 "${standalone_pid}" >/dev/null 2>&1; then
+      tail -n 120 "${standalone_log}" || true
+      fail "standalone config proxy exited before readiness"
+    fi
+    sleep 1
+  done
+  run_gradle_proxy_round_trip "http://127.0.0.1:${standalone_port}" "standalone-config-key" "${standalone_dir}"
+  kill "${standalone_pid}" >/dev/null 2>&1 || true
+  wait "${standalone_pid}" >/dev/null 2>&1 || true
+  standalone_pid=""
+  wait_for_tag_visibility "${standalone_tag}"
+  assert_recent_session_context \
+    "config-hints-standalone" \
+    "${standalone_project}" \
+    "flag" \
+    "env" \
+    ""
+  delete_tag "${standalone_tag}"
+
+  if command -v turbo >/dev/null 2>&1; then
+    note "Config hints E2E: adapter command from repo config"
+    cat > "${turbo_dir}/package.json" <<'EOF'
+{
+  "name": "turbo-config-hints-e2e",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "npm@10.9.0",
+  "workspaces": ["apps/*"]
+}
+EOF
+
+    cat > "${turbo_dir}/turbo.json" <<'EOF'
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalEnv": ["TURBO_MARKER_FILE"],
+  "tasks": {
+    "build": {
+      "outputs": ["dist/**"]
+    }
+  }
+}
+EOF
+
+    cat > "${turbo_dir}/apps/app1/package.json" <<'EOF'
+{
+  "name": "app1",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "bash ./build.sh"
+  }
+}
+EOF
+
+    cat > "${turbo_dir}/apps/app1/build.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+count=0
+if [[ -f "${TURBO_MARKER_FILE}" ]]; then
+  count=$(cat "${TURBO_MARKER_FILE}")
+fi
+count=$((count + 1))
+echo "${count}" > "${TURBO_MARKER_FILE}"
+mkdir -p dist
+echo "turbo-${count}" > dist/out.txt
+EOF
+    chmod +x "${turbo_dir}/apps/app1/build.sh"
+
+    cat > "${turbo_dir}/.boringcache.toml" <<EOF
+workspace = "${WORKSPACE}"
+
+[proxy]
+metadata-hints = ["project=${turbo_project}"]
+
+[adapters.turbo]
+tag = "${turbo_tag}"
+command = ["turbo", "run", "build", "--cache-dir=.turbo/cache", "--output-logs=errors-only"]
+port = 5323
+no-platform = true
+no-git = true
+metadata-hints = ["tool=turbo", "phase=warm", "scenario=adapter-config"]
+EOF
+
+    (
+      cd "${turbo_dir}"
+      TURBO_MARKER_FILE="${turbo_dir}/marker.txt" \
+      BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
+      BORINGCACHE_OBSERVABILITY_JSONL_PATH="${turbo_dir}/metrics.jsonl" \
+        "${BINARY}" turbo \
+        > "${turbo_dir}/cold.log" 2>&1
+    )
+    [[ "$(cat "${turbo_dir}/marker.txt")" == "1" ]] || fail "turbo config cold run did not execute exactly once"
+    wait_for_tag_visibility "${turbo_tag}"
+
+    rm -rf "${turbo_dir}/.turbo" "${turbo_dir}/apps/app1/dist"
+    (
+      cd "${turbo_dir}"
+      TURBO_MARKER_FILE="${turbo_dir}/marker.txt" \
+      BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
+      BORINGCACHE_OBSERVABILITY_JSONL_PATH="${turbo_dir}/metrics.jsonl" \
+        "${BINARY}" turbo \
+        > "${turbo_dir}/warm.log" 2>&1
+    )
+    [[ "$(cat "${turbo_dir}/marker.txt")" == "1" ]] || fail "turbo config warm run re-executed instead of using remote cache"
+    assert_recent_session_context \
+      "config-hints-turbo" \
+      "${turbo_project}" \
+      "warm" \
+      "adapter-config" \
+      "turbo"
+    delete_tag "${turbo_tag}"
+  else
+    skip_tool "config-hints-turbo" "turbo not installed"
+  fi
+
+  if [[ -n "${standalone_pid}" ]]; then
+    kill "${standalone_pid}" >/dev/null 2>&1 || true
+    wait "${standalone_pid}" >/dev/null 2>&1 || true
+  fi
+
+  pass_tool "config-hints" "repo config, proxy overrides, and adapter config recorded session hints"
 }
 
 wait_for_local_server() {
@@ -966,6 +1222,7 @@ main() {
   build_cli_binary
   start_local_rails
 
+  run_selected_tool "config-hints" run_config_hints_e2e
   run_selected_tool "gradle" run_gradle_e2e
   run_selected_tool "maven" run_maven_e2e
   run_selected_tool "docker" run_docker_e2e

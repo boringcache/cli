@@ -58,6 +58,13 @@ The config should store semantic intent. The planner should derive runner-specif
 - Docker immutable run refs and alias promotion refs;
 - endpoint hosts such as `host.docker.internal` when the builder runs in another container.
 
+Implementation note, 2026-04-23: adapter repo config now accepts the same
+kebab-case spellings users see in CLI help for repeated proxy fields such as
+`no-platform`, `no-git`, `read-only`, `cache-mode`, `cache-ref-tag`, and
+`endpoint-host`, with snake_case aliases preserved. This keeps `.boringcache.toml`
+as the first-class place to remove repeated flag wiring for both local CLI use
+and external helpers that ask the CLI for a plan.
+
 ## Docker Rule
 
 Do not put BoringCache commands, tokens, build args, secret mounts, or a bind-mounted `boringcache-bin` helper inside Dockerfile `RUN` steps.
