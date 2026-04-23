@@ -56,6 +56,12 @@ impl CiContext {
     pub fn run_context(&self) -> Option<&CiRunContext> {
         self.run_context.as_ref()
     }
+
+    pub fn inferred_project_hint(&self) -> Option<String> {
+        self.run_context
+            .as_ref()
+            .and_then(|context| context.inferred_project_hint(self.benchmark))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -83,6 +89,24 @@ pub struct CiRunContext {
     pub commit_sha: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_started_at: Option<String>,
+}
+
+impl CiRunContext {
+    pub fn inferred_project_hint(&self, benchmark_mode: bool) -> Option<String> {
+        let repository = self.repository.as_deref()?;
+        let repo_name = repository.rsplit('/').next()?.trim();
+        if repo_name.is_empty() {
+            return None;
+        }
+
+        let hint = if benchmark_mode {
+            repo_name.strip_prefix("benchmark-").unwrap_or(repo_name)
+        } else {
+            repo_name
+        };
+
+        Some(hint.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

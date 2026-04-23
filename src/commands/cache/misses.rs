@@ -36,22 +36,42 @@ fn render_misses_report(response: &WorkspaceMissesResponse) {
     crate::commands::status::print_field("Period", &format!("last {}", response.period.key));
     crate::commands::status::print_field("Showing", &showing_range(&response.pagination));
     crate::commands::status::print_field(
-        "Recurring",
+        "Warm hit rate",
+        &crate::commands::status::format_percent(response.cache_health.warm_hit_rate),
+    );
+    crate::commands::status::print_field(
+        "Actionable",
         &format!(
-            "{} ({})",
+            "{} total, {} recurring, {} first-seen",
+            response.cache_health.session_miss_total,
             response.cache_health.recurring_misses,
-            crate::commands::status::format_percent(response.cache_health.recurring_pct)
+            response.cache_health.cold_misses
         ),
     );
     crate::commands::status::print_field(
-        "Cold",
+        "Excluded seed",
+        &format!(
+            "{} across {} labeled sessions",
+            response.cache_health.excluded_seed_misses,
+            response.cache_health.excluded_seed_sessions
+        ),
+    );
+    crate::commands::status::print_field(
+        "Degraded",
         &format!(
             "{} ({})",
-            response.cache_health.cold_misses,
-            crate::commands::status::format_percent(response.cache_health.cold_pct)
+            response.cache_health.degraded_misses,
+            crate::commands::status::format_percent(response.cache_health.degraded_pct)
         ),
     );
     crate::ui::blank_line();
+
+    if response.cache_health.excluded_seed_sessions == 0 {
+        println!(
+            "Tip: label seed or prewarm runs with --metadata-hint phase=seed (or repo metadata-hints) so expected fill traffic stays out of actionable misses."
+        );
+        crate::ui::blank_line();
+    }
 
     if response.missed_keys.is_empty() {
         println!("  none");

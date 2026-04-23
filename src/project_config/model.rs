@@ -7,12 +7,31 @@ use std::path::PathBuf;
 pub struct RepoConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "RepoProxyConfig::is_empty")]
+    pub proxy: RepoProxyConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub entries: BTreeMap<String, RepoEntryConfig>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, RepoProfileConfig>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adapters: BTreeMap<String, AdapterConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RepoProxyConfig {
+    #[serde(
+        default,
+        rename = "metadata-hints",
+        alias = "metadata_hints",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub metadata_hints: Vec<String>,
+}
+
+impl RepoProxyConfig {
+    pub fn is_empty(&self) -> bool {
+        self.metadata_hints.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -136,6 +155,7 @@ pub struct ResolvedAdapterConfig {
 pub struct ResolvedRunPlan {
     pub workspace: Option<String>,
     pub repo_config_path: Option<PathBuf>,
+    pub proxy_metadata_hints: Vec<String>,
     pub tag_path_pairs: Vec<String>,
     pub env_vars: BTreeMap<String, String>,
     pub archive_entries: Vec<ResolvedRunEntryPlan>,

@@ -252,6 +252,7 @@ pub async fn execute(
     let project_config::ResolvedRunPlan {
         workspace: project_workspace,
         repo_config_path,
+        proxy_metadata_hints: configured_proxy_metadata_hints,
         tag_path_pairs: _planned_pairs,
         env_vars,
         archive_entries: planned_archive_entries,
@@ -352,7 +353,11 @@ pub async fn execute(
         .unwrap_or_default();
     let archive_enabled = !tag_path_pairs.is_empty();
     let proxy_enabled = proxy.is_some();
-    let proxy_metadata_hints = cache_registry::resolve_proxy_metadata_hints(&metadata_hints)?;
+    let mut proxy_metadata_hints = cache_registry::resolve_proxy_metadata_hints_with_config(
+        &configured_proxy_metadata_hints,
+        &metadata_hints,
+    )?;
+    cache_registry::inject_default_proxy_metadata_hints(&mut proxy_metadata_hints);
     let oci_prefetch_refs = cache_registry::resolve_oci_prefetch_refs(&oci_prefetch_ref)?;
     let oci_hydration_policy = cache_registry::resolve_oci_hydration_policy(&oci_hydration)?;
     let oci_prefetch_ref_specs = oci_prefetch_refs

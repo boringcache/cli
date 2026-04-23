@@ -25,7 +25,7 @@ pub struct CacheRegistryArgs {
     #[arg(
         long,
         value_name = "KEY=VALUE",
-        help = "Attach low-cardinality metadata hints to proxy sessions (repeatable; also reads BORINGCACHE_PROXY_METADATA_HINTS)"
+        help = "Attach low-cardinality metadata hints to proxy sessions, for example project=web or phase=seed (repeatable; also reads BORINGCACHE_PROXY_METADATA_HINTS)"
     )]
     pub metadata_hint: Vec<String>,
 

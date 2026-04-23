@@ -283,8 +283,14 @@ pub async fn adapter_execute(
     let skip_restore = adapter_config.skip_restore || args.skip_restore;
     let skip_save = adapter_config.skip_save || args.skip_save;
     let save_on_failure = adapter_config.save_on_failure || args.save_on_failure;
-    let metadata_hint_args =
-        merge_metadata_hints(&adapter_config.metadata_hints, &args.metadata_hint);
+    let metadata_hint_args = merge_metadata_hints(
+        loaded_config
+            .as_ref()
+            .map(|loaded| loaded.config.proxy.metadata_hints.as_slice())
+            .unwrap_or(&[]),
+        &adapter_config.metadata_hints,
+        &args.metadata_hint,
+    );
     let mut oci_prefetch_refs = cache_registry::resolve_oci_prefetch_refs(&args.oci_prefetch_ref)?;
     let oci_hydration_policy = cache_registry::resolve_oci_hydration_policy(&args.oci_hydration)?;
     let profile_requests = merge_profiles(&adapter_config.profiles, &args.profile);
@@ -302,6 +308,7 @@ pub async fn adapter_execute(
     let startup_warm = !(args.on_demand || docker_read_only_on_demand);
     let mut proxy_metadata_hints =
         cache_registry::resolve_proxy_metadata_hints(&metadata_hint_args)?;
+    cache_registry::inject_default_proxy_metadata_hints(&mut proxy_metadata_hints);
     let mut generated_proxy_metadata_hints = Vec::new();
     let effective_skip_save = skip_save || effective_read_only;
     let docker_cache_mode = project_config::prefer_cli_scalar(
@@ -360,7 +367,6 @@ pub async fn adapter_execute(
         }
         if let Some(run_metadata) = plan.oci_cache.run_metadata.as_ref() {
             generated_proxy_metadata_hints.push(("ci_provider", run_metadata.provider.clone()));
-            generated_proxy_metadata_hints.push(("ci_run_uid", run_metadata.run_uid.clone()));
             if let Some(run_started_at) = run_metadata.run_started_at.as_deref() {
                 generated_proxy_metadata_hints
                     .push(("ci_run_started_at", run_started_at.to_string()));
@@ -693,9 +699,14 @@ fn merge_profiles(configured: &[String], cli: &[String]) -> Vec<String> {
     project_config::prefer_cli_list(configured, cli, project_config::normalize_profile_name)
 }
 
-fn merge_metadata_hints(configured: &[String], cli: &[String]) -> Vec<String> {
+fn merge_metadata_hints(
+    configured_proxy: &[String],
+    configured_adapter: &[String],
+    cli: &[String],
+) -> Vec<String> {
     let mut merged = Vec::new();
-    merged.extend(configured.iter().cloned());
+    merged.extend(configured_proxy.iter().cloned());
+    merged.extend(configured_adapter.iter().cloned());
     merged.extend(cli.iter().cloned());
     merged
 }
@@ -806,12 +817,14 @@ mod tests {
 
     #[test]
     fn merge_metadata_hints_keeps_configured_order_and_appends_cli_values() {
-        let configured = vec!["phase=warm".to_string(), "tool=turbo".to_string()];
+        let configured_proxy = vec!["project=web".to_string()];
+        let configured_adapter = vec!["phase=warm".to_string(), "tool=turbo".to_string()];
         let cli = vec!["phase=ready".to_string(), "lane=ci".to_string()];
 
         assert_eq!(
-            merge_metadata_hints(&configured, &cli),
+            merge_metadata_hints(&configured_proxy, &configured_adapter, &cli),
             vec![
+                "project=web".to_string(),
                 "phase=warm".to_string(),
                 "tool=turbo".to_string(),
                 "phase=ready".to_string(),

@@ -184,19 +184,28 @@ fn print_operations(status: &WorkspaceStatusResponse) {
         &format_percent(status.operations.cache_health.warm_hit_rate),
     );
     print_field(
-        "Misses",
+        "Actionable",
         &format!(
-            "{} total, {} recurring, {} cold",
-            status.operations.cache_health.total_misses,
+            "{} total, {} recurring, {} first-seen",
+            status.operations.cache_health.session_miss_total,
             status.operations.cache_health.recurring_misses,
             status.operations.cache_health.cold_misses
         ),
     );
     print_field(
+        "Excluded seed",
+        &format!(
+            "{} across {} labeled sessions",
+            status.operations.cache_health.excluded_seed_misses,
+            status.operations.cache_health.excluded_seed_sessions
+        ),
+    );
+    print_field(
         "Degraded",
         &format!(
-            "{} cache, {} runtime",
-            status.operations.cache.degraded_count, status.operations.runtime.degraded_count
+            "{} lookup, {} runtime",
+            status.operations.cache_health.degraded_misses,
+            status.operations.runtime.degraded_count
         ),
     );
     print_field(

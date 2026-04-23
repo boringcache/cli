@@ -9,7 +9,8 @@ pub use builtins::{
 pub use discover::discover;
 pub use model::{
     AdapterCommandConfig, AdapterConfig, LoadedRepoConfig, RepoConfig, RepoEntryConfig,
-    RepoProfileConfig, ResolvedAdapterConfig, ResolvedRunEntryPlan, ResolvedRunPlan,
+    RepoProfileConfig, RepoProxyConfig, ResolvedAdapterConfig, ResolvedRunEntryPlan,
+    ResolvedRunPlan,
     RunEntryRequestSource, RunEntryResolutionSource,
 };
 pub use resolve::{prefer_cli_list, prefer_cli_scalar, resolve_adapter_config, resolve_run_plan};
@@ -295,6 +296,9 @@ default_path = "/mise/installs"
             r#"
 workspace = "org/workspace"
 
+[proxy]
+metadata-hints = ["project=web"]
+
 [adapters.turbo]
 tag = "turbo-main"
 command = ["pnpm", "turbo", "run", "build"]
@@ -316,6 +320,7 @@ sccache-key-prefix = "rust/ci"
         let adapter = resolved.adapter_config.unwrap();
 
         assert_eq!(loaded.config.workspace.as_deref(), Some("org/workspace"));
+        assert_eq!(loaded.config.proxy.metadata_hints, vec!["project=web"]);
         assert_eq!(adapter.tag.as_deref(), Some("turbo-main"));
         assert_eq!(adapter.entries, vec!["pnpm-store"]);
         assert_eq!(adapter.profiles, vec!["bundle-install"]);
@@ -365,6 +370,29 @@ workspace = "org/workspace"
         let resolved = resolve_adapter_config(temp_dir.path(), "turbo").unwrap();
         assert!(resolved.loaded_config.is_some());
         assert!(resolved.adapter_config.is_none());
+    }
+
+    #[test]
+    fn resolve_run_plan_returns_repo_proxy_metadata_hints() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join(".boringcache.toml"),
+            r#"
+workspace = "org/workspace"
+
+[proxy]
+metadata-hints = ["project=web", "phase=warm"]
+"#,
+        )
+        .unwrap();
+
+        let plan = resolve_run_plan(temp_dir.path(), &[], &[], &[]).unwrap();
+
+        assert_eq!(plan.workspace.as_deref(), Some("org/workspace"));
+        assert_eq!(
+            plan.proxy_metadata_hints,
+            vec!["project=web".to_string(), "phase=warm".to_string()]
+        );
     }
 
     #[test]

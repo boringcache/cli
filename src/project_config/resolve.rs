@@ -131,6 +131,10 @@ pub fn resolve_run_plan(
                 .as_ref()
                 .and_then(|loaded| sanitize_workspace(loaded.config.workspace.as_deref())),
             repo_config_path: repo_config.as_ref().map(|loaded| loaded.path.clone()),
+            proxy_metadata_hints: repo_config
+                .as_ref()
+                .map(|loaded| loaded.config.proxy.metadata_hints.clone())
+                .unwrap_or_default(),
             ..ResolvedRunPlan::default()
         });
     }
@@ -187,6 +191,10 @@ pub fn resolve_run_plan(
             .as_ref()
             .and_then(|loaded| sanitize_workspace(loaded.config.workspace.as_deref())),
         repo_config_path: repo_config.as_ref().map(|loaded| loaded.path.clone()),
+        proxy_metadata_hints: repo_config
+            .as_ref()
+            .map(|loaded| loaded.config.proxy.metadata_hints.clone())
+            .unwrap_or_default(),
         tag_path_pairs,
         env_vars,
         archive_entries,

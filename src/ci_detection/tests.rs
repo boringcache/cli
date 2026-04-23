@@ -48,6 +48,7 @@ fn clear_ci_env_vars() {
         "BORINGCACHE_CI_PR_NUMBER",
         "BORINGCACHE_CI_SHA",
         "BORINGCACHE_CI_RUN_STARTED_AT",
+        "BORINGCACHE_BENCHMARK_MODE",
     ];
 
     for var in &ci_vars {
@@ -109,6 +110,37 @@ fn detects_github_actions_run_context() {
     assert_eq!(run.default_branch.as_deref(), Some("main"));
     assert_eq!(run.pull_request_number, Some(42));
     assert_eq!(run.commit_sha.as_deref(), Some("abcdef1234567890"));
+
+    clear_ci_env_vars();
+}
+
+#[test]
+fn infers_project_hint_from_ci_repository() {
+    let _guard = test_env::lock();
+    clear_ci_env_vars();
+    test_env::set_var("GITHUB_ACTIONS", "true");
+    test_env::set_var("GITHUB_RUN_ID", "123456789");
+    test_env::set_var("GITHUB_REPOSITORY", "acme/widgets");
+
+    let context = detect_ci_context();
+
+    assert_eq!(context.inferred_project_hint().as_deref(), Some("widgets"));
+
+    clear_ci_env_vars();
+}
+
+#[test]
+fn benchmark_mode_strips_benchmark_prefix_from_project_hint() {
+    let _guard = test_env::lock();
+    clear_ci_env_vars();
+    test_env::set_var("GITHUB_ACTIONS", "true");
+    test_env::set_var("GITHUB_RUN_ID", "123456789");
+    test_env::set_var("GITHUB_REPOSITORY", "boringcache/benchmark-grpc");
+    test_env::set_var("BORINGCACHE_BENCHMARK_MODE", "1");
+
+    let context = detect_ci_context();
+
+    assert_eq!(context.inferred_project_hint().as_deref(), Some("grpc"));
 
     clear_ci_env_vars();
 }

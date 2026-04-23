@@ -18,6 +18,7 @@ const CI_RUN_ENV_VARS: &[&str] = &[
     "BORINGCACHE_CI_PR_NUMBER",
     "BORINGCACHE_CI_SHA",
     "BORINGCACHE_CI_RUN_STARTED_AT",
+    "BORINGCACHE_BENCHMARK_MODE",
     "GITHUB_ACTIONS",
     "GITHUB_RUN_ID",
     "GITHUB_RUN_ATTEMPT",
@@ -1134,6 +1135,9 @@ fn test_adapter_dry_run_json_replaces_configured_entry_list_and_merges_metadata_
         r#"
 workspace = "test-org/test-workspace"
 
+[proxy]
+metadata-hints = ["project=web"]
+
 [adapters.turbo]
 tag = "turbo-main"
 command = ["pnpm", "turbo", "run", "build"]
@@ -1174,9 +1178,95 @@ metadata-hints = ["phase=warm", "tool=turbo"]
         .expect("archive_entries should be an array");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["requested"], "bundler");
+    assert_eq!(parsed["proxy"]["metadata_hints"]["project"], "web");
     assert_eq!(parsed["proxy"]["metadata_hints"]["phase"], "ready");
     assert_eq!(parsed["proxy"]["metadata_hints"]["tool"], "turbo");
     assert_eq!(parsed["proxy"]["metadata_hints"]["lane"], "ci");
+}
+
+#[test]
+fn test_run_dry_run_json_merges_repo_proxy_metadata_hints_with_env_and_flags() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[proxy]
+metadata-hints = ["project=web", "scenario=repo"]
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .env("BORINGCACHE_PROXY_METADATA_HINTS", "phase=seed,scenario=env")
+        .args([
+            "run",
+            "--proxy",
+            "bazel-main",
+            "--metadata-hint",
+            "phase=warm",
+            "--metadata-hint",
+            "tool=bazel",
+            "--skip-restore",
+            "--skip-save",
+            "--dry-run",
+            "--json",
+            "--",
+            "true",
+        ])
+        .output()
+        .expect("Failed to execute run dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(parsed["proxy"]["metadata_hints"]["project"], "web");
+    assert_eq!(parsed["proxy"]["metadata_hints"]["scenario"], "env");
+    assert_eq!(parsed["proxy"]["metadata_hints"]["phase"], "warm");
+    assert_eq!(parsed["proxy"]["metadata_hints"]["tool"], "bazel");
+}
+
+#[test]
+fn test_run_dry_run_auto_adds_project_metadata_hint_from_ci_repository() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_RUN_ID", "123456789")
+        .env("GITHUB_REPOSITORY", "acme/widgets")
+        .args([
+            "run",
+            "test-org/test-workspace",
+            "--proxy",
+            "sccache-main",
+            "--skip-restore",
+            "--skip-save",
+            "--dry-run",
+            "--json",
+            "--",
+            "true",
+        ])
+        .output()
+        .expect("Failed to execute run dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(parsed["proxy"]["metadata_hints"]["project"], "widgets");
 }
 
 #[test]
@@ -1712,6 +1802,7 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
         parsed["proxy"]["metadata_hints"]["docker_alias_promotion_refs"],
         "pr-42"
     );
+    assert_eq!(parsed["proxy"]["metadata_hints"]["project"], "widgets");
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["docker_cache_from_refs"],
         Value::Null

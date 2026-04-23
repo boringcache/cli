@@ -73,6 +73,49 @@ Useful adapter fields:
 - `cache-mode`, `cache-ref-tag` — Docker-only cache export settings
 - `sccache-key-prefix` — sccache-only WebDAV key prefix/root
 
+## Session hints
+
+Proxy-backed CLI flows can label sessions directly. This is the non-GitHub path
+for grouping dashboard sessions and misses by stable labels instead of
+anonymous traffic.
+
+Use CLI flags when you want one-off labels:
+
+```bash
+boringcache run --proxy bazel-main \
+  --metadata-hint project=web \
+  --metadata-hint tool=bazel \
+  --metadata-hint phase=warm \
+  -- bazel build //...
+```
+
+Use repo config when the labels are part of the normal adapter contract:
+
+```toml
+[proxy]
+metadata-hints = ["project=web"]
+
+[adapters.turbo]
+tag = "turbo-main"
+command = ["pnpm", "turbo", "run", "build"]
+metadata-hints = ["tool=turbo", "phase=ci"]
+```
+
+Use `BORINGCACHE_PROXY_METADATA_HINTS` when another script or service starts
+`cache-registry` and you do not want to repeat `--metadata-hint` flags:
+
+```bash
+export BORINGCACHE_PROXY_METADATA_HINTS=project=web,tool=gradle,phase=seed
+boringcache cache-registry my-org/my-project gradle-main --port 5000
+```
+
+Keep these hints low-cardinality and replayable. Good values are
+`project=web`, `benchmark=grpc-bazel`, `tool=gradle`, `phase=seed`, and
+`phase=warm`. Avoid commit SHAs, run ids, timestamps, and other per-run values.
+Use `phase=prewarm` only for a real standalone priming session.
+The normal precedence is repo config first, then
+`BORINGCACHE_PROXY_METADATA_HINTS`, then explicit CLI flags.
+
 `command` is repo config, not a general templating system.
 For proxy-backed commands, BoringCache only substitutes these placeholders inside command arguments:
 

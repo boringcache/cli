@@ -166,7 +166,14 @@ pub async fn execute(
         resolve_registry_tag_config(&tag_resolver, &tag)?;
     let oci_prefetch_refs = resolve_oci_prefetch_refs(&oci_prefetch_ref)?;
     let oci_hydration_policy = resolve_oci_hydration_policy(&oci_hydration)?;
-    let proxy_metadata_hints = resolve_proxy_metadata_hints(&metadata_hints)?;
+    let current_dir = std::env::current_dir().context("Failed to determine current directory")?;
+    let configured_proxy_metadata_hints = crate::project_config::discover(&current_dir)
+        .context("Failed to load repo cache config")?
+        .map(|loaded| loaded.config.proxy.metadata_hints)
+        .unwrap_or_default();
+    let mut proxy_metadata_hints =
+        resolve_proxy_metadata_hints_with_config(&configured_proxy_metadata_hints, &metadata_hints)?;
+    inject_default_proxy_metadata_hints(&mut proxy_metadata_hints);
 
     crate::serve::run_server(
         api_client,
@@ -352,10 +359,17 @@ fn proxy_status_url(host: &str, port: u16) -> String {
     format!("http://{authority}:{port}{PROXY_STATUS_PATH}")
 }
 
-pub(crate) fn resolve_proxy_metadata_hints(
+pub(crate) fn resolve_proxy_metadata_hints(raw_hints: &[String]) -> Result<BTreeMap<String, String>> {
+    resolve_proxy_metadata_hints_with_config(&[], raw_hints)
+}
+
+pub(crate) fn resolve_proxy_metadata_hints_with_config(
+    configured_hints: &[String],
     raw_hints: &[String],
 ) -> Result<BTreeMap<String, String>> {
     let mut hints = BTreeMap::new();
+
+    merge_proxy_metadata_hints(&mut hints, configured_hints, "repo config")?;
 
     if let Some(env_hints) = crate::config::env_var(PROXY_METADATA_HINTS_ENV) {
         let parts = env_hints
@@ -369,6 +383,18 @@ pub(crate) fn resolve_proxy_metadata_hints(
 
     merge_proxy_metadata_hints(&mut hints, raw_hints, "command line")?;
     Ok(hints)
+}
+
+pub(crate) fn inject_default_proxy_metadata_hints(hints: &mut BTreeMap<String, String>) {
+    if hints.contains_key("project") || hints.contains_key("benchmark") {
+        return;
+    }
+
+    let Some(project) = crate::ci_detection::detect_ci_context().inferred_project_hint() else {
+        return;
+    };
+
+    insert_replayable_proxy_metadata_hint(hints, "project", &project);
 }
 
 fn merge_proxy_metadata_hints(
@@ -532,6 +558,28 @@ mod tests {
                 ("phase".to_string(), "warm".to_string()),
                 ("project".to_string(), "zed".to_string()),
                 ("tooling".to_string(), "main".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn proxy_metadata_hints_merge_config_then_env_then_flags() {
+        let _guard = test_env::lock();
+        test_env::set_var(PROXY_METADATA_HINTS_ENV, "phase=seed,scenario=env");
+        let hints = resolve_proxy_metadata_hints_with_config(
+            &["project=web".to_string(), "scenario=repo".to_string()],
+            &["phase=warm".to_string(), "tool=bazel".to_string()],
+        )
+        .unwrap();
+        test_env::remove_var(PROXY_METADATA_HINTS_ENV);
+
+        assert_eq!(
+            hints,
+            BTreeMap::from([
+                ("phase".to_string(), "warm".to_string()),
+                ("project".to_string(), "web".to_string()),
+                ("scenario".to_string(), "env".to_string()),
+                ("tool".to_string(), "bazel".to_string()),
             ])
         );
     }
