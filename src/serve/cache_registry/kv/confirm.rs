@@ -57,6 +57,13 @@ pub(crate) fn classify_flush_error(error: &anyhow::Error, context: &str) -> Flus
         return FlushError::Permanent(message);
     }
 
+    let upload_receipts_pending = context.contains("confirm")
+        && (lower.contains("upload_session_receipts_incomplete")
+            || lower.contains("requires complete upload receipts"));
+    if upload_receipts_pending {
+        return FlushError::Transient(message);
+    }
+
     let transient_status = has_status_code(&lower, 429)
         || has_status_code(&lower, 500)
         || has_status_code(&lower, 502)

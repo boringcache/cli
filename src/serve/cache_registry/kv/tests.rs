@@ -188,6 +188,15 @@ fn classify_flush_error_treats_blob_verification_pending_as_permanent() {
 }
 
 #[test]
+fn classify_flush_error_treats_receipt_incomplete_publish_as_transient() {
+    let error = anyhow::anyhow!(
+        "Server returned 422 Unprocessable Entity: CAS publish requires complete upload receipts (upload_session_receipts_incomplete)"
+    );
+    let classified = classify_flush_error(&error, "confirm failed");
+    assert!(matches!(classified, FlushError::Transient(_)));
+}
+
+#[test]
 fn should_clear_flushing_after_flush_skips_ok_path() {
     assert!(!should_clear_flushing_after_flush(&FlushResult::Ok));
     assert!(should_clear_flushing_after_flush(&FlushResult::Conflict));
