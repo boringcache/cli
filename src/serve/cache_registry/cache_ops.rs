@@ -672,6 +672,13 @@ impl Aggregator {
         }
     }
 
+    fn close_all_sessions(state: &mut AggregateState, ended_at_secs: u64) {
+        let tools_to_close: Vec<Tool> = state.active_sessions.keys().copied().collect();
+        for tool in tools_to_close {
+            Self::finalize_session(state, tool, ended_at_secs);
+        }
+    }
+
     fn finalize_session(state: &mut AggregateState, tool: Tool, ended_at_secs: u64) {
         let Some(session) = state.active_sessions.remove(&tool) else {
             return;
@@ -820,9 +827,26 @@ impl Aggregator {
     }
 
     pub(crate) fn drain(&self) -> (Vec<RollupRecord>, Vec<MissedKeyRecord>, Vec<SessionRecord>) {
+        self.drain_inner(false)
+    }
+
+    pub(crate) fn drain_for_shutdown(
+        &self,
+    ) -> (Vec<RollupRecord>, Vec<MissedKeyRecord>, Vec<SessionRecord>) {
+        self.drain_inner(true)
+    }
+
+    fn drain_inner(
+        &self,
+        close_active_sessions: bool,
+    ) -> (Vec<RollupRecord>, Vec<MissedKeyRecord>, Vec<SessionRecord>) {
         self.flush_async_events();
         let mut state = self.lock_state();
-        Self::close_idle_sessions(&mut state, now_epoch_secs());
+        let now_secs = now_epoch_secs();
+        Self::close_idle_sessions(&mut state, now_secs);
+        if close_active_sessions {
+            Self::close_all_sessions(&mut state, now_secs);
+        }
 
         let drained_buckets = std::mem::take(&mut state.buckets);
         let mut rollups = Vec::with_capacity(drained_buckets.len());
@@ -1252,6 +1276,29 @@ mod tests {
             .find(|r| r.tool == "turborepo")
             .expect("restored miss");
         assert_eq!(restored_miss.miss_count, 1);
+    }
+
+    #[test]
+    fn drain_for_shutdown_finalizes_active_sessions() {
+        let agg = Aggregator::new_with_metadata_hints(BTreeMap::from([(
+            "project".to_string(),
+            "launch".to_string(),
+        )]));
+        agg.record_session_connect(Tool::Sccache);
+        agg.record(Tool::Sccache, Op::Get, OpResult::Miss, false, 0, 3);
+
+        let (_, _, sessions) = agg.drain_for_shutdown();
+
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.tool, "sccache");
+        assert_eq!(session.hit_count, 0);
+        assert_eq!(session.miss_count, 1);
+        assert_eq!(session.error_count, 0);
+        assert_eq!(
+            session.metadata_hints.get("project"),
+            Some(&"launch".to_string())
+        );
     }
 
     #[test]

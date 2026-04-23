@@ -263,7 +263,11 @@ async fn flush_cache_ops_inner(state: &AppState, include_summary: bool) {
         return;
     }
     let (rollups, missed_keys, sessions) = if has_cache_ops {
-        state.cache_ops.drain()
+        if include_summary {
+            state.cache_ops.drain_for_shutdown()
+        } else {
+            state.cache_ops.drain()
+        }
     } else {
         (Vec::new(), Vec::new(), Vec::new())
     };

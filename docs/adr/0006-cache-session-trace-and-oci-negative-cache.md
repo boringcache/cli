@@ -259,6 +259,7 @@ The first CLI baseline is implemented:
 - the Rails/API summary section embeds in-memory v2 request rollups by operation: request counts, p50/p95 duration, error counts, retry counts, and totals;
 - `/_boringcache/status` exposes the same live session-summary snapshot under `session_summary`, and proxy shutdown reuses that builder for the JSONL event, so diagnostics do not need to control proxy lifecycle just to capture the summary shape;
 - cache-ops flush now adds a stable `proxy-summary-*` `oci` session with `summary_schema` and `summary_json` to the existing Rails `cache-rollups` batch, and shutdown forces one final summary upsert even when there are no fresh flat rollups;
+- shutdown also finalizes any still-active cache-op sessions before that last Rails batch, so short-lived proxy runs persist real tool-session hit/miss rows and metadata hints instead of landing only the synthetic `proxy-summary-*` row;
 - `ci/e2e/request-metrics-summary.py` promotes session summary fields, OCI upload-plan reuse counts, and new status snapshot keys into artifact env output;
 - the OCI protocol tests cover the PostHog-shaped transition where a blob `HEAD` miss is followed by local upload, manifest publish, negative-cache invalidation, and a later successful `HEAD`.
 - Docker adapter planning now carries provider-neutral CI run metadata into dry-run JSON and proxy metadata hints, including provider, run uid/attempt, ref type/name, default branch, PR number, commit SHA, immutable run ref, import refs, and promotion aliases when ADR 0007 derivation is active.
