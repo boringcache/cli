@@ -40,6 +40,9 @@ For proxy-backed modes, `boringcache/one@v1` also accepts first-class `metadata-
 Keep those hints low-cardinality. Good values are `project=web`, `benchmark=grpc-bazel`, `tool=gradle`, `phase=seed`, or `phase=warm`. Avoid commit SHAs, run ids, or timestamps.
 
 If the repo already defines `[proxy]` or adapter `metadata-hints` in `.boringcache.toml`, `boringcache/one@v1` inherits them through the CLI dry-run plan. Prefer repo config for durable defaults and use the action input only when the workflow needs an explicit override.
+The canonical repo-config starting points in [Tool guides](tool-guides.md) are
+meant to be shared between local CLI runs and GitHub Actions for exactly this
+reason.
 
 If you are migrating an existing workflow and do not have repo config yet, raw `entries` and `actions/cache`-compatible `path` / `key` / `restore-keys` inputs still work.
 
@@ -49,6 +52,9 @@ If you already manage the tool-specific setup yourself and only want proxy lifec
 - run: |
     cat > .boringcache.toml <<'EOF'
     workspace = "my-org/my-project"
+
+    [proxy]
+    metadata-hints = ["project=web"]
 
     [adapters.turbo]
     tag = "turbo-main"

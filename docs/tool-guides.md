@@ -13,12 +13,30 @@ The pattern is simple:
 `boringcache <tool>` and `boringcache run --proxy` temporarily start that same proxy for one command, wait until it is ready, then hand traffic to the wrapped tool.
 `cache-registry` itself is warm by default. Use `--on-demand` only for advanced shared-proxy setups that prefer immediate startup over warmed first reads.
 
+The snippets below are intended to be copy-pasteable `.boringcache.toml`
+starting points. They work for local CLI runs and for `boringcache/one@v1`
+because the action asks the CLI for the same repo plan.
+
+Shared defaults for the examples:
+
+- put the stable project label in `[proxy].metadata-hints`
+- put the stable tool and lane labels in `[adapters.<tool>].metadata-hints`
+- leave `no-platform` and `no-git` unset unless the cache is genuinely portable
+- set `read-only = true` only on restore-only lanes
+- use `phase=seed` for explicit priming jobs and `phase=ci` or `phase=warm` for normal runs
+
 ## Docker / BuildKit
 
 ```toml
+workspace = "my-org/my-project"
+
+[proxy]
+metadata-hints = ["project=app"]
+
 [adapters.docker]
 tag = "docker-cache"
 command = ["docker", "buildx", "build", "."]
+metadata-hints = ["tool=docker", "phase=ci"]
 ```
 
 ```bash
@@ -94,9 +112,15 @@ nx run-many --target=build
 ## Turborepo
 
 ```toml
+workspace = "my-org/my-project"
+
+[proxy]
+metadata-hints = ["project=web"]
+
 [adapters.turbo]
 tag = "turbo-cache"
 command = ["pnpm", "turbo", "run", "build"]
+metadata-hints = ["tool=turbo", "phase=ci"]
 ```
 
 ```bash
@@ -119,9 +143,15 @@ turbo run build
 ## Bazel
 
 ```toml
+workspace = "my-org/my-project"
+
+[proxy]
+metadata-hints = ["project=backend"]
+
 [adapters.bazel]
 tag = "bazel-cache"
 command = ["bazel", "build", "//..."]
+metadata-hints = ["tool=bazel", "phase=ci"]
 ```
 
 ```bash
@@ -144,9 +174,15 @@ bazel build --remote_cache=http://127.0.0.1:5000 //...
 ## Gradle
 
 ```toml
+workspace = "my-org/my-project"
+
+[proxy]
+metadata-hints = ["project=backend"]
+
 [adapters.gradle]
 tag = "gradle-cache"
-command = ["./gradlew", "build", "--build-cache", "--no-daemon"]
+command = ["./gradlew", "build", "--no-daemon"]
+metadata-hints = ["tool=gradle", "phase=ci"]
 ```
 
 ```bash
@@ -192,9 +228,15 @@ mvn install -DskipTests --batch-mode -ntp -Dmaven.build.cache.remote.save.enable
 ## sccache
 
 ```toml
+workspace = "my-org/my-project"
+
+[proxy]
+metadata-hints = ["project=rust"]
+
 [adapters.sccache]
 tag = "rust-cache"
 command = ["cargo", "build", "--release"]
+metadata-hints = ["tool=sccache", "phase=ci"]
 # Optional: keep sccache objects under a WebDAV sub-root.
 sccache-key-prefix = "rust/ci"
 ```
