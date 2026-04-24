@@ -560,11 +560,48 @@ mod tests {
         )
         .unwrap();
         assert!(resumable.is_resumable_pending_cas());
+        assert!(resumable.is_resumable_pending_cas_for(
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        ));
+        assert!(
+            resumable
+                .blocking_pending_cas_reason(
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                )
+                .is_none()
+        );
         assert!(!resumable.should_skip_existing_uploads());
+        assert!(!resumable.should_skip_existing_uploads_for(
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        ));
+
+        assert!(!resumable.is_resumable_pending_cas_for(
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        ));
+        assert!(
+            resumable
+                .blocking_pending_cas_reason(
+                    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                )
+                .is_some()
+        );
+        assert!(!resumable.should_skip_existing_uploads_for(
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        ));
 
         let mut missing_manifest = resumable;
         missing_manifest.manifest_upload_url = None;
         assert!(!missing_manifest.is_resumable_pending_cas());
         assert!(missing_manifest.should_skip_existing_uploads());
+        assert!(
+            missing_manifest
+                .blocking_pending_cas_reason(
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                )
+                .is_some()
+        );
+        assert!(!missing_manifest.should_skip_existing_uploads_for(
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        ));
     }
 }

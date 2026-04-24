@@ -165,8 +165,50 @@ impl SaveResponse {
             && self.manifest_upload_url.is_some()
     }
 
+    pub fn is_resumable_pending_cas_for(&self, expected_manifest_root_digest: &str) -> bool {
+        self.is_resumable_pending_cas()
+            && self.manifest_root_digest.as_deref() == Some(expected_manifest_root_digest)
+    }
+
+    pub fn blocking_pending_cas_reason(
+        &self,
+        expected_manifest_root_digest: &str,
+    ) -> Option<String> {
+        if !self.exists
+            || self.status.as_deref() != Some("pending")
+            || self.storage_mode.as_deref() != Some("cas")
+        {
+            return None;
+        }
+
+        let server_manifest_root_digest =
+            self.manifest_root_digest.as_deref().unwrap_or("<missing>");
+        if server_manifest_root_digest != expected_manifest_root_digest {
+            return Some(format!(
+                "pending CAS entry manifest_root_digest={} does not match expected {}",
+                server_manifest_root_digest, expected_manifest_root_digest
+            ));
+        }
+
+        if self.upload_session_id.as_deref().is_none()
+            || self.manifest_upload_url.as_ref().is_none()
+        {
+            return Some("pending CAS entry is missing resumable upload metadata".to_string());
+        }
+
+        None
+    }
+
     pub fn should_skip_existing_uploads(&self) -> bool {
         self.exists && !self.is_resumable_pending_cas()
+    }
+
+    pub fn should_skip_existing_uploads_for(&self, expected_manifest_root_digest: &str) -> bool {
+        self.exists
+            && !self.is_resumable_pending_cas_for(expected_manifest_root_digest)
+            && self
+                .blocking_pending_cas_reason(expected_manifest_root_digest)
+                .is_none()
     }
 }
 

@@ -104,7 +104,13 @@ where
     ConfirmFuture: Future<Output = Result<C, E>>,
     MapReceiptError: Fn(String) -> E,
 {
-    let manifest_etag = if save_response.should_skip_existing_uploads() {
+    if let Some(reason) = save_response.blocking_pending_cas_reason(&manifest_digest) {
+        return Err(map_receipt_error(format!(
+            "save_entry failed: another cache upload is in progress ({reason})"
+        )));
+    }
+
+    let manifest_etag = if save_response.should_skip_existing_uploads_for(&manifest_digest) {
         None
     } else {
         let blob_receipts = upload_blobs(save_response).await?;
