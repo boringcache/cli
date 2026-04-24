@@ -175,7 +175,50 @@ where
         return Err(err);
     }
 
-    let resumable_pending_existing = save_response.is_resumable_pending_cas();
+    if let Some(reason) = save_response.blocking_pending_cas_reason(&bundle.manifest_root_digest) {
+        progress_warning(
+            &reporter,
+            format!("  Pending CAS entry is not resumable: {reason}"),
+        );
+        progress_info(
+            &reporter,
+            "  Another job is uploading this tag with a different or incomplete root; skipping save",
+        );
+        complete_skipped_step(
+            &mut session,
+            "Checking remote blobs",
+            "skipped — another job is uploading",
+        )?;
+        complete_skipped_step(
+            &mut session,
+            "Uploading blobs",
+            "skipped — another job is uploading",
+        )?;
+        complete_skipped_step(
+            &mut session,
+            "Uploading CAS index",
+            "skipped — another job is uploading",
+        )?;
+        complete_skipped_step(
+            &mut session,
+            "Confirming upload",
+            "skipped — another job is uploading",
+        )?;
+
+        let summary = save_summary(
+            bundle.total_size_bytes,
+            bundle.confirm_spec.file_count,
+            bundle.manifest_root_digest.clone(),
+            path,
+        );
+        session.complete(summary)?;
+        drop(reporter);
+        progress_system.shutdown()?;
+        return Ok(SaveStatus::Skipped);
+    }
+
+    let resumable_pending_existing =
+        save_response.is_resumable_pending_cas_for(&bundle.manifest_root_digest);
 
     if resumable_pending_existing {
         progress_info(
@@ -184,7 +227,7 @@ where
         );
     }
 
-    if save_response.should_skip_existing_uploads() {
+    if save_response.should_skip_existing_uploads_for(&bundle.manifest_root_digest) {
         complete_skipped_step(
             &mut session,
             "Checking remote blobs",

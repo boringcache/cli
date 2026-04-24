@@ -259,7 +259,13 @@ pub(crate) async fn do_flush(
     let confirm_tag = tag.clone();
     let confirm_write_scope_tag = kv_primary_write_scope_tag(state);
 
-    if save_response.should_skip_existing_uploads() {
+    if let Some(reason) = save_response.blocking_pending_cas_reason(&manifest_root_digest) {
+        return Err(FlushError::Conflict(format!(
+            "save_entry failed: another cache upload is in progress ({reason})"
+        )));
+    }
+
+    if save_response.should_skip_existing_uploads_for(&manifest_root_digest) {
         let mut pending_blob_by_digest: HashMap<String, u64> = HashMap::new();
         for blob in filtered_pending_entries.values() {
             pending_blob_by_digest
