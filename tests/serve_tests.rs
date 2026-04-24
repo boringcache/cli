@@ -11,7 +11,7 @@ use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
     AppState, BlobLocatorCache, BlobLocatorEntry, BlobReadCache, BlobReadMetrics, KvPendingStore,
     KvPublishedIndex, OciManifestCacheEntry, UploadSession, UploadSessionBody, UploadSessionStore,
-    digest_tag, ref_tag,
+    digest_tag, legacy_ref_tag_for_input, ref_tag,
 };
 use boring_cache_cli::tag_utils::TagResolver;
 use boring_cache_cli::test_env;
@@ -156,8 +156,20 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
     (state, temp_home, guard)
 }
 
+fn namespaced_scoped_ref_tag(namespace: &str, name: &str, reference: &str) -> String {
+    ref_tag(namespace, &format!("{name}:{reference}"))
+}
+
 fn scoped_ref_tag(name: &str, reference: &str) -> String {
-    ref_tag("registry", &format!("{name}:{reference}"))
+    namespaced_scoped_ref_tag("registry", name, reference)
+}
+
+fn namespaced_legacy_scoped_ref_tag(namespace: &str, name: &str, reference: &str) -> String {
+    legacy_ref_tag_for_input(&format!("{namespace}:{name}:{reference}"))
+}
+
+fn legacy_scoped_ref_tag(name: &str, reference: &str) -> String {
+    namespaced_legacy_scoped_ref_tag("registry", name, reference)
 }
 
 fn make_pointer(index_json: &[u8], blobs: &[(&str, u64)]) -> Vec<u8> {
@@ -774,7 +786,7 @@ async fn test_oci_prefetch_ref_indexes_manifest_before_ready() {
         &[(blob_digest.as_str(), blob_payload.len() as u64)],
     );
     let oci_tag = scoped_ref_tag("img", "v1");
-    let legacy_oci_tag = ref_tag("img", "v1");
+    let legacy_oci_tag = legacy_scoped_ref_tag("img", "v1");
     let oci_entries_input = format!("{oci_tag},{legacy_oci_tag}");
     let oci_entries = urlencoding::encode(&oci_entries_input);
 
@@ -936,7 +948,7 @@ async fn test_oci_prefetch_ref_can_hydrate_bodies_before_ready() {
         &[(blob_digest.as_str(), blob_payload.len() as u64)],
     );
     let oci_tag = scoped_ref_tag("img", "v1");
-    let legacy_oci_tag = ref_tag("img", "v1");
+    let legacy_oci_tag = legacy_scoped_ref_tag("img", "v1");
     let oci_entries_input = format!("{oci_tag},{legacy_oci_tag}");
     let oci_entries = urlencoding::encode(&oci_entries_input);
 
@@ -1360,7 +1372,7 @@ async fn test_manifest_hit_returns_decoded_index_json() {
     let blob_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let pointer_bytes = make_pointer(index_json, &[(blob_digest, 5000)]);
 
-    let tag = ref_tag("my-cache", "main");
+    let tag = scoped_ref_tag("my-cache", "main");
 
     let restore_body = json!([{
         "tag": tag,
@@ -1456,7 +1468,7 @@ async fn test_manifest_misses_when_prefetch_batch_reports_missing_blobs() {
     let index_json = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:aaaa","size":100},"layers":[]}"#;
     let blob_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let pointer_bytes = make_pointer(index_json, &[(blob_digest, 5000)]);
-    let tag = ref_tag("my-cache", "main");
+    let tag = scoped_ref_tag("my-cache", "main");
 
     let restore_body = json!([{
         "tag": tag,
@@ -1535,7 +1547,7 @@ async fn test_manifest_serves_after_verified_blob_storage_preflight_in_best_effo
     let index_json =
         br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:aaaa","size":100},"layers":[]}"#;
     let pointer_bytes = make_pointer(index_json, &[(blob_digest, 4096)]);
-    let tag = ref_tag("my-cache", "main");
+    let tag = scoped_ref_tag("my-cache", "main");
 
     let _restore_mock = server
         .mock(
@@ -1617,7 +1629,7 @@ async fn test_cached_manifest_hit_returns_without_revalidation_in_best_effort() 
     let index_json =
         br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:aaaa","size":100},"layers":[]}"#
             .to_vec();
-    let tag = ref_tag("cached", "v1");
+    let tag = scoped_ref_tag("cached", "v1");
     let manifest_digest = cas_oci::prefixed_sha256_digest(&index_json);
     let cached = Arc::new(OciManifestCacheEntry {
         index_json,
@@ -1671,7 +1683,7 @@ async fn test_cached_manifest_hit_keeps_locator_urls() {
     let index_json =
         br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:aaaa","size":100},"layers":[]}"#
             .to_vec();
-    let tag = ref_tag("cached-fast", "v2");
+    let tag = scoped_ref_tag("cached-fast", "v2");
     let manifest_digest = cas_oci::prefixed_sha256_digest(&index_json);
     let cached = Arc::new(OciManifestCacheEntry {
         index_json,
@@ -1759,7 +1771,7 @@ async fn test_blob_get_refreshes_stale_locator_url_after_manifest_return() {
             (blob_b, 2048),
         ],
     );
-    let tag = ref_tag("img", "latest");
+    let tag = scoped_ref_tag("img", "latest");
     let batch_request = json!({
         "cache_entry_id": "entry-refresh",
         "verify_storage": true,
@@ -1897,7 +1909,7 @@ async fn test_manifest_miss_returns_404() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
 
-    let tag = ref_tag("my-cache", "nonexistent");
+    let tag = scoped_ref_tag("my-cache", "nonexistent");
     let restore_body = json!([{
         "tag": tag,
         "status": "miss",
@@ -1936,7 +1948,7 @@ async fn test_manifest_negative_cache_suppresses_repeated_restore_miss() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
 
-    let tag = ref_tag("my-cache", "missing");
+    let tag = scoped_ref_tag("my-cache", "missing");
     let restore_body = json!([{
         "tag": tag,
         "status": "miss",
@@ -1993,7 +2005,7 @@ async fn test_manifest_head_returns_headers_no_body() {
     let index_json =
         br#"{"schemaVersion":2,"config":{"digest":"sha256:cc","size":50},"layers":[]}"#;
     let pointer_bytes = make_pointer(index_json, &[]);
-    let tag = ref_tag("img", "latest");
+    let tag = scoped_ref_tag("img", "latest");
 
     let _restore_mock = server
         .mock(
@@ -2054,7 +2066,7 @@ async fn test_referrers_route_returns_empty_index_when_missing() {
     let (state, _home, _guard) = setup(&server).await;
 
     let subject_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let referrers_tag = ref_tag(
+    let referrers_tag = scoped_ref_tag(
         "my-cache",
         "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     );
@@ -2134,7 +2146,7 @@ async fn test_referrers_route_filters_artifact_type() {
     }))
     .unwrap();
     state.oci_manifest_cache.insert(
-        ref_tag("my-cache", reference),
+        scoped_ref_tag("my-cache", reference),
         Arc::new(OciManifestCacheEntry {
             index_json: index_json.clone(),
             content_type: "application/vnd.oci.image.index.v1+json".to_string(),
@@ -2479,7 +2491,7 @@ async fn test_blob_head_after_manifest_resolution_uses_remote_existence_check() 
     let index_json =
         br#"{"schemaVersion":2,"config":{"digest":"sha256:cc","size":10},"layers":[]}"#;
     let pointer_bytes = make_pointer(index_json, &[(blob_digest, blob_size)]);
-    let tag = ref_tag("img", "v1");
+    let tag = scoped_ref_tag("img", "v1");
 
     let _restore_mock = server
         .mock(
@@ -2648,7 +2660,7 @@ async fn test_blob_get_after_manifest_resolution() {
         index_json,
         &[(blob_digest.as_str(), blob_content.len() as u64)],
     );
-    let tag = ref_tag("img", "v1");
+    let tag = scoped_ref_tag("img", "v1");
 
     let _restore_mock = server
         .mock(
@@ -2945,7 +2957,7 @@ async fn test_index_manifest_detected_as_index_type() {
 
     let index_json = br#"{"schemaVersion":2,"manifests":[{"digest":"sha256:aaa","size":100,"mediaType":"application/vnd.oci.image.manifest.v1+json","platform":{"architecture":"amd64","os":"linux"}}]}"#;
     let pointer_bytes = make_pointer(index_json, &[]);
-    let tag = ref_tag("multi", "latest");
+    let tag = scoped_ref_tag("multi", "latest");
 
     let _restore_mock = server
         .mock(
@@ -2999,8 +3011,11 @@ async fn test_tag_mapping_deterministic() {
     let t1 = ref_tag("my-cache", "main");
     let t2 = ref_tag("my-cache", "main");
     assert_eq!(t1, t2);
-    assert!(t1.starts_with("oci_ref_"));
-    assert_eq!(t1.len(), 8 + 64);
+    let prefix = "oci_ref_my-cache__main__";
+    assert!(t1.starts_with(prefix));
+    let suffix = t1.strip_prefix(prefix).expect("readable ref tag suffix");
+    assert_eq!(suffix.len(), 16);
+    assert!(suffix.chars().all(|ch| ch.is_ascii_hexdigit()));
 
     let t3 = ref_tag("my-cache", "dev");
     assert_ne!(t1, t3);
@@ -3018,6 +3033,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
     let primary_tag = scoped_ref_tag("my-cache", "main");
     let alias_tag = digest_tag(&manifest_digest);
+    let legacy_alias_tag = legacy_scoped_ref_tag("my-cache", "main");
 
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -3156,6 +3172,52 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
         .expect(1)
         .create_async()
         .await;
+    let legacy_alias_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&legacy_alias_tag)
+    );
+    let legacy_alias_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&legacy_alias_tag)
+    );
+    let legacy_alias_pointer_mock = server
+        .mock("GET", legacy_alias_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "7",
+                "cache_entry_id": "entry-legacy-alias",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let legacy_alias_confirm_mock = server
+        .mock("PUT", legacy_alias_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "7")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary",
+            "publish_mode": "cas",
+            "write_scope_tag": "my-cache:main"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "8",
+                "status": "ok",
+                "cache_entry_id": "entry-primary"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
 
     let app = build_router(state);
     let response = tower::ServiceExt::oneshot(
@@ -3192,6 +3254,8 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
     alias_save_mock.assert_async().await;
     alias_pointer_mock.assert_async().await;
     alias_confirm_mock.assert_async().await;
+    legacy_alias_pointer_mock.assert_async().await;
+    legacy_alias_confirm_mock.assert_async().await;
 }
 
 #[tokio::test]
@@ -3508,6 +3572,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
     }
 
     let branch_alias_tag = scoped_ref_tag("cache", "branch-main");
+    let branch_legacy_alias_tag = legacy_scoped_ref_tag("cache", "branch-main");
     let branch_pointer_path = format!(
         "/v2/workspaces/org/repo/caches/tags/{}/pointer",
         urlencoding::encode(&branch_alias_tag)
@@ -3552,6 +3617,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
         let manifest_root_digest =
             cas_oci::prefixed_sha256_digest(&make_oci_publish_pointer(&manifest_body));
         let primary_tag = scoped_ref_tag("cache", reference);
+        let primary_legacy_alias_tag = legacy_scoped_ref_tag("cache", reference);
         let digest_alias_tag = digest_tag(&manifest_digest);
 
         let primary_save_mock = server
@@ -3712,6 +3778,61 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
             .await;
         mocks.push(digest_alias_confirm_mock);
 
+        let primary_legacy_alias_pointer_path = format!(
+            "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+            urlencoding::encode(&primary_legacy_alias_tag)
+        );
+        let primary_legacy_alias_pointer_mock = server
+            .mock("GET", primary_legacy_alias_pointer_path.as_str())
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "version": format!("{entry_prefix}-legacy-version"),
+                    "cache_entry_id": format!("{entry_prefix}-legacy-current"),
+                    "status": "ready"
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(primary_legacy_alias_pointer_mock);
+
+        let primary_legacy_alias_publish_path = format!(
+            "/v2/workspaces/org/repo/caches/tags/{}/publish",
+            urlencoding::encode(&primary_legacy_alias_tag)
+        );
+        let primary_legacy_alias_confirm_mock = server
+            .mock("PUT", primary_legacy_alias_publish_path.as_str())
+            .match_header("authorization", "Bearer test-token")
+            .match_header(
+                "if-match",
+                format!("{entry_prefix}-legacy-version").as_str(),
+            )
+            .match_body(Matcher::PartialJson(json!({
+                "cache_entry_id": entry_prefix,
+                "write_scope_tag": format!("cache:{reference}"),
+                "publish_mode": "cas"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "version": format!("{entry_prefix}-legacy-version"),
+                    "status": "ok",
+                    "cache_entry_id": entry_prefix,
+                    "promotion_status": "unchanged",
+                    "requested_cache_entry_id": entry_prefix
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(primary_legacy_alias_confirm_mock);
+
         let branch_alias_save_mock = server
             .mock("POST", "/v2/workspaces/org/repo/caches")
             .match_header("authorization", "Bearer test-token")
@@ -3757,6 +3878,61 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
             .create_async()
             .await;
         mocks.push(branch_alias_confirm_mock);
+
+        let branch_legacy_alias_pointer_path = format!(
+            "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+            urlencoding::encode(&branch_legacy_alias_tag)
+        );
+        let branch_legacy_alias_pointer_mock = server
+            .mock("GET", branch_legacy_alias_pointer_path.as_str())
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "version": format!("branch-legacy-version-{entry_prefix}"),
+                    "cache_entry_id": "entry-branch-legacy-current",
+                    "status": "ready"
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(branch_legacy_alias_pointer_mock);
+
+        let branch_legacy_alias_publish_path = format!(
+            "/v2/workspaces/org/repo/caches/tags/{}/publish",
+            urlencoding::encode(&branch_legacy_alias_tag)
+        );
+        let branch_legacy_alias_confirm_mock = server
+            .mock("PUT", branch_legacy_alias_publish_path.as_str())
+            .match_header("authorization", "Bearer test-token")
+            .match_header(
+                "if-match",
+                format!("branch-legacy-version-{entry_prefix}").as_str(),
+            )
+            .match_body(Matcher::PartialJson(json!({
+                "cache_entry_id": entry_prefix,
+                "write_scope_tag": "cache:branch-main",
+                "publish_mode": "cas"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "version": format!("branch-legacy-version-{entry_prefix}"),
+                    "status": "ok",
+                    "cache_entry_id": entry_prefix,
+                    "promotion_status": "unchanged",
+                    "requested_cache_entry_id": entry_prefix
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        mocks.push(branch_legacy_alias_confirm_mock);
 
         cases.push(PublishCase {
             reference,
@@ -3829,7 +4005,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
         diagnostics
             .get("oci_engine_alias_promotion_unchanged")
             .map(String::as_str),
-        Some("2")
+        Some("6")
     );
     assert_eq!(
         diagnostics
@@ -4120,6 +4296,7 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
     let primary_tag = digest_tag(&manifest_digest);
     let latest_alias_tag = scoped_ref_tag("my-cache", "latest");
+    let legacy_latest_alias_tag = legacy_scoped_ref_tag("my-cache", "latest");
 
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -4258,6 +4435,52 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
         .expect(1)
         .create_async()
         .await;
+    let legacy_latest_alias_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&legacy_latest_alias_tag)
+    );
+    let legacy_latest_alias_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&legacy_latest_alias_tag)
+    );
+    let legacy_latest_alias_pointer_mock = server
+        .mock("GET", legacy_latest_alias_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "6",
+                "cache_entry_id": "entry-latest-legacy",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let legacy_latest_alias_confirm_mock = server
+        .mock("PUT", legacy_latest_alias_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "6")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary",
+            "publish_mode": "cas",
+            "write_scope_tag": "my-cache:latest"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "7",
+                "status": "ok",
+                "cache_entry_id": "entry-primary"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
 
     let app = build_router(state);
     let response = tower::ServiceExt::oneshot(
@@ -4280,6 +4503,8 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
     latest_alias_save_mock.assert_async().await;
     latest_alias_pointer_mock.assert_async().await;
     latest_alias_confirm_mock.assert_async().await;
+    legacy_latest_alias_pointer_mock.assert_async().await;
+    legacy_latest_alias_confirm_mock.assert_async().await;
 }
 
 #[tokio::test]
@@ -4516,7 +4741,7 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = scoped_ref_tag("my-cache", "main");
+    let primary_tag = namespaced_scoped_ref_tag("human-alias", "my-cache", "main");
     let digest_alias_tag = digest_tag(&manifest_digest);
 
     let primary_save_mock = server
@@ -4683,8 +4908,9 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = scoped_ref_tag("my-cache", "main");
+    let primary_tag = namespaced_scoped_ref_tag("human-alias", "my-cache", "main");
     let digest_alias_tag = digest_tag(&manifest_digest);
+    let legacy_alias_tag = legacy_scoped_ref_tag("my-cache", "main");
 
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -4855,6 +5081,52 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
         .expect(1)
         .create_async()
         .await;
+    let legacy_alias_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&legacy_alias_tag)
+    );
+    let legacy_alias_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&legacy_alias_tag)
+    );
+    let legacy_alias_pointer_mock = server
+        .mock("GET", legacy_alias_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "7",
+                "cache_entry_id": "entry-legacy-alias",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let legacy_alias_confirm_mock = server
+        .mock("PUT", legacy_alias_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "7")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary",
+            "publish_mode": "cas",
+            "write_scope_tag": "my-cache:main"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "8",
+                "status": "ok",
+                "cache_entry_id": "entry-primary"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
 
     let app = build_router(state);
     let response = tower::ServiceExt::oneshot(
@@ -4879,6 +5151,8 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
     human_alias_save_mock.assert_async().await;
     human_alias_pointer_mock.assert_async().await;
     human_alias_confirm_mock.assert_async().await;
+    legacy_alias_pointer_mock.assert_async().await;
+    legacy_alias_confirm_mock.assert_async().await;
     capabilities_mock.assert_async().await;
 }
 
@@ -5467,7 +5741,7 @@ async fn test_multi_segment_name_manifest() {
     let index_json =
         br#"{"schemaVersion":2,"config":{"digest":"sha256:cc","size":50},"layers":[]}"#;
     let pointer_bytes = make_pointer(index_json, &[]);
-    let tag = ref_tag("org/my-cache", "main");
+    let tag = scoped_ref_tag("org/my-cache", "main");
 
     let _restore_mock = server
         .mock(
@@ -6282,7 +6556,7 @@ async fn test_blob_proxy_returns_error_on_storage_failure() {
     let index_json =
         br#"{"schemaVersion":2,"config":{"digest":"sha256:cc","size":10},"layers":[]}"#;
     let pointer_bytes = make_pointer(index_json, &[(blob_digest, 100)]);
-    let tag = ref_tag("img", "v1");
+    let tag = scoped_ref_tag("img", "v1");
 
     let _restore_mock = server
         .mock(
@@ -6378,7 +6652,7 @@ async fn test_blob_proxy_best_effort_returns_404_on_storage_failure() {
     let index_json =
         br#"{"schemaVersion":2,"config":{"digest":"sha256:cc","size":10},"layers":[]}"#;
     let pointer_bytes = make_pointer(index_json, &[(blob_digest, 100)]);
-    let tag = ref_tag("img", "v1");
+    let tag = scoped_ref_tag("img", "v1");
 
     let _restore_mock = server
         .mock(
