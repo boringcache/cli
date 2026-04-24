@@ -11,7 +11,10 @@ use crate::serve::engines::oci::publish::{PersistManifestEntryInput, persist_man
 use crate::serve::engines::oci::uploads::has_non_empty_local_blob;
 use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
-use crate::serve::http::oci_tags::{scoped_restore_tags, scoped_save_tag, scoped_write_scope_tag};
+use crate::serve::http::oci_tags::{
+    AliasBinding, scoped_legacy_alias_binding, scoped_restore_tags, scoped_save_tag,
+    scoped_write_scope_tag,
+};
 use crate::serve::state::{
     AppState, BlobLocatorEntry, OciNegativeCacheReason, UploadSession, digest_tag,
 };
@@ -293,12 +296,23 @@ pub(crate) async fn persist_referrers_manifest(
     let referrers_reference = referrers_reference_for_subject(subject_digest)?;
     let referrers_tag = scoped_save_tag(
         &state.tag_resolver,
+        &state.configured_human_tags,
         &state.registry_root_tag,
         name,
         &referrers_reference,
     )?;
     let referrers_write_scope_tag =
         scoped_write_scope_tag(&state.tag_resolver, name, &referrers_reference)?;
+    let mut additional_aliases = Vec::<AliasBinding>::new();
+    if let Some(alias) = scoped_legacy_alias_binding(
+        &state.tag_resolver,
+        &state.configured_human_tags,
+        &state.registry_root_tag,
+        name,
+        &referrers_reference,
+    )? {
+        additional_aliases.push(alias);
+    }
     let referrers_body = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
         "mediaType": OCI_IMAGE_INDEX_CONTENT_TYPE,
@@ -316,7 +330,7 @@ pub(crate) async fn persist_referrers_manifest(
         blob_descriptors: Vec::new(),
         present_blobs: Vec::new(),
         configured_human_tags: &[],
-        additional_aliases: &[],
+        additional_aliases: &additional_aliases,
     })
     .await?;
     if persisted.manifest_digest.is_empty() {
@@ -363,6 +377,7 @@ fn manifest_restore_tags(state: &AppState, name: &str, reference: &str) -> Vec<S
     } else {
         scoped_restore_tags(
             &state.tag_resolver,
+            &state.configured_human_tags,
             &state.registry_root_tag,
             name,
             reference,
@@ -389,26 +404,49 @@ async fn resolve_manifest_remote(
         ))
     })?
     .map_err(|e| OciError::internal(format!("Backend restore failed: {e}")))?;
+    let restore_summary = summarize_restore_results(&entries);
 
     let mut entries_by_tag: HashMap<String, _> = entries
         .into_iter()
         .map(|entry| (entry.tag.clone(), entry))
         .collect();
-    let mut selected = None;
-    for tag in tags {
-        if let Some(entry) = entries_by_tag.remove(tag)
-            && entry.status == "hit"
-        {
-            selected = Some(entry);
-            break;
+    let mut unexpected_hits = Vec::new();
+    for (tag, entry) in &entries_by_tag {
+        if !tags.contains(tag) && entry.status == "hit" {
+            unexpected_hits.push(tag.clone());
         }
     }
-    if selected.is_none() {
-        selected = entries_by_tag
-            .into_values()
-            .find(|entry| entry.status == "hit");
+    if !unexpected_hits.is_empty() {
+        let message = format!(
+            "OCI manifest restore ignored unexpected hits: workspace={} registry_root_tag={} name={} reference={} requested_tags=[{}] unexpected_hit_tags=[{}] backend_results=[{}]",
+            state.workspace,
+            state.registry_root_tag,
+            name,
+            reference,
+            tags.join(", "),
+            unexpected_hits.join(", "),
+            restore_summary
+        );
+        eprintln!("{message}");
+        log::warn!("{message}");
     }
-    let entry = selected.ok_or_else(|| {
+
+    let entry = tags
+        .iter()
+        .find_map(|tag| entries_by_tag.remove(tag))
+        .filter(|entry| entry.status == "hit")
+        .ok_or_else(|| {
+        let message = format!(
+            "OCI manifest restore miss: workspace={} registry_root_tag={} name={} reference={} requested_tags=[{}] backend_results=[{}]",
+            state.workspace,
+            state.registry_root_tag,
+            name,
+            reference,
+            tags.join(", "),
+            restore_summary
+        );
+        eprintln!("{message}");
+        log::warn!("{message}");
         state.oci_negative_cache.insert_manifest_ref_miss(
             &state.workspace,
             &state.registry_root_tag,
@@ -530,6 +568,32 @@ async fn resolve_manifest_remote(
     }
 
     Ok((index_json, content_type, digest))
+}
+
+fn summarize_restore_results(
+    entries: &[crate::api::models::cache::CacheResolutionEntry],
+) -> String {
+    if entries.is_empty() {
+        return "none".to_string();
+    }
+
+    entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "tag={} status={} cache_entry_id={} primary_tag={} manifest_root_digest={} manifest_url={} pending={} error={}",
+                entry.tag,
+                entry.status,
+                entry.cache_entry_id.as_deref().unwrap_or("-"),
+                entry.primary_tag.as_deref().unwrap_or("-"),
+                entry.manifest_root_digest.as_deref().unwrap_or("-"),
+                if entry.manifest_url.is_some() { "yes" } else { "no" },
+                entry.pending,
+                entry.error.as_deref().unwrap_or("-")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 async fn cached_manifest_response(

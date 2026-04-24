@@ -28,7 +28,9 @@ use crate::serve::engines::oci::publish::{
 use crate::serve::engines::oci::{PresentBlob, ensure_manifest_blobs_present};
 use crate::serve::http::error::OciError;
 use crate::serve::http::oci_route::{insert_digest_etag, insert_header};
-use crate::serve::http::oci_tags::{AliasBinding, scoped_save_tag, scoped_write_scope_tag};
+use crate::serve::http::oci_tags::{
+    AliasBinding, scoped_legacy_alias_binding, scoped_save_tag, scoped_write_scope_tag,
+};
 use crate::serve::state::{AppState, diagnostics_enabled, digest_tag};
 
 use super::OCI_DEGRADED_HEADER;
@@ -154,6 +156,7 @@ pub(super) async fn put_manifest(
     } else {
         scoped_save_tag(
             &state.tag_resolver,
+            &state.configured_human_tags,
             &state.registry_root_tag,
             &name,
             &reference,
@@ -163,6 +166,7 @@ pub(super) async fn put_manifest(
         vec![AliasBinding {
             tag: scoped_save_tag(
                 &state.tag_resolver,
+                &state.configured_human_tags,
                 &state.registry_root_tag,
                 &name,
                 "latest",
@@ -176,6 +180,28 @@ pub(super) async fn put_manifest(
     } else {
         Vec::new()
     };
+    if !reference.starts_with("sha256:")
+        && let Some(alias) = scoped_legacy_alias_binding(
+            &state.tag_resolver,
+            &state.configured_human_tags,
+            &state.registry_root_tag,
+            &name,
+            &reference,
+        )?
+    {
+        additional_aliases.push(alias);
+    }
+    if reference.starts_with("sha256:")
+        && let Some(alias) = scoped_legacy_alias_binding(
+            &state.tag_resolver,
+            &state.configured_human_tags,
+            &state.registry_root_tag,
+            &name,
+            "latest",
+        )?
+    {
+        additional_aliases.push(alias);
+    }
     additional_aliases.extend(planned_alias_promotion_bindings(&state, &name)?);
     let persist_result: Result<bool, OciError> = async {
         persist_manifest_entry(PersistManifestEntryInput {
@@ -356,25 +382,35 @@ fn planned_alias_promotion_bindings(
     state: &AppState,
     name: &str,
 ) -> Result<Vec<AliasBinding>, OciError> {
-    state
-        .oci_alias_promotion_refs
-        .iter()
-        .map(|reference| {
-            Ok(AliasBinding {
-                tag: scoped_save_tag(
-                    &state.tag_resolver,
-                    &state.registry_root_tag,
-                    name,
-                    reference,
-                )?,
-                write_scope_tag: Some(scoped_write_scope_tag(
-                    &state.tag_resolver,
-                    name,
-                    reference,
-                )?),
-            })
-        })
-        .collect()
+    let mut bindings = Vec::new();
+
+    for reference in &state.oci_alias_promotion_refs {
+        bindings.push(AliasBinding {
+            tag: scoped_save_tag(
+                &state.tag_resolver,
+                &state.configured_human_tags,
+                &state.registry_root_tag,
+                name,
+                reference,
+            )?,
+            write_scope_tag: Some(scoped_write_scope_tag(
+                &state.tag_resolver,
+                name,
+                reference,
+            )?),
+        });
+        if let Some(alias) = scoped_legacy_alias_binding(
+            &state.tag_resolver,
+            &state.configured_human_tags,
+            &state.registry_root_tag,
+            name,
+            reference,
+        )? {
+            bindings.push(alias);
+        }
+    }
+
+    Ok(bindings)
 }
 
 fn referrers_response(

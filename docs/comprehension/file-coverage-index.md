@@ -412,6 +412,7 @@ Owner: repo operations support (`support-primary`)
 - `ci/e2e/required/e2e-cross-runner-seed.sh`
 - `ci/e2e/required/e2e-cross-runner-verify.sh`
 - `ci/e2e/required/e2e-docker-buildkit-registry-test.sh`
+- `ci/e2e/required/e2e-oci-rooted-restore-isolation-test.sh`
 - `ci/e2e/required/e2e-oci-same-alias-writer-test.sh`
 - `ci/e2e/required/e2e-security-test.sh`
 - `ci/e2e/required/e2e-tool-bazel-test.sh`
@@ -425,6 +426,9 @@ Owner: repo operations support (`support-primary`)
 - `ci/e2e/extended/e2e-prefetch-readiness-test.sh`
 - `ci/e2e/extended/e2e-sccache-test.sh`
 - `ci/e2e/extended/e2e-tool-hugo-test.sh`
+
+Notes:
+- `e2e-oci-rooted-restore-isolation-test.sh` now proves the product OCI tag contract directly: readable rooted aliases under the primary human tag are the canonical path, legacy root-hash aliases stay bound for migration, and shared readable or legacy unrooted aliases do not leak across roots.
 
 ### Install surface
 

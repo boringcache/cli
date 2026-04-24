@@ -176,10 +176,63 @@ pub fn ref_tag(name: &str, reference: &str) -> String {
 }
 
 pub fn ref_tag_for_input(input: &str) -> String {
+    const REF_TAG_PREFIX: &str = "oci_ref_";
+    const REF_TAG_HASH_BYTES: usize = 16;
+    const REF_TAG_MAX_BODY_BYTES: usize = 240;
+
+    let readable = readable_ref_tag_fragment(input, REF_TAG_MAX_BODY_BYTES);
+    let digest = sha256_hex(input.as_bytes());
+    format!(
+        "{REF_TAG_PREFIX}{readable}__{}",
+        &digest[..REF_TAG_HASH_BYTES]
+    )
+}
+
+pub fn legacy_ref_tag_for_input(input: &str) -> String {
     format!("oci_ref_{}", sha256_hex(input.as_bytes()))
 }
 
 pub fn digest_tag(digest: &str) -> String {
     let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
     format!("oci_digest_{}", hex)
+}
+
+fn readable_ref_tag_fragment(input: &str, max_bytes: usize) -> String {
+    let mut fragment = String::new();
+    let mut previous_was_separator = false;
+
+    for ch in input.chars() {
+        let replacement = match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => {
+                previous_was_separator = false;
+                ch.to_string()
+            }
+            ':' | '/' | '@' => {
+                if previous_was_separator {
+                    continue;
+                }
+                previous_was_separator = true;
+                "__".to_string()
+            }
+            _ => {
+                if previous_was_separator {
+                    continue;
+                }
+                previous_was_separator = true;
+                "_".to_string()
+            }
+        };
+
+        if fragment.len() + replacement.len() > max_bytes {
+            break;
+        }
+        fragment.push_str(&replacement);
+    }
+
+    let fragment = fragment.trim_matches(|ch| ch == '_' || ch == '.' || ch == '-');
+    if fragment.is_empty() {
+        "ref".to_string()
+    } else {
+        fragment.to_string()
+    }
 }

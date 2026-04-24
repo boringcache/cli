@@ -89,7 +89,7 @@ docker-cache/default
 docker-cache/recent/<n>
 ```
 
-The CLI can hash long logical identities into OCI-safe tags using the existing scoped ref tag helpers. User-facing inputs should stay simple:
+The CLI can encode logical identities into OCI-safe tags using readable scoped ref tags with a short hash suffix for stability. The primary proxy human tag is the canonical rooted OCI namespace; legacy root-hash aliases stay as migration compatibility bindings only. User-facing inputs should stay simple:
 
 - `--tag` remains the proxy cache tag or logical cache family;
 - `--cache-ref-tag` remains the Docker OCI cache tag override;
@@ -225,6 +225,7 @@ The first hidden CLI/Rails slice is implemented:
 - CI-derived import refs include the legacy `buildcache` ref as a read fallback during the migration window. Derived PR-context promotion refs now keep that fallback restore-only and promote only the PR alias by default; trusted branch/default paths may still promote the fallback for migration compatibility, and explicit hidden promotion flags can override the derived plan.
 - explicit hidden run/import/promotion flags still override the derived plan.
 - OCI and KV alias binding now uses Rails ready-tag publish to point aliases at the confirmed root `cache_entry_id` instead of creating separate alias cache entries. This keeps the immutable/internal root and human-facing aliases attached to one logical entry for access updates and plan-limit eviction.
+- OCI rooted manifest refs now publish readable aliases under the proxy's primary human tag namespace and bind the old root-hash alias only as compatibility state. Restore reads the readable rooted alias first, keeps the legacy rooted alias as migration fallback, and never consults shared unrooted aliases for rooted proxies.
 - Cross-runner E2E handoff now compares the `cache_entry_id` returned by `boringcache check --json` against the proxy flush log, so the assertion uses the normal restore/read path instead of a helper-only direct pointer API call.
 - `cache-registry` now has a hidden `--oci-alias-promotion-ref` proof hook so required E2E can exercise planned OCI alias promotion refs directly through the standalone proxy.
 - `ci/e2e/required/e2e-oci-same-alias-writer-test.sh` is wired into the required E2E matrix. It now runs two live standalone writer proxies against the same backend, uploads both writers' OCI blobs, commits the newer immutable run ref before the older ref, requires promoted plus ignored-stale alias diagnostics with zero promotion failures, and verifies through a fresh read-only proxy that both immutable refs remain readable while the branch alias resolves to the newer run. The direct proof leg passes the provider-neutral CI fields Rails needs for ordering as scoped `BORINGCACHE_CI_*` environment on each proxy; metadata hints stay replay/debug labels and are not treated as ordering contract fields.

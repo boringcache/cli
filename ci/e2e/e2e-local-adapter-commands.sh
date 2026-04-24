@@ -1099,6 +1099,27 @@ run_oci_same_alias_e2e() {
   pass_tool "oci-same-alias" "dual-proxy same-alias writer e2e passed"
 }
 
+run_oci_rooted_restore_isolation_e2e() {
+  local tool_log_root="${LOG_DIR}/oci-rooted-restore-isolation-runtime"
+  mkdir -p "${tool_log_root}"
+
+  note "OCI rooted restore isolation runtime E2E"
+  LOG_DIR="${tool_log_root}" \
+  PROXY_PORT_A="${OCI_ROOTED_RESTORE_ISOLATION_PROXY_PORT_A:-5331}" \
+  PROXY_PORT_B="${OCI_ROOTED_RESTORE_ISOLATION_PROXY_PORT_B:-5330}" \
+  GITHUB_RUN_ID="${RUN_ID}" \
+  GITHUB_RUN_ATTEMPT="1" \
+  BINARY="${BINARY}" \
+  WORKSPACE="${WORKSPACE}" \
+  BORINGCACHE_API_URL="${API_URL}" \
+  BORINGCACHE_ADMIN_TOKEN="${TOKEN}" \
+  BORINGCACHE_SAVE_TOKEN="${TOKEN}" \
+  BORINGCACHE_RESTORE_TOKEN="${TOKEN}" \
+    bash "${SCRIPT_DIR}/required/e2e-oci-rooted-restore-isolation-test.sh"
+
+  pass_tool "oci-rooted-restore-isolation" "rooted restore isolation e2e passed"
+}
+
 run_bazel_e2e() {
   local bazel_cmd=""
   if command -v bazelisk >/dev/null 2>&1; then
@@ -1345,6 +1366,7 @@ main() {
   run_selected_tool "maven" run_maven_e2e
   run_selected_tool "docker" run_docker_e2e
   run_selected_tool "oci-same-alias" run_oci_same_alias_e2e
+  run_selected_tool "oci-rooted-restore-isolation" run_oci_rooted_restore_isolation_e2e
   run_selected_tool "turbo" run_turbo_e2e
   run_selected_tool "nx" run_nx_e2e
   run_selected_tool "go" run_go_e2e

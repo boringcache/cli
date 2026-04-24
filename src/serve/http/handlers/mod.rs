@@ -371,7 +371,8 @@ mod tests {
     };
     use crate::serve::state::{
         BlobLocatorCache, BlobReadCache, BlobReadMetrics, KvPendingStore, KvPublishedIndex,
-        UploadSession, UploadSessionBody, UploadSessionStore, ref_tag_for_input,
+        UploadSession, UploadSessionBody, UploadSessionStore, legacy_ref_tag_for_input,
+        ref_tag_for_input,
     };
     use crate::tag_utils::TagResolver;
     use axum::body::Bytes;
@@ -1676,15 +1677,22 @@ mod tests {
             true,
         );
 
-        let tag = scoped_save_tag(&resolver, "registry-root", "buildkit-cache", "main").unwrap();
+        let tag = scoped_save_tag(
+            &resolver,
+            &["buildcache".to_string()],
+            "registry-root",
+            "buildkit-cache",
+            "main",
+        )
+        .unwrap();
         assert_eq!(
             tag,
-            ref_tag_for_input("registry-root:buildkit-cache:main-branch-feature-x")
+            ref_tag_for_input("buildcache:buildkit-cache:main-branch-feature-x")
         );
     }
 
     #[test]
-    fn scoped_restore_tags_use_root_scoped_tag_with_legacy_fallback() {
+    fn scoped_restore_tags_use_human_root_and_legacy_compat_tags() {
         let resolver = TagResolver::new(
             None,
             GitContext {
@@ -1696,12 +1704,41 @@ mod tests {
             true,
         );
 
-        let tags = scoped_restore_tags(&resolver, "registry-root", "buildkit-cache", "main");
+        let tags = scoped_restore_tags(
+            &resolver,
+            &["buildcache".to_string()],
+            "registry-root",
+            "buildkit-cache",
+            "main",
+        );
         assert_eq!(
             tags,
             vec![
-                ref_tag_for_input("registry-root:buildkit-cache:main-branch-feature-x"),
-                ref_tag_for_input("buildkit-cache:main-branch-feature-x")
+                ref_tag_for_input("buildcache:buildkit-cache:main-branch-feature-x"),
+                legacy_ref_tag_for_input("registry-root:buildkit-cache:main-branch-feature-x"),
+            ]
+        );
+    }
+
+    #[test]
+    fn scoped_restore_tags_without_root_use_readable_and_legacy_unscoped_tags() {
+        let resolver = TagResolver::new(
+            None,
+            GitContext {
+                pr_number: None,
+                branch: Some("feature/x".to_string()),
+                default_branch: Some("main".to_string()),
+                commit_sha: None,
+            },
+            true,
+        );
+
+        let tags = scoped_restore_tags(&resolver, &[], "", "buildkit-cache", "main");
+        assert_eq!(
+            tags,
+            vec![
+                ref_tag_for_input("buildkit-cache:main-branch-feature-x"),
+                legacy_ref_tag_for_input("buildkit-cache:main-branch-feature-x"),
             ]
         );
     }
@@ -1719,8 +1756,15 @@ mod tests {
             true,
         );
 
-        let tag = scoped_save_tag(&resolver, "registry-root", "buildkit-cache", "main").unwrap();
-        assert_eq!(tag, ref_tag_for_input("registry-root:buildkit-cache:main"));
+        let tag = scoped_save_tag(
+            &resolver,
+            &["buildcache".to_string()],
+            "registry-root",
+            "buildkit-cache",
+            "main",
+        )
+        .unwrap();
+        assert_eq!(tag, ref_tag_for_input("buildcache:buildkit-cache:main"));
     }
 
     #[test]
@@ -1736,10 +1780,17 @@ mod tests {
             false,
         );
 
-        let tag = scoped_save_tag(&resolver, "registry-root", "buildkit-cache", "main").unwrap();
+        let tag = scoped_save_tag(
+            &resolver,
+            &["buildcache".to_string()],
+            "registry-root",
+            "buildkit-cache",
+            "main",
+        )
+        .unwrap();
         assert_eq!(
             tag,
-            ref_tag_for_input("registry-root:buildkit-cache:main-ubuntu-22-x86_64")
+            ref_tag_for_input("buildcache:buildkit-cache:main-ubuntu-22-x86_64")
         );
     }
 

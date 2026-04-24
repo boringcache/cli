@@ -1,33 +1,42 @@
 use std::collections::HashSet;
 
 use super::error::OciError;
-use crate::serve::state::{AppState, digest_tag, ref_tag_for_input};
+use crate::serve::state::{AppState, digest_tag, legacy_ref_tag_for_input, ref_tag_for_input};
 use crate::tag_utils::TagResolver;
 
 pub(crate) fn scoped_restore_tags(
     tag_resolver: &TagResolver,
+    configured_human_tags: &[String],
     registry_root_tag: &str,
     name: &str,
     reference: &str,
 ) -> Vec<String> {
     let scoped = effective_ref_input(tag_resolver, name, reference);
-    let primary = root_scoped_ref_tag(registry_root_tag, &scoped);
-    let legacy = ref_tag_for_input(&scoped);
-    if primary == legacy {
-        vec![primary]
-    } else {
-        vec![primary, legacy]
+    let mut tags = Vec::new();
+    let current = current_ref_tag(configured_human_tags, registry_root_tag, &scoped);
+    if !tags.contains(&current) {
+        tags.push(current);
     }
+    let legacy = legacy_ref_tag(registry_root_tag, &scoped);
+    if !tags.contains(&legacy) {
+        tags.push(legacy);
+    }
+    tags
 }
 
 pub(crate) fn scoped_save_tag(
     tag_resolver: &TagResolver,
+    configured_human_tags: &[String],
     registry_root_tag: &str,
     name: &str,
     reference: &str,
 ) -> Result<String, OciError> {
     let scoped = fallible_effective_ref_input(tag_resolver, name, reference)?;
-    Ok(root_scoped_ref_tag(registry_root_tag, &scoped))
+    Ok(current_ref_tag(
+        configured_human_tags,
+        registry_root_tag,
+        &scoped,
+    ))
 }
 
 pub(crate) fn scoped_write_scope_tag(
@@ -39,6 +48,26 @@ pub(crate) fn scoped_write_scope_tag(
     tag_resolver
         .effective_save_tag(&scoped_input)
         .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))
+}
+
+pub(crate) fn scoped_legacy_alias_binding(
+    tag_resolver: &TagResolver,
+    configured_human_tags: &[String],
+    registry_root_tag: &str,
+    name: &str,
+    reference: &str,
+) -> Result<Option<AliasBinding>, OciError> {
+    let scoped = fallible_effective_ref_input(tag_resolver, name, reference)?;
+    let current = current_ref_tag(configured_human_tags, registry_root_tag, &scoped);
+    let legacy = legacy_ref_tag(registry_root_tag, &scoped);
+    if current == legacy {
+        return Ok(None);
+    }
+
+    Ok(Some(AliasBinding {
+        tag: legacy,
+        write_scope_tag: Some(scoped_write_scope_tag(tag_resolver, name, reference)?),
+    }))
 }
 
 fn effective_ref_input(tag_resolver: &TagResolver, name: &str, reference: &str) -> String {
@@ -59,13 +88,53 @@ fn fallible_effective_ref_input(
         .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))
 }
 
-fn root_scoped_ref_tag(registry_root_tag: &str, scoped_ref: &str) -> String {
+fn current_ref_tag(
+    configured_human_tags: &[String],
+    registry_root_tag: &str,
+    scoped_ref: &str,
+) -> String {
+    ref_tag_for_input(&current_ref_input(
+        configured_human_tags,
+        registry_root_tag,
+        scoped_ref,
+    ))
+}
+
+fn legacy_ref_tag(registry_root_tag: &str, scoped_ref: &str) -> String {
+    legacy_ref_tag_for_input(&legacy_ref_input(registry_root_tag, scoped_ref))
+}
+
+fn current_ref_input(
+    configured_human_tags: &[String],
+    registry_root_tag: &str,
+    scoped_ref: &str,
+) -> String {
+    let namespace = current_ref_namespace(configured_human_tags, registry_root_tag);
+    if namespace.is_empty() {
+        scoped_ref.to_string()
+    } else {
+        format!("{namespace}:{scoped_ref}")
+    }
+}
+
+fn legacy_ref_input(registry_root_tag: &str, scoped_ref: &str) -> String {
     let root = registry_root_tag.trim();
     if root.is_empty() {
-        ref_tag_for_input(scoped_ref)
+        scoped_ref.to_string()
     } else {
-        ref_tag_for_input(&format!("{root}:{scoped_ref}"))
+        format!("{root}:{scoped_ref}")
     }
+}
+
+fn current_ref_namespace<'a>(
+    configured_human_tags: &'a [String],
+    registry_root_tag: &'a str,
+) -> &'a str {
+    configured_human_tags
+        .first()
+        .map(|tag| tag.as_str())
+        .filter(|tag| !tag.trim().is_empty())
+        .unwrap_or_else(|| registry_root_tag.trim())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

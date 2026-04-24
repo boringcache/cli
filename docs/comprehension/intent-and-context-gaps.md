@@ -18,6 +18,7 @@ This file tracks only product intent that is not fully settled by the current co
 - `cache-registry` is the explicit raw proxy command.
 - `run --proxy` temporarily starts that same proxy for one command.
 - `/_boringcache/status` is the operator/harness lifecycle endpoint, not the cache protocol surface.
+- Rooted OCI ref aliases use the proxy's primary human tag namespace as the canonical truth. Legacy root-hash aliases are compatibility-only during migration, and shared unscoped aliases are not part of rooted restore.
 - `.boringcache.toml` is the canonical repo config filename.
 - `.boringcache.toml` is the durable repo cache plan across local and CI; the CLI is the only local planner for it.
 - `doctor` plus `audit` are the current maintenance loop after onboard. Future `lint` or `rescan` naming should wrap those planner/audit paths, not create new config truth.

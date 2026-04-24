@@ -171,8 +171,13 @@ mod tests {
         let tag1 = ref_tag("my-cache", "main");
         let tag2 = ref_tag("my-cache", "main");
         assert_eq!(tag1, tag2);
-        assert!(tag1.starts_with("oci_ref_"));
-        assert_eq!(tag1.len(), 8 + 64);
+        assert_eq!(
+            tag1,
+            format!(
+                "oci_ref_my-cache__main__{}",
+                &sha256_hex(b"my-cache:main")[..16]
+            )
+        );
     }
 
     #[test]
@@ -180,6 +185,12 @@ mod tests {
         let tag1 = ref_tag("my-cache", "main");
         let tag2 = ref_tag("my-cache", "dev");
         assert_ne!(tag1, tag2);
+    }
+
+    #[test]
+    fn legacy_ref_tag_keeps_hash_only_shape() {
+        let tag = legacy_ref_tag_for_input("my-cache:main");
+        assert_eq!(tag, format!("oci_ref_{}", sha256_hex(b"my-cache:main")));
     }
 
     #[test]
