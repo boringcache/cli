@@ -25,6 +25,7 @@ Stable CLI rules live here so `AGENTS.md` can stay small. Read this when impleme
 
 - Tag resolution uses `TagResolver` with platform suffix and git suffix when enabled.
 - Restore candidates are a single effective tag. There is no fallback chain.
+- For the proxy KV flush path, `bc_registry_root_v2_*` remains the OCI URL path. When the server advertises `registry_path_tags` and the primary resolved tag is valid under Rails tag rules, publish the human tag directly and let Rails resolve the root path through `cache_tags.registry_path`; unsupported tag names stay on the legacy root publish path.
 - Manifest root digest uses SHA-256. File hashes remain BLAKE3.
 - Manifest digest is SHA-256 of the uploaded manifest bytes.
 - `BORINGCACHE_TEST_MODE=1` disables git suffixing to keep test tags stable.

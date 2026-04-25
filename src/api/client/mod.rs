@@ -57,6 +57,8 @@ struct CapabilityFlags {
     #[serde(default)]
     tag_publish_v2: bool,
     #[serde(default)]
+    registry_path_tags: bool,
+    #[serde(default)]
     finalize_only_v2: bool,
     #[serde(default)]
     entry_create_v2: bool,

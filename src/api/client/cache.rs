@@ -48,6 +48,10 @@ impl ApiClient {
         flags
     }
 
+    pub async fn supports_registry_path_tags(&self) -> bool {
+        self.get_capabilities().await.registry_path_tags
+    }
+
     async fn fetch_capabilities(&self) -> Result<CapabilityFlags> {
         let mut candidates = Vec::new();
         if !self.v2_base_url.is_empty() {
@@ -78,11 +82,12 @@ impl ApiClient {
                         .await
                         .context("Failed to parse capabilities response")?;
                     debug!(
-                        "Capabilities negotiated from {}: entry_create_v2={} blob_stage_v2={} tag_publish_v2={} finalize_only_v2={}",
+                        "Capabilities negotiated from {}: entry_create_v2={} blob_stage_v2={} tag_publish_v2={} registry_path_tags={} finalize_only_v2={}",
                         url,
                         payload.features.entry_create_v2,
                         payload.features.blob_stage_v2,
                         payload.features.tag_publish_v2,
+                        payload.features.registry_path_tags,
                         payload.features.finalize_only_v2
                     );
                     return Ok(payload.features);

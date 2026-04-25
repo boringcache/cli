@@ -349,6 +349,16 @@ fn kv_alias_tags_exclude_internal_root_tag() {
 }
 
 #[test]
+fn server_cache_tag_name_matches_web_tag_constraints() {
+    assert!(server_cache_tag_name("build-main_amd64.1"));
+    assert!(!server_cache_tag_name("build/main"));
+    assert!(!server_cache_tag_name("build:main"));
+    assert!(!server_cache_tag_name(".build-main"));
+    assert!(!server_cache_tag_name("build-main-"));
+    assert!(!server_cache_tag_name("build..main"));
+}
+
+#[test]
 fn pending_refresh_suppression_applies_for_recent_local_puts() {
     let now_ms: u64 = 100_000;
     let last_put_ms = now_ms.saturating_sub(5_000);

@@ -136,7 +136,16 @@ pub(crate) async fn do_flush(
     FlushError,
 > {
     let flush_started_at = std::time::Instant::now();
-    let tag = state.registry_root_tag.trim().to_string();
+    let primary_write_scope_tag = kv_primary_write_scope_tag(state);
+    let publish_tag =
+        if should_publish_kv_primary_human_tag(state, primary_write_scope_tag.as_deref()).await {
+            primary_write_scope_tag
+                .clone()
+                .unwrap_or_else(|| state.registry_root_tag.trim().to_string())
+        } else {
+            state.registry_root_tag.trim().to_string()
+        };
+    let tag = publish_tag;
 
     let (published_snapshot, published_blob_order) = {
         let published = state.kv_published_index.read().await;
@@ -210,7 +219,7 @@ pub(crate) async fn do_flush(
 
     let request = SaveRequest {
         tag: tag.clone(),
-        write_scope_tag: kv_primary_write_scope_tag(state),
+        write_scope_tag: primary_write_scope_tag.clone(),
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
@@ -257,7 +266,7 @@ pub(crate) async fn do_flush(
     let confirm_cache_entry_id = save_response.cache_entry_id.clone();
     let confirm_manifest_digest = manifest_root_digest.clone();
     let confirm_tag = tag.clone();
-    let confirm_write_scope_tag = kv_primary_write_scope_tag(state);
+    let confirm_write_scope_tag = primary_write_scope_tag.clone();
 
     if let Some(reason) = save_response.blocking_pending_cas_reason(&manifest_root_digest) {
         return Err(FlushError::Conflict(format!(
@@ -354,9 +363,10 @@ pub(crate) async fn do_flush(
         };
         let confirm_outcome =
             confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request).await?;
-        let alias_count = bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id).await?;
+        let alias_count =
+            bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id, Some(&tag)).await?;
         eprintln!(
-            "KV flush root publish: tag={} cache_entry_id={} state=published alias_tags={}",
+            "KV flush publish: tag={} cache_entry_id={} state=published alias_tags={}",
             tag, confirm_outcome.cache_entry_id, alias_count
         );
         if alias_count > 0 {
@@ -474,9 +484,10 @@ pub(crate) async fn do_flush(
     .await?;
     let upload_stats = upload_stats_holder.lock().unwrap().clone();
 
-    let alias_count = bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id).await?;
+    let alias_count =
+        bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id, Some(&tag)).await?;
     eprintln!(
-        "KV flush root publish: tag={} cache_entry_id={} state=published alias_tags={}",
+        "KV flush publish: tag={} cache_entry_id={} state=published alias_tags={}",
         tag, confirm_outcome.cache_entry_id, alias_count
     );
 
@@ -579,9 +590,14 @@ pub(crate) async fn bind_kv_alias_tag(
 pub(crate) async fn bind_kv_alias_tags(
     state: &AppState,
     cache_entry_id: &str,
+    skip_tag: Option<&str>,
 ) -> Result<usize, FlushError> {
     let mut alias_count = 0usize;
     for alias_tag in kv_alias_tags(state) {
+        if skip_tag == Some(alias_tag.as_str()) {
+            continue;
+        }
+
         let bind_result = bind_kv_alias_tag(state, &alias_tag, cache_entry_id).await;
         match bind_result {
             Ok(()) => {
@@ -597,6 +613,36 @@ pub(crate) async fn bind_kv_alias_tags(
         }
     }
     Ok(alias_count)
+}
+
+async fn should_publish_kv_primary_human_tag(
+    state: &AppState,
+    primary_write_scope_tag: Option<&str>,
+) -> bool {
+    let Some(primary_tag) = primary_write_scope_tag else {
+        return false;
+    };
+    let primary_tag = primary_tag.trim();
+    if !server_cache_tag_name(primary_tag) {
+        return false;
+    }
+    if crate::proxy::internal_registry_root_tag(primary_tag) != state.registry_root_tag {
+        return false;
+    }
+
+    state.api_client.supports_registry_path_tags().await
+}
+
+pub(crate) fn server_cache_tag_name(tag: &str) -> bool {
+    let trimmed = tag.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 512
+        && !matches!(trimmed.as_bytes().first(), Some(b'.' | b'-'))
+        && !matches!(trimmed.as_bytes().last(), Some(b'.' | b'-'))
+        && !trimmed.contains("..")
+        && trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
