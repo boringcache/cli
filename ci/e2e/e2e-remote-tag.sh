@@ -30,17 +30,29 @@ json_first_hit_string_value() {
   tr -d '\n' <"$file" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" | head -n 1
 }
 
+latest_proxy_log_publish_line() {
+  local proxy_log="$1"
+  local tag="${2:-}"
+
+  [[ -f "$proxy_log" ]] || return 1
+
+  if [[ -n "$tag" ]]; then
+    grep -E "KV flush (root )?publish:" "$proxy_log" \
+      | grep -F "tag=${tag} " \
+      | tail -n 1 || true
+  else
+    grep -E "KV flush (root )?publish:" "$proxy_log" \
+      | tail -n 1 || true
+  fi
+}
+
 latest_proxy_log_cache_entry_id() {
   local proxy_log="$1"
   local tag="$2"
   local line
 
-  [[ -f "$proxy_log" ]] || return 1
-
   line="$(
-    grep -F "KV flush root publish:" "$proxy_log" \
-      | grep -F "tag=${tag} " \
-      | tail -n 1 || true
+    latest_proxy_log_publish_line "$proxy_log" "$tag"
   )"
 
   [[ -n "$line" ]] || return 1
@@ -52,11 +64,8 @@ latest_proxy_log_root_tag() {
   local proxy_log="$1"
   local line
 
-  [[ -f "$proxy_log" ]] || return 1
-
   line="$(
-    grep -F "KV flush root publish:" "$proxy_log" \
-      | tail -n 1 || true
+    latest_proxy_log_publish_line "$proxy_log"
   )"
 
   [[ -n "$line" ]] || return 1
