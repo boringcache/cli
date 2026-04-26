@@ -298,11 +298,16 @@ async fn persist_manifest_entry_inner(
             )
             .await
             {
-                if state.fail_on_cache_error {
-                    return Err(OciError::internal(format!(
+                if state.fail_on_cache_error || alias.required {
+                    let error = OciError::internal(format!(
                         "Alias write failed for {} (workspace={}): {error}",
                         alias.tag, state.workspace
-                    )));
+                    ));
+                    return Err(if alias.required {
+                        error.without_degraded_fallback()
+                    } else {
+                        error
+                    });
                 }
                 let warning = format!(
                     "Alias write skipped for {} (workspace={}): {}",

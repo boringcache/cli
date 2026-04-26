@@ -1819,11 +1819,13 @@ mod tests {
             vec![
                 AliasBinding {
                     tag: "oci_digest_abc123".to_string(),
-                    write_scope_tag: Some("posthog-build:pr-123".to_string())
+                    write_scope_tag: Some("posthog-build:pr-123".to_string()),
+                    required: false
                 },
                 AliasBinding {
                     tag: "posthog-docker-build".to_string(),
-                    write_scope_tag: None
+                    write_scope_tag: None,
+                    required: true
                 }
             ]
         );
@@ -1859,15 +1861,45 @@ mod tests {
             vec![
                 AliasBinding {
                     tag: "oci_digest_abc123".to_string(),
-                    write_scope_tag: Some("posthog-build:pr-123".to_string())
+                    write_scope_tag: Some("posthog-build:pr-123".to_string()),
+                    required: false
                 },
                 AliasBinding {
                     tag: "posthog-build".to_string(),
-                    write_scope_tag: None
+                    write_scope_tag: None,
+                    required: true
                 },
                 AliasBinding {
                     tag: "posthog-stable".to_string(),
-                    write_scope_tag: None
+                    write_scope_tag: None,
+                    required: true
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn alias_tags_keep_invalid_human_aliases_best_effort() {
+        let tags = alias_tags_for_manifest(
+            "oci_ref_primary",
+            "sha256:abc123",
+            Some("posthog-build:pr-123"),
+            &["docker/main".to_string()],
+            &[],
+        );
+
+        assert_eq!(
+            tags,
+            vec![
+                AliasBinding {
+                    tag: "oci_digest_abc123".to_string(),
+                    write_scope_tag: Some("posthog-build:pr-123".to_string()),
+                    required: false
+                },
+                AliasBinding {
+                    tag: "docker/main".to_string(),
+                    write_scope_tag: None,
+                    required: false
                 },
             ]
         );
@@ -1884,14 +1916,17 @@ mod tests {
                 AliasBinding {
                     tag: "oci_ref_latest".to_string(),
                     write_scope_tag: Some("posthog-build:latest".to_string()),
+                    required: false,
                 },
                 AliasBinding {
                     tag: "posthog-build".to_string(),
                     write_scope_tag: None,
+                    required: true,
                 },
                 AliasBinding {
                     tag: "oci_ref_latest".to_string(),
                     write_scope_tag: Some("posthog-build:latest".to_string()),
+                    required: false,
                 },
             ],
         );
@@ -1900,11 +1935,13 @@ mod tests {
             vec![
                 AliasBinding {
                     tag: "posthog-build".to_string(),
-                    write_scope_tag: None
+                    write_scope_tag: None,
+                    required: true
                 },
                 AliasBinding {
                     tag: "oci_ref_latest".to_string(),
-                    write_scope_tag: Some("posthog-build:latest".to_string())
+                    write_scope_tag: Some("posthog-build:latest".to_string()),
+                    required: false
                 }
             ]
         );

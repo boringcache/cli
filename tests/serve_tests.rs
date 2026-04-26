@@ -4883,7 +4883,7 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
 }
 
 #[tokio::test]
-async fn test_manifest_put_best_effort_skips_alias_error() {
+async fn test_manifest_put_fails_required_human_alias_after_skipping_optional_alias_error() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.configured_human_tags = vec!["human-alias".to_string()];
@@ -5068,17 +5068,10 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
             "cache_entry_id": "entry-primary",
             "publish_mode": "cas"
         })))
-        .with_status(200)
+        .with_status(500)
         .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "version": "6",
-                "status": "ok",
-                "cache_entry_id": "entry-primary"
-            })
-            .to_string(),
-        )
-        .expect(1)
+        .with_body(r#"{"error":"backend unavailable"}"#)
+        .expect_at_least(1)
         .create_async()
         .await;
     let legacy_alias_publish_path = format!(
@@ -5102,7 +5095,7 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let legacy_alias_confirm_mock = server
@@ -5124,7 +5117,7 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
 
@@ -5140,7 +5133,10 @@ async fn test_manifest_put_best_effort_skips_alias_error() {
     .await
     .unwrap();
 
-    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["errors"][0]["code"], "INTERNAL_ERROR");
 
     primary_save_mock.assert_async().await;
     pointer_upload_mock.assert_async().await;

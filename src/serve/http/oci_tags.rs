@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use super::error::OciError;
 use crate::serve::state::{AppState, digest_tag, legacy_ref_tag_for_input, ref_tag_for_input};
-use crate::tag_utils::TagResolver;
+use crate::tag_utils::{TagResolver, server_cache_tag_name};
 
 pub(crate) fn scoped_restore_tags(
     tag_resolver: &TagResolver,
@@ -67,6 +67,7 @@ pub(crate) fn scoped_legacy_alias_binding(
     Ok(Some(AliasBinding {
         tag: legacy,
         write_scope_tag: Some(scoped_write_scope_tag(tag_resolver, name, reference)?),
+        required: false,
     }))
 }
 
@@ -141,6 +142,7 @@ fn current_ref_namespace<'a>(
 pub(crate) struct AliasBinding {
     pub tag: String,
     pub write_scope_tag: Option<String>,
+    pub required: bool,
 }
 
 pub(crate) fn alias_tags_for_manifest(
@@ -158,6 +160,7 @@ pub(crate) fn alias_tags_for_manifest(
         aliases.push(AliasBinding {
             tag: digest_alias,
             write_scope_tag: primary_write_scope_tag.map(ToOwned::to_owned),
+            required: false,
         });
     }
 
@@ -166,6 +169,7 @@ pub(crate) fn alias_tags_for_manifest(
             aliases.push(AliasBinding {
                 tag: human_tag.clone(),
                 write_scope_tag: None,
+                required: server_cache_tag_name(human_tag),
             });
         }
     }

@@ -604,7 +604,7 @@ pub(crate) async fn bind_kv_alias_tags(
                 alias_count = alias_count.saturating_add(1);
             }
             Err(error) => {
-                if state.fail_on_cache_error {
+                if state.fail_on_cache_error || server_cache_tag_name(&alias_tag) {
                     let stage = format!("alias bind failed for tag {alias_tag}");
                     return Err(classify_flush_error(&error, &stage));
                 }
@@ -634,15 +634,7 @@ async fn should_publish_kv_primary_human_tag(
 }
 
 pub(crate) fn server_cache_tag_name(tag: &str) -> bool {
-    let trimmed = tag.trim();
-    !trimmed.is_empty()
-        && trimmed.len() <= 512
-        && !matches!(trimmed.as_bytes().first(), Some(b'.' | b'-'))
-        && !matches!(trimmed.as_bytes().last(), Some(b'.' | b'-'))
-        && !trimmed.contains("..")
-        && trimmed
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    crate::tag_utils::server_cache_tag_name(tag)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

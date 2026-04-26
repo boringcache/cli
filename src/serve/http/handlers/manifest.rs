@@ -176,6 +176,7 @@ pub(super) async fn put_manifest(
                 &name,
                 "latest",
             )?),
+            required: false,
         }]
     } else {
         Vec::new()
@@ -251,7 +252,10 @@ pub(super) async fn put_manifest(
             subject_processed = processed;
         }
         Err(error) => {
-            if state.fail_on_cache_error || !error.status().is_server_error() {
+            if state.fail_on_cache_error
+                || !error.status().is_server_error()
+                || !error.degraded_fallback_allowed()
+            {
                 return Err(error);
             }
             let warning = format!(
@@ -398,6 +402,7 @@ fn planned_alias_promotion_bindings(
                 name,
                 reference,
             )?),
+            required: false,
         });
         if let Some(alias) = scoped_legacy_alias_binding(
             &state.tag_resolver,

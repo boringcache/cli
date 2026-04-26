@@ -19,6 +19,7 @@ struct OciErrorBody {
 pub struct OciError {
     status: StatusCode,
     body: OciErrorBody,
+    degraded_fallback_allowed: bool,
 }
 
 impl OciError {
@@ -34,6 +35,7 @@ impl OciError {
     ) -> Self {
         Self {
             status,
+            degraded_fallback_allowed: true,
             body: OciErrorBody {
                 errors: vec![OciErrorEntry {
                     code: code.to_string(),
@@ -109,6 +111,15 @@ impl OciError {
             .first()
             .map(|e| e.message.as_str())
             .unwrap_or("unknown")
+    }
+
+    pub(crate) fn without_degraded_fallback(mut self) -> Self {
+        self.degraded_fallback_allowed = false;
+        self
+    }
+
+    pub(crate) fn degraded_fallback_allowed(&self) -> bool {
+        self.degraded_fallback_allowed
     }
 }
 

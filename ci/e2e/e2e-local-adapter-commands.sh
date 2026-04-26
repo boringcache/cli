@@ -20,6 +20,10 @@ SUMMARY_FILE="${LOG_DIR}/summary.txt"
 LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-config-hints,docker,oci-same-alias,gradle,maven,turbo,nx,go,bazel,sccache}"
 LOCAL_ADAPTER_SKIP_BUILD="${LOCAL_ADAPTER_SKIP_BUILD:-0}"
 LOCAL_ADAPTER_CLEANUP="${LOCAL_ADAPTER_CLEANUP:-}"
+E2E_EMAIL="${E2E_EMAIL:-cli-local-adapter-e2e@example.com}"
+E2E_NAMESPACE_SLUG="${E2E_NAMESPACE_SLUG:-cli-local-adapter-e2e}"
+E2E_WORKSPACE_SLUG="${E2E_WORKSPACE_SLUG:-adapter-e2e}"
+E2E_WORKSPACE_NAME="${E2E_WORKSPACE_NAME:-Adapter E2E}"
 JAVA_TOOL_VERSION="${JAVA_TOOL_VERSION:-java@21.0.2}"
 MAVEN_TOOL_VERSION="${MAVEN_TOOL_VERSION:-maven@3.9.14}"
 
@@ -580,9 +584,10 @@ start_local_rails() {
   local bootstrap_output
   bootstrap_output="$(
     cd "${WEB_DIR}"
-    E2E_EMAIL="cli-local-adapter-e2e@example.com" \
-    E2E_NAMESPACE_SLUG="cli-local-adapter-e2e" \
-    E2E_WORKSPACE_SLUG="adapter-e2e" \
+    E2E_EMAIL="${E2E_EMAIL}" \
+    E2E_NAMESPACE_SLUG="${E2E_NAMESPACE_SLUG}" \
+    E2E_WORKSPACE_SLUG="${E2E_WORKSPACE_SLUG}" \
+    E2E_WORKSPACE_NAME="${E2E_WORKSPACE_NAME}" \
       run_web_command bin/rails runner '
       user = User.find_or_initialize_by(email: ENV.fetch("E2E_EMAIL"))
       user.namespace ||= Namespace.new(user: user)
@@ -617,7 +622,7 @@ start_local_rails() {
           namespace: user.namespace,
           slug: workspace_slug
         )
-        workspace.name = "Adapter E2E"
+        workspace.name = ENV.fetch("E2E_WORKSPACE_NAME")
         workspace.allow_reserved_slug = true
         workspace.save!
       end

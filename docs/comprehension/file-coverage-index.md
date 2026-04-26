@@ -150,7 +150,11 @@ Owner: cache lifecycle support (`support-primary`)
 - `src/signing/mod.rs`
 - `src/signing/policy.rs`
 - `src/git.rs`
-- `src/tag_utils.rs`
+- `src/tag_utils/mod.rs`
+- `src/tag_utils/platform.rs`
+- `src/tag_utils/resolver.rs`
+- `src/tag_utils/validation.rs`
+- `src/tag_utils/tests.rs`
 - `src/ci_detection/mod.rs`
 - `src/ci_detection/context.rs`
 - `src/ci_detection/detect.rs`
@@ -428,6 +432,7 @@ Owner: repo operations support (`support-primary`)
 - `ci/e2e/extended/e2e-tool-hugo-test.sh`
 
 Notes:
+- `e2e-local-adapter-commands.sh` accepts explicit E2E email, namespace, workspace slug, and workspace name env overrides so repeated local Rails-backed runs can use isolated workspaces instead of the default shared smoke workspace.
 - `e2e-oci-rooted-restore-isolation-test.sh` now proves the product OCI tag contract directly: readable rooted aliases under the primary human tag are the canonical path, legacy root-hash aliases stay bound for migration, and shared readable or legacy unrooted aliases do not leak across roots.
 
 ### Install surface
