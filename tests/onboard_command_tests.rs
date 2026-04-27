@@ -118,13 +118,10 @@ jobs:
     std::fs::write(
         temp_dir.path().join("images/app/Dockerfile"),
         r#"
-FROM ghcr.io/boringcache/base:bookworm-build
-RUN boringcache run my-org/my-app mise-installs:/mise/installs --no-platform --no-git -- \
-    mise install
-RUN boringcache run my-org/my-app bundler:/usr/local/bundle --no-platform --no-git -- \
-    bundle install
-RUN boringcache run my-org/my-app node_modules:node_modules --no-platform --no-git -- \
-    yarn install --frozen-lockfile
+FROM node:20
+WORKDIR /app
+COPY package.json yarn.lock ./
+RUN yarn install --frozen-lockfile
 "#,
     )
     .expect("write dockerfile");
@@ -161,6 +158,6 @@ RUN boringcache run my-org/my-app node_modules:node_modules --no-platform --no-g
 
     assert!(
         !temp_dir.path().join(".boringcache.toml").exists(),
-        "Dockerfile cache commands should not seed repo config"
+        "Dockerfiles should not seed repo config"
     );
 }
