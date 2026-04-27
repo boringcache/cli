@@ -82,7 +82,6 @@ struct DashboardApp {
     insight_limit: u32,
     tag_limit: u32,
     tag_page: u32,
-    include_system_tags: bool,
     refresh_interval: Duration,
     side_panel: SidePanel,
     selected_tag: usize,
@@ -169,7 +168,6 @@ impl DashboardApp {
             insight_limit,
             tag_limit,
             1,
-            false,
         )
         .await?;
 
@@ -180,7 +178,6 @@ impl DashboardApp {
             insight_limit,
             tag_limit,
             tag_page: 1,
-            include_system_tags: false,
             refresh_interval: Duration::from_secs(interval_seconds),
             side_panel: SidePanel::Sessions,
             selected_tag: 0,
@@ -244,7 +241,6 @@ impl DashboardApp {
             }
             KeyCode::PageDown | KeyCode::Char('n') => self.next_page().await,
             KeyCode::PageUp | KeyCode::Char('p') => self.previous_page().await,
-            KeyCode::Char('s') => self.toggle_system_tags().await,
             KeyCode::Tab => self.side_panel = self.side_panel.next(),
             KeyCode::BackTab => self.side_panel = self.side_panel.previous(),
             KeyCode::Enter | KeyCode::Char('i') => self.open_selected_tag_inspect().await,
@@ -457,15 +453,7 @@ impl DashboardApp {
         .header(header)
         .block(
             Block::default()
-                .title(format!(
-                    "Tags [{} | {}]",
-                    if self.include_system_tags {
-                        "all tags"
-                    } else {
-                        "human tags"
-                    },
-                    showing_range(&self.tags)
-                ))
+                .title(format!("Named tags [{}]", showing_range(&self.tags)))
                 .borders(Borders::ALL),
         )
         .column_spacing(1)
@@ -621,13 +609,8 @@ impl DashboardApp {
         let status_line = self.footer_message.as_deref().map_or_else(
             || {
                 format!(
-                    "Auto refresh {}s  System tags {}  Panel {}",
+                    "Auto refresh {}s  Panel {}",
                     self.refresh_interval.as_secs(),
-                    if self.include_system_tags {
-                        "on"
-                    } else {
-                        "off"
-                    },
                     match self.side_panel {
                         SidePanel::Sessions => "sessions",
                         SidePanel::Misses => "misses",
@@ -640,7 +623,7 @@ impl DashboardApp {
 
         let lines = vec![
             Line::from(
-                "Keys: arrows/jk move  Enter inspect  Tab switch panel  n/p page  s toggle system  r refresh  q quit",
+                "Keys: arrows/jk move  Enter inspect  Tab switch panel  n/p page  r refresh  q quit",
             ),
             Line::from(status_line),
         ];
@@ -655,16 +638,11 @@ impl DashboardApp {
         let status_line = self.footer_message.as_deref().map_or_else(
             || {
                 format!(
-                    "{}  system {}  {}s refresh",
+                    "{}  {}s refresh",
                     match self.side_panel {
                         SidePanel::Sessions => "sessions",
                         SidePanel::Misses => "misses",
                         SidePanel::Tools => "tools",
-                    },
-                    if self.include_system_tags {
-                        "on"
-                    } else {
-                        "off"
                     },
                     self.refresh_interval.as_secs()
                 )
@@ -673,7 +651,7 @@ impl DashboardApp {
         );
 
         let lines = vec![
-            Line::from("jk/arrows move  Enter inspect  Tab panel  n/p page  s system  q quit"),
+            Line::from("jk/arrows move  Enter inspect  Tab panel  n/p page  q quit"),
             Line::from(status_line),
         ];
         let widget = Paragraph::new(lines)
@@ -728,12 +706,6 @@ impl DashboardApp {
         self.refresh_in_place().await;
     }
 
-    async fn toggle_system_tags(&mut self) {
-        self.include_system_tags = !self.include_system_tags;
-        self.tag_page = 1;
-        self.refresh_in_place().await;
-    }
-
     async fn open_selected_tag_inspect(&mut self) {
         let Some(tag) = self.selected_tag() else {
             self.footer_message = Some("No tag selected to inspect.".to_string());
@@ -773,7 +745,6 @@ impl DashboardApp {
             self.insight_limit,
             self.tag_limit,
             self.tag_page,
-            self.include_system_tags,
         )
         .await
         {
@@ -799,12 +770,11 @@ async fn fetch_dashboard_data(
     insight_limit: u32,
     tag_limit: u32,
     tag_page: u32,
-    include_system_tags: bool,
 ) -> Result<(WorkspaceStatusResponse, WorkspaceTagsResponse)> {
     let offset = (tag_page.saturating_sub(1)).saturating_mul(tag_limit);
     tokio::try_join!(
         api_client.workspace_status(workspace, period, insight_limit),
-        api_client.workspace_tags(workspace, None, include_system_tags, tag_limit, offset),
+        api_client.workspace_tags(workspace, None, false, tag_limit, offset),
     )
 }
 
@@ -1182,7 +1152,7 @@ fn yes_no(value: bool) -> &'static str {
 
 fn tag_kind(tag: &WorkspaceTagFeedItem) -> &'static str {
     if tag.system {
-        "system"
+        "internal"
     } else if tag.primary {
         "primary"
     } else {

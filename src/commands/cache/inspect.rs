@@ -102,7 +102,7 @@ fn render_inspection(inspection: &CacheInspectResponse) {
                 labels.push("primary");
             }
             if tag.system {
-                labels.push("system");
+                labels.push("internal");
             }
             if labels.is_empty() {
                 println!("  {}", tag.name);
@@ -118,7 +118,7 @@ fn render_inspection(inspection: &CacheInspectResponse) {
     print_field("Save", &save_command(inspection));
     match remove_command(inspection) {
         Some(command) => print_field("Remove", &command),
-        None => print_field("Remove", "No human tag is bound to this cache entry"),
+        None => print_field("Remove", "No named tag is bound to this cache entry"),
     }
     ui::blank_line();
 

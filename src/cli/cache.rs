@@ -480,7 +480,11 @@ pub struct TagsArgs {
     #[arg(long, help = "Filter tags by substring")]
     pub filter: Option<String>,
 
-    #[arg(long, help = "Include system and internal tags")]
+    #[arg(
+        long,
+        hide = true,
+        help = "Compatibility no-op; internal tags are admin-only"
+    )]
     pub all: bool,
 
     #[arg(

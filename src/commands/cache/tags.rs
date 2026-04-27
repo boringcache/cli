@@ -18,8 +18,11 @@ pub async fn execute(
     )
     .await?;
     let offset = (page.saturating_sub(1)).saturating_mul(limit);
+    if include_system && !json_output {
+        crate::ui::warn("Internal cache entries are available in the admin workspace audit.");
+    }
     let response = api_client
-        .workspace_tags(&workspace, filter.as_deref(), include_system, limit, offset)
+        .workspace_tags(&workspace, filter.as_deref(), false, limit, offset)
         .await?;
 
     if json_output {
@@ -41,9 +44,9 @@ fn render_tags_report(response: &WorkspaceTagsResponse) {
     crate::commands::status::print_field(
         "Scope",
         if response.filter.include_system {
-            "all tags"
+            "internal tags"
         } else {
-            "human tags"
+            "named tags"
         },
     );
     crate::commands::status::print_field("Showing", &showing_range(&response.pagination));
@@ -82,7 +85,7 @@ fn render_tags_report(response: &WorkspaceTagsResponse) {
 
 fn tag_kind(tag: &crate::api::models::workspace::WorkspaceTagFeedItem) -> &'static str {
     if tag.system {
-        "system"
+        "internal"
     } else if tag.primary {
         "primary"
     } else {
@@ -111,10 +114,6 @@ fn next_page_command(response: &WorkspaceTagsResponse) -> String {
     if let Some(filter) = response.filter.query.as_deref() {
         parts.push(format!("--filter {}", shell_quote(filter)));
     }
-    if response.filter.include_system {
-        parts.push("--all".to_string());
-    }
-
     parts.join(" ")
 }
 
@@ -151,7 +150,7 @@ mod tests {
     };
 
     #[test]
-    fn next_page_command_preserves_filter_and_all_flag() {
+    fn next_page_command_preserves_filter() {
         let response = WorkspaceTagsResponse {
             workspace: WorkspaceSummaryContext {
                 name: "testing".to_string(),
@@ -185,7 +184,7 @@ mod tests {
 
         assert_eq!(
             next_page_command(&response),
-            r#"boringcache tags org/testing --page 3 --limit 20 --filter "ruby current" --all"#
+            r#"boringcache tags org/testing --page 3 --limit 20 --filter "ruby current""#
         );
     }
 
