@@ -1,12 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# Production Next.js Dockerfile — mise for tools, boringcache for caching.
+# Production Next.js Dockerfile — mise for tools.
 #
-# Build with caching (restore + save):
-#   docker build --secret id=bc_token,env=BORINGCACHE_API_TOKEN -t my-app .
-#
-# Build without caching:
+# Build locally:
 #   docker build -t my-app .
+#
+# CI build caching is configured with BuildKit registry-cache refs.
 #
 # Requires output: "standalone" in next.config.ts.
 
@@ -17,14 +16,11 @@ FROM ghcr.io/boringcache/base:bookworm-build AS build
 WORKDIR /app
 
 COPY mise.toml ./
-RUN --mount=type=secret,id=bc_token \
-    --mount=type=cache,target=/mise/cache \
-    boringcache run my-org/my-app mise-installs:/mise/installs --no-platform --no-git -- \
+RUN --mount=type=cache,target=/mise/cache \
     mise install
 
 COPY package.json yarn.lock ./
-RUN --mount=type=secret,id=bc_token \
-    boringcache run my-org/my-app node_modules:node_modules --no-platform --no-git -- \
+RUN --mount=type=cache,target=/usr/local/share/.cache/yarn \
     yarn install --frozen-lockfile
 
 COPY . .

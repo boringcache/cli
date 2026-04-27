@@ -2,7 +2,7 @@
 #
 # ghcr.io/boringcache/base:bookworm
 #
-# Minimal Debian Bookworm with mise and boringcache CLI.
+# Minimal Debian Bookworm with mise and the boringcache CLI.
 # Tool versions come from your project's mise.toml — not from this image.
 #
 # Usage:
@@ -11,17 +11,7 @@
 #   COPY mise.toml ./
 #   RUN mise install
 #
-# With boringcache caching in a Dockerfile:
-#   RUN --mount=type=secret,id=bc_token \
-#       boringcache run my-org/app deps:node_modules -- npm ci
-#
-# Pass the token via BuildKit secret (never baked into any layer):
-#   docker build --secret id=bc_token,env=BORINGCACHE_API_TOKEN .
-#
-# The CLI auto-detects /run/secrets/bc_token when mounted as a BuildKit secret.
-# With a save-capable token, updated deps are pushed back to cache.
-# With a restore-only token, saves are silently skipped.
-# With no token at all, cache ops are skipped and the command runs directly.
+# Docker build caching is configured from CI with BuildKit registry-cache refs.
 
 FROM debian:bookworm-slim
 

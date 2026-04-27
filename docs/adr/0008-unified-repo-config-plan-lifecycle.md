@@ -67,7 +67,7 @@ and external helpers that ask the CLI for a plan.
 
 ## Docker Rule
 
-The maintained Docker path is outside the Dockerfile:
+The maintained Docker path is BuildKit registry-cache planning:
 
 - `boringcache docker`;
 - `boringcache/one` Docker mode;

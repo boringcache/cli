@@ -29,23 +29,18 @@ fn apply_test_env(cmd: &mut Command) -> &mut Command {
 #[test]
 fn audit_json_supports_explicit_paths_and_skips_dynamic_and_quoted_examples() {
     let temp_dir = TempDir::new().expect("temp dir");
-    std::fs::create_dir_all(temp_dir.path().join("images/examples/rails")).expect("images dir");
     std::fs::create_dir_all(temp_dir.path().join("scripts")).expect("scripts dir");
     std::fs::create_dir_all(temp_dir.path().join(".github/workflows")).expect("workflow dir");
 
     std::fs::write(
-        temp_dir.path().join("images/examples/rails/Dockerfile"),
+        temp_dir.path().join("scripts/cache.sh"),
         r#"
-FROM ghcr.io/boringcache/base:bookworm-build
-RUN boringcache run my-org/my-app mise-installs:/mise/installs --no-platform --no-git -- \
-    mise install
-RUN boringcache run my-org/my-app bundler:/usr/local/bundle --no-platform --no-git -- \
-    bundle install
-RUN boringcache run my-org/my-app node_modules:node_modules --no-platform --no-git -- \
-    yarn install --frozen-lockfile
+boringcache run my-org/my-app mise-installs:/mise/installs -- mise install
+boringcache run my-org/my-app bundler:/usr/local/bundle -- bundle install
+boringcache run my-org/my-app node_modules:node_modules -- yarn install --frozen-lockfile
 "#,
     )
-    .expect("write dockerfile");
+    .expect("write script");
 
     std::fs::write(
         temp_dir.path().join("scripts/dynamic.sh"),
@@ -79,8 +74,6 @@ jobs:
         .args([
             "audit",
             "--json",
-            "--path",
-            "images",
             "--path",
             "scripts",
             "--path",
@@ -128,27 +121,23 @@ jobs:
 #[test]
 fn audit_write_generates_repo_config() {
     let temp_dir = TempDir::new().expect("temp dir");
-    std::fs::create_dir_all(temp_dir.path().join("images/examples/rails")).expect("images dir");
+    std::fs::create_dir_all(temp_dir.path().join("scripts")).expect("scripts dir");
 
     std::fs::write(
-        temp_dir.path().join("images/examples/rails/Dockerfile"),
+        temp_dir.path().join("scripts/cache.sh"),
         r#"
-FROM ghcr.io/boringcache/base:bookworm-build
-RUN boringcache run my-org/my-app mise-installs:/mise/installs --no-platform --no-git -- \
-    mise install
-RUN boringcache run my-org/my-app bundler:/usr/local/bundle --no-platform --no-git -- \
-    bundle install
-RUN boringcache run my-org/my-app node_modules:node_modules --no-platform --no-git -- \
-    yarn install --frozen-lockfile
+boringcache run my-org/my-app mise-installs:/mise/installs -- mise install
+boringcache run my-org/my-app bundler:/usr/local/bundle -- bundle install
+boringcache run my-org/my-app node_modules:node_modules -- yarn install --frozen-lockfile
 "#,
     )
-    .expect("write dockerfile");
+    .expect("write script");
 
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);
     let output = command
         .current_dir(temp_dir.path())
-        .args(["audit", "--write", "--path", "images"])
+        .args(["audit", "--write", "--path", "scripts"])
         .output()
         .expect("run audit --write");
 

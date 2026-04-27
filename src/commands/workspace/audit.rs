@@ -311,13 +311,6 @@ fn candidate_files(scan_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 }
 
 fn is_audit_candidate(path: &Path) -> bool {
-    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
-        return false;
-    };
-    if file_name.contains("Dockerfile") {
-        return true;
-    }
-
     path.extension()
         .and_then(|value| value.to_str())
         .is_some_and(|ext| {

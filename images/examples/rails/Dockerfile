@@ -1,21 +1,12 @@
 # syntax=docker/dockerfile:1
 # check=error=true
 #
-# Production Rails Dockerfile — mise for tools, boringcache for caching.
+# Production Rails Dockerfile — mise for tools.
 #
-# Build with caching (restore + save — recommended for main branch):
-#   docker build --secret id=bc_token,env=BORINGCACHE_API_TOKEN -t my-app .
-#
-# Build with restore-only caching (safer for PRs / forks):
-#   docker build --secret id=bc_token,env=BORINGCACHE_RESTORE_TOKEN -t my-app .
-#
-# Build without caching (same Dockerfile, no token needed):
+# Build locally:
 #   docker build -t my-app .
 #
-# The CLI auto-detects /run/secrets/bc_token when mounted as a BuildKit secret.
-# With a save-capable token, updated deps are pushed back to cache.
-# With a restore-only token, saves are silently skipped.
-# With no token at all, boringcache run skips caching and runs the command directly.
+# CI build caching is configured with BuildKit registry-cache refs.
 #
 # Tool versions live in mise.toml — the same file used in local dev and CI.
 # No version numbers in this Dockerfile.
@@ -26,29 +17,24 @@
 FROM ghcr.io/boringcache/base:bookworm-build AS build
 WORKDIR /rails
 
-# 1. Install tools — cached across builds via boringcache
+# 1. Install tools
 COPY mise.toml .ruby-version ./
-RUN --mount=type=secret,id=bc_token \
-    --mount=type=cache,target=/mise/cache \
-    boringcache run my-org/my-app mise-installs:/mise/installs --no-platform --no-git -- \
+RUN --mount=type=cache,target=/mise/cache \
     mise install
 
-# 2. Install gems — cached across builds via boringcache
+# 2. Install gems
 ENV BUNDLE_DEPLOYMENT="1" \
     BUNDLE_PATH="/usr/local/bundle" \
     BUNDLE_WITHOUT="development"
 
 COPY Gemfile Gemfile.lock ./
-RUN --mount=type=secret,id=bc_token \
-    boringcache run my-org/my-app bundler:/usr/local/bundle --no-platform --no-git -- \
-    bundle install && \
+RUN bundle install && \
     rm -rf ~/.bundle/ "${BUNDLE_PATH}"/ruby/*/cache "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git && \
     bundle exec bootsnap precompile -j 1 --gemfile
 
-# 3. Install node modules — cached across builds via boringcache
+# 3. Install node modules
 COPY package.json yarn.lock ./
-RUN --mount=type=secret,id=bc_token \
-    boringcache run my-org/my-app node_modules:node_modules --no-platform --no-git -- \
+RUN --mount=type=cache,target=/usr/local/share/.cache/yarn \
     yarn install --frozen-lockfile
 
 # 4. Copy source and compile (changes every commit — last for cache efficiency)
@@ -61,7 +47,7 @@ RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile && \
     rm -rf node_modules
 
 # ---------------------------------------------------------------------------
-# Runtime stage — no build tools, no boringcache, minimal footprint
+# Runtime stage — no build tools, minimal footprint
 # ---------------------------------------------------------------------------
 FROM ghcr.io/boringcache/base:bookworm
 WORKDIR /rails
