@@ -130,9 +130,13 @@ action/CLI path.
 Follow-up gate work adds `benchmarks/scripts/launch-proof.rb` so downloaded
 benchmark bundles can be rejected automatically when product refs, cache
 mode/lane, sample classification, Docker OCI counters, or attached
-`cache_session_summary` evidence are missing. The existing aggregate snapshot
-is still not launch proof until a fresh released-path run produces artifacts
-that pass that validator.
+`cache_session_summary` evidence are missing. The launch matrix extends that
+from artifact validity to coverage validity: each CLI/action tool path must
+carry explicit evidence for fresh cold runs, same-runner reruns,
+fresh-runner reruns, fresh-after-purge reruns, and Docker's extra same-ref and
+same-alias-writer paths. The existing aggregate snapshot is still not launch
+proof until a fresh released-path run produces artifacts that pass that
+validator and matrix.
 
 ## Legacy And Cleanup
 
