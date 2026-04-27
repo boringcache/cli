@@ -24,10 +24,114 @@ fn sample_tags_response(total: u32, returned: u32) -> WorkspaceTagsResponse {
     }
 }
 
+fn sample_tag(
+    name: &str,
+    primary: bool,
+    system: bool,
+    uploaded_at: Option<&str>,
+    last_accessed_at: Option<&str>,
+) -> WorkspaceTagFeedItem {
+    WorkspaceTagFeedItem {
+        name: name.to_string(),
+        primary,
+        system,
+        primary_tag: name.to_string(),
+        cache_entry_id: format!("entry-{name}"),
+        manifest_root_digest: format!("sha256:{name}"),
+        storage_mode: "archive".to_string(),
+        stored_size_bytes: 100,
+        hit_count: 1,
+        uploaded_at: uploaded_at.map(str::to_string),
+        last_accessed_at: last_accessed_at.map(str::to_string),
+    }
+}
+
 #[test]
 fn tag_page_count_handles_empty_state() {
     assert_eq!(tag_page_count(&sample_tags_response(0, 0)), 1);
     assert_eq!(tag_page_count(&sample_tags_response(76, 25)), 4);
+}
+
+#[test]
+fn dashboard_tags_page_keeps_primary_human_tags_sorted_by_recent_activity() {
+    let mut response = sample_tags_response(5, 5);
+    response.pagination.offset = 0;
+    response.tags = vec![
+        sample_tag(
+            "old-primary",
+            true,
+            false,
+            Some("2026-04-27T07:00:00Z"),
+            Some("2026-04-27T08:00:00Z"),
+        ),
+        sample_tag(
+            "fresh-alias",
+            false,
+            false,
+            Some("2026-04-27T07:00:00Z"),
+            Some("2026-04-27T12:00:00Z"),
+        ),
+        sample_tag(
+            "fresh-system",
+            true,
+            true,
+            Some("2026-04-27T07:00:00Z"),
+            Some("2026-04-27T11:00:00Z"),
+        ),
+        sample_tag(
+            "uploaded-only",
+            true,
+            false,
+            Some("2026-04-27T09:00:00Z"),
+            None,
+        ),
+        sample_tag(
+            "fresh-primary",
+            true,
+            false,
+            Some("2026-04-27T07:00:00Z"),
+            Some("2026-04-27T10:00:00Z"),
+        ),
+    ];
+
+    let page = dashboard_tags_page(response, 2, 1);
+
+    assert_eq!(page.pagination.total, 3);
+    assert_eq!(page.pagination.returned, 2);
+    assert!(page.pagination.has_more);
+    assert_eq!(
+        page.tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fresh-primary", "uploaded-only"]
+    );
+}
+
+#[test]
+fn dashboard_tags_page_paginates_after_filtering() {
+    let mut response = sample_tags_response(4, 4);
+    response.pagination.offset = 0;
+    response.tags = vec![
+        sample_tag("first", true, false, Some("2026-04-27T10:00:00Z"), None),
+        sample_tag(
+            "ignored-alias",
+            false,
+            false,
+            Some("2026-04-27T09:00:00Z"),
+            None,
+        ),
+        sample_tag("second", true, false, Some("2026-04-27T08:00:00Z"), None),
+        sample_tag("third", true, false, Some("2026-04-27T07:00:00Z"), None),
+    ];
+
+    let page = dashboard_tags_page(response, 2, 2);
+
+    assert_eq!(page.pagination.total, 3);
+    assert_eq!(page.pagination.offset, 2);
+    assert_eq!(page.pagination.returned, 1);
+    assert!(!page.pagination.has_more);
+    assert_eq!(page.tags[0].name, "third");
 }
 
 #[test]

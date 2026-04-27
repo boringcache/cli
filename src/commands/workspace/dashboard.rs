@@ -10,6 +10,7 @@ use crate::api::{
 };
 use crate::progress::format_bytes;
 use anyhow::{Result, bail};
+use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -24,9 +25,12 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs, Wrap},
 };
 use std::{
+    cmp::Ordering,
     io::{self, IsTerminal, Stdout},
     time::{Duration, Instant},
 };
+
+const DASHBOARD_TAG_FETCH_LIMIT: u32 = 100;
 
 pub async fn execute(
     workspace_option: Option<String>,
@@ -419,32 +423,26 @@ impl DashboardApp {
             .split(area);
 
         let header = Row::new(vec![
-            Cell::from("TYPE"),
             Cell::from("TAG"),
-            Cell::from("PRIMARY"),
             Cell::from("HITS"),
             Cell::from("SIZE"),
-            Cell::from("UPLOADED"),
+            Cell::from("LAST USED"),
         ])
         .style(Style::default().add_modifier(Modifier::BOLD));
 
         let rows = self.tags.tags.iter().map(|tag| {
             Row::new(vec![
-                Cell::from(tag_kind(tag)),
                 Cell::from(crate::commands::status::truncate(&tag.name, 28)),
-                Cell::from(crate::commands::status::truncate(&tag.primary_tag, 18)),
                 Cell::from(tag.hit_count.to_string()),
                 Cell::from(format_bytes(tag.stored_size_bytes)),
-                Cell::from(format_optional_relative_time(tag.uploaded_at.as_deref())),
+                Cell::from(format_tag_activity_time(tag)),
             ])
         });
 
         let table = Table::new(
             rows,
             [
-                Constraint::Length(8),
-                Constraint::Percentage(34),
-                Constraint::Percentage(24),
+                Constraint::Percentage(54),
                 Constraint::Length(6),
                 Constraint::Length(10),
                 Constraint::Length(12),
@@ -771,11 +769,96 @@ async fn fetch_dashboard_data(
     tag_limit: u32,
     tag_page: u32,
 ) -> Result<(WorkspaceStatusResponse, WorkspaceTagsResponse)> {
-    let offset = (tag_page.saturating_sub(1)).saturating_mul(tag_limit);
     tokio::try_join!(
         api_client.workspace_status(workspace, period, insight_limit),
-        api_client.workspace_tags(workspace, None, false, tag_limit, offset),
+        fetch_dashboard_tags(api_client, workspace, tag_limit, tag_page),
     )
+}
+
+async fn fetch_dashboard_tags(
+    api_client: &ApiClient,
+    workspace: &str,
+    tag_limit: u32,
+    tag_page: u32,
+) -> Result<WorkspaceTagsResponse> {
+    let mut response = api_client
+        .workspace_tags(workspace, None, false, DASHBOARD_TAG_FETCH_LIMIT, 0)
+        .await?;
+    let mut has_more = response.pagination.has_more;
+    let mut offset = response
+        .pagination
+        .offset
+        .saturating_add(response.pagination.returned);
+
+    while has_more {
+        let next = api_client
+            .workspace_tags(workspace, None, false, DASHBOARD_TAG_FETCH_LIMIT, offset)
+            .await?;
+        let returned = next.pagination.returned;
+        has_more = next.pagination.has_more && returned > 0;
+        offset = next.pagination.offset.saturating_add(returned);
+        response.tags.extend(next.tags);
+    }
+
+    Ok(dashboard_tags_page(response, tag_limit, tag_page))
+}
+
+fn dashboard_tags_page(
+    response: WorkspaceTagsResponse,
+    tag_limit: u32,
+    tag_page: u32,
+) -> WorkspaceTagsResponse {
+    let WorkspaceTagsResponse {
+        workspace,
+        filter,
+        mut tags,
+        ..
+    } = response;
+
+    tags.retain(|tag| tag.primary && !tag.system);
+    tags.sort_by(compare_dashboard_tags);
+
+    let total = tags.len() as u32;
+    let limit = tag_limit.max(1);
+    let offset = tag_page.saturating_sub(1).saturating_mul(limit);
+    let page_tags = tags
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect::<Vec<_>>();
+    let returned = page_tags.len() as u32;
+
+    WorkspaceTagsResponse {
+        workspace,
+        filter,
+        pagination: crate::api::models::workspace::WorkspacePagination {
+            limit,
+            offset,
+            total,
+            returned,
+            has_more: offset.saturating_add(returned) < total,
+        },
+        tags: page_tags,
+    }
+}
+
+fn compare_dashboard_tags(left: &WorkspaceTagFeedItem, right: &WorkspaceTagFeedItem) -> Ordering {
+    tag_activity_time(right)
+        .cmp(&tag_activity_time(left))
+        .then_with(|| left.name.cmp(&right.name))
+}
+
+fn tag_activity_time(tag: &WorkspaceTagFeedItem) -> Option<DateTime<Utc>> {
+    tag.last_accessed_at
+        .as_deref()
+        .and_then(parse_timestamp)
+        .or_else(|| tag.uploaded_at.as_deref().and_then(parse_timestamp))
+}
+
+fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .ok()
 }
 
 fn resolve_selected_tag_index(
@@ -1126,6 +1209,14 @@ fn inspect_modal_lines(modal: &InspectModal) -> (String, Vec<Line<'static>>) {
 
 fn format_optional_relative_time(value: Option<&str>) -> String {
     value
+        .map(crate::commands::status::format_relative_time)
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_tag_activity_time(tag: &WorkspaceTagFeedItem) -> String {
+    tag.last_accessed_at
+        .as_deref()
+        .or(tag.uploaded_at.as_deref())
         .map(crate::commands::status::format_relative_time)
         .unwrap_or_else(|| "-".to_string())
 }
