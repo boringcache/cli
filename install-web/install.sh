@@ -245,8 +245,7 @@ main() {
     print_success "🎉 Installation complete!"
     echo
     print_status "Next steps:"
-    print_status "1. Move into your repo:"
-    print_status "   cd your-project"
+    print_status "1. Move into an existing project repo."
     echo
     print_status "2. Connect the CLI:"
     print_status "   ${BINARY_NAME} onboard"

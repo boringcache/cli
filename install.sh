@@ -246,7 +246,7 @@ main() {
     print_success "🎉 Installation complete!"
     echo
     print_status "Next steps:"
-    print_status "  cd your-project"
+    print_status "  From an existing project directory, run:"
     print_status "  ${BINARY_NAME} onboard"
 }
 

@@ -737,11 +737,6 @@ pub(crate) async fn run_cli_connect_onboarding(
 ) -> Result<String> {
     let client = ApiClient::new()?;
     let connect = client.create_cli_connect_session().await?;
-    let verification_url_with_code = format!(
-        "{}?code={}",
-        connect.verification_url,
-        urlencoding::encode(&connect.user_code)
-    );
 
     ui::blank_line();
     let email_auth_selected = email_auth.is_some();
@@ -757,8 +752,8 @@ pub(crate) async fn run_cli_connect_onboarding(
         ui::info(&format!("  2. Enter code {}", connect.user_code));
         ui::info(&format!("  Direct link: {}", connect.authorize_url));
 
-        if !manual && try_open_browser(&verification_url_with_code) {
-            ui::info("Opened verification page automatically.");
+        if !manual && try_open_browser(&connect.authorize_url) {
+            ui::info("Opened authorization page automatically.");
         } else if manual {
             ui::info(
                 "Manual mode: open the verification URL on this machine or another device. The CLI will keep waiting for approval.",

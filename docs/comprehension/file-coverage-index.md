@@ -441,6 +441,9 @@ Notes:
 - `install-web/index.html`
 - `install-web/install.sh`
 
+Notes:
+- Installer next-step copy avoids fake `cd your-project` commands; it tells users to run `boringcache onboard` from an existing project repo.
+
 ### Example and image build assets
 
 - `images/bookworm/Dockerfile`
