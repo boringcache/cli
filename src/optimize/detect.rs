@@ -106,6 +106,10 @@ pub fn score_relevance(content: &str, ci_type: CiType) -> FileRelevance {
         return FileRelevance::TooLarge;
     }
 
+    if ci_type == CiType::Dockerfile {
+        return FileRelevance::NoOpportunity;
+    }
+
     let already_optimized_patterns = ["boringcache/one", "boringcache save", "boringcache restore"];
 
     if already_optimized_patterns
@@ -139,7 +143,6 @@ pub fn score_relevance(content: &str, ci_type: CiType) -> FileRelevance {
         CiType::CircleCi => vec!["save_cache", "restore_cache"],
         CiType::GitLabCi => vec!["cache:", "cache:\n"],
         CiType::Buildkite => vec!["cache#"],
-        CiType::Dockerfile => vec![],
         _ => vec!["cache:"],
     };
 
@@ -156,52 +159,28 @@ pub fn score_relevance(content: &str, ci_type: CiType) -> FileRelevance {
         return FileRelevance::HasCaching;
     }
 
-    let install_patterns = match ci_type {
-        CiType::Dockerfile => vec![
-            "npm ci",
-            "npm install",
-            "yarn install",
-            "pnpm install",
-            "bundle install",
-            "gem install",
-            "pip install",
-            "pip3 install",
-            "poetry install",
-            "uv sync",
-            "cargo build",
-            "cargo install",
-            "go build",
-            "go mod download",
-            "gradlew",
-            "mvn ",
-            "gradle ",
-            "apt-get install",
-            "apk add",
-            "composer install",
-        ],
-        _ => vec![
-            "npm ci",
-            "npm install",
-            "yarn install",
-            "pnpm install",
-            "bundle install",
-            "gem install",
-            "pip install",
-            "pip3 install",
-            "poetry install",
-            "uv sync",
-            "cargo build",
-            "cargo test",
-            "go build",
-            "go test",
-            "go mod download",
-            "./gradlew",
-            "mvn ",
-            "gradle ",
-            "composer install",
-            "dotnet restore",
-        ],
-    };
+    let install_patterns = vec![
+        "npm ci",
+        "npm install",
+        "yarn install",
+        "pnpm install",
+        "bundle install",
+        "gem install",
+        "pip install",
+        "pip3 install",
+        "poetry install",
+        "uv sync",
+        "cargo build",
+        "cargo test",
+        "go build",
+        "go test",
+        "go mod download",
+        "./gradlew",
+        "mvn ",
+        "gradle ",
+        "composer install",
+        "dotnet restore",
+    ];
 
     if install_patterns.iter().any(|p| content.contains(p)) {
         return FileRelevance::NoCaching;
@@ -257,7 +236,7 @@ mod tests {
         let dockerfile = "RUN boringcache restore my-org/app \"deps:node_modules\"";
         assert_eq!(
             score_relevance(dockerfile, CiType::Dockerfile),
-            FileRelevance::AlreadyOptimized
+            FileRelevance::NoOpportunity
         );
     }
 
@@ -302,7 +281,7 @@ mod tests {
         let dockerfile = "FROM node:20\nRUN npm ci\nCOPY . .";
         assert_eq!(
             score_relevance(dockerfile, CiType::Dockerfile),
-            FileRelevance::NoCaching
+            FileRelevance::NoOpportunity
         );
     }
 

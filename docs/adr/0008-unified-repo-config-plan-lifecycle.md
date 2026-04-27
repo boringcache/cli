@@ -67,15 +67,13 @@ and external helpers that ask the CLI for a plan.
 
 ## Docker Rule
 
-Do not put BoringCache commands, tokens, build args, secret mounts, or a bind-mounted `boringcache-bin` helper inside Dockerfile `RUN` steps.
-
 The maintained Docker path is outside the Dockerfile:
 
 - `boringcache docker`;
 - `boringcache/one` Docker mode;
 - direct `cache-registry` only for advanced/manual proxy use.
 
-The old Dockerfile helper path is not an adoption path and should not be promoted. Action ADR 0001 removed the helper inputs, outputs, code, docs, and tests before launch. The CLI should not add a replacement helper path. A CLI binary release must not be part of the user's Docker cache graph.
+The CLI should not add a second Docker adoption path. A CLI binary release must not be part of the user's Docker cache graph.
 
 ## Performance Guardrails
 
@@ -100,7 +98,7 @@ Each benchmark bundle must record:
 - wall-clock job time, build-tool time, restore/import time, save/export time, and storage transfer bytes when measurable;
 - `cache_session_summary`, OCI blob counts/bytes, upload-requested versus already-present blobs, cache-root publish/promotion status, and any BuildKit import/export diagnostics.
 
-Do not reuse artifacts from old Dockerfile-helper experiments or invalid same-branch reseeds as launch proof.
+Do not reuse artifacts from stale Docker experiments or invalid same-branch reseeds as launch proof.
 
 Evidence note, 2026-04-22: post-fix Docker artifacts prove that benchmark
 diagnostics can now retain `cache_session_summary` after the harness flushes

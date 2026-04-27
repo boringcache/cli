@@ -67,8 +67,7 @@ It plans the full BuildKit import fallback chain and injects every planned `--ca
 Passing `--cache-ref-tag customcache` only changes the final stable fallback from `buildcache` to `customcache`.
 On restore-only PR runs, the PR-scoped ref may not exist yet and may return 404. That is expected; BuildKit should continue with the remaining branch, default, and stable fallback refs. Enable PR saves only when you intentionally want PR-scoped writes. PR-context saves promote the PR alias by default; they do not promote the stable fallback unless an explicit promotion ref override asks for it.
 Local Docker runs without CI metadata keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
-Keep BoringCache outside the Dockerfile for normal Docker builds.
-Do not add `boringcache restore`, `boringcache save`, or a bind-mounted `boringcache-bin` helper to `RUN` steps; BuildKit cache mounts and image layers should stay native to BuildKit, while BoringCache backs the outer registry cache.
+BoringCache backs the BuildKit registry cache through the Docker adapter.
 By default the Docker path warms the selected OCI manifest, blob URLs, and blob bodies before BuildKit starts.
 That keeps the normal path simple: a warm BuildKit run should read cache bodies through the local proxy instead of discovering remote body reads after the manifest hit.
 

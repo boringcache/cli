@@ -1,7 +1,6 @@
 pub mod detect;
 pub mod rules_buildkite;
 pub mod rules_circleci;
-pub mod rules_dockerfile;
 pub mod rules_github_actions;
 pub mod rules_gitlab_ci;
 pub mod transform;
@@ -61,11 +60,7 @@ impl CiType {
     pub fn deterministic_supported(self) -> bool {
         matches!(
             self,
-            Self::GitHubActions
-                | Self::Dockerfile
-                | Self::CircleCi
-                | Self::GitLabCi
-                | Self::Buildkite
+            Self::GitHubActions | Self::CircleCi | Self::GitLabCi | Self::Buildkite
         )
     }
 }

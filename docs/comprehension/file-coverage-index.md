@@ -218,7 +218,6 @@ Owner: shared command support (`support-primary` unless noted otherwise)
 - `src/optimize/detect.rs`
 - `src/optimize/rules_buildkite.rs`
 - `src/optimize/rules_circleci.rs`
-- `src/optimize/rules_dockerfile.rs`
 - `src/optimize/rules_github_actions.rs`
 - `src/optimize/rules_gitlab_ci.rs`
 - `src/optimize/transform.rs`

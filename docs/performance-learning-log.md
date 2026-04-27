@@ -115,8 +115,8 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Docker benchmark workflows now label `oci.new_blob_bytes` from actual `oci_blob_upload` event bytes after the latest upload plan, not from the upload plan's full `requested_bytes` graph size.
   - Older artifacts before this fix are misleading when `new_blob_count=0` or `1`, because they can still report the full requested descriptor graph size. Recompute from `oci_blob_upload` events when reviewing those runs.
 - Docker benchmark graph fix:
-  - The Dockerfile-internal helper input surface has been removed from `boringcache/one`. Benchmark workflows should not pass `docker-internal-cache`, `docker-helper-path`, or any `BORINGCACHE_INTERNAL_*` build args.
-  - Keep BoringCache restore/save tokens only on the outer action/proxy and storage-probe steps. Do not pass BoringCache tokens, helper paths, helper binaries, or BoringCache-specific build args into Dockerfile `RUN` steps for these OCI registry-cache benchmarks.
+  - Docker benchmark workflows use the `boringcache/one` Docker mode and CLI-planned registry-cache refs.
+  - Keep BoringCache restore/save tokens on the action/proxy and storage-probe steps for these OCI registry-cache benchmarks.
 - Guardrails:
   - Rolling comparisons must use the same upstream ref and the same workflow graph. The first run after an upstream, Dockerfile, action, CLI, cache tag, or hydration-policy change is allowed to reseed.
   - A valid Docker steady-state sample needs cache import success, high cached-step count, `new_blob_count == 0`, short BuildKit export, no widespread import-time remote body reads, no startup body failures, and no registry 4xx/5xx or digest failures.

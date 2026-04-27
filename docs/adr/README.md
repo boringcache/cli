@@ -9,6 +9,7 @@ CLI ADRs own runner, proxy, adapter, local cache, and BuildKit-facing behavior.
 Web/API control-plane decisions live in the web repo. The canonical counterpart for the current cache-root, alias-promotion, session-insight, blob-truth, and restore-policy direction is:
 
 - `web/docs/adr/0001-cache-control-plane-roots-aliases-and-session-insight.md`
+- `web/docs/adr/0008-unified-cache-telemetry-contract.md` for the cross-stack telemetry contract shared by archive, proxy, backend API, runner headroom, storage, lifecycle health, JSONL event persistence, two-sided eval loops, first-class MCP/LLM interpretation, TUI-first diagnostics, benchmark artifacts, and legacy metrics/web UI retirement.
 
 When a CLI ADR needs Rails schema, endpoint, or state-machine behavior, describe the CLI requirement here and update the web ADR as the API source of truth.
 
@@ -43,8 +44,9 @@ Before launch, finish or explicitly defer these CLI ADR gates:
 - ADR 0006: backend/action enrichment proof with persisted `cache_session_summary` diagnostics and artifact validation.
 - ADR 0005: keep hidden implementation guarded unless large-layer disk-copy/cache-policy evidence supports broader rollout.
 - ADR 0004: keep stream-through hidden unless first-byte/body-wait comparison artifacts support a default threshold.
-- ADR 0008: version dry-run schemas enough for action/docs stability, add drift checks if launch copy says rescan/lint, and keep the removed Dockerfile-helper boundary aligned with action ADR 0001.
+- ADR 0008: version dry-run schemas enough for action/docs stability, add drift checks if launch copy says rescan/lint, and keep Docker docs/actions aligned on CLI-planned BuildKit registry-cache refs.
 - ADR 0009: keep the automatic maintenance path cheap, cross-platform warnings explicit, legacy aliases out of public copy, and action planning delegated to CLI dry-run plans.
+- Web ADR 0008: move archive, proxy, and benchmark telemetry producers toward the shared session-summary schema, persist raw run JSONL in object storage, retire legacy `/metrics`, keep provider-specific storage names out of customer-facing output, split customer-owned general-purpose insights from BoringCache-owned advanced debug evaluations, expose first-class MCP tools/resources for LLM-safe interpretation, normalize miss/degradation/retirement reasons for self-reported regression review, and shift day-to-day cache diagnostics toward CLI/TUI/Actions summaries.
 
 ## Handoff Rule
 

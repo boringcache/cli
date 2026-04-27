@@ -11,7 +11,6 @@ use crate::optimize::{CiType, FileRelevance, MAX_FILES_PER_REQUEST};
 use crate::types::Result;
 use crate::ui;
 use chrono::{DateTime, Utc};
-use jwalk::WalkDir;
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -574,8 +573,6 @@ fn scan_project() -> Result<Vec<ScannedFile>> {
 
     scan_glob(&cwd, ".github/workflows", &["yml", "yaml"], &mut files);
 
-    scan_dockerfiles_recursively(&cwd, &mut files);
-
     scan_exact(&cwd, ".gitlab-ci.yml", &mut files);
     scan_exact(&cwd, ".circleci/config.yml", &mut files);
     scan_exact(&cwd, ".buildkite/pipeline.yml", &mut files);
@@ -587,41 +584,6 @@ fn scan_project() -> Result<Vec<ScannedFile>> {
     scan_exact(&cwd, "Jenkinsfile", &mut files);
 
     Ok(files)
-}
-
-fn scan_dockerfiles_recursively(root: &Path, files: &mut Vec<ScannedFile>) {
-    for entry in WalkDir::new(root) {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-
-        if entry.file_type().is_dir() {
-            continue;
-        }
-
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-
-        if name != "Dockerfile"
-            && !name.starts_with("Dockerfile.")
-            && !name.ends_with(".dockerfile")
-        {
-            continue;
-        }
-
-        let display = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .to_string();
-
-        if let Some(file) = try_read_file(&path, &display) {
-            files.push(file);
-        }
-    }
 }
 
 fn scan_exact(root: &Path, relative: &str, files: &mut Vec<ScannedFile>) {

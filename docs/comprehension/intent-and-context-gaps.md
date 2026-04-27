@@ -22,7 +22,7 @@ This file tracks only product intent that is not fully settled by the current co
 - `.boringcache.toml` is the canonical repo config filename.
 - `.boringcache.toml` is the durable repo cache plan across local and CI; the CLI is the only local planner for it.
 - `doctor` plus `audit` are the current maintenance loop after onboard. Future `lint` or `rescan` naming should wrap those planner/audit paths, not create new config truth.
-- ADR 0009 records the current launch review: keep maintenance automatic but cheap, keep cross-platform suffixing explicit, keep the action from becoming a second planner, and do not revive Dockerfile-internal helper UX.
+- ADR 0009 records the current launch review: keep maintenance automatic but cheap, keep cross-platform suffixing explicit, keep the action from becoming a second planner, and keep Docker adoption on CLI-planned BuildKit registry-cache refs.
 - `project_config/**` is intentionally the planner for `run` and adapters.
 - `mount`, `dashboard`, `doctor`, `setup-encryption`, `status`, `sessions`, `misses`, and `tags` are supported product surfaces.
 - `go-cacheprog` is supported as advanced plumbing behind the `go` adapter and manual `GOCACHEPROG` setups.

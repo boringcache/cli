@@ -163,7 +163,6 @@ src/
     detect.rs
     rules_buildkite.rs
     rules_circleci.rs
-    rules_dockerfile.rs
     rules_github_actions.rs
     rules_gitlab_ci.rs
     transform.rs

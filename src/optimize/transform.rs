@@ -1,9 +1,6 @@
 use crate::api::models::optimize::{OptimizeChange, OptimizeFileResult};
 
-use super::{
-    CiType, rules_buildkite, rules_circleci, rules_dockerfile, rules_github_actions,
-    rules_gitlab_ci,
-};
+use super::{CiType, rules_buildkite, rules_circleci, rules_github_actions, rules_gitlab_ci};
 
 #[derive(Debug, Clone)]
 pub enum TransformResult {
@@ -36,20 +33,9 @@ pub fn deterministic_optimize(ci_type: CiType, content: &str) -> TransformResult
                 }
             }
         }
-        CiType::Dockerfile => {
-            if let Some(result) = rules_dockerfile::apply(content) {
-                TransformResult::Optimized {
-                    optimized_content: result.optimized_content,
-                    changes: result.changes,
-                    explanation: result.explanation,
-                }
-            } else {
-                TransformResult::Unsupported {
-                    reason: "Deterministic Dockerfile rules are not available for this file yet"
-                        .to_string(),
-                }
-            }
-        }
+        CiType::Dockerfile => TransformResult::NoChanges {
+            reason: "No supported deterministic cache pattern found".to_string(),
+        },
         CiType::CircleCi => {
             if let Some(result) = rules_circleci::apply(content) {
                 TransformResult::Optimized {

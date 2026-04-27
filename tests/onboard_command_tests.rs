@@ -92,7 +92,7 @@ jobs:
 }
 
 #[test]
-fn onboard_apply_handles_repo_with_dockerfile_and_actions_workflow() {
+fn onboard_apply_ignores_dockerfiles_and_handles_actions_workflow() {
     let temp_dir = TempDir::new().expect("temp dir");
     std::fs::create_dir_all(temp_dir.path().join(".github/workflows")).expect("workflow dir");
     std::fs::create_dir_all(temp_dir.path().join("images/app")).expect("docker dir");
@@ -159,23 +159,8 @@ RUN boringcache run my-org/my-app node_modules:node_modules --no-platform --no-g
         "workflow should not add a save token by default: {workflow}"
     );
 
-    let config = std::fs::read_to_string(temp_dir.path().join(".boringcache.toml"))
-        .expect("read repo config");
-    assert!(config.contains("[entries.mise]"), "config: {config}");
     assert!(
-        config.contains("default_path = \"/mise/installs\""),
-        "config: {config}"
-    );
-    assert!(
-        config.contains("[profiles.bundle-install]"),
-        "config: {config}"
-    );
-    assert!(
-        config.contains("[profiles.mise-install]"),
-        "config: {config}"
-    );
-    assert!(
-        config.contains("[profiles.yarn-install]"),
-        "config: {config}"
+        !temp_dir.path().join(".boringcache.toml").exists(),
+        "Dockerfile cache commands should not seed repo config"
     );
 }
