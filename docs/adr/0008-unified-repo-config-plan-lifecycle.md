@@ -127,6 +127,13 @@ post-fix artifacts still did not contain those fields, and the release/default
 claim gate still needs fresh artifacts produced by the intended released
 action/CLI path.
 
+Follow-up gate work adds `benchmarks/scripts/launch-proof.rb` so downloaded
+benchmark bundles can be rejected automatically when product refs, cache
+mode/lane, sample classification, Docker OCI counters, or attached
+`cache_session_summary` evidence are missing. The existing aggregate snapshot
+is still not launch proof until a fresh released-path run produces artifacts
+that pass that validator.
+
 ## Legacy And Cleanup
 
 `serve` and `docker-registry` are not active command aliases. Tests currently reject both. Public docs and product facts must not advertise them.
@@ -141,4 +148,4 @@ The hidden planner flags for `run --dry-run --json` are implementation surface f
 - Add a first-class config drift check if `audit --json` is not enough for launch messaging.
 - Make action archive planning avoid per-raw-entry CLI dry-run calls when a repo config exists.
 - Add cross-platform audit warnings for entries that look portable but still use platform suffixing, and for entries that look binary but opt out of platform suffixing.
-- Keep release/default claims blocked until benchmark artifacts show CLI version, action ref, cache mode, immutable run refs, alias promotion status, diagnostics numbers, and `cache_session_summary`.
+- Keep release/default claims blocked until benchmark artifacts pass the launch-proof validator with CLI version, action ref, cache mode, immutable run refs, alias promotion status, diagnostics numbers, and `cache_session_summary`.

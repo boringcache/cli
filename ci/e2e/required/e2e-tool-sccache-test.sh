@@ -204,7 +204,10 @@ fi
 
 stop_sccache_server
 stop_proxy
-dump_cache_ops_summary
+CACHE_OPS_SUMMARY="${SCCACHE_LOG_DIR}/cache-ops-summary.env"
+dump_cache_ops_summary "$(proxy_metrics_file)" "${CACHE_OPS_SUMMARY}" sccache
+assert_metric_equals "${CACHE_OPS_SUMMARY}" request_metrics_failures 0
+assert_cache_session_summary_present "${CACHE_OPS_SUMMARY}"
 
 if [[ "${BUDGET_REMOTE_TAG_HITS_MIN}" -gt 0 ]]; then
   if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${TAG}" "${SCCACHE_LOG_DIR}" \

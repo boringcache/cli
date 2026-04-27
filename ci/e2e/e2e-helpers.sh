@@ -410,6 +410,40 @@ assert_metric_gt_zero() {
   fi
 }
 
+assert_metric_equals() {
+  local summary_file="$1"
+  local key="$2"
+  local expected="$3"
+  # shellcheck source=/dev/null
+  source "${summary_file}"
+  local value="${!key:-}"
+  if [[ "${value}" != "${expected}" ]]; then
+    echo "ERROR: expected ${key}=${expected} in ${summary_file}, got ${value:-<unset>}" >&2
+    return 1
+  fi
+}
+
+assert_cache_session_summary_present() {
+  local summary_file="$1"
+  assert_metric_gt_zero "${summary_file}" request_metrics_cache_session_summaries
+
+  # shellcheck source=/dev/null
+  source "${summary_file}"
+  if [[ "${request_metrics_cache_session_schema:-}" != "cache_session_v1" ]]; then
+    echo "ERROR: expected cache_session_summary schema cache-session-v1 in ${summary_file}" >&2
+    return 1
+  fi
+  if [[ -z "${request_metrics_cache_session_mode:-}" ]]; then
+    echo "ERROR: cache_session_summary missing mode in ${summary_file}" >&2
+    return 1
+  fi
+  if [[ -z "${request_metrics_cache_session_adapter:-}" ]]; then
+    echo "ERROR: cache_session_summary missing adapter in ${summary_file}" >&2
+    return 1
+  fi
+  echo "  cache session summary: schema=${request_metrics_cache_session_schema} mode=${request_metrics_cache_session_mode} adapter=${request_metrics_cache_session_adapter}"
+}
+
 register_tag_for_cleanup() {
   _HELPER_TAGS_TO_DELETE+=("$1")
 }
