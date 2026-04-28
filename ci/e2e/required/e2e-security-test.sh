@@ -79,7 +79,7 @@ POISON_DATA="genuine-content-${RUN_ID}"
 printf '%s' "${POISON_DATA}" > "${POISON_SRC}/cas/legit-blob"
 LEGIT_HASH="$(sha256_file_hex "${POISON_SRC}/cas/legit-blob")"
 
-export BORINGCACHE_PROXY_METADATA_HINTS="project=e2e-security,tool=cas-tamper"
+export BORINGCACHE_PROXY_METADATA_HINTS="project=e2e-security,tool=runtime,scenario=cas-tamper"
 start_proxy "${BINARY}" "${WORKSPACE}" "${POISON_TAG}" "${PROXY_PORT}" "${SEC_LOG_DIR}/proxy-poison.log"
 wait_for_proxy "${PROXY_PORT}"
 
