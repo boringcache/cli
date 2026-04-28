@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use super::{AdapterCommandOptions, AdapterRunner};
 use crate::proxy;
 
-const GRADLE_CACHE_URL_ENV: &str = "BORINGCACHE_GRADLE_CACHE_URL";
-const GRADLE_CACHE_PUSH_ENV: &str = "BORINGCACHE_GRADLE_CACHE_PUSH";
-const GRADLE_INIT_SCRIPT_NAME: &str = "boringcache-gradle-build-cache.init.gradle";
-const GRADLE_INIT_SCRIPT: &str = r#"import org.gradle.caching.http.HttpBuildCache
+pub(super) const GRADLE_CACHE_URL_ENV: &str = "BORINGCACHE_GRADLE_CACHE_URL";
+pub(super) const GRADLE_CACHE_PUSH_ENV: &str = "BORINGCACHE_GRADLE_CACHE_PUSH";
+pub(super) const GRADLE_INIT_SCRIPT_NAME: &str = "boringcache-gradle-build-cache.init.gradle";
+pub(super) const GRADLE_INIT_SCRIPT: &str = r#"import org.gradle.caching.http.HttpBuildCache
 
 gradle.settingsEvaluated { settings ->
     def cacheUrl = System.getenv("BORINGCACHE_GRADLE_CACHE_URL")

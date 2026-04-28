@@ -112,6 +112,7 @@ Owner: proxy/adapter family (`public-primary`)
 - `src/commands/adapters/command/maven.rs`
 - `src/commands/adapters/command/nx.rs`
 - `src/commands/adapters/command/sccache.rs`
+- `src/commands/adapters/command/setup_plan.rs`
 - `src/commands/adapters/command/turbo.rs`
 
 Notes:

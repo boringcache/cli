@@ -17,6 +17,7 @@ mod gradle;
 mod maven;
 mod nx;
 mod sccache;
+mod setup_plan;
 mod turbo;
 
 const EXIT_CONFIG: i32 = 78;
@@ -163,6 +164,8 @@ struct DryRunPlan {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     archive_entries: Vec<DryRunArchiveEntry>,
     env_vars: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "setup_plan::AdapterSetupPlan::is_empty")]
+    setup: setup_plan::AdapterSetupPlan,
     proxy: DryRunProxyPlan,
     #[serde(skip_serializing_if = "Option::is_none")]
     oci_cache: Option<docker::OciCachePlan>,
@@ -491,6 +494,13 @@ pub async fn adapter_execute(
     preview_env_vars.extend(kind.proxy_env_plan(&preview_context, &command_options).set);
 
     if args.dry_run {
+        let preview_setup = setup_plan::adapter_setup_plan(
+            kind,
+            &args,
+            &current_dir,
+            &preview_context,
+            &command_options,
+        )?;
         let plan = DryRunPlan {
             adapter: kind,
             workspace,
@@ -531,6 +541,7 @@ pub async fn adapter_execute(
                 })
                 .collect(),
             env_vars: preview_env_vars,
+            setup: preview_setup,
             proxy: DryRunProxyPlan {
                 host: bind_host,
                 endpoint_host: advertised_endpoint_host,
@@ -782,6 +793,19 @@ fn print_dry_run(plan: &DryRunPlan, skip_save: bool, skip_restore: bool, save_on
 
     for (key, value) in &plan.env_vars {
         ui::info(&format!("[boringcache]   env {key}={value}"));
+    }
+
+    for (key, value) in &plan.setup.env_vars {
+        ui::info(&format!("[boringcache]   setup env {key}={value}"));
+    }
+    for directory in &plan.setup.directories {
+        ui::info(&format!("[boringcache]   setup dir {directory}"));
+    }
+    for file in &plan.setup.files {
+        ui::info(&format!(
+            "[boringcache]   setup file {:?} {}",
+            file.mode, file.path
+        ));
     }
 
     if !plan.command.is_empty() {

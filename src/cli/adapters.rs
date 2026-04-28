@@ -113,6 +113,69 @@ pub struct AdapterArgs {
     )]
     pub cache_promote_ref_tag: Vec<String>,
 
+    #[arg(
+        long = "bazelrc-line",
+        value_name = "LINE",
+        hide = true,
+        help = "Action integration: extra line to include in generated Bazel setup"
+    )]
+    pub bazelrc_line: Vec<String>,
+
+    #[arg(
+        long = "gradle-home",
+        value_name = "PATH",
+        hide = true,
+        help = "Action integration: Gradle user home for generated setup"
+    )]
+    pub gradle_home: Option<String>,
+
+    #[arg(
+        long = "no-gradle-build-cache-property",
+        hide = true,
+        help = "Action integration: do not append org.gradle.caching=true"
+    )]
+    pub no_gradle_build_cache_property: bool,
+
+    #[arg(
+        long = "maven-local-repo",
+        value_name = "PATH",
+        hide = true,
+        help = "Action integration: local Maven repository directory to create"
+    )]
+    pub maven_local_repo: Option<String>,
+
+    #[arg(
+        long = "maven-extensions-path",
+        value_name = "PATH",
+        hide = true,
+        help = "Action integration: Maven extensions.xml path for generated setup"
+    )]
+    pub maven_extensions_path: Option<String>,
+
+    #[arg(
+        long = "maven-build-cache-config-path",
+        value_name = "PATH",
+        hide = true,
+        help = "Action integration: Maven build-cache config path for generated setup"
+    )]
+    pub maven_build_cache_config_path: Option<String>,
+
+    #[arg(
+        long = "maven-build-cache-extension-version",
+        value_name = "VERSION",
+        hide = true,
+        help = "Action integration: Maven build-cache extension version for generated setup"
+    )]
+    pub maven_build_cache_extension_version: Option<String>,
+
+    #[arg(
+        long = "maven-build-cache-id",
+        value_name = "ID",
+        hide = true,
+        help = "Action integration: Maven remote build-cache id for generated setup"
+    )]
+    pub maven_build_cache_id: Option<String>,
+
     #[arg(long, help = "Print the resolved execution plan without running")]
     pub dry_run: bool,
 
