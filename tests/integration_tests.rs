@@ -482,7 +482,7 @@ fn test_check_exact_flag_help() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--exact"));
-    assert!(stdout.contains("Resolve and check only exact scoped tags"));
+    assert!(stdout.contains("Compatibility no-op"));
 }
 
 #[test]

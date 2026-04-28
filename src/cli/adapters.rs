@@ -21,10 +21,7 @@ pub struct AdapterArgs {
     #[arg(long, help = "Disable automatic platform suffix for cache tags")]
     pub no_platform: bool,
 
-    #[arg(
-        long,
-        help = "Disable automatic git-based tag suffixing and fallback restore logic"
-    )]
+    #[arg(long, help = "Disable automatic git-based tag suffixing")]
     pub no_git: bool,
 
     #[arg(long, help = "Run proxy reads only and skip cache writes")]

@@ -1,11 +1,12 @@
 //! Restore command namespace.
 //! Archive, OCI, and file layout restore flows should move into sibling modules here.
 
-#![allow(clippy::items_after_test_module)]
-
 mod archive;
 mod file;
 mod oci;
+
+#[cfg(test)]
+mod tests;
 
 use crate::api::{ApiClient, CacheResolutionEntry};
 use crate::command_support::RestoreSpec;
@@ -174,207 +175,6 @@ fn finalize_execute_batch_restore_result(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::command_support::RestoreSpec;
-    use anyhow::anyhow;
-
-    #[test]
-    fn preflight_skips_file_target() {
-        let temp = tempfile::tempdir().unwrap();
-        let file_path = temp.path().join("existing_file");
-        std::fs::write(&file_path, b"data").unwrap();
-
-        let parsed = RestoreSpec {
-            tag: "valid-tag".to_string(),
-            path: Some(file_path.to_string_lossy().to_string()),
-        };
-
-        let result = run_restore_preflight_checks(&[parsed], true).unwrap();
-        assert_eq!(result.valid_specs.len(), 0);
-    }
-
-    #[test]
-    fn preflight_accepts_new_directory() {
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("new-directory");
-        let parsed = RestoreSpec {
-            tag: "valid-tag".to_string(),
-            path: Some(target.to_string_lossy().to_string()),
-        };
-
-        let result = run_restore_preflight_checks(&[parsed], true).unwrap();
-        assert_eq!(result.valid_specs.len(), 1);
-    }
-
-    #[test]
-    fn preflight_skips_empty_tag() {
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("dir");
-        let parsed = RestoreSpec {
-            tag: "".to_string(),
-            path: Some(target.to_string_lossy().to_string()),
-        };
-
-        let result = run_restore_preflight_checks(&[parsed], true).unwrap();
-        assert_eq!(result.valid_specs.len(), 0);
-    }
-
-    #[test]
-    fn preflight_creates_missing_parent_directories() {
-        let temp = tempfile::tempdir().unwrap();
-        // Create a path with multiple nested missing directories
-        let target = temp.path().join("vendor").join("bundle");
-        let parsed = RestoreSpec {
-            tag: "valid-tag".to_string(),
-            path: Some(target.to_string_lossy().to_string()),
-        };
-
-        let result = run_restore_preflight_checks(&[parsed], true).unwrap();
-        assert_eq!(result.valid_specs.len(), 1);
-        // Verify parent directories were created
-        assert!(temp.path().join("vendor").exists());
-    }
-
-    #[test]
-    fn preflight_continues_batch_with_valid_entries() {
-        let temp = tempfile::tempdir().unwrap();
-        let file_path = temp.path().join("existing_file");
-        std::fs::write(&file_path, b"data").unwrap();
-
-        let valid_dir = temp.path().join("valid_dir");
-        let invalid_child = file_path.join("child");
-
-        let parsed_entries = vec![
-            RestoreSpec {
-                tag: "tag1".to_string(),
-                path: Some(file_path.to_string_lossy().to_string()),
-            },
-            RestoreSpec {
-                tag: "tag2".to_string(),
-                path: Some(valid_dir.to_string_lossy().to_string()),
-            },
-            RestoreSpec {
-                tag: "tag3".to_string(),
-                path: Some(invalid_child.to_string_lossy().to_string()),
-            },
-        ];
-
-        let result = run_restore_preflight_checks(&parsed_entries, true).unwrap();
-        assert_eq!(result.valid_specs.len(), 1);
-        assert_eq!(result.valid_specs[0].tag, "tag2");
-    }
-
-    #[test]
-    fn preflight_lookup_only_does_not_create_missing_parent_directories() {
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("vendor").join("bundle");
-        let parsed = RestoreSpec {
-            tag: "valid-tag".to_string(),
-            path: Some(target.to_string_lossy().to_string()),
-        };
-
-        let result = run_restore_preflight_checks(&[parsed], false).unwrap();
-        assert_eq!(result.valid_specs.len(), 1);
-        assert!(!temp.path().join("vendor").exists());
-    }
-
-    #[tokio::test]
-    async fn ensure_empty_target_accepts_existing_empty_directory() {
-        let temp = tempfile::tempdir().unwrap();
-
-        let result = super::ensure_empty_target(temp.path().to_str().unwrap())
-            .await
-            .unwrap();
-
-        assert!(matches!(result, super::EnsureTargetStatus::Ready));
-    }
-
-    #[tokio::test]
-    async fn ensure_empty_target_reports_blocking_entry() {
-        let temp = tempfile::tempdir().unwrap();
-        let blocking_path = temp.path().join("dev.db");
-        std::fs::write(&blocking_path, b"data").unwrap();
-
-        let result = super::ensure_empty_target(temp.path().to_str().unwrap())
-            .await
-            .unwrap();
-
-        match result {
-            super::EnsureTargetStatus::Occupied {
-                existing_path,
-                blocking_path: found_blocking_path,
-            } => {
-                assert_eq!(existing_path, temp.path().display().to_string());
-                assert_eq!(found_blocking_path, blocking_path.display().to_string());
-            }
-            super::EnsureTargetStatus::Ready => panic!("expected occupied target"),
-        }
-    }
-
-    #[test]
-    fn test_fail_on_cache_miss_flag_logic() {
-        let fail_on_cache_miss = true;
-        let misses = ["missing-cache".to_string()];
-
-        assert!(fail_on_cache_miss && !misses.is_empty());
-
-        let fail_on_cache_miss = false;
-        assert!(!fail_on_cache_miss || misses.is_empty());
-
-        let fail_on_cache_miss = true;
-        let misses: Vec<String> = vec![];
-        assert!(!fail_on_cache_miss || misses.is_empty());
-    }
-
-    #[test]
-    fn test_lookup_only_flag_logic() {
-        let lookup_only = true;
-        assert!(lookup_only);
-
-        let lookup_only = false;
-        assert!(!lookup_only);
-    }
-
-    #[test]
-    fn strict_restore_errors_include_signature_requirement() {
-        assert!(super::should_fail_on_restore_error(true, false));
-        assert!(super::should_fail_on_restore_error(false, true));
-        assert!(!super::should_fail_on_restore_error(false, false));
-    }
-
-    #[test]
-    fn lenient_execute_batch_restore_result_warns_and_continues() {
-        let err: Error = anyhow!("boom");
-        let result = super::finalize_execute_batch_restore_result(Err(err), false, false, false);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn strict_execute_batch_restore_result_returns_error() {
-        let err: Error = anyhow!("boom");
-        let result = super::finalize_execute_batch_restore_result(Err(err), false, true, false);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn finalize_restore_outcome_errors_on_restore_failure() {
-        let err: Error = anyhow!("boom");
-        let result = super::finalize_restore_outcome(vec![err], Vec::new());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn finalize_restore_outcome_errors_on_skipped_entries() {
-        let result = super::finalize_restore_outcome(
-            Vec::new(),
-            vec![("tag1".to_string(), "target busy".to_string())],
-        );
-        assert!(result.is_err());
-    }
-}
-
 fn assert_directory_writable(path: &Path) -> Result<()> {
     use std::fs::OpenOptions;
     use uuid::Uuid;
@@ -505,7 +305,7 @@ async fn execute_batch_restore_inner(
     struct RestorePlan {
         display_tag: String,
         target_path: String,
-        candidates: Vec<String>,
+        resolved_tag: String,
     }
 
     #[derive(Debug, Clone)]
@@ -515,8 +315,8 @@ async fn execute_batch_restore_inner(
     }
 
     let mut plans: Vec<RestorePlan> = Vec::with_capacity(preflight_result.valid_specs.len());
-    let mut all_candidates: Vec<String> = Vec::new();
-    let mut seen_candidates: HashSet<String> = HashSet::new();
+    let mut resolved_tags: Vec<String> = Vec::new();
+    let mut seen_resolved_tags: HashSet<String> = HashSet::new();
     let mut tags_display: Vec<String> = Vec::with_capacity(preflight_result.valid_specs.len());
 
     for spec in &preflight_result.valid_specs {
@@ -528,23 +328,21 @@ async fn execute_batch_restore_inner(
         };
         let resolver =
             crate::tag_utils::TagResolver::new(platform.clone(), git_context, git_enabled);
-        let candidates = resolver.restore_tag_candidates(&spec.tag);
+        let resolved_tag = resolver.effective_restore_tag(&spec.tag)?;
         let target_path = spec
             .path
             .as_deref()
             .map(crate::command_support::expand_tilde_path)
             .unwrap_or_else(|| ".".to_string());
 
-        for candidate in &candidates {
-            if seen_candidates.insert(candidate.clone()) {
-                all_candidates.push(candidate.clone());
-            }
+        if seen_resolved_tags.insert(resolved_tag.clone()) {
+            resolved_tags.push(resolved_tag.clone());
         }
 
         plans.push(RestorePlan {
             display_tag: spec.tag.clone(),
             target_path,
-            candidates,
+            resolved_tag,
         });
     }
 
@@ -565,7 +363,7 @@ async fn execute_batch_restore_inner(
     let mut pending_attempt = 0u32;
     let resolution_result = loop {
         let restore_result = api_client
-            .restore(&workspace, &all_candidates, require_server_signature)
+            .restore(&workspace, &resolved_tags, require_server_signature)
             .await;
         match restore_result {
             Ok(result) => {
@@ -673,19 +471,11 @@ async fn execute_batch_restore_inner(
     }
 
     for plan in &plans {
-        let mut chosen: Option<CacheResolutionEntry> = None;
-        for candidate in &plan.candidates {
-            if let Some(entry) = results_by_tag.get(candidate)
-                && entry.status == "hit"
-            {
-                chosen = Some(entry.clone());
-                break;
-            }
-        }
-
-        if let Some(entry) = chosen {
+        if let Some(entry) = results_by_tag.get(&plan.resolved_tag)
+            && entry.status == "hit"
+        {
             selected_hits.push(SelectedRestore {
-                entry,
+                entry: entry.clone(),
                 target_path: plan.target_path.clone(),
             });
         } else {

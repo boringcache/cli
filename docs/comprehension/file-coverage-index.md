@@ -64,6 +64,7 @@ Owner: cache lifecycle (`public-primary` unless noted otherwise)
 - `src/commands/cache/restore/archive.rs`
 - `src/commands/cache/restore/file.rs`
 - `src/commands/cache/restore/oci.rs`
+- `src/commands/cache/restore/tests.rs`
 - `src/commands/cache/save/mod.rs`
 - `src/commands/cache/save/archive.rs`
 - `src/commands/cache/save/cas.rs`

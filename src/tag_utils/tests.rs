@@ -23,16 +23,24 @@ fn family_tag(tag: &str) -> String {
     format!("{tag}-ubuntu-22-x86_64")
 }
 
+fn git_context(
+    branch: Option<&str>,
+    default_branch: Option<&str>,
+    commit_sha: Option<&str>,
+) -> GitContext {
+    GitContext {
+        pr_number: None,
+        branch: branch.map(ToOwned::to_owned),
+        default_branch: default_branch.map(ToOwned::to_owned),
+        commit_sha: commit_sha.map(ToOwned::to_owned),
+    }
+}
+
 #[test]
-fn git_branch_suffix_applied() {
+fn git_branch_suffix_applied_to_save_tags() {
     let resolver = TagResolver::new(
         Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/x".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
+        git_context(Some("feature/x"), Some("main"), None),
         true,
     );
 
@@ -41,113 +49,99 @@ fn git_branch_suffix_applied() {
 }
 
 #[test]
-fn git_branch_suffix_when_not_pr() {
+fn restore_uses_single_effective_tag_for_feature_branch() {
     let resolver = TagResolver::new(
         Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/x".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
+        git_context(Some("feature/login"), Some("main"), None),
         true,
     );
 
-    let tag = resolver.effective_save_tag("gems").unwrap();
-    assert_eq!(tag, family_tag("gems-branch-feature-x"));
+    let tag = resolver.effective_restore_tag("gems").unwrap();
+    assert_eq!(tag, family_tag("gems-branch-feature-login"));
+    assert_ne!(tag, family_tag("gems"));
 }
 
 #[test]
-fn main_branch_keeps_base_tag() {
+fn no_git_flag_disables_suffixes_for_save_and_restore() {
+    let resolver = TagResolver::new(
+        Some(make_platform()),
+        git_context(Some("feature/x"), Some("main"), None),
+        false,
+    );
+
+    assert_eq!(
+        resolver.effective_save_tag("gems").unwrap(),
+        family_tag("gems")
+    );
+    assert_eq!(
+        resolver.effective_restore_tag("gems").unwrap(),
+        family_tag("gems")
+    );
+}
+
+#[test]
+fn default_branch_keeps_base_tag_before_platform_suffix() {
+    let resolver = TagResolver::new(
+        Some(make_platform()),
+        git_context(Some("main"), Some("main"), None),
+        true,
+    );
+
+    assert_eq!(
+        resolver.effective_save_tag("gems").unwrap(),
+        family_tag("gems")
+    );
+    assert_eq!(
+        resolver.effective_restore_tag("gems").unwrap(),
+        family_tag("gems")
+    );
+}
+
+#[test]
+fn non_main_default_branch_keeps_base_tag() {
     let resolver = TagResolver::new(
         None,
-        GitContext {
-            pr_number: None,
-            branch: Some("main".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
+        git_context(Some("develop"), Some("develop"), None),
         true,
     );
 
-    let tag = resolver.effective_save_tag("gems").unwrap();
-    assert_eq!(tag, "gems");
+    assert_eq!(resolver.effective_save_tag("gems").unwrap(), "gems");
+    assert_eq!(resolver.effective_restore_tag("gems").unwrap(), "gems");
 }
 
 #[test]
 fn explicit_channel_skips_git_suffix() {
     let resolver = TagResolver::new(
-        None,
-        GitContext {
-            pr_number: Some(42),
-            branch: Some("feature/x".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
+        Some(make_platform()),
+        git_context(Some("feature/x"), Some("main"), None),
         true,
     );
 
-    let tag = resolver.effective_save_tag("gems-main").unwrap();
-    assert_eq!(tag, "gems-main");
+    assert_eq!(
+        resolver.effective_save_tag("gems-main").unwrap(),
+        family_tag("gems-main")
+    );
+    assert_eq!(
+        resolver.effective_restore_tag("gems-main").unwrap(),
+        family_tag("gems-main")
+    );
 }
 
 #[test]
-fn restore_candidates_with_fallback_to_default_branch() {
+fn commit_slug_used_when_branch_missing() {
     let resolver = TagResolver::new(
         Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/x".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
+        git_context(None, Some("main"), Some("abcdef1234567890")),
         true,
     );
 
-    let candidates = resolver.restore_tag_candidates("gems");
     assert_eq!(
-        candidates,
-        vec![family_tag("gems-branch-feature-x"), family_tag("gems"),]
+        resolver.effective_save_tag("gems").unwrap(),
+        family_tag("gems-sha-abcdef123456")
     );
-}
-
-#[test]
-fn no_git_flag_disables_suffixes_for_restore() {
-    let resolver = TagResolver::new(
-        None,
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/x".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        false,
-    );
-
-    let tag = resolver.effective_save_tag("gems").unwrap();
-    assert_eq!(tag, "gems");
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec!["gems".to_string()]);
-}
-
-#[test]
-fn branch_restore_falls_back_to_default_branch() {
-    let resolver = TagResolver::new(
-        Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/login".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates = resolver.restore_tag_candidates("gems");
     assert_eq!(
-        candidates,
-        vec![family_tag("gems-branch-feature-login"), family_tag("gems"),]
+        resolver.effective_restore_tag("gems").unwrap(),
+        family_tag("gems-sha-abcdef123456")
     );
 }
 
@@ -155,333 +149,36 @@ fn branch_restore_falls_back_to_default_branch() {
 fn no_git_context_keeps_base_tag() {
     let resolver = TagResolver::new(None, GitContext::default(), true);
 
-    let tag = resolver.effective_save_tag("gems").unwrap();
-    assert_eq!(tag, "gems");
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec!["gems".to_string()]);
+    assert_eq!(resolver.effective_save_tag("gems").unwrap(), "gems");
+    assert_eq!(resolver.effective_restore_tag("gems").unwrap(), "gems");
 }
 
 #[test]
-fn commit_slug_used_when_branch_missing() {
+fn deeply_nested_branch_is_normalized_once() {
     let resolver = TagResolver::new(
         Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: None,
-            default_branch: Some("main".to_string()),
-            commit_sha: Some("abcdef1234567890".to_string()),
-        },
+        git_context(Some("feature/team/project/task-123"), Some("main"), None),
         true,
     );
 
-    let tag = resolver.effective_save_tag("gems").unwrap();
-    assert_eq!(tag, family_tag("gems-sha-abcdef123456"));
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(
-        candidates,
-        vec![family_tag("gems-sha-abcdef123456"), family_tag("gems"),]
-    );
+    let tag = resolver.effective_restore_tag("gems").unwrap();
+    assert_eq!(tag, family_tag("gems-branch-feature-team-project-task-123"));
 }
 
 #[test]
-fn non_main_default_branch_uses_base() {
-    let resolver = TagResolver::new(
-        None,
-        GitContext {
-            pr_number: None,
-            branch: Some("develop".to_string()),
-            default_branch: Some("develop".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let tag = resolver.effective_save_tag("gems").unwrap();
-    assert_eq!(tag, "gems");
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec!["gems".to_string()]);
-}
-
-#[test]
-fn feature_branch_with_non_main_default_branch() {
-    let resolver = TagResolver::new(
-        Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/x".to_string()),
-            default_branch: Some("develop".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(
-        candidates,
-        vec![family_tag("gems-branch-feature-x"), family_tag("gems"),]
-    );
-}
-
-#[test]
-fn default_branch_no_fallback_needed() {
-    let resolver = TagResolver::new(
-        Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("main".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec![family_tag("gems")]);
-}
-
-#[test]
-fn fallback_not_duplicated_when_on_default_branch() {
-    let resolver = TagResolver::new(
-        Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("develop".to_string()),
-            default_branch: Some("develop".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec![family_tag("gems")]);
-}
-
-#[test]
-fn fallback_without_platform() {
-    let resolver = TagResolver::new(
-        None,
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/x".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(
-        candidates,
-        vec!["gems-branch-feature-x".to_string(), "gems".to_string(),]
-    );
-}
-
-#[test]
-fn long_tag_resolves_with_suffixes() {
-    let base_tag = "a".repeat(200);
-    assert!(validate_tag(&base_tag).is_ok());
-
-    let resolver = TagResolver::new(
-        Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/x".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates = resolver.restore_tag_candidates(&base_tag);
-    assert_eq!(candidates.len(), 2);
-    assert!(candidates[0].contains("-branch-feature-x"));
-    assert!(!candidates[1].contains("-branch-"));
-}
-
-#[test]
-fn fallback_order_branch_first_then_default() {
-    let resolver = TagResolver::new(
-        Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/checkout".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates = resolver.restore_tag_candidates("deps");
-    assert_eq!(candidates.len(), 2);
-    assert!(candidates[0].contains("-branch-feature-checkout"));
-    assert!(!candidates[1].contains("-branch-"));
-}
-
-#[test]
-fn multiple_feature_branches_each_fallback_to_same_default() {
-    let platform = make_platform();
-
-    let resolver_a = TagResolver::new(
-        Some(platform.clone()),
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/a".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let resolver_b = TagResolver::new(
-        Some(platform.clone()),
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/b".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates_a = resolver_a.restore_tag_candidates("gems");
-    let candidates_b = resolver_b.restore_tag_candidates("gems");
-
-    assert_ne!(candidates_a[0], candidates_b[0]);
-    assert_eq!(candidates_a[1], candidates_b[1]);
-    assert_eq!(candidates_a[1], family_tag("gems"));
-}
-
-#[test]
-fn explicit_channel_tag_no_fallback() {
-    let resolver = TagResolver::new(
-        Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/x".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates = resolver.restore_tag_candidates("gems-main");
-    assert_eq!(candidates, vec![family_tag("gems-main")]);
-}
-
-#[test]
-fn git_disabled_no_fallback() {
-    let resolver = TagResolver::new(
-        Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/x".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        false,
-    );
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec![family_tag("gems")]);
-}
-
-#[test]
-fn pr_branch_falls_back_to_default() {
-    let resolver = TagResolver::new(
-        Some(make_platform()),
-        GitContext {
-            pr_number: Some(123),
-            branch: Some("feature/pr-123".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(
-        candidates,
-        vec![family_tag("gems-branch-feature-pr-123"), family_tag("gems"),]
-    );
-}
-
-#[test]
-fn deeply_nested_branch_falls_back() {
-    let resolver = TagResolver::new(
-        Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/team/project/task-123".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates.len(), 2);
-    assert!(candidates[0].contains("-branch-feature-team-project-task-123"));
-    assert_eq!(candidates[1], family_tag("gems"));
-}
-
-#[test]
-fn master_as_default_branch() {
-    let resolver = TagResolver::new(
-        Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("master".to_string()),
-            default_branch: Some("master".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec![family_tag("gems")]);
-}
-
-#[test]
-fn feature_off_master_falls_back() {
-    let resolver = TagResolver::new(
-        Some(make_platform()),
-        GitContext {
-            pr_number: None,
-            branch: Some("hotfix/urgent".to_string()),
-            default_branch: Some("master".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(
-        candidates,
-        vec![family_tag("gems-branch-hotfix-urgent"), family_tag("gems"),]
-    );
-}
-
-#[test]
-fn no_git_context_single_candidate() {
+fn explicit_platform_suffix_is_not_duplicated() {
     let resolver = TagResolver::new(Some(make_platform()), GitContext::default(), true);
 
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec![family_tag("gems")]);
+    assert_eq!(
+        resolver
+            .effective_restore_tag("gems-ubuntu-22-x86_64")
+            .unwrap(),
+        "gems-ubuntu-22-x86_64"
+    );
 }
 
 #[test]
-fn explicit_platform_suffix_skips_duplicate_candidates() {
-    let resolver = TagResolver::new(Some(make_platform()), GitContext::default(), true);
-
-    let candidates = resolver.restore_tag_candidates("gems-ubuntu-22-x86_64");
-    assert_eq!(candidates, vec!["gems-ubuntu-22-x86_64".to_string()]);
-}
-
-#[test]
-fn macos_restore_candidates_use_versioned_suffix() {
+fn macos_restore_tag_uses_versioned_suffix() {
     let resolver = TagResolver::new(
         Some(Platform::new_for_testing(
             "macos",
@@ -493,45 +190,8 @@ fn macos_restore_candidates_use_versioned_suffix() {
         true,
     );
 
-    let candidates = resolver.restore_tag_candidates("gems");
-    assert_eq!(candidates, vec!["gems-macos-15-arm64".to_string()]);
-}
-
-#[test]
-fn is_on_default_branch_helper() {
-    let on_main = TagResolver::new(
-        None,
-        GitContext {
-            pr_number: None,
-            branch: Some("main".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        true,
+    assert_eq!(
+        resolver.effective_restore_tag("gems").unwrap(),
+        "gems-macos-15-arm64"
     );
-    assert!(on_main.is_on_default_branch());
-
-    let on_feature = TagResolver::new(
-        None,
-        GitContext {
-            pr_number: None,
-            branch: Some("feature/x".to_string()),
-            default_branch: Some("main".to_string()),
-            commit_sha: None,
-        },
-        true,
-    );
-    assert!(!on_feature.is_on_default_branch());
-
-    let no_branch = TagResolver::new(
-        None,
-        GitContext {
-            pr_number: None,
-            branch: None,
-            default_branch: Some("main".to_string()),
-            commit_sha: Some("abc123".to_string()),
-        },
-        true,
-    );
-    assert!(!no_branch.is_on_default_branch());
 }

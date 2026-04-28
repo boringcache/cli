@@ -111,8 +111,8 @@ async fn execute_inner(
 
     let git_enabled = !options.no_git && !crate::git::is_git_disabled_by_env();
 
-    let mut all_candidates: Vec<String> = Vec::new();
-    let mut tag_to_candidates: Vec<(String, Vec<String>)> = Vec::new();
+    let mut resolved_tags: Vec<String> = Vec::new();
+    let mut tag_to_resolved: Vec<(String, String)> = Vec::new();
 
     for tag in &valid_tags {
         let git_context = if git_enabled {
@@ -123,19 +123,13 @@ async fn execute_inner(
 
         let resolver =
             crate::tag_utils::TagResolver::new(platform.clone(), git_context, git_enabled);
-        let candidates = if options.exact {
-            vec![resolver.effective_save_tag(tag)?]
-        } else {
-            resolver.restore_tag_candidates(tag)
-        };
+        let resolved_tag = resolver.effective_restore_tag(tag)?;
 
-        for candidate in &candidates {
-            if !all_candidates.contains(candidate) {
-                all_candidates.push(candidate.clone());
-            }
+        if !resolved_tags.contains(&resolved_tag) {
+            resolved_tags.push(resolved_tag.clone());
         }
 
-        tag_to_candidates.push((tag.clone(), candidates));
+        tag_to_resolved.push((tag.clone(), resolved_tag));
     }
 
     let api_client = ApiClient::for_restore()?;
@@ -150,11 +144,7 @@ async fn execute_inner(
     }
 
     let resolution_result = api_client
-        .restore(
-            &workspace,
-            &all_candidates,
-            options.require_server_signature,
-        )
+        .restore(&workspace, &resolved_tags, options.require_server_signature)
         .await?;
 
     let mut results_by_tag: std::collections::HashMap<String, crate::api::CacheResolutionEntry> =
@@ -170,21 +160,13 @@ async fn execute_inner(
     let mut hits = 0usize;
     let mut misses = 0usize;
 
-    for (requested_tag, candidates) in &tag_to_candidates {
-        let mut found: Option<(String, &crate::api::CacheResolutionEntry)> = None;
-        for candidate in candidates {
-            if let Some(entry) = results_by_tag.get(candidate)
-                && entry.status == "hit"
-            {
-                found = Some((candidate.clone(), entry));
-                break;
-            }
-        }
-
-        if let Some((matched_tag, entry)) = found {
+    for (requested_tag, resolved_tag) in &tag_to_resolved {
+        if let Some(entry) = results_by_tag.get(resolved_tag)
+            && entry.status == "hit"
+        {
             hits += 1;
             check_results.push(CheckResult {
-                tag: matched_tag,
+                tag: resolved_tag.clone(),
                 requested_tag: requested_tag.clone(),
                 status: "hit".to_string(),
                 cache_entry_id: entry.cache_entry_id.clone(),
@@ -195,12 +177,8 @@ async fn execute_inner(
         } else {
             misses += 1;
 
-            let display_tag = candidates
-                .first()
-                .cloned()
-                .unwrap_or_else(|| requested_tag.clone());
             check_results.push(CheckResult {
-                tag: display_tag,
+                tag: resolved_tag.clone(),
                 requested_tag: requested_tag.clone(),
                 status: "miss".to_string(),
                 cache_entry_id: None,

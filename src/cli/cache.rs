@@ -11,10 +11,7 @@ pub struct MountArgs {
     #[arg(long, help = "Disable automatic platform suffix for tags")]
     pub no_platform: bool,
 
-    #[arg(
-        long,
-        help = "Disable automatic git-based tag suffixing and fallback restore logic"
-    )]
+    #[arg(long, help = "Disable automatic git-based tag suffixing")]
     pub no_git: bool,
 
     #[arg(short, long, help = "Enable verbose output")]
@@ -53,10 +50,7 @@ pub struct SaveArgs {
     #[arg(long, help = "Force save even if cache entry already exists on server")]
     pub force: bool,
 
-    #[arg(
-        long,
-        help = "Disable automatic git-based tag suffixing and fallback restore logic"
-    )]
+    #[arg(long, help = "Disable automatic git-based tag suffixing")]
     pub no_git: bool,
 
     #[arg(
@@ -95,10 +89,7 @@ pub struct RestoreArgs {
     #[arg(long, help = "Check if a cache entry exists without downloading")]
     pub lookup_only: bool,
 
-    #[arg(
-        long,
-        help = "Disable automatic git-based tag suffixing and fallback restore logic"
-    )]
+    #[arg(long, help = "Disable automatic git-based tag suffixing")]
     pub no_git: bool,
 
     #[arg(long, help = "Path to Age identity file for decryption")]
@@ -165,7 +156,7 @@ pub struct RunArgs {
         hide = true,
         value_name = "PREFIX",
         value_delimiter = ',',
-        help = "Internal integration flag: fallback prefix for path-derived archive tags (repeatable)"
+        help = "Internal integration flag: alternate prefix for path-derived archive restore planning (repeatable)"
     )]
     pub archive_restore_prefix: Vec<String>,
 
@@ -188,10 +179,7 @@ pub struct RunArgs {
     #[arg(long, help = "Disable automatic platform suffix for tags")]
     pub no_platform: bool,
 
-    #[arg(
-        long,
-        help = "Disable automatic git-based tag suffixing and fallback restore logic"
-    )]
+    #[arg(long, help = "Disable automatic git-based tag suffixing")]
     pub no_git: bool,
 
     #[arg(long, help = "Force save even if cache entry already exists on server")]
@@ -308,10 +296,7 @@ pub struct CheckArgs {
     #[arg(long, help = "Disable automatic platform suffix for tags")]
     pub no_platform: bool,
 
-    #[arg(
-        long,
-        help = "Disable automatic git-based tag suffixing and fallback resolution"
-    )]
+    #[arg(long, help = "Disable automatic git-based tag suffixing")]
     pub no_git: bool,
 
     #[arg(long, help = "Warn if any tag is not found (non-fatal)")]
@@ -322,7 +307,7 @@ pub struct CheckArgs {
 
     #[arg(
         long,
-        help = "Resolve and check only exact scoped tags (skip branch/default fallback candidates)"
+        help = "Compatibility no-op; check already resolves only the effective scoped tag"
     )]
     pub exact: bool,
 }
@@ -338,10 +323,7 @@ pub struct DeleteArgs {
     #[arg(long, help = "Disable automatic platform suffix appending to tags")]
     pub no_platform: bool,
 
-    #[arg(
-        long,
-        help = "Disable automatic git-based tag suffixing and fallback resolution"
-    )]
+    #[arg(long, help = "Disable automatic git-based tag suffixing")]
     pub no_git: bool,
 }
 

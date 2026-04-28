@@ -33,36 +33,8 @@ impl TagResolver {
         Ok(final_tag)
     }
 
-    pub fn restore_tag_candidates(&self, base_tag: &str) -> Vec<String> {
-        let mut candidates = Vec::new();
-
-        if let Ok(tag) = self.effective_save_tag(base_tag) {
-            candidates.push(tag);
-        }
-
-        if self.git_enabled && !self.is_on_default_branch() {
-            self.push_candidate(
-                &mut candidates,
-                apply_platform_to_tag_with_instance(base_tag, self.platform.as_ref()),
-            );
-        }
-
-        if candidates.is_empty() {
-            candidates.push(base_tag.to_string());
-        }
-
-        candidates
-    }
-
-    pub(super) fn is_on_default_branch(&self) -> bool {
-        if let Some(branch_slug) = self.git_context.branch_slug() {
-            is_default_branch(
-                &branch_slug,
-                self.git_context.default_branch_slug().as_deref(),
-            )
-        } else {
-            false
-        }
+    pub fn effective_restore_tag(&self, base_tag: &str) -> Result<String> {
+        self.effective_save_tag(base_tag)
     }
 
     fn tag_with_git_for_save(&self, base_tag: &str) -> String {
@@ -70,12 +42,6 @@ impl TagResolver {
             format!("{base_tag}{suffix}")
         } else {
             base_tag.to_string()
-        }
-    }
-
-    fn push_candidate(&self, candidates: &mut Vec<String>, candidate: String) {
-        if validate_tag(&candidate).is_ok() && !candidates.contains(&candidate) {
-            candidates.push(candidate);
         }
     }
 
