@@ -53,6 +53,7 @@ pub(super) async fn build_server_runtime(
     let oci_negative_cache = Arc::new(state::OciNegativeCache::new());
     let singleflight_metrics = Arc::new(state::SingleflightMetrics::new());
     let prefetch_metrics = Arc::new(state::PrefetchMetrics::new());
+    let kv_blob_upload_metrics = Arc::new(state::KvBlobUploadMetrics::new());
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
     let (prefetch_concurrency, prefetch_from_env) = blob_prefetch_concurrency(dl_concurrency);
     let (kv_replication_work_tx, kv_replication_work_rx) =
@@ -122,7 +123,10 @@ pub(super) async fn build_server_runtime(
         oci_body_metrics,
         oci_engine_diagnostics,
         prefetch_metrics,
+        kv_blob_upload_metrics,
         blob_download_max_concurrency: dl_concurrency,
+        blob_prefetch_max_concurrency: prefetch_concurrency,
+        blob_prefetch_concurrency_from_env: prefetch_from_env,
         blob_download_semaphore,
         blob_prefetch_semaphore,
         cache_ops: Arc::new(
@@ -209,10 +213,13 @@ pub(super) async fn build_server_runtime(
         src(dl_from_env),
         src(prefetch_from_env)
     );
-    if !dl_from_env {
-        eprintln!("  Expert Tuning Overrides: none");
-    } else {
-        eprintln!("  Expert Tuning Overrides: {BLOB_DOWNLOAD_CONCURRENCY_ENV}");
+    match (dl_from_env, prefetch_from_env) {
+        (false, false) => eprintln!("  Expert Tuning Overrides: none"),
+        (true, false) => eprintln!("  Expert Tuning Overrides: {BLOB_DOWNLOAD_CONCURRENCY_ENV}"),
+        (false, true) => eprintln!("  Expert Tuning Overrides: {BLOB_PREFETCH_CONCURRENCY_ENV}"),
+        (true, true) => eprintln!(
+            "  Expert Tuning Overrides: {BLOB_DOWNLOAD_CONCURRENCY_ENV}, {BLOB_PREFETCH_CONCURRENCY_ENV}"
+        ),
     }
     eprintln!("  Replication queue: {KV_REPLICATION_WORK_QUEUE_CAPACITY} (bounded)");
     eprintln!(
@@ -326,7 +333,7 @@ fn blob_prefetch_concurrency(download_concurrency: usize) -> (usize, bool) {
         return (configured, true);
     }
 
-    (download_concurrency.div_ceil(2), false)
+    (download_concurrency.max(1), false)
 }
 
 fn force_http1() -> bool {
@@ -437,7 +444,7 @@ mod tests {
 
     #[test]
     fn blob_prefetch_concurrency_defaults_from_download_concurrency() {
-        assert_eq!(blob_prefetch_concurrency(8), (4, false));
+        assert_eq!(blob_prefetch_concurrency(8), (8, false));
         assert_eq!(blob_prefetch_concurrency(1), (1, false));
     }
 

@@ -18,7 +18,6 @@ const KV_IDLE_FLUSH_WINDOW_SMALL_BATCH_MS: u64 = 2_000;
 const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BLOBS: usize = 64;
 const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const CACHE_SESSION_SUMMARY_SCHEMA: &str = "cache_session_summary.v1";
-const CACHE_SESSION_SUMMARY_TOOL: &str = "oci";
 
 pub(super) fn spawn_maintenance_tasks(
     state: &AppState,
@@ -350,6 +349,7 @@ fn build_cache_session_summary_param(
 ) -> crate::api::models::cache_rollups::SessionParam {
     let summary = crate::serve::state::build_cache_session_summary(state);
     let duration_ms = summary.duration_ms;
+    let tool = summary.adapter.to_string();
     let summary_json = serde_json::to_value(summary).unwrap_or_else(|error| {
         log::debug!("Failed to serialize cache session summary: {error}");
         serde_json::json!({})
@@ -357,6 +357,7 @@ fn build_cache_session_summary_param(
 
     cache_session_summary_param(
         state.cache_session_summary_id.clone(),
+        tool,
         duration_ms,
         state.proxy_metadata_hints.clone(),
         summary_json,
@@ -365,13 +366,14 @@ fn build_cache_session_summary_param(
 
 fn cache_session_summary_param(
     session_id: String,
+    tool: String,
     session_duration_ms: u64,
     metadata_hints: BTreeMap<String, String>,
     summary_json: serde_json::Value,
 ) -> crate::api::models::cache_rollups::SessionParam {
     crate::api::models::cache_rollups::SessionParam {
         session_id,
-        tool: CACHE_SESSION_SUMMARY_TOOL.to_string(),
+        tool,
         session_duration_ms,
         hit_count: 0,
         miss_count: 0,
@@ -637,6 +639,7 @@ mod tests {
     fn cache_session_summary_param_marks_structured_proxy_summary() {
         let param = cache_session_summary_param(
             "proxy-summary-test".to_string(),
+            "oci".to_string(),
             12_000,
             BTreeMap::from([(
                 "oci_engine_hydration_policy".to_string(),

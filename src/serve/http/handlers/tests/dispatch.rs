@@ -53,11 +53,13 @@ async fn proxy_status_includes_live_session_summary() {
 
     let summary = &json["session_summary"];
     assert_eq!(summary["schema"], "cache-session-v1");
-    assert_eq!(summary["mode"], "docker-registry");
-    assert_eq!(summary["adapter"], "oci");
+    assert_eq!(summary["mode"], "cache-registry");
+    assert_eq!(summary["adapter"], "runtime");
     assert_eq!(summary["workspace"], "boringcache/benchmarks");
     assert_eq!(summary["proxy"]["hydration_policy"], "metadata-only");
-    assert_eq!(summary["buildkit"]["run_classification"], "unknown");
+    assert_eq!(summary["proxy"]["blob_prefetch_max_concurrency"], 2);
+    assert!(summary["startup_prefetch"].is_object());
+    assert_eq!(summary["buildkit"]["run_classification"], "not_applicable");
     assert!(summary["duration_ms"].as_u64().is_some());
 }
 

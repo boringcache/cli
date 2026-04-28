@@ -59,7 +59,7 @@ If you already manage the tool-specific setup yourself and only want proxy lifec
     [adapters.turbo]
     tag = "turbo-main"
     command = ["pnpm", "turbo", "run", "build"]
-    metadata-hints = ["tool=turbo", "phase=ci"]
+    metadata-hints = ["tool=turborepo", "phase=ci"]
     EOF
 
 - run: boringcache turbo

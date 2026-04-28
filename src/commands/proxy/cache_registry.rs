@@ -432,11 +432,20 @@ fn parse_proxy_metadata_hint(raw_hint: &str, source: &str) -> Result<(String, St
             "Invalid proxy metadata hint key in {source}: {raw_key} (expected lowercase letters, digits, underscores, or hyphens)"
         )
     })?;
-    let value = normalize_proxy_metadata_hint_value(raw_value).ok_or_else(|| {
+    let mut value = normalize_proxy_metadata_hint_value(raw_value).ok_or_else(|| {
         anyhow::anyhow!(
             "Invalid proxy metadata hint value in {source}: {raw_value} (use short ASCII labels like zed, grpc, warm, or changed-source)"
         )
     })?;
+    if matches!(key.as_str(), "tool" | "adapter") {
+        value = canonical_proxy_metadata_tool_value(&value)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid proxy metadata hint {key} in {source}: {raw_value} (expected a known cache tool such as turborepo, gocache, bazel, sccache, oci, archive, or runtime)"
+                )
+            })?;
+    }
 
     Ok((key, value))
 }
@@ -446,8 +455,28 @@ pub(crate) fn normalize_proxy_metadata_hint(
     raw_value: &str,
 ) -> Option<(String, String)> {
     let key = normalize_proxy_metadata_hint_key(raw_key)?;
-    let value = normalize_proxy_metadata_hint_value(raw_value)?;
+    let mut value = normalize_proxy_metadata_hint_value(raw_value)?;
+    if matches!(key.as_str(), "tool" | "adapter") {
+        value = canonical_proxy_metadata_tool_value(&value)?.to_string();
+    }
     Some((key, value))
+}
+
+fn canonical_proxy_metadata_tool_value(value: &str) -> Option<&'static str> {
+    match value {
+        "runtime" => Some("runtime"),
+        "turborepo" | "turbo" | "turbo-proxy" => Some("turborepo"),
+        "nx" => Some("nx"),
+        "bazel" => Some("bazel"),
+        "gradle" => Some("gradle"),
+        "maven" => Some("maven"),
+        "sccache" | "rust-sccache" => Some("sccache"),
+        "gocache" | "gocacheprog" | "go" | "go-cache" | "go-cacheprog" | "go-build-cache"
+        | "go-build" => Some("gocache"),
+        "oci" | "docker" | "docker-registry" | "buildkit" => Some("oci"),
+        "archive" => Some("archive"),
+        _ => None,
+    }
 }
 
 pub(crate) fn insert_replayable_proxy_metadata_hint(
@@ -598,6 +627,29 @@ mod tests {
 
         assert_eq!(hints.get("project"), Some(&"zed".to_string()));
         assert_eq!(hints.get("phase"), Some(&"changed-source".to_string()));
+    }
+
+    #[test]
+    fn proxy_metadata_hints_canonicalize_reserved_tool_values() {
+        let hints = resolve_proxy_metadata_hints(&[
+            "tool=Turbo".to_string(),
+            "adapter=Go CacheProg".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(hints.get("tool"), Some(&"turborepo".to_string()));
+        assert_eq!(hints.get("adapter"), Some(&"gocache".to_string()));
+    }
+
+    #[test]
+    fn proxy_metadata_hints_reject_unknown_reserved_tool_values() {
+        let error = resolve_proxy_metadata_hints(&["tool=custom-cache".to_string()]).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid proxy metadata hint tool")
+        );
     }
 
     #[test]

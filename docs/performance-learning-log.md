@@ -182,6 +182,13 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - `cache-registry` is the warm-first standalone proxy surface.
   - `boringcache <tool>` and `boringcache run --proxy` temporarily start that same proxy for one command and inherit the same warm-first startup behavior.
   - `--on-demand` is the explicit expert override when a caller wants immediate startup instead of startup warming.
+- Concurrency follow-up:
+  - The machine governor already picks safe blob download concurrency from runner headroom. Startup prefetch now uses that full safe download budget before readiness instead of halving it again, so high object-count KV adapter tags warm harder while the wrapped tool is not running yet.
+  - Local Rails/Tigris-backed E2E with 5,000 x 4 KiB blobs measured startup-prefetch readiness at 36s with concurrency 3, 13s with concurrency 10, and 14s with concurrency 20. That shape says the useful client-side warm concurrency ceiling for many tiny objects is around 10 in this environment; above that, storage/server scheduling dominates.
+  - A 20-concurrency stress attempt also exposed a save-side limit: high write pressure produced an HTTP/2 `too_many_internal_resets` storage upload error, preserved partial blob receipts, then repeatedly hit a server-side `Cache upload in progress` conflict during shutdown flush. Treat that as a separate save/publish robustness follow-up, not as a prefetch win.
+  - Do not treat S3-compatible storage as unlimited for this path. AWS documents high per-prefix request floors and gradual scaling with possible `503 Slow Down`; Tigris does not publish a precise per-prefix write ceiling. Our product should classify 429/503, `Retry-After`, HTTP/2 resets, and timeout pressure as storage-write backpressure and feed that into upload concurrency and session summaries.
+  - The save-side governor now caps many-small-blob upload batches instead of ramping every large batch to 64. A 20,000 x 4 KiB local Rails/Tigris E2E published cleanly with the final 11,817-object flush held at concurrency 12, then startup-prefetched all 20,000 blobs in 51s with zero verify failures.
+  - The 50,000 x 4 KiB stress run also passed: the seed side uploaded all 50,000 blobs with zero failed uploads, the largest follow-up flush stayed at concurrency 12, startup prefetch inserted all 50,000 blobs in 187s, and local-cache verification read all 50,000 with zero failures.
 - Guardrail:
   - Keep warm as the default user path. Treat on-demand as an advanced escape hatch, not the main story.
 - Contract:

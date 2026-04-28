@@ -444,7 +444,7 @@ command = ["turbo", "run", "build", "--cache-dir=.turbo/cache", "--output-logs=e
 port = 5323
 no-platform = true
 no-git = true
-metadata-hints = ["tool=turbo", "phase=warm", "scenario=adapter-config"]
+metadata-hints = ["tool=turborepo", "phase=warm", "scenario=adapter-config"]
 EOF
 
     (

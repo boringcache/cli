@@ -36,7 +36,7 @@ metadata-hints = ["project=app"]
 [adapters.docker]
 tag = "docker-cache"
 command = ["docker", "buildx", "build", "."]
-metadata-hints = ["tool=docker", "phase=ci"]
+metadata-hints = ["tool=oci", "phase=ci"]
 ```
 
 ```bash
@@ -119,7 +119,7 @@ metadata-hints = ["project=web"]
 [adapters.turbo]
 tag = "turbo-cache"
 command = ["pnpm", "turbo", "run", "build"]
-metadata-hints = ["tool=turbo", "phase=ci"]
+metadata-hints = ["tool=turborepo", "phase=ci"]
 ```
 
 ```bash

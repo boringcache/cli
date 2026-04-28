@@ -99,7 +99,7 @@ metadata-hints = ["project=web"]
 [adapters.turbo]
 tag = "turbo-main"
 command = ["pnpm", "turbo", "run", "build"]
-metadata-hints = ["tool=turbo", "phase=ci"]
+metadata-hints = ["tool=turborepo", "phase=ci"]
 ```
 
 Use `BORINGCACHE_PROXY_METADATA_HINTS` when another script or service starts

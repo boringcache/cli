@@ -88,6 +88,19 @@ impl AdapterKind {
         runner_for(self).name
     }
 
+    fn telemetry_tool(self) -> &'static str {
+        match self {
+            Self::Turbo => "turborepo",
+            Self::Nx => "nx",
+            Self::Bazel => "bazel",
+            Self::Gradle => "gradle",
+            Self::Maven => "maven",
+            Self::Sccache => "sccache",
+            Self::Go => "gocache",
+            Self::Docker => "oci",
+        }
+    }
+
     fn proxy_env_plan(
         self,
         context: &proxy::ProxyContext,
@@ -309,6 +322,13 @@ pub async fn adapter_execute(
     let mut proxy_metadata_hints =
         cache_registry::resolve_proxy_metadata_hints(&metadata_hint_args)?;
     cache_registry::inject_default_proxy_metadata_hints(&mut proxy_metadata_hints);
+    if kind != AdapterKind::Docker {
+        cache_registry::insert_replayable_proxy_metadata_hint(
+            &mut proxy_metadata_hints,
+            "tool",
+            kind.telemetry_tool(),
+        );
+    }
     let mut generated_proxy_metadata_hints = Vec::new();
     let effective_skip_save = skip_save || effective_read_only;
     let docker_cache_mode = project_config::prefer_cli_scalar(
@@ -831,5 +851,23 @@ mod tests {
                 "lane=ci".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn adapter_telemetry_tools_match_rails_rollup_vocabulary() {
+        let tools = [
+            (AdapterKind::Turbo, "turborepo"),
+            (AdapterKind::Nx, "nx"),
+            (AdapterKind::Bazel, "bazel"),
+            (AdapterKind::Gradle, "gradle"),
+            (AdapterKind::Maven, "maven"),
+            (AdapterKind::Sccache, "sccache"),
+            (AdapterKind::Go, "gocache"),
+            (AdapterKind::Docker, "oci"),
+        ];
+
+        for (adapter, tool) in tools {
+            assert_eq!(adapter.telemetry_tool(), tool);
+        }
     }
 }

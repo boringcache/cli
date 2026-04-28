@@ -12,11 +12,15 @@ pub(super) fn emit_cache_session_summary(state: &AppState) {
 
     observability::emit(ObservabilityEvent::cache_session_summary(
         state.workspace.clone(),
+        summary.mode,
+        summary.adapter,
         summary.duration_ms,
         summary.proxy,
         summary.rails,
         summary.storage,
         summary.oci,
+        summary.startup_prefetch,
+        summary.kv_upload,
         summary.singleflight,
         summary.local_cache,
         summary.buildkit,
@@ -36,8 +40,6 @@ pub(super) async fn cleanup_runtime_temp_dir(state: &AppState) {
 }
 
 pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
-    super::maintenance::flush_cache_ops_on_shutdown(state).await;
-
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
 
     loop {
@@ -55,7 +57,7 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
                 pending.entry_count()
             };
             if pending_after_flush == 0 {
-                return;
+                break;
             }
             continue;
         }
@@ -89,14 +91,19 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
                 let pending = state.kv_pending.read().await;
                 pending.entry_count()
             };
+            if pending_entries == 0 {
+                break;
+            }
             eprintln!(
                 "Shutdown: flush timeout reached with {pending_entries} pending entries remaining"
             );
-            return;
+            break;
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
+
+    super::maintenance::flush_cache_ops_on_shutdown(state).await;
 }
 
 pub(super) async fn shutdown_signal(shutdown_requested: Arc<AtomicBool>) {

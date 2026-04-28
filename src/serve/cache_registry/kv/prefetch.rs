@@ -4,6 +4,13 @@ use crate::observability;
 pub(crate) const KV_PREFETCH_READINESS_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(300);
 const PREFETCH_BLOB_DOWNLOAD_ATTEMPTS: usize = 3;
+const STARTUP_PREFETCH_MANY_BLOB_COUNT: usize = 1_000;
+const STARTUP_PREFETCH_SMALL_BLOB_BYTES: u64 = 64 * 1024;
+const STARTUP_PREFETCH_MEDIUM_BLOB_BYTES: u64 = 1024 * 1024;
+const STARTUP_PREFETCH_LARGE_BLOB_BYTES: u64 = 8 * 1024 * 1024;
+const STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP: usize = 10;
+const STARTUP_PREFETCH_MEDIUM_BLOB_CAP: usize = 8;
+const STARTUP_PREFETCH_LARGE_BLOB_CAP: usize = 4;
 
 pub(crate) async fn count_missing_local_blobs(state: &AppState, blobs: &[BlobDescriptor]) -> usize {
     let mut missing = 0usize;
@@ -318,6 +325,63 @@ pub(crate) async fn preload_single_blob(
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StartupPrefetchConcurrencyPlan {
+    pub(crate) max_concurrency: usize,
+    pub(crate) effective_concurrency: usize,
+    pub(crate) source: &'static str,
+    pub(crate) reason: &'static str,
+}
+
+pub(crate) fn adaptive_startup_prefetch_concurrency(
+    max_concurrency: usize,
+    explicit_override: bool,
+    target_blobs: usize,
+    target_bytes: u64,
+) -> StartupPrefetchConcurrencyPlan {
+    let max_concurrency = max_concurrency.max(1);
+    if target_blobs == 0 {
+        return StartupPrefetchConcurrencyPlan {
+            max_concurrency,
+            effective_concurrency: 1,
+            source: "auto",
+            reason: "empty",
+        };
+    }
+
+    if explicit_override {
+        return StartupPrefetchConcurrencyPlan {
+            max_concurrency,
+            effective_concurrency: max_concurrency.min(target_blobs).max(1),
+            source: "env",
+            reason: "explicit_override",
+        };
+    }
+
+    let average_blob_bytes = target_bytes / target_blobs as u64;
+    let (cap, reason) = if target_blobs >= STARTUP_PREFETCH_MANY_BLOB_COUNT
+        && average_blob_bytes <= STARTUP_PREFETCH_SMALL_BLOB_BYTES
+    {
+        (
+            STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP,
+            "many_small_blobs_measured_cap",
+        )
+    } else if average_blob_bytes >= STARTUP_PREFETCH_LARGE_BLOB_BYTES {
+        (STARTUP_PREFETCH_LARGE_BLOB_CAP, "large_blobs")
+    } else if average_blob_bytes >= STARTUP_PREFETCH_MEDIUM_BLOB_BYTES {
+        (STARTUP_PREFETCH_MEDIUM_BLOB_CAP, "medium_blobs")
+    } else {
+        (max_concurrency, "machine_governor")
+    };
+
+    StartupPrefetchConcurrencyPlan {
+        max_concurrency,
+        effective_concurrency: max_concurrency.min(cap).min(target_blobs).max(1),
+        source: "auto",
+        reason,
+    }
+}
+
 fn should_retry_prefetch_blob_error(status: StatusCode) -> bool {
     matches!(
         status,
@@ -334,6 +398,7 @@ async fn prefetch_blob_targets(
     total_unique_blobs: usize,
     targets: Vec<StartupPrefetchTarget>,
     summary: StartupPrefetchTargetSummary,
+    concurrency_plan: StartupPrefetchConcurrencyPlan,
     log_label: &str,
 ) -> BlobPrefetchStats {
     let mut stats = BlobPrefetchStats {
@@ -373,22 +438,30 @@ async fn prefetch_blob_targets(
         .map(|target| target.blob.size_bytes)
         .sum();
     eprintln!(
-        "{log_label}: warming {}/{} blobs ({:.1} MB, cached_urls={}, unresolved_urls={}, already_local={})",
+        "{log_label}: warming {}/{} blobs ({:.1} MB, concurrency={}/{}, source={}, reason={}, cached_urls={}, unresolved_urls={}, already_local={})",
         stats.scheduled,
         stats.total_unique_blobs,
         stats.scheduled_bytes as f64 / (1024.0 * 1024.0),
+        concurrency_plan.effective_concurrency,
+        concurrency_plan.max_concurrency,
+        concurrency_plan.source,
+        concurrency_plan.reason,
         summary.cached_url_count,
         summary.unresolved_url_count,
         stats.already_local,
     );
 
     let prefetch_started_at = std::time::Instant::now();
-    let prefetch_semaphore = state.blob_prefetch_semaphore.clone();
+    let mut pending_iter = pending_targets.into_iter();
     let mut tasks = tokio::task::JoinSet::new();
-    for target in pending_targets {
-        let state = state.clone();
-        let cache_entry_id = cache_entry_id.to_string();
-        let prefetch_semaphore = prefetch_semaphore.clone();
+
+    fn spawn_prefetch_task(
+        tasks: &mut tokio::task::JoinSet<anyhow::Result<bool>>,
+        state: AppState,
+        cache_entry_id: String,
+        target: StartupPrefetchTarget,
+    ) {
+        let prefetch_semaphore = state.blob_prefetch_semaphore.clone();
         tasks.spawn(async move {
             let prefetch_permit = prefetch_semaphore
                 .acquire_owned()
@@ -399,6 +472,19 @@ async fn prefetch_blob_targets(
             drop(prefetch_permit);
             result
         });
+    }
+
+    let max_in_flight = concurrency_plan
+        .effective_concurrency
+        .min(stats.scheduled)
+        .max(1);
+    for _ in 0..max_in_flight {
+        let Some(target) = pending_iter.next() else {
+            break;
+        };
+        let state = state.clone();
+        let cache_entry_id = cache_entry_id.to_string();
+        spawn_prefetch_task(&mut tasks, state, cache_entry_id, target);
     }
 
     let log_interval = (stats.scheduled / 10).max(1);
@@ -429,6 +515,11 @@ async fn prefetch_blob_targets(
                 stats.failures,
                 prefetch_started_at.elapsed().as_secs_f64(),
             );
+        }
+        if let Some(target) = pending_iter.next() {
+            let state = state.clone();
+            let cache_entry_id = cache_entry_id.to_string();
+            spawn_prefetch_task(&mut tasks, state, cache_entry_id, target);
         }
     }
 
@@ -494,17 +585,33 @@ pub(crate) async fn prefetch_manifest_blobs(
             let total_unique_blobs = unique_blobs.len();
             let total_unique_bytes: u64 =
                 unique_blobs.iter().map(|blob| blob.size_bytes).sum::<u64>();
-            state.prefetch_metrics.record_startup_plan(
-                "full_tag",
-                total_unique_blobs,
+            let concurrency_plan = adaptive_startup_prefetch_concurrency(
+                state.blob_prefetch_max_concurrency,
+                state.blob_prefetch_concurrency_from_env,
                 total_unique_blobs,
                 total_unique_bytes,
             );
+            state
+                .prefetch_metrics
+                .record_startup_plan(crate::serve::state::StartupPrefetchPlan {
+                    mode: "full_tag",
+                    total_unique_blobs,
+                    target_blobs: total_unique_blobs,
+                    target_bytes: total_unique_bytes,
+                    max_concurrency: concurrency_plan.max_concurrency,
+                    effective_concurrency: concurrency_plan.effective_concurrency,
+                    concurrency_source: concurrency_plan.source,
+                    concurrency_reason: concurrency_plan.reason,
+                });
 
             eprintln!(
-                "Prefetch: {count} entries loaded, hydrating full tag locally ({} blobs, {:.1} MB)",
+                "Prefetch: {count} entries loaded, hydrating full tag locally ({} blobs, {:.1} MB, concurrency={}/{}, source={}, reason={})",
                 total_unique_blobs,
                 total_unique_bytes as f64 / (1024.0 * 1024.0),
+                concurrency_plan.effective_concurrency,
+                concurrency_plan.max_concurrency,
+                concurrency_plan.source,
+                concurrency_plan.reason,
             );
 
             let startup_url_stats =
@@ -520,7 +627,7 @@ pub(crate) async fn prefetch_manifest_blobs(
             eprintln!("Prefetch: warming full tag...");
             match tokio::time::timeout(
                 KV_PREFETCH_READINESS_TIMEOUT,
-                prefetch_all_blobs(state, &cache_entry_id, &unique_blobs),
+                prefetch_all_blobs(state, &cache_entry_id, &unique_blobs, concurrency_plan),
             )
             .await
             {
@@ -573,6 +680,7 @@ pub(crate) async fn prefetch_all_blobs(
     state: &AppState,
     cache_entry_id: &str,
     blobs: &[BlobDescriptor],
+    concurrency_plan: StartupPrefetchConcurrencyPlan,
 ) {
     let (startup_targets, startup_summary) = {
         let published = state.kv_published_index.read().await;
@@ -587,6 +695,7 @@ pub(crate) async fn prefetch_all_blobs(
         blobs.len(),
         startup_targets,
         startup_summary,
+        concurrency_plan,
         "Prefetch: full tag",
     )
     .await;

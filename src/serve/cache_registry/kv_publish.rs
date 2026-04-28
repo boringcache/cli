@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::api::models::cache::{BlobDescriptor, BlobReceipt};
 use crate::progress::TransferProgress;
-use crate::serve::state::AppState;
+use crate::serve::state::{AppState, KvBlobUploadBatch};
 
 const KV_BLOB_UPLOAD_MAX_ATTEMPTS: u32 = 3;
 const KV_BLOB_UPLOAD_RETRY_BASE_MS: u64 = 300;
@@ -13,6 +13,11 @@ const KV_BLOB_UPLOAD_RETRY_MAX_MS: u64 = 1_500;
 const KV_BLOB_UPLOAD_MAX_CONCURRENCY: usize = 64;
 const KV_BLOB_UPLOAD_CONCURRENCY_ENV: &str = "BORINGCACHE_KV_BLOB_UPLOAD_CONCURRENCY";
 const KV_BLOB_UPLOAD_INITIAL_CONCURRENCY: usize = 16;
+const KV_BLOB_UPLOAD_MANY_BLOB_COUNT: usize = 1_000;
+const KV_BLOB_UPLOAD_VERY_MANY_BLOB_COUNT: usize = 10_000;
+const KV_BLOB_UPLOAD_SMALL_BLOB_BYTES: u64 = 64 * 1024;
+const KV_BLOB_UPLOAD_MEDIUM_BLOB_BYTES: u64 = 1024 * 1024;
+const KV_BLOB_UPLOAD_LARGE_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone)]
 pub(super) struct BlobUploadStats {
@@ -58,6 +63,14 @@ enum BlobUploadOutcome {
     Uploaded,
     UploadedAfterRetry,
     AlreadyPresent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlobUploadConcurrencyPlan {
+    initial: usize,
+    max: usize,
+    source: &'static str,
+    reason: &'static str,
 }
 
 struct AdaptiveUploadConcurrency {
@@ -142,18 +155,56 @@ fn clamp_concurrency(value: usize, operation_count: usize) -> usize {
     value.min(operation_count).max(1)
 }
 
-fn kv_blob_upload_concurrency(operation_count: usize) -> (usize, usize) {
+fn kv_blob_upload_concurrency(
+    operation_count: usize,
+    upload_bytes: u64,
+) -> BlobUploadConcurrencyPlan {
     if let Ok(val) = std::env::var(KV_BLOB_UPLOAD_CONCURRENCY_ENV)
         && let Ok(v) = val.trim().parse::<usize>()
         && v > 0
     {
         let fixed = clamp_concurrency(v, operation_count);
-        return (fixed, fixed);
+        return BlobUploadConcurrencyPlan {
+            initial: fixed,
+            max: fixed,
+            source: "env",
+            reason: "explicit_override",
+        };
     }
 
-    let max = clamp_concurrency(KV_BLOB_UPLOAD_MAX_CONCURRENCY, operation_count);
-    let initial = clamp_concurrency(KV_BLOB_UPLOAD_INITIAL_CONCURRENCY.min(max), operation_count);
-    (initial, max)
+    let average_blob_bytes = if operation_count > 0 {
+        upload_bytes / operation_count as u64
+    } else {
+        0
+    };
+    let (initial_cap, max_cap, reason) = if operation_count >= KV_BLOB_UPLOAD_VERY_MANY_BLOB_COUNT
+        && average_blob_bytes <= KV_BLOB_UPLOAD_SMALL_BLOB_BYTES
+    {
+        (8, 12, "very_many_small_blobs")
+    } else if operation_count >= KV_BLOB_UPLOAD_MANY_BLOB_COUNT
+        && average_blob_bytes <= KV_BLOB_UPLOAD_SMALL_BLOB_BYTES
+    {
+        (8, 16, "many_small_blobs")
+    } else if average_blob_bytes >= KV_BLOB_UPLOAD_LARGE_BLOB_BYTES {
+        (2, 4, "large_blobs")
+    } else if average_blob_bytes >= KV_BLOB_UPLOAD_MEDIUM_BLOB_BYTES {
+        (4, 8, "medium_blobs")
+    } else {
+        (
+            KV_BLOB_UPLOAD_INITIAL_CONCURRENCY,
+            KV_BLOB_UPLOAD_MAX_CONCURRENCY,
+            "adaptive_ramp",
+        )
+    };
+
+    let max = clamp_concurrency(max_cap, operation_count);
+    let initial = clamp_concurrency(initial_cap.min(max), operation_count);
+    BlobUploadConcurrencyPlan {
+        initial,
+        max,
+        source: "auto",
+        reason,
+    }
 }
 
 struct UploadRequest {
@@ -268,6 +319,7 @@ pub(super) async fn upload_blobs(
     blobs: &[BlobDescriptor],
     local_blob_paths: &HashMap<String, PathBuf>,
 ) -> anyhow::Result<BlobUploadStats> {
+    let upload_started_at = std::time::Instant::now();
     let upload_plan = state
         .api_client
         .blob_upload_urls(&state.workspace, cache_entry_id, blobs)
@@ -286,15 +338,26 @@ pub(super) async fn upload_blobs(
         .map(|blob| (blob.digest.clone(), blob.clone()))
         .collect();
 
-    let (initial, max) = kv_blob_upload_concurrency(upload_plan.upload_urls.len());
-    let limiter = Arc::new(AdaptiveUploadConcurrency::new(initial, max));
+    let upload_bytes = upload_plan
+        .upload_urls
+        .iter()
+        .filter_map(|upload| blobs_by_digest.get(&upload.digest))
+        .map(|blob| blob.size_bytes)
+        .sum::<u64>();
+    let concurrency_plan = kv_blob_upload_concurrency(upload_plan.upload_urls.len(), upload_bytes);
+    let limiter = Arc::new(AdaptiveUploadConcurrency::new(
+        concurrency_plan.initial,
+        concurrency_plan.max,
+    ));
     let total_requested = upload_plan.upload_urls.len() as u64;
     eprintln!(
-        "KV blob upload plan: requested={} already_present={} concurrency={}/{}",
+        "KV blob upload plan: requested={} already_present={} concurrency={}/{} source={} reason={}",
         total_requested,
         upload_plan.already_present.len(),
-        initial,
-        max,
+        concurrency_plan.initial,
+        concurrency_plan.max,
+        concurrency_plan.source,
+        concurrency_plan.reason,
     );
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -389,6 +452,22 @@ pub(super) async fn upload_blobs(
     }
 
     if !failures.is_empty() {
+        let final_concurrency = limiter.current();
+        state
+            .kv_blob_upload_metrics
+            .record_batch(KvBlobUploadBatch {
+                requested_blobs: total_requested,
+                uploaded_blobs: stats.uploaded_count,
+                already_present_blobs: stats.already_present_count,
+                missing_local_blobs: stats.missing_local_count,
+                failed_blobs: failures.len() as u64,
+                duration_ms: upload_started_at.elapsed().as_millis() as u64,
+                initial_concurrency: concurrency_plan.initial,
+                max_concurrency: concurrency_plan.max,
+                final_concurrency,
+                concurrency_source: concurrency_plan.source,
+                concurrency_reason: concurrency_plan.reason,
+            });
         eprintln!(
             "KV blob upload partial failure: uploaded={} already_present={} missing_local={} failed={}",
             stats.uploaded_count,
@@ -402,12 +481,28 @@ pub(super) async fn upload_blobs(
         }));
     }
 
+    let final_concurrency = limiter.current();
+    state
+        .kv_blob_upload_metrics
+        .record_batch(KvBlobUploadBatch {
+            requested_blobs: total_requested,
+            uploaded_blobs: stats.uploaded_count,
+            already_present_blobs: stats.already_present_count,
+            missing_local_blobs: stats.missing_local_count,
+            failed_blobs: 0,
+            duration_ms: upload_started_at.elapsed().as_millis() as u64,
+            initial_concurrency: concurrency_plan.initial,
+            max_concurrency: concurrency_plan.max,
+            final_concurrency,
+            concurrency_source: concurrency_plan.source,
+            concurrency_reason: concurrency_plan.reason,
+        });
     eprintln!(
         "KV blob upload complete: uploaded={} already_present={} missing_local={} final_concurrency={}",
         stats.uploaded_count,
         stats.already_present_count,
         stats.missing_local_count,
-        limiter.current(),
+        final_concurrency,
     );
 
     Ok(stats)
@@ -446,7 +541,11 @@ mod tests {
         let _guard = test_env::lock();
         test_env::set_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV, "99");
 
-        assert_eq!(kv_blob_upload_concurrency(3), (3, 3));
+        let plan = kv_blob_upload_concurrency(3, 3 * 4096);
+        assert_eq!(plan.initial, 3);
+        assert_eq!(plan.max, 3);
+        assert_eq!(plan.source, "env");
+        assert_eq!(plan.reason, "explicit_override");
 
         test_env::remove_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV);
     }
@@ -456,7 +555,11 @@ mod tests {
         let _guard = test_env::lock();
         test_env::set_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV, "0");
 
-        assert_eq!(kv_blob_upload_concurrency(12), (12, 12));
+        let plan = kv_blob_upload_concurrency(12, 12 * 4096);
+        assert_eq!(plan.initial, 12);
+        assert_eq!(plan.max, 12);
+        assert_eq!(plan.source, "auto");
+        assert_eq!(plan.reason, "adaptive_ramp");
 
         test_env::remove_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV);
     }
@@ -466,9 +569,44 @@ mod tests {
         let _guard = test_env::lock();
         test_env::remove_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV);
 
-        assert_eq!(kv_blob_upload_concurrency(0), (1, 1));
-        assert_eq!(kv_blob_upload_concurrency(4), (4, 4));
-        assert_eq!(kv_blob_upload_concurrency(12), (12, 12));
+        let empty = kv_blob_upload_concurrency(0, 0);
+        assert_eq!(empty.initial, 1);
+        assert_eq!(empty.max, 1);
+
+        let four = kv_blob_upload_concurrency(4, 4 * 4096);
+        assert_eq!(four.initial, 4);
+        assert_eq!(four.max, 4);
+
+        let twelve = kv_blob_upload_concurrency(12, 12 * 4096);
+        assert_eq!(twelve.initial, 12);
+        assert_eq!(twelve.max, 12);
+    }
+
+    #[test]
+    fn kv_blob_upload_concurrency_caps_many_small_object_batches() {
+        let _guard = test_env::lock();
+        test_env::remove_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV);
+
+        let many = kv_blob_upload_concurrency(2_000, 2_000 * 4096);
+        assert_eq!(many.initial, 8);
+        assert_eq!(many.max, 16);
+        assert_eq!(many.reason, "many_small_blobs");
+
+        let very_many = kv_blob_upload_concurrency(20_000, 20_000 * 4096);
+        assert_eq!(very_many.initial, 8);
+        assert_eq!(very_many.max, 12);
+        assert_eq!(very_many.reason, "very_many_small_blobs");
+    }
+
+    #[test]
+    fn kv_blob_upload_concurrency_caps_large_blob_batches() {
+        let _guard = test_env::lock();
+        test_env::remove_var(KV_BLOB_UPLOAD_CONCURRENCY_ENV);
+
+        let plan = kv_blob_upload_concurrency(12, 12 * 16 * 1024 * 1024);
+        assert_eq!(plan.initial, 2);
+        assert_eq!(plan.max, 4);
+        assert_eq!(plan.reason, "large_blobs");
     }
 
     #[test]

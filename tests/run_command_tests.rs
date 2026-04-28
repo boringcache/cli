@@ -1136,6 +1136,54 @@ port = 6001
 }
 
 #[test]
+fn test_adapter_dry_run_json_aligns_startup_policy_and_tool_hints() {
+    let adapters = [
+        ("turbo", "turborepo"),
+        ("nx", "nx"),
+        ("bazel", "bazel"),
+        ("gradle", "gradle"),
+        ("maven", "maven"),
+        ("sccache", "sccache"),
+        ("go", "gocache"),
+    ];
+
+    for (adapter, canonical_tool) in adapters {
+        let mut command = Command::new(cli_binary());
+        apply_test_env(&mut command);
+        let output = command
+            .args([
+                adapter,
+                "--workspace",
+                "test-org/test-workspace",
+                "--tag",
+                &format!("{adapter}-cache"),
+                "--dry-run",
+                "--json",
+                "--",
+                "echo",
+                "ok",
+            ])
+            .output()
+            .unwrap_or_else(|error| panic!("Failed to execute {adapter} dry-run: {error}"));
+
+        assert!(
+            output.status.success(),
+            "{adapter} dry-run should succeed, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let parsed: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("parse {adapter} dry-run JSON: {error}"));
+        assert_schema_version(&parsed);
+        assert_eq!(parsed["adapter"], adapter);
+        assert_eq!(parsed["proxy"]["startup_mode"], "warm");
+        assert_eq!(parsed["proxy"]["oci_hydration"], "metadata-only");
+        assert!(parsed["proxy"].get("oci_prefetch_refs").is_none());
+        assert_eq!(parsed["proxy"]["metadata_hints"]["tool"], canonical_tool);
+    }
+}
+
+#[test]
 fn test_adapter_dry_run_json_reports_oci_prefetch_refs() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);
@@ -1222,7 +1270,7 @@ metadata-hints = ["phase=warm", "tool=turbo"]
     assert_eq!(entries[0]["requested"], "bundler");
     assert_eq!(parsed["proxy"]["metadata_hints"]["project"], "web");
     assert_eq!(parsed["proxy"]["metadata_hints"]["phase"], "ready");
-    assert_eq!(parsed["proxy"]["metadata_hints"]["tool"], "turbo");
+    assert_eq!(parsed["proxy"]["metadata_hints"]["tool"], "turborepo");
     assert_eq!(parsed["proxy"]["metadata_hints"]["lane"], "ci");
 }
 

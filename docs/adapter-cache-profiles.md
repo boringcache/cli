@@ -20,7 +20,7 @@ It is based on:
 
 - Startup warming hydrates the full active tag by default.
 - Blob-read cache sizing and restore/prefetch concurrency now come from one automatic machine governor.
-- Startup warming now resolves URLs for the full active tag first, hydrates that tag first, and lets the blob read cache evict over budget.
+- Startup warming now resolves URLs for the full active tag first, hydrates that tag with the governor's full safe download concurrency before readiness, and lets the blob read cache evict over budget.
 - Read-path metrics now record `local_cache` vs `remote_fetch`, so we can measure hit ratio and latency instead of guessing.
 
 ## Tuning surface
@@ -40,12 +40,12 @@ If a benchmark needs lower-level overrides, treat those as engineering controls,
 | --- | --- | --- | --- | --- | --- |
 | `sccache` | WebDAV `MKCOL`/`GET`/`HEAD`/`PUT` | `SCCACHE_DIR` plus local server process | Many small compiler result blobs keyed by path-like keys | Keep GET/HEAD cheap, batch URL resolution, and hydrate the active tag into disk cache by default | Per-hit URL resolution and low steady-state read concurrency |
 | `bazel` | Remote cache over HTTP for `ac/` and `cas/` | Local output base and local disk cache | Split `AC` metadata and `CAS` blobs; can be many objects, sometimes large | Preserve `ac/` and `cas/` correctness, hydrate the active tag generically, and let disk-cache eviction enforce capacity | Tool-detected hydrate-first rules or treating large CAS graphs like tiny kv objects |
-| `gradle` | Remote HTTP build cache | Local build cache directory; Gradle stores remote hits locally after fetch | One cache object per cacheable task output | Keep GET/PUT path cheap, batch nothing unnecessary, rely on local cache after first restore | Heavy startup hydration by default |
-| `maven` | Maven build-cache HTTP or DAV remote | Local Maven repo and local build-cache extension state | Keyed module/project-state artifacts, often many small modules | Keep metadata cheap, preserve portability checks, and rely on local reuse after restore | Ignoring portability/config mismatches or assuming cross-env reuse is always safe |
-| `turborepo` | Remote cache API: `GET`/`HEAD`/`PUT`/`POST` | `.turbo/cache` on local disk | One artifact archive per task hash plus query/events calls | Keep query and artifact fetch cheap; warm opportunistically from observed cache state, not tool guesses | Full-tag hydration by default for large monorepos |
-| `nx` | Custom remote cache API: `PUT`/`GET`/`HEAD` and query | Local Nx cache folder | Tar archives per task hash plus optional terminal output objects | Same as Turborepo: low-overhead fetch path and opportunistic warming from observed cache state | Blanket hydration of all cached task hashes |
+| `gradle` | Remote HTTP build cache | Local build cache directory; Gradle stores remote hits locally after fetch | One cache object per cacheable task output | Hydrate the active tag before readiness with the generic machine-safe governor, then keep GET/PUT cheap | Adapter-specific lazy readiness that hides startup cache misses |
+| `maven` | Maven build-cache HTTP or DAV remote | Local Maven repo and local build-cache extension state | Keyed module/project-state artifacts, often many small modules | Hydrate the active tag before readiness, keep metadata cheap, and preserve portability checks | Ignoring portability/config mismatches or assuming cross-env reuse is always safe |
+| `turborepo` | Remote cache API: `GET`/`HEAD`/`PUT`/`POST` | `.turbo/cache` on local disk | One artifact archive per task hash plus query/events calls | Hydrate the active tag before readiness so task artifacts read like a local cache | Adapter-name guesses or custom partial-warm policies before measuring request patterns |
+| `nx` | Custom remote cache API: `PUT`/`GET`/`HEAD` and query | Local Nx cache folder | Tar archives per task hash plus optional terminal output objects | Same as Turborepo: hydrate the active tag before readiness and keep the live request path cheap | Adapter-name guesses or custom partial-warm policies before measuring request patterns |
 | `docker` | BuildKit registry cache via OCI registry manifests and blobs | Builder local content store and layer cache | OCI manifests plus blob layers; `mode=max` exports more cache state | Optimize manifest/index reuse, URL batching, on-demand blob read-through, and local content-store reuse | Treating OCI cache like filesystem kv objects or forcing full blob hydration before BuildKit starts |
-| `go-cache` | Simple object API `GET`/`HEAD`/`PUT` | Go local build cache | One object per action/result key | Fast kv path, cheap metadata, local reuse after first fetch | Overengineering it with heavy startup hydration |
+| `gocache` | Simple object API `GET`/`HEAD`/`PUT` | Go local build cache | One object per action/result key | Hydrate the active tag before readiness so `GOCACHEPROG` can read from local disk during the build | Partial/lazy readiness as the default for release-path runs |
 
 ## Working rules
 
@@ -53,6 +53,7 @@ If a benchmark needs lower-level overrides, treat those as engineering controls,
 - BoringCache owns storage, transfer, verification, and machine-safe scheduling.
 - Generic KV startup warming should hydrate the full active tag by default on disk-backed cache-registry paths. Capacity control belongs in the blob read cache size and eviction policy, not a separate startup selection budget.
 - Query-aware or protocol-aware optimizations should come from real request patterns, not adapter-name guesses.
+- Telemetry fields named `tool` or `adapter` must use the Rails canonical rollup names: `turborepo`, `nx`, `bazel`, `gradle`, `maven`, `sccache`, `gocache`, `oci`, `archive`, or `runtime`. Keep command spellings such as `turbo`, `go`, and `docker` in user-facing plan fields only, or put them in a separate `adapter_command` field.
 - `docker` should stay OCI-native. BuildKit already understands manifests, layers, and local content reuse. The product default resolves selected refs and serves blob bodies on demand (`metadata-only`); `bodies-background` and `bodies-before-ready` stay internal benchmark/diagnostic modes.
 
 ## Local measurement plan

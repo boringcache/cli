@@ -532,6 +532,8 @@ def main() -> int:
             "rails",
             "storage",
             "oci",
+            "startup_prefetch",
+            "kv_upload",
             "singleflight",
             "local_cache",
             "buildkit",

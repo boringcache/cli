@@ -76,7 +76,10 @@ async fn put_kv_object_is_noop_in_read_only_mode() {
             crate::serve::state::OciEngineDiagnostics::new(),
         ),
         prefetch_metrics: std::sync::Arc::new(crate::serve::state::PrefetchMetrics::new()),
+        kv_blob_upload_metrics: std::sync::Arc::new(crate::serve::state::KvBlobUploadMetrics::new()),
         blob_download_max_concurrency: 16,
+        blob_prefetch_max_concurrency: 2,
+        blob_prefetch_concurrency_from_env: false,
         blob_download_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
         blob_prefetch_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
         cache_ops: std::sync::Arc::new(crate::serve::cache_registry::cache_ops::Aggregator::new()),
@@ -618,6 +621,34 @@ fn startup_prefetch_defaults_cover_full_tag_by_default() {
         kv_blob_prefetch_max_inflight_bytes(cache_max),
         512 * 1024 * 1024
     );
+}
+
+#[test]
+fn startup_prefetch_concurrency_caps_many_small_blobs_to_measured_ceiling() {
+    let plan = adaptive_startup_prefetch_concurrency(16, false, 5_000, 5_000 * 4_096);
+
+    assert_eq!(plan.max_concurrency, 16);
+    assert_eq!(plan.effective_concurrency, 10);
+    assert_eq!(plan.source, "auto");
+    assert_eq!(plan.reason, "many_small_blobs_measured_cap");
+}
+
+#[test]
+fn startup_prefetch_concurrency_keeps_explicit_override_for_benchmarks() {
+    let plan = adaptive_startup_prefetch_concurrency(20, true, 5_000, 5_000 * 4_096);
+
+    assert_eq!(plan.max_concurrency, 20);
+    assert_eq!(plan.effective_concurrency, 20);
+    assert_eq!(plan.source, "env");
+    assert_eq!(plan.reason, "explicit_override");
+}
+
+#[test]
+fn startup_prefetch_concurrency_caps_large_blobs() {
+    let plan = adaptive_startup_prefetch_concurrency(12, false, 12, 12 * 16 * 1024 * 1024);
+
+    assert_eq!(plan.effective_concurrency, 4);
+    assert_eq!(plan.reason, "large_blobs");
 }
 
 #[test]

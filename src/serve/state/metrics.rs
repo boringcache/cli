@@ -1052,6 +1052,11 @@ struct StartupPrefetchSnapshot {
     total_unique_blobs: u64,
     target_blobs: u64,
     target_bytes: u64,
+    average_blob_bytes: u64,
+    max_concurrency: u64,
+    concurrency: u64,
+    concurrency_source: Option<String>,
+    concurrency_reason: Option<String>,
     url_resolved: u64,
     url_missing: u64,
     already_local: u64,
@@ -1083,6 +1088,17 @@ pub struct StartupOciExecution<'a> {
     pub duration_ms: u64,
 }
 
+pub struct StartupPrefetchPlan<'a> {
+    pub mode: &'a str,
+    pub total_unique_blobs: usize,
+    pub target_blobs: usize,
+    pub target_bytes: u64,
+    pub max_concurrency: usize,
+    pub effective_concurrency: usize,
+    pub concurrency_source: &'a str,
+    pub concurrency_reason: &'a str,
+}
+
 pub struct PrefetchMetrics {
     startup: StdMutex<StartupPrefetchSnapshot>,
 }
@@ -1100,18 +1116,21 @@ impl PrefetchMetrics {
         }
     }
 
-    pub fn record_startup_plan(
-        &self,
-        mode: &str,
-        total_unique_blobs: usize,
-        target_blobs: usize,
-        target_bytes: u64,
-    ) {
+    pub fn record_startup_plan(&self, plan: StartupPrefetchPlan<'_>) {
         if let Ok(mut snapshot) = self.startup.lock() {
-            snapshot.mode = Some(mode.to_string());
-            snapshot.total_unique_blobs = total_unique_blobs as u64;
-            snapshot.target_blobs = target_blobs as u64;
-            snapshot.target_bytes = target_bytes;
+            snapshot.mode = Some(plan.mode.to_string());
+            snapshot.total_unique_blobs = plan.total_unique_blobs as u64;
+            snapshot.target_blobs = plan.target_blobs as u64;
+            snapshot.target_bytes = plan.target_bytes;
+            snapshot.average_blob_bytes = if plan.target_blobs > 0 {
+                plan.target_bytes / plan.target_blobs as u64
+            } else {
+                0
+            };
+            snapshot.max_concurrency = plan.max_concurrency as u64;
+            snapshot.concurrency = plan.effective_concurrency as u64;
+            snapshot.concurrency_source = Some(plan.concurrency_source.to_string());
+            snapshot.concurrency_reason = Some(plan.concurrency_reason.to_string());
         }
     }
 
@@ -1215,6 +1234,30 @@ impl PrefetchMetrics {
             snapshot.target_bytes.to_string(),
         );
         hints.insert(
+            "startup_prefetch_average_blob_bytes".to_string(),
+            snapshot.average_blob_bytes.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_max_concurrency".to_string(),
+            snapshot.max_concurrency.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_concurrency".to_string(),
+            snapshot.concurrency.to_string(),
+        );
+        if let Some(source) = &snapshot.concurrency_source {
+            hints.insert(
+                "startup_prefetch_concurrency_source".to_string(),
+                source.clone(),
+            );
+        }
+        if let Some(reason) = &snapshot.concurrency_reason {
+            hints.insert(
+                "startup_prefetch_concurrency_reason".to_string(),
+                reason.clone(),
+            );
+        }
+        hints.insert(
             "startup_prefetch_url_resolved".to_string(),
             snapshot.url_resolved.to_string(),
         );
@@ -1242,6 +1285,16 @@ impl PrefetchMetrics {
             "startup_prefetch_duration_ms".to_string(),
             snapshot.duration_ms.to_string(),
         );
+        if snapshot.duration_ms > 0 {
+            hints.insert(
+                "startup_prefetch_blobs_per_sec".to_string(),
+                ((snapshot.inserted.saturating_mul(1000)) / snapshot.duration_ms).to_string(),
+            );
+            hints.insert(
+                "startup_prefetch_bytes_per_sec".to_string(),
+                ((snapshot.target_bytes.saturating_mul(1000)) / snapshot.duration_ms).to_string(),
+            );
+        }
         if snapshot.timed_out {
             hints.insert("startup_prefetch_timed_out".to_string(), "true".to_string());
         }
@@ -1295,6 +1348,147 @@ impl PrefetchMetrics {
 }
 
 impl Default for PrefetchMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct KvBlobUploadSnapshot {
+    batches: u64,
+    requested_blobs: u64,
+    uploaded_blobs: u64,
+    already_present_blobs: u64,
+    missing_local_blobs: u64,
+    failed_blobs: u64,
+    duration_ms: u64,
+    max_initial_concurrency: u64,
+    max_allowed_concurrency: u64,
+    max_final_concurrency: u64,
+    last_concurrency_source: Option<String>,
+    last_concurrency_reason: Option<String>,
+}
+
+pub struct KvBlobUploadBatch<'a> {
+    pub requested_blobs: u64,
+    pub uploaded_blobs: u64,
+    pub already_present_blobs: u64,
+    pub missing_local_blobs: u64,
+    pub failed_blobs: u64,
+    pub duration_ms: u64,
+    pub initial_concurrency: usize,
+    pub max_concurrency: usize,
+    pub final_concurrency: usize,
+    pub concurrency_source: &'a str,
+    pub concurrency_reason: &'a str,
+}
+
+pub struct KvBlobUploadMetrics {
+    snapshot: StdMutex<KvBlobUploadSnapshot>,
+}
+
+impl KvBlobUploadMetrics {
+    pub fn new() -> Self {
+        Self {
+            snapshot: StdMutex::new(KvBlobUploadSnapshot::default()),
+        }
+    }
+
+    pub fn record_batch(&self, batch: KvBlobUploadBatch<'_>) {
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            snapshot.batches = snapshot.batches.saturating_add(1);
+            snapshot.requested_blobs = snapshot
+                .requested_blobs
+                .saturating_add(batch.requested_blobs);
+            snapshot.uploaded_blobs = snapshot.uploaded_blobs.saturating_add(batch.uploaded_blobs);
+            snapshot.already_present_blobs = snapshot
+                .already_present_blobs
+                .saturating_add(batch.already_present_blobs);
+            snapshot.missing_local_blobs = snapshot
+                .missing_local_blobs
+                .saturating_add(batch.missing_local_blobs);
+            snapshot.failed_blobs = snapshot.failed_blobs.saturating_add(batch.failed_blobs);
+            snapshot.duration_ms = snapshot.duration_ms.saturating_add(batch.duration_ms);
+            snapshot.max_initial_concurrency = snapshot
+                .max_initial_concurrency
+                .max(batch.initial_concurrency as u64);
+            snapshot.max_allowed_concurrency = snapshot
+                .max_allowed_concurrency
+                .max(batch.max_concurrency as u64);
+            snapshot.max_final_concurrency = snapshot
+                .max_final_concurrency
+                .max(batch.final_concurrency as u64);
+            snapshot.last_concurrency_source = Some(batch.concurrency_source.to_string());
+            snapshot.last_concurrency_reason = Some(batch.concurrency_reason.to_string());
+        }
+    }
+
+    pub fn metadata_hints(&self) -> BTreeMap<String, String> {
+        let Ok(snapshot) = self.snapshot.lock() else {
+            return BTreeMap::new();
+        };
+        if snapshot.batches == 0 {
+            return BTreeMap::new();
+        }
+
+        let mut hints = BTreeMap::new();
+        hints.insert(
+            "kv_upload_batches".to_string(),
+            snapshot.batches.to_string(),
+        );
+        hints.insert(
+            "kv_upload_requested_blobs".to_string(),
+            snapshot.requested_blobs.to_string(),
+        );
+        hints.insert(
+            "kv_upload_uploaded_blobs".to_string(),
+            snapshot.uploaded_blobs.to_string(),
+        );
+        hints.insert(
+            "kv_upload_already_present_blobs".to_string(),
+            snapshot.already_present_blobs.to_string(),
+        );
+        hints.insert(
+            "kv_upload_missing_local_blobs".to_string(),
+            snapshot.missing_local_blobs.to_string(),
+        );
+        hints.insert(
+            "kv_upload_failed_blobs".to_string(),
+            snapshot.failed_blobs.to_string(),
+        );
+        hints.insert(
+            "kv_upload_duration_ms".to_string(),
+            snapshot.duration_ms.to_string(),
+        );
+        hints.insert(
+            "kv_upload_initial_concurrency_max".to_string(),
+            snapshot.max_initial_concurrency.to_string(),
+        );
+        hints.insert(
+            "kv_upload_allowed_concurrency_max".to_string(),
+            snapshot.max_allowed_concurrency.to_string(),
+        );
+        hints.insert(
+            "kv_upload_final_concurrency_max".to_string(),
+            snapshot.max_final_concurrency.to_string(),
+        );
+        if snapshot.duration_ms > 0 {
+            hints.insert(
+                "kv_upload_blobs_per_sec".to_string(),
+                ((snapshot.uploaded_blobs.saturating_mul(1000)) / snapshot.duration_ms).to_string(),
+            );
+        }
+        if let Some(source) = &snapshot.last_concurrency_source {
+            hints.insert("kv_upload_concurrency_source".to_string(), source.clone());
+        }
+        if let Some(reason) = &snapshot.last_concurrency_reason {
+            hints.insert("kv_upload_concurrency_reason".to_string(), reason.clone());
+        }
+        hints
+    }
+}
+
+impl Default for KvBlobUploadMetrics {
     fn default() -> Self {
         Self::new()
     }
