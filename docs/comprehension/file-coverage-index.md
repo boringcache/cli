@@ -270,6 +270,7 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/serve/http/handlers/mod.rs`
 - `src/serve/http/handlers/blobs.rs`
 - `src/serve/http/handlers/manifest.rs`
+- `src/serve/http/handlers/tests.rs`
 - `src/serve/http/handlers/uploads.rs`
 - `src/serve/runtime/mod.rs`
 - `src/serve/runtime/listener.rs`
