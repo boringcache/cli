@@ -22,6 +22,7 @@ Keep this file short. It is loaded often; durable detail belongs in skills and `
 - Adapter capability and layout decisions belong in `src/adapters/mod.rs`.
 - Keep archive-specific behavior separate from CAS-specific behavior.
 - Split workflow intent cleanly: PR validation belongs in validation workflows; publish/deploy behavior belongs in main, tag, or release workflows.
+- When touching a long or hard-to-grok file, treat simplification as part of the task: split by ownership, move tests into focused sibling modules, delete dead paths, or leave a clear note in `docs/comprehension` when deferring the cleanup.
 
 ## Required Gates
 

@@ -52,6 +52,14 @@ Stable CLI rules live here so `AGENTS.md` can stay small. Read this when impleme
 - Delete unused code completely. Do not leave commented-out dead code.
 - Comments are only for non-obvious business logic or external constraints.
 
+## Refactoring Hygiene
+
+- When a change touches a complex module, long file, or confusing test surface, make the touched area easier for the next human or agent to understand.
+- Prefer small, reviewable cleanup slices: move tests into sibling modules, split protocol or command concerns by owner, extract repeated setup only when it removes real noise, and keep mechanical moves separate from behavior changes when possible.
+- Do not refactor across hot cache, proxy, publish, or restore paths without behavior-boundary tests that prove no regression.
+- If cleanup would make the task riskier or too broad, document the deferred cleanup and owner in the relevant `docs/comprehension` file instead of leaving hidden complexity unnamed.
+- Do not add abstractions for tidiness alone. A new module or helper should make ownership, data flow, or invariants easier to see.
+
 ## Operational Notes
 
 - Config file: `~/.boringcache/config.json`.

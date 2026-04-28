@@ -38,6 +38,8 @@ When a feature changes:
 5. Update `file-coverage-index.md` if files moved, were added, or were deleted.
 6. Keep `cli-structure.md` focused on namespace boundaries, not feature intent.
 
+When the work exposes a long or hard-to-grok file, treat cleanup as part of the handoff. Either make the touched area simpler with focused modules/tests, or record the deferred simplification and owner in the relevant comprehension file.
+
 ## Scope note
 
 This map should track the current workspace shape. Update it when module boundaries move or command names change.
