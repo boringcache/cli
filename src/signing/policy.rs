@@ -70,23 +70,32 @@ pub(crate) fn verify_cache_entry_signature(
             signature_tag
         )
     })?;
-    let server_signature = hit.server_signature.as_deref().ok_or_else(|| {
-        anyhow!(
-            "Server signature missing for {}; strict signature mode is enabled",
-            signature_tag
-        )
-    })?;
-
     if let Some(payload) = hit.server_signature_payload.as_deref() {
+        let envelope_signature = hit
+            .server_envelope_signature
+            .as_deref()
+            .or(hit.server_signature.as_deref())
+            .ok_or_else(|| {
+                anyhow!(
+                    "Server envelope signature missing for {}; strict signature mode is enabled",
+                    signature_tag
+                )
+            })?;
         verify_enveloped_signature(
             hit,
             signature_tag,
             root_digest,
             workspace_key,
-            server_signature,
+            envelope_signature,
             payload,
         )
     } else {
+        let server_signature = hit.server_signature.as_deref().ok_or_else(|| {
+            anyhow!(
+                "Server signature missing for {}; strict signature mode is enabled",
+                signature_tag
+            )
+        })?;
         verify_workspace_key_trust(hit, workspace_key)?;
         verify_server_signature(signature_tag, root_digest, workspace_key, server_signature)
     }
@@ -102,8 +111,10 @@ pub(crate) fn verify_restore_signature(
 ) -> Result<()> {
     let display_tag = signature_display_tag(hit, manifest_tag.unwrap_or(hit.tag.as_str()));
 
-    match (&hit.workspace_signing_public_key, &hit.server_signature) {
-        (Some(workspace_key), Some(_)) => {
+    let has_signature = hit.server_signature.is_some() || hit.server_envelope_signature.is_some();
+
+    match (&hit.workspace_signing_public_key, has_signature) {
+        (Some(workspace_key), true) => {
             match verify_cache_entry_signature(hit, root_digest, manifest_tag) {
                 Ok(()) => {
                     if verbose {
@@ -128,21 +139,21 @@ pub(crate) fn verify_restore_signature(
                 ),
             }
         }
-        (Some(_), None) => signature_policy_failure(
+        (Some(_), false) => signature_policy_failure(
             format!(
                 "Server signature missing for {}; authenticity not verified",
                 display_tag
             ),
             require_server_signature,
         ),
-        (None, Some(_)) => signature_policy_failure(
+        (None, true) => signature_policy_failure(
             format!(
                 "Workspace signing key missing for {}; cannot verify server signature",
                 display_tag
             ),
             require_server_signature,
         ),
-        (None, None) => signature_policy_failure(
+        (None, false) => signature_policy_failure(
             format!(
                 "Server signature missing for {}; authenticity not verified",
                 display_tag
@@ -334,6 +345,7 @@ mod tests {
             workspace_signing_key_fingerprint: None,
             server_signature: None,
             server_signature_payload: None,
+            server_envelope_signature: None,
             server_signature_version: None,
             server_signing_key_id: None,
             server_signed_at: None,
@@ -378,8 +390,9 @@ mod tests {
             error: None,
             workspace_signing_public_key: Some(public_key),
             workspace_signing_key_fingerprint: Some(key_id.clone()),
-            server_signature: Some(signature),
+            server_signature: Some("legacy-signature-is-not-the-envelope".to_string()),
             server_signature_payload: Some(payload),
+            server_envelope_signature: Some(signature),
             server_signature_version: Some(1),
             server_signing_key_id: Some(key_id),
             server_signed_at: Some("2026-04-28T12:00:01Z".to_string()),

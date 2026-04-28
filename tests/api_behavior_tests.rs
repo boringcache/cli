@@ -704,6 +704,7 @@ mod cache_resolution_tests {
             workspace_signing_key_fingerprint: None,
             server_signature: None,
             server_signature_payload: None,
+            server_envelope_signature: None,
             server_signature_version: None,
             server_signing_key_id: None,
             server_signed_at: None,

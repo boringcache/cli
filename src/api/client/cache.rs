@@ -806,6 +806,7 @@ impl ApiClient {
                 workspace_signing_key_fingerprint: item.workspace_signing_key_fingerprint.clone(),
                 server_signature: item.server_signature.clone(),
                 server_signature_payload: item.server_signature_payload.clone(),
+                server_envelope_signature: item.server_envelope_signature.clone(),
                 server_signature_version: item.server_signature_version,
                 server_signing_key_id: item.server_signing_key_id.clone(),
                 server_signed_at: item.server_signed_at.clone(),

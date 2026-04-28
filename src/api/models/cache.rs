@@ -362,6 +362,9 @@ pub struct RestoreResult {
     pub server_signature_payload: Option<String>,
 
     #[serde(default)]
+    pub server_envelope_signature: Option<String>,
+
+    #[serde(default)]
     pub server_signature_version: Option<u32>,
 
     #[serde(default)]
@@ -776,6 +779,8 @@ pub struct CacheResolutionEntry {
     pub server_signature: Option<String>,
 
     pub server_signature_payload: Option<String>,
+
+    pub server_envelope_signature: Option<String>,
 
     pub server_signature_version: Option<u32>,
 
