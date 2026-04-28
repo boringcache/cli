@@ -175,6 +175,19 @@ fn test_save_with_only_existing_paths_works_normally() {
         stderr,
         stdout
     );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("Summary: Saved 0/1 entry"),
+        "Should not report an unavailable backend save as successful. stderr: {}, stdout: {}",
+        stderr,
+        stdout
+    );
+    assert!(
+        !combined.contains("Summary: Saved 1 entry"),
+        "Should not claim the cache was saved when the backend was unavailable. stderr: {}, stdout: {}",
+        stderr,
+        stdout
+    );
 
     assert!(
         output.status.success(),

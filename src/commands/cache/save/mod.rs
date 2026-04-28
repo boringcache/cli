@@ -180,7 +180,8 @@ async fn execute_batch_save_inner(
     for task in tasks {
         let (tag, result) = task.await.context("Batch save task panicked")??;
         match result {
-            Ok(_status) => successful_saves += 1,
+            Ok(SaveStatus::AlreadyExists | SaveStatus::Uploaded) => successful_saves += 1,
+            Ok(SaveStatus::Skipped) => {}
             Err(err) => {
                 failed_attempts += 1;
                 errors.push(err.context(format!("Failed to save {}", tag)));

@@ -85,7 +85,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - `boringcache/one v1.12.58` was released from action commit `e22cc5a6a0039389329b4c974722196a738553ca` by workflow run `24672935639`.
   - The signed `v1` major tag now dereferences to the same commit as `v1.12.58`.
   - The released action still installs CLI `v1.12.40`; no new CLI release was needed for this action change because CLI `v1.12.40` already supports the hidden `--oci-hydration metadata-only` policy.
-  - The action and Docker benchmark workflows now use the product default instead of forcing `bodies-before-ready`. The Docker-mode configure step passes `oci-hydration: metadata-only`, and logs show `Registry proxy OCI hydration: metadata-only`.
+  - The action and Docker benchmark workflows now use the product default instead of forcing `bodies-before-ready`. The Docker-mode configure step passes `oci-hydration: metadata-only`; current CLI-owned startup diagnostics label this as `OCI body hydration: metadata-only` only for canonical `oci` proxy sessions.
 - Product decision:
   - `metadata-only` is the BuildKit product default. Startup indexes the selected OCI refs and locator/download URL metadata, reports ready quickly, and lets BuildKit fetch blob bodies on demand through the proxy.
   - `bodies-background` and `bodies-before-ready` remain diagnostic policies. `bodies-background` can still compete with a large BuildKit graph, and `bodies-before-ready` can front-load multi-GB downloads before the build starts.

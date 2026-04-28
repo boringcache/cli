@@ -252,7 +252,7 @@ pub(super) async fn save_single_archive_entry(
                 drop(reporter);
                 progress_system.shutdown()?;
                 ui::warn(&format!("Cache unavailable, skipping save: {}", err));
-                return Ok(SaveStatus::AlreadyExists);
+                return Err(err.context(format!("Failed to check cache before saving {tag}")));
             }
             progress_warning(&reporter, format!("  Check failed ({}); proceeding", err));
         }
