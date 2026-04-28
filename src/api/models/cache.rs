@@ -353,7 +353,19 @@ pub struct RestoreResult {
     pub workspace_signing_public_key: Option<String>,
 
     #[serde(default)]
+    pub workspace_signing_key_fingerprint: Option<String>,
+
+    #[serde(default)]
     pub server_signature: Option<String>,
+
+    #[serde(default)]
+    pub server_signature_payload: Option<String>,
+
+    #[serde(default)]
+    pub server_signature_version: Option<u32>,
+
+    #[serde(default)]
+    pub server_signing_key_id: Option<String>,
 
     #[serde(default)]
     pub server_signed_at: Option<String>,
@@ -759,7 +771,15 @@ pub struct CacheResolutionEntry {
 
     pub workspace_signing_public_key: Option<String>,
 
+    pub workspace_signing_key_fingerprint: Option<String>,
+
     pub server_signature: Option<String>,
+
+    pub server_signature_payload: Option<String>,
+
+    pub server_signature_version: Option<u32>,
+
+    pub server_signing_key_id: Option<String>,
 
     pub server_signed_at: Option<String>,
     pub encrypted: bool,

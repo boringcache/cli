@@ -1074,7 +1074,11 @@ fn test_map_restore_result_prefers_top_level_cas_fields() {
         error: None,
         pending: false,
         workspace_signing_public_key: None,
+        workspace_signing_key_fingerprint: None,
         server_signature: None,
+        server_signature_payload: None,
+        server_signature_version: None,
+        server_signing_key_id: None,
         server_signed_at: None,
         encrypted: false,
     });
@@ -1123,7 +1127,11 @@ fn test_map_restore_result_uses_metadata_cas_fields_as_fallback() {
         error: None,
         pending: false,
         workspace_signing_public_key: None,
+        workspace_signing_key_fingerprint: None,
         server_signature: None,
+        server_signature_payload: None,
+        server_signature_version: None,
+        server_signing_key_id: None,
         server_signed_at: None,
         encrypted: false,
     });

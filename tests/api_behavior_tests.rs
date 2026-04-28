@@ -701,7 +701,11 @@ mod cache_resolution_tests {
             pending: true,
             error: Some("Test error".to_string()),
             workspace_signing_public_key: None,
+            workspace_signing_key_fingerprint: None,
             server_signature: None,
+            server_signature_payload: None,
+            server_signature_version: None,
+            server_signing_key_id: None,
             server_signed_at: None,
             encrypted: false,
         };

@@ -263,35 +263,15 @@ fn verify_check_signature(entry: &crate::api::CacheResolutionEntry) -> Result<()
         .as_deref()
         .or(entry.primary_tag.as_deref())
         .unwrap_or(entry.tag.as_str());
-    let public_key = entry
-        .workspace_signing_public_key
-        .as_deref()
-        .ok_or_else(|| {
+    crate::signing::policy::verify_cache_entry_signature(entry, root_digest, None).map_err(
+        |error| {
             anyhow!(
-                "Workspace signing key missing for {}; strict signature mode is enabled",
-                signature_tag
+                "Server signature verification failed for {}: {}",
+                signature_tag,
+                error
             )
-        })?;
-    let server_signature = entry.server_signature.as_deref().ok_or_else(|| {
-        anyhow!(
-            "Server signature missing for {}; strict signature mode is enabled",
-            signature_tag
-        )
-    })?;
-
-    crate::signing::policy::verify_server_signature(
-        signature_tag,
-        root_digest,
-        public_key,
-        server_signature,
+        },
     )
-    .map_err(|error| {
-        anyhow!(
-            "Server signature verification failed for {}: {}",
-            signature_tag,
-            error
-        )
-    })
 }
 
 #[cfg(test)]

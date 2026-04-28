@@ -11,8 +11,9 @@ Stable CLI rules live here so `AGENTS.md` can stay small. Read this when impleme
 ## Encryption And Signing
 
 - The server signs `{tag}:{manifest_root_digest}` with Ed25519.
-- The CLI verifies `workspace_signing_public_key` and `server_signature`.
-- Signature verification is warn-only. Missing or invalid signatures must not fail restore by default.
+- The CLI verifies `workspace_signing_public_key` and `server_signature`. New responses can carry a canonical server signature payload, signature version, workspace key fingerprint, and signing key id; legacy simple signatures remain supported during rollout.
+- Signature verification is warn-only unless strict mode is enabled. Missing or invalid signatures must not fail restore by default.
+- `BORINGCACHE_TRUSTED_WORKSPACE_KEY_FINGERPRINT` optionally pins strict restores/checks to an expected `ed25519-sha256` workspace signing key fingerprint.
 - Manifest bytes digest and manifest root digest mismatches warn and skip the cache.
 - Encryption uses age: archives are `tar.zst` then age-encrypted; manifests are CBOR, zstd-compressed, then age-encrypted when encryption is on.
 - `setup-encryption` stores workspace encryption config and default identity.

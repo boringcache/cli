@@ -3,6 +3,7 @@ pub mod policy;
 use anyhow::{Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
+use sha2::Digest as _;
 use std::path::Path;
 
 pub const SIGNING_ALGORITHM: &str = "ed25519";
@@ -153,6 +154,11 @@ pub fn public_key_fingerprint(key: &VerifyingKey) -> String {
     } else {
         full
     }
+}
+
+pub fn public_key_pin_fingerprint(key: &VerifyingKey) -> String {
+    let digest = sha2::Sha256::digest(key.as_bytes());
+    format!("ed25519-sha256:{}", hex::encode(digest))
 }
 
 #[cfg(test)]
