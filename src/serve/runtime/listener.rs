@@ -289,7 +289,7 @@ fn new_runtime_temp_dir() -> Result<PathBuf> {
 fn auto_transfer_concurrency() -> usize {
     let resources = crate::platform::resources::SystemResources::detect();
     let is_ci = std::env::var("CI").is_ok();
-    resources.recommended_download_concurrency(is_ci)
+    resources.recommended_proxy_download_concurrency(is_ci)
 }
 
 fn parse_positive_usize_env(name: &str) -> Option<usize> {

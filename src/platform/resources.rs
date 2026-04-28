@@ -153,6 +153,28 @@ impl SystemResources {
 
         concurrency.clamp(1, 16)
     }
+
+    pub fn recommended_proxy_download_concurrency(&self, is_ci: bool) -> usize {
+        let mut concurrency = self.recommended_download_concurrency(is_ci);
+
+        if is_ci && self.available_memory_gb >= 4.0 && self.cpu_load_percent <= 75.0 {
+            // Registry-proxy warmup is dominated by storage request scheduling
+            // and object reads. Do not let small CI CPU counts force a serial
+            // prewarm path for thousands of small/medium cache blobs.
+            let io_floor = if self.available_memory_gb >= 8.0 {
+                10
+            } else {
+                8
+            };
+            concurrency = concurrency.max(io_floor);
+        }
+
+        if self.cpu_load_percent > 85.0 {
+            concurrency = concurrency.min(4);
+        }
+
+        concurrency.clamp(1, 16)
+    }
 }
 
 fn detect_available_memory_gb() -> f64 {
@@ -352,5 +374,36 @@ mod tests {
         };
 
         assert_eq!(resources.recommended_download_concurrency(true), 2);
+    }
+
+    #[test]
+    fn proxy_download_concurrency_allows_ci_io_parallelism_on_two_core_runners() {
+        let resources = SystemResources {
+            cpu_cores: 2,
+            available_memory_gb: 7.0,
+            cpu_load_percent: 10.0,
+            max_parallel_chunks: 8,
+            memory_strategy: MemoryStrategy::Balanced,
+            disk_type: DiskType::SataSsd,
+            disk_speed_estimate_mb_s: 500.0,
+        };
+
+        assert_eq!(resources.recommended_download_concurrency(true), 2);
+        assert_eq!(resources.recommended_proxy_download_concurrency(true), 8);
+    }
+
+    #[test]
+    fn proxy_download_concurrency_backs_off_when_runner_is_cpu_saturated() {
+        let resources = SystemResources {
+            cpu_cores: 4,
+            available_memory_gb: 16.0,
+            cpu_load_percent: 90.0,
+            max_parallel_chunks: 8,
+            memory_strategy: MemoryStrategy::Aggressive,
+            disk_type: DiskType::NvmeSsd,
+            disk_speed_estimate_mb_s: 2_000.0,
+        };
+
+        assert_eq!(resources.recommended_proxy_download_concurrency(true), 4);
     }
 }
