@@ -382,6 +382,13 @@ Owner: verification layer (`support-primary`)
 - `tests/serve_tests/startup.rs`
 - `tests/serve_tests/tag_pointer.rs`
 - `tests/serve_tests/tool_routes.rs`
+- `tests/serve_tests/tool_routes/bazel.rs`
+- `tests/serve_tests/tool_routes/go_cache.rs`
+- `tests/serve_tests/tool_routes/gradle.rs`
+- `tests/serve_tests/tool_routes/maven.rs`
+- `tests/serve_tests/tool_routes/nx.rs`
+- `tests/serve_tests/tool_routes/sccache.rs`
+- `tests/serve_tests/tool_routes/turborepo.rs`
 
 ## Repo automation, release, install, and example assets
 
