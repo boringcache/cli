@@ -159,18 +159,23 @@ pub(super) async fn build_server_runtime(
     socket.bind(bind_addr)?;
     let listener = socket.listen(listen_backlog)?;
 
-    eprintln!("BoringCache cache registry proxy listening on {addr}");
+    eprintln!("BoringCache proxy listening on {addr}");
     eprintln!("  Workspace: {workspace}");
     if state.read_only {
         eprintln!("  Mode: read-only");
     }
     if !state.configured_human_tags.is_empty() {
         eprintln!(
-            "  OCI Human Tags: {}",
+            "  {}: {}",
+            cache_tag_label(&state.proxy_metadata_hints),
             state.configured_human_tags.join(", ")
         );
     }
-    eprintln!("  Internal Registry Root Tag: {}", state.registry_root_tag);
+    eprintln!(
+        "  {}: {}",
+        internal_root_tag_label(&state.proxy_metadata_hints),
+        state.registry_root_tag
+    );
     eprintln!(
         "  Strict Cache Errors: {}",
         if state.fail_on_cache_error {
@@ -191,17 +196,9 @@ pub(super) async fn build_server_runtime(
                 .join(", ")
         );
     }
-    eprintln!("  OCI: --cache-from/--cache-to type=registry,ref={host}:{port}/CACHE_NAME:TAG");
-    eprintln!("  Bazel HTTP: http://{host}:{port}/ac/{{sha256}} and /cas/{{sha256}}");
-    eprintln!("  Gradle HTTP: http://{host}:{port}/cache/{{cache-key}}");
-    eprintln!(
-        "  Maven cache: http://{host}:{port}/v1.1/{{groupId}}/{{artifactId}}/{{checksum}}/{{filename}} (also /v1/...)"
-    );
-    eprintln!("  Nx Cache: http://{host}:{port}/v1/cache/{{hash}}");
-    eprintln!("  Turborepo: http://{host}:{port}/v8/artifacts/{{hash}}");
-    eprintln!("  sccache WebDAV: http://{host}:{port}/<prefix>/a/b/c/<key>");
-    eprintln!("  Go cache object API: http://{host}:{port}/gocache/{{action-id}}");
-    eprintln!("  GOCACHEPROG helper: boringcache go-cacheprog --endpoint http://{host}:{port}");
+    for endpoint in endpoint_lines(&state.proxy_metadata_hints, &host, port) {
+        eprintln!("{endpoint}");
+    }
     eprintln!(
         "  Blob Read Cache: {} (max {} bytes)",
         state.blob_read_cache.cache_dir().display(),
@@ -227,7 +224,8 @@ pub(super) async fn build_server_runtime(
         if startup_warm { "warm" } else { "on-demand" }
     );
     eprintln!(
-        "  OCI body hydration: {}",
+        "  {}: {}",
+        body_hydration_label(&state.proxy_metadata_hints),
         state.oci_hydration_policy.as_str()
     );
     eprintln!(
@@ -250,6 +248,95 @@ pub(super) async fn build_server_runtime(
     eprintln!("  Runtime Temp: {}", state.runtime_temp_dir.display());
 
     Ok((state, listener, kv_replication_work_rx))
+}
+
+fn cache_tag_label(proxy_metadata_hints: &BTreeMap<String, String>) -> &'static str {
+    if proxy_tool(proxy_metadata_hints) == Some("oci") {
+        "OCI Tags"
+    } else {
+        "Cache Tags"
+    }
+}
+
+fn internal_root_tag_label(proxy_metadata_hints: &BTreeMap<String, String>) -> &'static str {
+    if proxy_tool(proxy_metadata_hints) == Some("oci") {
+        "Internal Registry Root Tag"
+    } else {
+        "Internal Cache Root Tag"
+    }
+}
+
+fn body_hydration_label(proxy_metadata_hints: &BTreeMap<String, String>) -> &'static str {
+    if proxy_tool(proxy_metadata_hints) == Some("oci") {
+        "OCI body hydration"
+    } else {
+        "Cache body hydration"
+    }
+}
+
+fn proxy_tool(proxy_metadata_hints: &BTreeMap<String, String>) -> Option<&str> {
+    proxy_metadata_hints
+        .get("tool")
+        .or_else(|| proxy_metadata_hints.get("adapter"))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+}
+
+fn endpoint_lines(
+    proxy_metadata_hints: &BTreeMap<String, String>,
+    host: &str,
+    port: u16,
+) -> Vec<String> {
+    let selected = proxy_tool(proxy_metadata_hints);
+    let mut lines = Vec::new();
+    let mut push = |line: String| lines.push(line);
+
+    match selected {
+        Some("oci") | None => push(format!(
+            "  OCI registry: --cache-from/--cache-to type=registry,ref={host}:{port}/CACHE_NAME:TAG"
+        )),
+        _ => {}
+    }
+    if matches!(selected, Some("bazel") | None) {
+        push(format!(
+            "  Bazel HTTP cache: http://{host}:{port}/ac/{{sha256}} and /cas/{{sha256}}"
+        ));
+    }
+    if matches!(selected, Some("gradle") | None) {
+        push(format!(
+            "  Gradle remote cache: http://{host}:{port}/cache/{{cache-key}}"
+        ));
+    }
+    if matches!(selected, Some("maven") | None) {
+        push(format!(
+            "  Maven remote cache: http://{host}:{port}/v1.1/{{groupId}}/{{artifactId}}/{{checksum}}/{{filename}} (also /v1/...)"
+        ));
+    }
+    if matches!(selected, Some("nx") | None) {
+        push(format!(
+            "  Nx cache: http://{host}:{port}/v1/cache/{{hash}}"
+        ));
+    }
+    if matches!(selected, Some("turborepo") | None) {
+        push(format!(
+            "  Turborepo cache: http://{host}:{port}/v8/artifacts/{{hash}}"
+        ));
+    }
+    if matches!(selected, Some("sccache") | None) {
+        push(format!(
+            "  sccache WebDAV: http://{host}:{port}/<prefix>/a/b/c/<key>"
+        ));
+    }
+    if matches!(selected, Some("gocache") | None) {
+        push(format!(
+            "  Go cache object API: http://{host}:{port}/gocache/{{action-id}}"
+        ));
+        push(format!(
+            "  GOCACHEPROG helper: boringcache go-cacheprog --endpoint http://{host}:{port}"
+        ));
+    }
+
+    lines
 }
 
 pub(super) async fn serve_router<F>(
@@ -454,5 +541,43 @@ mod tests {
         test_env::set_var(BLOB_PREFETCH_CONCURRENCY_ENV, "3");
         assert_eq!(blob_prefetch_concurrency(8), (3, true));
         test_env::remove_var(BLOB_PREFETCH_CONCURRENCY_ENV);
+    }
+
+    #[test]
+    fn proxy_startup_labels_go_as_cache_not_oci() {
+        let hints = BTreeMap::from([("tool".to_string(), "gocache".to_string())]);
+
+        assert_eq!(cache_tag_label(&hints), "Cache Tags");
+        assert_eq!(internal_root_tag_label(&hints), "Internal Cache Root Tag");
+        assert_eq!(body_hydration_label(&hints), "Cache body hydration");
+
+        let lines = endpoint_lines(&hints, "127.0.0.1", 4242);
+        assert_eq!(
+            lines,
+            vec![
+                "  Go cache object API: http://127.0.0.1:4242/gocache/{action-id}".to_string(),
+                "  GOCACHEPROG helper: boringcache go-cacheprog --endpoint http://127.0.0.1:4242"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn proxy_startup_keeps_oci_labels_for_docker_registry_mode() {
+        let hints = BTreeMap::from([("tool".to_string(), "oci".to_string())]);
+
+        assert_eq!(cache_tag_label(&hints), "OCI Tags");
+        assert_eq!(
+            internal_root_tag_label(&hints),
+            "Internal Registry Root Tag"
+        );
+        assert_eq!(body_hydration_label(&hints), "OCI body hydration");
+        assert_eq!(
+            endpoint_lines(&hints, "127.0.0.1", 4242),
+            vec![
+                "  OCI registry: --cache-from/--cache-to type=registry,ref=127.0.0.1:4242/CACHE_NAME:TAG"
+                    .to_string()
+            ]
+        );
     }
 }

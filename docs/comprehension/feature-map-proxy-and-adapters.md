@@ -60,4 +60,6 @@ OCI manifest reads must prove the referenced descriptor set before serving the m
 
 The KV path is active. Publish orchestration still lives in `src/serve/cache_registry/kv/flush.rs`, while shared KV types, confirm, schedule, handoff, refresh, lookup, read-cache, prefetch, index, and write behavior now live in focused helper modules under `src/serve/cache_registry/kv/`.
 
+The CLI owns detailed proxy startup diagnostics. Action wrappers should only orchestrate process start/readiness; the CLI listener prints tool-scoped tag, endpoint, and hydration labels so Go/Bazel/sccache/Turbo runs do not surface Docker/OCI wording unless the canonical tool is `oci`.
+
 Launch performance note: action/archive planning should avoid one CLI dry-run subprocess per raw entry when a repo config can produce one logical plan. Proxy and adapter paths should keep hidden hydration, stream-through, and retry controls proof-gated until benchmark evidence supports broader defaults.
