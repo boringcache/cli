@@ -376,6 +376,12 @@ Owner: verification layer (`support-primary`)
 - `tests/cas_adapter_integration_tests.rs`
 - `tests/run_proxy_e2e_tests.rs`
 - `tests/serve_tests.rs`
+- `tests/serve_tests/oci_publish.rs`
+- `tests/serve_tests/oci_read.rs`
+- `tests/serve_tests/oci_uploads.rs`
+- `tests/serve_tests/startup.rs`
+- `tests/serve_tests/tag_pointer.rs`
+- `tests/serve_tests/tool_routes.rs`
 
 ## Repo automation, release, install, and example assets
 
