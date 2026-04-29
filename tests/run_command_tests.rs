@@ -51,7 +51,10 @@ fn apply_test_env(cmd: &mut Command) -> &mut Command {
     cmd.env("BORINGCACHE_TEST_MODE", "1")
         .env_remove("BORINGCACHE_REQUIRE_SERVER_SIGNATURE")
         .env_remove("BORINGCACHE_RESTORE_TOKEN")
-        .env_remove("BORINGCACHE_SAVE_TOKEN");
+        .env_remove("BORINGCACHE_SAVE_TOKEN")
+        .env_remove("CARGO_INCREMENTAL")
+        .env_remove("CC")
+        .env_remove("CXX");
     for name in CI_RUN_ENV_VARS {
         cmd.env_remove(name);
     }

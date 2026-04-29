@@ -124,6 +124,7 @@ mod tests {
     #[test]
     fn sccache_env_plan_sets_webdav_backend() {
         let _guard = test_env::lock();
+        test_env::remove_var("CARGO_INCREMENTAL");
         test_env::remove_var("CC");
         test_env::remove_var("CXX");
 
@@ -162,6 +163,7 @@ mod tests {
     #[test]
     fn sccache_env_plan_sets_configured_key_prefix() {
         let _guard = test_env::lock();
+        test_env::remove_var("CARGO_INCREMENTAL");
         test_env::remove_var("CC");
         test_env::remove_var("CXX");
 
