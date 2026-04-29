@@ -396,6 +396,9 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             )
             .await
         }
+        Commands::Analyze(args) => {
+            commands::analyze::execute(args.workspace, args.period, args.limit, args.json).await
+        }
         Commands::Sessions(args) => {
             commands::sessions::execute(
                 args.workspace,

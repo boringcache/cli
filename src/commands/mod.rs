@@ -14,7 +14,7 @@ mod workspace_group;
 pub use adapters_group::{command as adapter, go_cacheprog};
 pub use auth_group::{auth, login, token};
 pub use cache_group::{
-    check, delete, inspect, ls, misses, mount, restore, run, save, sessions, status, tags,
+    analyze, check, delete, inspect, ls, misses, mount, restore, run, save, sessions, status, tags,
 };
 pub use config_group::{config, setup_encryption};
 pub use proxy_group::cache_registry;

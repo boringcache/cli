@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand};
 
 use super::{
-    AdapterArgs, AuditArgs, AuthArgs, CacheRegistryArgs, CheckArgs, ConfigArgs, DashboardArgs,
-    DeleteArgs, DoctorArgs, GoCacheProgArgs, InspectArgs, LoginArgs, LsArgs, MissesArgs, MountArgs,
-    OnboardArgs, RestoreArgs, RunArgs, SaveArgs, SessionsArgs, SetupEncryptionArgs, StatusArgs,
-    TagsArgs, TokenCommands, UseArgs, WorkspacesArgs,
+    AdapterArgs, AnalyzeArgs, AuditArgs, AuthArgs, CacheRegistryArgs, CheckArgs, ConfigArgs,
+    DashboardArgs, DeleteArgs, DoctorArgs, GoCacheProgArgs, InspectArgs, LoginArgs, LsArgs,
+    MissesArgs, MountArgs, OnboardArgs, RestoreArgs, RunArgs, SaveArgs, SessionsArgs,
+    SetupEncryptionArgs, StatusArgs, TagsArgs, TokenCommands, UseArgs, WorkspacesArgs,
 };
 
 #[derive(Parser)]
@@ -100,6 +100,9 @@ pub enum Commands {
 
     #[command(about = "Show workspace status, cache health, and operator insights")]
     Status(StatusArgs),
+
+    #[command(about = "Explain recent cache sessions and customer actions")]
+    Analyze(AnalyzeArgs),
 
     #[command(about = "Show recent cache sessions and execution context")]
     Sessions(SessionsArgs),

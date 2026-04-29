@@ -18,8 +18,8 @@ pub use adapters::AdapterArgs;
 pub use app::{Cli, Commands};
 pub use auth::{AuthArgs, LoginArgs, TokenCommands};
 pub use cache::{
-    CheckArgs, DeleteArgs, InspectArgs, LsArgs, MissesArgs, MountArgs, RestoreArgs, RunArgs,
-    SaveArgs, SessionsArgs, StatusArgs, TagsArgs,
+    AnalyzeArgs, CheckArgs, DeleteArgs, InspectArgs, LsArgs, MissesArgs, MountArgs, RestoreArgs,
+    RunArgs, SaveArgs, SessionsArgs, StatusArgs, TagsArgs,
 };
 pub use config::{ConfigArgs, ConfigSubcommand, SetupEncryptionArgs};
 pub use proxy::{CacheRegistryArgs, GoCacheProgArgs};

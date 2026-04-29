@@ -1,3 +1,4 @@
+pub mod analyze;
 pub mod check;
 pub mod delete;
 pub mod inspect;

@@ -397,6 +397,32 @@ pub struct StatusArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct AnalyzeArgs {
+    #[arg(help = "Workspace name (org/project or user/project)")]
+    pub workspace: Option<String>,
+
+    #[arg(
+        long,
+        default_value = "24h",
+        value_parser = ["1h", "6h", "24h", "7d", "30d"],
+        help = "Time window for cache analysis"
+    )]
+    pub period: String,
+
+    #[arg(
+        short,
+        long,
+        default_value = "10",
+        value_parser = clap::value_parser!(u32).range(1..=50),
+        help = "Maximum number of recent sessions to inspect"
+    )]
+    pub limit: u32,
+
+    #[arg(short, long, help = "Output the underlying status JSON")]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct SessionsArgs {
     #[arg(help = "Workspace name (org/project or user/project)")]
     pub workspace: Option<String>,

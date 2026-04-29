@@ -72,6 +72,7 @@ fn test_cli_help() {
     assert!(stdout.contains("save"));
     assert!(stdout.contains("restore"));
     assert!(stdout.contains("run"));
+    assert!(stdout.contains("analyze"));
     assert!(stdout.contains("audit"));
     assert!(stdout.contains("workspaces"));
 }
