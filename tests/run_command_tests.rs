@@ -1732,11 +1732,11 @@ fn test_docker_dry_run_json_injects_cache_flags() {
     );
     assert_eq!(
         parsed["oci_cache"]["cache_from"],
-        "type=registry,ref=host.docker.internal:5000/cache:buildcache"
+        "type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true"
     );
     assert_eq!(
         parsed["oci_cache"]["cache_to"],
-        "type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max"
+        "type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max,registry.insecure=true"
     );
     assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
@@ -1749,11 +1749,10 @@ fn test_docker_dry_run_json_injects_cache_flags() {
         .map(|value| value.as_str().unwrap_or_default())
         .collect::<Vec<_>>();
     assert!(
-        command
-            .contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache")
+        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true")
     );
     assert!(command.contains(
-        &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max"
+        &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max,registry.insecure=true"
     ));
 }
 
@@ -1807,8 +1806,8 @@ fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
     assert_eq!(
         parsed["oci_cache"]["cache_from_refs"],
         serde_json::json!([
-            "type=registry,ref=host.docker.internal:5000/cache:branch-main",
-            "type=registry,ref=host.docker.internal:5000/cache:default"
+            "type=registry,ref=host.docker.internal:5000/cache:branch-main,registry.insecure=true",
+            "type=registry,ref=host.docker.internal:5000/cache:default,registry.insecure=true"
         ])
     );
     assert_eq!(
@@ -1817,7 +1816,7 @@ fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
     );
     assert_eq!(
         parsed["oci_cache"]["cache_to"],
-        "type=registry,ref=host.docker.internal:5000/cache:run-123-attempt-1,mode=max"
+        "type=registry,ref=host.docker.internal:5000/cache:run-123-attempt-1,mode=max,registry.insecure=true"
     );
     assert_eq!(
         parsed["oci_cache"]["immutable_run_ref_tag"],
@@ -1851,15 +1850,13 @@ fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
         .map(|value| value.as_str().unwrap_or_default())
         .collect::<Vec<_>>();
     assert!(
-        command.contains(
-            &"--cache-from=type=registry,ref=host.docker.internal:5000/cache:branch-main"
-        )
+        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:branch-main,registry.insecure=true")
     );
     assert!(
-        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:default")
+        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:default,registry.insecure=true")
     );
     assert!(command.contains(
-        &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:run-123-attempt-1,mode=max"
+        &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:run-123-attempt-1,mode=max,registry.insecure=true"
     ));
 }
 
@@ -1913,10 +1910,10 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
     assert_eq!(
         parsed["oci_cache"]["cache_from_refs"],
         serde_json::json!([
-            "type=registry,ref=host.docker.internal:5000/cache:pr-42",
-            "type=registry,ref=host.docker.internal:5000/cache:branch-feature-docker-cache",
-            "type=registry,ref=host.docker.internal:5000/cache:default",
-            "type=registry,ref=host.docker.internal:5000/cache:buildcache"
+            "type=registry,ref=host.docker.internal:5000/cache:pr-42,registry.insecure=true",
+            "type=registry,ref=host.docker.internal:5000/cache:branch-feature-docker-cache,registry.insecure=true",
+            "type=registry,ref=host.docker.internal:5000/cache:default,registry.insecure=true",
+            "type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true"
         ])
     );
     assert_eq!(
@@ -1930,7 +1927,7 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
     );
     assert_eq!(
         parsed["oci_cache"]["cache_to"],
-        "type=registry,ref=host.docker.internal:5000/cache:run-gha-123456789-attempt-2,mode=max"
+        "type=registry,ref=host.docker.internal:5000/cache:run-gha-123456789-attempt-2,mode=max,registry.insecure=true"
     );
     assert_eq!(
         parsed["oci_cache"]["immutable_run_ref_tag"],
@@ -1999,20 +1996,19 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
         .map(|value| value.as_str().unwrap_or_default())
         .collect::<Vec<_>>();
     assert!(
-        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:pr-42")
+        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:pr-42,registry.insecure=true")
     );
     assert!(command.contains(
-        &"--cache-from=type=registry,ref=host.docker.internal:5000/cache:branch-feature-docker-cache"
+        &"--cache-from=type=registry,ref=host.docker.internal:5000/cache:branch-feature-docker-cache,registry.insecure=true"
     ));
     assert!(
-        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:default")
+        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:default,registry.insecure=true")
     );
     assert!(
-        command
-            .contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache")
+        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true")
     );
     assert!(command.contains(
-        &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:run-gha-123456789-attempt-2,mode=max"
+        &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:run-gha-123456789-attempt-2,mode=max,registry.insecure=true"
     ));
 }
 
@@ -2063,8 +2059,7 @@ fn test_docker_read_only_dry_run_json_uses_on_demand_proxy_mode() {
         .map(|value| value.as_str().unwrap_or_default())
         .collect::<Vec<_>>();
     assert!(
-        command
-            .contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache")
+        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true")
     );
     assert!(!command.iter().any(|arg| arg.starts_with("--cache-to=")));
 }

@@ -140,15 +140,16 @@ pub(super) fn resolve_docker_plan(input: ResolveDockerPlanInput<'_>) -> Result<R
 
     let cache_from_refs = import_ref_tags
         .iter()
-        .map(|tag| format!("type=registry,ref={endpoint_host}:{port}/cache:{tag}"))
+        .map(|tag| docker_cache_import_spec(&format!("{endpoint_host}:{port}/cache:{tag}")))
         .collect::<Vec<_>>();
     let cache_from = cache_from_refs
         .first()
         .cloned()
         .expect("docker cache imports always include at least one ref");
     let cache_to = cache_to_ref_tag.as_deref().map(|cache_to_ref_tag| {
-        format!(
-            "type=registry,ref={endpoint_host}:{port}/cache:{cache_to_ref_tag},mode={cache_mode}"
+        docker_cache_export_spec(
+            &format!("{endpoint_host}:{port}/cache:{cache_to_ref_tag}"),
+            cache_mode,
         )
     });
     let registry_ref = cache_to_ref_tag
@@ -390,10 +391,11 @@ fn inject_docker_cache_flags(
     }
 
     let context = proxy_context.expect("checked above");
-    let fallback_cache_from = format!(
-        "type=registry,ref={}:{}/cache:{}",
+    let fallback_registry_ref = format!(
+        "{}:{}/cache:{}",
         context.endpoint_host, context.port, cache_ref_tag
     );
+    let fallback_cache_from = docker_cache_import_spec(&fallback_registry_ref);
     let cache_from_refs = oci_cache
         .map(|plan| plan.cache_from_refs.as_slice())
         .filter(|refs| !refs.is_empty())
@@ -407,13 +409,21 @@ fn inject_docker_cache_flags(
         let cache_to = oci_cache
             .and_then(|plan| plan.cache_to.as_deref())
             .map(ToOwned::to_owned)
-            .unwrap_or_else(|| format!("{fallback_cache_from},mode={cache_mode}"));
+            .unwrap_or_else(|| docker_cache_export_spec(&fallback_registry_ref, cache_mode));
         prepared.insert(
             insert_at + cache_from_refs.len(),
             format!("--cache-to={cache_to}"),
         );
     }
     Ok(prepared)
+}
+
+fn docker_cache_import_spec(registry_ref: &str) -> String {
+    format!("type=registry,ref={registry_ref},registry.insecure=true")
+}
+
+fn docker_cache_export_spec(registry_ref: &str, cache_mode: &str) -> String {
+    format!("type=registry,ref={registry_ref},mode={cache_mode},registry.insecure=true")
 }
 
 fn validate_cache_ref_tag(value: &str) -> Result<String> {
@@ -489,9 +499,9 @@ mod tests {
 
         assert_eq!(command.last().map(String::as_str), Some("."));
         assert!(command.iter().any(|arg| arg
-            == "--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache"));
+            == "--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true"));
         assert!(command.iter().any(|arg| arg
-            == "--cache-to=type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max"));
+            == "--cache-to=type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max,registry.insecure=true"));
     }
 
     #[test]
@@ -520,7 +530,7 @@ mod tests {
         assert!(
             command
                 .iter()
-                .any(|arg| arg == "--cache-from=type=registry,ref=127.0.0.1:5000/cache:buildcache")
+                .any(|arg| arg == "--cache-from=type=registry,ref=127.0.0.1:5000/cache:buildcache,registry.insecure=true")
         );
         assert!(!command.iter().any(|arg| arg.starts_with("--cache-to=")));
     }

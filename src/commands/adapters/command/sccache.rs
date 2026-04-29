@@ -16,6 +16,8 @@ fn inject_proxy_env(
 ) {
     let endpoint = context.endpoint();
     set.insert("RUSTC_WRAPPER".to_string(), "sccache".to_string());
+    set.insert("CC".to_string(), "sccache cc".to_string());
+    set.insert("CXX".to_string(), "sccache c++".to_string());
     set.insert(
         "SCCACHE_WEBDAV_ENDPOINT".to_string(),
         format!("{endpoint}/"),
@@ -55,6 +57,8 @@ mod tests {
             Some(&"http://127.0.0.1:5000/".to_string())
         );
         assert_eq!(plan.set.get("RUSTC_WRAPPER"), Some(&"sccache".to_string()));
+        assert_eq!(plan.set.get("CC"), Some(&"sccache cc".to_string()));
+        assert_eq!(plan.set.get("CXX"), Some(&"sccache c++".to_string()));
         assert_eq!(
             plan.set.get("SCCACHE_WEBDAV_KEY_PREFIX"),
             Some(&String::new())
