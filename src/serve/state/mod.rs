@@ -19,6 +19,7 @@ mod kv_published_index;
 mod metrics;
 mod oci_negative_cache;
 mod session_summary;
+mod skip_rules;
 mod upload_sessions;
 
 pub use blob_locator::*;
@@ -28,6 +29,7 @@ pub use kv_published_index::*;
 pub use metrics::*;
 pub use oci_negative_cache::*;
 pub use session_summary::*;
+pub use skip_rules::*;
 pub use upload_sessions::*;
 
 pub use crate::serve::engines::oci::manifest_cache::OciManifestCacheEntry;
@@ -51,6 +53,7 @@ pub struct AppState {
     pub registry_root_tag: String,
     pub oci_alias_promotion_refs: Vec<String>,
     pub proxy_metadata_hints: BTreeMap<String, String>,
+    pub proxy_skip_rules: Arc<Vec<ProxySkipRule>>,
     pub proxy_ci_run_context: Option<CiRunContext>,
     pub fail_on_cache_error: bool,
     pub oci_hydration_policy: crate::serve::OciHydrationPolicy,
@@ -84,6 +87,7 @@ pub struct AppState {
     pub oci_engine_diagnostics: Arc<OciEngineDiagnostics>,
     pub prefetch_metrics: Arc<PrefetchMetrics>,
     pub kv_blob_upload_metrics: Arc<KvBlobUploadMetrics>,
+    pub skip_rule_metrics: Arc<ProxySkipRuleMetrics>,
     pub blob_download_max_concurrency: usize,
     pub blob_prefetch_max_concurrency: usize,
     pub blob_prefetch_concurrency_from_env: bool,

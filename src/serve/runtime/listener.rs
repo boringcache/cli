@@ -54,6 +54,8 @@ pub(super) async fn build_server_runtime(
     let singleflight_metrics = Arc::new(state::SingleflightMetrics::new());
     let prefetch_metrics = Arc::new(state::PrefetchMetrics::new());
     let kv_blob_upload_metrics = Arc::new(state::KvBlobUploadMetrics::new());
+    let proxy_skip_rules = Arc::new(load_proxy_skip_rules_from_current_dir()?);
+    let skip_rule_metrics = Arc::new(state::ProxySkipRuleMetrics::new());
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
     let (prefetch_concurrency, prefetch_from_env) = blob_prefetch_concurrency(dl_concurrency);
     let (kv_replication_work_tx, kv_replication_work_rx) =
@@ -89,6 +91,7 @@ pub(super) async fn build_server_runtime(
         registry_root_tag,
         oci_alias_promotion_refs,
         proxy_metadata_hints: proxy_metadata_hints.clone(),
+        proxy_skip_rules,
         proxy_ci_run_context: crate::ci_detection::detect_ci_context()
             .run_context()
             .cloned(),
@@ -124,6 +127,7 @@ pub(super) async fn build_server_runtime(
         oci_engine_diagnostics,
         prefetch_metrics,
         kv_blob_upload_metrics,
+        skip_rule_metrics,
         blob_download_max_concurrency: dl_concurrency,
         blob_prefetch_max_concurrency: prefetch_concurrency,
         blob_prefetch_concurrency_from_env: prefetch_from_env,
@@ -371,6 +375,16 @@ fn new_runtime_temp_dir() -> Result<PathBuf> {
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create runtime temp dir {}", dir.display()))?;
     Ok(dir)
+}
+
+fn load_proxy_skip_rules_from_current_dir() -> Result<Vec<state::ProxySkipRule>> {
+    let current_dir = std::env::current_dir().context("Failed to determine current directory")?;
+    let Some(loaded) = crate::project_config::discover(&current_dir)
+        .context("Failed to load repo cache config")?
+    else {
+        return Ok(Vec::new());
+    };
+    state::proxy_skip_rules_from_config(&loaded.config.skip)
 }
 
 fn auto_transfer_concurrency() -> usize {

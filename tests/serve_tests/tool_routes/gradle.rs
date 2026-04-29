@@ -236,6 +236,45 @@ async fn test_gradle_get_miss_returns_not_found() {
 }
 
 #[tokio::test]
+async fn test_gradle_skip_rule_returns_synthetic_miss() {
+    let server = Server::new_async().await;
+    let (mut state, _home, _guard) = setup(&server).await;
+    state.proxy_skip_rules = Arc::new(vec![ProxySkipRule {
+        tool: "gradle".to_string(),
+        action: ":app:processReleaseResources".to_string(),
+        reason: Some("net loss".to_string()),
+    }]);
+
+    let response = tower::ServiceExt::oneshot(
+        build_router(state.clone()),
+        Request::builder()
+            .method(Method::GET)
+            .uri("/cache/expensive-action-output")
+            .header("X-Boringcache-Action", ":app:processReleaseResources")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.headers().get("x-boringcache-skip-rule").unwrap(),
+        "boringcache_skip_rule"
+    );
+    assert_eq!(state.skip_rule_metrics.matched_count(), 1);
+    let summary = boring_cache_cli::serve::state::build_cache_session_summary(&state);
+    assert_eq!(
+        summary.lifecycle["miss_reason_counts"]["boringcache_skip_rule"],
+        1
+    );
+    assert_eq!(
+        summary.lifecycle["product_behavior_reason_counts"]["boringcache_skip_rule"],
+        1
+    );
+}
+
+#[tokio::test]
 async fn test_gradle_put_returns_413_when_spool_budget_exceeded() {
     let server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;

@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
 
@@ -14,6 +14,8 @@ static INFLIGHT_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_REQUESTS: AtomicU64 = AtomicU64::new(0);
 const SLOW_REQUEST_WARN_MS: u128 = 2_000;
 const PUT_SLOW_WARN_MS: u64 = 2_000;
+const ACTION_HEADER: &str = "x-boringcache-action";
+const SKIP_RULE_HEADER: &str = "x-boringcache-skip-rule";
 tokio::task_local! {
     static REQUEST_SEQ: u64;
 }
@@ -246,6 +248,24 @@ async fn dispatch_with_path(
     let route = route::detect_route(&method, &normalized_path)?;
     let route_tool = tool_for_route(&route);
     let route_instruments_cache_ops = route_instruments_cache_ops(&route);
+    if let Some(tool) = route_tool
+        && request_matches_skip_rule(&state, tool, &headers)
+    {
+        let op = op_for_method(&request_method);
+        let result = if op == cache_ops::Op::Get {
+            cache_ops::OpResult::Miss
+        } else {
+            cache_ops::OpResult::Hit
+        };
+        state.skip_rule_metrics.record_match();
+        state.cache_ops.record(tool, op, result, false, 0, 0);
+        let mut response = best_effort_cache_registry_response(&request_method);
+        response.headers_mut().insert(
+            SKIP_RULE_HEADER,
+            HeaderValue::from_static("boringcache_skip_rule"),
+        );
+        return Ok(response);
+    }
     let is_sccache_connect_route = matches!(route, route::RegistryRoute::SccacheMkcol);
     let is_sccache_route = matches!(
         route,
@@ -407,6 +427,25 @@ async fn dispatch_with_path(
             Ok(best_effort_cache_registry_response(&request_method))
         }
     }
+}
+
+fn request_matches_skip_rule(state: &AppState, tool: cache_ops::Tool, headers: &HeaderMap) -> bool {
+    if state.proxy_skip_rules.is_empty() {
+        return false;
+    }
+    let Some(action) = headers
+        .get(ACTION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+
+    state
+        .proxy_skip_rules
+        .iter()
+        .any(|rule| rule.matches(tool.as_str(), action))
 }
 
 fn tool_for_route(route: &route::RegistryRoute) -> Option<cache_ops::Tool> {

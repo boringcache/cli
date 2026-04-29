@@ -10,7 +10,7 @@ pub use discover::discover;
 pub use model::{
     AdapterCommandConfig, AdapterConfig, LoadedRepoConfig, RepoConfig, RepoEntryConfig,
     RepoProfileConfig, RepoProxyConfig, ResolvedAdapterConfig, ResolvedRunEntryPlan,
-    ResolvedRunPlan, RunEntryRequestSource, RunEntryResolutionSource,
+    ResolvedRunPlan, RunEntryRequestSource, RunEntryResolutionSource, SkipRuleConfig,
 };
 pub use resolve::{prefer_cli_list, prefer_cli_scalar, resolve_adapter_config, resolve_run_plan};
 
@@ -54,6 +54,33 @@ workspace = "org/workspace"
         .unwrap();
 
         assert!(discover(temp_dir.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn parses_skip_rules() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join(".boringcache.toml"),
+            r#"
+[[skip]]
+tool = "gradle"
+action = ":app:processReleaseResources"
+reason = "fetch consistently exceeds local execute"
+"#,
+        )
+        .unwrap();
+
+        let loaded = discover(temp_dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.config.skip.len(), 1);
+        assert_eq!(loaded.config.skip[0].tool.as_deref(), Some("gradle"));
+        assert_eq!(
+            loaded.config.skip[0].action.as_deref(),
+            Some(":app:processReleaseResources")
+        );
+        assert_eq!(
+            loaded.config.skip[0].reason.as_deref(),
+            Some("fetch consistently exceeds local execute")
+        );
     }
 
     #[test]

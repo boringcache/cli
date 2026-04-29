@@ -10,8 +10,8 @@ use boring_cache_cli::manifest::EntryType;
 use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
     AppState, BlobLocatorCache, BlobLocatorEntry, BlobReadCache, BlobReadMetrics, KvPendingStore,
-    KvPublishedIndex, OciManifestCacheEntry, UploadSession, UploadSessionBody, UploadSessionStore,
-    digest_tag, legacy_ref_tag_for_input, ref_tag,
+    KvPublishedIndex, OciManifestCacheEntry, ProxySkipRule, UploadSession, UploadSessionBody,
+    UploadSessionStore, digest_tag, legacy_ref_tag_for_input, ref_tag,
 };
 use boring_cache_cli::tag_utils::TagResolver;
 use boring_cache_cli::test_env;
@@ -102,6 +102,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         registry_root_tag: "registry".to_string(),
         oci_alias_promotion_refs: Vec::new(),
         proxy_metadata_hints: std::collections::BTreeMap::new(),
+        proxy_skip_rules: Arc::new(Vec::new()),
         proxy_ci_run_context: None,
         fail_on_cache_error: true,
         oci_hydration_policy: boring_cache_cli::serve::OciHydrationPolicy::MetadataOnly,
@@ -143,6 +144,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         ),
         prefetch_metrics: Arc::new(boring_cache_cli::serve::state::PrefetchMetrics::new()),
         kv_blob_upload_metrics: Arc::new(boring_cache_cli::serve::state::KvBlobUploadMetrics::new()),
+        skip_rule_metrics: Arc::new(boring_cache_cli::serve::state::ProxySkipRuleMetrics::new()),
         blob_download_max_concurrency: 16,
         blob_prefetch_max_concurrency: 2,
         blob_prefetch_concurrency_from_env: false,

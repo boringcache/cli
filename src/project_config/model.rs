@@ -15,6 +15,8 @@ pub struct RepoConfig {
     pub profiles: BTreeMap<String, RepoProfileConfig>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adapters: BTreeMap<String, AdapterConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip: Vec<SkipRuleConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -50,6 +52,16 @@ pub struct RepoEntryConfig {
 pub struct RepoProfileConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SkipRuleConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

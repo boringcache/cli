@@ -36,6 +36,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
     let singleflight_hints = state.singleflight_metrics.metadata_hints();
     let startup_prefetch_hints = state.prefetch_metrics.metadata_hints();
     let kv_upload_hints = state.kv_blob_upload_metrics.metadata_hints();
+    let skip_rule_match_count = state.skip_rule_metrics.matched_count();
 
     let proxy = json!({
         "mode": session_kind.mode,
@@ -57,6 +58,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
         &startup_prefetch_hints,
         &kv_upload_hints,
         &singleflight_hints,
+        skip_rule_match_count,
     );
     let mut oci = merged_maps_to_json(&[oci_body.clone(), oci_engine, oci_negative]);
     if let Some(object) = oci.as_object_mut() {
@@ -185,10 +187,12 @@ fn lifecycle_summary(
     startup_prefetch: &BTreeMap<String, String>,
     kv_upload: &BTreeMap<String, String>,
     singleflight: &BTreeMap<String, String>,
+    skip_rule_match_count: u64,
 ) -> Value {
     let mut object = serde_json::Map::new();
     let mut miss_reason_counts = serde_json::Map::new();
     let mut degradation_reason_counts = serde_json::Map::new();
+    let mut product_behavior_reason_counts = serde_json::Map::new();
 
     let entry_missing_count = sum_metric_keys(
         oci_engine,
@@ -203,6 +207,16 @@ fn lifecycle_summary(
         &mut miss_reason_counts,
         "entry_missing",
         entry_missing_count,
+    );
+    insert_positive_count(
+        &mut miss_reason_counts,
+        "boringcache_skip_rule",
+        skip_rule_match_count,
+    );
+    insert_positive_count(
+        &mut product_behavior_reason_counts,
+        "boringcache_skip_rule",
+        skip_rule_match_count,
     );
 
     let storage_check_failed_count = sum_metric_keys(
@@ -255,6 +269,11 @@ fn lifecycle_summary(
     );
 
     insert_count_map(&mut object, "miss_reason_counts", miss_reason_counts);
+    insert_count_map(
+        &mut object,
+        "product_behavior_reason_counts",
+        product_behavior_reason_counts,
+    );
     let degraded_miss_count = sum_json_counts(&degradation_reason_counts);
     insert_count_map(
         &mut object,
@@ -551,9 +570,15 @@ mod tests {
                 "singleflight_kv_lookup_follower_timeouts".to_string(),
                 "6".to_string(),
             )]),
+            7,
         );
 
         assert_eq!(summary["miss_reason_counts"]["entry_missing"], 5);
+        assert_eq!(summary["miss_reason_counts"]["boringcache_skip_rule"], 7);
+        assert_eq!(
+            summary["product_behavior_reason_counts"]["boringcache_skip_rule"],
+            7
+        );
         assert_eq!(
             summary["degradation_reason_counts"]["storage_check_failed"],
             4
