@@ -36,6 +36,7 @@ PROXY_READY_WARN_SECS="${PROXY_READY_WARN_SECS:-10}"
 PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-210}"
 PROXY_SHUTDOWN_WAIT_MIN_SECS=210
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
+RUN_NATIVE_BUILDKIT="${RUN_NATIVE_BUILDKIT:-auto}"
 
 mkdir -p "${LOG_DIR}"
 
@@ -120,6 +121,13 @@ case "$BUILDKIT_INSECURE_REGISTRY" in
   auto|true|false|1|0|yes|no) ;;
   *)
     echo "ERROR: BUILDKIT_INSECURE_REGISTRY must be auto, true, or false"
+    exit 1
+    ;;
+esac
+case "$RUN_NATIVE_BUILDKIT" in
+  auto|true|false|1|0|yes|no) ;;
+  *)
+    echo "ERROR: RUN_NATIVE_BUILDKIT must be auto, true, or false"
     exit 1
     ;;
 esac
@@ -611,6 +619,102 @@ assert_import_reference_seen() {
   fi
 }
 
+native_buildkit_enabled() {
+  case "$RUN_NATIVE_BUILDKIT" in
+    true|1|yes)
+      return 0
+      ;;
+    false|0|no)
+      return 1
+      ;;
+    auto)
+      command -v buildctl >/dev/null 2>&1
+      return $?
+      ;;
+  esac
+}
+
+run_native_buildkit_with_cli() {
+  if ! native_buildkit_enabled; then
+    echo "Skipping native boringcache buildkit smoke (RUN_NATIVE_BUILDKIT=${RUN_NATIVE_BUILDKIT}, buildctl unavailable or disabled)"
+    return 0
+  fi
+
+  local buildkit_addr="docker-container://buildx_buildkit_${BUILDER}0"
+  local native_cache_tag="${CACHE_TAG}-native"
+  local native_proxy_tag="${REGISTRY_ROOT_TAG}-native"
+  local cold_log="${LOG_DIR}/native-buildkit-cold.log"
+  local warm_log="${LOG_DIR}/native-buildkit-warm.log"
+  local metrics_file="${LOG_DIR}/native-buildkit-request-metrics.jsonl"
+
+  LOG_FILES+=("${cold_log}" "${warm_log}" "${metrics_file}")
+
+  echo
+  echo "=== Phase 5: Native boringcache buildkit wrapper ==="
+  reset_builder
+  if ! buildctl --addr "${buildkit_addr}" debug workers >/dev/null 2>&1; then
+    if [[ "$RUN_NATIVE_BUILDKIT" == "auto" ]]; then
+      echo "Skipping native boringcache buildkit smoke; buildctl cannot reach ${buildkit_addr}"
+      return 0
+    fi
+    echo "ERROR: buildctl cannot reach ${buildkit_addr}"
+    exit 1
+  fi
+
+  BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
+  BORINGCACHE_OBSERVABILITY_JSONL_PATH="${metrics_file}" \
+    "${BINARY}" buildkit \
+      --workspace "${WORKSPACE}" \
+      --tag "${native_proxy_tag}" \
+      --cache-ref-tag "${native_cache_tag}" \
+      --port "${REGISTRY_PORT}" \
+      --host "${PROXY_HOST}" \
+      --endpoint-host "${REGISTRY_HOST}" \
+      --no-platform \
+      --no-git \
+      --fail-on-cache-error \
+      --metadata-hint "project=cli-cache-registry" \
+      --metadata-hint "phase=buildkit-native-cold" \
+      --metadata-hint "scenario=docker-buildkit" \
+      -- buildctl --addr "${buildkit_addr}" build \
+        --frontend dockerfile.v0 \
+        --local "context=${LOG_DIR}/e2e-context" \
+        --local "dockerfile=${LOG_DIR}/e2e-context" \
+        --opt filename=Dockerfile \
+        --progress plain \
+        --no-cache \
+        --output "type=oci,dest=${LOG_DIR}/native-buildkit-cold.tar" \
+      >"${cold_log}" 2>&1
+
+  reset_builder
+  BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
+  BORINGCACHE_OBSERVABILITY_JSONL_PATH="${metrics_file}" \
+    "${BINARY}" buildkit \
+      --workspace "${WORKSPACE}" \
+      --tag "${native_proxy_tag}" \
+      --cache-ref-tag "${native_cache_tag}" \
+      --port "${REGISTRY_PORT}" \
+      --host "${PROXY_HOST}" \
+      --endpoint-host "${REGISTRY_HOST}" \
+      --no-platform \
+      --no-git \
+      --fail-on-cache-error \
+      --metadata-hint "project=cli-cache-registry" \
+      --metadata-hint "phase=buildkit-native-warm" \
+      --metadata-hint "scenario=docker-buildkit" \
+      -- buildctl --addr "${buildkit_addr}" build \
+        --frontend dockerfile.v0 \
+        --local "context=${LOG_DIR}/e2e-context" \
+        --local "dockerfile=${LOG_DIR}/e2e-context" \
+        --opt filename=Dockerfile \
+        --progress plain \
+        --output "type=oci,dest=${LOG_DIR}/native-buildkit-warm.tar" \
+      >"${warm_log}" 2>&1
+
+  assert_cached "${warm_log}"
+  assert_registry_import_succeeded "${warm_log}"
+}
+
 manifest_reference_is_readable() {
   local reference="$1"
   local url="http://${PROXY_STATUS_HOST}:${PROXY_PORT}/v2/boringcache-e2e/cache/manifests/${reference}"
@@ -814,6 +918,8 @@ done
 
 summarize_request_metrics
 assert_default_restart_body_locality
+stop_proxy
+run_native_buildkit_with_cli
 
 declare -a BAD_PATTERNS=(
   'expected sha256:.*got sha256:e3b0'

@@ -38,6 +38,7 @@ pub enum AdapterKind {
     Sccache,
     Go,
     Docker,
+    Buildkit,
 }
 
 struct AdapterRunner {
@@ -100,6 +101,7 @@ impl AdapterKind {
             Self::Sccache => "sccache",
             Self::Go => "gocache",
             Self::Docker => "oci",
+            Self::Buildkit => "oci",
         }
     }
 
@@ -140,6 +142,7 @@ fn runner_for(kind: AdapterKind) -> &'static AdapterRunner {
         AdapterKind::Sccache => &sccache::RUNNER,
         AdapterKind::Go => &go::RUNNER,
         AdapterKind::Docker => &docker::RUNNER,
+        AdapterKind::Buildkit => &docker::BUILDKIT_RUNNER,
     }
 }
 
@@ -321,7 +324,8 @@ pub async fn adapter_execute(
     )?;
     let archive_enabled = !resolved_plan.tag_path_pairs.is_empty();
     let effective_read_only = cache_registry::effective_proxy_read_only(configured_read_only);
-    let docker_read_only_on_demand = kind == AdapterKind::Docker && effective_read_only;
+    let docker_read_only_on_demand =
+        matches!(kind, AdapterKind::Docker | AdapterKind::Buildkit) && effective_read_only;
     let startup_warm = !(args.on_demand || docker_read_only_on_demand);
     let mut proxy_metadata_hints =
         cache_registry::resolve_proxy_metadata_hints(&metadata_hint_args)?;
@@ -341,7 +345,7 @@ pub async fn adapter_execute(
     )
     .unwrap_or_else(|| "max".to_string());
     docker::validate_cache_mode(&docker_cache_mode)?;
-    let docker_plan = if kind == AdapterKind::Docker {
+    let docker_plan = if matches!(kind, AdapterKind::Docker | AdapterKind::Buildkit) {
         let cache_from_ref_tags = project_config::prefer_cli_list(
             &adapter_config.cache_from_ref_tags,
             &args.cache_from_ref_tag,
@@ -579,6 +583,7 @@ pub async fn adapter_execute(
             proxy::spawn_command(&command, &resolved_plan.env_vars, None, |_, _| {}).await?;
         return match child_outcome {
             proxy::ChildOutcome::Exited(status) => {
+                run_post_command_diagnostics(kind).await;
                 let code = proxy::status_exit_code(&status);
                 if code == 0 {
                     Ok(())
@@ -725,6 +730,7 @@ pub async fn adapter_execute(
                 }
             }
 
+            run_post_command_diagnostics(kind).await;
             shutdown_proxy_handle(proxy_handle, fail_on_cache_error, command_succeeded).await?;
 
             if command_exit_code == 0 {
@@ -733,6 +739,12 @@ pub async fn adapter_execute(
                 Err(ExitCodeError::silent(command_exit_code).into())
             }
         }
+    }
+}
+
+async fn run_post_command_diagnostics(kind: AdapterKind) {
+    if kind == AdapterKind::Sccache {
+        sccache::print_stats_summary().await;
     }
 }
 
@@ -928,6 +940,7 @@ mod tests {
             (AdapterKind::Sccache, "sccache"),
             (AdapterKind::Go, "gocache"),
             (AdapterKind::Docker, "oci"),
+            (AdapterKind::Buildkit, "oci"),
         ];
 
         for (adapter, tool) in tools {

@@ -48,6 +48,23 @@ boringcache docker --tag docker-cache -- docker buildx build .
 Do not pass those flags yourself.
 Use `--cache-ref-tag` and `--cache-mode` only when you need to override the OCI cache ref or export mode.
 
+Direct BuildKit runs use the same OCI cache plan:
+
+```toml
+[adapters.buildkit]
+tag = "docker-cache"
+command = ["buildctl", "build", "--frontend", "dockerfile.v0"]
+metadata-hints = ["tool=oci", "phase=ci"]
+```
+
+```bash
+boringcache buildkit
+boringcache buildkit --tag docker-cache -- buildctl build --frontend dockerfile.v0
+```
+
+`boringcache buildkit` injects `--import-cache` and `--export-cache` for `buildctl build`.
+Keep builder installation, daemon lifecycle, QEMU/binfmt, and Docker container networking in the caller's runtime setup.
+
 Docker has two cache tag concepts:
 
 - `--tag docker-cache` selects the BoringCache proxy cache family.
@@ -67,7 +84,7 @@ It plans the full BuildKit import fallback chain and injects every planned `--ca
 Passing `--cache-ref-tag customcache` only changes the final stable fallback from `buildcache` to `customcache`.
 On restore-only PR runs, the PR-scoped ref may not exist yet and may return 404. That is expected; BuildKit should continue with the remaining branch, default, and stable fallback refs. Enable PR saves only when you intentionally want PR-scoped writes. PR-context saves promote the PR alias by default; they do not promote the stable fallback unless an explicit promotion ref override asks for it.
 Local Docker runs without CI metadata keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
-BoringCache backs the BuildKit registry cache through the Docker adapter.
+BoringCache backs the BuildKit registry cache through the Docker and direct BuildKit adapters.
 By default the Docker path warms the selected OCI manifest, blob URLs, and blob bodies before BuildKit starts.
 That keeps the normal path simple: a warm BuildKit run should read cache bodies through the local proxy instead of discovering remote body reads after the manifest hit.
 
@@ -251,6 +268,7 @@ boringcache sccache
 ```
 
 The adapter sets `RUSTC_WRAPPER=sccache`, `SCCACHE_WEBDAV_ENDPOINT`, and `SCCACHE_WEBDAV_KEY_PREFIX` automatically.
+After the wrapped command exits, it reads `sccache --show-stats` and prints a concise hit/miss summary when sccache reports one.
 
 For a long-lived endpoint:
 

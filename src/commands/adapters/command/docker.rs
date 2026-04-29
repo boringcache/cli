@@ -11,6 +11,12 @@ pub(super) const RUNNER: AdapterRunner = AdapterRunner {
     prepare_command,
 };
 
+pub(super) const BUILDKIT_RUNNER: AdapterRunner = AdapterRunner {
+    name: "buildkit",
+    inject_proxy_env: no_extra_proxy_env,
+    prepare_command: prepare_buildkit_command,
+};
+
 const DEFAULT_CACHE_REF_TAG: &str = "buildcache";
 
 #[derive(Debug, Clone, Serialize)]
@@ -356,6 +362,21 @@ fn prepare_command(
     )
 }
 
+fn prepare_buildkit_command(
+    command: &[String],
+    proxy_context: Option<&proxy::ProxyContext>,
+    options: &AdapterCommandOptions,
+) -> Result<Vec<String>> {
+    inject_buildkit_cache_flags(
+        command,
+        proxy_context,
+        &options.cache_ref_tag,
+        &options.cache_mode,
+        options.read_only,
+        options.docker_oci_cache.as_ref(),
+    )
+}
+
 fn inject_docker_cache_flags(
     command: &[String],
     proxy_context: Option<&proxy::ProxyContext>,
@@ -414,6 +435,62 @@ fn inject_docker_cache_flags(
             insert_at + cache_from_refs.len(),
             format!("--cache-to={cache_to}"),
         );
+    }
+    Ok(prepared)
+}
+
+fn inject_buildkit_cache_flags(
+    command: &[String],
+    proxy_context: Option<&proxy::ProxyContext>,
+    cache_ref_tag: &str,
+    cache_mode: &str,
+    read_only: bool,
+    oci_cache: Option<&OciCachePlan>,
+) -> Result<Vec<String>> {
+    if proxy_context.is_none() {
+        return Ok(command.to_vec());
+    }
+
+    if command.len() < 2 || command[0] != "buildctl" || !command.iter().any(|arg| arg == "build") {
+        anyhow::bail!(
+            "`boringcache buildkit` expects `buildctl build ...`. Pass the buildctl command after --."
+        );
+    }
+
+    if command
+        .iter()
+        .any(|arg| arg == "--import-cache" || arg.starts_with("--import-cache="))
+        || command
+            .iter()
+            .any(|arg| arg == "--export-cache" || arg.starts_with("--export-cache="))
+    {
+        anyhow::bail!(
+            "Do not pass --import-cache/--export-cache to `boringcache buildkit`; use --cache-ref-tag and --cache-mode instead."
+        );
+    }
+
+    let context = proxy_context.expect("checked above");
+    let fallback_registry_ref = format!(
+        "{}:{}/cache:{}",
+        context.endpoint_host, context.port, cache_ref_tag
+    );
+    let fallback_cache_from = docker_cache_import_spec(&fallback_registry_ref);
+    let cache_from_refs = oci_cache
+        .map(|plan| plan.cache_from_refs.as_slice())
+        .filter(|refs| !refs.is_empty())
+        .unwrap_or(std::slice::from_ref(&fallback_cache_from));
+    let mut prepared = command.to_vec();
+    for cache_from in cache_from_refs {
+        prepared.push("--import-cache".to_string());
+        prepared.push(cache_from.clone());
+    }
+    if !read_only {
+        let cache_to = oci_cache
+            .and_then(|plan| plan.cache_to.as_deref())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| docker_cache_export_spec(&fallback_registry_ref, cache_mode));
+        prepared.push("--export-cache".to_string());
+        prepared.push(cache_to);
     }
     Ok(prepared)
 }
@@ -533,6 +610,51 @@ mod tests {
                 .any(|arg| arg == "--cache-from=type=registry,ref=127.0.0.1:5000/cache:buildcache,registry.insecure=true")
         );
         assert!(!command.iter().any(|arg| arg.starts_with("--cache-to=")));
+    }
+
+    #[test]
+    fn buildkit_cache_flags_append_import_and_export_refs() {
+        let context = proxy::ProxyContext {
+            endpoint_host: "host.docker.internal".to_string(),
+            port: 5000,
+            cache_ref: "{CACHE_REF}".to_string(),
+        };
+
+        let command = inject_buildkit_cache_flags(
+            &[
+                "buildctl".to_string(),
+                "--addr".to_string(),
+                "tcp://buildkitd:1234".to_string(),
+                "build".to_string(),
+                "--frontend".to_string(),
+                "dockerfile.v0".to_string(),
+            ],
+            Some(&context),
+            "buildcache",
+            "max",
+            false,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            command[command.len() - 4],
+            "--import-cache",
+            "import flag should be appended"
+        );
+        assert_eq!(
+            command[command.len() - 3],
+            "type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true"
+        );
+        assert_eq!(
+            command[command.len() - 2],
+            "--export-cache",
+            "export flag should be appended"
+        );
+        assert_eq!(
+            command[command.len() - 1],
+            "type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max,registry.insecure=true"
+        );
     }
 
     #[test]

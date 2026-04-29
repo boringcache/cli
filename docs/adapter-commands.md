@@ -18,6 +18,7 @@ Supported adapter commands today:
 - `boringcache maven`
 - `boringcache sccache`
 - `boringcache go`
+- `boringcache buildkit`
 
 ## Common commands
 
@@ -30,6 +31,9 @@ boringcache docker
 
 # Same adapter without repo config
 boringcache docker --tag docker-cache -- docker buildx build .
+
+# Direct BuildKit adapter
+boringcache buildkit --tag docker-cache -- buildctl build --frontend dockerfile.v0
 
 # Long-lived local proxy
 boringcache cache-registry my-org/app registry-cache --port 5000
@@ -71,7 +75,7 @@ Useful adapter fields:
 - `metadata-hints` — low-cardinality session metadata
 - `host`, `endpoint-host`, `port` — local endpoint settings
 - `skip-restore`, `skip-save`, `save-on-failure` — archive behavior overrides
-- `cache-mode`, `cache-ref-tag` — Docker-only cache export settings
+- `cache-mode`, `cache-ref-tag` — Docker/BuildKit cache export settings
 - `sccache-key-prefix` — sccache-only WebDAV key prefix/root
 
 ## Session hints
@@ -139,6 +143,7 @@ command = ["bazel", "build", "--remote_cache={ENDPOINT}", "//..."]
 These adapters inject the tool-specific settings for you:
 
 - `docker`
+- `buildkit`
 - `nx`
 - `turbo`
 - `bazel`
@@ -148,9 +153,10 @@ These adapters inject the tool-specific settings for you:
 - `go`
 
 For Bazel, the adapter injects the remote-cache flags directly.
+For BuildKit, the adapter injects `--import-cache` and `--export-cache` for `buildctl build`.
 For Gradle, the adapter adds `--build-cache` plus a generated init script that points the remote cache at the local proxy.
 For Maven, the adapter injects the `maven.build.cache.*` remote endpoint properties, but the Maven build cache extension still needs to be present in the repo.
-For sccache, the adapter injects `RUSTC_WRAPPER`, `SCCACHE_WEBDAV_ENDPOINT`, and `SCCACHE_WEBDAV_KEY_PREFIX`. Leave `sccache-key-prefix` unset unless you need a stable WebDAV sub-root within the proxy cache.
+For sccache, the adapter injects `RUSTC_WRAPPER`, `SCCACHE_WEBDAV_ENDPOINT`, and `SCCACHE_WEBDAV_KEY_PREFIX`, then prints a best-effort `sccache --show-stats` summary after the wrapped command. Leave `sccache-key-prefix` unset unless you need a stable WebDAV sub-root within the proxy cache.
 
 If a repo already has a stable checked-in cache config, that still works. Explicit tool flags and checked-in config stay user-owned.
 
@@ -179,7 +185,7 @@ Useful flags:
 - `--dry-run`
 - `--json`
 
-Docker also supports:
+Docker and BuildKit also support:
 
 - `--cache-mode`
 - `--cache-ref-tag`
@@ -192,11 +198,12 @@ Override precedence:
 | Lists | CLI list replaces repo config |
 | Metadata hints | repo config and CLI merge; CLI wins on duplicate keys |
 
-For Docker, `--tag` is always the proxy cache tag. Use `--cache-ref-tag` for the OCI cache tag.
+For Docker and BuildKit, `--tag` is always the proxy cache tag. Use `--cache-ref-tag` for the OCI cache tag.
 In GitHub Actions, the Docker adapter derives an immutable run ref plus PR/branch/default cache aliases from CI metadata.
 The CLI plans the full BuildKit import fallback chain and injects every planned `--cache-from` ref before the run-scoped `--cache-to` ref.
 On restore-only PR runs, the PR-scoped ref may not exist yet and may return 404; BuildKit should then continue with branch/default/stable imports. Enable PR saves only when you intentionally want PR-scoped writes. PR-context saves promote the PR alias by default and leave the stable fallback restore-only unless an explicit promotion override is supplied.
 Local Docker runs keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
+The direct `buildkit` adapter uses the same OCI plan as Docker, but injects `buildctl build` flags as `--import-cache` and `--export-cache`.
 
 A Docker cache has two tag concepts:
 

@@ -85,6 +85,9 @@ pub enum Commands {
     #[command(about = "Run docker buildx build against a local BoringCache proxy")]
     Docker(AdapterArgs),
 
+    #[command(about = "Run buildctl build against a local BoringCache proxy")]
+    Buildkit(AdapterArgs),
+
     Check(CheckArgs),
 
     #[command(name = "rm", visible_alias = "delete", about = "Delete cache tags")]

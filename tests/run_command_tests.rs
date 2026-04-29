@@ -1757,6 +1757,77 @@ fn test_docker_dry_run_json_injects_cache_flags() {
 }
 
 #[test]
+fn test_buildkit_dry_run_json_injects_cache_flags() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .args([
+            "buildkit",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "docker-main",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--dry-run",
+            "--json",
+            "--",
+            "buildctl",
+            "--addr",
+            "tcp://buildkitd:1234",
+            "build",
+            "--frontend",
+            "dockerfile.v0",
+        ])
+        .output()
+        .expect("Failed to execute buildkit dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_proxy_metadata_hints_are_cli_replayable(&parsed);
+    assert_eq!(parsed["adapter"], "buildkit");
+    assert_eq!(parsed["tag"], "docker-main");
+    assert_eq!(parsed["proxy"]["metadata_hints"]["tool"], "oci");
+    assert_eq!(
+        parsed["oci_cache"]["cache_from"],
+        "type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true"
+    );
+    assert_eq!(
+        parsed["oci_cache"]["cache_to"],
+        "type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max,registry.insecure=true"
+    );
+
+    let command = parsed["command"]
+        .as_array()
+        .expect("command array")
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        command
+            .windows(2)
+            .filter(|args| args[0] == "--import-cache"
+                && args[1] == "type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true")
+            .count(),
+        1
+    );
+    assert_eq!(
+        command
+            .windows(2)
+            .filter(|args| args[0] == "--export-cache"
+                && args[1] == "type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max,registry.insecure=true")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);

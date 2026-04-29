@@ -1,0 +1,11 @@
+# CLI Comprehension
+
+Durable feature maps live in `docs/comprehension/`.
+
+Current adapter boundary:
+
+- The CLI owns portable cache/proxy behavior: adapter env vars, cache flags, proxy refs, on-disk adapter cache config, tag/ref planning, and local diagnostics that should work on a laptop, CI runner, or container.
+- GitHub Actions owns runner orchestration: CLI installation, action outputs/state, detached proxy lifecycle, runtime/toolchain bootstrap, and GitHub-specific policy.
+- BuildKit is a first-class CLI adapter through `boringcache buildkit`; it shares Docker's OCI cache plan and injects `buildctl build` cache refs without owning buildctl installation or daemon lifecycle.
+- The Docker/BuildKit registry E2E keeps the existing `docker buildx` proof and, when `buildctl` can reach the temporary BuildKit builder, also runs a native `boringcache buildkit -- buildctl build` cold/warm smoke against the same Rails-backed workspace.
+- `boringcache sccache` owns WebDAV env wiring and prints a best-effort `sccache --show-stats` summary after the wrapped command; it only supplies `CC`/`CXX` wrappers when the caller has not already exported those variables. sccache installation and server lifecycle stay caller-owned.

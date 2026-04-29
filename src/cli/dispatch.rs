@@ -321,6 +321,15 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             )
             .await
         }
+        Commands::Buildkit(args) => {
+            execute_adapter(
+                commands::adapter::AdapterKind::Buildkit,
+                args,
+                verbose,
+                require_server_signature,
+            )
+            .await
+        }
         Commands::Check(args) => {
             let tag_list = split_comma_values(args.tags);
             let effective_workspace = resolve_effective_workspace(&args.workspace);
