@@ -97,6 +97,12 @@ boringcache nx
 ```
 
 Nx gets the local endpoint and access token automatically.
+If `nx.json` is still connected to Nx Cloud with `nxCloudId`, `nxCloudAccessToken`,
+or an `nx-cloud` task runner, Nx may select its private cloud runner before the
+self-hosted cache endpoint. Remove that Nx Cloud binding from the workspace
+config before using the BoringCache Nx proxy, or use a prepared disposable
+checkout for benchmarks. Do not use `NX_NO_CLOUD` as the BoringCache setup path;
+Nx treats it as remote-cache disablement in current releases.
 
 For a long-lived endpoint:
 

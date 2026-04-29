@@ -1046,6 +1046,64 @@ port = 6001
 }
 
 #[test]
+fn test_nx_dry_run_warns_when_nx_cloud_workspace_binding_is_present() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.nx]
+tag = "nx-cache"
+command = ["nx", "run", "app:build"]
+"#,
+    )
+    .expect("write repo config");
+    std::fs::write(
+        temp_dir.path().join("nx.json"),
+        r#"
+{
+  "nxCloudId": "private-workspace",
+  "targetDefaults": {
+    "build": {
+      "cache": true
+    }
+  }
+}
+"#,
+    )
+    .expect("write nx config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["nx", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute nx dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Nx Cloud workspace binding detected in nx.json"),
+        "expected Nx Cloud binding warning, got: {stderr}"
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_eq!(parsed["adapter"], "nx");
+    assert_eq!(
+        parsed["env_vars"]["NX_SELF_HOSTED_REMOTE_CACHE_SERVER"],
+        "http://127.0.0.1:5000"
+    );
+}
+
+#[test]
 fn test_sccache_dry_run_json_injects_webdav_env() {
     let temp_dir = TempDir::new().expect("temp dir");
     std::fs::write(
