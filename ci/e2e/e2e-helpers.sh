@@ -425,6 +425,7 @@ assert_metric_equals() {
 
 assert_cache_session_summary_present() {
   local summary_file="$1"
+  local require_v2_sections="${2:-0}"
   assert_metric_gt_zero "${summary_file}" request_metrics_cache_session_summaries
 
   # shellcheck source=/dev/null
@@ -440,6 +441,11 @@ assert_cache_session_summary_present() {
   if [[ -z "${request_metrics_cache_session_adapter:-}" ]]; then
     echo "ERROR: cache_session_summary missing adapter in ${summary_file}" >&2
     return 1
+  fi
+  if [[ "${require_v2_sections}" == "1" || "${require_v2_sections}" == "true" ]]; then
+    assert_metric_equals "${summary_file}" request_metrics_cache_session_backend_api_present 1
+    assert_metric_equals "${summary_file}" request_metrics_cache_session_lifecycle_present 1
+    assert_metric_equals "${summary_file}" request_metrics_cache_session_classification_present 1
   fi
   echo "  cache session summary: schema=${request_metrics_cache_session_schema} mode=${request_metrics_cache_session_mode} adapter=${request_metrics_cache_session_adapter}"
 }

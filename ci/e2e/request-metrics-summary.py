@@ -532,6 +532,7 @@ def main() -> int:
             "mode",
             "adapter",
             "proxy",
+            "backend_api",
             "rails",
             "storage",
             "oci",
@@ -540,8 +541,11 @@ def main() -> int:
             "singleflight",
             "local_cache",
             "buildkit",
+            "lifecycle",
+            "classification",
         ):
             if section in latest_summary:
+                flattened_summary[f"{env_slug(section)}_present"] = "1"
                 flatten_summary(section, latest_summary.get(section), flattened_summary)
         for key in sorted(flattened_summary):
             print(f"request_metrics_cache_session_{key}={flattened_summary[key]}")

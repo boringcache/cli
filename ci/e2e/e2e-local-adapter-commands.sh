@@ -21,7 +21,18 @@ LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-config-hints,docker,oci-same-alias,g
 LOCAL_ADAPTER_SKIP_BUILD="${LOCAL_ADAPTER_SKIP_BUILD:-0}"
 LOCAL_ADAPTER_CLEANUP="${LOCAL_ADAPTER_CLEANUP:-}"
 E2E_RUN_SUFFIX="${RUN_ID//[^a-zA-Z0-9]/-}"
-E2E_RUN_SUFFIX="${E2E_RUN_SUFFIX:0:24}"
+if ((${#E2E_RUN_SUFFIX} > 24)); then
+  E2E_RUN_PREFIX="${E2E_RUN_SUFFIX:0:12}"
+  E2E_RUN_TAIL="${E2E_RUN_SUFFIX: -11}"
+  E2E_RUN_SUFFIX="${E2E_RUN_PREFIX}-${E2E_RUN_TAIL}"
+fi
+while [[ "${E2E_RUN_SUFFIX}" == -* ]]; do
+  E2E_RUN_SUFFIX="${E2E_RUN_SUFFIX#-}"
+done
+while [[ "${E2E_RUN_SUFFIX}" == *- ]]; do
+  E2E_RUN_SUFFIX="${E2E_RUN_SUFFIX%-}"
+done
+E2E_RUN_SUFFIX="${E2E_RUN_SUFFIX:-run}"
 if [[ "${RAILS_ENV_NAME}" == "test" ]]; then
   E2E_EMAIL="${E2E_EMAIL:-cli-local-adapter-e2e-${E2E_RUN_SUFFIX}@example.com}"
   E2E_NAMESPACE_SLUG="${E2E_NAMESPACE_SLUG:-cli-local-adapter-e2e-${E2E_RUN_SUFFIX}}"
@@ -231,6 +242,25 @@ assert_metric_gt_zero() {
   fi
 }
 
+assert_metric_equals() {
+  local summary_file="$1"
+  local key="$2"
+  local expected="$3"
+  # shellcheck source=/dev/null
+  source "${summary_file}"
+  local value="${!key:-}"
+  [[ "${value}" == "${expected}" ]] || fail "expected ${key}=${expected} in ${summary_file}, got ${value:-<unset>}"
+}
+
+assert_cache_session_summary_v2_sections_present() {
+  local summary_file="$1"
+  assert_metric_gt_zero "${summary_file}" request_metrics_cache_session_summaries
+  assert_metric_equals "${summary_file}" request_metrics_cache_session_schema cache_session_v2
+  assert_metric_equals "${summary_file}" request_metrics_cache_session_backend_api_present 1
+  assert_metric_equals "${summary_file}" request_metrics_cache_session_lifecycle_present 1
+  assert_metric_equals "${summary_file}" request_metrics_cache_session_classification_present 1
+}
+
 write_repo_config() {
   local config_path="$1"
   local body="$2"
@@ -375,6 +405,9 @@ metadata-hints = ["project='"${standalone_project}"'","scenario=repo"]'
   kill "${standalone_pid}" >/dev/null 2>&1 || true
   wait "${standalone_pid}" >/dev/null 2>&1 || true
   standalone_pid=""
+  local standalone_summary
+  standalone_summary="$(metric_summary "${standalone_dir}/metrics.jsonl")"
+  assert_cache_session_summary_v2_sections_present "${standalone_summary}"
   wait_for_tag_visibility "${standalone_tag}"
   assert_recent_session_context \
     "config-hints-standalone" \
@@ -473,7 +506,7 @@ EOF
       "${turbo_project}" \
       "warm" \
       "adapter-config" \
-      "turbo"
+      "turborepo"
     delete_tag "${turbo_tag}"
   else
     skip_tool "config-hints-turbo" "turbo not installed"
