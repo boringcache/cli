@@ -60,11 +60,14 @@ PROXY_READY_FILE_A=""
 PROXY_READY_FILE_B=""
 PROXY_READY_FILE_VERIFY=""
 INTERRUPTED="0"
+FORCED_STOP_COUNT=0
 declare -a ACTIVE_BUILD_PIDS=()
 PREWARM_REMOTE_TAG_HITS=0
 PREWARM_REMOTE_TAG_MISSES=0
+PREWARM_REMOTE_TAG_PENDING=0
 POST_CONTENTION_REMOTE_TAG_HITS=0
 POST_CONTENTION_REMOTE_TAG_MISSES=0
+POST_CONTENTION_REMOTE_TAG_PENDING=0
 
 phase_metadata_hints() {
   local phase="$1"
@@ -210,6 +213,7 @@ stop_pid_tree() {
   while kill -0 "$pid" >/dev/null 2>&1; do
     if (( SECONDS >= deadline )); then
       echo "WARNING: ${label} ${pid} did not exit after ${wait_secs}s, sending SIGKILL"
+      FORCED_STOP_COUNT=$((FORCED_STOP_COUNT + 1))
       signal_pid_tree "$pid" KILL
       break
     fi
@@ -773,6 +777,7 @@ if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${PREWARM_DIR}
 fi
 PREWARM_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"
 PREWARM_REMOTE_TAG_MISSES="${REMOTE_TAG_CHECK_MISSES:-0}"
+PREWARM_REMOTE_TAG_PENDING="${REMOTE_TAG_CHECK_PENDING:-0}"
 
 PREWARM_COLD_SECONDS="$(cat "${PREWARM_DIR}/cold.log.seconds")"
 PREWARM_ENTRIES="$(count_pattern "$PREWARM_PROXY_LOG" 'KV flush summary:')"
@@ -850,11 +855,16 @@ stop_proxy_graceful "PROXY_PID_B" "B"
 
 echo ""
 echo "=== Phase 2b: Verify published remote tag after contention flush ==="
-if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${CONTENTION_DIR}/publish-check" "$BUDGET_REMOTE_TAG_HITS_MIN" "${REMOTE_TAG_VERIFY_ATTEMPTS}" "${REMOTE_TAG_VERIFY_SLEEP_SECS}" "$PROXY_LOG_A"; then
+if ! verify_remote_tag_visible "$TMP_BINARY" "$WORKSPACE" "$TAG" "${CONTENTION_DIR}/publish-check" "$BUDGET_REMOTE_TAG_HITS_MIN" "${REMOTE_TAG_VERIFY_ATTEMPTS}" "${REMOTE_TAG_VERIFY_SLEEP_SECS}"; then
+  echo "--- proxy A log tail ---"
+  tail -n 120 "$PROXY_LOG_A" || true
+  echo "--- proxy B log tail ---"
+  tail -n 120 "$PROXY_LOG_B" || true
   exit 1
 fi
 POST_CONTENTION_REMOTE_TAG_HITS="${REMOTE_TAG_CHECK_HITS:-0}"
 POST_CONTENTION_REMOTE_TAG_MISSES="${REMOTE_TAG_CHECK_MISSES:-0}"
+POST_CONTENTION_REMOTE_TAG_PENDING="${REMOTE_TAG_CHECK_PENDING:-0}"
 
 BUILD_A_SECONDS="$(cat "${CONTENTION_DIR}/build-a.log.seconds" 2>/dev/null || echo "0")"
 BUILD_B_SECONDS="$(cat "${CONTENTION_DIR}/build-b.log.seconds" 2>/dev/null || echo "0")"
@@ -884,6 +894,8 @@ SCCACHE_COMBINED_HIT_RATE="$(awk \
 
 CONFLICTS_A="$(count_pattern "$PROXY_LOG_A" 'tag conflict')"
 CONFLICTS_B="$(count_pattern "$PROXY_LOG_B" 'tag conflict')"
+ACCEPTED_CONTENTION_A="$(count_pattern "$PROXY_LOG_A" 'another upload is already publishing this cache')"
+ACCEPTED_CONTENTION_B="$(count_pattern "$PROXY_LOG_B" 'another upload is already publishing this cache')"
 PROXY_429_A="$(count_pattern "$PROXY_LOG_A" '429 Too Many Requests')"
 PROXY_429_B="$(count_pattern "$PROXY_LOG_B" '429 Too Many Requests')"
 TOTAL_429="$((PROXY_429_A + PROXY_429_B))"
@@ -966,8 +978,8 @@ echo "Build A: ${BUILD_A_SECONDS}s"
 echo "Build B: ${BUILD_B_SECONDS}s"
 echo "Wall clock: ${CONTENTION_WALL}s"
 echo "Compile req/hit/miss: A=${REQ_A}/${HITS_A}/${MISSES_A}, B=${REQ_B}/${HITS_B}/${MISSES_B}, combined_hit_rate=${SCCACHE_COMBINED_HIT_RATE}%"
-echo "Proxy A: conflicts=${CONFLICTS_A}, batches_flushed=${FLUSHED_A}, flush_timeouts=${TIMEOUT_A}, permanent_drops=${DROPS_A}"
-echo "Proxy B: conflicts=${CONFLICTS_B}, batches_flushed=${FLUSHED_B}, flush_timeouts=${TIMEOUT_B}, permanent_drops=${DROPS_B}"
+echo "Proxy A: conflicts=${CONFLICTS_A}, accepted_contention=${ACCEPTED_CONTENTION_A}, batches_flushed=${FLUSHED_A}, flush_timeouts=${TIMEOUT_A}, permanent_drops=${DROPS_A}"
+echo "Proxy B: conflicts=${CONFLICTS_B}, accepted_contention=${ACCEPTED_CONTENTION_B}, batches_flushed=${FLUSHED_B}, flush_timeouts=${TIMEOUT_B}, permanent_drops=${DROPS_B}"
 echo "Proxy 429: A=${PROXY_429_A}, B=${PROXY_429_B}, total=${TOTAL_429}"
 echo "Flush A: ${FLUSH_SUMMARY_A}"
 echo "Flush B: ${FLUSH_SUMMARY_B}"
@@ -1002,8 +1014,10 @@ echo "Merged index entries: ${VERIFY_PRELOADED}"
 # ---------------------------------------------------------------------------
 
 TOTAL_CONFLICTS="$((CONFLICTS_A + CONFLICTS_B))"
+TOTAL_ACCEPTED_CONTENTION="$((ACCEPTED_CONTENTION_A + ACCEPTED_CONTENTION_B))"
 TOTAL_TIMEOUTS="$((TIMEOUT_A + TIMEOUT_B))"
 TOTAL_DROPS="$((DROPS_A + DROPS_B))"
+TOTAL_FORCED_STOPS="${FORCED_STOP_COUNT:-0}"
 
 echo ""
 echo "========================================="
@@ -1013,7 +1027,7 @@ echo ""
 echo "Prewarm"
 echo "  Cold build:           ${PREWARM_COLD_SECONDS}s"
 echo "  Flush uploaded:       ${PREWARM_FLUSH_UPLOADED}"
-echo "  Remote tag hits/miss: ${PREWARM_REMOTE_TAG_HITS}/${PREWARM_REMOTE_TAG_MISSES}"
+echo "  Remote tag hit/pending/miss: ${PREWARM_REMOTE_TAG_HITS}/${PREWARM_REMOTE_TAG_PENDING}/${PREWARM_REMOTE_TAG_MISSES}"
 echo ""
 echo "Contention"
 echo "  Build A:              ${BUILD_A_SECONDS}s"
@@ -1024,18 +1038,20 @@ echo "  Compile req/hit/miss: ${TOTAL_REQ}/${TOTAL_HITS}/${TOTAL_MISSES} (hit_ra
 echo "  Proxy A conflicts:    ${CONFLICTS_A}"
 echo "  Proxy B conflicts:    ${CONFLICTS_B}"
 echo "  Total conflicts:      ${TOTAL_CONFLICTS}"
+echo "  Accepted contention:  ${TOTAL_ACCEPTED_CONTENTION}"
 echo "  Proxy 429 total:      ${TOTAL_429}"
 echo "  Proxy A flush:        ${FLUSH_SUMMARY_A}"
 echo "  Proxy B flush:        ${FLUSH_SUMMARY_B}"
 echo "  Max flush duration:   ${MAX_FLUSH_DURATION_MS}ms"
 echo "  Flush timeouts:       ${TOTAL_TIMEOUTS}"
 echo "  Permanent drops:      ${TOTAL_DROPS}"
+echo "  Forced stops:         ${TOTAL_FORCED_STOPS}"
 echo "  Cache ops GET:        records=${TOTAL_CACHE_OPS_GET_RECORDS} hits=${TOTAL_CACHE_OPS_GET_HITS} misses=${TOTAL_CACHE_OPS_GET_MISSES} errors=${TOTAL_CACHE_OPS_GET_ERRORS} hit_rate=${CACHE_OPS_GET_HIT_RATE}%"
 echo "  Hit-rate delta:       ${CACHE_OPS_SCCACHE_HIT_RATE_DELTA}pp (cache-ops GET vs sccache)"
 echo ""
 echo "Verification"
 echo "  Merged index entries: ${VERIFY_PRELOADED}"
-echo "  Remote tag hits/miss: ${POST_CONTENTION_REMOTE_TAG_HITS}/${POST_CONTENTION_REMOTE_TAG_MISSES}"
+echo "  Remote tag hit/pending/miss: ${POST_CONTENTION_REMOTE_TAG_HITS}/${POST_CONTENTION_REMOTE_TAG_PENDING}/${POST_CONTENTION_REMOTE_TAG_MISSES}"
 echo ""
 echo "Logs: ${LOG_DIR}"
 echo "========================================="
@@ -1060,6 +1076,18 @@ if [[ "$TOTAL_DROPS" -gt 0 ]]; then
   SCENARIO_PASS=0
 fi
 
+if [[ "$TOTAL_FORCED_STOPS" -gt 0 ]]; then
+  echo ""
+  echo "FAIL: ${TOTAL_FORCED_STOPS} forced stop(s) detected"
+  SCENARIO_PASS=0
+fi
+
+if [[ "$POST_CONTENTION_REMOTE_TAG_PENDING" -gt 0 ]]; then
+  echo ""
+  echo "FAIL: remote tag is still pending after contention flush"
+  SCENARIO_PASS=0
+fi
+
 if [[ "$VERIFY_PRELOADED" -eq 0 ]]; then
   echo ""
   echo "FAIL: verification proxy loaded 0 entries (expected merged index)"
@@ -1068,7 +1096,7 @@ fi
 
 if [[ "$SCENARIO_PASS" -eq 1 ]]; then
   echo ""
-  echo "PASS: both proxies flushed without timeouts/drops, merged index has ${VERIFY_PRELOADED} entries"
+  echo "PASS: proxies finished without timeouts/drops/forced stops; accepted_contention=${TOTAL_ACCEPTED_CONTENTION}, merged index has ${VERIFY_PRELOADED} entries"
 fi
 
 BUDGET_STATUS=0

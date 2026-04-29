@@ -78,7 +78,7 @@ remote_tag_check_once() {
   local workspace="$2"
   local tag="$3"
   local output_dir="$4"
-  local check_file stderr_file hits misses
+  local check_file stderr_file hits misses pending
 
   mkdir -p "$output_dir"
   check_file="${output_dir}/remote-tag-check.json"
@@ -92,8 +92,10 @@ remote_tag_check_once() {
 
   hits="$(json_summary_value "hits" "$check_file")"
   misses="$(json_summary_value "misses" "$check_file")"
+  pending="$(json_summary_value "pending" "$check_file")"
   REMOTE_TAG_CHECK_HITS="${hits:-0}"
   REMOTE_TAG_CHECK_MISSES="${misses:-0}"
+  REMOTE_TAG_CHECK_PENDING="${pending:-0}"
   REMOTE_TAG_CHECK_CACHE_ENTRY_ID="$(json_first_hit_string_value "cache_entry_id" "$check_file")"
   REMOTE_TAG_CHECK_FILE="$check_file"
   REMOTE_TAG_CHECK_STDERR_FILE="$stderr_file"
@@ -102,6 +104,7 @@ remote_tag_check_once() {
     REMOTE_TAG_CHECK_FILE \
     REMOTE_TAG_CHECK_HITS \
     REMOTE_TAG_CHECK_MISSES \
+    REMOTE_TAG_CHECK_PENDING \
     REMOTE_TAG_CHECK_STDERR_FILE
   return 0
 }
@@ -128,7 +131,7 @@ verify_remote_tag_visible() {
 
   for attempt in $(seq 1 "$attempts"); do
     if remote_tag_check_once "$binary" "$workspace" "$tag" "$output_dir"; then
-      echo "Remote tag check (${tag}): hits=${REMOTE_TAG_CHECK_HITS:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0}, file=${REMOTE_TAG_CHECK_FILE}"
+      echo "Remote tag check (${tag}): hits=${REMOTE_TAG_CHECK_HITS:-0}, pending=${REMOTE_TAG_CHECK_PENDING:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0}, file=${REMOTE_TAG_CHECK_FILE}"
       if awk -v a="${REMOTE_TAG_CHECK_HITS:-0}" -v b="$minimum_hits" 'BEGIN { exit (a + 0 >= b + 0) ? 0 : 1 }'; then
         if [[ -z "$expected_cache_entry_id" ]]; then
           return 0
@@ -155,9 +158,9 @@ verify_remote_tag_visible() {
   done
 
   if [[ -n "$expected_cache_entry_id" ]]; then
-    echo "ERROR: remote tag ${tag} did not converge to cache_entry_id=${expected_cache_entry_id} (hits=${REMOTE_TAG_CHECK_HITS:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0}, observed_cache_entry_id=${REMOTE_TAG_CHECK_CACHE_ENTRY_ID:-})"
+    echo "ERROR: remote tag ${tag} did not converge to cache_entry_id=${expected_cache_entry_id} (hits=${REMOTE_TAG_CHECK_HITS:-0}, pending=${REMOTE_TAG_CHECK_PENDING:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0}, observed_cache_entry_id=${REMOTE_TAG_CHECK_CACHE_ENTRY_ID:-})"
   else
-    echo "ERROR: remote tag ${tag} is not published (hits=${REMOTE_TAG_CHECK_HITS:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0})"
+    echo "ERROR: remote tag ${tag} is not published (hits=${REMOTE_TAG_CHECK_HITS:-0}, pending=${REMOTE_TAG_CHECK_PENDING:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0})"
   fi
   if [[ -n "$proxy_log" && -f "$proxy_log" ]]; then
     echo "--- proxy log tail ---"
