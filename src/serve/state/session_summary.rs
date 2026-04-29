@@ -14,27 +14,31 @@ pub struct CacheSessionSummarySnapshot {
     pub proxy: Value,
     pub rails: Value,
     pub storage: Value,
+    pub lifecycle: Value,
     pub oci: Value,
     pub startup_prefetch: Value,
     pub kv_upload: Value,
     pub singleflight: Value,
     pub local_cache: Value,
     pub buildkit: Value,
+    pub classification: Value,
 }
 
 pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnapshot {
     let duration_ms = state.started_at.elapsed().as_millis() as u64;
-    let classification = classify_cache_session(state);
+    let session_kind = classify_cache_session(state);
     let oci_body = state.oci_body_metrics.metadata_hints();
     let oci_engine = state
         .oci_engine_diagnostics
         .metadata_hints(state.oci_hydration_policy.as_str());
     let oci_negative = state.oci_negative_cache.metadata_hints();
-    let singleflight = state.singleflight_metrics.metadata_hints();
+    let singleflight_hints = state.singleflight_metrics.metadata_hints();
+    let startup_prefetch_hints = state.prefetch_metrics.metadata_hints();
+    let kv_upload_hints = state.kv_blob_upload_metrics.metadata_hints();
 
     let proxy = json!({
-        "mode": classification.mode,
-        "adapter": classification.adapter,
+        "mode": session_kind.mode,
+        "adapter": session_kind.adapter,
         "hydration_policy": state.oci_hydration_policy.as_str(),
         "duration_ms": duration_ms,
         "read_only": state.read_only,
@@ -44,10 +48,14 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
         "blob_prefetch_concurrency_source": if state.blob_prefetch_concurrency_from_env { "env" } else { "auto" },
         "oci_alias_promotion_refs": &state.oci_alias_promotion_refs,
     });
-    let startup_prefetch = map_to_json(state.prefetch_metrics.metadata_hints());
-    let kv_upload = map_to_json(state.kv_blob_upload_metrics.metadata_hints());
     let rails = crate::observability::rails_request_summary();
     let storage = storage_summary(&oci_engine);
+    let lifecycle = lifecycle_summary(
+        &oci_engine,
+        &startup_prefetch_hints,
+        &kv_upload_hints,
+        &singleflight_hints,
+    );
     let mut oci = merged_maps_to_json(&[oci_body.clone(), oci_engine, oci_negative]);
     if let Some(object) = oci.as_object_mut() {
         object.insert(
@@ -62,28 +70,33 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
         "blob_read": map_to_json(state.blob_read_metrics.metadata_hints()),
     });
     let buildkit = json!({
-        "run_classification": if classification.adapter == "oci" {
+        "run_classification": if session_kind.adapter == "oci" {
             "unknown"
         } else {
             "not_applicable"
         },
     });
+    let classification = json!({
+        "issue_candidates": []
+    });
 
     CacheSessionSummarySnapshot {
         schema: "cache-session-v2",
-        mode: classification.mode,
-        adapter: classification.adapter,
+        mode: session_kind.mode,
+        adapter: session_kind.adapter,
         workspace: state.workspace.clone(),
         duration_ms,
         proxy,
         rails,
         storage,
+        lifecycle,
         oci,
-        startup_prefetch,
-        kv_upload,
-        singleflight: map_to_json(singleflight),
+        startup_prefetch: map_to_json(startup_prefetch_hints),
+        kv_upload: map_to_json(kv_upload_hints),
+        singleflight: map_to_json(singleflight_hints),
         local_cache,
         buildkit,
+        classification,
     }
 }
 
@@ -160,6 +173,92 @@ fn storage_summary(oci_engine: &BTreeMap<String, String>) -> Value {
             .entry(key)
             .or_insert_with(|| json_metric_value(&value));
     }
+
+    Value::Object(object)
+}
+
+fn lifecycle_summary(
+    oci_engine: &BTreeMap<String, String>,
+    startup_prefetch: &BTreeMap<String, String>,
+    kv_upload: &BTreeMap<String, String>,
+    singleflight: &BTreeMap<String, String>,
+) -> Value {
+    let mut object = serde_json::Map::new();
+    let mut miss_reason_counts = serde_json::Map::new();
+    let mut degradation_reason_counts = serde_json::Map::new();
+
+    let entry_missing_count = sum_metric_keys(
+        oci_engine,
+        &[
+            "oci_engine_miss_manifest",
+            "oci_engine_miss_blob_locator",
+            "oci_engine_miss_download_url",
+            "oci_engine_miss_remote_blob",
+        ],
+    );
+    insert_positive_count(
+        &mut miss_reason_counts,
+        "entry_missing",
+        entry_missing_count,
+    );
+
+    let storage_check_failed_count = sum_metric_keys(
+        oci_engine,
+        &[
+            "oci_engine_remote_blob_check_errors",
+            "oci_engine_storage_get_error_count",
+            "oci_engine_storage_get_timeout_count",
+        ],
+    );
+    insert_positive_count(
+        &mut degradation_reason_counts,
+        "storage_check_failed",
+        storage_check_failed_count,
+    );
+
+    let negative_cache_hit_count = sum_metric_keys(
+        oci_engine,
+        &[
+            "oci_engine_negative_cache_hit_manifest_ref",
+            "oci_engine_negative_cache_hit_blob_locator",
+            "oci_engine_negative_cache_hit_download_url",
+            "oci_engine_negative_cache_hit_remote_blob",
+        ],
+    );
+    insert_positive_count(
+        &mut degradation_reason_counts,
+        "negative_cache_hit",
+        negative_cache_hit_count,
+    );
+
+    if metric_bool(startup_prefetch, "startup_prefetch_timed_out") {
+        insert_positive_count(
+            &mut degradation_reason_counts,
+            "startup_prefetch_timeout",
+            1,
+        );
+    }
+
+    insert_positive_count(
+        &mut degradation_reason_counts,
+        "singleflight_timeout",
+        sum_metric_suffix(singleflight, "_follower_timeouts"),
+    );
+
+    insert_positive_count(
+        &mut degradation_reason_counts,
+        "receipt_commit_failed",
+        metric_u64(kv_upload, "kv_upload_failed_blobs").unwrap_or(0),
+    );
+
+    insert_count_map(&mut object, "miss_reason_counts", miss_reason_counts);
+    let degraded_miss_count = sum_json_counts(&degradation_reason_counts);
+    insert_count_map(
+        &mut object,
+        "degradation_reason_counts",
+        degradation_reason_counts,
+    );
+    insert_positive_count(&mut object, "degraded_miss_count", degraded_miss_count);
 
     Value::Object(object)
 }
@@ -282,6 +381,41 @@ fn metric_u64(map: &BTreeMap<String, String>, key: &str) -> Option<u64> {
     map.get(key).and_then(|value| value.parse::<u64>().ok())
 }
 
+fn metric_bool(map: &BTreeMap<String, String>, key: &str) -> bool {
+    matches!(map.get(key).map(String::as_str), Some("true" | "1" | "yes"))
+}
+
+fn sum_metric_keys(map: &BTreeMap<String, String>, keys: &[&str]) -> u64 {
+    keys.iter().filter_map(|key| metric_u64(map, key)).sum()
+}
+
+fn sum_metric_suffix(map: &BTreeMap<String, String>, suffix: &str) -> u64 {
+    map.iter()
+        .filter(|(key, _)| key.ends_with(suffix))
+        .filter_map(|(_, value)| value.parse::<u64>().ok())
+        .sum()
+}
+
+fn insert_positive_count(object: &mut serde_json::Map<String, Value>, key: &str, count: u64) {
+    if count > 0 {
+        object.insert(key.to_string(), Value::from(count));
+    }
+}
+
+fn insert_count_map(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    counts: serde_json::Map<String, Value>,
+) {
+    if !counts.is_empty() {
+        object.insert(key.to_string(), Value::Object(counts));
+    }
+}
+
+fn sum_json_counts(counts: &serde_json::Map<String, Value>) -> u64 {
+    counts.values().filter_map(Value::as_u64).sum()
+}
+
 fn throughput_mbps(bytes: u64, body_duration_ms: u64) -> Option<f64> {
     if bytes == 0 || body_duration_ms == 0 {
         return None;
@@ -379,5 +513,64 @@ mod tests {
         assert_eq!(summary["cache_status"], "hit");
         assert_eq!(summary["block_location"], "remote");
         assert_eq!(summary["oci_engine_storage_get_ttfb_ms"], 400);
+    }
+
+    #[test]
+    fn lifecycle_summary_rolls_up_proxy_health_counters() {
+        let summary = lifecycle_summary(
+            &BTreeMap::from([
+                ("oci_engine_miss_manifest".to_string(), "2".to_string()),
+                ("oci_engine_miss_remote_blob".to_string(), "3".to_string()),
+                (
+                    "oci_engine_remote_blob_check_errors".to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    "oci_engine_storage_get_error_count".to_string(),
+                    "2".to_string(),
+                ),
+                (
+                    "oci_engine_storage_get_timeout_count".to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    "oci_engine_negative_cache_hit_manifest_ref".to_string(),
+                    "4".to_string(),
+                ),
+                (
+                    "oci_engine_negative_cache_hit_remote_blob".to_string(),
+                    "5".to_string(),
+                ),
+            ]),
+            &BTreeMap::from([("startup_prefetch_timed_out".to_string(), "true".to_string())]),
+            &BTreeMap::from([("kv_upload_failed_blobs".to_string(), "2".to_string())]),
+            &BTreeMap::from([(
+                "singleflight_kv_lookup_follower_timeouts".to_string(),
+                "6".to_string(),
+            )]),
+        );
+
+        assert_eq!(summary["miss_reason_counts"]["entry_missing"], 5);
+        assert_eq!(
+            summary["degradation_reason_counts"]["storage_check_failed"],
+            4
+        );
+        assert_eq!(
+            summary["degradation_reason_counts"]["negative_cache_hit"],
+            9
+        );
+        assert_eq!(
+            summary["degradation_reason_counts"]["startup_prefetch_timeout"],
+            1
+        );
+        assert_eq!(
+            summary["degradation_reason_counts"]["singleflight_timeout"],
+            6
+        );
+        assert_eq!(
+            summary["degradation_reason_counts"]["receipt_commit_failed"],
+            2
+        );
+        assert_eq!(summary["degraded_miss_count"], 22);
     }
 }

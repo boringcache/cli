@@ -18,12 +18,14 @@ pub(super) fn emit_cache_session_summary(state: &AppState) {
         summary.proxy,
         summary.rails,
         summary.storage,
+        summary.lifecycle,
         summary.oci,
         summary.startup_prefetch,
         summary.kv_upload,
         summary.singleflight,
         summary.local_cache,
         summary.buildkit,
+        summary.classification,
     ));
     observability::flush_for(std::time::Duration::from_secs(2));
 }

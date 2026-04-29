@@ -51,6 +51,8 @@ pub(crate) struct ObservabilityEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub oci: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub startup_prefetch: Option<Value>,
@@ -62,6 +64,8 @@ pub(crate) struct ObservabilityEvent {
     pub local_cache: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buildkit: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classification: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,12 +146,14 @@ impl ObservabilityEvent {
             proxy: None,
             rails: None,
             storage: None,
+            lifecycle: None,
             oci: None,
             startup_prefetch: None,
             kv_upload: None,
             singleflight: None,
             local_cache: None,
             buildkit: None,
+            classification: None,
         }
     }
 
@@ -191,12 +197,14 @@ impl ObservabilityEvent {
             proxy: None,
             rails: None,
             storage: None,
+            lifecycle: None,
             oci: None,
             startup_prefetch: None,
             kv_upload: None,
             singleflight: None,
             local_cache: None,
             buildkit: None,
+            classification: None,
         }
     }
 
@@ -238,12 +246,14 @@ impl ObservabilityEvent {
             proxy: None,
             rails: None,
             storage: None,
+            lifecycle: None,
             oci: None,
             startup_prefetch: None,
             kv_upload: None,
             singleflight: None,
             local_cache: None,
             buildkit: None,
+            classification: None,
         }
     }
 
@@ -256,12 +266,14 @@ impl ObservabilityEvent {
         proxy: Value,
         rails: Value,
         storage: Value,
+        lifecycle: Value,
         oci: Value,
         startup_prefetch: Value,
         kv_upload: Value,
         singleflight: Value,
         local_cache: Value,
         buildkit: Value,
+        classification: Value,
     ) -> Self {
         let ctx = default_context();
         Self {
@@ -294,12 +306,14 @@ impl ObservabilityEvent {
             proxy: Some(proxy),
             rails: Some(rails),
             storage: Some(storage),
+            lifecycle: Some(lifecycle),
             oci: Some(oci),
             startup_prefetch: Some(startup_prefetch),
             kv_upload: Some(kv_upload),
             singleflight: Some(singleflight),
             local_cache: Some(local_cache),
             buildkit: Some(buildkit),
+            classification: Some(classification),
         }
     }
 
