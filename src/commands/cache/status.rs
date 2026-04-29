@@ -1,4 +1,7 @@
-use crate::api::{ApiClient, models::workspace::WorkspaceStatusResponse};
+use crate::api::{
+    ApiClient,
+    models::workspace::{WorkspaceStatusResponse, WorkspaceStatusSession},
+};
 use crate::progress::format_bytes;
 use crate::ui;
 use anyhow::Result;
@@ -320,6 +323,10 @@ fn print_sessions_section(status: &WorkspaceStatusResponse) {
             println!("    context: {}", truncate(&context.join(" "), 80));
         }
 
+        for line in session_review_lines(session) {
+            println!("    {line}");
+        }
+
         if !session.missed_keys.is_empty() {
             let misses = session
                 .missed_keys
@@ -348,6 +355,36 @@ fn print_sessions_section(status: &WorkspaceStatusResponse) {
     }
 
     ui::blank_line();
+}
+
+pub(crate) fn session_review_lines(session: &WorkspaceStatusSession) -> Vec<String> {
+    let Some(review) = session.review.as_ref() else {
+        return Vec::new();
+    };
+
+    if review.state == "clear" && review.issue_candidates.is_empty() && !review.service_side_issue {
+        return Vec::new();
+    }
+
+    let label = match review.state.as_str() {
+        "action_required" => "action",
+        "service_side_issue" => "service",
+        _ => "review",
+    };
+    let mut lines = vec![format!(
+        "review: {label} - {}",
+        truncate(&review.summary, 92)
+    )];
+
+    if let Some(action) = review
+        .issue_candidates
+        .first()
+        .and_then(|candidate| candidate.suggested_action.as_deref())
+    {
+        lines.push(format!("next: {}", truncate(action, 92)));
+    }
+
+    lines
 }
 
 fn print_missed_keys_section(status: &WorkspaceStatusResponse) {
@@ -453,7 +490,8 @@ mod tests {
         WorkspaceStatusMissedKey, WorkspaceStatusOperations, WorkspaceStatusPeriod,
         WorkspaceStatusResponse, WorkspaceStatusRuntimeSummary, WorkspaceStatusSavings,
         WorkspaceStatusSession, WorkspaceStatusSessionError, WorkspaceStatusSessionHealth,
-        WorkspaceStatusSessionMissedKey, WorkspaceStatusTool, WorkspaceStatusWorkspace,
+        WorkspaceStatusSessionIssueCandidate, WorkspaceStatusSessionMissedKey,
+        WorkspaceStatusSessionReview, WorkspaceStatusTool, WorkspaceStatusWorkspace,
     };
     use serde_json::Value;
 
@@ -579,6 +617,7 @@ mod tests {
                     miss_count: 3,
                     sampled_key_prefix: Some("deps-".to_string()),
                 }],
+                review: None,
             }],
             missed_keys: vec![WorkspaceStatusMissedKey {
                 key_hash: "abc123".to_string(),
@@ -610,5 +649,50 @@ mod tests {
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["workspace"]["slug"], "org/demo");
         assert_eq!(value["tools"][0]["tool"], "turbo");
+    }
+
+    #[test]
+    fn session_review_lines_render_customer_action_and_next_step() {
+        let mut status = sample_status_response();
+        status.sessions[0].review = Some(WorkspaceStatusSessionReview {
+            primary_bottleneck: Some("cache_miss_bound".to_string()),
+            state: "action_required".to_string(),
+            summary: "No cache entry was found for this tag.".to_string(),
+            service_side_issue: false,
+            issue_candidates: vec![WorkspaceStatusSessionIssueCandidate {
+                owner: "customer".to_string(),
+                kind: "cache_miss_tag_not_found".to_string(),
+                surface: "tui".to_string(),
+                severity: "actionable".to_string(),
+                confidence: Some(0.7),
+                summary: "No cache entry was found for this tag.".to_string(),
+                suggested_action: Some("Check tag/ref naming and trusted save path.".to_string()),
+                evidence_refs: vec!["cache_session:sess_1:summary:lifecycle".to_string()],
+            }],
+        });
+
+        let lines = session_review_lines(&status.sessions[0]);
+
+        assert_eq!(
+            lines,
+            vec![
+                "review: action - No cache entry was found for this tag.".to_string(),
+                "next: Check tag/ref naming and trusted save path.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn session_review_lines_stays_quiet_for_clear_reviews() {
+        let mut status = sample_status_response();
+        status.sessions[0].review = Some(WorkspaceStatusSessionReview {
+            primary_bottleneck: None,
+            state: "clear".to_string(),
+            summary: "No customer action needed from the available cache telemetry.".to_string(),
+            service_side_issue: false,
+            issue_candidates: Vec::new(),
+        });
+
+        assert!(session_review_lines(&status.sessions[0]).is_empty());
     }
 }

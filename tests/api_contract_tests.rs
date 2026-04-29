@@ -308,7 +308,9 @@ mod response_validation {
         CompleteMultipartResponse, ManifestCheckResponse, RestoreResult, SaveResponse,
         TagDeleteResponse, UploadSessionStatusResponse,
     };
-    use boring_cache_cli::api::models::workspace::{SessionInfo, Workspace};
+    use boring_cache_cli::api::models::workspace::{
+        SessionInfo, Workspace, WorkspaceSessionsResponse,
+    };
     use serde_json::json;
 
     #[test]
@@ -613,6 +615,47 @@ mod response_validation {
     }
 
     #[test]
+    fn test_workspace_sessions_deserializes_without_review_for_old_servers() {
+        let response: WorkspaceSessionsResponse =
+            serde_json::from_value(workspace_sessions_response_json(None)).unwrap();
+
+        assert!(response.sessions[0].review.is_none());
+    }
+
+    #[test]
+    fn test_workspace_sessions_deserializes_customer_safe_review() {
+        let review = json!({
+            "primary_bottleneck": "cache_miss_bound",
+            "state": "action_required",
+            "summary": "No cache entry was found for this tag.",
+            "service_side_issue": true,
+            "issue_candidates": [
+                {
+                    "owner": "customer",
+                    "kind": "cache_miss_tag_not_found",
+                    "surface": "tui",
+                    "severity": "actionable",
+                    "confidence": 0.7,
+                    "summary": "No cache entry was found for this tag.",
+                    "suggested_action": "Check tag/ref naming and trusted save path.",
+                    "evidence_refs": ["cache_session:sess_1:summary:lifecycle.miss_reason_counts.tag_not_found"]
+                }
+            ]
+        });
+        let response: WorkspaceSessionsResponse =
+            serde_json::from_value(workspace_sessions_response_json(Some(review))).unwrap();
+        let review = response.sessions[0].review.as_ref().unwrap();
+
+        assert_eq!(review.state, "action_required");
+        assert!(review.service_side_issue);
+        assert_eq!(review.issue_candidates[0].kind, "cache_miss_tag_not_found");
+        assert_eq!(
+            review.issue_candidates[0].suggested_action.as_deref(),
+            Some("Check tag/ref naming and trusted save path.")
+        );
+    }
+
+    #[test]
     fn test_session_info_deserializes() {
         let api_response = json!({
             "valid": true,
@@ -638,6 +681,63 @@ mod response_validation {
         });
 
         let _: SessionInfo = serde_json::from_value(api_response).unwrap();
+    }
+
+    fn workspace_sessions_response_json(review: Option<serde_json::Value>) -> serde_json::Value {
+        let mut session = json!({
+            "session_id": "sess_1",
+            "tool": "turbo",
+            "project_hint": "demo",
+            "phase_hint": "build",
+            "metadata_hints": {},
+            "hit_rate": 80.0,
+            "hit_count": 8,
+            "miss_count": 2,
+            "error_count": 0,
+            "error_details": [],
+            "duration_seconds": 3.0,
+            "bytes_read": 512,
+            "bytes_written": 256,
+            "created_at": "2026-04-15T00:00:00Z",
+            "missed_keys": []
+        });
+        if let Some(review) = review {
+            session["review"] = review;
+        }
+
+        json!({
+            "workspace": {
+                "id": "ws_1",
+                "name": "Demo",
+                "slug": "org/demo",
+                "description": null,
+                "provisioned": true,
+                "created_at": "2026-04-15T00:00:00Z",
+                "updated_at": "2026-04-15T00:00:00Z"
+            },
+            "period": {
+                "key": "24h",
+                "started_at": "2026-04-14T00:00:00Z",
+                "ended_at": "2026-04-15T00:00:00Z"
+            },
+            "generated_at": "2026-04-15T00:00:00Z",
+            "session_health": {
+                "total_sessions": 1,
+                "healthy_sessions": 1,
+                "error_sessions": 0,
+                "degraded_sessions": 0,
+                "avg_hit_rate": 80.0,
+                "avg_duration_ms": 3000.0
+            },
+            "pagination": {
+                "limit": 20,
+                "offset": 0,
+                "total": 1,
+                "returned": 1,
+                "has_more": false
+            },
+            "sessions": [session]
+        })
     }
 
     #[test]

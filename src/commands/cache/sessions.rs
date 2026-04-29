@@ -89,6 +89,10 @@ fn render_sessions_report(response: &WorkspaceSessionsResponse) {
             );
         }
 
+        for line in crate::commands::status::session_review_lines(session) {
+            println!("    {line}");
+        }
+
         if !session.missed_keys.is_empty() {
             let misses = session
                 .missed_keys
@@ -205,6 +209,7 @@ mod tests {
                     miss_count: 2,
                     sampled_key_prefix: Some("deps-".to_string()),
                 }],
+                review: None,
             }],
         };
 

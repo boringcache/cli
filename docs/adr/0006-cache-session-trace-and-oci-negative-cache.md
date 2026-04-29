@@ -265,6 +265,7 @@ The first CLI baseline is implemented:
 - Docker adapter planning now carries provider-neutral CI run metadata into dry-run JSON and proxy metadata hints, including provider, run uid/attempt, ref type/name, default branch, PR number, commit SHA, immutable run ref, import refs, and promotion aliases when ADR 0007 derivation is active.
 - startup download-url preload uses the normal API request retry path, and startup blob body warm retries transient URL/storage failures; these are read/transport retries, not publish-readiness polling.
 - the proxy summary now posts `cache_session_summary.v2` and keeps OCI storage GET evidence in the same provider-neutral `storage` shape used by the web ADR 0008 archive/CAS metrics bridge: direction, bytes, request count, TTFB/body duration, throughput, retry/error/timeout counts, and region/cache-status/block-location when the storage response headers provide them. Raw `oci_engine_storage_*` counters remain in the section for compatibility and low-level debug.
+- `status`, `sessions`, and the TUI dashboard now accept the optional web ADR 0008 customer-safe session `review` payload. Human output renders only non-clear action/service review lines, JSON output preserves the review object, and old web APIs that omit the field remain compatible.
 
 Remaining trace depth belongs in later passes: richer backend/action operation naming, richer BuildKit enrichment from the action/harness, and release-path Docker E2E artifact validation.
 

@@ -998,6 +998,9 @@ fn session_lines(sessions: &[WorkspaceStatusSession]) -> Vec<Line<'static>> {
             session.error_count,
             format_bytes(session.bytes_read)
         )));
+        for review_line in crate::commands::status::session_review_lines(session) {
+            lines.push(Line::from(format!("  {review_line}")));
+        }
     }
     lines
 }

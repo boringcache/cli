@@ -341,6 +341,34 @@ pub struct WorkspaceStatusSession {
     pub bytes_written: u64,
     pub created_at: String,
     pub missed_keys: Vec<WorkspaceStatusSessionMissedKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<WorkspaceStatusSessionReview>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WorkspaceStatusSessionReview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_bottleneck: Option<String>,
+    pub state: String,
+    pub summary: String,
+    pub service_side_issue: bool,
+    #[serde(default)]
+    pub issue_candidates: Vec<WorkspaceStatusSessionIssueCandidate>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WorkspaceStatusSessionIssueCandidate {
+    pub owner: String,
+    pub kind: String,
+    pub surface: String,
+    pub severity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_action: Option<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
