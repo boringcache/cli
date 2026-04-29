@@ -122,7 +122,7 @@ pub(super) fn builtin_entry(entry_id: &str) -> Option<BuiltInEntrySpec> {
             default_tag: "target",
             env_lookup: empty_env,
             env_export: empty_env,
-            extra_env: empty_pairs,
+            extra_env: &[("CARGO_INCREMENTAL", "0")],
             default_path: DefaultPathKind::Relative("target"),
         }),
         "sccache-dir" => Some(BuiltInEntrySpec {

@@ -1202,6 +1202,7 @@ sccache-key-prefix = "rust/ci"
     assert_eq!(parsed["tag"], "sccache-cache");
     assert_eq!(parsed["command"], serde_json::json!(["cargo", "build"]));
     assert_eq!(parsed["env_vars"]["RUSTC_WRAPPER"], "sccache");
+    assert_eq!(parsed["env_vars"]["CARGO_INCREMENTAL"], "0");
     assert_eq!(
         parsed["env_vars"]["SCCACHE_WEBDAV_ENDPOINT"],
         "http://host.docker.internal:6001/"

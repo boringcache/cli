@@ -230,6 +230,10 @@ default_path = "/mise/installs"
             plan.env_vars.get("SCCACHE_DIR"),
             Some(&sccache_dir.display().to_string())
         );
+        assert_eq!(
+            plan.env_vars.get("CARGO_INCREMENTAL"),
+            Some(&"0".to_string())
+        );
     }
 
     #[test]

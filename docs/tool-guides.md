@@ -267,7 +267,7 @@ sccache-key-prefix = "rust/ci"
 boringcache sccache
 ```
 
-The adapter sets `RUSTC_WRAPPER=sccache`, `SCCACHE_WEBDAV_ENDPOINT`, and `SCCACHE_WEBDAV_KEY_PREFIX` automatically.
+The adapter sets `RUSTC_WRAPPER=sccache`, `SCCACHE_WEBDAV_ENDPOINT`, `SCCACHE_WEBDAV_KEY_PREFIX`, and `CARGO_INCREMENTAL=0` when the caller has not set it.
 After the wrapped command exits, it reads `sccache --show-stats` and prints a concise hit/miss summary when sccache reports one.
 
 For a long-lived endpoint:

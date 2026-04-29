@@ -156,7 +156,7 @@ For Bazel, the adapter injects the remote-cache flags directly.
 For BuildKit, the adapter injects `--import-cache` and `--export-cache` for `buildctl build`.
 For Gradle, the adapter adds `--build-cache` plus a generated init script that points the remote cache at the local proxy.
 For Maven, the adapter injects the `maven.build.cache.*` remote endpoint properties, but the Maven build cache extension still needs to be present in the repo.
-For sccache, the adapter injects `RUSTC_WRAPPER`, `SCCACHE_WEBDAV_ENDPOINT`, and `SCCACHE_WEBDAV_KEY_PREFIX`, then prints a best-effort `sccache --show-stats` summary after the wrapped command. Leave `sccache-key-prefix` unset unless you need a stable WebDAV sub-root within the proxy cache.
+For sccache, the adapter injects `RUSTC_WRAPPER`, `SCCACHE_WEBDAV_ENDPOINT`, `SCCACHE_WEBDAV_KEY_PREFIX`, and `CARGO_INCREMENTAL=0` when the caller has not set it, then prints a best-effort `sccache --show-stats` summary after the wrapped command. Leave `sccache-key-prefix` unset unless you need a stable WebDAV sub-root within the proxy cache.
 
 If a repo already has a stable checked-in cache config, that still works. Explicit tool flags and checked-in config stay user-owned.
 
