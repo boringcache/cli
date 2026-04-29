@@ -2,6 +2,12 @@
 
 This log captures regressions, root causes, and guardrails for cache-registry performance/correctness.
 
+## 2026-04-29 - Nx self-hosted archive metadata collision
+
+- Storybook Nx rolling warm failed after the tag-plan fix with an Nx 22.x panic in `http_remote_cache.rs` while reading a remote cache hit. Datadog showed the BoringCache proxy had restored and prefetched the selected Nx tag successfully with zero startup prefetch failures, so the failure moved from tag visibility to the artifact read path.
+- The benchmark workspace caches compile output under workspace-root `code/bench/...`. Nx 22.x uploads self-hosted remote-cache artifacts as gzip tar archives, appends root metadata files named `terminalOutput` and `code`, and on restore branches on root path names before checking entry type. A root `code/` directory entry is therefore read as the metadata exit-code file and can panic on an empty byte buffer.
+- The proxy now fail-opens on Nx artifact normalization and rewrites only gzip tar uploads that contain exact root directory entries named `code` or `terminalOutput`; nested output files and the real metadata files are preserved. The public Nx compatibility claim remains the self-hosted HTTP API boundary, not a broad promise to own Nx archive internals.
+
 ## 2026-04-22 - Docker benchmark diagnostics after proxy flush
 
 - Post-fix benchmark artifacts now prove the diagnostics ordering fix beyond
