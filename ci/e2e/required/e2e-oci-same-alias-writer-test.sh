@@ -19,6 +19,7 @@ LOG_DIR="${LOG_DIR:-.}"
 ALIAS_REF="${ALIAS_REF:-branch-main}"
 RUN_ID="${GITHUB_RUN_ID:-${BORINGCACHE_E2E_RUN_ID:-local}}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-${BORINGCACHE_E2E_RUN_ATTEMPT:-1}}"
+EXPECTED_CACHE_SESSION_SCHEMA="${EXPECTED_CACHE_SESSION_SCHEMA:-cache_session_v2}"
 RUN_A_REF="${RUN_A_REF:-run-a-${RUN_ID}-${RUN_ATTEMPT}}"
 RUN_B_REF="${RUN_B_REF:-run-b-${RUN_ID}-${RUN_ATTEMPT}}"
 RUN_A_STARTED_AT="${RUN_A_STARTED_AT:-2026-04-21T10:00:00Z}"
@@ -486,7 +487,7 @@ write_metrics_summary "run-b"
 assert_summary_equals \
   "${LOG_DIR}/summary-run-b.env" \
   "request_metrics_cache_session_schema" \
-  "cache_session_v2"
+  "${EXPECTED_CACHE_SESSION_SCHEMA}"
 assert_summary_positive \
   "${LOG_DIR}/summary-run-b.env" \
   "request_metrics_cache_session_oci_oci_engine_alias_promotion_promoted"
@@ -497,7 +498,7 @@ write_metrics_summary "run-a"
 assert_summary_equals \
   "${LOG_DIR}/summary-run-a.env" \
   "request_metrics_cache_session_schema" \
-  "cache_session_v2"
+  "${EXPECTED_CACHE_SESSION_SCHEMA}"
 assert_summary_positive \
   "${LOG_DIR}/summary-run-a.env" \
   "request_metrics_cache_session_oci_oci_engine_alias_promotion_ignored_stale"
