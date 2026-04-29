@@ -1613,6 +1613,11 @@ tag = "gradle-cache"
 command = ["./gradlew", "build", "--no-daemon"]
 endpoint-host = "host.docker.internal"
 port = 6001
+
+[[skip]]
+tool = "gradle"
+action = ":app:processReleaseResources"
+reason = "fetch consistently exceeds local execute"
 "#,
     )
     .expect("write repo config");
@@ -1650,18 +1655,35 @@ port = 6001
         "http://host.docker.internal:6001/cache/"
     );
     assert_eq!(parsed["env_vars"]["BORINGCACHE_GRADLE_CACHE_PUSH"], "false");
+    assert_eq!(
+        parsed["env_vars"]["BORINGCACHE_GRADLE_SKIP_ACTIONS"],
+        "[\":app:processReleaseResources\"]"
+    );
     let setup_files = parsed["setup"]["files"]
         .as_array()
         .expect("setup files should be present");
     assert_eq!(parsed["setup"]["schema_version"], 1);
-    assert!(setup_files.iter().any(|file| {
-        file["path"].as_str().is_some_and(|path| {
-            path.ends_with(".gradle/init.d/boringcache-gradle-build-cache.init.gradle")
+    let gradle_init = setup_files
+        .iter()
+        .find(|file| {
+            file["path"].as_str().is_some_and(|path| {
+                path.ends_with(".gradle/init.d/boringcache-gradle-build-cache.init.gradle")
+            })
         })
+        .expect("gradle init setup file");
+    assert!(gradle_init["path"].as_str().is_some_and(|path| {
+        path.ends_with(".gradle/init.d/boringcache-gradle-build-cache.init.gradle")
+    }));
+    assert!(gradle_init["content"].as_str().is_some_and(|content| {
+        content.contains("task.outputs.cacheIf(\"BoringCache skip rule\")")
     }));
     assert_eq!(
         parsed["setup"]["env_vars"]["BORINGCACHE_GRADLE_CACHE_PUSH"],
         "false"
+    );
+    assert_eq!(
+        parsed["setup"]["env_vars"]["BORINGCACHE_GRADLE_SKIP_ACTIONS"],
+        "[\":app:processReleaseResources\"]"
     );
 }
 

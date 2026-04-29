@@ -6,8 +6,31 @@ use crate::proxy;
 
 pub(super) const GRADLE_CACHE_URL_ENV: &str = "BORINGCACHE_GRADLE_CACHE_URL";
 pub(super) const GRADLE_CACHE_PUSH_ENV: &str = "BORINGCACHE_GRADLE_CACHE_PUSH";
+pub(super) const GRADLE_SKIP_ACTIONS_ENV: &str = "BORINGCACHE_GRADLE_SKIP_ACTIONS";
 pub(super) const GRADLE_INIT_SCRIPT_NAME: &str = "boringcache-gradle-build-cache.init.gradle";
 pub(super) const GRADLE_INIT_SCRIPT: &str = r#"import org.gradle.caching.http.HttpBuildCache
+import groovy.json.JsonSlurper
+
+def boringcacheSkipActions() {
+    def raw = System.getenv("BORINGCACHE_GRADLE_SKIP_ACTIONS")
+    if (!raw) {
+        return [] as Set
+    }
+
+    try {
+        def parsed = new JsonSlurper().parseText(raw)
+        if (parsed instanceof Collection) {
+            return parsed
+                .collect { value -> value == null ? null : value.toString().trim() }
+                .findAll { value -> value }
+                .toSet()
+        }
+    } catch (Exception ignored) {
+        logger.warn("[boringcache] ignoring invalid BORINGCACHE_GRADLE_SKIP_ACTIONS")
+    }
+
+    return [] as Set
+}
 
 gradle.settingsEvaluated { settings ->
     def cacheUrl = System.getenv("BORINGCACHE_GRADLE_CACHE_URL")
@@ -18,6 +41,19 @@ gradle.settingsEvaluated { settings ->
                 url = uri(cacheUrl)
                 push = System.getenv("BORINGCACHE_GRADLE_CACHE_PUSH") == "true"
                 allowInsecureProtocol = true
+            }
+        }
+    }
+}
+
+gradle.projectsEvaluated {
+    def boringcacheSkip = boringcacheSkipActions()
+    if (!boringcacheSkip.empty) {
+        gradle.rootProject.allprojects { project ->
+            project.tasks.configureEach { task ->
+                if (boringcacheSkip.contains(task.path)) {
+                    task.outputs.cacheIf("BoringCache skip rule") { false }
+                }
             }
         }
     }
@@ -43,6 +79,12 @@ fn inject_proxy_env(
         GRADLE_CACHE_PUSH_ENV.to_string(),
         (!options.read_only).to_string(),
     );
+    if !options.skip_actions.is_empty() {
+        set.insert(
+            GRADLE_SKIP_ACTIONS_ENV.to_string(),
+            serde_json::to_string(&options.skip_actions).unwrap_or_else(|_| "[]".to_string()),
+        );
+    }
 }
 
 fn prepare_command(
@@ -111,6 +153,7 @@ mod tests {
             sccache_key_prefix: None,
             gradle_home: None,
             node_package_manager_env: Default::default(),
+            skip_actions: Vec::new(),
         }
     }
 
@@ -149,6 +192,24 @@ mod tests {
         assert_eq!(command[1], "--build-cache");
         assert_eq!(command[2], "build");
         assert!(!command.iter().any(|arg| arg.starts_with("--init-script=")));
+    }
+
+    #[test]
+    fn gradle_env_plan_sets_skip_actions() {
+        let mut options = options(false);
+        options.skip_actions = vec![
+            ":app:processReleaseResources".to_string(),
+            ":lib:compileJava".to_string(),
+        ];
+
+        let mut env = BTreeMap::new();
+        inject_proxy_env(&mut env, &context(), &options);
+
+        assert_eq!(
+            env.get(GRADLE_SKIP_ACTIONS_ENV),
+            Some(&"[\":app:processReleaseResources\",\":lib:compileJava\"]".to_string())
+        );
+        assert!(GRADLE_INIT_SCRIPT.contains("task.outputs.cacheIf(\"BoringCache skip rule\")"));
     }
 
     #[test]

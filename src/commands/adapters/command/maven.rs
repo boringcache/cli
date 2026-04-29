@@ -86,6 +86,7 @@ mod tests {
             sccache_key_prefix: None,
             gradle_home: None,
             node_package_manager_env: Default::default(),
+            skip_actions: Vec::new(),
         }
     }
 

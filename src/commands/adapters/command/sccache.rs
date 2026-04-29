@@ -144,6 +144,7 @@ mod tests {
                 sccache_key_prefix: None,
                 gradle_home: None,
                 node_package_manager_env: Default::default(),
+                skip_actions: Vec::new(),
             },
         );
         assert_eq!(
@@ -183,6 +184,7 @@ mod tests {
                 sccache_key_prefix: Some("rust/ci".to_string()),
                 gradle_home: None,
                 node_package_manager_env: Default::default(),
+                skip_actions: Vec::new(),
             },
         );
         assert_eq!(
@@ -213,6 +215,7 @@ mod tests {
                 sccache_key_prefix: None,
                 gradle_home: None,
                 node_package_manager_env: Default::default(),
+                skip_actions: Vec::new(),
             },
         );
         assert!(!plan.set.contains_key("CC"));

@@ -62,6 +62,7 @@ struct AdapterCommandOptions {
     sccache_key_prefix: Option<String>,
     gradle_home: Option<String>,
     node_package_manager_env: ProxyEnvSet,
+    skip_actions: Vec<String>,
 }
 
 impl AdapterRunner {
@@ -485,6 +486,7 @@ pub async fn adapter_execute(
         } else {
             BTreeMap::new()
         },
+        skip_actions: adapter_skip_actions(kind, loaded_config.as_ref())?,
     };
 
     let preview_context = proxy::ProxyContext {
@@ -757,6 +759,23 @@ async fn run_post_command_diagnostics(kind: AdapterKind) {
 
 fn trim_non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn adapter_skip_actions(
+    kind: AdapterKind,
+    loaded_config: Option<&project_config::LoadedRepoConfig>,
+) -> Result<Vec<String>> {
+    let Some(loaded_config) = loaded_config else {
+        return Ok(Vec::new());
+    };
+    let tool = kind.telemetry_tool();
+    Ok(
+        crate::serve::state::proxy_skip_rules_from_config(&loaded_config.config.skip)?
+            .into_iter()
+            .filter(|rule| rule.tool == tool)
+            .map(|rule| rule.action)
+            .collect(),
+    )
 }
 
 fn resolve_adapter_tag(
