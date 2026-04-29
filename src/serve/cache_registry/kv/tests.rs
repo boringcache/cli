@@ -144,6 +144,22 @@ fn conflict_backoff_window_is_longer_for_in_progress_conflicts() {
 }
 
 #[test]
+fn upload_in_progress_conflict_detector_is_narrow() {
+    assert!(is_upload_in_progress_conflict(
+        "save_entry failed: another cache upload is in progress"
+    ));
+    assert!(is_upload_in_progress_conflict(
+        "cache upload in progress for this tag"
+    ));
+    assert!(!is_upload_in_progress_conflict(
+        "tag already points to a different digest"
+    ));
+    assert!(!is_upload_in_progress_conflict(
+        "confirm failed: blob not yet verified"
+    ));
+}
+
+#[test]
 fn transient_backoff_window_is_longer_for_write_path_failures() {
     let (base, jitter) = transient_backoff_window("confirm failed: Server error (500)");
     assert_eq!(base, KV_TRANSIENT_WRITE_PATH_BACKOFF_MS);
@@ -202,6 +218,9 @@ fn classify_flush_error_treats_receipt_incomplete_publish_as_transient() {
 #[test]
 fn should_clear_flushing_after_flush_skips_ok_path() {
     assert!(!should_clear_flushing_after_flush(&FlushResult::Ok));
+    assert!(should_clear_flushing_after_flush(
+        &FlushResult::AcceptedContention
+    ));
     assert!(should_clear_flushing_after_flush(&FlushResult::Conflict));
     assert!(should_clear_flushing_after_flush(&FlushResult::Error));
     assert!(should_clear_flushing_after_flush(&FlushResult::Permanent));

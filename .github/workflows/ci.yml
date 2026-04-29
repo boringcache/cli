@@ -121,8 +121,6 @@ jobs:
           sccache: "true"
           sccache-mode: "proxy"
           cache-target: "true"
-          target-tag: "cargo-target-debug-rust-${{ steps.rust-version.outputs.version }}-aarch64-apple-darwin"
-          sccache-tag: "rust-${{ steps.rust-version.outputs.version }}-sccache-debug-aarch64-apple-darwin"
 
       - name: Setup Rust (Fallback)
         if: steps.boringcache-rust.outcome == 'failure'

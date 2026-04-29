@@ -558,6 +558,13 @@ async fn process_replication_work(state: &AppState, urgent: bool, consecutive_fa
                 let _ = cache_registry::enqueue_replication_flush_hint(state, true, false);
             }
         }
+        cache_registry::FlushResult::AcceptedContention => {
+            let mut gate = state.kv_next_flush_at.write().await;
+            *gate = None;
+            state
+                .kv_replication_flush_conflict
+                .fetch_add(1, Ordering::AcqRel);
+        }
         cache_registry::FlushResult::Conflict => {
             state
                 .kv_replication_flush_conflict
@@ -587,6 +594,7 @@ fn update_consecutive_failures_on_flush_result(
             *consecutive_failures = consecutive_failures.saturating_add(1);
         }
         cache_registry::FlushResult::Ok
+        | cache_registry::FlushResult::AcceptedContention
         | cache_registry::FlushResult::Conflict
         | cache_registry::FlushResult::Permanent => {
             *consecutive_failures = 0;
@@ -630,6 +638,13 @@ mod tests {
         consecutive_failures = 5;
         update_consecutive_failures_on_flush_result(
             &cache_registry::FlushResult::Permanent,
+            &mut consecutive_failures,
+        );
+        assert_eq!(consecutive_failures, 0);
+
+        consecutive_failures = 4;
+        update_consecutive_failures_on_flush_result(
+            &cache_registry::FlushResult::AcceptedContention,
             &mut consecutive_failures,
         );
         assert_eq!(consecutive_failures, 0);

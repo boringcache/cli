@@ -67,11 +67,9 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
             Some(_flush_guard) => {
                 let flush_result = cache_registry::flush_kv_index_on_shutdown(state).await;
                 match flush_result {
-                    cache_registry::FlushResult::Ok => {
-                        let mut gate = state.kv_next_flush_at.write().await;
-                        *gate = None;
-                    }
-                    cache_registry::FlushResult::Permanent => {
+                    cache_registry::FlushResult::Ok
+                    | cache_registry::FlushResult::AcceptedContention
+                    | cache_registry::FlushResult::Permanent => {
                         let mut gate = state.kv_next_flush_at.write().await;
                         *gate = None;
                     }

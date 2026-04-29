@@ -33,6 +33,7 @@ pub struct CheckSummary {
     pub workspace: String,
     pub total: usize,
     pub hits: usize,
+    pub pending: usize,
     pub misses: usize,
     pub results: Vec<CheckResult>,
 }
@@ -64,6 +65,7 @@ async fn execute_inner(
                 workspace: workspace.clone(),
                 total: 0,
                 hits: 0,
+                pending: 0,
                 misses: 0,
                 results: vec![],
             };
@@ -93,6 +95,7 @@ async fn execute_inner(
                 workspace: workspace.clone(),
                 total: 0,
                 hits: 0,
+                pending: 0,
                 misses: 0,
                 results: vec![],
             };
@@ -143,9 +146,19 @@ async fn execute_inner(
         ));
     }
 
-    let resolution_result = api_client
+    let resolution_result = match api_client
         .restore(&workspace, &resolved_tags, options.require_server_signature)
-        .await?;
+        .await
+    {
+        Ok(result) => result,
+        Err(err) if crate::command_support::save_support::is_cache_pending_error(&err) => {
+            resolved_tags
+                .iter()
+                .map(|tag| pending_resolution_entry(tag))
+                .collect()
+        }
+        Err(err) => return Err(err),
+    };
 
     let mut results_by_tag: std::collections::HashMap<String, crate::api::CacheResolutionEntry> =
         std::collections::HashMap::new();
@@ -158,34 +171,48 @@ async fn execute_inner(
 
     let mut check_results: Vec<CheckResult> = Vec::new();
     let mut hits = 0usize;
+    let mut pending = 0usize;
     let mut misses = 0usize;
 
     for (requested_tag, resolved_tag) in &tag_to_resolved {
-        if let Some(entry) = results_by_tag.get(resolved_tag)
-            && entry.status == "hit"
-        {
-            hits += 1;
-            check_results.push(CheckResult {
-                tag: resolved_tag.clone(),
-                requested_tag: requested_tag.clone(),
-                status: "hit".to_string(),
-                cache_entry_id: entry.cache_entry_id.clone(),
-                manifest_root_digest: entry.manifest_root_digest.clone(),
-                size: entry.size,
-                compressed_size: entry.compressed_size,
-            });
-        } else {
-            misses += 1;
+        match results_by_tag.get(resolved_tag) {
+            Some(entry) if entry.status == "hit" => {
+                hits += 1;
+                check_results.push(CheckResult {
+                    tag: resolved_tag.clone(),
+                    requested_tag: requested_tag.clone(),
+                    status: "hit".to_string(),
+                    cache_entry_id: entry.cache_entry_id.clone(),
+                    manifest_root_digest: entry.manifest_root_digest.clone(),
+                    size: entry.size,
+                    compressed_size: entry.compressed_size,
+                });
+            }
+            Some(entry) if is_pending_resolution(entry) => {
+                pending += 1;
+                check_results.push(CheckResult {
+                    tag: resolved_tag.clone(),
+                    requested_tag: requested_tag.clone(),
+                    status: "pending".to_string(),
+                    cache_entry_id: entry.cache_entry_id.clone(),
+                    manifest_root_digest: entry.manifest_root_digest.clone(),
+                    size: entry.size,
+                    compressed_size: entry.compressed_size,
+                });
+            }
+            _ => {
+                misses += 1;
 
-            check_results.push(CheckResult {
-                tag: resolved_tag.clone(),
-                requested_tag: requested_tag.clone(),
-                status: "miss".to_string(),
-                cache_entry_id: None,
-                manifest_root_digest: None,
-                size: None,
-                compressed_size: None,
-            });
+                check_results.push(CheckResult {
+                    tag: resolved_tag.clone(),
+                    requested_tag: requested_tag.clone(),
+                    status: "miss".to_string(),
+                    cache_entry_id: None,
+                    manifest_root_digest: None,
+                    size: None,
+                    compressed_size: None,
+                });
+            }
         }
     }
 
@@ -194,12 +221,18 @@ async fn execute_inner(
         .filter(|r| r.status == "miss")
         .map(|r| r.requested_tag.clone())
         .collect();
+    let pending_tags: Vec<String> = check_results
+        .iter()
+        .filter(|r| r.status == "pending")
+        .map(|r| r.requested_tag.clone())
+        .collect();
 
     if options.json_output {
         let summary = CheckSummary {
             workspace: workspace.clone(),
             total: check_results.len(),
             hits,
+            pending,
             misses,
             results: check_results,
         };
@@ -207,7 +240,11 @@ async fn execute_inner(
     } else {
         ui::blank_line();
         for result in &check_results {
-            let status_icon = if result.status == "hit" { "+" } else { "-" };
+            let status_icon = match result.status.as_str() {
+                "hit" => "+",
+                "pending" => "~",
+                _ => "-",
+            };
             let size_info = match (result.compressed_size, result.size) {
                 (Some(compressed), Some(uncompressed)) if compressed < uncompressed => {
                     format!(
@@ -234,21 +271,82 @@ async fn execute_inner(
 
         ui::blank_line();
         ui::info(&format!(
-            "Result: {}/{} cache entries found",
+            "Result: {}/{} cache entries found{}",
             hits,
-            check_results.len()
+            check_results.len(),
+            if pending > 0 {
+                format!(" ({pending} pending)")
+            } else {
+                String::new()
+            }
         ));
 
         if !missing_tags.is_empty() {
             ui::warn(&format!("Missing: {}", missing_tags.join(", ")));
         }
+        if !pending_tags.is_empty() {
+            ui::warn(&format!("Pending upload: {}", pending_tags.join(", ")));
+        }
     }
 
-    if options.fail_on_miss && !missing_tags.is_empty() {
-        anyhow::bail!("Cache miss for tags: {}", missing_tags.join(", "));
+    if options.fail_on_miss && (!missing_tags.is_empty() || !pending_tags.is_empty()) {
+        match (missing_tags.is_empty(), pending_tags.is_empty()) {
+            (false, true) => anyhow::bail!("Cache miss for tags: {}", missing_tags.join(", ")),
+            (true, false) => {
+                anyhow::bail!(
+                    "Cache upload in progress for tags: {}",
+                    pending_tags.join(", ")
+                )
+            }
+            (false, false) => anyhow::bail!(
+                "Cache miss for tags: {}; cache upload in progress for tags: {}",
+                missing_tags.join(", "),
+                pending_tags.join(", ")
+            ),
+            (true, true) => {}
+        }
     }
 
     Ok(())
+}
+
+fn is_pending_resolution(entry: &crate::api::CacheResolutionEntry) -> bool {
+    entry.pending || matches!(entry.status.as_str(), "pending" | "uploading")
+}
+
+fn pending_resolution_entry(tag: &str) -> crate::api::CacheResolutionEntry {
+    crate::api::CacheResolutionEntry {
+        tag: tag.to_string(),
+        primary_tag: None,
+        signature_tag: None,
+        status: "pending".to_string(),
+        cache_entry_id: None,
+        manifest_url: None,
+        manifest_root_digest: None,
+        manifest_digest: None,
+        compression_algorithm: None,
+        storage_mode: None,
+        blob_count: None,
+        blob_total_size_bytes: None,
+        cas_layout: None,
+        archive_urls: Vec::new(),
+        size: None,
+        uncompressed_size: None,
+        compressed_size: None,
+        uploaded_at: None,
+        content_hash: None,
+        pending: true,
+        error: None,
+        workspace_signing_public_key: None,
+        workspace_signing_key_fingerprint: None,
+        server_signature: None,
+        server_signature_payload: None,
+        server_envelope_signature: None,
+        server_signature_version: None,
+        server_signing_key_id: None,
+        server_signed_at: None,
+        encrypted: false,
+    }
 }
 
 fn verify_check_signature(entry: &crate::api::CacheResolutionEntry) -> Result<()> {
@@ -284,6 +382,7 @@ mod tests {
             workspace: "org/demo".to_string(),
             total: 2,
             hits: 1,
+            pending: 0,
             misses: 1,
             results: vec![
                 CheckResult {

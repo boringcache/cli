@@ -4,7 +4,9 @@ use mockito::{Matcher, Server};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const DUMMY_API_URL: &str = "http://127.0.0.1:65535";
@@ -427,4 +429,132 @@ curl -fsS \
     root_publish_mock.assert();
     alias_pointer_mock.assert();
     alias_publish_mock.assert();
+}
+
+#[test]
+fn test_run_proxy_shutdown_accepts_upload_in_progress_contention() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut server = Server::new();
+    let workspace_path = "/v2/workspaces/test-org/test-workspace";
+
+    let _capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .match_header("authorization", "Bearer test-save-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "features": {
+                    "tag_publish_v2": true,
+                    "registry_path_tags": true
+                }
+            })
+            .to_string(),
+        )
+        .expect_at_least(1)
+        .create();
+
+    let save_mock = server
+        .mock("POST", format!("{workspace_path}/caches").as_str())
+        .match_header("authorization", "Bearer test-save-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "main",
+                "cache_entry_id": "entry-pending-owner",
+                "exists": true,
+                "status": "pending",
+                "storage_mode": "cas",
+                "cas_layout": "file-v1",
+                "manifest_root_digest": "sha256:foreign-owner",
+                "upload_session_id": "session-owner",
+                "manifest_upload_url": "https://uploads.example.invalid/manifest"
+            })
+            .to_string(),
+        )
+        .expect_at_least(1)
+        .create();
+
+    let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let script = r#"endpoint="http://127.0.0.1:$1"
+hash="$2"
+curl -fsS \
+  -X PUT \
+  -H "Authorization: Bearer proxy-token" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary "contended-artifact" \
+  "$endpoint/v8/artifacts/$hash" >/dev/null
+"#;
+
+    let mut child = Command::new(cli_binary())
+        .args([
+            "run",
+            "test-org/test-workspace",
+            "--proxy",
+            "main",
+            "--on-demand",
+            "--no-platform",
+            "--no-git",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--",
+            "sh",
+            "-ec",
+            script,
+            "_",
+            "{PORT}",
+            hash,
+        ])
+        .env("HOME", temp_dir.path())
+        .env("BORINGCACHE_API_URL", server.url())
+        .env("BORINGCACHE_SAVE_TOKEN", "test-save-token")
+        .env_remove("BORINGCACHE_API_TOKEN")
+        .env_remove("BORINGCACHE_TOKEN_FILE")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run proxy command");
+
+    let started = Instant::now();
+    loop {
+        if child.try_wait().expect("poll child").is_some() {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(15) {
+            let _ = child.kill();
+            let output = child.wait_with_output().expect("collect timed-out child");
+            panic!(
+                "proxy shutdown did not accept upload-in-progress contention within 15s, stdout: {}, stderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let elapsed = started.elapsed();
+    let output = child.wait_with_output().expect("collect child output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    assert!(
+        output.status.success(),
+        "Expected proxy run to exit successfully after accepted contention, stdout: {stdout}, stderr: {stderr}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "Expected fast contention shutdown, took {elapsed:?}"
+    );
+    assert!(
+        combined.contains(
+            "another upload is already publishing this cache; leaving local batch unpublished"
+        ),
+        "Expected accepted contention log, got: {combined}"
+    );
+
+    save_mock.assert();
 }

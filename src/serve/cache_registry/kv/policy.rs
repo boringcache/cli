@@ -51,11 +51,14 @@ pub(crate) fn use_kv_miss_cache(namespace: KvNamespace) -> bool {
     !matches!(namespace, KvNamespace::Sccache)
 }
 
-pub(crate) fn conflict_backoff_window(message: &str) -> (u64, u64) {
+pub(crate) fn is_upload_in_progress_conflict(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    if lower.contains("another cache upload is in progress")
+    lower.contains("another cache upload is in progress")
         || lower.contains("cache upload in progress")
-    {
+}
+
+pub(crate) fn conflict_backoff_window(message: &str) -> (u64, u64) {
+    if is_upload_in_progress_conflict(message) {
         (
             KV_CONFLICT_IN_PROGRESS_BACKOFF_MS,
             KV_CONFLICT_IN_PROGRESS_JITTER_MS,

@@ -282,6 +282,100 @@ async fn test_restore_retries_on_pending_entries_in_response() {
 }
 
 #[tokio::test]
+async fn test_check_reports_pending_distinctly_and_fail_on_miss_still_fails() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!("skipping test: networking disabled");
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+        )
+        .with_status(207)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "pending-tag",
+                "status": "pending",
+                "pending": true,
+                "cache_entry_id": "entry-pending",
+                "manifest_root_digest": "sha256:pending"
+            }])
+            .to_string(),
+        )
+        .expect(2)
+        .create_async()
+        .await;
+
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    test_env::set_var("HOME", temp_dir.path());
+
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "check",
+            "test/workspace",
+            "pending-tag",
+            "--json",
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        output.status.success(),
+        "Expected pending check without --fail-on-miss to succeed, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("check JSON output");
+    assert_eq!(value["hits"], 0);
+    assert_eq!(value["pending"], 1);
+    assert_eq!(value["misses"], 0);
+    assert_eq!(value["results"][0]["status"], "pending");
+    assert_eq!(value["results"][0]["requested_tag"], "pending-tag");
+
+    let fail_output = std::process::Command::new(cli_binary())
+        .args([
+            "check",
+            "test/workspace",
+            "pending-tag",
+            "--json",
+            "--no-platform",
+            "--no-git",
+            "--fail-on-miss",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        !fail_output.status.success(),
+        "Expected pending check with --fail-on-miss to fail, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&fail_output.stdout),
+        String::from_utf8_lossy(&fail_output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&fail_output.stderr).to_lowercase();
+    assert!(
+        stderr.contains("upload in progress") || stderr.contains("pending"),
+        "Expected pending failure message, got: {stderr}"
+    );
+
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
+}
+
+#[tokio::test]
 async fn test_restore_retries_on_storage_backend_unavailable() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {
