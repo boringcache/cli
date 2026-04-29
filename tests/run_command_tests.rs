@@ -925,6 +925,54 @@ fail-on-cache-error = true
 }
 
 #[test]
+fn test_turbo_dry_run_json_injects_detected_package_manager_cache_env() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.turbo]
+tag = "turbo-main"
+command = ["pnpm", "turbo", "run", "build"]
+"#,
+    )
+    .expect("write repo config");
+    std::fs::write(
+        temp_dir.path().join("package.json"),
+        r#"{"name":"demo","packageManager":"pnpm@9.15.1"}"#,
+    )
+    .expect("write package json");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .env_remove("PNPM_STORE_DIR")
+        .env_remove("NPM_CONFIG_STORE_DIR")
+        .args(["turbo", "--dry-run", "--json"])
+        .output()
+        .expect("Failed to execute turbo dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    let expected_store = temp_dir
+        .path()
+        .canonicalize()
+        .expect("canonical temp dir")
+        .join(".pnpm-store")
+        .to_string_lossy()
+        .to_string();
+    assert_eq!(parsed["env_vars"]["PNPM_STORE_DIR"], expected_store);
+    assert_eq!(parsed["env_vars"]["NPM_CONFIG_STORE_DIR"], expected_store);
+}
+
+#[test]
 fn test_turbo_dry_run_json_reports_on_demand_proxy_mode() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);
@@ -1012,11 +1060,13 @@ port = 6001
 "#,
     )
     .expect("write repo config");
+    std::fs::write(temp_dir.path().join("yarn.lock"), "# yarn lock\n").expect("write yarn lock");
 
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);
     let output = command
         .current_dir(temp_dir.path())
+        .env_remove("YARN_CACHE_FOLDER")
         .args(["nx", "--dry-run", "--json"])
         .output()
         .expect("Failed to execute nx dry-run command");
@@ -1043,6 +1093,17 @@ port = 6001
         parsed["env_vars"]["NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN"],
         "boringcache"
     );
+    assert_eq!(
+        parsed["env_vars"]["YARN_CACHE_FOLDER"],
+        temp_dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp dir")
+            .join(".yarn-cache")
+            .to_string_lossy()
+            .to_string()
+    );
+    assert_eq!(parsed["env_vars"]["YARN_ENABLE_GLOBAL_CACHE"], "false");
 }
 
 #[test]

@@ -15,6 +15,7 @@ mod docker;
 mod go;
 mod gradle;
 mod maven;
+mod node_package_manager;
 mod nx;
 mod sccache;
 mod setup_plan;
@@ -60,6 +61,7 @@ struct AdapterCommandOptions {
     docker_oci_cache: Option<docker::OciCachePlan>,
     sccache_key_prefix: Option<String>,
     gradle_home: Option<String>,
+    node_package_manager_env: ProxyEnvSet,
 }
 
 impl AdapterRunner {
@@ -478,6 +480,11 @@ pub async fn adapter_execute(
         sccache_key_prefix: trim_non_empty(adapter_config.sccache_key_prefix.as_deref())
             .map(ToOwned::to_owned),
         gradle_home,
+        node_package_manager_env: if matches!(kind, AdapterKind::Turbo | AdapterKind::Nx) {
+            node_package_manager::cache_env_for_project(&current_dir)
+        } else {
+            BTreeMap::new()
+        },
     };
 
     let preview_context = proxy::ProxyContext {

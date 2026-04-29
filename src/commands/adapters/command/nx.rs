@@ -14,7 +14,7 @@ pub(super) const RUNNER: AdapterRunner = AdapterRunner {
 fn inject_proxy_env(
     set: &mut BTreeMap<String, String>,
     context: &proxy::ProxyContext,
-    _: &super::AdapterCommandOptions,
+    options: &super::AdapterCommandOptions,
 ) {
     warn_if_nx_cloud_workspace_binding_detected();
     set.insert(
@@ -25,6 +25,7 @@ fn inject_proxy_env(
         "NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN".to_string(),
         proxy::PROXY_AUTH_TOKEN.to_string(),
     );
+    set.extend(options.node_package_manager_env.clone());
 }
 
 fn warn_if_nx_cloud_workspace_binding_detected() {

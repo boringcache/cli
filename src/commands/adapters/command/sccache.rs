@@ -141,6 +141,7 @@ mod tests {
                 docker_oci_cache: None,
                 sccache_key_prefix: None,
                 gradle_home: None,
+                node_package_manager_env: Default::default(),
             },
         );
         assert_eq!(
@@ -177,6 +178,7 @@ mod tests {
                 docker_oci_cache: None,
                 sccache_key_prefix: Some("rust/ci".to_string()),
                 gradle_home: None,
+                node_package_manager_env: Default::default(),
             },
         );
         assert_eq!(
@@ -206,6 +208,7 @@ mod tests {
                 docker_oci_cache: None,
                 sccache_key_prefix: None,
                 gradle_home: None,
+                node_package_manager_env: Default::default(),
             },
         );
         assert!(!plan.set.contains_key("CC"));

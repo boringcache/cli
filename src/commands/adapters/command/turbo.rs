@@ -12,7 +12,7 @@ pub(super) const RUNNER: AdapterRunner = AdapterRunner {
 fn inject_proxy_env(
     set: &mut BTreeMap<String, String>,
     context: &proxy::ProxyContext,
-    _: &super::AdapterCommandOptions,
+    options: &super::AdapterCommandOptions,
 ) {
     set.insert("TURBO_API".to_string(), context.endpoint());
     set.insert(
@@ -23,4 +23,5 @@ fn inject_proxy_env(
         "TURBO_TEAM".to_string(),
         proxy::PROXY_AUTH_TOKEN.to_string(),
     );
+    set.extend(options.node_package_manager_env.clone());
 }
