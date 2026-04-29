@@ -9,8 +9,11 @@ use super::{AdapterCommandOptions, AdapterKind};
 use crate::cli::AdapterArgs;
 use crate::proxy;
 
-#[derive(Debug, Clone, Default, Serialize)]
+const ADAPTER_SETUP_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize)]
 pub(super) struct AdapterSetupPlan {
+    pub(super) schema_version: u32,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) env_vars: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -22,6 +25,17 @@ pub(super) struct AdapterSetupPlan {
 impl AdapterSetupPlan {
     pub(super) fn is_empty(&self) -> bool {
         self.env_vars.is_empty() && self.files.is_empty() && self.directories.is_empty()
+    }
+}
+
+impl Default for AdapterSetupPlan {
+    fn default() -> Self {
+        Self {
+            schema_version: ADAPTER_SETUP_SCHEMA_VERSION,
+            env_vars: BTreeMap::new(),
+            files: Vec::new(),
+            directories: Vec::new(),
+        }
     }
 }
 
@@ -111,18 +125,12 @@ fn bazel_setup_plan(
         .map(|line| line.trim())
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
-    let mut config_lines = vec![
-        String::new(),
-        "# BoringCache remote cache".to_string(),
-        format!("build --remote_cache={}", context.endpoint()),
-        format!("build --remote_upload_local_results={}", !options.read_only),
-        "build --remote_cache_async=false".to_string(),
-        "build --remote_download_minimal".to_string(),
-        format!(
-            "build --remote_max_connections={}",
-            super::bazel::remote_max_connections()
-        ),
-    ];
+    let mut config_lines = vec![String::new(), "# BoringCache remote cache".to_string()];
+    config_lines.extend(
+        super::bazel::default_remote_cache_args(context, options)
+            .into_iter()
+            .map(|arg| format!("build {arg}")),
+    );
     config_lines.extend(extra_lines.into_iter().map(ToOwned::to_owned));
     config_lines.push(String::new());
 
@@ -405,11 +413,28 @@ mod tests {
     fn gradle_setup_uses_adapter_env_contract() {
         let args = adapter_args();
         let plan = gradle_setup_plan(&args, Path::new("."), &context(), &options(false)).unwrap();
+        assert_eq!(plan.schema_version, 1);
         assert_eq!(
             plan.env_vars
                 .get(super::super::gradle::GRADLE_CACHE_PUSH_ENV),
             Some(&"true".to_string())
         );
+    }
+
+    #[test]
+    fn bazel_setup_plan_uses_the_default_command_flag_source() {
+        let args = adapter_args();
+        let options = options(false);
+        let plan = bazel_setup_plan(&args, &context(), &options).unwrap();
+        let content = &plan.files[0].content;
+
+        assert_eq!(plan.schema_version, 1);
+        for arg in super::super::bazel::default_remote_cache_args(&context(), &options) {
+            assert!(
+                content.contains(&format!("build {arg}")),
+                "setup plan should include build {arg}: {content}"
+            );
+        }
     }
 
     #[test]

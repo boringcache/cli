@@ -18,28 +18,10 @@ fn prepare_command(
         return Ok(command.to_vec());
     };
 
-    let mut injected = Vec::new();
-    if !has_option(command, "--remote_cache") {
-        injected.push(format!("--remote_cache={}", context.endpoint()));
-    }
-    if !has_upload_flag(command) {
-        injected.push(format!(
-            "--remote_upload_local_results={}",
-            !options.read_only
-        ));
-    }
-    if !has_option(command, "--remote_cache_async") {
-        injected.push("--remote_cache_async=false".to_string());
-    }
-    if !has_remote_download_setting(command) {
-        injected.push("--remote_download_minimal".to_string());
-    }
-    if !has_option(command, "--remote_max_connections") {
-        injected.push(format!(
-            "--remote_max_connections={}",
-            remote_max_connections()
-        ));
-    }
+    let injected = default_remote_cache_args(context, options)
+        .into_iter()
+        .filter(|arg| should_inject_default_arg(command, arg))
+        .collect::<Vec<_>>();
     if injected.is_empty() {
         return Ok(command.to_vec());
     }
@@ -82,6 +64,31 @@ fn has_remote_download_setting(command: &[String]) -> bool {
             || arg == "--noremote_download_toplevel"
             || arg.starts_with("--remote_download_outputs=")
     })
+}
+
+pub(super) fn default_remote_cache_args(
+    context: &proxy::ProxyContext,
+    options: &AdapterCommandOptions,
+) -> Vec<String> {
+    vec![
+        format!("--remote_cache={}", context.endpoint()),
+        format!("--remote_upload_local_results={}", !options.read_only),
+        "--remote_cache_async=false".to_string(),
+        "--remote_download_minimal".to_string(),
+        format!("--remote_max_connections={}", remote_max_connections()),
+    ]
+}
+
+fn should_inject_default_arg(command: &[String], arg: &str) -> bool {
+    let option = arg.split_once('=').map(|(name, _)| name).unwrap_or(arg);
+    match option {
+        "--remote_upload_local_results" => !has_upload_flag(command),
+        "--remote_download_minimal" => !has_remote_download_setting(command),
+        "--remote_cache" | "--remote_cache_async" | "--remote_max_connections" => {
+            !has_option(command, option)
+        }
+        _ => true,
+    }
 }
 
 pub(super) fn remote_max_connections() -> u16 {

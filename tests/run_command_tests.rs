@@ -1474,6 +1474,7 @@ port = 6001
     assert_eq!(command[5], "--remote_download_minimal");
     assert_eq!(command[6], "--remote_max_connections=64");
     assert_eq!(command[7], "//...");
+    assert_eq!(parsed["setup"]["schema_version"], 1);
 }
 
 #[test]
@@ -1529,6 +1530,7 @@ port = 6001
     let setup_files = parsed["setup"]["files"]
         .as_array()
         .expect("setup files should be present");
+    assert_eq!(parsed["setup"]["schema_version"], 1);
     assert!(setup_files.iter().any(|file| {
         file["path"].as_str().is_some_and(|path| {
             path.ends_with(".gradle/init.d/boringcache-gradle-build-cache.init.gradle")
@@ -1585,6 +1587,7 @@ port = 6001
     assert!(args.contains(&"-Dmaven.build.cache.remote.enabled=true"));
     assert!(args.contains(&"-Dmaven.build.cache.remote.url=http://host.docker.internal:6001"));
     assert!(args.contains(&"-Dmaven.build.cache.remote.save.enabled=false"));
+    assert_eq!(parsed["setup"]["schema_version"], 1);
 }
 
 #[test]
