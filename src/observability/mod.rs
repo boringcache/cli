@@ -288,7 +288,7 @@ impl ObservabilityEvent {
             cache_entry_id: None,
             error: None,
             details: None,
-            schema: Some("cache-session-v1"),
+            schema: Some("cache-session-v2"),
             mode: Some(mode),
             adapter: Some(adapter),
             proxy: Some(proxy),

@@ -16,6 +16,7 @@ use crate::serve::http::flight::{
 };
 use crate::serve::http::oci_route::{insert_digest_etag, insert_header};
 use crate::serve::state::{AppState, BlobLocatorEntry, BlobReadHandle, OciNegativeCacheReason};
+use crate::telemetry::StorageMetrics;
 
 const DOWNLOAD_URL_CACHE_TTL: Duration = Duration::from_secs(45 * 60);
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -859,10 +860,12 @@ async fn stream_oci_blob_to_client(
             Ok(Err(error)) => {
                 let message = format!("Failed to stream blob: {error}");
                 if attempt < max_attempts {
+                    state.oci_engine_diagnostics.record_storage_get_retry();
                     log_oci_blob_download_retry(&digest, attempt, max_attempts, &message);
                     sleep_oci_blob_download_retry(attempt).await;
                     continue;
                 }
+                state.oci_engine_diagnostics.record_storage_get_error();
                 return Err(OciError::internal(message));
             }
             Err(_) => {
@@ -870,11 +873,14 @@ async fn stream_oci_blob_to_client(
                     "Timed out streaming blob after {}s",
                     OCI_TRANSFER_CALL_TIMEOUT.as_secs()
                 );
+                state.oci_engine_diagnostics.record_storage_get_timeout();
                 if attempt < max_attempts {
+                    state.oci_engine_diagnostics.record_storage_get_retry();
                     log_oci_blob_download_retry(&digest, attempt, max_attempts, &message);
                     sleep_oci_blob_download_retry(attempt).await;
                     continue;
                 }
+                state.oci_engine_diagnostics.record_storage_get_error();
                 return Err(OciError::internal(message));
             }
         };
@@ -893,6 +899,7 @@ async fn stream_oci_blob_to_client(
                 resolve_oci_download_url(&state, &cache_entry_id, &blob_desc, &name, &digest)
                     .await?;
             from_cached_url = false;
+            state.oci_engine_diagnostics.record_storage_get_retry();
             last_error = Some(format!(
                 "Cached OCI blob URL returned {}",
                 response.status()
@@ -916,14 +923,22 @@ async fn stream_oci_blob_to_client(
 
         if is_retryable_oci_blob_storage_status(response.status()) && attempt < max_attempts {
             let message = format!("Blob storage returned {}", response.status());
+            state.oci_engine_diagnostics.record_storage_get_retry();
             log_oci_blob_download_retry(&digest, attempt, max_attempts, &message);
             sleep_oci_blob_download_retry(attempt).await;
             continue;
         }
 
-        let response = response
-            .error_for_status()
-            .map_err(|e| OciError::internal(format!("Blob storage returned error: {e}")))?;
+        let response = match response.error_for_status() {
+            Ok(response) => response,
+            Err(error) => {
+                state.oci_engine_diagnostics.record_storage_get_error();
+                return Err(OciError::internal(format!(
+                    "Blob storage returned error: {error}"
+                )));
+            }
+        };
+        let storage_metrics = StorageMetrics::from_headers(response.headers());
         let temp_path = temp_dir.join(format!(
             "blob-{}-{}",
             &digest_hex[..16],
@@ -951,6 +966,7 @@ async fn stream_oci_blob_to_client(
             file,
             temp_path,
             storage_get_started_at,
+            storage_metrics,
             request_started_at,
             tx,
             flight_guard,
@@ -983,6 +999,7 @@ async fn stream_oci_blob_body(
     mut file: tokio::fs::File,
     temp_path: std::path::PathBuf,
     storage_get_started_at: std::time::Instant,
+    storage_metrics: StorageMetrics,
     request_started_at: std::time::Instant,
     tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
     _flight_guard: FlightGuard,
@@ -1003,6 +1020,7 @@ async fn stream_oci_blob_body(
             Ok(chunk) => chunk,
             Err(error) => {
                 let _ = tokio::fs::remove_file(&temp_path).await;
+                state.oci_engine_diagnostics.record_storage_get_error();
                 let _ = tx
                     .send(Err(std::io::Error::other(format!(
                         "Failed to read blob stream: {error}"
@@ -1059,11 +1077,13 @@ async fn stream_oci_blob_body(
         body_started_at.elapsed().as_millis() as u64,
         spool_write_duration_ms,
         verify_duration_ms,
+        Some(&storage_metrics),
     );
 
     if actual_digest != digest {
         let _ = tokio::fs::remove_file(&temp_path).await;
         state.oci_engine_diagnostics.record_digest_verify_failure();
+        state.oci_engine_diagnostics.record_storage_get_error();
         state
             .oci_engine_diagnostics
             .record_stream_through_verify_failure();
@@ -1077,6 +1097,7 @@ async fn stream_oci_blob_body(
 
     if written != expected_size {
         let _ = tokio::fs::remove_file(&temp_path).await;
+        state.oci_engine_diagnostics.record_storage_get_error();
         state
             .oci_engine_diagnostics
             .record_stream_through_verify_failure();
@@ -1161,10 +1182,12 @@ async fn download_oci_blob_to_cache(
             Ok(Err(error)) => {
                 let message = format!("Failed to download blob: {error}");
                 if attempt < max_attempts {
+                    state.oci_engine_diagnostics.record_storage_get_retry();
                     log_oci_blob_download_retry(digest, attempt, max_attempts, &message);
                     sleep_oci_blob_download_retry(attempt).await;
                     continue;
                 }
+                state.oci_engine_diagnostics.record_storage_get_error();
                 return Err(OciError::internal(message));
             }
             Err(_) => {
@@ -1172,11 +1195,14 @@ async fn download_oci_blob_to_cache(
                     "Timed out downloading blob after {}s",
                     OCI_TRANSFER_CALL_TIMEOUT.as_secs()
                 );
+                state.oci_engine_diagnostics.record_storage_get_timeout();
                 if attempt < max_attempts {
+                    state.oci_engine_diagnostics.record_storage_get_retry();
                     log_oci_blob_download_retry(digest, attempt, max_attempts, &message);
                     sleep_oci_blob_download_retry(attempt).await;
                     continue;
                 }
+                state.oci_engine_diagnostics.record_storage_get_error();
                 return Err(OciError::internal(message));
             }
         };
@@ -1194,6 +1220,7 @@ async fn download_oci_blob_to_cache(
             download_url =
                 resolve_oci_download_url(state, cache_entry_id, blob_desc, name, digest).await?;
             from_cached_url = false;
+            state.oci_engine_diagnostics.record_storage_get_retry();
             last_error = Some(format!(
                 "Cached OCI blob URL returned {}",
                 response.status()
@@ -1217,14 +1244,22 @@ async fn download_oci_blob_to_cache(
 
         if is_retryable_oci_blob_storage_status(response.status()) && attempt < max_attempts {
             let message = format!("Blob storage returned {}", response.status());
+            state.oci_engine_diagnostics.record_storage_get_retry();
             log_oci_blob_download_retry(digest, attempt, max_attempts, &message);
             sleep_oci_blob_download_retry(attempt).await;
             continue;
         }
 
-        let response = response
-            .error_for_status()
-            .map_err(|e| OciError::internal(format!("Blob storage returned error: {e}")))?;
+        let response = match response.error_for_status() {
+            Ok(response) => response,
+            Err(error) => {
+                state.oci_engine_diagnostics.record_storage_get_error();
+                return Err(OciError::internal(format!(
+                    "Blob storage returned error: {error}"
+                )));
+            }
+        };
+        let storage_metrics = StorageMetrics::from_headers(response.headers());
 
         let temp_path = temp_dir.join(format!(
             "blob-{}-{}",
@@ -1270,11 +1305,13 @@ async fn download_oci_blob_to_cache(
         if let Some(message) = stream_error {
             let _ = tokio::fs::remove_file(&temp_path).await;
             if attempt < max_attempts {
+                state.oci_engine_diagnostics.record_storage_get_retry();
                 log_oci_blob_download_retry(digest, attempt, max_attempts, &message);
                 sleep_oci_blob_download_retry(attempt).await;
                 last_error = Some(message);
                 continue;
             }
+            state.oci_engine_diagnostics.record_storage_get_error();
             return Err(OciError::internal(message));
         }
         file.flush()
@@ -1290,10 +1327,12 @@ async fn download_oci_blob_to_cache(
             body_started_at.elapsed().as_millis() as u64,
             spool_write_duration_ms,
             verify_duration_ms,
+            Some(&storage_metrics),
         );
         if actual_digest != digest {
             let _ = tokio::fs::remove_file(&temp_path).await;
             state.oci_engine_diagnostics.record_digest_verify_failure();
+            state.oci_engine_diagnostics.record_storage_get_error();
             return Err(OciError::digest_invalid(format!(
                 "Downloaded blob digest mismatch for {digest}: got {actual_digest}"
             )));
@@ -1306,11 +1345,13 @@ async fn download_oci_blob_to_cache(
                 blob_desc.size_bytes, written
             );
             if attempt < max_attempts {
+                state.oci_engine_diagnostics.record_storage_get_retry();
                 log_oci_blob_download_retry(digest, attempt, max_attempts, &message);
                 sleep_oci_blob_download_retry(attempt).await;
                 last_error = Some(message);
                 continue;
             }
+            state.oci_engine_diagnostics.record_storage_get_error();
             return Err(OciError::internal(message));
         }
 

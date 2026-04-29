@@ -52,7 +52,7 @@ async fn proxy_status_includes_live_session_summary() {
         serde_json::from_slice(&body).expect("proxy status should be JSON");
 
     let summary = &json["session_summary"];
-    assert_eq!(summary["schema"], "cache-session-v1");
+    assert_eq!(summary["schema"], "cache-session-v2");
     assert_eq!(summary["mode"], "cache-registry");
     assert_eq!(summary["adapter"], "runtime");
     assert_eq!(summary["workspace"], "boringcache/benchmarks");

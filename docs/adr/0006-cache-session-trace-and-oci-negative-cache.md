@@ -43,7 +43,7 @@ The trace should be one JSON object with stable top-level sections:
 
 ```json
 {
-  "schema": "cache-session-v1",
+  "schema": "cache-session-v2",
   "workspace": "namespace/workspace",
   "mode": "docker-registry",
   "adapter": "oci",
@@ -264,12 +264,13 @@ The first CLI baseline is implemented:
 - the OCI protocol tests cover the PostHog-shaped transition where a blob `HEAD` miss is followed by local upload, manifest publish, negative-cache invalidation, and a later successful `HEAD`.
 - Docker adapter planning now carries provider-neutral CI run metadata into dry-run JSON and proxy metadata hints, including provider, run uid/attempt, ref type/name, default branch, PR number, commit SHA, immutable run ref, import refs, and promotion aliases when ADR 0007 derivation is active.
 - startup download-url preload uses the normal API request retry path, and startup blob body warm retries transient URL/storage failures; these are read/transport retries, not publish-readiness polling.
+- the proxy summary now posts `cache_session_summary.v2` and keeps OCI storage GET evidence in the same provider-neutral `storage` shape used by the web ADR 0008 archive/CAS metrics bridge: direction, bytes, request count, TTFB/body duration, throughput, retry/error/timeout counts, and region/cache-status/block-location when the storage response headers provide them. Raw `oci_engine_storage_*` counters remain in the section for compatibility and low-level debug.
 
 Remaining trace depth belongs in later passes: richer backend/action operation naming, richer BuildKit enrichment from the action/harness, and release-path Docker E2E artifact validation.
 
 ## Proof Status
 
-Documentation and the first CLI baseline are aligned as of 2026-04-22. The trace is accepted as the platform insight spine; CLI-to-Rails summary persistence is implemented locally through `cache-rollups`, and the CLI now embeds Rails/API request count, p50/p95, error, and retry rollups in the structured summary. Action enrichment, benchmark artifact validation, release-path proof, and broader operator reporting remain follow-up work.
+Documentation and the first CLI baseline are aligned as of 2026-04-22. The trace is accepted as the platform insight spine; CLI-to-Rails summary persistence is implemented locally through `cache-rollups`, and the CLI now embeds Rails/API request count, p50/p95, error, and retry rollups in the structured summary. Follow-up implementation on 2026-04-29 moves the proxy producer to `cache_session_summary.v2` for the summary row and `cache-session-v2` for JSONL/status snapshots, with normalized storage-transfer fields aligned to web ADR 0008 while preserving the old raw OCI engine counters. Action enrichment, benchmark artifact validation, release-path proof, and broader operator reporting remain follow-up work.
 
 Focused CLI tests now cover negative-cache invalidation after local writes and
 the remote-existence-check error path that must degrade without inserting a

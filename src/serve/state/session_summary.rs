@@ -47,15 +47,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
     let startup_prefetch = map_to_json(state.prefetch_metrics.metadata_hints());
     let kv_upload = map_to_json(state.kv_blob_upload_metrics.metadata_hints());
     let rails = crate::observability::rails_request_summary();
-    let storage = map_to_json(select_metric_prefixes(
-        &oci_engine,
-        &[
-            "oci_engine_storage_",
-            "oci_engine_local_spool_",
-            "oci_engine_digest_verify_",
-            "oci_engine_cache_promotion_",
-        ],
-    ));
+    let storage = storage_summary(&oci_engine);
     let mut oci = merged_maps_to_json(&[oci_body.clone(), oci_engine, oci_negative]);
     if let Some(object) = oci.as_object_mut() {
         object.insert(
@@ -78,7 +70,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
     });
 
     CacheSessionSummarySnapshot {
-        schema: "cache-session-v1",
+        schema: "cache-session-v2",
         mode: classification.mode,
         adapter: classification.adapter,
         workspace: state.workspace.clone(),
@@ -93,6 +85,83 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
         local_cache,
         buildkit,
     }
+}
+
+fn storage_summary(oci_engine: &BTreeMap<String, String>) -> Value {
+    let raw = select_metric_prefixes(
+        oci_engine,
+        &[
+            "oci_engine_storage_",
+            "oci_engine_local_spool_",
+            "oci_engine_digest_verify_",
+            "oci_engine_cache_promotion_",
+        ],
+    );
+    let mut object = serde_json::Map::new();
+
+    let request_count = metric_u64(oci_engine, "oci_engine_storage_get_count").unwrap_or(0);
+    let bytes = metric_u64(oci_engine, "oci_engine_storage_get_bytes").unwrap_or(0);
+    let ttfb_ms_sum = metric_u64(oci_engine, "oci_engine_storage_get_ttfb_ms").unwrap_or(0);
+    let body_duration_ms_sum =
+        metric_u64(oci_engine, "oci_engine_storage_get_body_duration_ms").unwrap_or(0);
+    let retry_count = metric_u64(oci_engine, "oci_engine_storage_get_retry_count").unwrap_or(0);
+    let error_count = metric_u64(oci_engine, "oci_engine_storage_get_error_count").unwrap_or(0);
+    let timeout_count = metric_u64(oci_engine, "oci_engine_storage_get_timeout_count").unwrap_or(0);
+
+    if request_count > 0 || bytes > 0 || retry_count > 0 || error_count > 0 {
+        object.insert(
+            "direction".to_string(),
+            Value::String("download".to_string()),
+        );
+        object.insert(
+            "object_kind".to_string(),
+            Value::String("oci_blob".to_string()),
+        );
+        object.insert("request_count".to_string(), Value::from(request_count));
+        object.insert("bytes".to_string(), Value::from(bytes));
+        object.insert("retry_count".to_string(), Value::from(retry_count));
+        object.insert("error_count".to_string(), Value::from(error_count));
+        object.insert("timeout_count".to_string(), Value::from(timeout_count));
+
+        if request_count > 0 {
+            object.insert(
+                "ttfb_ms".to_string(),
+                Value::from(ttfb_ms_sum / request_count),
+            );
+            object.insert(
+                "body_duration_ms".to_string(),
+                Value::from(body_duration_ms_sum / request_count),
+            );
+        }
+        object.insert("ttfb_ms_sum".to_string(), Value::from(ttfb_ms_sum));
+        object.insert(
+            "body_duration_ms_sum".to_string(),
+            Value::from(body_duration_ms_sum),
+        );
+
+        if let Some(throughput) = throughput_mbps(bytes, body_duration_ms_sum) {
+            object.insert("throughput_mbps".to_string(), json!(throughput));
+        }
+        for (source_key, target_key) in [
+            ("oci_engine_storage_region", "region"),
+            ("oci_engine_storage_cache_status", "cache_status"),
+            ("oci_engine_storage_block_location", "block_location"),
+        ] {
+            if let Some(value) = oci_engine.get(source_key)
+                && !value.trim().is_empty()
+            {
+                object.insert(target_key.to_string(), Value::String(value.clone()));
+            }
+        }
+    }
+
+    for (key, value) in raw {
+        object
+            .entry(key)
+            .or_insert_with(|| json_metric_value(&value));
+    }
+
+    Value::Object(object)
 }
 
 struct CacheSessionClassification {
@@ -209,6 +278,18 @@ fn json_metric_value(value: &str) -> Value {
         .unwrap_or_else(|_| Value::String(value.to_string()))
 }
 
+fn metric_u64(map: &BTreeMap<String, String>, key: &str) -> Option<u64> {
+    map.get(key).and_then(|value| value.parse::<u64>().ok())
+}
+
+fn throughput_mbps(bytes: u64, body_duration_ms: u64) -> Option<f64> {
+    if bytes == 0 || body_duration_ms == 0 {
+        return None;
+    }
+    let mbps = (bytes as f64 * 8.0) / (body_duration_ms as f64 / 1000.0) / 1_000_000.0;
+    Some((mbps * 100.0).round() / 100.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +331,53 @@ mod tests {
         };
         assert_eq!(classification.mode, "cache-registry");
         assert_eq!(classification.adapter, "runtime");
+    }
+
+    #[test]
+    fn storage_summary_combines_normalized_fields_with_raw_proxy_counters() {
+        let summary = storage_summary(&BTreeMap::from([
+            ("oci_engine_storage_get_count".to_string(), "2".to_string()),
+            (
+                "oci_engine_storage_get_bytes".to_string(),
+                "50000000".to_string(),
+            ),
+            (
+                "oci_engine_storage_get_ttfb_ms".to_string(),
+                "400".to_string(),
+            ),
+            (
+                "oci_engine_storage_get_body_duration_ms".to_string(),
+                "2000".to_string(),
+            ),
+            (
+                "oci_engine_storage_get_retry_count".to_string(),
+                "1".to_string(),
+            ),
+            ("oci_engine_storage_region".to_string(), "iad".to_string()),
+            (
+                "oci_engine_storage_cache_status".to_string(),
+                "hit".to_string(),
+            ),
+            (
+                "oci_engine_storage_block_location".to_string(),
+                "remote".to_string(),
+            ),
+        ]));
+
+        assert_eq!(summary["direction"], "download");
+        assert_eq!(summary["object_kind"], "oci_blob");
+        assert_eq!(summary["request_count"], 2);
+        assert_eq!(summary["bytes"], 50_000_000);
+        assert_eq!(summary["ttfb_ms"], 200);
+        assert_eq!(summary["ttfb_ms_sum"], 400);
+        assert_eq!(summary["body_duration_ms"], 1000);
+        assert_eq!(summary["body_duration_ms_sum"], 2000);
+        assert_eq!(summary["throughput_mbps"], 200.0);
+        assert_eq!(summary["retry_count"], 1);
+        assert_eq!(summary["error_count"], 0);
+        assert_eq!(summary["region"], "iad");
+        assert_eq!(summary["cache_status"], "hit");
+        assert_eq!(summary["block_location"], "remote");
+        assert_eq!(summary["oci_engine_storage_get_ttfb_ms"], 400);
     }
 }

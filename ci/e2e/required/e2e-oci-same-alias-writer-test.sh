@@ -386,6 +386,19 @@ assert_summary_zero() {
   fi
 }
 
+assert_summary_equals() {
+  local summary_file="$1"
+  local key="$2"
+  local expected="$3"
+  local value
+  value="$(summary_value "${summary_file}" "${key}")"
+  if [[ "${value}" != "${expected}" ]]; then
+    echo "ERROR: expected ${key}=${expected} in ${summary_file}; got ${value:-<unset>}"
+    cat "${summary_file}"
+    exit 1
+  fi
+}
+
 fetch_manifest_once() {
   local reference="$1"
   local proxy_url="$2"
@@ -470,6 +483,10 @@ publish_manifest_for_run "run-a" "$(proxy_url "${PROXY_PORT_A}")" "${RUN_A_REF}"
 stop_all_proxies
 
 write_metrics_summary "run-b"
+assert_summary_equals \
+  "${LOG_DIR}/summary-run-b.env" \
+  "request_metrics_cache_session_schema" \
+  "cache_session_v2"
 assert_summary_positive \
   "${LOG_DIR}/summary-run-b.env" \
   "request_metrics_cache_session_oci_oci_engine_alias_promotion_promoted"
@@ -477,6 +494,10 @@ assert_summary_zero \
   "${LOG_DIR}/summary-run-b.env" \
   "request_metrics_cache_session_oci_oci_engine_alias_promotion_failed"
 write_metrics_summary "run-a"
+assert_summary_equals \
+  "${LOG_DIR}/summary-run-a.env" \
+  "request_metrics_cache_session_schema" \
+  "cache_session_v2"
 assert_summary_positive \
   "${LOG_DIR}/summary-run-a.env" \
   "request_metrics_cache_session_oci_oci_engine_alias_promotion_ignored_stale"

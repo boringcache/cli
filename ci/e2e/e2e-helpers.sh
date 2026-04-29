@@ -429,8 +429,8 @@ assert_cache_session_summary_present() {
 
   # shellcheck source=/dev/null
   source "${summary_file}"
-  if [[ "${request_metrics_cache_session_schema:-}" != "cache_session_v1" ]]; then
-    echo "ERROR: expected cache_session_summary schema cache-session-v1 in ${summary_file}" >&2
+  if [[ "${request_metrics_cache_session_schema:-}" != "cache_session_v2" ]]; then
+    echo "ERROR: expected cache_session_summary schema cache-session-v2 in ${summary_file}" >&2
     return 1
   fi
   if [[ -z "${request_metrics_cache_session_mode:-}" ]]; then

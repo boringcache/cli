@@ -17,7 +17,7 @@ const KV_IDLE_FLUSH_WINDOW_DEFAULT_MS: u64 = 10_000;
 const KV_IDLE_FLUSH_WINDOW_SMALL_BATCH_MS: u64 = 2_000;
 const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BLOBS: usize = 64;
 const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BYTES: u64 = 64 * 1024 * 1024;
-const CACHE_SESSION_SUMMARY_SCHEMA: &str = "cache_session_summary.v1";
+const CACHE_SESSION_SUMMARY_SCHEMA: &str = "cache_session_summary.v2";
 
 pub(super) fn spawn_maintenance_tasks(
     state: &AppState,
@@ -661,7 +661,7 @@ mod tests {
                 "metadata-only".to_string(),
             )]),
             serde_json::json!({
-                "schema": "cache-session-v1",
+                "schema": "cache-session-v2",
                 "proxy": { "hydration_policy": "metadata-only" },
                 "oci": { "blob_read_remote_count": 4 }
             }),
@@ -672,7 +672,7 @@ mod tests {
         assert_eq!(param.session_duration_ms, 12_000);
         assert_eq!(
             param.summary_schema.as_deref(),
-            Some("cache_session_summary.v1")
+            Some("cache_session_summary.v2")
         );
         assert_eq!(
             param

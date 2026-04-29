@@ -381,6 +381,12 @@ pub struct OciEngineDiagnostics {
     storage_get_ttfb_ms: AtomicU64,
     storage_get_body_duration_ms: AtomicU64,
     storage_get_bytes: AtomicU64,
+    storage_get_retry_count: AtomicU64,
+    storage_get_error_count: AtomicU64,
+    storage_get_timeout_count: AtomicU64,
+    storage_get_regions: StdMutex<BTreeMap<String, u64>>,
+    storage_get_cache_statuses: StdMutex<BTreeMap<String, u64>>,
+    storage_get_block_locations: StdMutex<BTreeMap<String, u64>>,
     local_spool_bytes: AtomicU64,
     local_spool_write_duration_ms: AtomicU64,
     digest_verify_duration_ms: AtomicU64,
@@ -457,6 +463,12 @@ impl OciEngineDiagnostics {
             storage_get_ttfb_ms: AtomicU64::new(0),
             storage_get_body_duration_ms: AtomicU64::new(0),
             storage_get_bytes: AtomicU64::new(0),
+            storage_get_retry_count: AtomicU64::new(0),
+            storage_get_error_count: AtomicU64::new(0),
+            storage_get_timeout_count: AtomicU64::new(0),
+            storage_get_regions: StdMutex::new(BTreeMap::new()),
+            storage_get_cache_statuses: StdMutex::new(BTreeMap::new()),
+            storage_get_block_locations: StdMutex::new(BTreeMap::new()),
             local_spool_bytes: AtomicU64::new(0),
             local_spool_write_duration_ms: AtomicU64::new(0),
             digest_verify_duration_ms: AtomicU64::new(0),
@@ -599,6 +611,7 @@ impl OciEngineDiagnostics {
         body_duration_ms: u64,
         spool_write_duration_ms: u64,
         verify_duration_ms: u64,
+        storage_metrics: Option<&crate::telemetry::StorageMetrics>,
     ) {
         self.storage_get_count.fetch_add(1, Ordering::AcqRel);
         self.storage_get_bytes.fetch_add(bytes, Ordering::AcqRel);
@@ -611,6 +624,30 @@ impl OciEngineDiagnostics {
             .fetch_add(spool_write_duration_ms, Ordering::AcqRel);
         self.digest_verify_duration_ms
             .fetch_add(verify_duration_ms, Ordering::AcqRel);
+        if let Some(metrics) = storage_metrics {
+            self.record_storage_label(&self.storage_get_regions, metrics.region.as_deref());
+            self.record_storage_label(
+                &self.storage_get_cache_statuses,
+                metrics.cache_status.as_deref(),
+            );
+            self.record_storage_label(
+                &self.storage_get_block_locations,
+                metrics.block_location.as_deref(),
+            );
+        }
+    }
+
+    pub fn record_storage_get_retry(&self) {
+        self.storage_get_retry_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_storage_get_error(&self) {
+        self.storage_get_error_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_storage_get_timeout(&self) {
+        self.storage_get_timeout_count
+            .fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn record_digest_verify_failure(&self) {
@@ -893,6 +930,36 @@ impl OciEngineDiagnostics {
         );
         self.insert_counter(
             &mut hints,
+            "oci_engine_storage_get_retry_count",
+            &self.storage_get_retry_count,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_storage_get_error_count",
+            &self.storage_get_error_count,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_storage_get_timeout_count",
+            &self.storage_get_timeout_count,
+        );
+        self.insert_top_label(
+            &mut hints,
+            "oci_engine_storage_region",
+            &self.storage_get_regions,
+        );
+        self.insert_top_label(
+            &mut hints,
+            "oci_engine_storage_cache_status",
+            &self.storage_get_cache_statuses,
+        );
+        self.insert_top_label(
+            &mut hints,
+            "oci_engine_storage_block_location",
+            &self.storage_get_block_locations,
+        );
+        self.insert_counter(
+            &mut hints,
             "oci_engine_local_spool_bytes",
             &self.local_spool_bytes,
         );
@@ -1017,6 +1084,35 @@ impl OciEngineDiagnostics {
         }
     }
 
+    fn record_storage_label(&self, counts: &StdMutex<BTreeMap<String, u64>>, label: Option<&str>) {
+        let Some(label) = normalize_storage_label(label) else {
+            return;
+        };
+        if let Ok(mut locked) = counts.try_lock() {
+            let value = locked.entry(label).or_insert(0);
+            *value = value.saturating_add(1);
+        }
+    }
+
+    fn insert_top_label(
+        &self,
+        hints: &mut BTreeMap<String, String>,
+        name: &str,
+        counts: &StdMutex<BTreeMap<String, u64>>,
+    ) {
+        let Ok(locked) = counts.try_lock() else {
+            return;
+        };
+        let Some((label, count)) = locked
+            .iter()
+            .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))
+        else {
+            return;
+        };
+        hints.insert(name.to_string(), label.clone());
+        hints.insert(format!("{name}_count"), count.to_string());
+    }
+
     fn insert_publish_phase(
         &self,
         hints: &mut BTreeMap<String, String>,
@@ -1038,6 +1134,14 @@ impl OciEngineDiagnostics {
             duration_value.to_string(),
         );
     }
+}
+
+fn normalize_storage_label(label: Option<&str>) -> Option<String> {
+    let label = label?.trim().trim_matches('"');
+    if label.is_empty() {
+        return None;
+    }
+    Some(label.chars().take(64).collect())
 }
 
 impl Default for OciEngineDiagnostics {
