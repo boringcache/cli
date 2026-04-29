@@ -58,6 +58,7 @@ struct AdapterCommandOptions {
     read_only: bool,
     docker_oci_cache: Option<docker::OciCachePlan>,
     sccache_key_prefix: Option<String>,
+    gradle_home: Option<String>,
 }
 
 impl AdapterRunner {
@@ -460,6 +461,11 @@ pub async fn adapter_execute(
             )
         })
         .unwrap_or_else(|| "buildcache".to_string());
+    let gradle_home = args
+        .gradle_home
+        .as_deref()
+        .map(|value| setup_plan::resolve_setup_path_string(value, &current_dir))
+        .transpose()?;
     let command_options = AdapterCommandOptions {
         cache_ref_tag: docker_cache_ref_tag,
         cache_mode: docker_cache_mode,
@@ -467,6 +473,7 @@ pub async fn adapter_execute(
         docker_oci_cache: docker_plan.as_ref().map(|plan| plan.oci_cache.clone()),
         sccache_key_prefix: trim_non_empty(adapter_config.sccache_key_prefix.as_deref())
             .map(ToOwned::to_owned),
+        gradle_home,
     };
 
     let preview_context = proxy::ProxyContext {
@@ -637,11 +644,44 @@ pub async fn adapter_execute(
         port: proxy_handle.port(),
         cache_ref: proxy_handle.cache_ref(),
     };
-    let command_to_run = kind.prepare_command(&command, Some(&proxy_context), &command_options)?;
+
+    let runtime_setup = if setup_plan::applies_during_runtime(kind) {
+        let setup = match setup_plan::adapter_setup_plan(
+            kind,
+            &args,
+            &current_dir,
+            &proxy_context,
+            &command_options,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                shutdown_proxy_handle(proxy_handle, fail_on_cache_error, false).await?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = setup_plan::apply_adapter_setup_plan(&setup) {
+            shutdown_proxy_handle(proxy_handle, fail_on_cache_error, false).await?;
+            return Err(error);
+        }
+        setup
+    } else {
+        setup_plan::AdapterSetupPlan::default()
+    };
+
+    let command_to_run =
+        match kind.prepare_command(&command, Some(&proxy_context), &command_options) {
+            Ok(command) => command,
+            Err(error) => {
+                shutdown_proxy_handle(proxy_handle, fail_on_cache_error, false).await?;
+                return Err(error);
+            }
+        };
+    let mut command_env_vars = resolved_plan.env_vars.clone();
+    command_env_vars.extend(runtime_setup.env_vars.clone());
 
     let child_outcome = proxy::spawn_command(
         &command_to_run,
-        &resolved_plan.env_vars,
+        &command_env_vars,
         Some(&proxy_context),
         |process, context| kind.inject_proxy_env(process, context, &command_options),
     )

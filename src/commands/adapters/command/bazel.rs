@@ -28,6 +28,18 @@ fn prepare_command(
             !options.read_only
         ));
     }
+    if !has_option(command, "--remote_cache_async") {
+        injected.push("--remote_cache_async=false".to_string());
+    }
+    if !has_remote_download_setting(command) {
+        injected.push("--remote_download_minimal".to_string());
+    }
+    if !has_option(command, "--remote_max_connections") {
+        injected.push(format!(
+            "--remote_max_connections={}",
+            remote_max_connections()
+        ));
+    }
     if injected.is_empty() {
         return Ok(command.to_vec());
     }
@@ -62,6 +74,24 @@ fn has_upload_flag(command: &[String]) -> bool {
     })
 }
 
+fn has_remote_download_setting(command: &[String]) -> bool {
+    command.iter().any(|arg| {
+        arg == "--remote_download_minimal"
+            || arg == "--noremote_download_minimal"
+            || arg == "--remote_download_toplevel"
+            || arg == "--noremote_download_toplevel"
+            || arg.starts_with("--remote_download_outputs=")
+    })
+}
+
+pub(super) fn remote_max_connections() -> u16 {
+    std::env::var("BORINGCACHE_BAZEL_REMOTE_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +111,7 @@ mod tests {
             read_only,
             docker_oci_cache: None,
             sccache_key_prefix: None,
+            gradle_home: None,
         }
     }
 
@@ -103,6 +134,9 @@ mod tests {
         assert_eq!(command[2], "build");
         assert_eq!(command[3], "--remote_cache=http://127.0.0.1:5000");
         assert_eq!(command[4], "--remote_upload_local_results=true");
+        assert_eq!(command[5], "--remote_cache_async=false");
+        assert_eq!(command[6], "--remote_download_minimal");
+        assert_eq!(command[7], "--remote_max_connections=64");
     }
 
     #[test]
@@ -120,16 +154,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            command,
-            vec![
-                "bazel".to_string(),
-                "build".to_string(),
-                "--remote_cache=http://cache.example".to_string(),
-                "--noremote_upload_local_results".to_string(),
-                "//...".to_string(),
-            ]
-        );
+        assert!(command.contains(&"--remote_cache=http://cache.example".to_string()));
+        assert!(command.contains(&"--noremote_upload_local_results".to_string()));
+        assert!(command.contains(&"--remote_cache_async=false".to_string()));
+        assert!(command.contains(&"--remote_download_minimal".to_string()));
+        assert!(command.contains(&"--remote_max_connections=64".to_string()));
     }
 
     #[test]

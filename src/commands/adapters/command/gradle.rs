@@ -1,6 +1,5 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 
 use super::{AdapterCommandOptions, AdapterRunner};
 use crate::proxy;
@@ -49,14 +48,12 @@ fn inject_proxy_env(
 fn prepare_command(
     command: &[String],
     proxy_context: Option<&proxy::ProxyContext>,
-    _: &AdapterCommandOptions,
+    options: &AdapterCommandOptions,
 ) -> Result<Vec<String>> {
     let Some(_) = proxy_context else {
         return Ok(command.to_vec());
     };
 
-    let init_script = ensure_gradle_init_script()?;
-    let init_script_arg = format!("--init-script={}", init_script.display());
     let mut injected = Vec::new();
     if !command
         .iter()
@@ -64,8 +61,10 @@ fn prepare_command(
     {
         injected.push("--build-cache".to_string());
     }
-    if !command_has_exact_init_script(command, &init_script) {
-        injected.push(init_script_arg);
+    if let Some(gradle_home) = options.gradle_home.as_deref()
+        && !command_has_gradle_user_home(command)
+    {
+        injected.push(format!("--gradle-user-home={gradle_home}"));
     }
     if injected.is_empty() {
         return Ok(command.to_vec());
@@ -82,32 +81,9 @@ fn prepare_command(
     }
 }
 
-fn ensure_gradle_init_script() -> Result<PathBuf> {
-    let path = std::env::temp_dir().join(GRADLE_INIT_SCRIPT_NAME);
-    let existing = std::fs::read_to_string(&path).ok();
-    if existing.as_deref() == Some(GRADLE_INIT_SCRIPT) {
-        return Ok(path);
-    }
-    std::fs::write(&path, GRADLE_INIT_SCRIPT)
-        .with_context(|| format!("Failed to write Gradle init script {}", path.display()))?;
-    Ok(path)
-}
-
-fn command_has_exact_init_script(command: &[String], script_path: &Path) -> bool {
-    let expected = script_path.to_string_lossy();
-    let mut iter = command.iter();
-    while let Some(arg) = iter.next() {
-        if arg == "-I" || arg == "--init-script" {
-            if let Some(value) = iter.next()
-                && value == expected.as_ref()
-            {
-                return true;
-            }
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("--init-script=")
-            && value == expected.as_ref()
-        {
+fn command_has_gradle_user_home(command: &[String]) -> bool {
+    for arg in command {
+        if arg == "-g" || arg == "--gradle-user-home" || arg.starts_with("--gradle-user-home=") {
             return true;
         }
     }
@@ -133,6 +109,7 @@ mod tests {
             read_only,
             docker_oci_cache: None,
             sccache_key_prefix: None,
+            gradle_home: None,
         }
     }
 
@@ -155,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn gradle_prepare_command_injects_init_script_and_build_cache() {
+    fn gradle_prepare_command_injects_build_cache() {
         let command = prepare_command(
             &[
                 "./gradlew".to_string(),
@@ -169,8 +146,23 @@ mod tests {
 
         assert_eq!(command[0], "./gradlew");
         assert_eq!(command[1], "--build-cache");
-        assert!(command[2].starts_with("--init-script="));
-        assert_eq!(command[3], "build");
+        assert_eq!(command[2], "build");
+        assert!(!command.iter().any(|arg| arg.starts_with("--init-script=")));
+    }
+
+    #[test]
+    fn gradle_prepare_command_injects_configured_gradle_home() {
+        let mut options = options(false);
+        options.gradle_home = Some("/tmp/gradle-home".to_string());
+
+        let command = prepare_command(
+            &["./gradlew".to_string(), "test".to_string()],
+            Some(&context()),
+            &options,
+        )
+        .unwrap();
+
+        assert!(command.contains(&"--gradle-user-home=/tmp/gradle-home".to_string()));
     }
 
     #[test]

@@ -1470,11 +1470,14 @@ port = 6001
         "--remote_cache=http://host.docker.internal:6001"
     );
     assert_eq!(command[3], "--remote_upload_local_results=true");
-    assert_eq!(command[4], "//...");
+    assert_eq!(command[4], "--remote_cache_async=false");
+    assert_eq!(command[5], "--remote_download_minimal");
+    assert_eq!(command[6], "--remote_max_connections=64");
+    assert_eq!(command[7], "//...");
 }
 
 #[test]
-fn test_gradle_dry_run_json_injects_init_script_and_env() {
+fn test_gradle_dry_run_json_reports_setup_plan_and_env() {
     let temp_dir = TempDir::new().expect("temp dir");
     std::fs::write(
         temp_dir.path().join(".boringcache.toml"),
@@ -1511,16 +1514,30 @@ port = 6001
         .expect("command should be an array");
     assert_eq!(command[0], "./gradlew");
     assert_eq!(command[1], "--build-cache");
-    assert!(
-        command[2]
+    assert_eq!(command[2], "build");
+    assert!(command.iter().all(|value| {
+        !value
             .as_str()
-            .is_some_and(|value| value.starts_with("--init-script="))
-    );
+            .unwrap_or_default()
+            .starts_with("--init-script=")
+    }));
     assert_eq!(
         parsed["env_vars"]["BORINGCACHE_GRADLE_CACHE_URL"],
         "http://host.docker.internal:6001/cache/"
     );
     assert_eq!(parsed["env_vars"]["BORINGCACHE_GRADLE_CACHE_PUSH"], "false");
+    let setup_files = parsed["setup"]["files"]
+        .as_array()
+        .expect("setup files should be present");
+    assert!(setup_files.iter().any(|file| {
+        file["path"].as_str().is_some_and(|path| {
+            path.ends_with(".gradle/init.d/boringcache-gradle-build-cache.init.gradle")
+        })
+    }));
+    assert_eq!(
+        parsed["setup"]["env_vars"]["BORINGCACHE_GRADLE_CACHE_PUSH"],
+        "false"
+    );
 }
 
 #[test]

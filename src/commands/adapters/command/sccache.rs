@@ -47,6 +47,7 @@ mod tests {
                 read_only: false,
                 docker_oci_cache: None,
                 sccache_key_prefix: None,
+                gradle_home: None,
             },
         );
         assert_eq!(
@@ -76,6 +77,7 @@ mod tests {
                 read_only: false,
                 docker_oci_cache: None,
                 sccache_key_prefix: Some("rust/ci".to_string()),
+                gradle_home: None,
             },
         );
         assert_eq!(

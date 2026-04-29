@@ -117,7 +117,7 @@ pub struct AdapterArgs {
         long = "bazelrc-line",
         value_name = "LINE",
         hide = true,
-        help = "Action integration: extra line to include in generated Bazel setup"
+        help = "Extra line to include in generated Bazel setup"
     )]
     pub bazelrc_line: Vec<String>,
 
@@ -125,14 +125,14 @@ pub struct AdapterArgs {
         long = "gradle-home",
         value_name = "PATH",
         hide = true,
-        help = "Action integration: Gradle user home for generated setup"
+        help = "Gradle user home for generated setup files"
     )]
     pub gradle_home: Option<String>,
 
     #[arg(
         long = "no-gradle-build-cache-property",
         hide = true,
-        help = "Action integration: do not append org.gradle.caching=true"
+        help = "Do not append org.gradle.caching=true to Gradle setup files"
     )]
     pub no_gradle_build_cache_property: bool,
 
@@ -140,7 +140,7 @@ pub struct AdapterArgs {
         long = "maven-local-repo",
         value_name = "PATH",
         hide = true,
-        help = "Action integration: local Maven repository directory to create"
+        help = "Local Maven repository directory to create"
     )]
     pub maven_local_repo: Option<String>,
 
@@ -148,7 +148,7 @@ pub struct AdapterArgs {
         long = "maven-extensions-path",
         value_name = "PATH",
         hide = true,
-        help = "Action integration: Maven extensions.xml path for generated setup"
+        help = "Maven extensions.xml path for generated setup"
     )]
     pub maven_extensions_path: Option<String>,
 
@@ -156,7 +156,7 @@ pub struct AdapterArgs {
         long = "maven-build-cache-config-path",
         value_name = "PATH",
         hide = true,
-        help = "Action integration: Maven build-cache config path for generated setup"
+        help = "Maven build-cache config path for generated setup"
     )]
     pub maven_build_cache_config_path: Option<String>,
 
@@ -164,7 +164,7 @@ pub struct AdapterArgs {
         long = "maven-build-cache-extension-version",
         value_name = "VERSION",
         hide = true,
-        help = "Action integration: Maven build-cache extension version for generated setup"
+        help = "Maven build-cache extension version for generated setup"
     )]
     pub maven_build_cache_extension_version: Option<String>,
 
@@ -172,7 +172,7 @@ pub struct AdapterArgs {
         long = "maven-build-cache-id",
         value_name = "ID",
         hide = true,
-        help = "Action integration: Maven remote build-cache id for generated setup"
+        help = "Maven remote build-cache id for generated setup"
     )]
     pub maven_build_cache_id: Option<String>,
 

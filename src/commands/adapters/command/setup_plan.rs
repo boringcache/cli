@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::{AdapterCommandOptions, AdapterKind};
@@ -52,16 +54,57 @@ pub(super) fn adapter_setup_plan(
     }
 }
 
+pub(super) fn applies_during_runtime(kind: AdapterKind) -> bool {
+    matches!(kind, AdapterKind::Gradle | AdapterKind::Maven)
+}
+
+pub(super) fn apply_adapter_setup_plan(plan: &AdapterSetupPlan) -> Result<()> {
+    for directory in &plan.directories {
+        std::fs::create_dir_all(directory)
+            .with_context(|| format!("Failed to create setup directory {directory}"))?;
+    }
+
+    for file in &plan.files {
+        if let Some(parent) = Path::new(&file.path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create setup directory {}", parent.display())
+            })?;
+        }
+
+        match file.mode {
+            AdapterSetupFileMode::Write => {
+                std::fs::write(&file.path, &file.content)
+                    .with_context(|| format!("Failed to write setup file {}", file.path))?;
+            }
+            AdapterSetupFileMode::Append => {
+                if std::fs::read_to_string(&file.path)
+                    .ok()
+                    .is_some_and(|existing| existing.contains(&file.content))
+                {
+                    continue;
+                }
+                let mut output = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&file.path)
+                    .with_context(|| format!("Failed to open setup file {}", file.path))?;
+                output
+                    .write_all(file.content.as_bytes())
+                    .with_context(|| format!("Failed to append setup file {}", file.path))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn bazel_setup_plan(
     args: &AdapterArgs,
     context: &proxy::ProxyContext,
     options: &AdapterCommandOptions,
 ) -> Result<AdapterSetupPlan> {
-    let remote_max_connections = std::env::var("BORINGCACHE_BAZEL_REMOTE_MAX_CONNECTIONS")
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(64);
     let extra_lines = args
         .bazelrc_line
         .iter()
@@ -75,7 +118,10 @@ fn bazel_setup_plan(
         format!("build --remote_upload_local_results={}", !options.read_only),
         "build --remote_cache_async=false".to_string(),
         "build --remote_download_minimal".to_string(),
-        format!("build --remote_max_connections={remote_max_connections}"),
+        format!(
+            "build --remote_max_connections={}",
+            super::bazel::remote_max_connections()
+        ),
     ];
     config_lines.extend(extra_lines.into_iter().map(ToOwned::to_owned));
     config_lines.push(String::new());
@@ -96,8 +142,15 @@ fn gradle_setup_plan(
     context: &proxy::ProxyContext,
     options: &AdapterCommandOptions,
 ) -> Result<AdapterSetupPlan> {
+    let env_gradle_home = std::env::var("GRADLE_USER_HOME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let gradle_home = resolve_user_path(
-        args.gradle_home.as_deref().unwrap_or("~/.gradle"),
+        args.gradle_home
+            .as_deref()
+            .or(env_gradle_home.as_deref())
+            .unwrap_or("~/.gradle"),
         current_dir,
     )?;
     let init_script = gradle_home
@@ -202,6 +255,10 @@ fn resolve_user_path(value: &str, current_dir: &Path) -> Result<PathBuf> {
     }
 }
 
+pub(super) fn resolve_setup_path_string(value: &str, current_dir: &Path) -> Result<String> {
+    resolve_user_path(value, current_dir).map(path_string)
+}
+
 fn path_string(path: PathBuf) -> String {
     path.to_string_lossy().to_string()
 }
@@ -283,6 +340,7 @@ mod tests {
             read_only,
             docker_oci_cache: None,
             sccache_key_prefix: None,
+            gradle_home: None,
         }
     }
 
@@ -352,5 +410,39 @@ mod tests {
                 .get(super::super::gradle::GRADLE_CACHE_PUSH_ENV),
             Some(&"true".to_string())
         );
+    }
+
+    #[test]
+    fn apply_setup_plan_writes_files_and_keeps_appends_idempotent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let appended = temp_dir.path().join("gradle.properties");
+        let written = temp_dir.path().join("nested").join("settings.xml");
+        let created = temp_dir.path().join("repo");
+        let plan = AdapterSetupPlan {
+            files: vec![
+                AdapterSetupFile {
+                    path: path_string(written.clone()),
+                    mode: AdapterSetupFileMode::Write,
+                    content: "written".to_string(),
+                },
+                AdapterSetupFile {
+                    path: path_string(appended.clone()),
+                    mode: AdapterSetupFileMode::Append,
+                    content: "\norg.gradle.caching=true\n".to_string(),
+                },
+            ],
+            directories: vec![path_string(created.clone())],
+            ..AdapterSetupPlan::default()
+        };
+
+        apply_adapter_setup_plan(&plan).unwrap();
+        apply_adapter_setup_plan(&plan).unwrap();
+
+        assert_eq!(std::fs::read_to_string(written).unwrap(), "written");
+        assert_eq!(
+            std::fs::read_to_string(appended).unwrap(),
+            "\norg.gradle.caching=true\n"
+        );
+        assert!(created.is_dir());
     }
 }

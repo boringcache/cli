@@ -84,6 +84,7 @@ mod tests {
             read_only,
             docker_oci_cache: None,
             sccache_key_prefix: None,
+            gradle_home: None,
         }
     }
 
