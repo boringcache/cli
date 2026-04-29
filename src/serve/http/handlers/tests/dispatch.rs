@@ -58,6 +58,8 @@ async fn proxy_status_includes_live_session_summary() {
     assert_eq!(summary["workspace"], "boringcache/benchmarks");
     assert_eq!(summary["proxy"]["hydration_policy"], "metadata-only");
     assert_eq!(summary["proxy"]["blob_prefetch_max_concurrency"], 2);
+    assert!(summary["backend_api"].is_object());
+    assert!(summary["rails"].is_object());
     assert!(summary["startup_prefetch"].is_object());
     assert!(summary["lifecycle"].is_object());
     assert_eq!(summary["buildkit"]["run_classification"], "not_applicable");

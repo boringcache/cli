@@ -16,6 +16,7 @@ pub(super) fn emit_cache_session_summary(state: &AppState) {
         summary.adapter,
         summary.duration_ms,
         summary.proxy,
+        summary.backend_api,
         summary.rails,
         summary.storage,
         summary.lifecycle,

@@ -12,6 +12,7 @@ pub struct CacheSessionSummarySnapshot {
     pub workspace: String,
     pub duration_ms: u64,
     pub proxy: Value,
+    pub backend_api: Value,
     pub rails: Value,
     pub storage: Value,
     pub lifecycle: Value,
@@ -49,6 +50,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
         "oci_alias_promotion_refs": &state.oci_alias_promotion_refs,
     });
     let rails = crate::observability::rails_request_summary();
+    let backend_api = rails.clone();
     let storage = storage_summary(&oci_engine);
     let lifecycle = lifecycle_summary(
         &oci_engine,
@@ -87,6 +89,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
         workspace: state.workspace.clone(),
         duration_ms,
         proxy,
+        backend_api,
         rails,
         storage,
         lifecycle,

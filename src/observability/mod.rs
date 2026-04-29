@@ -47,6 +47,8 @@ pub(crate) struct ObservabilityEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_api: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rails: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage: Option<Value>,
@@ -144,6 +146,7 @@ impl ObservabilityEvent {
             mode: None,
             adapter: None,
             proxy: None,
+            backend_api: None,
             rails: None,
             storage: None,
             lifecycle: None,
@@ -195,6 +198,7 @@ impl ObservabilityEvent {
             mode: None,
             adapter: None,
             proxy: None,
+            backend_api: None,
             rails: None,
             storage: None,
             lifecycle: None,
@@ -244,6 +248,7 @@ impl ObservabilityEvent {
             mode: None,
             adapter: None,
             proxy: None,
+            backend_api: None,
             rails: None,
             storage: None,
             lifecycle: None,
@@ -264,6 +269,7 @@ impl ObservabilityEvent {
         adapter: &'static str,
         duration_ms: u64,
         proxy: Value,
+        backend_api: Value,
         rails: Value,
         storage: Value,
         lifecycle: Value,
@@ -304,6 +310,7 @@ impl ObservabilityEvent {
             mode: Some(mode),
             adapter: Some(adapter),
             proxy: Some(proxy),
+            backend_api: Some(backend_api),
             rails: Some(rails),
             storage: Some(storage),
             lifecycle: Some(lifecycle),
