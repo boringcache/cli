@@ -90,7 +90,7 @@ Use CLI flags when you want one-off labels:
 boringcache run --proxy bazel-main \
   --metadata-hint project=web \
   --metadata-hint tool=bazel \
-  --metadata-hint phase=warm \
+  --metadata-hint lane=ci \
   -- bazel build //...
 ```
 
@@ -103,21 +103,22 @@ metadata-hints = ["project=web"]
 [adapters.turbo]
 tag = "turbo-main"
 command = ["pnpm", "turbo", "run", "build"]
-metadata-hints = ["tool=turborepo", "phase=ci"]
+metadata-hints = ["tool=turborepo", "lane=ci"]
 ```
 
 Use `BORINGCACHE_PROXY_METADATA_HINTS` when another script or service starts
 `cache-registry` and you do not want to repeat `--metadata-hint` flags:
 
 ```bash
-export BORINGCACHE_PROXY_METADATA_HINTS=project=web,tool=gradle,phase=seed
+export BORINGCACHE_PROXY_METADATA_HINTS=project=web,tool=gradle,lane=ci
 boringcache cache-registry my-org/my-project gradle-main --port 5000
 ```
 
 Keep these hints low-cardinality and replayable. Good values are
-`project=web`, `benchmark=grpc-bazel`, `tool=gradle`, `phase=seed`, and
-`phase=warm`. Avoid commit SHAs, run ids, timestamps, and other per-run values.
-Use `phase=prewarm` only for a real standalone priming session.
+`project=web`, `benchmark=grpc-bazel`, `tool=gradle`, `lane=ci`, and
+`workflow=build`. Avoid commit SHAs, run ids, timestamps, and other per-run
+values. Normal sessions do not need `cold` or `warm` labels; BoringCache
+derives new-vs-recurring misses from cache target and lifecycle telemetry.
 The normal precedence is repo config first, then
 `BORINGCACHE_PROXY_METADATA_HINTS`, then explicit CLI flags.
 Use the same kebab-case spellings in `.boringcache.toml` that you see in CLI

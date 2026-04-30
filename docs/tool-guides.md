@@ -23,7 +23,7 @@ Shared defaults for the examples:
 - put the stable tool and lane labels in `[adapters.<tool>].metadata-hints`
 - leave `no-platform` and `no-git` unset unless the cache is genuinely portable
 - set `read-only = true` only on restore-only lanes
-- use `phase=seed` for explicit priming jobs and `phase=ci` or `phase=warm` for normal runs
+- do not add cold/warm labels for normal runs; BoringCache derives new-vs-recurring misses from cache target and lifecycle telemetry
 
 ## Docker / BuildKit
 
@@ -36,7 +36,7 @@ metadata-hints = ["project=app"]
 [adapters.docker]
 tag = "docker-cache"
 command = ["docker", "buildx", "build", "."]
-metadata-hints = ["tool=oci", "phase=ci"]
+metadata-hints = ["tool=oci", "lane=ci"]
 ```
 
 ```bash
@@ -54,7 +54,7 @@ Direct BuildKit runs use the same OCI cache plan:
 [adapters.buildkit]
 tag = "docker-cache"
 command = ["buildctl", "build", "--frontend", "dockerfile.v0"]
-metadata-hints = ["tool=oci", "phase=ci"]
+metadata-hints = ["tool=oci", "lane=ci"]
 ```
 
 ```bash
@@ -142,7 +142,7 @@ metadata-hints = ["project=web"]
 [adapters.turbo]
 tag = "turbo-cache"
 command = ["pnpm", "turbo", "run", "build"]
-metadata-hints = ["tool=turborepo", "phase=ci"]
+metadata-hints = ["tool=turborepo", "lane=ci"]
 ```
 
 ```bash
@@ -173,7 +173,7 @@ metadata-hints = ["project=backend"]
 [adapters.bazel]
 tag = "bazel-cache"
 command = ["bazel", "build", "//..."]
-metadata-hints = ["tool=bazel", "phase=ci"]
+metadata-hints = ["tool=bazel", "lane=ci"]
 ```
 
 ```bash
@@ -204,7 +204,7 @@ metadata-hints = ["project=backend"]
 [adapters.gradle]
 tag = "gradle-cache"
 command = ["./gradlew", "build", "--no-daemon"]
-metadata-hints = ["tool=gradle", "phase=ci"]
+metadata-hints = ["tool=gradle", "lane=ci"]
 ```
 
 ```bash
@@ -258,7 +258,7 @@ metadata-hints = ["project=rust"]
 [adapters.sccache]
 tag = "rust-cache"
 command = ["cargo", "build", "--release"]
-metadata-hints = ["tool=sccache", "phase=ci"]
+metadata-hints = ["tool=sccache", "lane=ci"]
 # Optional: keep sccache objects under a WebDAV sub-root.
 sccache-key-prefix = "rust/ci"
 ```

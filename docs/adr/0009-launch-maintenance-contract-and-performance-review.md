@@ -47,9 +47,9 @@ Launch reporting must also be useful on first use:
 
 - CI-backed proxy sessions should group automatically by low-cardinality
   `project` metadata when repository context is available;
-- seed/prewarm exclusion should depend on explicit low-cardinality labels such
-  as `phase=seed` or `phase=prewarm`, not heuristics that quietly reclassify
-  user traffic;
+- seed/prewarm exclusion in first-party benchmark and E2E evidence should
+  depend on harness-owned scenario or lane fields, not heuristics that quietly
+  reclassify user traffic and not labels normal users have to supply;
 - human-readable `status` and `misses` output should separate actionable misses
   from excluded seed traffic so users can tell whether they have a cache
   quality problem or a benchmark wiring problem.
@@ -148,8 +148,10 @@ or diagnostics, not as the first-run UX.
   for launch messaging.
 - Add cross-platform audit warnings for suspicious platform suffix choices.
 - Reduce action archive planning that shells out per raw entry.
-- Keep benchmark and CI guidance pushing explicit `phase` labels so shared
-  workspaces do not turn recurring misses into product noise.
+- Keep benchmark guidance carrying explicit scenario/lane classifications so
+  shared workspaces do not turn recurring misses into product noise. Normal
+  CI/user docs should use stable project/tool/lane labels and let ADR 0008
+  lifecycle summaries infer new versus recurring misses.
 - Close or explicitly defer every `must-fix` or `validate` item in the
   consolidated follow-up table above before launch copy treats the behavior as
   complete.

@@ -940,17 +940,17 @@ mod tests {
     #[test]
     fn merge_metadata_hints_keeps_configured_order_and_appends_cli_values() {
         let configured_proxy = vec!["project=web".to_string()];
-        let configured_adapter = vec!["phase=warm".to_string(), "tool=turbo".to_string()];
-        let cli = vec!["phase=ready".to_string(), "lane=ci".to_string()];
+        let configured_adapter = vec!["lane=ci".to_string(), "tool=turbo".to_string()];
+        let cli = vec!["scenario=release".to_string(), "workflow=build".to_string()];
 
         assert_eq!(
             merge_metadata_hints(&configured_proxy, &configured_adapter, &cli),
             vec![
                 "project=web".to_string(),
-                "phase=warm".to_string(),
+                "lane=ci".to_string(),
                 "tool=turbo".to_string(),
-                "phase=ready".to_string(),
-                "lane=ci".to_string()
+                "scenario=release".to_string(),
+                "workflow=build".to_string()
             ]
         );
     }

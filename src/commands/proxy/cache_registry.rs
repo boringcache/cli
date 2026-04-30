@@ -630,16 +630,16 @@ mod tests {
     #[test]
     fn proxy_metadata_hints_merge_env_and_flags() {
         let _guard = test_env::lock();
-        test_env::set_var(PROXY_METADATA_HINTS_ENV, "project=zed,phase=seed");
+        test_env::set_var(PROXY_METADATA_HINTS_ENV, "project=zed,lane=bootstrap");
         let hints =
-            resolve_proxy_metadata_hints(&["phase=warm".to_string(), "tooling=main".to_string()])
+            resolve_proxy_metadata_hints(&["lane=ci".to_string(), "tooling=main".to_string()])
                 .unwrap();
         test_env::remove_var(PROXY_METADATA_HINTS_ENV);
 
         assert_eq!(
             hints,
             BTreeMap::from([
-                ("phase".to_string(), "warm".to_string()),
+                ("lane".to_string(), "ci".to_string()),
                 ("project".to_string(), "zed".to_string()),
                 ("tooling".to_string(), "main".to_string()),
             ])
@@ -649,10 +649,10 @@ mod tests {
     #[test]
     fn proxy_metadata_hints_merge_config_then_env_then_flags() {
         let _guard = test_env::lock();
-        test_env::set_var(PROXY_METADATA_HINTS_ENV, "phase=seed,scenario=env");
+        test_env::set_var(PROXY_METADATA_HINTS_ENV, "lane=bootstrap,scenario=env");
         let hints = resolve_proxy_metadata_hints_with_config(
             &["project=web".to_string(), "scenario=repo".to_string()],
-            &["phase=warm".to_string(), "tool=bazel".to_string()],
+            &["lane=ci".to_string(), "tool=bazel".to_string()],
         )
         .unwrap();
         test_env::remove_var(PROXY_METADATA_HINTS_ENV);
@@ -660,7 +660,7 @@ mod tests {
         assert_eq!(
             hints,
             BTreeMap::from([
-                ("phase".to_string(), "warm".to_string()),
+                ("lane".to_string(), "ci".to_string()),
                 ("project".to_string(), "web".to_string()),
                 ("scenario".to_string(), "env".to_string()),
                 ("tool".to_string(), "bazel".to_string()),

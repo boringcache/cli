@@ -31,13 +31,13 @@ For proxy-backed modes, `boringcache/one@v1` also accepts first-class `metadata-
     metadata-hints: |
       project=web
       tool=bazel
-      phase=ci
+      lane=ci
   env:
     BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
     BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
 ```
 
-Keep those hints low-cardinality. Good values are `project=web`, `benchmark=grpc-bazel`, `tool=gradle`, `phase=seed`, or `phase=warm`. Avoid commit SHAs, run ids, or timestamps.
+Keep those hints low-cardinality. Good values are `project=web`, `benchmark=grpc-bazel`, `tool=gradle`, `lane=ci`, or `workflow=build`. Avoid commit SHAs, run ids, timestamps, and cold/warm labels for normal sessions; BoringCache classifies new and recurring misses from cache target and lifecycle data.
 
 If the repo already defines `[proxy]` or adapter `metadata-hints` in `.boringcache.toml`, `boringcache/one@v1` inherits them through the CLI dry-run plan. Prefer repo config for durable defaults and use the action input only when the workflow needs an explicit override.
 The canonical repo-config starting points in [Tool guides](tool-guides.md) are
@@ -59,7 +59,7 @@ If you already manage the tool-specific setup yourself and only want proxy lifec
     [adapters.turbo]
     tag = "turbo-main"
     command = ["pnpm", "turbo", "run", "build"]
-    metadata-hints = ["tool=turborepo", "phase=ci"]
+    metadata-hints = ["tool=turborepo", "lane=ci"]
     EOF
 
 - run: boringcache turbo

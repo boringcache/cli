@@ -337,7 +337,7 @@ no-git = true
 read-only = true
 entries = ["pnpm-store"]
 profiles = ["bundle-install"]
-metadata-hints = ["phase=warm"]
+metadata-hints = ["lane=ci"]
 fail-on-cache-error = true
 skip-save = true
 save-on-failure = true
@@ -362,7 +362,7 @@ sccache-key-prefix = "rust/ci"
         assert!(adapter.read_only);
         assert_eq!(adapter.entries, vec!["pnpm-store"]);
         assert_eq!(adapter.profiles, vec!["bundle-install"]);
-        assert_eq!(adapter.metadata_hints, vec!["phase=warm"]);
+        assert_eq!(adapter.metadata_hints, vec!["lane=ci"]);
         assert!(adapter.fail_on_cache_error);
         assert!(adapter.skip_save);
         assert!(adapter.save_on_failure);
@@ -421,7 +421,7 @@ workspace = "org/workspace"
 workspace = "org/workspace"
 
 [proxy]
-metadata-hints = ["project=web", "phase=warm"]
+metadata-hints = ["project=web", "lane=ci"]
 "#,
         )
         .unwrap();
@@ -431,7 +431,7 @@ metadata-hints = ["project=web", "phase=warm"]
         assert_eq!(plan.workspace.as_deref(), Some("org/workspace"));
         assert_eq!(
             plan.proxy_metadata_hints,
-            vec!["project=web".to_string(), "phase=warm".to_string()]
+            vec!["project=web".to_string(), "lane=ci".to_string()]
         );
     }
 
