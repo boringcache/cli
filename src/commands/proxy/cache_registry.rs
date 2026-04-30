@@ -176,6 +176,11 @@ pub async fn execute(
         &metadata_hints,
     )?;
     inject_default_proxy_metadata_hints(&mut proxy_metadata_hints);
+    inject_cache_target_metadata_hints(
+        &mut proxy_metadata_hints,
+        &configured_human_tags,
+        &registry_root_tag,
+    );
 
     crate::serve::run_server(
         api_client,
@@ -227,6 +232,12 @@ pub async fn start_proxy_background(
     let tag_resolver = build_tag_resolver(no_platform, no_git)?;
     let (registry_root_tag, configured_human_tags) =
         resolve_registry_tag_config(&tag_resolver, &tag)?;
+    let mut proxy_metadata_hints = proxy_metadata_hints;
+    inject_cache_target_metadata_hints(
+        &mut proxy_metadata_hints,
+        &configured_human_tags,
+        &registry_root_tag,
+    );
 
     let primary_human_tag = configured_human_tags[0].clone();
     let endpoint_host = endpoint_host_override
@@ -399,6 +410,46 @@ pub(crate) fn inject_default_proxy_metadata_hints(hints: &mut BTreeMap<String, S
     };
 
     insert_replayable_proxy_metadata_hint(hints, "project", &project);
+}
+
+fn inject_cache_target_metadata_hints(
+    hints: &mut BTreeMap<String, String>,
+    configured_human_tags: &[String],
+    registry_root_tag: &str,
+) {
+    if !hints.contains_key("cache_tag") && !hints.contains_key("cache_scope") {
+        reserve_cache_target_metadata_slot(hints);
+    }
+
+    let target = configured_human_tags
+        .first()
+        .map(String::as_str)
+        .unwrap_or(registry_root_tag);
+    if insert_replayable_proxy_metadata_hint(hints, "cache_tag", target) {
+        return;
+    }
+
+    let digest = crate::cas_oci::sha256_hex(target.as_bytes());
+    let scope = format!("tag-{}", &digest[..16]);
+    insert_replayable_proxy_metadata_hint(hints, "cache_scope", &scope);
+}
+
+fn reserve_cache_target_metadata_slot(hints: &mut BTreeMap<String, String>) {
+    if hints.len() < MAX_PROXY_METADATA_HINTS {
+        return;
+    }
+
+    for key in [
+        "ci_commit_sha",
+        "ci_run_started_at",
+        "ci_run_attempt",
+        "ci_default_branch",
+        "ci_provider",
+    ] {
+        if hints.remove(key).is_some() {
+            return;
+        }
+    }
 }
 
 fn merge_proxy_metadata_hints(
@@ -660,6 +711,61 @@ mod tests {
                 .to_string()
                 .contains("Invalid proxy metadata hint key")
         );
+    }
+
+    #[test]
+    fn cache_target_metadata_uses_primary_human_tag() {
+        let mut hints = BTreeMap::new();
+
+        inject_cache_target_metadata_hints(
+            &mut hints,
+            &["main-cache".to_string(), "fallback-cache".to_string()],
+            "bc_registry_root_v2_abc",
+        );
+
+        assert_eq!(hints.get("cache_tag"), Some(&"main-cache".to_string()));
+        assert!(!hints.contains_key("cache_scope"));
+    }
+
+    #[test]
+    fn cache_target_metadata_falls_back_to_stable_scope_for_noisy_tags() {
+        let long_tag = "a".repeat(80);
+        let mut hints = BTreeMap::new();
+
+        inject_cache_target_metadata_hints(&mut hints, std::slice::from_ref(&long_tag), "root");
+
+        let expected = format!(
+            "tag-{}",
+            &crate::cas_oci::sha256_hex(long_tag.as_bytes())[..16]
+        );
+        assert!(!hints.contains_key("cache_tag"));
+        assert_eq!(hints.get("cache_scope"), Some(&expected));
+    }
+
+    #[test]
+    fn cache_target_metadata_keeps_a_slot_ahead_of_noisy_ci_hints() {
+        let mut hints = BTreeMap::from([
+            ("project".to_string(), "repo".to_string()),
+            ("tool".to_string(), "oci".to_string()),
+            ("ci_provider".to_string(), "github".to_string()),
+            (
+                "ci_run_started_at".to_string(),
+                "2026-04-30t00:00:00z".to_string(),
+            ),
+            ("ci_run_attempt".to_string(), "2".to_string()),
+            ("ci_commit_sha".to_string(), "a".repeat(40)),
+            ("docker_cache_ref_tag".to_string(), "buildcache".to_string()),
+            (
+                "docker_alias_promotion_refs".to_string(),
+                "main".to_string(),
+            ),
+        ]);
+
+        inject_cache_target_metadata_hints(&mut hints, &["main-cache".to_string()], "root");
+
+        assert_eq!(hints.len(), MAX_PROXY_METADATA_HINTS);
+        assert_eq!(hints.get("cache_tag"), Some(&"main-cache".to_string()));
+        assert!(!hints.contains_key("ci_commit_sha"));
     }
 
     #[test]
