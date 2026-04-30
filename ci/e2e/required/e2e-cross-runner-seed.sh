@@ -87,7 +87,7 @@ CAS_DIGEST="$(sha256sum "${CAS_PAYLOAD}" | awk '{print $1}')"
 printf 'cross-runner-ac-%s-%s\n' "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-1}" > "${AC_PAYLOAD}"
 AC_DIGEST="$(sha256sum "${AC_PAYLOAD}" | awk '{print $1}')"
 
-RUST_LOG=info "${BINARY}" cache-registry "${WORKSPACE}" "${TAG}" \
+BORINGCACHE_PROXY_DEBUG=1 RUST_LOG=info "${BINARY}" cache-registry "${WORKSPACE}" "${TAG}" \
   --host 127.0.0.1 \
   --port "${PROXY_PORT}" \
   --ready-file "${PROXY_READY_FILE}" \
