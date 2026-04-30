@@ -87,6 +87,30 @@ The canonical web/API decision for session-summary ingestion, backend persistenc
 
 This CLI ADR owns emitted runner/proxy fields and local negative-cache behavior. The web ADR owns backend storage, reporting, API shape, and product/operator visibility.
 
+## Benchmark Cache Eligibility Evidence
+
+Benchmark regression classification is not a CLI-only decision. The CLI should
+emit the runner-local evidence that makes classification possible, while Rails
+and benchmark artifacts decide whether a sample is eligible for comparison.
+
+For benchmark and action runs, the CLI/proxy evidence should include:
+
+- expected cache inputs for the phase, including tag/ref, tool, cache scope, and
+  whether the phase expects warm behavior;
+- restore/check outcomes for required inputs, using bounded miss or lifecycle
+  reason enums returned by Rails where available;
+- native tool effectiveness summaries such as sccache compile requests, hits,
+  misses, read/write errors, and timeouts;
+- runner headroom snapshots when cheap enough to collect without delaying cache
+  work;
+- identity fields that let Rails and benchmark artifacts join the same run:
+  benchmark id, phase, lane, CI run uid, attempt, repository, commit, action ref,
+  CLI version, and web/API revision when known.
+
+The CLI should not query Datadog, decide AC/BC same-commit pairing, assign public
+benchmark severity, or infer storage-limit eviction without Rails lifecycle
+evidence. Web ADR 0012 owns the cross-stack benchmark cache-eligibility contract.
+
 ## Required Fields
 
 ### Rails/API

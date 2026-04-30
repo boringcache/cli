@@ -75,10 +75,12 @@ pub(crate) async fn flush_kv_index_with_mode(
             cleanup_blob_files(&pending_blob_paths).await;
             state.kv_last_put.store(0, Ordering::Release);
 
-            eprintln!(
-                "KV batch: flushed {entry_count} new entries ({} blobs cleaned up, {promoted} promoted to read cache)",
-                pending_blob_paths.len(),
-            );
+            if crate::serve::state::diagnostics_enabled() {
+                eprintln!(
+                    "KV batch: flushed {entry_count} new entries ({} blobs cleaned up, {promoted} promoted to read cache)",
+                    pending_blob_paths.len(),
+                );
+            }
             drop(guard);
             preload_download_urls(state, &cache_entry_id).await;
             FlushResult::Ok
@@ -146,6 +148,7 @@ pub(crate) async fn do_flush(
     FlushError,
 > {
     let flush_started_at = std::time::Instant::now();
+    let diagnostics = crate::serve::state::diagnostics_enabled();
     let primary_write_scope_tag = kv_primary_write_scope_tag(state);
     let publish_tag =
         if should_publish_kv_primary_human_tag(state, primary_write_scope_tag.as_deref()).await {
@@ -189,6 +192,7 @@ pub(crate) async fn do_flush(
         missing_published_keys,
         mismatched_published_keys,
     } = base_selection
+        && diagnostics
     {
         if backend_entry_count == 0 {
             eprintln!(
@@ -213,10 +217,12 @@ pub(crate) async fn do_flush(
     );
     let merged_blob_order = merge_blob_order(&entries, &base_blob_order);
     let total_count = entries.len();
-    eprintln!(
-        "KV flush: merging {existing_count} existing + {} pending = {total_count} total entries",
-        filtered_pending_entries.len()
-    );
+    if diagnostics {
+        eprintln!(
+            "KV flush: merging {existing_count} existing + {} pending = {total_count} total entries",
+            filtered_pending_entries.len()
+        );
+    }
 
     let (pointer_bytes, blobs) = build_index_pointer(&entries, &merged_blob_order)
         .map_err(|e| FlushError::Transient(format!("build pointer failed: {e:?}")))?;
@@ -318,7 +324,9 @@ pub(crate) async fn do_flush(
                             "KV flush: exists=true blob reconcile receipt commit failed: {error:#}"
                         );
                     }
-                    if heal_stats.uploaded_count > 0 || heal_stats.missing_local_count > 0 {
+                    if heal_stats.missing_local_count > 0
+                        || (diagnostics && heal_stats.uploaded_count > 0)
+                    {
                         eprintln!(
                             "KV flush: exists=true blob reconcile uploaded={} already_present={} missing_local={}",
                             heal_stats.uploaded_count,
@@ -375,25 +383,31 @@ pub(crate) async fn do_flush(
             confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request).await?;
         let alias_count =
             bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id, Some(&tag)).await?;
-        eprintln!(
-            "KV flush publish: tag={} cache_entry_id={} state=published alias_tags={}",
-            tag, confirm_outcome.cache_entry_id, alias_count
-        );
-        if alias_count > 0 {
+        if diagnostics {
+            eprintln!(
+                "KV flush publish: tag={} cache_entry_id={} state=published alias_tags={}",
+                tag, confirm_outcome.cache_entry_id, alias_count
+            );
+        }
+        if diagnostics && alias_count > 0 {
             eprintln!(
                 "KV alias publish completed: cache_entry_id={} alias_tags={}",
                 confirm_outcome.cache_entry_id, alias_count
             );
         }
 
-        eprintln!(
-            "KV flush: save_entry returned exists=true ({total_count} entries, {blob_count} blobs, digest={manifest_root_digest})"
-        );
+        if diagnostics {
+            eprintln!(
+                "KV flush: save_entry returned exists=true ({total_count} entries, {blob_count} blobs, digest={manifest_root_digest})"
+            );
+        }
         return Ok((entries, merged_blob_order, save_response.cache_entry_id));
     }
-    eprintln!(
-        "KV flush: uploading {total_count} entries, {blob_count} blobs, pointer={expected_manifest_size} bytes"
-    );
+    if diagnostics {
+        eprintln!(
+            "KV flush: uploading {total_count} entries, {blob_count} blobs, pointer={expected_manifest_size} bytes"
+        );
+    }
 
     let upload_stats_holder = Arc::new(std::sync::Mutex::new(BlobUploadStats::default()));
     let publish_upload_stats = upload_stats_holder.clone();
@@ -496,28 +510,32 @@ pub(crate) async fn do_flush(
 
     let alias_count =
         bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id, Some(&tag)).await?;
-    eprintln!(
-        "KV flush publish: tag={} cache_entry_id={} state=published alias_tags={}",
-        tag, confirm_outcome.cache_entry_id, alias_count
-    );
+    if diagnostics {
+        eprintln!(
+            "KV flush publish: tag={} cache_entry_id={} state=published alias_tags={}",
+            tag, confirm_outcome.cache_entry_id, alias_count
+        );
+    }
 
-    if alias_count > 0 {
+    if diagnostics && alias_count > 0 {
         eprintln!(
             "KV alias publish completed: cache_entry_id={} alias_tags={}",
             confirm_outcome.cache_entry_id, alias_count
         );
     }
 
-    eprintln!(
-        "KV flush summary: entries={} unique_blobs={} uploaded={} already_present={} skipped_local={} bytes={} duration_ms={}",
-        total_count,
-        blob_count,
-        upload_stats.uploaded_count,
-        upload_stats.already_present_count,
-        upload_stats.missing_local_count,
-        blob_total_size_bytes,
-        flush_started_at.elapsed().as_millis()
-    );
+    if diagnostics {
+        eprintln!(
+            "KV flush summary: entries={} unique_blobs={} uploaded={} already_present={} skipped_local={} bytes={} duration_ms={}",
+            total_count,
+            blob_count,
+            upload_stats.uploaded_count,
+            upload_stats.already_present_count,
+            upload_stats.missing_local_count,
+            blob_total_size_bytes,
+            flush_started_at.elapsed().as_millis()
+        );
+    }
 
     Ok((entries, merged_blob_order, save_response.cache_entry_id))
 }

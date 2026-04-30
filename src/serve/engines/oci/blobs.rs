@@ -404,12 +404,14 @@ pub(crate) async fn prefetch_blob_bodies(
     }
 
     if pending_targets.is_empty() {
-        eprintln!(
-            "{log_label}: already warm (cached_urls={} unresolved_urls={} already_local={})",
-            cached_url_count,
-            blobs.len().saturating_sub(cached_url_count),
-            stats.already_local,
-        );
+        if crate::serve::state::diagnostics_enabled() {
+            eprintln!(
+                "{log_label}: already warm (cached_urls={} unresolved_urls={} already_local={})",
+                cached_url_count,
+                blobs.len().saturating_sub(cached_url_count),
+                stats.already_local,
+            );
+        }
         return stats;
     }
 
@@ -418,15 +420,18 @@ pub(crate) async fn prefetch_blob_bodies(
         .iter()
         .map(|target| target.blob.size_bytes)
         .sum();
-    eprintln!(
-        "{log_label}: hydrating {}/{} OCI blobs ({:.1} MB, cached_urls={}, unresolved_urls={}, already_local={})",
-        stats.scheduled,
-        stats.total_unique_blobs,
-        stats.scheduled_bytes as f64 / (1024.0 * 1024.0),
-        cached_url_count,
-        blobs.len().saturating_sub(cached_url_count),
-        stats.already_local,
-    );
+    let diagnostics = crate::serve::state::diagnostics_enabled();
+    if diagnostics {
+        eprintln!(
+            "{log_label}: hydrating {}/{} OCI blobs ({:.1} MB, cached_urls={}, unresolved_urls={}, already_local={})",
+            stats.scheduled,
+            stats.total_unique_blobs,
+            stats.scheduled_bytes as f64 / (1024.0 * 1024.0),
+            cached_url_count,
+            blobs.len().saturating_sub(cached_url_count),
+            stats.already_local,
+        );
+    }
 
     let prefetch_started_at = std::time::Instant::now();
     let mut tasks = tokio::task::JoinSet::new();
@@ -468,7 +473,7 @@ pub(crate) async fn prefetch_blob_bodies(
             }
         }
         completed = completed.saturating_add(1);
-        if completed.is_multiple_of(log_interval) {
+        if diagnostics && completed.is_multiple_of(log_interval) {
             eprintln!(
                 "{log_label}: {completed}/{} OCI blobs ({} inserted, {} failed, {:.1}s)",
                 stats.scheduled,
@@ -480,14 +485,16 @@ pub(crate) async fn prefetch_blob_bodies(
     }
 
     stats.duration_ms = prefetch_started_at.elapsed().as_millis() as u64;
-    eprintln!(
-        "{log_label}: done inserted={} scheduled={} failures={} cache_size={} bytes in {:.1}s",
-        stats.inserted,
-        stats.scheduled,
-        stats.failures,
-        state.blob_read_cache.total_bytes(),
-        prefetch_started_at.elapsed().as_secs_f64(),
-    );
+    if diagnostics {
+        eprintln!(
+            "{log_label}: done inserted={} scheduled={} failures={} cache_size={} bytes in {:.1}s",
+            stats.inserted,
+            stats.scheduled,
+            stats.failures,
+            state.blob_read_cache.total_bytes(),
+            prefetch_started_at.elapsed().as_secs_f64(),
+        );
+    }
     stats
 }
 

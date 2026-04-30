@@ -134,6 +134,7 @@ async fn execute_adapter(
 
 pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
     let verbose = cli.verbose;
+    crate::serve::state::set_diagnostics_enabled(verbose);
 
     match cli.command {
         Commands::Auth(args) => commands::auth::execute(args.token).await,

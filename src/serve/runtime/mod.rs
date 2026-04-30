@@ -110,7 +110,9 @@ pub async fn run_server(
     )
     .await?;
 
-    eprintln!("Shutdown: flushing pending KV entries");
+    if crate::serve::state::diagnostics_enabled() {
+        eprintln!("Shutdown: flushing pending KV entries");
+    }
     shutdown::flush_pending_on_shutdown(&state).await;
     shutdown::emit_cache_session_summary(&state);
     shutdown::cleanup_runtime_temp_dir(&state).await;
@@ -178,7 +180,9 @@ pub async fn start_server_background(
         )
         .await?;
 
-        eprintln!("Shutdown: flushing pending KV entries");
+        if crate::serve::state::diagnostics_enabled() {
+            eprintln!("Shutdown: flushing pending KV entries");
+        }
         shutdown::flush_pending_on_shutdown(&server_state).await;
         shutdown::emit_cache_session_summary(&server_state);
         shutdown::cleanup_runtime_temp_dir(&server_state).await;

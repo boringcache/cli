@@ -163,93 +163,114 @@ pub(super) async fn build_server_runtime(
     socket.bind(bind_addr)?;
     let listener = socket.listen(listen_backlog)?;
 
-    eprintln!("BoringCache proxy listening on {addr}");
-    eprintln!("  Workspace: {workspace}");
-    if state.read_only {
-        eprintln!("  Mode: read-only");
-    }
-    if !state.configured_human_tags.is_empty() {
-        eprintln!(
-            "  {}: {}",
-            cache_tag_label(&state.proxy_metadata_hints),
-            state.configured_human_tags.join(", ")
-        );
-    }
-    eprintln!(
-        "  {}: {}",
-        internal_root_tag_label(&state.proxy_metadata_hints),
-        state.registry_root_tag
-    );
-    eprintln!(
-        "  Strict Cache Errors: {}",
-        if state.fail_on_cache_error {
-            "enabled"
-        } else {
-            "disabled (best-effort)"
-        }
-    );
-    if proxy_metadata_hints.is_empty() {
-        eprintln!("  Proxy Metadata Hints: none");
+    let tag_summary = if state.configured_human_tags.is_empty() {
+        state.registry_root_tag.clone()
     } else {
-        eprintln!(
-            "  Proxy Metadata Hints: {}",
-            proxy_metadata_hints
-                .iter()
-                .map(|(key, value)| format!("{key}={value}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    for endpoint in endpoint_lines(&state.proxy_metadata_hints, &host, port) {
-        eprintln!("{endpoint}");
-    }
+        state.configured_human_tags.join(", ")
+    };
     eprintln!(
-        "  Blob Read Cache: {} (max {} bytes)",
-        state.blob_read_cache.cache_dir().display(),
-        state.blob_read_cache.max_bytes()
-    );
-    let src = |from_env: bool| if from_env { "env" } else { "auto" };
-    eprintln!(
-        "  Blob Download Concurrency: {dl_concurrency} max ({}), prefetch budget: {prefetch_concurrency} ({})",
-        src(dl_from_env),
-        src(prefetch_from_env)
-    );
-    match (dl_from_env, prefetch_from_env) {
-        (false, false) => eprintln!("  Expert Tuning Overrides: none"),
-        (true, false) => eprintln!("  Expert Tuning Overrides: {BLOB_DOWNLOAD_CONCURRENCY_ENV}"),
-        (false, true) => eprintln!("  Expert Tuning Overrides: {BLOB_PREFETCH_CONCURRENCY_ENV}"),
-        (true, true) => eprintln!(
-            "  Expert Tuning Overrides: {BLOB_DOWNLOAD_CONCURRENCY_ENV}, {BLOB_PREFETCH_CONCURRENCY_ENV}"
-        ),
-    }
-    eprintln!("  Replication queue: {KV_REPLICATION_WORK_QUEUE_CAPACITY} (bounded)");
-    eprintln!(
-        "  Startup mode: {}",
-        if startup_warm { "warm" } else { "on-demand" }
-    );
-    eprintln!(
-        "  {}: {}",
-        body_hydration_label(&state.proxy_metadata_hints),
+        "BoringCache proxy listening on {addr} workspace={workspace} tags={tag_summary} mode={} startup={} hydration={}",
+        if state.read_only {
+            "read-only"
+        } else {
+            "read/write"
+        },
+        if startup_warm { "warm" } else { "on-demand" },
         state.oci_hydration_policy.as_str()
     );
-    eprintln!(
-        "  Full-tag hydration: {}",
-        if startup_warm {
-            "before ready"
-        } else {
-            "per-request only"
+
+    if state::diagnostics_enabled() {
+        eprintln!("  Workspace: {workspace}");
+        if state.read_only {
+            eprintln!("  Mode: read-only");
         }
-    );
-    eprintln!("  KV backlog policy: {KV_BACKLOG_POLICY}");
-    eprintln!(
-        "  TCP listen backlog: {listen_backlog} ({})",
-        if std::env::var(TCP_LISTEN_BACKLOG_ENV).is_ok() {
-            "env"
-        } else {
-            "default"
+        if !state.configured_human_tags.is_empty() {
+            eprintln!(
+                "  {}: {}",
+                cache_tag_label(&state.proxy_metadata_hints),
+                state.configured_human_tags.join(", ")
+            );
         }
-    );
-    eprintln!("  Runtime Temp: {}", state.runtime_temp_dir.display());
+        eprintln!(
+            "  {}: {}",
+            internal_root_tag_label(&state.proxy_metadata_hints),
+            state.registry_root_tag
+        );
+        eprintln!(
+            "  Strict Cache Errors: {}",
+            if state.fail_on_cache_error {
+                "enabled"
+            } else {
+                "disabled (best-effort)"
+            }
+        );
+        if proxy_metadata_hints.is_empty() {
+            eprintln!("  Proxy Metadata Hints: none");
+        } else {
+            eprintln!(
+                "  Proxy Metadata Hints: {}",
+                proxy_metadata_hints
+                    .iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        for endpoint in endpoint_lines(&state.proxy_metadata_hints, &host, port) {
+            eprintln!("{endpoint}");
+        }
+        eprintln!(
+            "  Blob Read Cache: {} (max {} bytes)",
+            state.blob_read_cache.cache_dir().display(),
+            state.blob_read_cache.max_bytes()
+        );
+        let src = |from_env: bool| if from_env { "env" } else { "auto" };
+        eprintln!(
+            "  Blob Download Concurrency: {dl_concurrency} max ({}), prefetch budget: {prefetch_concurrency} ({})",
+            src(dl_from_env),
+            src(prefetch_from_env)
+        );
+        match (dl_from_env, prefetch_from_env) {
+            (false, false) => eprintln!("  Expert Tuning Overrides: none"),
+            (true, false) => {
+                eprintln!("  Expert Tuning Overrides: {BLOB_DOWNLOAD_CONCURRENCY_ENV}")
+            }
+            (false, true) => {
+                eprintln!("  Expert Tuning Overrides: {BLOB_PREFETCH_CONCURRENCY_ENV}")
+            }
+            (true, true) => eprintln!(
+                "  Expert Tuning Overrides: {BLOB_DOWNLOAD_CONCURRENCY_ENV}, {BLOB_PREFETCH_CONCURRENCY_ENV}"
+            ),
+        }
+        eprintln!("  Replication queue: {KV_REPLICATION_WORK_QUEUE_CAPACITY} (bounded)");
+        eprintln!(
+            "  Startup mode: {}",
+            if startup_warm { "warm" } else { "on-demand" }
+        );
+        eprintln!(
+            "  {}: {}",
+            body_hydration_label(&state.proxy_metadata_hints),
+            state.oci_hydration_policy.as_str()
+        );
+        eprintln!(
+            "  Full-tag hydration: {}",
+            if startup_warm {
+                "before ready"
+            } else {
+                "per-request only"
+            }
+        );
+        eprintln!("  KV backlog policy: {KV_BACKLOG_POLICY}");
+        eprintln!(
+            "  TCP listen backlog: {listen_backlog} ({})",
+            if std::env::var(TCP_LISTEN_BACKLOG_ENV).is_ok() {
+                "env"
+            } else {
+                "default"
+            }
+        );
+        eprintln!("  Runtime Temp: {}", state.runtime_temp_dir.display());
+    }
 
     Ok((state, listener, kv_replication_work_rx))
 }
@@ -352,7 +373,9 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     if force_http1() {
-        eprintln!("  HTTP transport: h1 only ({}=1)", HTTP_VERSION_ENV);
+        if state::diagnostics_enabled() {
+            eprintln!("  HTTP transport: h1 only ({}=1)", HTTP_VERSION_ENV);
+        }
         let listener = listener.tap_io(|tcp_stream| {
             let _ = tcp_stream.set_nodelay(true);
         });
@@ -460,12 +483,14 @@ where
 {
     let builder = build_http_connection_builder();
 
-    eprintln!(
-        "  HTTP transport: h1+h2c auto (stream_window={}MB, conn_window={}MB, max_streams={})",
-        H2_INITIAL_STREAM_WINDOW / (1024 * 1024),
-        H2_INITIAL_CONNECTION_WINDOW / (1024 * 1024),
-        H2_MAX_CONCURRENT_STREAMS,
-    );
+    if state::diagnostics_enabled() {
+        eprintln!(
+            "  HTTP transport: h1+h2c auto (stream_window={}MB, conn_window={}MB, max_streams={})",
+            H2_INITIAL_STREAM_WINDOW / (1024 * 1024),
+            H2_INITIAL_CONNECTION_WINDOW / (1024 * 1024),
+            H2_MAX_CONCURRENT_STREAMS,
+        );
+    }
 
     tokio::pin!(shutdown);
 

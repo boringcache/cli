@@ -684,7 +684,9 @@ impl Aggregator {
             return;
         };
         let record = session.into_record(ended_at_secs);
-        Self::emit_session_summary(&record);
+        if crate::serve::state::diagnostics_enabled() {
+            Self::emit_session_summary(&record);
+        }
         state.completed_sessions.push(record);
     }
 

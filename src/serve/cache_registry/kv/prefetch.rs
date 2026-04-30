@@ -60,9 +60,11 @@ pub(crate) async fn preload_download_urls_for_blobs(
             let missing_count = response.missing.len();
             let mut published = state.kv_published_index.write().await;
             published.merge_download_urls(urls);
-            eprintln!(
-                "KV index preload: resolved {url_count}/{requested} download URLs (missing={missing_count})"
-            );
+            if crate::serve::state::diagnostics_enabled() {
+                eprintln!(
+                    "KV index preload: resolved {url_count}/{requested} download URLs (missing={missing_count})"
+                );
+            }
             emit_serve_phase_metric(
                 Some(&state.workspace),
                 Some(cache_entry_id),
@@ -425,10 +427,12 @@ async fn prefetch_blob_targets(
     }
 
     if pending_targets.is_empty() {
-        eprintln!(
-            "{log_label}: already warm (cached_urls={} unresolved_urls={} already_local={})",
-            summary.cached_url_count, summary.unresolved_url_count, stats.already_local,
-        );
+        if crate::serve::state::diagnostics_enabled() {
+            eprintln!(
+                "{log_label}: already warm (cached_urls={} unresolved_urls={} already_local={})",
+                summary.cached_url_count, summary.unresolved_url_count, stats.already_local,
+            );
+        }
         return stats;
     }
 
@@ -437,19 +441,22 @@ async fn prefetch_blob_targets(
         .iter()
         .map(|target| target.blob.size_bytes)
         .sum();
-    eprintln!(
-        "{log_label}: warming {}/{} blobs ({:.1} MB, concurrency={}/{}, source={}, reason={}, cached_urls={}, unresolved_urls={}, already_local={})",
-        stats.scheduled,
-        stats.total_unique_blobs,
-        stats.scheduled_bytes as f64 / (1024.0 * 1024.0),
-        concurrency_plan.effective_concurrency,
-        concurrency_plan.max_concurrency,
-        concurrency_plan.source,
-        concurrency_plan.reason,
-        summary.cached_url_count,
-        summary.unresolved_url_count,
-        stats.already_local,
-    );
+    let diagnostics = crate::serve::state::diagnostics_enabled();
+    if diagnostics {
+        eprintln!(
+            "{log_label}: warming {}/{} blobs ({:.1} MB, concurrency={}/{}, source={}, reason={}, cached_urls={}, unresolved_urls={}, already_local={})",
+            stats.scheduled,
+            stats.total_unique_blobs,
+            stats.scheduled_bytes as f64 / (1024.0 * 1024.0),
+            concurrency_plan.effective_concurrency,
+            concurrency_plan.max_concurrency,
+            concurrency_plan.source,
+            concurrency_plan.reason,
+            summary.cached_url_count,
+            summary.unresolved_url_count,
+            stats.already_local,
+        );
+    }
 
     let prefetch_started_at = std::time::Instant::now();
     let mut pending_iter = pending_targets.into_iter();
@@ -507,7 +514,7 @@ async fn prefetch_blob_targets(
             }
         }
         completed = completed.saturating_add(1);
-        if completed.is_multiple_of(log_interval) {
+        if diagnostics && completed.is_multiple_of(log_interval) {
             eprintln!(
                 "{log_label}: {completed}/{} blobs ({} inserted, {} failed, {:.1}s)",
                 stats.scheduled,
@@ -524,14 +531,16 @@ async fn prefetch_blob_targets(
     }
 
     stats.duration_ms = prefetch_started_at.elapsed().as_millis() as u64;
-    eprintln!(
-        "{log_label}: done inserted={} scheduled={} failures={} cache_size={} bytes in {:.1}s",
-        stats.inserted,
-        stats.scheduled,
-        stats.failures,
-        state.blob_read_cache.total_bytes(),
-        prefetch_started_at.elapsed().as_secs_f64(),
-    );
+    if diagnostics {
+        eprintln!(
+            "{log_label}: done inserted={} scheduled={} failures={} cache_size={} bytes in {:.1}s",
+            stats.inserted,
+            stats.scheduled,
+            stats.failures,
+            state.blob_read_cache.total_bytes(),
+            prefetch_started_at.elapsed().as_secs_f64(),
+        );
+    }
     stats
 }
 
@@ -554,7 +563,10 @@ pub(crate) async fn prefetch_manifest_blobs(
     )
     .await;
 
-    eprintln!("Prefetch: loading index and hydrating full tag before serving...");
+    let diagnostics = crate::serve::state::diagnostics_enabled();
+    if diagnostics {
+        eprintln!("Prefetch: loading index and hydrating full tag before serving...");
+    }
     let started_at = std::time::Instant::now();
 
     emit_serve_event(
@@ -604,27 +616,35 @@ pub(crate) async fn prefetch_manifest_blobs(
                     concurrency_reason: concurrency_plan.reason,
                 });
 
-            eprintln!(
-                "Prefetch: {count} entries loaded, hydrating full tag locally ({} blobs, {:.1} MB, concurrency={}/{}, source={}, reason={})",
-                total_unique_blobs,
-                total_unique_bytes as f64 / (1024.0 * 1024.0),
-                concurrency_plan.effective_concurrency,
-                concurrency_plan.max_concurrency,
-                concurrency_plan.source,
-                concurrency_plan.reason,
-            );
+            if diagnostics {
+                eprintln!(
+                    "Prefetch: {count} entries loaded, hydrating full tag locally ({} blobs, {:.1} MB, concurrency={}/{}, source={}, reason={})",
+                    total_unique_blobs,
+                    total_unique_bytes as f64 / (1024.0 * 1024.0),
+                    concurrency_plan.effective_concurrency,
+                    concurrency_plan.max_concurrency,
+                    concurrency_plan.source,
+                    concurrency_plan.reason,
+                );
+            }
 
             let startup_url_stats =
                 preload_download_urls_for_blobs(state, &cache_entry_id, &unique_blobs).await;
-            eprintln!(
-                "Prefetch: full-tag URL coverage resolved={}/{} missing={}",
-                startup_url_stats.resolved, startup_url_stats.requested, startup_url_stats.missing,
-            );
+            if diagnostics {
+                eprintln!(
+                    "Prefetch: full-tag URL coverage resolved={}/{} missing={}",
+                    startup_url_stats.resolved,
+                    startup_url_stats.requested,
+                    startup_url_stats.missing,
+                );
+            }
             state
                 .prefetch_metrics
                 .record_startup_url_coverage(startup_url_stats.resolved, startup_url_stats.missing);
 
-            eprintln!("Prefetch: warming full tag...");
+            if diagnostics {
+                eprintln!("Prefetch: warming full tag...");
+            }
             match tokio::time::timeout(
                 KV_PREFETCH_READINESS_TIMEOUT,
                 prefetch_all_blobs(state, &cache_entry_id, &unique_blobs, concurrency_plan),
@@ -632,11 +652,13 @@ pub(crate) async fn prefetch_manifest_blobs(
             .await
             {
                 Ok(()) => {
-                    eprintln!(
-                        "Prefetch: complete in {:.1}s, cache_size={} bytes",
-                        started_at.elapsed().as_secs_f64(),
-                        state.blob_read_cache.total_bytes(),
-                    );
+                    if diagnostics {
+                        eprintln!(
+                            "Prefetch: complete in {:.1}s, cache_size={} bytes",
+                            started_at.elapsed().as_secs_f64(),
+                            state.blob_read_cache.total_bytes(),
+                        );
+                    }
                 }
                 Err(_) => {
                     let message = format!(
@@ -665,7 +687,9 @@ pub(crate) async fn prefetch_manifest_blobs(
                 let mut published = state.kv_published_index.write().await;
                 published.set_empty_incomplete();
             }
-            eprintln!("Prefetch: no existing entries, skipping");
+            if diagnostics {
+                eprintln!("Prefetch: no existing entries, skipping");
+            }
         }
         Err(e) => {
             let mut published = state.kv_published_index.write().await;

@@ -29,6 +29,13 @@ pub(super) fn emit_cache_session_summary(state: &AppState) {
         summary.classification,
     ));
     observability::flush_for(std::time::Duration::from_secs(2));
+    eprintln!(
+        "BoringCache proxy summary workspace={} mode={} adapter={} duration={}s",
+        summary.workspace,
+        summary.mode,
+        summary.adapter,
+        summary.duration_ms / 1000
+    );
 }
 
 pub(super) async fn cleanup_runtime_temp_dir(state: &AppState) {

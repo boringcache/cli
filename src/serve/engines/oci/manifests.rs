@@ -168,12 +168,14 @@ pub(crate) async fn prefetch_manifest_reference(
     let local_blobs = count_local_oci_blobs(state, &cached.blobs).await;
     if !hydrate_bodies {
         let cold_blobs = cached.blobs.len().saturating_sub(local_blobs);
-        eprintln!(
-            "OCI prefetch {name}@{reference}: indexed {} blobs ({} locator URLs, {} already local); blob bodies remain on demand",
-            cached.blobs.len(),
-            cached_urls.len(),
-            local_blobs,
-        );
+        if crate::serve::state::diagnostics_enabled() {
+            eprintln!(
+                "OCI prefetch {name}@{reference}: indexed {} blobs ({} locator URLs, {} already local); blob bodies remain on demand",
+                cached.blobs.len(),
+                cached_urls.len(),
+                local_blobs,
+            );
+        }
 
         return Ok((
             BlobPrefetchStats {
@@ -186,12 +188,14 @@ pub(crate) async fn prefetch_manifest_reference(
         ));
     }
 
-    eprintln!(
-        "OCI prefetch {name}@{reference}: indexed {} blobs ({} locator URLs, {} already local); hydrating blob bodies",
-        cached.blobs.len(),
-        cached_urls.len(),
-        local_blobs,
-    );
+    if crate::serve::state::diagnostics_enabled() {
+        eprintln!(
+            "OCI prefetch {name}@{reference}: indexed {} blobs ({} locator URLs, {} already local); hydrating blob bodies",
+            cached.blobs.len(),
+            cached_urls.len(),
+            local_blobs,
+        );
+    }
     let stats = blobs::prefetch_blob_bodies(
         state,
         &cached.name,

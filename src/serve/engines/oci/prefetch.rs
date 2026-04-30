@@ -9,10 +9,13 @@ pub(crate) async fn prefetch_selected_refs(
         return;
     }
 
-    eprintln!(
-        "Prefetch: resolving {} selected OCI manifest refs",
-        oci_prefetch_refs.len()
-    );
+    let diagnostics = crate::serve::state::diagnostics_enabled();
+    if diagnostics {
+        eprintln!(
+            "Prefetch: resolving {} selected OCI manifest refs",
+            oci_prefetch_refs.len()
+        );
+    }
     let oci_started_at = std::time::Instant::now();
     let mut completed_refs = 0usize;
     let mut total_unique_blobs = 0usize;

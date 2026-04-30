@@ -69,3 +69,7 @@ Most users should rely on the default proxy behavior.
 The intended expert overrides are:
 
 - `BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY` to cap read/download parallelism
+- `BORINGCACHE_PROXY_DEBUG=1` to print detailed proxy diagnostics such as prefetch, tag refresh, blob upload, flush, and per-session lines
+
+The proxy keeps normal stderr quiet: one startup line, warnings/errors, and one shutdown summary.
+Use global `--verbose`, `BORINGCACHE_PROXY_DEBUG=1`, or debug-level logging when debugging proxy internals.

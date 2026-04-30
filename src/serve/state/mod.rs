@@ -34,8 +34,17 @@ pub use upload_sessions::*;
 
 pub use crate::serve::engines::oci::manifest_cache::OciManifestCacheEntry;
 
+const PROXY_DEBUG_ENV: &str = "BORINGCACHE_PROXY_DEBUG";
+static PROXY_DIAGNOSTICS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_diagnostics_enabled(enabled: bool) {
+    PROXY_DIAGNOSTICS_ENABLED.store(enabled, Ordering::Release);
+}
+
 pub fn diagnostics_enabled() -> bool {
-    log::log_enabled!(log::Level::Debug)
+    PROXY_DIAGNOSTICS_ENABLED.load(Ordering::Acquire)
+        || log::log_enabled!(log::Level::Debug)
+        || crate::config::env_bool(PROXY_DEBUG_ENV)
 }
 
 #[derive(Clone)]
@@ -172,6 +181,25 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostics_flag_and_env_enable_proxy_diagnostics() {
+        let _guard = crate::test_env::lock();
+        crate::test_env::remove_var(PROXY_DEBUG_ENV);
+        set_diagnostics_enabled(false);
+
+        assert_eq!(diagnostics_enabled(), log::log_enabled!(log::Level::Debug));
+
+        set_diagnostics_enabled(true);
+        assert!(diagnostics_enabled());
+
+        set_diagnostics_enabled(false);
+        crate::test_env::set_var(PROXY_DEBUG_ENV, "1");
+        assert!(diagnostics_enabled());
+
+        crate::test_env::remove_var(PROXY_DEBUG_ENV);
+        set_diagnostics_enabled(false);
+    }
 
     #[test]
     fn ref_tag_is_deterministic() {

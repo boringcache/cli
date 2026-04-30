@@ -47,6 +47,7 @@ Before launch, finish or explicitly defer these CLI ADR gates:
 - ADR 0008: version dry-run schemas enough for action/docs stability, add drift checks if launch copy says rescan/lint, and keep Docker docs/actions aligned on CLI-planned BuildKit registry-cache refs.
 - ADR 0009: keep the automatic maintenance path cheap, cross-platform warnings explicit, legacy aliases out of public copy, and action planning delegated to CLI dry-run plans.
 - Web ADR 0008: direct archive/CAS metrics and the CLI proxy producer now emit provider-neutral storage evidence under the shared session-summary shape; benchmark telemetry, raw run JSONL object persistence, legacy `/metrics` retirement, provider-neutral customer copy, two-sided evaluation surfaces, first-class MCP resources, normalized miss/degradation/retirement reasons, and CLI/TUI/Actions-first customer diagnostics remain launch work or explicit deferrals.
+- Web ADR 0012: CLI/action producers need to emit required cache input state, bounded restore/check reasons, native hit-rate summaries, runner headroom, and run identity for benchmark cache-eligibility review; Rails and benchmark artifacts own lifecycle truth, same-commit pairing, and public regression classification.
 
 ## Handoff Rule
 

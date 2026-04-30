@@ -552,9 +552,11 @@ async fn process_replication_work(state: &AppState, urgent: bool, consecutive_fa
                 pending.entry_count()
             };
             if remaining_pending > 0 {
-                eprintln!(
-                    "KV flush: {remaining_pending} pending entries arrived during flush, scheduling follow-up"
-                );
+                if diagnostics_enabled() {
+                    eprintln!(
+                        "KV flush: {remaining_pending} pending entries arrived during flush, scheduling follow-up"
+                    );
+                }
                 let _ = cache_registry::enqueue_replication_flush_hint(state, true, false);
             }
         }

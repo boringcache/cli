@@ -20,6 +20,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         return;
     }
 
+    let diagnostics = crate::serve::state::diagnostics_enabled();
     let tag = state.registry_root_tag.trim().to_string();
     let hit = match resolve_hit_for_index_load(state, &tag, true).await {
         Ok(hit) => hit,
@@ -32,7 +33,9 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
                 let mut published = state.kv_published_index.write().await;
                 published.touch_refresh();
                 clear_tag_misses(state, &state.registry_root_tag);
-                eprintln!("KV index refresh: preserving in-memory index (no backend index)");
+                if diagnostics {
+                    eprintln!("KV index refresh: preserving in-memory index (no backend index)");
+                }
                 return;
             }
             {
@@ -40,7 +43,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
                 published.set_empty();
             }
             clear_tag_misses(state, &state.registry_root_tag);
-            if had_entries {
+            if diagnostics && had_entries {
                 eprintln!("KV index refresh: cleared stale entries (no backend index)");
             }
             return;
@@ -128,13 +131,15 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         let mut published = state.kv_published_index.write().await;
         published.touch_refresh();
         clear_tag_misses(state, &state.registry_root_tag);
-        eprintln!(
-            "KV index refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
-            entry_map.len(),
-            published_entry_count,
-            gap_counts.missing_keys,
-            gap_counts.mismatched_keys
-        );
+        if diagnostics {
+            eprintln!(
+                "KV index refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
+                entry_map.len(),
+                published_entry_count,
+                gap_counts.missing_keys,
+                gap_counts.mismatched_keys
+            );
+        }
         return;
     }
 
@@ -147,7 +152,9 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             let mut published = state.kv_published_index.write().await;
             published.touch_refresh();
             clear_tag_misses(state, &state.registry_root_tag);
-            eprintln!("KV index refresh: preserving in-memory index (empty pointer)");
+            if diagnostics {
+                eprintln!("KV index refresh: preserving in-memory index (empty pointer)");
+            }
             return;
         }
         {
@@ -155,7 +162,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             published.set_empty();
         }
         clear_tag_misses(state, &state.registry_root_tag);
-        if had_entries {
+        if diagnostics && had_entries {
             eprintln!("KV index refresh: cleared stale entries (empty pointer)");
         }
         return;
@@ -167,7 +174,9 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         published.update(entries, blob_order, cache_entry_id.clone());
     }
     clear_tag_misses(state, &state.registry_root_tag);
-    eprintln!("KV index refresh: {count} entries loaded");
+    if diagnostics {
+        eprintln!("KV index refresh: {count} entries loaded");
+    }
     preload_download_urls(state, &cache_entry_id).await;
 }
 
@@ -179,6 +188,7 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
         return;
     }
 
+    let diagnostics = crate::serve::state::diagnostics_enabled();
     let tag = state.registry_root_tag.trim().to_string();
     let hit = match resolve_hit_for_index_load(state, &tag, true).await {
         Ok(hit) => hit,
@@ -266,13 +276,15 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
         let mut published = state.kv_published_index.write().await;
         published.touch_refresh();
         clear_tag_misses(state, &state.registry_root_tag);
-        eprintln!(
-            "KV version-triggered refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
-            entry_map.len(),
-            published_entry_count,
-            gap_counts.missing_keys,
-            gap_counts.mismatched_keys
-        );
+        if diagnostics {
+            eprintln!(
+                "KV version-triggered refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
+                entry_map.len(),
+                published_entry_count,
+                gap_counts.missing_keys,
+                gap_counts.mismatched_keys
+            );
+        }
         return;
     }
 
@@ -301,7 +313,9 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
         published.update(entries, blob_order, cache_entry_id.clone());
     }
     clear_tag_misses(state, &state.registry_root_tag);
-    eprintln!("KV version-triggered refresh: {count} entries loaded (no blob prefetch)");
+    if diagnostics {
+        eprintln!("KV version-triggered refresh: {count} entries loaded (no blob prefetch)");
+    }
 }
 
 pub(crate) async fn poll_tag_version_loop(state: &AppState) {
@@ -382,24 +396,28 @@ pub(crate) async fn poll_tag_version_loop(state: &AppState) {
                     let cooldown_ms = KV_VERSION_REFRESH_COOLDOWN.as_millis() as u64;
                     if last_ms > 0 && now_ms.saturating_sub(last_ms) < cooldown_ms {
                         skipped_refreshes += 1;
-                        eprintln!(
-                            "Tag version changed: {} (poll={} changes={} mode={} refresh=cooldown skipped={})",
-                            &new_id[..8.min(new_id.len())],
-                            polls,
-                            changes,
-                            if is_active { "active" } else { "idle" },
-                            skipped_refreshes,
-                        );
+                        if crate::serve::state::diagnostics_enabled() {
+                            eprintln!(
+                                "Tag version changed: {} (poll={} changes={} mode={} refresh=cooldown skipped={})",
+                                &new_id[..8.min(new_id.len())],
+                                polls,
+                                changes,
+                                if is_active { "active" } else { "idle" },
+                                skipped_refreshes,
+                            );
+                        }
                         continue;
                     }
 
-                    eprintln!(
-                        "Tag version changed: {} (poll={} changes={} mode={})",
-                        &new_id[..8.min(new_id.len())],
-                        polls,
-                        changes,
-                        if is_active { "active" } else { "idle" }
-                    );
+                    if crate::serve::state::diagnostics_enabled() {
+                        eprintln!(
+                            "Tag version changed: {} (poll={} changes={} mode={})",
+                            &new_id[..8.min(new_id.len())],
+                            polls,
+                            changes,
+                            if is_active { "active" } else { "idle" }
+                        );
+                    }
 
                     let refresh_state = state.clone();
                     let refresh_flag = refreshing.clone();
@@ -413,10 +431,12 @@ pub(crate) async fn poll_tag_version_loop(state: &AppState) {
                         let duration_ms = started.elapsed().as_millis();
                         let completed_ms = crate::serve::state::unix_time_ms_now();
                         refresh_completed.store(completed_ms, Ordering::Release);
-                        eprintln!(
-                            "Tag version refresh complete: {}ms (refreshes={})",
-                            duration_ms, refresh_count
-                        );
+                        if crate::serve::state::diagnostics_enabled() {
+                            eprintln!(
+                                "Tag version refresh complete: {}ms (refreshes={})",
+                                duration_ms, refresh_count
+                            );
+                        }
                         refresh_flag.store(false, Ordering::Release);
                     });
                 }

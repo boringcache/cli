@@ -350,15 +350,18 @@ pub(super) async fn upload_blobs(
         concurrency_plan.max,
     ));
     let total_requested = upload_plan.upload_urls.len() as u64;
-    eprintln!(
-        "KV blob upload plan: requested={} already_present={} concurrency={}/{} source={} reason={}",
-        total_requested,
-        upload_plan.already_present.len(),
-        concurrency_plan.initial,
-        concurrency_plan.max,
-        concurrency_plan.source,
-        concurrency_plan.reason,
-    );
+    let diagnostics = crate::serve::state::diagnostics_enabled();
+    if diagnostics {
+        eprintln!(
+            "KV blob upload plan: requested={} already_present={} concurrency={}/{} source={} reason={}",
+            total_requested,
+            upload_plan.already_present.len(),
+            concurrency_plan.initial,
+            concurrency_plan.max,
+            concurrency_plan.source,
+            concurrency_plan.reason,
+        );
+    }
     let mut tasks = tokio::task::JoinSet::new();
 
     for upload in upload_plan.upload_urls {
@@ -436,7 +439,8 @@ pub(super) async fn upload_blobs(
         let completed_requested = stats
             .uploaded_count
             .saturating_add(stats.missing_local_count);
-        if total_requested > 0
+        if diagnostics
+            && total_requested > 0
             && (completed_requested == total_requested
                 || completed_requested.is_multiple_of(1000)
                 || completed_requested == 1)
@@ -497,13 +501,15 @@ pub(super) async fn upload_blobs(
             concurrency_source: concurrency_plan.source,
             concurrency_reason: concurrency_plan.reason,
         });
-    eprintln!(
-        "KV blob upload complete: uploaded={} already_present={} missing_local={} final_concurrency={}",
-        stats.uploaded_count,
-        stats.already_present_count,
-        stats.missing_local_count,
-        final_concurrency,
-    );
+    if diagnostics {
+        eprintln!(
+            "KV blob upload complete: uploaded={} already_present={} missing_local={} final_concurrency={}",
+            stats.uploaded_count,
+            stats.already_present_count,
+            stats.missing_local_count,
+            final_concurrency,
+        );
+    }
 
     Ok(stats)
 }
