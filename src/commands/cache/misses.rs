@@ -66,13 +66,6 @@ fn render_misses_report(response: &WorkspaceMissesResponse) {
     );
     crate::ui::blank_line();
 
-    if response.cache_health.excluded_seed_sessions == 0 {
-        println!(
-            "Tip: label seed or prewarm runs with --metadata-hint phase=seed (or repo metadata-hints) so expected fill traffic stays out of actionable misses."
-        );
-        crate::ui::blank_line();
-    }
-
     if response.missed_keys.is_empty() {
         println!("  none");
         return;
