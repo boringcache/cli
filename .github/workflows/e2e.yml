@@ -545,6 +545,7 @@ jobs:
           set -euo pipefail
           mkdir -p "${LOG_DIR}"
           BINARY="${RUNNER_TEMP}/boringcache-bin/boringcache" \
+          EXPECTED_CACHE_SESSION_SCHEMA=cache_session_v2 \
             bash ./ci/e2e/e2e-local-adapter-commands.sh 2>&1 | tee "${LOG_DIR}/run.log"
 
       - name: Extract local adapter metrics

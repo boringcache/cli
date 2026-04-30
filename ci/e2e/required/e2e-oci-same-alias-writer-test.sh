@@ -19,7 +19,7 @@ LOG_DIR="${LOG_DIR:-.}"
 ALIAS_REF="${ALIAS_REF:-branch-main}"
 RUN_ID="${GITHUB_RUN_ID:-${BORINGCACHE_E2E_RUN_ID:-local}}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-${BORINGCACHE_E2E_RUN_ATTEMPT:-1}}"
-EXPECTED_CACHE_SESSION_SCHEMA="${EXPECTED_CACHE_SESSION_SCHEMA:-cache_session_v2}"
+EXPECTED_CACHE_SESSION_SCHEMA="${EXPECTED_CACHE_SESSION_SCHEMA:-auto}"
 RUN_A_REF="${RUN_A_REF:-run-a-${RUN_ID}-${RUN_ATTEMPT}}"
 RUN_B_REF="${RUN_B_REF:-run-b-${RUN_ID}-${RUN_ATTEMPT}}"
 RUN_A_STARTED_AT="${RUN_A_STARTED_AT:-2026-04-21T10:00:00Z}"
@@ -400,6 +400,33 @@ assert_summary_equals() {
   fi
 }
 
+assert_cache_session_schema() {
+  local summary_file="$1"
+  local value
+  value="$(summary_value "${summary_file}" "request_metrics_cache_session_schema")"
+
+  case "${EXPECTED_CACHE_SESSION_SCHEMA}" in
+    auto)
+      case "${value}" in
+        cache_session_v1|cache_session_v2) return 0 ;;
+      esac
+      echo "ERROR: expected request_metrics_cache_session_schema=cache_session_v1 or cache_session_v2 in ${summary_file}; got ${value:-<unset>}"
+      ;;
+    cache_session_v1|cache_session_v2)
+      if [[ "${value}" == "${EXPECTED_CACHE_SESSION_SCHEMA}" ]]; then
+        return 0
+      fi
+      echo "ERROR: expected request_metrics_cache_session_schema=${EXPECTED_CACHE_SESSION_SCHEMA} in ${summary_file}; got ${value:-<unset>}"
+      ;;
+    *)
+      echo "ERROR: unsupported EXPECTED_CACHE_SESSION_SCHEMA=${EXPECTED_CACHE_SESSION_SCHEMA}; use auto, cache_session_v1, or cache_session_v2"
+      ;;
+  esac
+
+  cat "${summary_file}"
+  exit 1
+}
+
 fetch_manifest_once() {
   local reference="$1"
   local proxy_url="$2"
@@ -484,10 +511,7 @@ publish_manifest_for_run "run-a" "$(proxy_url "${PROXY_PORT_A}")" "${RUN_A_REF}"
 stop_all_proxies
 
 write_metrics_summary "run-b"
-assert_summary_equals \
-  "${LOG_DIR}/summary-run-b.env" \
-  "request_metrics_cache_session_schema" \
-  "${EXPECTED_CACHE_SESSION_SCHEMA}"
+assert_cache_session_schema "${LOG_DIR}/summary-run-b.env"
 assert_summary_positive \
   "${LOG_DIR}/summary-run-b.env" \
   "request_metrics_cache_session_oci_oci_engine_alias_promotion_promoted"
@@ -495,10 +519,7 @@ assert_summary_zero \
   "${LOG_DIR}/summary-run-b.env" \
   "request_metrics_cache_session_oci_oci_engine_alias_promotion_failed"
 write_metrics_summary "run-a"
-assert_summary_equals \
-  "${LOG_DIR}/summary-run-a.env" \
-  "request_metrics_cache_session_schema" \
-  "${EXPECTED_CACHE_SESSION_SCHEMA}"
+assert_cache_session_schema "${LOG_DIR}/summary-run-a.env"
 assert_summary_positive \
   "${LOG_DIR}/summary-run-a.env" \
   "request_metrics_cache_session_oci_oci_engine_alias_promotion_ignored_stale"

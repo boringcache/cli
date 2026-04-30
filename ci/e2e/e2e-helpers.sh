@@ -426,14 +426,33 @@ assert_metric_equals() {
 assert_cache_session_summary_present() {
   local summary_file="$1"
   local require_v2_sections="${2:-0}"
+  local expected_schema="${EXPECTED_CACHE_SESSION_SCHEMA:-auto}"
   assert_metric_gt_zero "${summary_file}" request_metrics_cache_session_summaries
 
   # shellcheck source=/dev/null
   source "${summary_file}"
-  if [[ "${request_metrics_cache_session_schema:-}" != "cache_session_v2" ]]; then
-    echo "ERROR: expected cache_session_summary schema cache-session-v2 in ${summary_file}" >&2
-    return 1
-  fi
+  local actual_schema="${request_metrics_cache_session_schema:-}"
+  case "${expected_schema}" in
+    auto)
+      case "${actual_schema}" in
+        cache_session_v1|cache_session_v2) ;;
+        *)
+          echo "ERROR: expected cache_session_summary schema cache_session_v1 or cache_session_v2 in ${summary_file}, got ${actual_schema:-<unset>}" >&2
+          return 1
+          ;;
+      esac
+      ;;
+    cache_session_v1|cache_session_v2)
+      if [[ "${actual_schema}" != "${expected_schema}" ]]; then
+        echo "ERROR: expected cache_session_summary schema ${expected_schema} in ${summary_file}, got ${actual_schema:-<unset>}" >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "ERROR: unsupported EXPECTED_CACHE_SESSION_SCHEMA=${expected_schema}; use auto, cache_session_v1, or cache_session_v2" >&2
+      return 1
+      ;;
+  esac
   if [[ -z "${request_metrics_cache_session_mode:-}" ]]; then
     echo "ERROR: cache_session_summary missing mode in ${summary_file}" >&2
     return 1
@@ -443,6 +462,10 @@ assert_cache_session_summary_present() {
     return 1
   fi
   if [[ "${require_v2_sections}" == "1" || "${require_v2_sections}" == "true" ]]; then
+    if [[ "${actual_schema}" != "cache_session_v2" ]]; then
+      echo "ERROR: cache_session_summary v2 sections were required but ${summary_file} used ${actual_schema:-<unset>}" >&2
+      return 1
+    fi
     assert_metric_equals "${summary_file}" request_metrics_cache_session_backend_api_present 1
     assert_metric_equals "${summary_file}" request_metrics_cache_session_lifecycle_present 1
     assert_metric_equals "${summary_file}" request_metrics_cache_session_classification_present 1

@@ -20,6 +20,7 @@ SUMMARY_FILE="${LOG_DIR}/summary.txt"
 LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-config-hints,docker,oci-same-alias,gradle,maven,turbo,nx,go,bazel,sccache}"
 LOCAL_ADAPTER_SKIP_BUILD="${LOCAL_ADAPTER_SKIP_BUILD:-0}"
 LOCAL_ADAPTER_CLEANUP="${LOCAL_ADAPTER_CLEANUP:-}"
+EXPECTED_CACHE_SESSION_SCHEMA="${EXPECTED_CACHE_SESSION_SCHEMA:-auto}"
 E2E_RUN_SUFFIX="${RUN_ID//[^a-zA-Z0-9]/-}"
 if ((${#E2E_RUN_SUFFIX} > 24)); then
   E2E_RUN_PREFIX="${E2E_RUN_SUFFIX:0:12}"
@@ -252,13 +253,37 @@ assert_metric_equals() {
   [[ "${value}" == "${expected}" ]] || fail "expected ${key}=${expected} in ${summary_file}, got ${value:-<unset>}"
 }
 
-assert_cache_session_summary_v2_sections_present() {
+assert_cache_session_summary_sections_present() {
   local summary_file="$1"
   assert_metric_gt_zero "${summary_file}" request_metrics_cache_session_summaries
-  assert_metric_equals "${summary_file}" request_metrics_cache_session_schema cache_session_v2
-  assert_metric_equals "${summary_file}" request_metrics_cache_session_backend_api_present 1
-  assert_metric_equals "${summary_file}" request_metrics_cache_session_lifecycle_present 1
-  assert_metric_equals "${summary_file}" request_metrics_cache_session_classification_present 1
+
+  # shellcheck source=/dev/null
+  source "${summary_file}"
+  local actual_schema="${request_metrics_cache_session_schema:-}"
+  case "${EXPECTED_CACHE_SESSION_SCHEMA}" in
+    auto)
+      case "${actual_schema}" in
+        cache_session_v1|cache_session_v2) ;;
+        *) fail "expected cache_session schema cache_session_v1 or cache_session_v2 in ${summary_file}, got ${actual_schema:-<unset>}" ;;
+      esac
+      ;;
+    cache_session_v1|cache_session_v2)
+      [[ "${actual_schema}" == "${EXPECTED_CACHE_SESSION_SCHEMA}" ]] || \
+        fail "expected request_metrics_cache_session_schema=${EXPECTED_CACHE_SESSION_SCHEMA} in ${summary_file}, got ${actual_schema:-<unset>}"
+      ;;
+    *)
+      fail "unsupported EXPECTED_CACHE_SESSION_SCHEMA=${EXPECTED_CACHE_SESSION_SCHEMA}; use auto, cache_session_v1, or cache_session_v2"
+      ;;
+  esac
+
+  assert_metric_equals "${summary_file}" request_metrics_cache_session_storage_present 1
+  if [[ "${actual_schema}" == "cache_session_v2" ]]; then
+    assert_metric_equals "${summary_file}" request_metrics_cache_session_backend_api_present 1
+    assert_metric_equals "${summary_file}" request_metrics_cache_session_lifecycle_present 1
+    assert_metric_equals "${summary_file}" request_metrics_cache_session_classification_present 1
+  else
+    assert_metric_equals "${summary_file}" request_metrics_cache_session_rails_present 1
+  fi
 }
 
 write_repo_config() {
@@ -338,9 +363,9 @@ run_config_hints_e2e() {
   local run_dir="${tool_dir}/run-proxy"
   local standalone_dir="${tool_dir}/standalone-proxy"
   local turbo_dir="${tool_dir}/turbo-adapter"
-  local run_project="config-hints-run-${RUN_ID}"
-  local standalone_project="config-hints-standalone-${RUN_ID}"
-  local turbo_project="config-hints-turbo-${RUN_ID}"
+  local run_project="cfg-run-${E2E_RUN_SUFFIX}"
+  local standalone_project="cfg-standalone-${E2E_RUN_SUFFIX}"
+  local turbo_project="cfg-turbo-${E2E_RUN_SUFFIX}"
   local run_tag="local-config-hints-run-${RUN_ID}"
   local standalone_tag="local-config-hints-standalone-${RUN_ID}"
   local turbo_tag="local-config-hints-turbo-${RUN_ID}"
@@ -407,7 +432,7 @@ metadata-hints = ["project='"${standalone_project}"'","scenario=repo"]'
   standalone_pid=""
   local standalone_summary
   standalone_summary="$(metric_summary "${standalone_dir}/metrics.jsonl")"
-  assert_cache_session_summary_v2_sections_present "${standalone_summary}"
+  assert_cache_session_summary_sections_present "${standalone_summary}"
   wait_for_tag_visibility "${standalone_tag}"
   assert_recent_session_context \
     "config-hints-standalone" \
@@ -1140,6 +1165,7 @@ run_oci_same_alias_e2e() {
   BORINGCACHE_ADMIN_TOKEN="${TOKEN}" \
   BORINGCACHE_SAVE_TOKEN="${TOKEN}" \
   BORINGCACHE_RESTORE_TOKEN="${TOKEN}" \
+  EXPECTED_CACHE_SESSION_SCHEMA="${EXPECTED_CACHE_SESSION_SCHEMA}" \
     bash "${SCRIPT_DIR}/required/e2e-oci-same-alias-writer-test.sh"
 
   pass_tool "oci-same-alias" "dual-proxy same-alias writer e2e passed"

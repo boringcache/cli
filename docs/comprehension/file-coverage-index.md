@@ -453,6 +453,7 @@ Owner: repo operations support (`support-primary`)
 
 Notes:
 - `e2e-local-adapter-commands.sh` accepts explicit E2E email, namespace, workspace slug, and workspace name env overrides so repeated local Rails-backed runs can use isolated workspaces instead of the default shared smoke workspace.
+- `e2e-local-adapter-commands.sh`, `e2e-helpers.sh`, and `e2e-oci-same-alias-writer-test.sh` accept `EXPECTED_CACHE_SESSION_SCHEMA=auto|cache_session_v1|cache_session_v2`; local released-binary compatibility runs default to `auto`, while CI pins current CLI artifacts to `cache_session_v2`.
 - `e2e-oci-rooted-restore-isolation-test.sh` now proves the product OCI tag contract directly: readable rooted aliases under the primary human tag are the canonical path, legacy root-hash aliases stay bound for migration, and shared readable or legacy unrooted aliases do not leak across roots.
 
 ### Install surface
