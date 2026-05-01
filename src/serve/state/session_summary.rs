@@ -1,6 +1,8 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::process::Command;
 
 use crate::ci_detection::CiSourceRefType;
 
@@ -26,6 +28,56 @@ pub struct CacheSessionSummarySnapshot {
     pub local_cache: Value,
     pub buildkit: Value,
     pub classification: Value,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CacheSessionRunIdentity {
+    pub kind: Option<String>,
+    pub uid: Option<String>,
+    pub provider: Option<String>,
+    pub provider_run_uid: Option<String>,
+    pub attempt: Option<String>,
+    pub repository: Option<String>,
+    pub source_ref_type: Option<String>,
+    pub source_ref_name: Option<String>,
+    pub change_number: Option<String>,
+    pub pull_request_number: Option<String>,
+    pub commit_sha: Option<String>,
+    pub run_started_at: Option<String>,
+}
+
+impl CacheSessionRunIdentity {
+    pub fn summary_json(&self, summary_session_id: &str) -> Value {
+        let mut object = serde_json::Map::new();
+
+        insert_optional_string(&mut object, "kind", self.kind.clone());
+        insert_optional_string(&mut object, "uid", self.uid.clone());
+        insert_optional_string(&mut object, "provider", self.provider.clone());
+        insert_optional_string(
+            &mut object,
+            "provider_run_uid",
+            self.provider_run_uid.clone(),
+        );
+        insert_optional_string(&mut object, "attempt", self.attempt.clone());
+        insert_optional_string(&mut object, "repository", self.repository.clone());
+        insert_optional_string(&mut object, "source_ref_type", self.source_ref_type.clone());
+        insert_optional_string(&mut object, "source_ref_name", self.source_ref_name.clone());
+        insert_optional_string(&mut object, "change_number", self.change_number.clone());
+        insert_optional_string(
+            &mut object,
+            "pull_request_number",
+            self.pull_request_number.clone(),
+        );
+        insert_optional_string(&mut object, "commit_sha", self.commit_sha.clone());
+        insert_optional_string(&mut object, "run_started_at", self.run_started_at.clone());
+        insert_string(
+            &mut object,
+            "summary_session_id",
+            summary_session_id.to_string(),
+        );
+
+        Value::Object(object)
+    }
 }
 
 pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnapshot {
@@ -187,9 +239,7 @@ fn storage_summary(oci_engine: &BTreeMap<String, String>) -> Value {
     Value::Object(object)
 }
 
-pub fn cache_session_identity(state: &AppState) -> Value {
-    let mut object = serde_json::Map::new();
-
+pub fn cache_session_run_identity(state: &AppState) -> CacheSessionRunIdentity {
     if let Some(context) = &state.proxy_ci_run_context {
         let run_repository = context
             .repository
@@ -201,61 +251,111 @@ pub fn cache_session_identity(state: &AppState) -> Value {
             context.provider, run_repository, context.run_uid
         );
 
-        insert_string(&mut object, "kind", "ci");
-        insert_string(&mut object, "uid", uid);
-        insert_string(&mut object, "provider", context.provider.clone());
-        insert_string(&mut object, "provider_run_uid", context.run_uid.clone());
-        insert_optional_string(&mut object, "attempt", context.run_attempt.clone());
-        insert_optional_string(&mut object, "repository", context.repository.clone());
-        insert_string(
-            &mut object,
-            "source_ref_type",
-            ci_ref_type_name(context.source_ref_type),
-        );
-        insert_optional_string(
-            &mut object,
-            "source_ref_name",
-            context.source_ref_name.clone(),
-        );
-        if let Some(number) = context.pull_request_number {
-            insert_string(&mut object, "change_number", number.to_string());
-            insert_string(&mut object, "pull_request_number", number.to_string());
-        }
-        insert_optional_string(&mut object, "commit_sha", context.commit_sha.clone());
-        insert_optional_string(
-            &mut object,
-            "run_started_at",
-            context.run_started_at.clone(),
-        );
-        insert_string(
-            &mut object,
-            "summary_session_id",
-            state.cache_session_summary_id.clone(),
-        );
-
-        return Value::Object(object);
+        return CacheSessionRunIdentity {
+            kind: Some("ci".to_string()),
+            uid: Some(uid),
+            provider: Some(context.provider.clone()),
+            provider_run_uid: Some(context.run_uid.clone()),
+            attempt: context.run_attempt.clone(),
+            repository: context.repository.clone(),
+            source_ref_type: Some(ci_ref_type_name(context.source_ref_type).to_string()),
+            source_ref_name: context.source_ref_name.clone(),
+            change_number: context.pull_request_number.map(|number| number.to_string()),
+            pull_request_number: context.pull_request_number.map(|number| number.to_string()),
+            commit_sha: context.commit_sha.clone(),
+            run_started_at: context.run_started_at.clone(),
+        };
     }
 
     let uid = format!(
         "local:{}:{}",
         state.workspace, state.cache_session_summary_id
     );
-    insert_string(&mut object, "kind", "local");
-    insert_string(&mut object, "uid", uid);
-    insert_string(&mut object, "provider", "local");
-    insert_string(
-        &mut object,
-        "provider_run_uid",
-        state.cache_session_summary_id.clone(),
-    );
-    insert_string(&mut object, "source_ref_type", "local");
-    insert_string(
-        &mut object,
-        "summary_session_id",
-        state.cache_session_summary_id.clone(),
-    );
+    let local_git = local_git_identity();
 
-    Value::Object(object)
+    CacheSessionRunIdentity {
+        kind: Some("local".to_string()),
+        uid: Some(uid),
+        provider: Some("local".to_string()),
+        provider_run_uid: Some(state.cache_session_summary_id.clone()),
+        repository: local_git
+            .as_ref()
+            .and_then(|identity| identity.repository.clone()),
+        source_ref_type: local_git
+            .as_ref()
+            .map(|identity| identity.source_ref_type.clone())
+            .or_else(|| Some("local".to_string())),
+        source_ref_name: local_git
+            .as_ref()
+            .and_then(|identity| identity.source_ref_name.clone()),
+        commit_sha: local_git.and_then(|identity| identity.commit_sha),
+        ..CacheSessionRunIdentity::default()
+    }
+}
+
+pub fn cache_session_identity(state: &AppState) -> Value {
+    cache_session_run_identity(state).summary_json(&state.cache_session_summary_id)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LocalGitIdentity {
+    repository: Option<String>,
+    source_ref_type: String,
+    source_ref_name: Option<String>,
+    commit_sha: Option<String>,
+}
+
+fn local_git_identity() -> Option<LocalGitIdentity> {
+    if crate::git::is_git_disabled_by_env() {
+        return None;
+    }
+
+    let inside_worktree = git_output(&["rev-parse", "--is-inside-work-tree"])?;
+    if inside_worktree != "true" {
+        return None;
+    }
+
+    let root = git_output(&["rev-parse", "--show-toplevel"]);
+    let branch = git_output(&["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    let tag = if branch.is_none() {
+        git_output(&["describe", "--tags", "--exact-match", "HEAD"])
+    } else {
+        None
+    };
+    let commit_sha = git_output(&["rev-parse", "HEAD"]);
+    let (source_ref_type, source_ref_name) = if let Some(branch) = branch {
+        ("branch".to_string(), Some(branch))
+    } else if let Some(tag) = tag {
+        ("tag".to_string(), Some(tag))
+    } else {
+        ("local".to_string(), None)
+    };
+
+    Some(LocalGitIdentity {
+        repository: root.as_deref().and_then(repository_name_from_root),
+        source_ref_type,
+        source_ref_name,
+        commit_sha,
+    })
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn repository_name_from_root(root: &str) -> Option<String> {
+    Path::new(root)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn lifecycle_summary(
@@ -589,6 +689,39 @@ mod tests {
         };
         assert_eq!(classification.mode, "cache-registry");
         assert_eq!(classification.adapter, "runtime");
+    }
+
+    #[test]
+    fn run_identity_summary_json_keeps_local_git_fields() {
+        let identity = CacheSessionRunIdentity {
+            kind: Some("local".to_string()),
+            uid: Some("local:demo:proxy-summary-test".to_string()),
+            provider: Some("local".to_string()),
+            provider_run_uid: Some("proxy-summary-test".to_string()),
+            repository: Some("demo-repo".to_string()),
+            source_ref_type: Some("branch".to_string()),
+            source_ref_name: Some("feature/local-build".to_string()),
+            commit_sha: Some("4986550abcdef".to_string()),
+            ..CacheSessionRunIdentity::default()
+        };
+
+        let json = identity.summary_json("proxy-summary-test");
+
+        assert_eq!(json["kind"], "local");
+        assert_eq!(json["provider"], "local");
+        assert_eq!(json["repository"], "demo-repo");
+        assert_eq!(json["source_ref_type"], "branch");
+        assert_eq!(json["source_ref_name"], "feature/local-build");
+        assert_eq!(json["commit_sha"], "4986550abcdef");
+        assert_eq!(json["summary_session_id"], "proxy-summary-test");
+    }
+
+    #[test]
+    fn repository_name_from_root_uses_leaf_directory() {
+        assert_eq!(
+            repository_name_from_root("/tmp/bc-local-git-e2e/demo-repo").as_deref(),
+            Some("demo-repo")
+        );
     }
 
     #[test]
