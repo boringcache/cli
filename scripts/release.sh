@@ -4,7 +4,8 @@
 #
 # Preferred usage:
 #   ./scripts/release.sh prepare patch    # create and push the signed version commit
-#   ./scripts/release.sh tag 0.1.3        # tag the already-green release commit
+#   ./scripts/release.sh tag 0.1.3        # tag the already-green HEAD commit
+#   ./scripts/release.sh tag 0.1.3 SHA    # tag an explicit already-green commit
 #
 # Legacy one-shot usage:
 #   ./scripts/release.sh patch            # bump, commit, tag, and push in one run
@@ -22,7 +23,7 @@
 #   7. Updates install fallback versions
 #   8. Updates Cargo.lock
 #   9. Commits the version bump (signed)
-#   10. Creates a signed annotated git tag
+#   10. Creates a signed annotated git tag on the already-green commit
 #   11. Pushes the commit and/or tag
 
 set -euo pipefail
@@ -61,9 +62,10 @@ Usage:
       Create and push the signed version commit. Wait for CLI CI/E2E on
       that commit, then run the tag command.
 
-  ./scripts/release.sh tag <VERSION>
-      Create and push a signed tag for the current already-green release
-      commit. This does not create a new commit or run local tests.
+  ./scripts/release.sh tag <VERSION> [COMMIT]
+      Create and push a signed tag for an already-green release commit.
+      When COMMIT is omitted, HEAD is used. This does not create a new
+      commit, run local tests, or dispatch CI.
 
   ./scripts/release.sh <patch|minor|major|VERSION>
       Legacy one-shot release. This bumps, commits, tags, and pushes in
@@ -73,6 +75,7 @@ Usage:
 Examples:
   ./scripts/release.sh prepare patch
   ./scripts/release.sh tag 1.2.3
+  ./scripts/release.sh tag 1.2.3 0123abcd
   ./scripts/release.sh 1.2.3
 USAGE
 }
@@ -215,9 +218,10 @@ run_local_gates() {
 
 create_signed_tag() {
     local version="$1"
+    local target_ref="${2:-HEAD}"
 
-    log_info "Creating tag v${version}..."
-    git tag -s "v${version}" -m "Release v${version}"
+    log_info "Creating tag v${version} at ${target_ref}..."
+    git tag -s -m "Release v${version}" "v${version}" "${target_ref}"
 }
 
 assert_head_matches_origin() {
@@ -232,6 +236,34 @@ assert_head_matches_origin() {
     if [[ "$local_sha" != "$remote_sha" ]]; then
         log_error "HEAD ${local_sha} does not match origin/${branch} ${remote_sha}."
         log_error "Tag mode must run on the pushed, already-green release commit."
+        exit 1
+    fi
+}
+
+assert_ref_is_on_origin_branch() {
+    local branch="$1"
+    local target_sha="$2"
+
+    log_info "Verifying ${target_sha} is present on origin/${branch}..."
+    git fetch origin "$branch"
+    if ! git merge-base --is-ancestor "${target_sha}" "origin/${branch}"; then
+        log_error "Commit ${target_sha} is not reachable from origin/${branch}."
+        log_error "Release tags must point at a pushed, already-green mainline commit."
+        exit 1
+    fi
+}
+
+verify_release_version_at_ref() {
+    local target_ref="$1"
+    local expected_version="$2"
+    local version_line
+    local actual_version
+
+    version_line="$(git show "${target_ref}:Cargo.toml" | grep '^version = ' | head -1 || true)"
+    actual_version="$(printf '%s\n' "${version_line}" | sed 's/version = "\(.*\)"/\1/')"
+    if [[ "${actual_version}" != "${expected_version}" ]]; then
+        log_error "Cargo.toml at ${target_ref} is version ${actual_version:-<missing>}, expected ${expected_version}."
+        log_error "Tag the release commit that already contains the version bump."
         exit 1
     fi
 }
@@ -256,7 +288,7 @@ main() {
             bump_type="$2"
             ;;
         tag)
-            if [[ $# -ne 2 ]]; then
+            if [[ $# -lt 2 || $# -gt 3 ]]; then
                 usage
                 exit 1
             fi
@@ -309,8 +341,14 @@ main() {
     local current_version
     current_version=$(get_current_version)
     local new_version
+    local tag_target_ref="HEAD"
+    local tag_target_sha=""
     if [[ "$mode" == "tag" ]]; then
         new_version="$bump_type"
+        if [[ $# -eq 3 ]]; then
+            tag_target_ref="$3"
+        fi
+        tag_target_sha="$(git rev-parse "${tag_target_ref}^{commit}")"
     else
         new_version=$(bump_version "$current_version" "$bump_type")
     fi
@@ -325,15 +363,20 @@ main() {
     ensure_tag_absent "$new_version"
 
     if [[ "$mode" == "tag" ]]; then
-        if [[ "$current_version" != "$new_version" ]]; then
+        if [[ "${tag_target_ref}" == "HEAD" && "$current_version" != "$new_version" ]]; then
             log_error "Cargo.toml version is ${current_version}, but tag mode requested ${new_version}."
             log_error "Run './scripts/release.sh prepare ${new_version}' first, wait for CI, then tag."
             exit 1
         fi
-        assert_head_matches_origin "$current_branch"
+        if [[ "${tag_target_ref}" == "HEAD" ]]; then
+            assert_head_matches_origin "$current_branch"
+        else
+            assert_ref_is_on_origin_branch "$current_branch" "$tag_target_sha"
+        fi
+        verify_release_version_at_ref "$tag_target_sha" "$new_version"
 
-        log_info "Tagging already-prepared release commit $(git rev-parse --short HEAD)."
-        create_signed_tag "$new_version"
+        log_info "Tagging already-prepared release commit $(git rev-parse --short "$tag_target_sha")."
+        create_signed_tag "$new_version" "$tag_target_sha"
         log_info "Pushing tag v${new_version} to origin..."
         git push origin "v$new_version"
 

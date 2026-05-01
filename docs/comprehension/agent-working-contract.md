@@ -69,6 +69,7 @@ Stable CLI rules live here so `AGENTS.md` can stay small. Read this when impleme
 - Default identity path: `~/.boringcache/age-identity.txt`.
 - Important environment variables: `BORINGCACHE_API_TOKEN`, `BORINGCACHE_DEFAULT_WORKSPACE`, `BORINGCACHE_API_URL`, `BORINGCACHE_NO_GIT`.
 - `mount` is long-running and refuses to clear root, home, or the current directory unless `--force` is set.
+- CLI releases use a two-step path: prepare the signed version commit, wait for the existing CLI CI and E2E workflow runs on that exact commit to pass, then create the signed tag. `scripts/release.sh tag VERSION [COMMIT]` may target an explicit already-green commit SHA; the release workflow verifies existing runs and does not dispatch prerequisite CI.
 
 ## Testing Gates
 
