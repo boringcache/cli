@@ -42,6 +42,24 @@ pub struct SessionParam {
     pub error_count: u64,
     pub bytes_read: u64,
     pub bytes_written: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_uid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_run_uid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_attempt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_ref_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_ref_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_change_number: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_commit_sha: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata_hints: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]

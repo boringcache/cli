@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 
 use tokio::sync::mpsc;
 
+use crate::ci_detection::CiSourceRefType;
 use crate::observability;
 use crate::serve::cache_registry;
 use crate::serve::state::{
@@ -18,6 +19,19 @@ const KV_IDLE_FLUSH_WINDOW_SMALL_BATCH_MS: u64 = 2_000;
 const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BLOBS: usize = 64;
 const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const CACHE_SESSION_SUMMARY_SCHEMA: &str = "cache_session_summary.v2";
+
+#[derive(Clone, Debug, Default)]
+struct RunIdentityParam {
+    run_uid: Option<String>,
+    run_provider: Option<String>,
+    provider_run_uid: Option<String>,
+    run_attempt: Option<String>,
+    run_repository: Option<String>,
+    run_ref_type: Option<String>,
+    run_ref_name: Option<String>,
+    run_change_number: Option<String>,
+    run_commit_sha: Option<String>,
+}
 
 pub(super) fn spawn_maintenance_tasks(
     state: &AppState,
@@ -275,6 +289,7 @@ async fn flush_cache_ops_inner(state: &AppState, include_summary: bool) {
     if rollups.is_empty() && missed_keys.is_empty() && sessions.is_empty() && !include_summary {
         return;
     }
+    let run_identity = run_identity_param(state);
     let mut session_params: Vec<_> = sessions
         .iter()
         .map(|session| crate::api::models::cache_rollups::SessionParam {
@@ -286,6 +301,15 @@ async fn flush_cache_ops_inner(state: &AppState, include_summary: bool) {
             error_count: session.error_count,
             bytes_read: session.bytes_read,
             bytes_written: session.bytes_written,
+            run_uid: run_identity.run_uid.clone(),
+            run_provider: run_identity.run_provider.clone(),
+            provider_run_uid: run_identity.provider_run_uid.clone(),
+            run_attempt: run_identity.run_attempt.clone(),
+            run_repository: run_identity.run_repository.clone(),
+            run_ref_type: run_identity.run_ref_type.clone(),
+            run_ref_name: run_identity.run_ref_name.clone(),
+            run_change_number: run_identity.run_change_number.clone(),
+            run_commit_sha: run_identity.run_commit_sha.clone(),
             metadata_hints: session.metadata_hints.clone(),
             summary_schema: None,
             summary_json: None,
@@ -303,7 +327,7 @@ async fn flush_cache_ops_inner(state: &AppState, include_summary: bool) {
         })
         .collect();
     if include_summary {
-        session_params.push(build_cache_session_summary_param(state));
+        session_params.push(build_cache_session_summary_param(state, run_identity));
     }
     let batch = crate::api::models::cache_rollups::BatchParams {
         rollups: rollups
@@ -346,6 +370,7 @@ async fn flush_cache_ops_inner(state: &AppState, include_summary: bool) {
 
 fn build_cache_session_summary_param(
     state: &AppState,
+    run_identity: RunIdentityParam,
 ) -> crate::api::models::cache_rollups::SessionParam {
     let summary = crate::serve::state::build_cache_session_summary(state);
     let duration_ms = summary.duration_ms;
@@ -361,6 +386,7 @@ fn build_cache_session_summary_param(
         duration_ms,
         state.proxy_metadata_hints.clone(),
         summary_json,
+        run_identity,
     )
 }
 
@@ -370,6 +396,7 @@ fn cache_session_summary_param(
     session_duration_ms: u64,
     metadata_hints: BTreeMap<String, String>,
     summary_json: serde_json::Value,
+    run_identity: RunIdentityParam,
 ) -> crate::api::models::cache_rollups::SessionParam {
     crate::api::models::cache_rollups::SessionParam {
         session_id,
@@ -380,10 +407,68 @@ fn cache_session_summary_param(
         error_count: 0,
         bytes_read: 0,
         bytes_written: 0,
+        run_uid: run_identity.run_uid,
+        run_provider: run_identity.run_provider,
+        provider_run_uid: run_identity.provider_run_uid,
+        run_attempt: run_identity.run_attempt,
+        run_repository: run_identity.run_repository,
+        run_ref_type: run_identity.run_ref_type,
+        run_ref_name: run_identity.run_ref_name,
+        run_change_number: run_identity.run_change_number,
+        run_commit_sha: run_identity.run_commit_sha,
         metadata_hints,
         summary_schema: Some(CACHE_SESSION_SUMMARY_SCHEMA.to_string()),
         summary_json: Some(summary_json),
         top_missed_keys: Vec::new(),
+    }
+}
+
+fn run_identity_param(state: &AppState) -> RunIdentityParam {
+    if let Some(context) = &state.proxy_ci_run_context {
+        let repository = context.repository.clone();
+        let run_repository = repository
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&state.workspace);
+
+        return RunIdentityParam {
+            run_uid: Some(format!(
+                "{}:{}:{}",
+                context.provider, run_repository, context.run_uid
+            )),
+            run_provider: Some(context.provider.clone()),
+            provider_run_uid: Some(context.run_uid.clone()),
+            run_attempt: context.run_attempt.clone(),
+            run_repository: repository,
+            run_ref_type: Some(ci_ref_type_name(context.source_ref_type).to_string()),
+            run_ref_name: context.source_ref_name.clone(),
+            run_change_number: context.pull_request_number.map(|number| number.to_string()),
+            run_commit_sha: context.commit_sha.clone(),
+        };
+    }
+
+    RunIdentityParam {
+        run_uid: Some(local_run_uid(state)),
+        run_provider: Some("local".to_string()),
+        provider_run_uid: Some(state.cache_session_summary_id.clone()),
+        run_ref_type: Some("local".to_string()),
+        ..RunIdentityParam::default()
+    }
+}
+
+fn local_run_uid(state: &AppState) -> String {
+    format!(
+        "local:{}:{}",
+        state.workspace, state.cache_session_summary_id
+    )
+}
+
+fn ci_ref_type_name(ref_type: CiSourceRefType) -> &'static str {
+    match ref_type {
+        CiSourceRefType::Branch => "branch",
+        CiSourceRefType::Tag => "tag",
+        CiSourceRefType::PullRequest => "pull_request",
+        CiSourceRefType::Other => "other",
     }
 }
 
@@ -667,6 +752,13 @@ mod tests {
                 "proxy": { "hydration_policy": "metadata-only" },
                 "oci": { "blob_read_remote_count": 4 }
             }),
+            RunIdentityParam {
+                run_uid: Some("local:demo:proxy-summary-test".to_string()),
+                run_provider: Some("local".to_string()),
+                provider_run_uid: Some("proxy-summary-test".to_string()),
+                run_ref_type: Some("local".to_string()),
+                ..RunIdentityParam::default()
+            },
         );
 
         assert_eq!(param.session_id, "proxy-summary-test");
@@ -691,6 +783,12 @@ mod tests {
                 .map(String::as_str),
             Some("metadata-only")
         );
+        assert_eq!(
+            param.run_uid.as_deref(),
+            Some("local:demo:proxy-summary-test")
+        );
+        assert_eq!(param.run_provider.as_deref(), Some("local"));
+        assert_eq!(param.run_ref_type.as_deref(), Some("local"));
     }
 
     #[test]

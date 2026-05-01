@@ -2,6 +2,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+use crate::ci_detection::CiSourceRefType;
+
 use super::AppState;
 
 #[derive(Clone, Debug, Serialize)]
@@ -11,6 +13,7 @@ pub struct CacheSessionSummarySnapshot {
     pub adapter: &'static str,
     pub workspace: String,
     pub duration_ms: u64,
+    pub identity: Value,
     pub proxy: Value,
     pub backend_api: Value,
     pub rails: Value,
@@ -37,6 +40,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
     let startup_prefetch_hints = state.prefetch_metrics.metadata_hints();
     let kv_upload_hints = state.kv_blob_upload_metrics.metadata_hints();
     let skip_rule_match_count = state.skip_rule_metrics.matched_count();
+    let identity = cache_session_identity(state);
 
     let proxy = json!({
         "mode": session_kind.mode,
@@ -90,6 +94,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
         adapter: session_kind.adapter,
         workspace: state.workspace.clone(),
         duration_ms,
+        identity,
         proxy,
         backend_api,
         rails,
@@ -178,6 +183,77 @@ fn storage_summary(oci_engine: &BTreeMap<String, String>) -> Value {
             .entry(key)
             .or_insert_with(|| json_metric_value(&value));
     }
+
+    Value::Object(object)
+}
+
+pub fn cache_session_identity(state: &AppState) -> Value {
+    let mut object = serde_json::Map::new();
+
+    if let Some(context) = &state.proxy_ci_run_context {
+        let run_repository = context
+            .repository
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&state.workspace);
+        let uid = format!(
+            "{}:{}:{}",
+            context.provider, run_repository, context.run_uid
+        );
+
+        insert_string(&mut object, "kind", "ci");
+        insert_string(&mut object, "uid", uid);
+        insert_string(&mut object, "provider", context.provider.clone());
+        insert_string(&mut object, "provider_run_uid", context.run_uid.clone());
+        insert_optional_string(&mut object, "attempt", context.run_attempt.clone());
+        insert_optional_string(&mut object, "repository", context.repository.clone());
+        insert_string(
+            &mut object,
+            "source_ref_type",
+            ci_ref_type_name(context.source_ref_type),
+        );
+        insert_optional_string(
+            &mut object,
+            "source_ref_name",
+            context.source_ref_name.clone(),
+        );
+        if let Some(number) = context.pull_request_number {
+            insert_string(&mut object, "change_number", number.to_string());
+            insert_string(&mut object, "pull_request_number", number.to_string());
+        }
+        insert_optional_string(&mut object, "commit_sha", context.commit_sha.clone());
+        insert_optional_string(
+            &mut object,
+            "run_started_at",
+            context.run_started_at.clone(),
+        );
+        insert_string(
+            &mut object,
+            "summary_session_id",
+            state.cache_session_summary_id.clone(),
+        );
+
+        return Value::Object(object);
+    }
+
+    let uid = format!(
+        "local:{}:{}",
+        state.workspace, state.cache_session_summary_id
+    );
+    insert_string(&mut object, "kind", "local");
+    insert_string(&mut object, "uid", uid);
+    insert_string(&mut object, "provider", "local");
+    insert_string(
+        &mut object,
+        "provider_run_uid",
+        state.cache_session_summary_id.clone(),
+    );
+    insert_string(&mut object, "source_ref_type", "local");
+    insert_string(
+        &mut object,
+        "summary_session_id",
+        state.cache_session_summary_id.clone(),
+    );
 
     Value::Object(object)
 }
@@ -397,6 +473,32 @@ fn json_metric_value(value: &str) -> Value {
         .parse::<u64>()
         .map(Value::from)
         .unwrap_or_else(|_| Value::String(value.to_string()))
+}
+
+fn insert_string(object: &mut serde_json::Map<String, Value>, key: &str, value: impl Into<String>) {
+    let value = value.into();
+    if !value.trim().is_empty() {
+        object.insert(key.to_string(), Value::String(value));
+    }
+}
+
+fn insert_optional_string(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<String>,
+) {
+    if let Some(value) = value {
+        insert_string(object, key, value);
+    }
+}
+
+fn ci_ref_type_name(ref_type: CiSourceRefType) -> &'static str {
+    match ref_type {
+        CiSourceRefType::Branch => "branch",
+        CiSourceRefType::Tag => "tag",
+        CiSourceRefType::PullRequest => "pull_request",
+        CiSourceRefType::Other => "other",
+    }
 }
 
 fn metric_u64(map: &BTreeMap<String, String>, key: &str) -> Option<u64> {

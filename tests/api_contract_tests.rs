@@ -275,6 +275,15 @@ mod request_validation {
                 error_count: 0,
                 bytes_read: 1024,
                 bytes_written: 0,
+                run_uid: Some("local:demo:proxy-summary-1".to_string()),
+                run_provider: Some("local".to_string()),
+                provider_run_uid: Some("proxy-summary-1".to_string()),
+                run_attempt: None,
+                run_repository: None,
+                run_ref_type: Some("local".to_string()),
+                run_ref_name: None,
+                run_change_number: None,
+                run_commit_sha: None,
                 metadata_hints: BTreeMap::from([
                     ("project".to_string(), "zed".to_string()),
                     ("phase".to_string(), "warm".to_string()),
@@ -293,6 +302,10 @@ mod request_validation {
 
         assert_eq!(session["metadata_hints"]["project"], "zed");
         assert_eq!(session["metadata_hints"]["phase"], "warm");
+        assert_eq!(session["run_uid"], "local:demo:proxy-summary-1");
+        assert_eq!(session["run_provider"], "local");
+        assert_eq!(session["run_ref_type"], "local");
+        assert!(session.get("run_ref_name").is_none());
         assert_eq!(session["summary_schema"], "cache_session_summary.v1");
         assert_eq!(
             session["summary_json"]["proxy"]["hydration_policy"],
