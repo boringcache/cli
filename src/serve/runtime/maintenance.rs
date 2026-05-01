@@ -365,6 +365,8 @@ fn build_cache_session_summary_param(
         log::debug!("Failed to serialize cache session summary: {error}");
         serde_json::json!({})
     });
+    let operation_summary = state.cache_ops.tool_operation_summary(&tool);
+    insert_tool_operation_summary(&mut summary_json, &operation_summary);
     if let Some(object) = summary_json.as_object_mut() {
         object.insert(
             "identity".to_string(),
@@ -380,6 +382,48 @@ fn build_cache_session_summary_param(
         summary_json,
         run_identity,
     )
+}
+
+fn insert_tool_operation_summary(
+    summary_json: &mut serde_json::Value,
+    operation_summary: &cache_registry::cache_ops::ToolOperationSummary,
+) {
+    let Some(root) = summary_json.as_object_mut() else {
+        return;
+    };
+    let tool_value = root
+        .entry("tool".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !tool_value.is_object() {
+        *tool_value = serde_json::json!({});
+    }
+    let Some(tool) = tool_value.as_object_mut() else {
+        return;
+    };
+
+    for (key, value) in [
+        (
+            "cache_read_hit_count",
+            operation_summary.cache_read_hit_count,
+        ),
+        (
+            "cache_read_miss_count",
+            operation_summary.cache_read_miss_count,
+        ),
+        (
+            "cache_read_error_count",
+            operation_summary.cache_read_error_count,
+        ),
+        ("cache_read_bytes", operation_summary.cache_read_bytes),
+        ("cache_write_count", operation_summary.cache_write_count),
+        (
+            "cache_write_error_count",
+            operation_summary.cache_write_error_count,
+        ),
+        ("cache_write_bytes", operation_summary.cache_write_bytes),
+    ] {
+        tool.insert(key.to_string(), serde_json::Value::from(value));
+    }
 }
 
 fn cache_session_summary_param(
@@ -732,6 +776,48 @@ mod tests {
         );
         assert_eq!(param.run_provider.as_deref(), Some("local"));
         assert_eq!(param.run_ref_type.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn insert_tool_operation_summary_preserves_tool_actions() {
+        let mut summary = serde_json::json!({
+            "tool": {
+                "actions": [
+                    { "label": "build", "outcome": "hit" }
+                ]
+            }
+        });
+        let operation_summary = cache_registry::cache_ops::ToolOperationSummary {
+            cache_read_hit_count: 3,
+            cache_read_miss_count: 1,
+            cache_read_error_count: 0,
+            cache_read_bytes: 128,
+            cache_write_count: 2,
+            cache_write_error_count: 1,
+            cache_write_bytes: 64,
+        };
+
+        insert_tool_operation_summary(&mut summary, &operation_summary);
+
+        assert!(summary.pointer("/tool/actions/0/label").is_some());
+        assert_eq!(
+            summary
+                .pointer("/tool/cache_read_hit_count")
+                .and_then(|value| value.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            summary
+                .pointer("/tool/cache_read_miss_count")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            summary
+                .pointer("/tool/cache_write_bytes")
+                .and_then(|value| value.as_u64()),
+            Some(64)
+        );
     }
 
     #[test]

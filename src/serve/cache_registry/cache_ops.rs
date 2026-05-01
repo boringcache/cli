@@ -152,6 +152,14 @@ struct BucketCounters {
     latency_count: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct OperationTotalKey {
+    tool: Tool,
+    op: Op,
+    result: OpResult,
+    degraded: bool,
+}
+
 fn bucket_epoch(now_secs: u64) -> u64 {
     now_secs - (now_secs % BUCKET_SECONDS)
 }
@@ -195,6 +203,7 @@ struct SessionState {
 #[derive(Default)]
 struct AggregateState {
     buckets: HashMap<BucketKey, BucketCounters>,
+    operation_totals: HashMap<OperationTotalKey, BucketCounters>,
     missed_keys: HashMap<(String, Tool), MissEntry>,
     missed_key_cardinality: HashMap<Tool, usize>,
     active_sessions: HashMap<Tool, SessionState>,
@@ -226,16 +235,12 @@ impl SessionState {
     }
 
     fn record_event(&mut self, op: Op, result: OpResult, degraded: bool, bytes: u64) {
-        match result {
-            OpResult::Hit => self.hit_count = self.hit_count.saturating_add(1),
-            OpResult::Miss => self.miss_count = self.miss_count.saturating_add(1),
-            OpResult::Error => {
-                if degraded && op == Op::Get {
-                    self.miss_count = self.miss_count.saturating_add(1);
-                } else {
-                    self.error_count = self.error_count.saturating_add(1);
-                }
-            }
+        match (op, result, degraded) {
+            (Op::Get, OpResult::Hit, _) => self.hit_count = self.hit_count.saturating_add(1),
+            (Op::Get, OpResult::Miss, _) => self.miss_count = self.miss_count.saturating_add(1),
+            (Op::Get, OpResult::Error, true) => self.miss_count = self.miss_count.saturating_add(1),
+            (_, OpResult::Error, _) => self.error_count = self.error_count.saturating_add(1),
+            _ => {}
         }
 
         if result == OpResult::Hit {
@@ -530,6 +535,22 @@ impl Aggregator {
         if event.latency_ms > 0 {
             counters.latency_sum_ms = counters.latency_sum_ms.saturating_add(event.latency_ms);
             counters.latency_count = counters.latency_count.saturating_add(1);
+        }
+
+        let total_key = OperationTotalKey {
+            tool: event.tool,
+            op: event.op,
+            result: event.result,
+            degraded: event.degraded,
+        };
+        let operation_totals = state.operation_totals.entry(total_key).or_default();
+        operation_totals.event_count = operation_totals.event_count.saturating_add(1);
+        operation_totals.bytes_total = operation_totals.bytes_total.saturating_add(event.bytes);
+        if event.latency_ms > 0 {
+            operation_totals.latency_sum_ms = operation_totals
+                .latency_sum_ms
+                .saturating_add(event.latency_ms);
+            operation_totals.latency_count = operation_totals.latency_count.saturating_add(1);
         }
     }
 
@@ -828,6 +849,30 @@ impl Aggregator {
         emit_cache_ops_miss(tool, raw_key);
     }
 
+    pub(crate) fn tool_operation_summary(&self, tool_name: &str) -> ToolOperationSummary {
+        let Some(tool) = Tool::from_str(tool_name) else {
+            return ToolOperationSummary::default();
+        };
+
+        self.flush_async_events();
+        let state = self.lock_state();
+        let mut summary = ToolOperationSummary::default();
+        for (key, counters) in &state.operation_totals {
+            if key.tool != tool {
+                continue;
+            }
+
+            summary.record(
+                key.op,
+                key.result,
+                key.degraded,
+                counters.event_count,
+                counters.bytes_total,
+            );
+        }
+        summary
+    }
+
     pub(crate) fn drain(&self) -> (Vec<RollupRecord>, Vec<MissedKeyRecord>, Vec<SessionRecord>) {
         self.drain_inner(false)
     }
@@ -1080,6 +1125,51 @@ pub(crate) struct SessionRecord {
     pub top_missed_keys: Vec<SessionMissedKeyRecord>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ToolOperationSummary {
+    pub cache_read_hit_count: u64,
+    pub cache_read_miss_count: u64,
+    pub cache_read_error_count: u64,
+    pub cache_read_bytes: u64,
+    pub cache_write_count: u64,
+    pub cache_write_error_count: u64,
+    pub cache_write_bytes: u64,
+}
+
+impl ToolOperationSummary {
+    fn record(
+        &mut self,
+        op: Op,
+        result: OpResult,
+        degraded: bool,
+        event_count: u64,
+        bytes_total: u64,
+    ) {
+        match (op, result, degraded) {
+            (Op::Get, OpResult::Hit, _) => {
+                self.cache_read_hit_count = self.cache_read_hit_count.saturating_add(event_count);
+                self.cache_read_bytes = self.cache_read_bytes.saturating_add(bytes_total);
+            }
+            (Op::Get, OpResult::Miss, _) | (Op::Get, OpResult::Error, true) => {
+                self.cache_read_miss_count = self.cache_read_miss_count.saturating_add(event_count);
+            }
+            (Op::Get, OpResult::Error, false) => {
+                self.cache_read_error_count =
+                    self.cache_read_error_count.saturating_add(event_count);
+            }
+            (Op::Put, OpResult::Hit, _) => {
+                self.cache_write_count = self.cache_write_count.saturating_add(event_count);
+                self.cache_write_bytes = self.cache_write_bytes.saturating_add(bytes_total);
+            }
+            (Op::Put, OpResult::Error, _) => {
+                self.cache_write_error_count =
+                    self.cache_write_error_count.saturating_add(event_count);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1301,6 +1391,34 @@ mod tests {
             session.metadata_hints.get("project"),
             Some(&"launch".to_string())
         );
+    }
+
+    #[test]
+    fn tool_operation_summary_tracks_read_counts_without_put_hits() {
+        let agg = Aggregator::new();
+        agg.record(Tool::Sccache, Op::Get, OpResult::Hit, false, 100, 5);
+        agg.record(Tool::Sccache, Op::Get, OpResult::Miss, false, 0, 2);
+        agg.record(Tool::Sccache, Op::Get, OpResult::Error, true, 0, 4);
+        agg.record(Tool::Sccache, Op::Get, OpResult::Error, false, 0, 6);
+        agg.record(Tool::Sccache, Op::Put, OpResult::Hit, false, 50, 3);
+
+        let summary = agg.tool_operation_summary("sccache");
+
+        assert_eq!(summary.cache_read_hit_count, 1);
+        assert_eq!(summary.cache_read_miss_count, 2);
+        assert_eq!(summary.cache_read_error_count, 1);
+        assert_eq!(summary.cache_read_bytes, 100);
+        assert_eq!(summary.cache_write_count, 1);
+        assert_eq!(summary.cache_write_bytes, 50);
+
+        let (_, _, sessions) = agg.drain_for_shutdown();
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.hit_count, 1);
+        assert_eq!(session.miss_count, 2);
+        assert_eq!(session.error_count, 1);
+        assert_eq!(session.bytes_read, 100);
+        assert_eq!(session.bytes_written, 50);
     }
 
     #[test]
