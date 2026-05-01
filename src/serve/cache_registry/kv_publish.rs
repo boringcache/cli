@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::api::models::cache::{BlobDescriptor, BlobReceipt};
 use crate::progress::TransferProgress;
-use crate::serve::state::{AppState, KvBlobUploadBatch};
+use crate::serve::state::{AppState, BlobReadLease, KvBlobUploadBatch};
 
 const KV_BLOB_UPLOAD_MAX_ATTEMPTS: u32 = 3;
 const KV_BLOB_UPLOAD_RETRY_BASE_MS: u64 = 300;
@@ -42,9 +42,10 @@ impl fmt::Display for PartialBlobUploadError {
             .unwrap_or("unknown blob upload failure");
         write!(
             f,
-            "Failed to upload {} blob(s) after preserving {} uploaded receipt(s): {}",
+            "Failed to upload {} blob(s) after preserving {} uploaded receipt(s) and missing {} local blob(s): {}",
             self.failures.len(),
             self.stats.uploaded_receipts.len(),
+            self.stats.missing_local_count,
             summary
         )
     }
@@ -213,7 +214,64 @@ struct UploadRequest {
     upload_digest: String,
     upload_url: String,
     upload_headers: HashMap<String, String>,
-    blob_path: PathBuf,
+    blob_source: UploadSource,
+}
+
+struct UploadSource {
+    path: PathBuf,
+    offset: u64,
+    size_bytes: Option<u64>,
+    _lease: Option<BlobReadLease>,
+}
+
+impl UploadSource {
+    fn full_file(path: PathBuf) -> Self {
+        Self {
+            path,
+            offset: 0,
+            size_bytes: None,
+            _lease: None,
+        }
+    }
+
+    fn read_cache(lease: BlobReadLease) -> Self {
+        Self {
+            path: lease.path().to_path_buf(),
+            offset: lease.offset(),
+            size_bytes: Some(lease.size_bytes()),
+            _lease: Some(lease),
+        }
+    }
+
+    async fn upload(
+        &self,
+        upload_url: &str,
+        progress: &TransferProgress,
+        client: &reqwest::Client,
+        upload_headers: &HashMap<String, String>,
+    ) -> anyhow::Result<(Option<String>, crate::telemetry::StorageMetrics)> {
+        if let Some(size_bytes) = self.size_bytes {
+            crate::multipart_upload::upload_via_single_url_range(
+                self.path.as_path(),
+                self.offset,
+                size_bytes,
+                upload_url,
+                progress,
+                client,
+                upload_headers,
+            )
+            .await
+        } else {
+            crate::multipart_upload::upload_via_single_url(
+                self.path.as_path(),
+                upload_url,
+                progress,
+                client,
+                upload_headers,
+            )
+            .await
+        }
+    }
 }
 
 async fn upload_single_blob_with_retry(
@@ -224,14 +282,15 @@ async fn upload_single_blob_with_retry(
 
     for attempt in 1..=KV_BLOB_UPLOAD_MAX_ATTEMPTS {
         let progress = TransferProgress::new_noop();
-        let upload_result = crate::multipart_upload::upload_via_single_url(
-            request.blob_path.as_path(),
-            &request.upload_url,
-            &progress,
-            state.api_client.transfer_client(),
-            &request.upload_headers,
-        )
-        .await;
+        let upload_result = request
+            .blob_source
+            .upload(
+                &request.upload_url,
+                &progress,
+                state.api_client.transfer_client(),
+                &request.upload_headers,
+            )
+            .await;
         match upload_result {
             Ok(_) => {
                 let outcome = if attempt > 1 {
@@ -365,16 +424,19 @@ pub(super) async fn upload_blobs(
     let mut tasks = tokio::task::JoinSet::new();
 
     for upload in upload_plan.upload_urls {
-        let blob_path = match local_blob_paths.get(&upload.digest).cloned() {
-            Some(path) => path,
-            None => {
-                log::warn!(
-                    "KV batch flush: skipping blob {} (no local file)",
-                    upload.digest
-                );
-                stats.missing_local_count = stats.missing_local_count.saturating_add(1);
-                continue;
-            }
+        let blob_source = match local_blob_paths.get(&upload.digest).cloned() {
+            Some(path) => UploadSource::full_file(path),
+            None => match state.blob_read_cache.lease_handle(&upload.digest).await {
+                Some(lease) => UploadSource::read_cache(lease),
+                None => {
+                    log::warn!(
+                        "KV batch flush: skipping blob {} (no local file)",
+                        upload.digest
+                    );
+                    stats.missing_local_count = stats.missing_local_count.saturating_add(1);
+                    continue;
+                }
+            },
         };
 
         let state = state.clone();
@@ -394,7 +456,7 @@ pub(super) async fn upload_blobs(
                     upload_digest: upload.digest,
                     upload_url: upload.url,
                     upload_headers: upload.headers,
-                    blob_path,
+                    blob_source,
                 },
             )
             .await;
@@ -455,7 +517,13 @@ pub(super) async fn upload_blobs(
         }
     }
 
-    if !failures.is_empty() {
+    if !failures.is_empty() || stats.missing_local_count > 0 {
+        if stats.missing_local_count > 0 && failures.is_empty() {
+            failures.push(format!(
+                "{} requested blob(s) had no local body to upload",
+                stats.missing_local_count
+            ));
+        }
         let final_concurrency = limiter.current();
         state
             .kv_blob_upload_metrics
@@ -517,10 +585,14 @@ pub(super) async fn upload_blobs(
 #[cfg(test)]
 mod tests {
     use super::{
-        BlobUploadStats, KV_BLOB_UPLOAD_CONCURRENCY_ENV, is_retryable_blob_upload_error,
-        kv_blob_upload_concurrency, partial_blob_upload_stats,
+        BlobUploadStats, KV_BLOB_UPLOAD_CONCURRENCY_ENV, UploadSource,
+        is_retryable_blob_upload_error, kv_blob_upload_concurrency, partial_blob_upload_stats,
     };
+    use crate::progress::TransferProgress;
+    use crate::serve::state::BlobReadCache;
     use crate::test_env;
+    use mockito::Matcher;
+    use std::collections::HashMap;
 
     #[test]
     fn retryable_blob_upload_errors_keep_legacy_transient_matches() {
@@ -613,6 +685,48 @@ mod tests {
         assert_eq!(plan.initial, 2);
         assert_eq!(plan.max, 4);
         assert_eq!(plan.reason, "large_blobs");
+    }
+
+    #[tokio::test]
+    async fn upload_source_reads_segmented_blob_cache_range() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut server = mockito::Server::new_async().await;
+        let payload = b"segmented read-cache payload";
+        let digest = crate::cas_file::prefixed_sha256_digest(payload);
+        let temp_home = tempfile::tempdir().expect("temp dir");
+        let read_cache =
+            BlobReadCache::new_at(temp_home.path().join("blob-read-cache"), 1024 * 1024)
+                .expect("read cache");
+
+        assert!(read_cache.insert(&digest, payload).await.expect("insert"));
+        let lease = read_cache
+            .lease_handle(&digest)
+            .await
+            .expect("read-cache lease");
+        assert!(
+            lease.offset() > 0,
+            "inserted blobs should be stored inside a segment range"
+        );
+
+        let _upload_mock = server
+            .mock("PUT", "/blob")
+            .match_body(Matcher::Exact(
+                String::from_utf8(payload.to_vec()).expect("payload is utf8"),
+            ))
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let source = UploadSource::read_cache(lease);
+        source
+            .upload(
+                &format!("{}/blob", server.url()),
+                &TransferProgress::new_noop(),
+                &reqwest::Client::new(),
+                &HashMap::new(),
+            )
+            .await
+            .expect("range upload");
     }
 
     #[test]
