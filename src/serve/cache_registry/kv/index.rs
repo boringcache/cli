@@ -103,8 +103,8 @@ pub(crate) fn count_published_gaps_in_backend(
 pub(crate) async fn refresh_published_index_for_lookup(
     state: &AppState,
 ) -> Result<(), RegistryError> {
-    let (entries, blob_order, cache_entry_id, _) =
-        match load_existing_index_snapshot(state, true).await {
+    let (_resolved_root_tag, entries, blob_order, cache_entry_id, _) =
+        match load_existing_index_snapshot_with_tag(state, true).await {
             Ok(result) => {
                 state.backend_breaker.record_success();
                 result
@@ -146,7 +146,7 @@ pub(crate) async fn refresh_published_index_for_lookup(
             published.set_empty();
         }
     }
-    clear_tag_misses(state, &state.registry_root_tag);
+    clear_restore_tag_misses(state);
 
     Ok(())
 }
@@ -475,7 +475,84 @@ pub(crate) async fn load_existing_index_snapshot(
     ),
     RegistryError,
 > {
-    load_existing_index(state, state.registry_root_tag.trim(), retry_not_found).await
+    let (_, entries, blob_order, cache_entry_id, manifest_root_digest) =
+        load_existing_index_snapshot_with_tag(state, retry_not_found).await?;
+    Ok((entries, blob_order, cache_entry_id, manifest_root_digest))
+}
+
+pub(crate) async fn load_existing_index_snapshot_with_tag(
+    state: &AppState,
+    retry_not_found: bool,
+) -> Result<
+    (
+        String,
+        BTreeMap<String, BlobDescriptor>,
+        Vec<BlobDescriptor>,
+        Option<String>,
+        Option<String>,
+    ),
+    RegistryError,
+> {
+    let root_tags = ordered_restore_root_tags(state);
+
+    let mut first_empty = None;
+    for (index, tag) in root_tags.iter().enumerate() {
+        let is_last = index + 1 == root_tags.len();
+        let result = match load_existing_index(state, tag, retry_not_found).await {
+            Ok(result) => result,
+            Err(error) if !is_last && should_try_next_restore_root_after_error(&error) => {
+                log::warn!(
+                    "KV index restore root {tag} failed with a transient backend error; trying next restore root: {error:?}"
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if result.2.is_some() || !result.0.is_empty() {
+            return Ok((tag.clone(), result.0, result.1, result.2, result.3));
+        }
+        if first_empty.is_none() {
+            first_empty = Some((tag.clone(), result.0, result.1, result.2, result.3));
+        }
+    }
+
+    Ok(first_empty.unwrap_or_else(|| {
+        (
+            state.registry_root_tag.trim().to_string(),
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+            None,
+        )
+    }))
+}
+
+fn ordered_restore_root_tags(state: &AppState) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut seen = HashSet::new();
+
+    for tag in std::iter::once(state.registry_root_tag.as_str())
+        .chain(state.registry_restore_root_tags.iter().map(String::as_str))
+    {
+        let tag = tag.trim();
+        if !tag.is_empty() && seen.insert(tag.to_string()) {
+            tags.push(tag.to_string());
+        }
+    }
+
+    if tags.is_empty() {
+        tags.push(state.registry_root_tag.trim().to_string());
+    }
+
+    tags
+}
+
+fn should_try_next_restore_root_after_error(error: &RegistryError) -> bool {
+    error.status.is_server_error()
+        || matches!(
+            error.status,
+            StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+        )
 }
 
 pub(crate) async fn resolve_hit_for_index_load(

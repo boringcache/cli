@@ -345,6 +345,18 @@ pub(crate) fn clear_tag_misses(state: &AppState, registry_root_tag: &str) {
     }
 }
 
+pub(crate) fn clear_restore_tag_misses(state: &AppState) {
+    let mut seen = HashSet::new();
+    for tag in std::iter::once(state.registry_root_tag.as_str())
+        .chain(state.registry_restore_root_tags.iter().map(String::as_str))
+    {
+        let tag = tag.trim();
+        if !tag.is_empty() && seen.insert(tag.to_string()) {
+            clear_tag_misses(state, tag);
+        }
+    }
+}
+
 pub(crate) fn cleanup_expired_kv_misses(state: &AppState) {
     let now = std::time::Instant::now();
     state

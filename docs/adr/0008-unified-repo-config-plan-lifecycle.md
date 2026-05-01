@@ -65,6 +65,22 @@ kebab-case spellings users see in CLI help for repeated proxy fields such as
 as the first-class place to remove repeated flag wiring for both local CLI use
 and external helpers that ask the CLI for a plan.
 
+Implementation note, 2026-05-01: cache scope is now a single CLI-owned model
+across archive restore/check, proxy roots, adapters, and Docker/BuildKit refs.
+Default-branch runs read/write the default tag, trusted non-default branches
+read branch then default and write branch, PRs read base/default by default,
+PR restore-cache-enabled runs read PR then base/default, PR saves write only
+PR, and no-git or outside-git runs use the explicit tag only.
+`BORINGCACHE_RESTORE_PR_CACHE` controls PR-first archive reads;
+`BORINGCACHE_SAVE_ON_PULL_REQUEST` is save intent and must not be reused as a
+restore toggle. `boringcache/one` may pass GitHub provider metadata and expose
+compatibility outputs, but it should not keep a second branch/default/PR
+planner. Rails resolves and authorizes the requested tags/aliases; it does not
+infer GitHub scope for normal restore. Generated git suffixes are sanitized,
+while explicit workflow tags remain caller-owned so a
+raw `github.ref_name` containing `/` must be slugged before it is used as a
+cache tag.
+
 ## Docker Rule
 
 The maintained Docker path is BuildKit registry-cache planning:

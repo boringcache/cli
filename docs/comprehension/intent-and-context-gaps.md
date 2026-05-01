@@ -12,6 +12,7 @@ This file tracks only product intent that is not fully settled by the current co
 - Archive mode is the default direct save/restore workflow.
 - `run` is the primary archive-mode command; `save` and `restore` are the split lower-level commands.
 - Tag suffixing by git and platform is part of cache identity.
+- Cache scope is settled in `cache-scope-model.md`: default reads/writes default, trusted branches read branch then default and write branch, PRs read base/default by default, PR saves use PR/base/default reads and write only PR, and outside-git runs use the explicit tag only.
 - Signature verification is warn-only by default unless explicit strictness is requested.
 - Encryption is workspace-scoped and Age-based when configured.
 - Adapter commands are the preferred path for supported remote-cache tools.
@@ -22,7 +23,7 @@ This file tracks only product intent that is not fully settled by the current co
 - `.boringcache.toml` is the canonical repo config filename.
 - `.boringcache.toml` is the durable repo cache plan across local and CI; the CLI is the only local planner for it.
 - `doctor` plus `audit` are the current maintenance loop after onboard. Future `lint` or `rescan` naming should wrap those planner/audit paths, not create new config truth.
-- ADR 0009 records the current launch review: keep maintenance automatic but cheap, keep cross-platform suffixing explicit, keep the action from becoming a second planner, and keep Docker adoption on CLI-planned BuildKit registry-cache refs.
+- ADR 0009 records the current launch review: keep maintenance automatic but cheap, keep cross-platform suffixing explicit, keep the action from becoming a second planner, keep cache scope in the CLI, and keep Docker adoption on CLI-planned BuildKit registry-cache refs.
 - `project_config/**` is intentionally the planner for `run` and adapters.
 - `mount`, `dashboard`, `doctor`, `setup-encryption`, `status`, `sessions`, `misses`, and `tags` are supported product surfaces.
 - `go-cacheprog` is supported as advanced plumbing behind the `go` adapter and manual `GOCACHEPROG` setups.

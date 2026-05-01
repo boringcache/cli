@@ -185,6 +185,18 @@ Read-only Docker adapter runs should only inject `--cache-from` refs and must no
 
 The CLI accepts provider-neutral run metadata through `BORINGCACHE_CI_*` environment variables. The GitHub Actions adapter is the first built-in mapper into that contract. Normal local Docker runs do not auto-generate run refs; they keep the existing `buildcache` behavior unless explicit hidden flags or provider-neutral metadata are supplied.
 
+Implementation note, 2026-05-01: Docker/BuildKit import and promotion planning
+now follows the same cache accessibility model as archive and proxy restore.
+Trusted branch runs import branch/default and promote branch, default-branch
+runs import/promote default, restore-only PRs import base/default without
+reading the PR head-branch alias, and PR save-enabled runs may import/promote
+the PR alias while branch/default aliases remain trusted-branch outputs.
+`buildcache` stays a migration import fallback. The GitHub Action readiness
+gate consumes the CLI-planned imports and may proceed as soon as the first
+usable fallback is readable; an earlier PR-ref miss is expected on restore-only
+PRs and should not spend the whole setup budget before default fallback can be
+used.
+
 ## Session Trace Requirements
 
 ADR 0006 session trace should include:

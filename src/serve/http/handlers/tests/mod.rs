@@ -37,6 +37,7 @@ fn test_state() -> AppState {
         tag_resolver: TagResolver::new(None, GitContext::default(), false),
         configured_human_tags: Vec::new(),
         registry_root_tag: "registry".to_string(),
+        registry_restore_root_tags: vec!["registry".to_string()],
         oci_alias_promotion_refs: Vec::new(),
         proxy_metadata_hints: std::collections::BTreeMap::new(),
         proxy_skip_rules: Arc::new(Vec::new()),

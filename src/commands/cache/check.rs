@@ -115,7 +115,7 @@ async fn execute_inner(
     let git_enabled = !options.no_git && !crate::git::is_git_disabled_by_env();
 
     let mut resolved_tags: Vec<String> = Vec::new();
-    let mut tag_to_resolved: Vec<(String, String)> = Vec::new();
+    let mut tag_to_resolved: Vec<(String, Vec<String>)> = Vec::new();
 
     for tag in &valid_tags {
         let git_context = if git_enabled {
@@ -126,13 +126,15 @@ async fn execute_inner(
 
         let resolver =
             crate::tag_utils::TagResolver::new(platform.clone(), git_context, git_enabled);
-        let resolved_tag = resolver.effective_restore_tag(tag)?;
+        let candidate_tags = resolver.effective_restore_tags(tag)?;
 
-        if !resolved_tags.contains(&resolved_tag) {
-            resolved_tags.push(resolved_tag.clone());
+        for resolved_tag in &candidate_tags {
+            if !resolved_tags.contains(resolved_tag) {
+                resolved_tags.push(resolved_tag.clone());
+            }
         }
 
-        tag_to_resolved.push((tag.clone(), resolved_tag));
+        tag_to_resolved.push((tag.clone(), candidate_tags));
     }
 
     let api_client = ApiClient::for_restore()?;
@@ -174,12 +176,25 @@ async fn execute_inner(
     let mut pending = 0usize;
     let mut misses = 0usize;
 
-    for (requested_tag, resolved_tag) in &tag_to_resolved {
-        match results_by_tag.get(resolved_tag) {
+    for (requested_tag, candidate_tags) in &tag_to_resolved {
+        let hit = candidate_tags
+            .iter()
+            .filter_map(|tag| results_by_tag.get(tag))
+            .find(|entry| entry.status == "hit");
+        let pending_entry = candidate_tags
+            .iter()
+            .filter_map(|tag| results_by_tag.get(tag))
+            .find(|entry| is_pending_resolution(entry));
+        let fallback_tag = candidate_tags
+            .first()
+            .cloned()
+            .unwrap_or_else(|| requested_tag.clone());
+
+        match hit.or(pending_entry) {
             Some(entry) if entry.status == "hit" => {
                 hits += 1;
                 check_results.push(CheckResult {
-                    tag: resolved_tag.clone(),
+                    tag: entry.tag.clone(),
                     requested_tag: requested_tag.clone(),
                     status: "hit".to_string(),
                     cache_entry_id: entry.cache_entry_id.clone(),
@@ -191,7 +206,7 @@ async fn execute_inner(
             Some(entry) if is_pending_resolution(entry) => {
                 pending += 1;
                 check_results.push(CheckResult {
-                    tag: resolved_tag.clone(),
+                    tag: entry.tag.clone(),
                     requested_tag: requested_tag.clone(),
                     status: "pending".to_string(),
                     cache_entry_id: entry.cache_entry_id.clone(),
@@ -204,7 +219,7 @@ async fn execute_inner(
                 misses += 1;
 
                 check_results.push(CheckResult {
-                    tag: resolved_tag.clone(),
+                    tag: fallback_tag,
                     requested_tag: requested_tag.clone(),
                     status: "miss".to_string(),
                     cache_entry_id: None,

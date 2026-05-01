@@ -7,15 +7,16 @@ Use it in this order:
 1. `feature-map-overview.md`
 2. `feature-map-cache-lifecycle.md`
 3. `feature-map-proxy-and-adapters.md`
-4. `feature-map-workspace-auth-config.md`
-5. `support-and-reachability.md`
-6. `intent-and-context-gaps.md`
-7. `file-coverage-index.md`
-8. `cli-structure.md` for the namespace/tree view
+4. `cache-scope-model.md`
+5. `feature-map-workspace-auth-config.md`
+6. `support-and-reachability.md`
+7. `intent-and-context-gaps.md`
+8. `file-coverage-index.md`
+9. `cli-structure.md` for the namespace/tree view
 
 Use `agent-working-contract.md` when implementing CLI behavior or test changes. It holds stable rules that are intentionally kept out of `AGENTS.md`.
 
-Launch review context lives in `../adr/0009-launch-maintenance-contract-and-performance-review.md`. It records the `.boringcache.toml` maintenance contract, cross-platform behavior, Docker helper boundary, action/web ownership, legacy surface review, and performance guardrails.
+Launch review context lives in `../adr/0009-launch-maintenance-contract-and-performance-review.md`. It records the `.boringcache.toml` maintenance contract, cross-platform behavior, cache scope model, Docker helper boundary, action/web ownership, legacy surface review, and performance guardrails.
 
 ## Status legend
 
@@ -33,10 +34,11 @@ When a feature changes:
 
 1. Update the relevant row in the feature-family file.
 2. Update `feature-map-overview.md` if the feature moved groups, changed status, or added/removed entrypoints.
-3. Update `support-and-reachability.md` if shared plumbing changed reachability.
-4. Update `intent-and-context-gaps.md` when product intent becomes clearer or a previously open question is decided.
-5. Update `file-coverage-index.md` if files moved, were added, or were deleted.
-6. Keep `cli-structure.md` focused on namespace boundaries, not feature intent.
+3. Update `cache-scope-model.md` when branch/default/PR, platform, archive/proxy, Docker/BuildKit, or action/Rails ownership changes.
+4. Update `support-and-reachability.md` if shared plumbing changed reachability.
+5. Update `intent-and-context-gaps.md` when product intent becomes clearer or a previously open question is decided.
+6. Update `file-coverage-index.md` if files moved, were added, or were deleted.
+7. Keep `cli-structure.md` focused on namespace boundaries, not feature intent.
 
 When the work exposes a long or hard-to-grok file, treat cleanup as part of the handoff. Either make the touched area simpler with focused modules/tests, or record the deferred simplification and owner in the relevant comprehension file.
 

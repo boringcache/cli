@@ -25,7 +25,10 @@ Stable CLI rules live here so `AGENTS.md` can stay small. Read this when impleme
 ## Tags, Manifests, And Misses
 
 - Tag resolution uses `TagResolver` with platform suffix and git suffix when enabled.
-- Restore candidates are a single effective tag. There is no fallback chain.
+- Restore candidates are ordered by the GitHub cache accessibility model: default-branch runs read/write the default tag; trusted non-default branches read branch then default and write branch; PRs read base/default by default; PR save-enabled runs read PR then base/default and write only PR. The complete matrix and action/Rails ownership split lives in `docs/comprehension/cache-scope-model.md`.
+- Generated git scope suffixes are sanitized. Explicit user-provided cache tags are not silently rewritten, so workflow authors who interpolate refs such as `github.ref_name` must pass a slugged tag.
+- The action may pass GitHub metadata, `BORINGCACHE_SAVE_ON_PULL_REQUEST` for PR save intent, and `BORINGCACHE_RESTORE_PR_CACHE` for PR-first archive reads. The CLI restore path must not infer read scope from the save-side env name, and the action must not become a second branch/default/PR planner for archive, proxy, or Docker behavior.
+- Git detection env precedence is explicit. Default branch detection reads `BORINGCACHE_DEFAULT_BRANCH`, then `BORINGCACHE_CI_DEFAULT_BRANCH`, then `GITHUB_DEFAULT_BRANCH`, then `GITHUB_EVENT_PATH` repository JSON. PR base and number overrides are `BORINGCACHE_CI_BASE_REF` and `BORINGCACHE_CI_PR_NUMBER`; GitHub Actions `GITHUB_BASE_REF`, `GITHUB_REF`, `GITHUB_REF_NAME`, and event JSON are fallbacks.
 - For the proxy KV flush path, `bc_registry_root_v2_*` remains the OCI URL path. When the server advertises `registry_path_tags` and the primary resolved tag is valid under Rails tag rules, publish the human tag directly and let Rails resolve the root path through `cache_tags.registry_path`; unsupported tag names stay on the legacy root publish path.
 - Manifest root digest uses SHA-256. File hashes remain BLAKE3.
 - Manifest digest is SHA-256 of the uploaded manifest bytes.

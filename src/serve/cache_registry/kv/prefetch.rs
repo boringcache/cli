@@ -1001,7 +1001,7 @@ pub(crate) async fn prefetch_manifest_blobs(
                     cache_entry_id.clone(),
                 );
             }
-            clear_tag_misses(state, &state.registry_root_tag);
+            clear_restore_tag_misses(state);
             let unique_blobs = {
                 let published = state.kv_published_index.read().await;
                 published.unique_blobs()

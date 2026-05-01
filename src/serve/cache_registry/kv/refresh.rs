@@ -21,10 +21,18 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
     }
 
     let diagnostics = crate::serve::state::diagnostics_enabled();
-    let tag = state.registry_root_tag.trim().to_string();
-    let hit = match resolve_hit_for_index_load(state, &tag, true).await {
-        Ok(hit) => hit,
-        Err(error) if error.status == StatusCode::NOT_FOUND => {
+    let (loaded_tag, entries_by_path, blob_order, cache_entry_id, manifest_root_digest) =
+        match load_existing_index_snapshot_with_tag(state, true).await {
+            Ok(result) => result,
+            Err(error) => {
+                log::warn!("KV index refresh failed during resolve: {error:?}");
+                return;
+            }
+        };
+
+    let cache_entry_id = match cache_entry_id {
+        Some(id) => id,
+        None => {
             let had_entries = {
                 let published = state.kv_published_index.read().await;
                 published.entry_count() > 0
@@ -32,7 +40,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             if had_entries {
                 let mut published = state.kv_published_index.write().await;
                 published.touch_refresh();
-                clear_tag_misses(state, &state.registry_root_tag);
+                clear_restore_tag_misses(state);
                 if diagnostics {
                     eprintln!("KV index refresh: preserving in-memory index (no backend index)");
                 }
@@ -42,29 +50,11 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
                 let mut published = state.kv_published_index.write().await;
                 published.set_empty();
             }
-            clear_tag_misses(state, &state.registry_root_tag);
-            if diagnostics && had_entries {
-                eprintln!("KV index refresh: cleared stale entries (no backend index)");
-            }
-            return;
-        }
-        Err(error) => {
-            log::warn!("KV index refresh failed during resolve: {error:?}");
+            clear_restore_tag_misses(state);
             return;
         }
     };
 
-    let cache_entry_id = match hit.cache_entry_id.clone() {
-        Some(id) => id,
-        None => {
-            log::warn!("KV index refresh: live hit missing cache_entry_id");
-            return;
-        }
-    };
-    let manifest_root_digest = hit
-        .manifest_root_digest
-        .clone()
-        .or(hit.manifest_digest.clone());
     let should_fence = {
         let published = state.kv_published_index.read().await;
         if published
@@ -83,7 +73,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
     if should_fence
         && !refresh_fence_allows_update(
             state,
-            &tag,
+            &loaded_tag,
             &cache_entry_id,
             manifest_root_digest.as_deref(),
         )
@@ -92,35 +82,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         return;
     }
 
-    let pointer = match fetch_pointer(state, &hit).await {
-        Ok(pointer) => pointer,
-        Err(error) => {
-            log::warn!("KV index refresh failed to fetch pointer: {error:?}");
-            return;
-        }
-    };
-
-    let mut entries = HashMap::new();
-    for entry in &pointer.entries {
-        if !matches!(entry.entry_type, EntryType::File) {
-            continue;
-        }
-        if let Some(digest) = &entry.digest {
-            entries.insert(
-                entry.path.clone(),
-                BlobDescriptor {
-                    digest: digest.clone(),
-                    size_bytes: entry.size_bytes,
-                },
-            );
-        }
-    }
-    let entry_map: BTreeMap<String, BlobDescriptor> = entries
-        .iter()
-        .map(|(key, blob)| (key.clone(), blob.clone()))
-        .collect();
-    let blob_order = pointer_blob_order(&pointer, &entry_map);
-
+    let entry_map = entries_by_path;
     let (published_entries, published_entry_count) = {
         let published = state.kv_published_index.read().await;
         (published.entries_snapshot(), published.entry_count())
@@ -130,7 +92,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
     {
         let mut published = state.kv_published_index.write().await;
         published.touch_refresh();
-        clear_tag_misses(state, &state.registry_root_tag);
+        clear_restore_tag_misses(state);
         if diagnostics {
             eprintln!(
                 "KV index refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
@@ -143,6 +105,10 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         return;
     }
 
+    let entries: HashMap<String, BlobDescriptor> = entry_map
+        .iter()
+        .map(|(path, blob)| (path.clone(), blob.clone()))
+        .collect();
     if entries.is_empty() {
         let had_entries = {
             let published = state.kv_published_index.read().await;
@@ -151,7 +117,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         if had_entries {
             let mut published = state.kv_published_index.write().await;
             published.touch_refresh();
-            clear_tag_misses(state, &state.registry_root_tag);
+            clear_restore_tag_misses(state);
             if diagnostics {
                 eprintln!("KV index refresh: preserving in-memory index (empty pointer)");
             }
@@ -161,10 +127,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
             let mut published = state.kv_published_index.write().await;
             published.set_empty();
         }
-        clear_tag_misses(state, &state.registry_root_tag);
-        if diagnostics && had_entries {
-            eprintln!("KV index refresh: cleared stale entries (empty pointer)");
-        }
+        clear_restore_tag_misses(state);
         return;
     }
 
@@ -173,7 +136,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
         let mut published = state.kv_published_index.write().await;
         published.update(entries, blob_order, cache_entry_id.clone());
     }
-    clear_tag_misses(state, &state.registry_root_tag);
+    clear_restore_tag_misses(state);
     if diagnostics {
         eprintln!("KV index refresh: {count} entries loaded");
     }
@@ -189,27 +152,19 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
     }
 
     let diagnostics = crate::serve::state::diagnostics_enabled();
-    let tag = state.registry_root_tag.trim().to_string();
-    let hit = match resolve_hit_for_index_load(state, &tag, true).await {
-        Ok(hit) => hit,
-        Err(error) if error.status == StatusCode::NOT_FOUND => return,
-        Err(error) => {
-            log::warn!("KV version-triggered refresh failed during resolve: {error:?}");
-            return;
-        }
-    };
+    let (loaded_tag, entries_by_path, blob_order, cache_entry_id, manifest_root_digest) =
+        match load_existing_index_snapshot_with_tag(state, true).await {
+            Ok(result) => result,
+            Err(error) => {
+                log::warn!("KV version-triggered refresh failed during resolve: {error:?}");
+                return;
+            }
+        };
 
-    let cache_entry_id = match hit.cache_entry_id.clone() {
+    let cache_entry_id = match cache_entry_id {
         Some(id) => id,
-        None => {
-            log::warn!("KV version-triggered refresh: live hit missing cache_entry_id");
-            return;
-        }
+        None => return,
     };
-    let manifest_root_digest = hit
-        .manifest_root_digest
-        .clone()
-        .or(hit.manifest_digest.clone());
     let should_fence = {
         let published = state.kv_published_index.read().await;
         if published
@@ -228,7 +183,7 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
     if should_fence
         && !refresh_fence_allows_update(
             state,
-            &tag,
+            &loaded_tag,
             &cache_entry_id,
             manifest_root_digest.as_deref(),
         )
@@ -237,35 +192,7 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
         return;
     }
 
-    let pointer = match fetch_pointer(state, &hit).await {
-        Ok(pointer) => pointer,
-        Err(error) => {
-            log::warn!("KV version-triggered refresh failed to fetch pointer: {error:?}");
-            return;
-        }
-    };
-
-    let mut entries = HashMap::new();
-    for entry in &pointer.entries {
-        if !matches!(entry.entry_type, EntryType::File) {
-            continue;
-        }
-        if let Some(digest) = &entry.digest {
-            entries.insert(
-                entry.path.clone(),
-                BlobDescriptor {
-                    digest: digest.clone(),
-                    size_bytes: entry.size_bytes,
-                },
-            );
-        }
-    }
-    let entry_map: BTreeMap<String, BlobDescriptor> = entries
-        .iter()
-        .map(|(key, blob)| (key.clone(), blob.clone()))
-        .collect();
-    let blob_order = pointer_blob_order(&pointer, &entry_map);
-
+    let entry_map = entries_by_path;
     let (published_entries, published_entry_count) = {
         let published = state.kv_published_index.read().await;
         (published.entries_snapshot(), published.entry_count())
@@ -275,7 +202,7 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
     {
         let mut published = state.kv_published_index.write().await;
         published.touch_refresh();
-        clear_tag_misses(state, &state.registry_root_tag);
+        clear_restore_tag_misses(state);
         if diagnostics {
             eprintln!(
                 "KV version-triggered refresh: preserving in-memory index (backend={} published={} missing_keys={} mismatched_keys={})",
@@ -288,6 +215,10 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
         return;
     }
 
+    let entries: HashMap<String, BlobDescriptor> = entry_map
+        .iter()
+        .map(|(path, blob)| (path.clone(), blob.clone()))
+        .collect();
     if entries.is_empty() {
         let had_entries = {
             let published = state.kv_published_index.read().await;
@@ -296,14 +227,14 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
         if had_entries {
             let mut published = state.kv_published_index.write().await;
             published.touch_refresh();
-            clear_tag_misses(state, &state.registry_root_tag);
+            clear_restore_tag_misses(state);
             return;
         }
         {
             let mut published = state.kv_published_index.write().await;
             published.set_empty();
         }
-        clear_tag_misses(state, &state.registry_root_tag);
+        clear_restore_tag_misses(state);
         return;
     }
 
@@ -312,7 +243,7 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
         let mut published = state.kv_published_index.write().await;
         published.update(entries, blob_order, cache_entry_id.clone());
     }
-    clear_tag_misses(state, &state.registry_root_tag);
+    clear_restore_tag_misses(state);
     if diagnostics {
         eprintln!("KV version-triggered refresh: {count} entries loaded (no blob prefetch)");
     }

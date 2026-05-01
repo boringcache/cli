@@ -7,6 +7,7 @@ fn scoped_save_tag_applies_git_suffix() {
         GitContext {
             pr_number: None,
             branch: Some("feature/x".to_string()),
+            base_branch: None,
             default_branch: Some("main".to_string()),
             commit_sha: None,
         },
@@ -34,6 +35,7 @@ fn scoped_restore_tags_use_human_root_and_legacy_compat_tags() {
         GitContext {
             pr_number: None,
             branch: Some("feature/x".to_string()),
+            base_branch: None,
             default_branch: Some("main".to_string()),
             commit_sha: None,
         },
@@ -52,6 +54,8 @@ fn scoped_restore_tags_use_human_root_and_legacy_compat_tags() {
         vec![
             ref_tag_for_input("buildcache:buildkit-cache:main-branch-feature-x"),
             legacy_ref_tag_for_input("registry-root:buildkit-cache:main-branch-feature-x"),
+            ref_tag_for_input("buildcache:buildkit-cache:main"),
+            legacy_ref_tag_for_input("registry-root:buildkit-cache:main"),
         ]
     );
 }
@@ -63,6 +67,7 @@ fn scoped_restore_tags_without_root_use_readable_and_legacy_unscoped_tags() {
         GitContext {
             pr_number: None,
             branch: Some("feature/x".to_string()),
+            base_branch: None,
             default_branch: Some("main".to_string()),
             commit_sha: None,
         },
@@ -75,6 +80,8 @@ fn scoped_restore_tags_without_root_use_readable_and_legacy_unscoped_tags() {
         vec![
             ref_tag_for_input("buildkit-cache:main-branch-feature-x"),
             legacy_ref_tag_for_input("buildkit-cache:main-branch-feature-x"),
+            ref_tag_for_input("buildkit-cache:main"),
+            legacy_ref_tag_for_input("buildkit-cache:main"),
         ]
     );
 }
@@ -86,6 +93,7 @@ fn scoped_save_tag_on_default_branch_uses_base() {
         GitContext {
             pr_number: None,
             branch: Some("main".to_string()),
+            base_branch: None,
             default_branch: Some("main".to_string()),
             commit_sha: None,
         },

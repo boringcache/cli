@@ -5,6 +5,7 @@ use super::normalize::{normalize_ref, shorten_sha};
 pub struct GitContext {
     pub pr_number: Option<u32>,
     pub branch: Option<String>,
+    pub base_branch: Option<String>,
     pub default_branch: Option<String>,
     pub commit_sha: Option<String>,
 }
@@ -25,6 +26,7 @@ impl GitContext {
     pub fn has_context(&self) -> bool {
         self.pr_number.is_some()
             || self.branch.is_some()
+            || self.base_branch.is_some()
             || self.default_branch.is_some()
             || self.commit_sha.is_some()
     }
@@ -35,6 +37,12 @@ impl GitContext {
 
     pub fn default_branch_slug(&self) -> Option<String> {
         self.default_branch
+            .as_ref()
+            .map(|branch| normalize_ref(branch))
+    }
+
+    pub fn base_branch_slug(&self) -> Option<String> {
+        self.base_branch
             .as_ref()
             .map(|branch| normalize_ref(branch))
     }

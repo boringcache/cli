@@ -12,6 +12,7 @@ pub mod encryption;
 pub mod error;
 pub mod exit_code;
 pub mod git;
+pub(crate) mod github_event;
 pub(crate) mod json_output;
 pub mod manifest;
 pub(crate) mod observability;

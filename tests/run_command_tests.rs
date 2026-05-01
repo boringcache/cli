@@ -2069,19 +2069,13 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
         parsed["oci_cache"]["cache_from_refs"],
         serde_json::json!([
             "type=registry,ref=host.docker.internal:5000/cache:pr-42,registry.insecure=true",
-            "type=registry,ref=host.docker.internal:5000/cache:branch-feature-docker-cache,registry.insecure=true",
             "type=registry,ref=host.docker.internal:5000/cache:default,registry.insecure=true",
             "type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true"
         ])
     );
     assert_eq!(
         parsed["oci_cache"]["cache_from_ref_tags"],
-        serde_json::json!([
-            "pr-42",
-            "branch-feature-docker-cache",
-            "default",
-            "buildcache"
-        ])
+        serde_json::json!(["pr-42", "default", "buildcache"])
     );
     assert_eq!(
         parsed["oci_cache"]["cache_to"],
@@ -2113,12 +2107,7 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
     );
     assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
-        serde_json::json!([
-            "cache@pr-42",
-            "cache@branch-feature-docker-cache",
-            "cache@default",
-            "cache@buildcache"
-        ])
+        serde_json::json!(["cache@pr-42", "cache@default", "cache@buildcache"])
     );
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["docker_immutable_run_ref"],
@@ -2156,7 +2145,7 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
     assert!(
         command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:pr-42,registry.insecure=true")
     );
-    assert!(command.contains(
+    assert!(!command.contains(
         &"--cache-from=type=registry,ref=host.docker.internal:5000/cache:branch-feature-docker-cache,registry.insecure=true"
     ));
     assert!(

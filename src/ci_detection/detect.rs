@@ -148,7 +148,9 @@ fn detect_github_actions_run_context() -> Option<CiRunContext> {
         source_ref_name,
         head_ref_name: head_ref,
         base_ref_name: base_ref.clone(),
-        default_branch: env_trimmed("GITHUB_DEFAULT_BRANCH").or(base_ref),
+        default_branch: env_trimmed("GITHUB_DEFAULT_BRANCH")
+            .or_else(crate::github_event::default_branch_from_env)
+            .or(base_ref),
         pull_request_number,
         commit_sha: env_trimmed("GITHUB_SHA"),
         run_started_at: env_trimmed("BORINGCACHE_CI_RUN_STARTED_AT"),
@@ -171,26 +173,11 @@ fn github_pull_request_number(source_ref: Option<&str>, ref_name: Option<&str>) 
     source_ref
         .and_then(|value| parse_github_pull_ref_number(value.strip_prefix("refs/pull/")?))
         .or_else(|| ref_name.and_then(parse_github_pull_ref_number))
-        .or_else(github_event_pull_request_number)
+        .or_else(crate::github_event::pull_request_number_from_env)
 }
 
 fn parse_github_pull_ref_number(value: &str) -> Option<u32> {
     value.split('/').next()?.parse::<u32>().ok()
-}
-
-fn github_event_pull_request_number() -> Option<u32> {
-    let path = env_trimmed("GITHUB_EVENT_PATH")?;
-    let bytes = std::fs::read(path).ok()?;
-    let json = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
-    json.get("number")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .or_else(|| {
-            json.get("pull_request")
-                .and_then(|pull_request| pull_request.get("number"))
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|value| u32::try_from(value).ok())
-        })
 }
 
 fn strip_ref_prefix(source_ref: Option<&str>, prefix: &str) -> Option<String> {

@@ -34,6 +34,7 @@ async fn put_kv_object_is_noop_in_read_only_mode() {
         tag_resolver: TagResolver::new(None, GitContext::default(), false),
         configured_human_tags: Vec::new(),
         registry_root_tag: "registry".to_string(),
+        registry_restore_root_tags: vec!["registry".to_string()],
         oci_alias_promotion_refs: Vec::new(),
         proxy_metadata_hints: std::collections::BTreeMap::new(),
         proxy_skip_rules: std::sync::Arc::new(Vec::new()),

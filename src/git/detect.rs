@@ -23,6 +23,8 @@ pub fn is_git_disabled_by_env() -> bool {
 
 pub(super) fn detect_git_context(path_hint: Option<&str>) -> GitContext {
     let override_default = env_default_branch();
+    let override_base = env_base_branch();
+    let override_pr_number = env_pr_number();
 
     let mut context = detect_local_git_context(path_hint).unwrap_or_default();
 
@@ -30,8 +32,16 @@ pub(super) fn detect_git_context(path_hint: Option<&str>) -> GitContext {
         context.branch = detect_ci_branch();
     }
 
+    if override_base.is_some() {
+        context.base_branch = override_base;
+    }
+
     if override_default.is_some() {
         context.default_branch = override_default;
+    }
+
+    if override_pr_number.is_some() {
+        context.pr_number = override_pr_number;
     }
 
     if context.commit_sha.is_none() && is_ci_env() {
@@ -64,6 +74,7 @@ fn detect_local_git_context(path_hint: Option<&str>) -> Option<GitContext> {
     Some(GitContext {
         pr_number: None,
         branch: Some(branch),
+        base_branch: None,
         default_branch,
         commit_sha: None,
     })
@@ -127,7 +138,32 @@ fn detect_default_branch(git_dir: &Path) -> Option<String> {
 }
 
 fn env_default_branch() -> Option<String> {
-    crate::config::env_var("BORINGCACHE_DEFAULT_BRANCH").map(|v| normalize_ref(&v))
+    crate::config::env_var("BORINGCACHE_DEFAULT_BRANCH")
+        .or_else(|| crate::config::env_var("BORINGCACHE_CI_DEFAULT_BRANCH"))
+        .or_else(|| crate::config::env_var("GITHUB_DEFAULT_BRANCH"))
+        .or_else(crate::github_event::default_branch_from_env)
+        .map(|v| normalize_ref(&v))
+}
+
+fn env_base_branch() -> Option<String> {
+    crate::config::env_var("BORINGCACHE_CI_BASE_REF")
+        .or_else(|| crate::config::env_var("GITHUB_BASE_REF"))
+        .map(|v| normalize_ref(&v))
+}
+
+fn env_pr_number() -> Option<u32> {
+    crate::config::env_var("BORINGCACHE_CI_PR_NUMBER")
+        .and_then(|value| value.parse::<u32>().ok())
+        .or_else(|| {
+            crate::config::env_var("GITHUB_REF")
+                .and_then(|value| value.strip_prefix("refs/pull/").map(ToOwned::to_owned))
+                .and_then(|value| parse_github_pull_ref_number(&value))
+        })
+        .or_else(|| {
+            crate::config::env_var("GITHUB_REF_NAME")
+                .and_then(|value| parse_github_pull_ref_number(&value))
+        })
+        .or_else(crate::github_event::pull_request_number_from_env)
 }
 
 fn detect_ci_branch() -> Option<String> {
@@ -170,4 +206,8 @@ fn is_ci_env() -> bool {
         || env::var("GITLAB_CI").is_ok()
         || env::var("CIRCLECI").is_ok()
         || env::var("BITBUCKET_BUILD_NUMBER").is_ok()
+}
+
+fn parse_github_pull_ref_number(value: &str) -> Option<u32> {
+    value.split('/').next()?.parse::<u32>().ok()
 }

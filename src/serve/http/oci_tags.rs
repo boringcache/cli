@@ -11,15 +11,20 @@ pub(crate) fn scoped_restore_tags(
     name: &str,
     reference: &str,
 ) -> Vec<String> {
-    let scoped = effective_ref_input(tag_resolver, name, reference);
+    let scoped_input = format!("{name}:{reference}");
+    let scoped_candidates = tag_resolver
+        .effective_restore_tags(&scoped_input)
+        .unwrap_or_else(|_| vec![scoped_input]);
     let mut tags = Vec::new();
-    let current = current_ref_tag(configured_human_tags, registry_root_tag, &scoped);
-    if !tags.contains(&current) {
-        tags.push(current);
-    }
-    let legacy = legacy_ref_tag(registry_root_tag, &scoped);
-    if !tags.contains(&legacy) {
-        tags.push(legacy);
+    for scoped in scoped_candidates {
+        let current = current_ref_tag(configured_human_tags, registry_root_tag, &scoped);
+        if !tags.contains(&current) {
+            tags.push(current);
+        }
+        let legacy = legacy_ref_tag(registry_root_tag, &scoped);
+        if !tags.contains(&legacy) {
+            tags.push(legacy);
+        }
     }
     tags
 }
@@ -69,13 +74,6 @@ pub(crate) fn scoped_legacy_alias_binding(
         write_scope_tag: Some(scoped_write_scope_tag(tag_resolver, name, reference)?),
         required: false,
     }))
-}
-
-fn effective_ref_input(tag_resolver: &TagResolver, name: &str, reference: &str) -> String {
-    let scoped_input = format!("{name}:{reference}");
-    tag_resolver
-        .effective_save_tag(&scoped_input)
-        .unwrap_or(scoped_input)
 }
 
 fn fallible_effective_ref_input(

@@ -60,6 +60,7 @@ pub struct AppState {
     pub tag_resolver: TagResolver,
     pub configured_human_tags: Vec<String>,
     pub registry_root_tag: String,
+    pub registry_restore_root_tags: Vec<String>,
     pub oci_alias_promotion_refs: Vec<String>,
     pub proxy_metadata_hints: BTreeMap<String, String>,
     pub proxy_skip_rules: Arc<Vec<ProxySkipRule>>,

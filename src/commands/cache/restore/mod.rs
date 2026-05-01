@@ -305,7 +305,7 @@ async fn execute_batch_restore_inner(
     struct RestorePlan {
         display_tag: String,
         target_path: String,
-        resolved_tag: String,
+        candidate_tags: Vec<String>,
     }
 
     #[derive(Debug, Clone)]
@@ -328,21 +328,23 @@ async fn execute_batch_restore_inner(
         };
         let resolver =
             crate::tag_utils::TagResolver::new(platform.clone(), git_context, git_enabled);
-        let resolved_tag = resolver.effective_restore_tag(&spec.tag)?;
+        let candidate_tags = resolver.effective_restore_tags(&spec.tag)?;
         let target_path = spec
             .path
             .as_deref()
             .map(crate::command_support::expand_tilde_path)
             .unwrap_or_else(|| ".".to_string());
 
-        if seen_resolved_tags.insert(resolved_tag.clone()) {
-            resolved_tags.push(resolved_tag.clone());
+        for resolved_tag in &candidate_tags {
+            if seen_resolved_tags.insert(resolved_tag.clone()) {
+                resolved_tags.push(resolved_tag.clone());
+            }
         }
 
         plans.push(RestorePlan {
             display_tag: spec.tag.clone(),
             target_path,
-            resolved_tag,
+            candidate_tags,
         });
     }
 
@@ -471,8 +473,11 @@ async fn execute_batch_restore_inner(
     }
 
     for plan in &plans {
-        if let Some(entry) = results_by_tag.get(&plan.resolved_tag)
-            && entry.status == "hit"
+        if let Some(entry) = plan
+            .candidate_tags
+            .iter()
+            .filter_map(|tag| results_by_tag.get(tag))
+            .find(|entry| entry.status == "hit")
         {
             selected_hits.push(SelectedRestore {
                 entry: entry.clone(),
