@@ -179,6 +179,8 @@ Implemented status metric names follow `OciEngineDiagnostics` style:
 
 The remaining rollout item is benchmarking: compare client first-byte wait and total remote body wait for large Docker layers before enabling any nonzero default.
 
+Benchmark workflow support is now in place for that rollout check: the standalone benchmark repos expose optional manual inputs for `BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY`, `BORINGCACHE_BLOB_PREFETCH_CONCURRENCY`, and `BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES`, and the Docker benchmark helper records the stream-through counters from proxy status diagnostics. This only makes A/B tuning possible; it does not enable stream-through by default.
+
 ## Proof Status
 
 Documentation and the hidden CLI prototype are aligned as of 2026-04-21. The stream-through threshold remains a hidden engineering control and is unset by default.
