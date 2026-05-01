@@ -39,6 +39,7 @@ pub(super) async fn build_server_runtime(
     tag_resolver: TagResolver,
     configured_human_tags: Vec<String>,
     registry_root_tag: String,
+    registry_restore_root_tags: Vec<String>,
     oci_alias_promotion_refs: Vec<String>,
     proxy_metadata_hints: BTreeMap<String, String>,
     startup_warm: bool,
@@ -57,7 +58,8 @@ pub(super) async fn build_server_runtime(
     let proxy_skip_rules = Arc::new(load_proxy_skip_rules_from_current_dir()?);
     let skip_rule_metrics = Arc::new(state::ProxySkipRuleMetrics::new());
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
-    let (prefetch_concurrency, prefetch_from_env) = blob_prefetch_concurrency(dl_concurrency);
+    let (prefetch_concurrency, prefetch_from_env) =
+        blob_prefetch_concurrency(dl_concurrency, dl_from_env);
     let (kv_replication_work_tx, kv_replication_work_rx) =
         mpsc::channel(KV_REPLICATION_WORK_QUEUE_CAPACITY);
     let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
@@ -89,6 +91,7 @@ pub(super) async fn build_server_runtime(
         tag_resolver,
         configured_human_tags,
         registry_root_tag,
+        registry_restore_root_tags,
         oci_alias_promotion_refs,
         proxy_metadata_hints: proxy_metadata_hints.clone(),
         proxy_skip_rules,
@@ -416,6 +419,12 @@ fn auto_transfer_concurrency() -> usize {
     resources.recommended_proxy_download_concurrency(is_ci)
 }
 
+fn auto_prefetch_concurrency() -> usize {
+    let resources = crate::platform::resources::SystemResources::detect();
+    let is_ci = std::env::var("CI").is_ok();
+    resources.recommended_proxy_prefetch_concurrency(is_ci)
+}
+
 fn parse_positive_usize_env(name: &str) -> Option<usize> {
     let raw = std::env::var(name).ok()?;
     let trimmed = raw.trim();
@@ -452,12 +461,22 @@ fn blob_download_concurrency() -> (usize, bool) {
     (auto_transfer_concurrency().max(1), false)
 }
 
-fn blob_prefetch_concurrency(download_concurrency: usize) -> (usize, bool) {
+fn blob_prefetch_concurrency(
+    download_concurrency: usize,
+    download_from_env: bool,
+) -> (usize, bool) {
     if let Some(configured) = parse_positive_usize_env(BLOB_PREFETCH_CONCURRENCY_ENV) {
         return (configured, true);
     }
 
-    (download_concurrency.max(1), false)
+    if download_from_env {
+        return (download_concurrency.max(1), false);
+    }
+
+    (
+        auto_prefetch_concurrency().max(download_concurrency).max(1),
+        false,
+    )
 }
 
 fn force_http1() -> bool {
@@ -570,15 +589,31 @@ mod tests {
 
     #[test]
     fn blob_prefetch_concurrency_defaults_from_download_concurrency() {
-        assert_eq!(blob_prefetch_concurrency(8), (8, false));
-        assert_eq!(blob_prefetch_concurrency(1), (1, false));
+        let _guard = test_env::lock();
+        test_env::remove_var(BLOB_PREFETCH_CONCURRENCY_ENV);
+
+        let (concurrency, from_env) = blob_prefetch_concurrency(8, false);
+        assert!(!from_env);
+        assert!(concurrency >= 8);
+
+        let (concurrency, from_env) = blob_prefetch_concurrency(1, false);
+        assert!(!from_env);
+        assert!(concurrency >= 1);
+    }
+
+    #[test]
+    fn blob_prefetch_concurrency_respects_download_env_cap_by_default() {
+        let _guard = test_env::lock();
+        test_env::remove_var(BLOB_PREFETCH_CONCURRENCY_ENV);
+
+        assert_eq!(blob_prefetch_concurrency(3, true), (3, false));
     }
 
     #[test]
     fn blob_prefetch_concurrency_honors_env_override() {
         let _guard = test_env::lock();
         test_env::set_var(BLOB_PREFETCH_CONCURRENCY_ENV, "3");
-        assert_eq!(blob_prefetch_concurrency(8), (3, true));
+        assert_eq!(blob_prefetch_concurrency(8, false), (3, true));
         test_env::remove_var(BLOB_PREFETCH_CONCURRENCY_ENV);
     }
 

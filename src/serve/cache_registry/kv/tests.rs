@@ -645,13 +645,27 @@ fn startup_prefetch_defaults_cover_full_tag_by_default() {
 }
 
 #[test]
-fn startup_prefetch_concurrency_caps_many_small_blobs_to_measured_ceiling() {
+fn startup_prefetch_concurrency_uses_rtt_bound_cap_for_many_small_blobs() {
+    let plan = adaptive_startup_prefetch_concurrency(100, false, 5_000, 5_000 * 4_096);
+
+    assert_eq!(plan.max_concurrency, 100);
+    assert_eq!(plan.effective_concurrency, 100);
+    assert_eq!(plan.initial_concurrency, 20);
+    assert!(plan.adaptive);
+    assert_eq!(plan.source, "auto");
+    assert_eq!(plan.reason, "many_small_blobs_rtt_bound");
+}
+
+#[test]
+fn startup_prefetch_concurrency_respects_smaller_machine_ceiling_for_many_small_blobs() {
     let plan = adaptive_startup_prefetch_concurrency(16, false, 5_000, 5_000 * 4_096);
 
     assert_eq!(plan.max_concurrency, 16);
-    assert_eq!(plan.effective_concurrency, 10);
+    assert_eq!(plan.effective_concurrency, 16);
+    assert_eq!(plan.initial_concurrency, 16);
+    assert!(plan.adaptive);
     assert_eq!(plan.source, "auto");
-    assert_eq!(plan.reason, "many_small_blobs_measured_cap");
+    assert_eq!(plan.reason, "many_small_blobs_rtt_bound");
 }
 
 #[test]
@@ -660,8 +674,308 @@ fn startup_prefetch_concurrency_keeps_explicit_override_for_benchmarks() {
 
     assert_eq!(plan.max_concurrency, 20);
     assert_eq!(plan.effective_concurrency, 20);
+    assert_eq!(plan.initial_concurrency, 20);
+    assert!(!plan.adaptive);
     assert_eq!(plan.source, "env");
     assert_eq!(plan.reason, "explicit_override");
+}
+
+fn startup_prefetch_window(
+    completed: usize,
+    bytes: u64,
+    failures: usize,
+    rate_limited: bool,
+    p95_ms: u64,
+) -> StartupPrefetchWindowSample {
+    StartupPrefetchWindowSample {
+        elapsed: std::time::Duration::from_secs(1),
+        completed,
+        bytes,
+        failures,
+        rate_limited,
+        retry_after: None,
+        p95_ms,
+    }
+}
+
+#[test]
+fn startup_prefetch_tuner_increases_when_goodput_improves() {
+    let mut state = StartupPrefetchTuningState::new();
+
+    let (next, decision) = tune_startup_prefetch_concurrency(
+        20,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(20, 2_000_000, 0, false, 50),
+        false,
+    );
+
+    assert_eq!(next, 25);
+    assert_eq!(decision, StartupPrefetchAdjustment::Increase);
+}
+
+#[test]
+fn startup_prefetch_tuner_halves_on_failures() {
+    let mut state = StartupPrefetchTuningState::new();
+
+    let (next, decision) = tune_startup_prefetch_concurrency(
+        80,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(80, 2_000_000, 1, false, 50),
+        false,
+    );
+
+    assert_eq!(next, 40);
+    assert_eq!(decision, StartupPrefetchAdjustment::DropFast);
+}
+
+#[test]
+fn startup_prefetch_tuner_drops_slow_on_latency_spike() {
+    let mut state = StartupPrefetchTuningState::new();
+    let _ = tune_startup_prefetch_concurrency(
+        40,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(40, 2_000_000, 0, false, 50),
+        false,
+    );
+
+    let (next, decision) = tune_startup_prefetch_concurrency(
+        45,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(45, 1_000_000, 0, false, 200),
+        false,
+    );
+
+    assert_eq!(next, 38);
+    assert_eq!(decision, StartupPrefetchAdjustment::DropSlow);
+}
+
+#[test]
+fn startup_prefetch_tuner_holds_when_latency_spikes_without_goodput_regression() {
+    let mut state = StartupPrefetchTuningState::new();
+    let _ = tune_startup_prefetch_concurrency(
+        40,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(40, 2_000_000, 0, false, 50),
+        false,
+    );
+
+    let (next, decision) = tune_startup_prefetch_concurrency(
+        45,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(45, 2_100_000, 0, false, 200),
+        false,
+    );
+
+    assert_eq!(next, 45);
+    assert_eq!(decision, StartupPrefetchAdjustment::Hold);
+}
+
+#[test]
+fn startup_prefetch_tuner_holds_without_enough_gain() {
+    let mut state = StartupPrefetchTuningState::new();
+    let _ = tune_startup_prefetch_concurrency(
+        20,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(20, 2_000_000, 0, false, 50),
+        false,
+    );
+
+    let (next, decision) = tune_startup_prefetch_concurrency(
+        25,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(25, 2_100_000, 0, false, 55),
+        false,
+    );
+
+    assert_eq!(next, 25);
+    assert_eq!(decision, StartupPrefetchAdjustment::Hold);
+}
+
+#[test]
+fn startup_prefetch_tuner_holds_under_resource_pressure() {
+    let mut state = StartupPrefetchTuningState::new();
+
+    let (next, decision) = tune_startup_prefetch_concurrency(
+        20,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(20, 2_000_000, 0, false, 50),
+        true,
+    );
+
+    assert_eq!(next, 20);
+    assert_eq!(decision, StartupPrefetchAdjustment::Hold);
+}
+
+#[test]
+fn startup_prefetch_tuner_rate_limit_halves_with_specific_reason() {
+    let mut state = StartupPrefetchTuningState::new();
+
+    let (next, decision) = tune_startup_prefetch_concurrency(
+        80,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(80, 2_000_000, 1, true, 50),
+        false,
+    );
+
+    assert_eq!(next, 40);
+    assert_eq!(decision, StartupPrefetchAdjustment::RateLimited);
+}
+
+#[test]
+fn startup_prefetch_rate_limit_hold_pauses_new_spawns() {
+    let plan = StartupPrefetchConcurrencyPlan {
+        max_concurrency: 100,
+        effective_concurrency: 100,
+        initial_concurrency: 20,
+        adaptive: true,
+        source: "auto",
+        reason: "many_small_blobs_rtt_bound",
+    };
+    let mut controller = AdaptiveStartupPrefetch::new(plan);
+    controller.record(&StartupPrefetchTaskReport {
+        inserted: false,
+        size_bytes: 1,
+        duration_ms: 50,
+        status: Some(StatusCode::TOO_MANY_REQUESTS),
+        retry_after: Some(std::time::Duration::from_secs(60)),
+        error: Some("HTTP 429".to_string()),
+    });
+    controller.force_window_elapsed_for_test();
+
+    let (decision, previous, next) = controller.maybe_adjust().expect("adjustment");
+
+    assert_eq!(decision, StartupPrefetchAdjustment::RateLimited);
+    assert_eq!(previous, 20);
+    assert_eq!(next, 10);
+    assert_eq!(controller.current(), 10);
+    assert_eq!(controller.target_in_flight(), 0);
+    assert!(
+        controller.pause_remaining().expect("retry-after hold")
+            > std::time::Duration::from_secs(50)
+    );
+}
+
+#[test]
+fn startup_prefetch_metrics_keep_ceiling_separate_from_initial() {
+    let metrics = crate::serve::state::PrefetchMetrics::new();
+
+    metrics.record_startup_plan(crate::serve::state::StartupPrefetchPlan {
+        mode: "full_tag",
+        total_unique_blobs: 5_000,
+        target_blobs: 5_000,
+        target_bytes: 5_000 * 4_096,
+        max_concurrency: 100,
+        effective_concurrency: 100,
+        initial_concurrency: 20,
+        concurrency_source: "auto",
+        concurrency_reason: "many_small_blobs_rtt_bound",
+    });
+
+    let hints = metrics.metadata_hints();
+
+    assert_eq!(
+        hints
+            .get("startup_prefetch_concurrency")
+            .map(String::as_str),
+        Some("100")
+    );
+    assert_eq!(
+        hints
+            .get("startup_prefetch_initial_concurrency")
+            .map(String::as_str),
+        Some("20")
+    );
+}
+
+#[test]
+fn startup_prefetch_tuner_disabled_when_not_adaptive() {
+    let mut state = StartupPrefetchTuningState::new();
+
+    let (next, decision) = tune_startup_prefetch_concurrency(
+        16,
+        16,
+        false,
+        &mut state,
+        startup_prefetch_window(16, 2_000_000, 1, true, 50),
+        true,
+    );
+
+    assert_eq!(next, 16);
+    assert_eq!(decision, StartupPrefetchAdjustment::Disabled);
+}
+
+#[test]
+fn startup_prefetch_tuner_can_recover_after_drop_fast() {
+    let mut state = StartupPrefetchTuningState::new();
+    let (dropped, decision) = tune_startup_prefetch_concurrency(
+        80,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(80, 2_000_000, 1, false, 50),
+        false,
+    );
+    assert_eq!(dropped, 40);
+    assert_eq!(decision, StartupPrefetchAdjustment::DropFast);
+
+    let (next, decision) = tune_startup_prefetch_concurrency(
+        dropped,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(40, 2_200_000, 0, false, 60),
+        false,
+    );
+
+    assert!(next > dropped);
+    assert_eq!(decision, StartupPrefetchAdjustment::Increase);
+}
+
+#[test]
+fn startup_prefetch_tuner_settles_after_initial_climb() {
+    let mut state = StartupPrefetchTuningState::new();
+    let mut current = 20;
+    let windows = [
+        (2_000_000, StartupPrefetchAdjustment::Increase),
+        (2_500_000, StartupPrefetchAdjustment::Increase),
+        (2_600_000, StartupPrefetchAdjustment::Increase),
+        (2_620_000, StartupPrefetchAdjustment::Hold),
+    ];
+
+    for (bytes, expected) in windows {
+        let (next, decision) = tune_startup_prefetch_concurrency(
+            current,
+            100,
+            true,
+            &mut state,
+            startup_prefetch_window(current, bytes, 0, false, 50),
+            false,
+        );
+        assert_eq!(decision, expected);
+        current = next;
+    }
+
+    assert_eq!(current, 35);
 }
 
 #[test]

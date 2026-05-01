@@ -175,6 +175,106 @@ impl SystemResources {
 
         concurrency.clamp(1, 16)
     }
+
+    pub fn recommended_proxy_prefetch_concurrency(&self, is_ci: bool) -> usize {
+        let base = self.recommended_proxy_download_concurrency(is_ci);
+        if !is_ci || self.cpu_load_percent > 75.0 || self.available_memory_gb < 4.0 {
+            return base;
+        }
+
+        let ceiling = if matches!(self.disk_type, DiskType::NvmeSsd)
+            && self.available_memory_gb >= 8.0
+            && self.cpu_cores >= 4
+        {
+            100
+        } else if self.available_memory_gb >= 4.0 && self.cpu_cores >= 2 {
+            50
+        } else {
+            base
+        };
+
+        ceiling.max(base).clamp(1, 100)
+    }
+}
+
+pub(crate) fn proxy_resource_pressure_high() -> bool {
+    current_load_average_per_core().is_some_and(|load| load > 1.5)
+        || current_available_memory_mb()
+            .is_some_and(|available_mb| available_mb < proxy_min_free_memory_mb())
+}
+
+fn proxy_min_free_memory_mb() -> f64 {
+    std::env::var("BORINGCACHE_PROXY_MIN_FREE_MB")
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| *value > 0.0)
+        .unwrap_or(256.0)
+}
+
+fn current_load_average_per_core() -> Option<f64> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let mut loads = [0.0_f64; 3];
+        // SAFETY: `loads` is a valid writable array with at least one slot, and
+        // `getloadavg` is called with `nelem=1`, so libc writes within bounds.
+        let loaded = unsafe { libc::getloadavg(loads.as_mut_ptr(), 1) };
+        if loaded == 1 {
+            return Some(loads[0] / num_cpus::get().max(1) as f64);
+        }
+    }
+
+    None
+}
+
+fn current_available_memory_mb() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in meminfo.lines() {
+            if line.starts_with("MemAvailable:")
+                && let Some(kb_str) = line.split_whitespace().nth(1)
+                && let Ok(kb) = kb_str.parse::<u64>()
+            {
+                return Some(kb as f64 / 1024.0);
+            }
+        }
+        None
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("vm_stat").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let output = String::from_utf8(output.stdout).ok()?;
+        let page_size = output
+            .lines()
+            .next()
+            .and_then(|line| line.split("page size of ").nth(1))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(4096);
+        let mut pages = 0u64;
+        for line in output.lines() {
+            if (line.starts_with("Pages free:")
+                || line.starts_with("Pages inactive:")
+                || line.starts_with("Pages speculative:"))
+                && let Some(raw) = line.split(':').nth(1)
+            {
+                let cleaned = raw.trim().trim_end_matches('.').replace('.', "");
+                if let Ok(count) = cleaned.parse::<u64>() {
+                    pages = pages.saturating_add(count);
+                }
+            }
+        }
+        Some((pages.saturating_mul(page_size)) as f64 / (1024.0 * 1024.0))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
 }
 
 fn detect_available_memory_gb() -> f64 {
@@ -390,6 +490,7 @@ mod tests {
 
         assert_eq!(resources.recommended_download_concurrency(true), 2);
         assert_eq!(resources.recommended_proxy_download_concurrency(true), 8);
+        assert_eq!(resources.recommended_proxy_prefetch_concurrency(true), 50);
     }
 
     #[test]
@@ -405,5 +506,22 @@ mod tests {
         };
 
         assert_eq!(resources.recommended_proxy_download_concurrency(true), 4);
+        assert_eq!(resources.recommended_proxy_prefetch_concurrency(true), 4);
+    }
+
+    #[test]
+    fn proxy_prefetch_concurrency_scales_for_capable_ci_runners() {
+        let resources = SystemResources {
+            cpu_cores: 4,
+            available_memory_gb: 16.0,
+            cpu_load_percent: 10.0,
+            max_parallel_chunks: 8,
+            memory_strategy: MemoryStrategy::Aggressive,
+            disk_type: DiskType::NvmeSsd,
+            disk_speed_estimate_mb_s: 2_000.0,
+        };
+
+        assert_eq!(resources.recommended_proxy_download_concurrency(true), 12);
+        assert_eq!(resources.recommended_proxy_prefetch_concurrency(true), 100);
     }
 }

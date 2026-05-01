@@ -1159,6 +1159,11 @@ struct StartupPrefetchSnapshot {
     average_blob_bytes: u64,
     max_concurrency: u64,
     concurrency: u64,
+    initial_concurrency: u64,
+    final_concurrency: u64,
+    max_observed_concurrency: u64,
+    concurrency_adjustment_count: u64,
+    concurrency_adjustments: Vec<String>,
     concurrency_source: Option<String>,
     concurrency_reason: Option<String>,
     url_resolved: u64,
@@ -1199,6 +1204,7 @@ pub struct StartupPrefetchPlan<'a> {
     pub target_bytes: u64,
     pub max_concurrency: usize,
     pub effective_concurrency: usize,
+    pub initial_concurrency: usize,
     pub concurrency_source: &'a str,
     pub concurrency_reason: &'a str,
 }
@@ -1233,8 +1239,39 @@ impl PrefetchMetrics {
             };
             snapshot.max_concurrency = plan.max_concurrency as u64;
             snapshot.concurrency = plan.effective_concurrency as u64;
+            snapshot.initial_concurrency = plan.initial_concurrency as u64;
+            snapshot.final_concurrency = plan.initial_concurrency as u64;
+            snapshot.max_observed_concurrency = plan.initial_concurrency as u64;
             snapshot.concurrency_source = Some(plan.concurrency_source.to_string());
             snapshot.concurrency_reason = Some(plan.concurrency_reason.to_string());
+        }
+    }
+
+    pub fn record_startup_concurrency_adjustment(
+        &self,
+        adjustment: &str,
+        previous: usize,
+        next: usize,
+    ) {
+        if let Ok(mut snapshot) = self.startup.lock() {
+            snapshot.concurrency_adjustment_count =
+                snapshot.concurrency_adjustment_count.saturating_add(1);
+            if snapshot.concurrency_adjustments.len() < 32 {
+                snapshot
+                    .concurrency_adjustments
+                    .push(format!("{adjustment}:{previous}->{next}"));
+            }
+        }
+    }
+
+    pub fn record_startup_concurrency_observed(
+        &self,
+        final_concurrency: usize,
+        max_observed_concurrency: usize,
+    ) {
+        if let Ok(mut snapshot) = self.startup.lock() {
+            snapshot.final_concurrency = final_concurrency as u64;
+            snapshot.max_observed_concurrency = max_observed_concurrency as u64;
         }
     }
 
@@ -1349,6 +1386,28 @@ impl PrefetchMetrics {
             "startup_prefetch_concurrency".to_string(),
             snapshot.concurrency.to_string(),
         );
+        hints.insert(
+            "startup_prefetch_initial_concurrency".to_string(),
+            snapshot.initial_concurrency.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_final_concurrency".to_string(),
+            snapshot.final_concurrency.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_max_observed_concurrency".to_string(),
+            snapshot.max_observed_concurrency.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_concurrency_adjustment_count".to_string(),
+            snapshot.concurrency_adjustment_count.to_string(),
+        );
+        if !snapshot.concurrency_adjustments.is_empty() {
+            hints.insert(
+                "startup_prefetch_concurrency_adjustments".to_string(),
+                snapshot.concurrency_adjustments.join(","),
+            );
+        }
         if let Some(source) = &snapshot.concurrency_source {
             hints.insert(
                 "startup_prefetch_concurrency_source".to_string(),

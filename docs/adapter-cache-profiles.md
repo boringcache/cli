@@ -19,8 +19,8 @@ It is based on:
 ## Current proxy changes
 
 - Startup warming hydrates the full active tag by default.
-- Blob-read cache sizing and restore/prefetch concurrency now come from one automatic machine governor, with proxy prewarm using an IO-oriented CI floor instead of archive-style CPU limits.
-- Startup warming now resolves URLs for the full active tag first, hydrates that tag with the governor's full safe proxy download concurrency before readiness, and lets the blob read cache evict over budget.
+- Blob-read cache sizing and restore/download concurrency come from the automatic machine governor. Startup prefetch has a separate resource-scaled CI budget because it runs before the wrapped tool competes for CPU, disk, and network.
+- Startup warming now resolves URLs for the full active tag first, hydrates that tag before readiness, and lets the blob read cache evict over budget. Many-small-object and machine-governed tags use an adaptive prefetch controller on capable CI runners, while medium and large blob classes keep conservative caps.
 - Read-path metrics now record `local_cache` vs `remote_fetch`, so we can measure hit ratio and latency instead of guessing.
 
 ## Tuning surface
@@ -29,9 +29,11 @@ Keep the normal operator surface small:
 
 - Public expert knobs:
   - `BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY`
+- Internal benchmark/proof knobs:
+  - `BORINGCACHE_BLOB_PREFETCH_CONCURRENCY`
 - Internal batching stays fixed in code.
 
-The intent is that one machine governor and one generic startup path pick the right defaults for almost every workload. Archive restore can stay CPU/disk conservative; proxy-native warmup is allowed more concurrent object reads because the wrapped build is not running yet.
+The intent is that the machine governor, workload shape, and one generic startup path pick the right defaults for almost every workload. Archive restore can stay CPU/disk conservative; proxy-native warmup is allowed more concurrent object reads because the wrapped build is not running yet.
 If a benchmark needs lower-level overrides, treat those as engineering controls, not product defaults.
 
 ## Adapter matrix

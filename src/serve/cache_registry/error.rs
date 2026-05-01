@@ -10,6 +10,7 @@ enum RegistryErrorBody {
 #[derive(Debug)]
 pub struct RegistryError {
     pub(crate) status: StatusCode,
+    pub(crate) retry_after: Option<std::time::Duration>,
     message: String,
     body: RegistryErrorBody,
 }
@@ -18,6 +19,7 @@ impl RegistryError {
     pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             status,
+            retry_after: None,
             message: message.into(),
             body: RegistryErrorBody::PlainText,
         }
@@ -45,6 +47,11 @@ impl RegistryError {
 
     pub(crate) fn with_json_code(mut self, code: impl Into<String>) -> Self {
         self.body = RegistryErrorBody::Json { code: code.into() };
+        self
+    }
+
+    pub(crate) fn with_retry_after(mut self, retry_after: Option<std::time::Duration>) -> Self {
+        self.retry_after = retry_after;
         self
     }
 }

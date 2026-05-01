@@ -229,15 +229,17 @@ pub(crate) async fn stream_blob_to_file(
                 .send()
                 .await
                 .map_err(|e| RegistryError::internal(format!("Failed to download blob: {e}")))?
-                .error_for_status()
-                .map_err(|e| {
-                    RegistryError::internal(format!("Blob storage returned an error: {e}"))
-                })?
         } else {
-            response.error_for_status().map_err(|e| {
-                RegistryError::internal(format!("Blob storage returned an error: {e}"))
-            })?
+            response
         };
+
+        if !response.status().is_success() {
+            return Err(RegistryError::new(
+                response.status(),
+                format!("Blob storage returned HTTP {}", response.status()),
+            )
+            .with_retry_after(retry_after_duration(response.headers())));
+        }
 
         let mut stream = response.bytes_stream();
         let mut file = tokio::fs::File::create(dest)
@@ -289,6 +291,14 @@ pub(crate) async fn stream_blob_to_file(
     Err(RegistryError::internal(
         "Blob download failed after digest validation retries",
     ))
+}
+
+fn retry_after_duration(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?;
+    // TODO: also accept the RFC 7231 HTTP-date form. Most storage backends
+    // return integer seconds, which is the only form we need for current tests.
+    let seconds = value.to_str().ok()?.trim().parse::<u64>().ok()?;
+    Some(std::time::Duration::from_secs(seconds))
 }
 
 pub(crate) fn short_digest(digest: &str) -> &str {

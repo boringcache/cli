@@ -72,6 +72,34 @@ http_proxy_status_probe() {
   printf '%s %s %s' "$status" "$phase" "$publish_state"
 }
 
+status_metric() {
+  local status_file="$1"
+  local path="$2"
+  local default_value="${3:-0}"
+  python3 - "$status_file" "$path" "$default_value" <<'PY'
+import json
+import sys
+
+status_file, path, default_value = sys.argv[1:]
+try:
+    value = json.loads(open(status_file, encoding="utf-8").read())
+except Exception:
+    print(default_value)
+    raise SystemExit(0)
+
+for part in path.split("."):
+    if not isinstance(value, dict) or part not in value:
+        print(default_value)
+        raise SystemExit(0)
+    value = value[part]
+
+if value is None or value == "":
+    print(default_value)
+else:
+    print(value)
+PY
+}
+
 wait_for_proxy_ready() {
   local waited=0
   while (( waited < PROXY_READY_TIMEOUT_SECS )); do
@@ -227,6 +255,65 @@ PREFETCH_END="$(date +%s)"
 PREFETCH_SECS=$((PREFETCH_END - PREFETCH_START))
 echo "  proxy became ready in ${PREFETCH_SECS}s (prefetched manifest blobs)"
 
+PREFETCH_STATUS_FILE="${LOG_DIR}/proxy-status-prefetch-restart.json"
+curl -fsS --max-time 10 "${PROXY_URL}${PROXY_STATUS_PATH}" -o "$PREFETCH_STATUS_FILE"
+
+prefetch_concurrency="$(status_metric "$PREFETCH_STATUS_FILE" "startup_prefetch.startup_prefetch_concurrency")"
+prefetch_initial_concurrency="$(status_metric "$PREFETCH_STATUS_FILE" "startup_prefetch.startup_prefetch_initial_concurrency")"
+prefetch_final_concurrency="$(status_metric "$PREFETCH_STATUS_FILE" "startup_prefetch.startup_prefetch_final_concurrency")"
+prefetch_max_observed_concurrency="$(status_metric "$PREFETCH_STATUS_FILE" "startup_prefetch.startup_prefetch_max_observed_concurrency")"
+prefetch_adjustment_count="$(status_metric "$PREFETCH_STATUS_FILE" "startup_prefetch.startup_prefetch_concurrency_adjustment_count")"
+prefetch_adjustments="$(status_metric "$PREFETCH_STATUS_FILE" "startup_prefetch.startup_prefetch_concurrency_adjustments" "")"
+
+expected_workload_cap="$SEED_CONCURRENCY"
+expected_adaptive=1
+if (( BLOB_COUNT >= 1000 && BLOB_SIZE_BYTES <= 64 * 1024 )); then
+  expected_workload_cap=100
+elif (( BLOB_SIZE_BYTES >= 8 * 1024 * 1024 )); then
+  expected_workload_cap=4
+  expected_adaptive=0
+elif (( BLOB_SIZE_BYTES >= 1024 * 1024 )); then
+  expected_workload_cap=8
+  expected_adaptive=0
+fi
+
+expected_prefetch_ceiling="$SEED_CONCURRENCY"
+if (( expected_prefetch_ceiling > expected_workload_cap )); then
+  expected_prefetch_ceiling="$expected_workload_cap"
+fi
+if (( expected_prefetch_ceiling > BLOB_COUNT )); then
+  expected_prefetch_ceiling="$BLOB_COUNT"
+fi
+expected_initial_concurrency="$expected_prefetch_ceiling"
+if (( expected_adaptive == 1 && expected_initial_concurrency > 20 )); then
+  expected_initial_concurrency=20
+fi
+
+echo "  adaptive prefetch: initial=${prefetch_initial_concurrency} ceiling=${prefetch_concurrency} final=${prefetch_final_concurrency} max_observed=${prefetch_max_observed_concurrency} adjustments=${prefetch_adjustment_count}"
+if [[ -n "$prefetch_adjustments" ]]; then
+  echo "  adaptive adjustments: ${prefetch_adjustments}"
+fi
+
+if [[ "$prefetch_concurrency" != "$expected_prefetch_ceiling" ]]; then
+  echo "ERROR: startup_prefetch_concurrency=${prefetch_concurrency}, expected workload ceiling ${expected_prefetch_ceiling}"
+  cat "$PREFETCH_STATUS_FILE"
+  exit 1
+fi
+
+if [[ "$prefetch_initial_concurrency" != "$expected_initial_concurrency" ]]; then
+  echo "ERROR: startup_prefetch_initial_concurrency=${prefetch_initial_concurrency}, expected ${expected_initial_concurrency}"
+  cat "$PREFETCH_STATUS_FILE"
+  exit 1
+fi
+
+if ! [[ "$prefetch_max_observed_concurrency" =~ ^[0-9]+$ ]] \
+  || (( prefetch_max_observed_concurrency < expected_initial_concurrency )) \
+  || (( prefetch_max_observed_concurrency > expected_prefetch_ceiling )); then
+  echo "ERROR: startup_prefetch_max_observed_concurrency=${prefetch_max_observed_concurrency} outside expected range ${expected_initial_concurrency}..${expected_prefetch_ceiling}"
+  cat "$PREFETCH_STATUS_FILE"
+  exit 1
+fi
+
 PREFETCH_LOG_LINES="$(grep -c "Prefetch:" "$PROXY_LOG" || true)"
 echo "  prefetch log lines: ${PREFETCH_LOG_LINES}"
 
@@ -285,6 +372,11 @@ echo "=== Results ==="
 echo "  blobs seeded:    ${SEED_COUNT}"
 echo "  prefetch time:   ${PREFETCH_SECS}s"
 echo "  prefetch fails:  ${PREFETCH_FAILURES}"
+echo "  prefetch init:   ${prefetch_initial_concurrency}"
+echo "  prefetch ceil:   ${prefetch_concurrency}"
+echo "  prefetch final:  ${prefetch_final_concurrency}"
+echo "  prefetch max:    ${prefetch_max_observed_concurrency}"
+echo "  prefetch adjust: ${prefetch_adjustment_count}"
 echo "  remote tag hits: ${REMOTE_TAG_HITS:-0}"
 echo "  remote tag miss: ${REMOTE_TAG_MISSES:-0}"
 echo "  warming polls:   ${PREFETCH_WARMING_POLLS}"
