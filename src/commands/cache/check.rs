@@ -44,7 +44,7 @@ pub async fn execute(
     options: CheckOptions,
 ) -> Result<()> {
     if let Err(err) = execute_inner(workspace, tags, options).await {
-        if options.fail_on_miss || options.require_server_signature {
+        if options.json_output || options.fail_on_miss || options.require_server_signature {
             return Err(err);
         }
         ui::warn(&format!("{:#}", err));
@@ -390,6 +390,32 @@ fn verify_check_signature(entry: &crate::api::CacheResolutionEntry) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn check_json_errors_when_auth_is_missing() {
+        let _guard = crate::test_env::lock();
+        crate::test_env::remove_var("BORINGCACHE_RESTORE_TOKEN");
+        crate::test_env::remove_var("BORINGCACHE_SAVE_TOKEN");
+        crate::test_env::remove_var("BORINGCACHE_ADMIN_TOKEN");
+        crate::test_env::remove_var("BORINGCACHE_API_TOKEN");
+        crate::test_env::remove_var("BORINGCACHE_TOKEN_FILE");
+
+        let result = execute(
+            Some("org/demo".to_string()),
+            vec!["deps".to_string()],
+            CheckOptions {
+                no_platform: true,
+                no_git: true,
+                fail_on_miss: false,
+                json_output: true,
+                require_server_signature: false,
+                exact: false,
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn check_json_contract_adds_schema_version() {
