@@ -523,6 +523,78 @@ cache_ops_get_summary_for_metrics_file() {
   echo "${records} ${hits} ${misses} ${errors}"
 }
 
+capture_proxy_status() {
+  local port="$1"
+  local status_file="$2"
+  curl -fsS --max-time 5 \
+    "http://${PROXY_HOST}:${port}${PROXY_STATUS_PATH}" \
+    -o "$status_file" 2>/dev/null || true
+}
+
+status_metric() {
+  local status_file="$1"
+  local path="$2"
+  local default_value="${3:-0}"
+  python3 - "$status_file" "$path" "$default_value" <<'PY'
+import json
+import sys
+
+status_file, path, default_value = sys.argv[1:]
+try:
+    value = json.loads(open(status_file, encoding="utf-8").read())
+except Exception:
+    print(default_value)
+    raise SystemExit(0)
+
+for part in path.split("."):
+    if not isinstance(value, dict) or part not in value:
+        print(default_value)
+        raise SystemExit(0)
+    value = value[part]
+
+if value is None or value == "":
+    print(default_value)
+else:
+    print(value)
+PY
+}
+
+status_prefetch_loaded_count() {
+  local status_file="$1"
+  python3 - "$status_file" <<'PY'
+import json
+import sys
+
+def as_int(value):
+    try:
+        return int(str(value))
+    except Exception:
+        return 0
+
+try:
+    status = json.loads(open(sys.argv[1], encoding="utf-8").read())
+except Exception:
+    print(0)
+    raise SystemExit(0)
+
+prefetch = status.get("startup_prefetch") or {}
+
+for key in (
+    "startup_prefetch_total_unique_blobs",
+    "startup_prefetch_target_blobs",
+    "startup_prefetch_inserted",
+):
+    value = as_int(prefetch.get(key))
+    if value > 0:
+        print(value)
+        raise SystemExit(0)
+
+inserted = as_int(prefetch.get("startup_prefetch_inserted"))
+cold = as_int(prefetch.get("startup_prefetch_cold_blobs"))
+print(inserted + cold)
+PY
+}
+
 format_delta() {
   local base="$1"
   local current="$2"
@@ -994,20 +1066,30 @@ echo ""
 echo "=== Phase 3: Verification (merged index check) ==="
 VERIFY_DIR="${LOG_DIR}/verify"
 VERIFY_PROXY_LOG="${VERIFY_DIR}/proxy.log"
+VERIFY_STATUS_FILE="${VERIFY_DIR}/proxy-status.json"
 mkdir -p "$VERIFY_DIR"
 
 start_proxy "verify" "$PROXY_PORT_VERIFY" "$VERIFY_PROXY_LOG" "PROXY_PID_VERIFY" "$(phase_metadata_hints "dual-proxy-verify")"
 ensure_proxy_ready "$PROXY_PORT_VERIFY" "$VERIFY_PROXY_LOG" "PROXY_PID_VERIFY"
 echo "Verification proxy running (pid=${PROXY_PID_VERIFY}) on port ${PROXY_PORT_VERIFY}"
 
-sleep 3
+capture_proxy_status "$PROXY_PORT_VERIFY" "$VERIFY_STATUS_FILE"
 
-VERIFY_PRELOADED="$(sed -n 's/.*Prefetch: \([0-9]*\) entries loaded.*/\1/p' "$VERIFY_PROXY_LOG" | tail -1)"
+VERIFY_PRELOADED="$(status_prefetch_loaded_count "$VERIFY_STATUS_FILE")"
+if [[ "${VERIFY_PRELOADED:-0}" -eq 0 ]]; then
+  VERIFY_PRELOADED="$(sed -n 's/.*Prefetch: \([0-9]*\) entries loaded.*/\1/p' "$VERIFY_PROXY_LOG" | tail -1)"
+fi
 VERIFY_PRELOADED="${VERIFY_PRELOADED:-0}"
+VERIFY_STATUS_PHASE="$(status_metric "$VERIFY_STATUS_FILE" "phase" "unknown")"
+VERIFY_CACHE_ENTRY_ID="$(status_metric "$VERIFY_STATUS_FILE" "cache_entry_id" "")"
+VERIFY_STARTUP_MODE="$(status_metric "$VERIFY_STATUS_FILE" "startup_prefetch.startup_prefetch_mode" "")"
+VERIFY_TOTAL_UNIQUE_BLOBS="$(status_metric "$VERIFY_STATUS_FILE" "startup_prefetch.startup_prefetch_total_unique_blobs" "0")"
+VERIFY_PREFETCH_COLD_BLOBS="$(status_metric "$VERIFY_STATUS_FILE" "startup_prefetch.startup_prefetch_cold_blobs" "0")"
 
 stop_proxy_graceful "PROXY_PID_VERIFY" "verify"
 
 echo "Merged index entries: ${VERIFY_PRELOADED}"
+echo "Verification status: phase=${VERIFY_STATUS_PHASE}, cache_entry_id=${VERIFY_CACHE_ENTRY_ID:-none}, startup_mode=${VERIFY_STARTUP_MODE:-unknown}, unique_blobs=${VERIFY_TOTAL_UNIQUE_BLOBS}, cold_blobs=${VERIFY_PREFETCH_COLD_BLOBS}"
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -1051,6 +1133,9 @@ echo "  Hit-rate delta:       ${CACHE_OPS_SCCACHE_HIT_RATE_DELTA}pp (cache-ops G
 echo ""
 echo "Verification"
 echo "  Merged index entries: ${VERIFY_PRELOADED}"
+echo "  Status phase:         ${VERIFY_STATUS_PHASE}"
+echo "  Cache entry id:       ${VERIFY_CACHE_ENTRY_ID:-none}"
+echo "  Startup prefetch:     mode=${VERIFY_STARTUP_MODE:-unknown} unique_blobs=${VERIFY_TOTAL_UNIQUE_BLOBS} cold_blobs=${VERIFY_PREFETCH_COLD_BLOBS}"
 echo "  Remote tag hit/pending/miss: ${POST_CONTENTION_REMOTE_TAG_HITS}/${POST_CONTENTION_REMOTE_TAG_PENDING}/${POST_CONTENTION_REMOTE_TAG_MISSES}"
 echo ""
 echo "Logs: ${LOG_DIR}"
