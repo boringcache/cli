@@ -1192,6 +1192,41 @@ run_oci_rooted_restore_isolation_e2e() {
   pass_tool "oci-rooted-restore-isolation" "rooted restore isolation e2e passed"
 }
 
+run_dual_proxy_e2e() {
+  command -v cargo >/dev/null 2>&1 || {
+    skip_tool "dual-proxy" "cargo not installed"
+    return 0
+  }
+  command -v sccache >/dev/null 2>&1 || {
+    skip_tool "dual-proxy" "sccache not installed"
+    return 0
+  }
+
+  local tool_log_root="${LOG_DIR}/dual-proxy-runtime"
+  mkdir -p "${tool_log_root}"
+
+  note "Dual-proxy contention runtime E2E"
+  LOG_DIR="${tool_log_root}" \
+  PROXY_PORT_A="${DUAL_PROXY_PORT_A:-5341}" \
+  PROXY_PORT_B="${DUAL_PROXY_PORT_B:-5343}" \
+  PROXY_PORT_VERIFY="${DUAL_PROXY_PORT_VERIFY:-5345}" \
+  SCCACHE_PORT_A="${DUAL_PROXY_SCCACHE_PORT_A:-4341}" \
+  SCCACHE_PORT_B="${DUAL_PROXY_SCCACHE_PORT_B:-4342}" \
+  TAG="local-dual-proxy-${RUN_ID}" \
+  GITHUB_RUN_ID="${RUN_ID}" \
+  GITHUB_RUN_ATTEMPT="1" \
+  BINARY="${BINARY}" \
+  WORKSPACE="${WORKSPACE}" \
+  BORINGCACHE_API_URL="${API_URL}" \
+  BORINGCACHE_ADMIN_TOKEN="${TOKEN}" \
+  BORINGCACHE_SAVE_TOKEN="${TOKEN}" \
+  BORINGCACHE_RESTORE_TOKEN="${TOKEN}" \
+  EXPECTED_CACHE_SESSION_SCHEMA="${EXPECTED_CACHE_SESSION_SCHEMA}" \
+    bash "${SCRIPT_DIR}/extended/e2e-dual-proxy-contention-test.sh"
+
+  pass_tool "dual-proxy" "contention publish and status-backed merged-index verification passed"
+}
+
 run_bazel_e2e() {
   local bazel_cmd=""
   if command -v bazelisk >/dev/null 2>&1; then
@@ -1439,6 +1474,7 @@ main() {
   run_selected_tool "docker" run_docker_e2e
   run_selected_tool "oci-same-alias" run_oci_same_alias_e2e
   run_selected_tool "oci-rooted-restore-isolation" run_oci_rooted_restore_isolation_e2e
+  run_selected_tool "dual-proxy" run_dual_proxy_e2e
   run_selected_tool "turbo" run_turbo_e2e
   run_selected_tool "nx" run_nx_e2e
   run_selected_tool "go" run_go_e2e
