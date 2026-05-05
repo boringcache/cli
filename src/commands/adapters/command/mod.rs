@@ -385,8 +385,19 @@ pub async fn adapter_execute(
         None
     };
     if let Some(plan) = &docker_plan {
+        let diagnostic_ref_tag = plan
+            .oci_cache
+            .cache_to_ref_tag
+            .as_deref()
+            .or_else(|| {
+                plan.oci_cache
+                    .cache_from_ref_tags
+                    .first()
+                    .map(String::as_str)
+            })
+            .unwrap_or(&plan.oci_cache.ref_tag);
         generated_proxy_metadata_hints
-            .push(("docker_cache_ref_tag", plan.oci_cache.ref_tag.clone()));
+            .push(("docker_cache_ref_tag", diagnostic_ref_tag.to_string()));
         if let Some(run_ref) = plan.oci_cache.immutable_run_ref_tag.as_deref() {
             generated_proxy_metadata_hints.push(("docker_immutable_run_ref", run_ref.to_string()));
         }

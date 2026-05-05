@@ -85,8 +85,8 @@ Use `boringcache/one@v1` when you want the action to keep owning tool setup such
 When you run `boringcache docker` directly in GitHub Actions, the CLI derives Docker registry-cache run refs and aliases from GitHub metadata automatically. The action path passes the same provider-neutral metadata so Docker cache artifacts report the immutable run ref, import aliases, and promotion aliases.
 
 For Docker and BuildKit registry caches on pull requests, restore-only is the default.
-A PR-scoped ref such as `/cache:pr-3208` may be absent and return 404, but the CLI/action should still import the rest of the planned fallback chain: branch, default, and the stable fallback such as `/cache:buildcache`.
-If a workflow intentionally wants PR-scoped Docker writes, give the job a save-capable token and set `save-on-pull-request: true`; do that only when the PR write scope is isolated, not merely to make the PR ref exist. In PR context, the derived write target is the PR alias. The stable fallback remains restore-only unless an explicit promotion override is configured.
+A PR-scoped ref such as `/cache:pr-3208` may be absent and return 404, so restore-only PRs import the CLI-planned base/default aliases without gaining write access.
+If a workflow intentionally wants PR-scoped Docker writes, give the job a save-capable token and set `save-on-pull-request: true`; do that only when the PR write scope is isolated, not merely to make the PR ref exist. In PR context, the derived write target is the PR alias.
 
 Keep the proxy story simple in CI too:
 
@@ -100,7 +100,7 @@ Keep the trust model simple:
 - every job gets `BORINGCACHE_RESTORE_TOKEN`
 - only trusted jobs get `BORINGCACHE_SAVE_TOKEN`
 - `pull_request` jobs stay restore-only by default inside `boringcache/one`; set `save-on-pull-request: true` only when the write scope is intentionally isolated
-- restore-only PR Docker refs may 404 and should fall through to branch/default/stable imports
+- restore-only PR Docker refs may 404 and should fall through to CLI-planned base/default imports
 - avoid broad legacy `BORINGCACHE_API_TOKEN` use in CI
 
 Read from pull requests.

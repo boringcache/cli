@@ -80,16 +80,17 @@ accessibility model, with OCI-shaped aliases instead of archive tag names:
 - PRs import base/default by default and do not read the PR head-branch alias;
 - PRs with explicit save permission import PR then base/default and promote
   only the PR alias;
-- legacy `buildcache` remains a stable import fallback during migration.
+- local/no-CI runs keep the single legacy `buildcache` ref unless an explicit
+  cache ref override is supplied.
 - Default-branch Docker aliases now converge on `default`. Older caches that
   only exist under `branch-main` or `branch-master` may look cold until a
   default-branch run republishes the canonical alias, or until an explicit
   hidden import override is used for a one-off migration.
 
 The action may probe planned OCI import refs after starting the proxy. It may
-use the first readable fallback immediately instead of waiting for every earlier
-miss to time out. Missing PR refs on restore-only PRs are expected misses, not
-evidence that the PR should gain branch/default write access.
+use the first readable planned ref immediately instead of waiting for every
+earlier miss to time out. Missing PR refs on restore-only PRs are expected
+misses, not evidence that the PR should gain branch/default write access.
 
 ## Ownership
 

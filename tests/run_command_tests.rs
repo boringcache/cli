@@ -2069,13 +2069,12 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
         parsed["oci_cache"]["cache_from_refs"],
         serde_json::json!([
             "type=registry,ref=host.docker.internal:5000/cache:pr-42,registry.insecure=true",
-            "type=registry,ref=host.docker.internal:5000/cache:default,registry.insecure=true",
-            "type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true"
+            "type=registry,ref=host.docker.internal:5000/cache:default,registry.insecure=true"
         ])
     );
     assert_eq!(
         parsed["oci_cache"]["cache_from_ref_tags"],
-        serde_json::json!(["pr-42", "default", "buildcache"])
+        serde_json::json!(["pr-42", "default"])
     );
     assert_eq!(
         parsed["oci_cache"]["cache_to"],
@@ -2107,10 +2106,14 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
     );
     assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
-        serde_json::json!(["cache@pr-42", "cache@default", "cache@buildcache"])
+        serde_json::json!(["cache@pr-42", "cache@default"])
     );
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["docker_immutable_run_ref"],
+        "run-gha-123456789-attempt-2"
+    );
+    assert_eq!(
+        parsed["proxy"]["metadata_hints"]["docker_cache_ref_tag"],
         "run-gha-123456789-attempt-2"
     );
     assert_eq!(
@@ -2152,7 +2155,7 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
         command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:default,registry.insecure=true")
     );
     assert!(
-        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true")
+        !command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true")
     );
     assert!(command.contains(
         &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:run-gha-123456789-attempt-2,mode=max,registry.insecure=true"
@@ -2160,7 +2163,7 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
 }
 
 #[test]
-fn test_docker_dry_run_json_promotes_default_branch_stable_fallback() {
+fn test_docker_dry_run_json_uses_single_default_branch_alias() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);
     let output = command
@@ -2202,19 +2205,23 @@ fn test_docker_dry_run_json_promotes_default_branch_stable_fallback() {
     assert_proxy_metadata_hints_are_cli_replayable(&parsed);
     assert_eq!(
         parsed["oci_cache"]["cache_from_ref_tags"],
-        serde_json::json!(["default", "buildcache"])
+        serde_json::json!(["default"])
     );
     assert_eq!(
         parsed["oci_cache"]["promotion_ref_tags"],
-        serde_json::json!(["default", "buildcache"])
+        serde_json::json!(["default"])
     );
     assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
-        serde_json::json!(["cache@default", "cache@buildcache"])
+        serde_json::json!(["cache@default"])
     );
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["docker_alias_promotion_refs"],
-        "default/buildcache"
+        "default"
+    );
+    assert_eq!(
+        parsed["proxy"]["metadata_hints"]["docker_cache_ref_tag"],
+        "run-gha-987654321-attempt-1"
     );
     assert_eq!(
         parsed["oci_cache"]["cache_to"],

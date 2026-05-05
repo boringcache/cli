@@ -68,21 +68,20 @@ Keep builder installation, daemon lifecycle, QEMU/binfmt, and Docker container n
 Docker has two cache tag concepts:
 
 - `--tag docker-cache` selects the BoringCache proxy cache family.
-- `--cache-ref-tag buildcache` selects the stable BuildKit OCI ref tag under that family, such as `/cache:buildcache`. You can omit it when you want `buildcache`, because that is the default.
+- `--cache-ref-tag buildcache` selects the local/no-CI BuildKit OCI ref tag under that family, such as `/cache:buildcache`. You can omit it when you want `buildcache`, because that is the local default.
 
 In GitHub Actions or another CI environment that provides BoringCache CI metadata, the adapter derives an immutable run ref plus PR/branch/default cache aliases.
-It plans the full BuildKit import fallback chain and injects every planned `--cache-from` ref before the run-scoped `--cache-to` ref:
+It plans the standard CI import set and injects every planned `--cache-from` ref before the run-scoped `--cache-to` ref:
 
 ```text
 --cache-from .../cache:pr-3208
 --cache-from .../cache:branch-feature-docker-cache
 --cache-from .../cache:default
---cache-from .../cache:buildcache
 --cache-to   .../cache:run-gha-24771923434-attempt-1
 ```
 
-Passing `--cache-ref-tag customcache` only changes the final stable fallback from `buildcache` to `customcache`.
-On restore-only PR runs, the PR-scoped ref may not exist yet and may return 404. That is expected; BuildKit should continue with the remaining branch, default, and stable fallback refs. Enable PR saves only when you intentionally want PR-scoped writes. PR-context saves promote the PR alias by default; they do not promote the stable fallback unless an explicit promotion ref override asks for it.
+In CI, default-branch runs read/write `default`, trusted non-default branches read branch then default and write branch, restore-only PRs read base/default, and PR save-enabled runs read/write `pr-<number>` plus default fallback.
+On restore-only PR runs, the PR-scoped ref may not exist yet and may return 404. That is expected; BuildKit should continue with the remaining base/default refs. Enable PR saves only when you intentionally want PR-scoped writes. PR-context saves promote the PR alias by default.
 Local Docker runs without CI metadata keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
 BoringCache backs the BuildKit registry cache through the Docker and direct BuildKit adapters.
 By default the Docker path warms the selected OCI manifest, blob URLs, and blob bodies before BuildKit starts.

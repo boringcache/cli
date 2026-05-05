@@ -109,7 +109,7 @@ pub(super) fn resolve_docker_plan(input: ResolveDockerPlanInput<'_>) -> Result<R
     let promotion_ref_tags = normalize_ref_tag_list(explicit_cache_promote_ref_tags)?;
     let derived_cache_refs = run_context
         .as_ref()
-        .map(|context| derive_cache_refs(context, &ref_tag, !read_only))
+        .map(|context| derive_cache_refs(context, !read_only))
         .transpose()?;
     let immutable_run_ref_tag = explicit_immutable_run_ref_tag.clone().or_else(|| {
         derived_cache_refs
@@ -180,11 +180,7 @@ pub(super) fn resolve_docker_plan(input: ResolveDockerPlanInput<'_>) -> Result<R
     })
 }
 
-fn derive_cache_refs(
-    context: &CiRunContext,
-    fallback_ref_tag: &str,
-    include_pr_ref: bool,
-) -> Result<DerivedCacheRefs> {
+fn derive_cache_refs(context: &CiRunContext, include_pr_ref: bool) -> Result<DerivedCacheRefs> {
     let run_ref_tag = validate_cache_ref_tag(&run_ref_tag(context)?)?;
     let mut import_ref_tags = Vec::new();
     let mut promotion_ref_tags = Vec::new();
@@ -207,7 +203,6 @@ fn derive_cache_refs(
                 if is_default_branch(branch, context.default_branch.as_deref()) {
                     push_tag(&mut import_ref_tags, "default".to_string());
                     push_tag(&mut promotion_ref_tags, "default".to_string());
-                    push_tag(&mut promotion_ref_tags, fallback_ref_tag.to_string());
                 } else {
                     let branch_alias = branch_alias(branch)?;
                     push_tag(&mut import_ref_tags, branch_alias.clone());
@@ -223,7 +218,6 @@ fn derive_cache_refs(
         }
     }
 
-    push_tag(&mut import_ref_tags, fallback_ref_tag.to_string());
     let import_ref_tags = validate_ref_tag_list(import_ref_tags)?;
     let promotion_ref_tags = validate_ref_tag_list(promotion_ref_tags)?;
 
@@ -716,11 +710,8 @@ mod tests {
             plan.oci_cache.immutable_run_ref_tag.as_deref(),
             Some("run-gha-12345-attempt-1")
         );
-        assert_eq!(
-            plan.oci_cache.cache_from_ref_tags,
-            ["default", "buildcache"]
-        );
-        assert_eq!(plan.oci_cache.promotion_ref_tags, ["default", "buildcache"]);
+        assert_eq!(plan.oci_cache.cache_from_ref_tags, ["default"]);
+        assert_eq!(plan.oci_cache.promotion_ref_tags, ["default"]);
     }
 
     #[test]
@@ -753,10 +744,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(
-            plan.oci_cache.cache_from_ref_tags,
-            ["pr-7", "default", "buildcache"]
-        );
+        assert_eq!(plan.oci_cache.cache_from_ref_tags, ["pr-7", "default"]);
         assert_eq!(plan.oci_cache.promotion_ref_tags, ["pr-7"]);
     }
 
@@ -790,10 +778,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(
-            plan.oci_cache.cache_from_ref_tags,
-            ["default", "buildcache"]
-        );
+        assert_eq!(plan.oci_cache.cache_from_ref_tags, ["default"]);
         assert!(plan.oci_cache.cache_to.is_none());
         assert!(plan.oci_cache.promotion_ref_tags.is_empty());
     }
@@ -830,7 +815,7 @@ mod tests {
 
         assert_eq!(
             plan.oci_cache.cache_from_ref_tags,
-            ["branch-release-1", "default", "buildcache"]
+            ["branch-release-1", "default"]
         );
         assert!(plan.oci_cache.promotion_ref_tags.is_empty());
     }

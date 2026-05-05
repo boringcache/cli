@@ -201,15 +201,15 @@ Override precedence:
 
 For Docker and BuildKit, `--tag` is always the proxy cache tag. Use `--cache-ref-tag` for the OCI cache tag.
 In GitHub Actions, the Docker adapter derives an immutable run ref plus PR/branch/default cache aliases from CI metadata.
-The CLI plans the full BuildKit import fallback chain and injects every planned `--cache-from` ref before the run-scoped `--cache-to` ref.
-On restore-only PR runs, the PR-scoped ref may not exist yet and may return 404; BuildKit should then continue with branch/default/stable imports. Enable PR saves only when you intentionally want PR-scoped writes. PR-context saves promote the PR alias by default and leave the stable fallback restore-only unless an explicit promotion override is supplied.
+The CLI plans the standard CI import set and injects every planned `--cache-from` ref before the run-scoped `--cache-to` ref.
+On restore-only PR runs, the PR-scoped ref may not exist yet and may return 404; BuildKit should then continue with the CLI-planned base/default imports. Enable PR saves only when you intentionally want PR-scoped writes. PR-context saves promote the PR alias by default.
 Local Docker runs keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
 The direct `buildkit` adapter uses the same OCI plan as Docker, but injects `buildctl build` flags as `--import-cache` and `--export-cache`.
 
 A Docker cache has two tag concepts:
 
 - `--tag docker-cache` selects the BoringCache proxy cache family.
-- `--cache-ref-tag buildcache` selects the stable BuildKit OCI ref tag under that family, such as `/cache:buildcache`. Omit it when you want the default `buildcache` fallback.
+- `--cache-ref-tag buildcache` selects the local/no-CI BuildKit OCI ref tag under that family, such as `/cache:buildcache`. Omit it when you want the local default `buildcache` ref.
 
 So the common Docker command can stay short:
 

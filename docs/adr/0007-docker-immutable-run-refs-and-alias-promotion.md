@@ -150,12 +150,9 @@ Promote default branch alias only from default branch builds.
 
 Promote PR alias only from the PR scope.
 
-Keep the stable fallback alias, such as `buildcache`, conservative. It is
-always safe as an import fallback during migration. It may be promoted from
-trusted branch/default/manual paths when that is the intended compatibility
-write, but PR-context saves should not promote the global fallback by default;
-they should promote only the PR-scoped alias unless an explicit promotion
-override asks for the fallback.
+Keep the legacy `buildcache` ref out of the CI-derived alias family. It remains
+the local/no-CI compatibility ref, while CI runs use default, branch, and PR
+aliases that the corresponding save path can publish.
 
 Do not promote on failed builds unless explicitly configured for a benchmark.
 
@@ -177,7 +174,7 @@ The CLI/action should:
 - pass selected aliases as Docker `--cache-from`;
 - include alias promotion intent in proxy metadata or publish requests;
 - surface alias promotion result in diagnostics;
-- keep current same-ref behavior as compatibility fallback during rollout.
+- keep current same-ref behavior for local/no-CI compatibility.
 
 For `boringcache docker`, multiple `--cache-from` flags are allowed. The current injection path should grow from one cache-from ref to a planned list when this feature is enabled.
 
@@ -191,11 +188,11 @@ Trusted branch runs import branch/default and promote branch, default-branch
 runs import/promote default, restore-only PRs import base/default without
 reading the PR head-branch alias, and PR save-enabled runs may import/promote
 the PR alias while branch/default aliases remain trusted-branch outputs.
-`buildcache` stays a migration import fallback. The GitHub Action readiness
-gate consumes the CLI-planned imports and may proceed as soon as the first
-usable fallback is readable; an earlier PR-ref miss is expected on restore-only
-PRs and should not spend the whole setup budget before default fallback can be
-used.
+Update, 2026-05-05: CI-derived plans no longer append `buildcache` as a stable
+read fallback. The GitHub Action readiness gate consumes only the CLI-planned
+CI imports and may proceed as soon as the first usable planned ref is readable;
+an earlier PR-ref miss is expected on restore-only PRs and should not spend the
+whole setup budget before default fallback can be used.
 
 ## Session Trace Requirements
 
@@ -234,7 +231,7 @@ The first hidden CLI/Rails slice is implemented:
 - Rails tag publish responses now expose `promotion_status`, `promotion_reason`, and `requested_cache_entry_id` so stale/ignored alias promotion is visible without deleting the immutable root.
 - focused proxy tests now simulate two immutable run refs requesting promotion to the same provider-neutral alias, proving both run refs remain readable and diagnostics distinguish `promoted` from `ignored_stale`.
 - `boringcache docker` now derives immutable run refs, branch/default/PR import aliases, and promotion aliases from provider-neutral `BORINGCACHE_CI_*` metadata, with GitHub Actions `GITHUB_*` metadata as the first built-in mapper;
-- CI-derived import refs include the legacy `buildcache` ref as a read fallback during the migration window. Derived PR-context promotion refs now keep that fallback restore-only and promote only the PR alias by default; trusted branch/default paths may still promote the fallback for migration compatibility, and explicit hidden promotion flags can override the derived plan.
+- CI-derived import refs no longer include the legacy `buildcache` ref. Derived PR-context promotion refs promote only the PR alias by default, trusted branch/default paths promote only their matching alias, and explicit hidden import/promotion flags can still override the derived plan.
 - explicit hidden run/import/promotion flags still override the derived plan.
 - OCI and KV alias binding now uses Rails ready-tag publish to point aliases at the confirmed root `cache_entry_id` instead of creating separate alias cache entries. This keeps the immutable/internal root and human-facing aliases attached to one logical entry for access updates and plan-limit eviction.
 - OCI rooted manifest refs now publish readable aliases under the proxy's primary human tag namespace and bind the old root-hash alias only as compatibility state. Restore reads the readable rooted alias first, keeps the legacy rooted alias as migration fallback, and never consults shared unrooted aliases for rooted proxies.
@@ -276,8 +273,8 @@ Focused evidence now available:
 - `detects_provider_neutral_run_context` and `detects_github_actions_run_context` cover provider-neutral and GitHub Actions run metadata detection;
 - `does_not_create_run_context_for_local_or_generic_ci_without_run_identity` proves local runs and generic CI labels do not create first-class run metadata without a provider/run id;
 - `resolve_docker_plan_derives_branch_aliases_from_ci_run_context` covers default-branch import/promotion alias planning;
-- `resolve_docker_plan_keeps_pr_fallback_restore_only_by_default` covers PR-context planning where the fallback alias is imported but not promoted by default;
-- `test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases` proves dry-run JSON and injected Docker flags for a GitHub Actions PR context: immutable run ref, PR/head/default/fallback imports, PR-only derived promotion, and CI metadata hints.
+- `resolve_docker_plan_writes_pr_scope_without_head_branch_fallback` covers PR-context planning where the PR alias is imported and promoted only when PR writes are enabled;
+- `test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases` proves dry-run JSON and injected Docker flags for a GitHub Actions PR context: immutable run ref, PR/default imports, PR-only derived promotion, and CI metadata hints.
 - CLI save/publish request models now carry provider-neutral run metadata (`ci_run_uid`, attempt, ref type/name, default branch, PR number, commit SHA, and run start time) from detected run context, not from capped hints, so Rails can order alias promotions without knowing which CI produced the build. The shared save helper now applies that context to archive saves, CAS saves, and mount archive syncs; local runs and generic CI labels still send no first-class run ordering fields unless a provider/run id is detected.
 - Rails local tests prove `ci_run_started_at` beats upload completion time for alias promotion, so an older run that finishes later does not replace a newer run's branch alias.
 - `boringcache/one` local release-prep surfaces Docker cache run refs, import refs, promotion refs, and provider-neutral CI metadata as action outputs, and unit coverage proves a generated GitHub run-start timestamp is shared by the CLI dry-run and proxy process.
@@ -350,7 +347,7 @@ Before enabling in benchmarks:
 - losing/ignored promotion is visible in API response and session trace;
 - read path can import from branch plus default aliases;
 - read-only runs do not promote.
-- PR-context saves promote the PR alias by default and do not promote the stable fallback alias unless explicitly configured.
+- PR-context saves promote the PR alias by default.
 
 Before making it default:
 
