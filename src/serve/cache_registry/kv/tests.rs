@@ -41,6 +41,11 @@ async fn put_kv_object_is_noop_in_read_only_mode() {
         proxy_ci_run_context: None,
         fail_on_cache_error: true,
         oci_hydration_policy: crate::serve::OciHydrationPolicy::MetadataOnly,
+        http_transport: crate::serve::state::HttpTransportConfig::h1_h2c_auto(
+            2 * 1024 * 1024,
+            32 * 1024 * 1024,
+            1024,
+        ),
         blob_locator: std::sync::Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: std::sync::Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: std::sync::Arc::new(RwLock::new(KvPendingStore::default())),

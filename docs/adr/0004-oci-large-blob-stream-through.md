@@ -1,6 +1,6 @@
 # ADR 0004: OCI Large Blob Stream-Through
 
-Status: accepted for hidden prototype; default rollout pending benchmark proof
+Status: accepted; default-on at 32 MiB, launch rollout pending benchmark proof
 Date: 2026-04-20
 
 ## Context
@@ -156,11 +156,17 @@ Exact names can change to match the current `OciEngineDiagnostics` style, but th
 
 ## Implementation Progress
 
-The first hidden CLI slice is implemented behind `BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES`.
+The first CLI slice is implemented with a conservative default threshold controlled
+by `BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES`.
 
 Current behavior:
 
-- default behavior is unchanged because the threshold is unset by default;
+- default behavior streams eligible OCI full-body blob `GET` misses at or above
+  32 MiB;
+- `BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES=0`, `false`, `no`, or `off`
+  disables stream-through for rollback;
+- positive `BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES` values override the
+  threshold for benchmark or emergency tuning;
 - only full-body OCI `GET` misses are eligible;
 - `HEAD`, ranged `GET`, local hits, upload-session hits, and small blobs stay on the existing paths;
 - the leader streams remote bytes to the client while teeing to a temp file and hashing;
@@ -177,13 +183,13 @@ Implemented status metric names follow `OciEngineDiagnostics` style:
 - `oci_engine_stream_through_verify_failures`;
 - `oci_engine_stream_through_cache_promotion_failures`.
 
-The remaining rollout item is benchmarking: compare client first-byte wait and total remote body wait for large Docker layers before enabling any nonzero default.
+The remaining launch item is benchmarking: compare client first-byte wait and total remote body wait for large Docker layers before treating the default as launch-proven.
 
 Benchmark workflow support is now in place for that rollout check: the standalone benchmark repos expose optional manual inputs for `BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY`, `BORINGCACHE_BLOB_PREFETCH_CONCURRENCY`, and `BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES`, and the Docker benchmark helper records the stream-through counters from proxy status diagnostics. This only makes A/B tuning possible; it does not enable stream-through by default.
 
 ## Proof Status
 
-Documentation and the hidden CLI prototype are aligned as of 2026-04-21. The stream-through threshold remains a hidden engineering control and is unset by default.
+Documentation and the CLI implementation are aligned as of 2026-05-05. The stream-through threshold now defaults to 32 MiB and remains explicitly disableable by environment override while launch benchmark proof is collected.
 
 Evidence now available:
 
@@ -193,9 +199,9 @@ Evidence now available:
 - local Colima/BuildKit A/B on 2026-04-22 proved hidden-threshold activation without changing the default: a 16 MiB random payload run fetched about `16.78 MB` remotely on restart warm with `stream_through_count=0` when unset, and streamed the same large blob with `stream_through_count=1`, `stream_through_bytes=16782486`, and `stream_through_verify_failures=0` when `BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES=16777216`;
 - the same local A/B with a more realistic multi-layer graph (`2,8,20,28 MiB` random payload layers plus six small file layers, per-proxy blob cache, metadata-only hydration) fetched about `60.84 MB` remotely on restart warm in both variants; the unset run recorded `stream_through_count=0`, while the 16 MiB threshold run streamed exactly the two larger layers with `stream_through_count=2`, `stream_through_bytes=50347369`, and `stream_through_verify_failures=0`.
 
-This is activation and correctness evidence, not default-readiness proof. The local harness does not yet record client first-byte wait, upstream TTFB, or upstream body duration for the streamed blobs, and one 16 MiB-threshold multi-layer warm export hit a transient BuildKit `HEAD` timeout/retry unrelated to stream verification.
+This is activation and correctness evidence, not launch-readiness proof. The local harness does not yet record client first-byte wait, upstream TTFB, or upstream body duration for the streamed blobs, and one 16 MiB-threshold multi-layer warm export hit a transient BuildKit `HEAD` timeout/retry unrelated to stream verification.
 
-Benchmark proof is still pending before any default change. The later proof bundle must attach:
+Benchmark proof is still pending before launch claims rely on the new default. The later proof bundle must attach:
 
 - a default-off metadata-only Docker E2E artifact for the same workload and ref class;
 - a stream-through-enabled artifact for the same workload and ref class;
@@ -205,7 +211,7 @@ Benchmark proof is still pending before any default change. The later proof bund
 
 ## Acceptance Gates
 
-Before enabling by default:
+Before treating default stream-through as launch-proven:
 
 - existing OCI blob GET, HEAD, range, invalid range, digest mismatch, and retry tests pass;
 - BuildKit registry E2E passes under default metadata-only behavior;

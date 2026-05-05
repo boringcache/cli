@@ -57,6 +57,10 @@ async fn proxy_status_includes_live_session_summary() {
     assert_eq!(summary["adapter"], "runtime");
     assert_eq!(summary["workspace"], "boringcache/benchmarks");
     assert_eq!(summary["proxy"]["hydration_policy"], "metadata-only");
+    assert_eq!(summary["proxy"]["http_transport"], "h1+h2c-auto");
+    assert_eq!(summary["proxy"]["http2_enabled"], true);
+    assert_eq!(summary["proxy"]["h2_max_concurrent_streams"], 1024);
+    assert_eq!(json["http_transport"]["mode"], "h1+h2c-auto");
     assert_eq!(summary["proxy"]["blob_prefetch_max_concurrency"], 2);
     assert!(summary["backend_api"].is_object());
     assert!(summary["rails"].is_object());

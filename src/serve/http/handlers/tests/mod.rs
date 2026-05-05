@@ -44,6 +44,11 @@ fn test_state() -> AppState {
         proxy_ci_run_context: None,
         fail_on_cache_error: true,
         oci_hydration_policy: crate::serve::OciHydrationPolicy::MetadataOnly,
+        http_transport: crate::serve::state::HttpTransportConfig::h1_h2c_auto(
+            2 * 1024 * 1024,
+            32 * 1024 * 1024,
+            1024,
+        ),
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),

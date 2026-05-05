@@ -13,9 +13,9 @@ use tower::ServiceExt;
 use crate::api::client::ApiClient;
 use crate::serve::cache_registry;
 use crate::serve::state::{
-    self, AppState, BlobLocatorCache, BlobReadCache, BlobReadMetrics, KV_BACKLOG_POLICY,
-    KV_REPLICATION_WORK_QUEUE_CAPACITY, KvPendingStore, KvPublishedIndex, KvReplicationWork,
-    UploadSessionStore,
+    self, AppState, BlobLocatorCache, BlobReadCache, BlobReadMetrics, HttpTransportConfig,
+    KV_BACKLOG_POLICY, KV_REPLICATION_WORK_QUEUE_CAPACITY, KvPendingStore, KvPublishedIndex,
+    KvReplicationWork, UploadSessionStore,
 };
 use crate::tag_utils::TagResolver;
 
@@ -60,6 +60,7 @@ pub(super) async fn build_server_runtime(
     let (dl_concurrency, dl_from_env) = blob_download_concurrency();
     let (prefetch_concurrency, prefetch_from_env) =
         blob_prefetch_concurrency(dl_concurrency, dl_from_env);
+    let http_transport = http_transport_config();
     let (kv_replication_work_tx, kv_replication_work_rx) =
         mpsc::channel(KV_REPLICATION_WORK_QUEUE_CAPACITY);
     let blob_download_semaphore = Arc::new(tokio::sync::Semaphore::new(dl_concurrency));
@@ -100,6 +101,7 @@ pub(super) async fn build_server_runtime(
             .cloned(),
         fail_on_cache_error,
         oci_hydration_policy,
+        http_transport,
         blob_locator: Arc::new(RwLock::new(BlobLocatorCache::default())),
         upload_sessions: Arc::new(RwLock::new(UploadSessionStore::default())),
         kv_pending: Arc::new(RwLock::new(KvPendingStore::default())),
@@ -486,6 +488,18 @@ fn force_http1() -> bool {
     )
 }
 
+fn http_transport_config() -> HttpTransportConfig {
+    if force_http1() {
+        HttpTransportConfig::h1_only()
+    } else {
+        HttpTransportConfig::h1_h2c_auto(
+            H2_INITIAL_STREAM_WINDOW,
+            H2_INITIAL_CONNECTION_WINDOW,
+            H2_MAX_CONCURRENT_STREAMS,
+        )
+    }
+}
+
 fn build_http_connection_builder() -> HttpConnectionBuilder<TokioExecutor> {
     let mut builder = HttpConnectionBuilder::new(TokioExecutor::new());
     builder
@@ -615,6 +629,41 @@ mod tests {
         test_env::set_var(BLOB_PREFETCH_CONCURRENCY_ENV, "3");
         assert_eq!(blob_prefetch_concurrency(8, false), (3, true));
         test_env::remove_var(BLOB_PREFETCH_CONCURRENCY_ENV);
+    }
+
+    #[test]
+    fn http_transport_defaults_to_h2c_auto() {
+        let _guard = test_env::lock();
+        test_env::remove_var(HTTP_VERSION_ENV);
+
+        let transport = http_transport_config();
+        assert_eq!(transport.mode, "h1+h2c-auto");
+        assert!(transport.http2_enabled);
+        assert_eq!(
+            transport.h2_initial_stream_window_bytes,
+            Some(H2_INITIAL_STREAM_WINDOW)
+        );
+        assert_eq!(
+            transport.h2_initial_connection_window_bytes,
+            Some(H2_INITIAL_CONNECTION_WINDOW)
+        );
+        assert_eq!(
+            transport.h2_max_concurrent_streams,
+            Some(H2_MAX_CONCURRENT_STREAMS)
+        );
+    }
+
+    #[test]
+    fn http_transport_can_be_forced_to_h1() {
+        let _guard = test_env::lock();
+        test_env::set_var(HTTP_VERSION_ENV, "1");
+
+        let transport = http_transport_config();
+        assert_eq!(transport.mode, "h1");
+        assert!(!transport.http2_enabled);
+        assert_eq!(transport.h2_max_concurrent_streams, None);
+
+        test_env::remove_var(HTTP_VERSION_ENV);
     }
 
     #[test]

@@ -37,6 +37,41 @@ pub use crate::serve::engines::oci::manifest_cache::OciManifestCacheEntry;
 const PROXY_DEBUG_ENV: &str = "BORINGCACHE_PROXY_DEBUG";
 static PROXY_DIAGNOSTICS_ENABLED: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct HttpTransportConfig {
+    pub mode: &'static str,
+    pub http2_enabled: bool,
+    pub h2_initial_stream_window_bytes: Option<u32>,
+    pub h2_initial_connection_window_bytes: Option<u32>,
+    pub h2_max_concurrent_streams: Option<u32>,
+}
+
+impl HttpTransportConfig {
+    pub fn h1_only() -> Self {
+        Self {
+            mode: "h1",
+            http2_enabled: false,
+            h2_initial_stream_window_bytes: None,
+            h2_initial_connection_window_bytes: None,
+            h2_max_concurrent_streams: None,
+        }
+    }
+
+    pub fn h1_h2c_auto(
+        h2_initial_stream_window_bytes: u32,
+        h2_initial_connection_window_bytes: u32,
+        h2_max_concurrent_streams: u32,
+    ) -> Self {
+        Self {
+            mode: "h1+h2c-auto",
+            http2_enabled: true,
+            h2_initial_stream_window_bytes: Some(h2_initial_stream_window_bytes),
+            h2_initial_connection_window_bytes: Some(h2_initial_connection_window_bytes),
+            h2_max_concurrent_streams: Some(h2_max_concurrent_streams),
+        }
+    }
+}
+
 pub fn set_diagnostics_enabled(enabled: bool) {
     PROXY_DIAGNOSTICS_ENABLED.store(enabled, Ordering::Release);
 }
@@ -67,6 +102,7 @@ pub struct AppState {
     pub proxy_ci_run_context: Option<CiRunContext>,
     pub fail_on_cache_error: bool,
     pub oci_hydration_policy: crate::serve::OciHydrationPolicy,
+    pub http_transport: HttpTransportConfig,
     pub blob_locator: Arc<RwLock<BlobLocatorCache>>,
     pub upload_sessions: Arc<RwLock<UploadSessionStore>>,
     pub kv_pending: Arc<RwLock<KvPendingStore>>,

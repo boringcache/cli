@@ -38,8 +38,10 @@ use super::oci_tags::{
 #[cfg(test)]
 use crate::cas_oci;
 use crate::serve::cache_registry;
+use crate::serve::engines::oci::blobs as oci_blobs;
 use crate::serve::state::{
-    AppState, CacheSessionSummarySnapshot, build_cache_session_summary, diagnostics_enabled,
+    AppState, CacheSessionSummarySnapshot, HttpTransportConfig, build_cache_session_summary,
+    diagnostics_enabled,
 };
 #[cfg(test)]
 use crate::serve::state::{OciManifestCacheEntry, digest_tag};
@@ -68,6 +70,9 @@ struct ProxyStatusResponse {
     oci_engine: BTreeMap<String, String>,
     oci_negative_cache: BTreeMap<String, String>,
     singleflight: BTreeMap<String, String>,
+    http_transport: HttpTransportConfig,
+    oci_stream_through_min_bytes: Option<u64>,
+    oci_stream_through_enabled: bool,
     session_summary: CacheSessionSummarySnapshot,
     shutdown_requested: bool,
     cache_entry_id: Option<String>,
@@ -90,6 +95,7 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
         .metadata_hints(state.oci_hydration_policy.as_str());
     let oci_negative_cache = state.oci_negative_cache.metadata_hints();
     let singleflight = state.singleflight_metrics.metadata_hints();
+    let oci_stream_through_min_bytes = oci_blobs::stream_through_min_bytes();
     let shutdown_requested = state
         .shutdown_requested
         .load(std::sync::atomic::Ordering::Acquire);
@@ -146,6 +152,9 @@ pub async fn proxy_status(State(state): State<AppState>) -> impl IntoResponse {
             oci_engine,
             oci_negative_cache,
             singleflight,
+            http_transport: state.http_transport,
+            oci_stream_through_min_bytes,
+            oci_stream_through_enabled: oci_stream_through_min_bytes.is_some(),
             session_summary: build_cache_session_summary(&state),
             shutdown_requested,
             cache_entry_id,

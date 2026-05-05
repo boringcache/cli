@@ -24,6 +24,7 @@ const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 const OCI_BLOB_DOWNLOAD_MAX_ATTEMPTS: usize = 4;
 const OCI_BLOB_DOWNLOAD_RETRY_BASE_MS: u64 = 500;
 const OCI_STREAM_THROUGH_MIN_BYTES_ENV: &str = "BORINGCACHE_OCI_STREAM_THROUGH_MIN_BYTES";
+const DEFAULT_OCI_STREAM_THROUGH_MIN_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BlobRange {
@@ -748,13 +749,24 @@ fn should_stream_through_blob(method: &Method, headers: &HeaderMap, size_bytes: 
     size_bytes >= min_bytes
 }
 
-fn stream_through_min_bytes() -> Option<u64> {
-    let value = std::env::var(OCI_STREAM_THROUGH_MIN_BYTES_ENV).ok()?;
+pub(crate) fn stream_through_min_bytes() -> Option<u64> {
+    let Ok(value) = std::env::var(OCI_STREAM_THROUGH_MIN_BYTES_ENV) else {
+        return Some(DEFAULT_OCI_STREAM_THROUGH_MIN_BYTES);
+    };
     let trimmed = value.trim();
     if trimmed.is_empty() {
+        return Some(DEFAULT_OCI_STREAM_THROUGH_MIN_BYTES);
+    }
+    if matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    ) {
         return None;
     }
-    trimmed.parse::<u64>().ok()
+    match trimmed.parse::<u64>() {
+        Ok(min_bytes) if min_bytes > 0 => Some(min_bytes),
+        _ => Some(DEFAULT_OCI_STREAM_THROUGH_MIN_BYTES),
+    }
 }
 
 pub(crate) async fn resolve_oci_download_url(
@@ -1461,9 +1473,12 @@ async fn fresh_locator_download_url(
 
 #[cfg(test)]
 mod tests {
-    use axum::http::StatusCode;
+    use axum::http::{HeaderMap, Method, StatusCode};
 
-    use super::{BlobRange, BlobRangeSelection, is_retryable_oci_blob_storage_status};
+    use super::{
+        BlobRange, BlobRangeSelection, DEFAULT_OCI_STREAM_THROUGH_MIN_BYTES,
+        OCI_STREAM_THROUGH_MIN_BYTES_ENV, is_retryable_oci_blob_storage_status,
+    };
 
     #[test]
     fn parses_standard_byte_range() {
@@ -1520,6 +1535,55 @@ mod tests {
         assert!(!is_retryable_oci_blob_storage_status(StatusCode::FORBIDDEN));
         assert!(!is_retryable_oci_blob_storage_status(
             StatusCode::UNPROCESSABLE_ENTITY
+        ));
+    }
+
+    #[test]
+    fn stream_through_threshold_defaults_to_large_blob_cutoff() {
+        let _guard = crate::test_env::lock();
+        crate::test_env::remove_var(OCI_STREAM_THROUGH_MIN_BYTES_ENV);
+
+        assert_eq!(
+            super::stream_through_min_bytes(),
+            Some(DEFAULT_OCI_STREAM_THROUGH_MIN_BYTES)
+        );
+    }
+
+    #[test]
+    fn stream_through_threshold_can_be_disabled() {
+        let _guard = crate::test_env::lock();
+
+        for value in ["0", "false", "FALSE", "no", "off"] {
+            crate::test_env::set_var(OCI_STREAM_THROUGH_MIN_BYTES_ENV, value);
+            assert_eq!(super::stream_through_min_bytes(), None);
+        }
+        crate::test_env::remove_var(OCI_STREAM_THROUGH_MIN_BYTES_ENV);
+    }
+
+    #[test]
+    fn stream_through_threshold_honors_positive_override() {
+        let _guard = crate::test_env::lock();
+        crate::test_env::set_var(OCI_STREAM_THROUGH_MIN_BYTES_ENV, "1");
+
+        assert_eq!(super::stream_through_min_bytes(), Some(1));
+
+        crate::test_env::remove_var(OCI_STREAM_THROUGH_MIN_BYTES_ENV);
+    }
+
+    #[test]
+    fn stream_through_is_default_for_large_full_body_gets() {
+        let _guard = crate::test_env::lock();
+        crate::test_env::remove_var(OCI_STREAM_THROUGH_MIN_BYTES_ENV);
+
+        assert!(super::should_stream_through_blob(
+            &Method::GET,
+            &HeaderMap::new(),
+            DEFAULT_OCI_STREAM_THROUGH_MIN_BYTES
+        ));
+        assert!(!super::should_stream_through_blob(
+            &Method::GET,
+            &HeaderMap::new(),
+            DEFAULT_OCI_STREAM_THROUGH_MIN_BYTES - 1
         ));
     }
 }

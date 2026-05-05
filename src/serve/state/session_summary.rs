@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::ci_detection::CiSourceRefType;
+use crate::serve::engines::oci::blobs;
 
 use super::AppState;
 
@@ -93,11 +94,19 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
     let kv_upload_hints = state.kv_blob_upload_metrics.metadata_hints();
     let skip_rule_match_count = state.skip_rule_metrics.matched_count();
     let identity = cache_session_identity(state);
+    let oci_stream_through_min_bytes = blobs::stream_through_min_bytes();
 
     let proxy = json!({
         "mode": session_kind.mode,
         "adapter": session_kind.adapter,
         "hydration_policy": state.oci_hydration_policy.as_str(),
+        "http_transport": state.http_transport.mode,
+        "http2_enabled": state.http_transport.http2_enabled,
+        "h2_initial_stream_window_bytes": state.http_transport.h2_initial_stream_window_bytes,
+        "h2_initial_connection_window_bytes": state.http_transport.h2_initial_connection_window_bytes,
+        "h2_max_concurrent_streams": state.http_transport.h2_max_concurrent_streams,
+        "oci_stream_through_min_bytes": oci_stream_through_min_bytes,
+        "oci_stream_through_enabled": oci_stream_through_min_bytes.is_some(),
         "duration_ms": duration_ms,
         "read_only": state.read_only,
         "fail_on_cache_error": state.fail_on_cache_error,
