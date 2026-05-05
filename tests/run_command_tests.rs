@@ -2160,6 +2160,69 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
 }
 
 #[test]
+fn test_docker_dry_run_json_promotes_default_branch_stable_fallback() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_RUN_ID", "987654321")
+        .env("GITHUB_RUN_ATTEMPT", "1")
+        .env("GITHUB_REPOSITORY", "acme/widgets")
+        .env("GITHUB_REF", "refs/heads/main")
+        .env("GITHUB_REF_NAME", "main")
+        .env("GITHUB_SHA", "abcdef1234567890")
+        .env("BORINGCACHE_CI_RUN_STARTED_AT", "2026-04-21T10:00:00Z")
+        .args([
+            "docker",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "docker-main",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--dry-run",
+            "--json",
+            "--",
+            "docker",
+            "buildx",
+            "build",
+            ".",
+        ])
+        .output()
+        .expect("Failed to execute docker GitHub Actions default-branch dry-run command");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    assert_proxy_metadata_hints_are_cli_replayable(&parsed);
+    assert_eq!(
+        parsed["oci_cache"]["cache_from_ref_tags"],
+        serde_json::json!(["default", "buildcache"])
+    );
+    assert_eq!(
+        parsed["oci_cache"]["promotion_ref_tags"],
+        serde_json::json!(["default", "buildcache"])
+    );
+    assert_eq!(
+        parsed["proxy"]["oci_prefetch_refs"],
+        serde_json::json!(["cache@default", "cache@buildcache"])
+    );
+    assert_eq!(
+        parsed["proxy"]["metadata_hints"]["docker_alias_promotion_refs"],
+        "default/buildcache"
+    );
+    assert_eq!(
+        parsed["oci_cache"]["cache_to"],
+        "type=registry,ref=host.docker.internal:5000/cache:run-gha-987654321-attempt-1,mode=max,registry.insecure=true"
+    );
+}
+
+#[test]
 fn test_docker_read_only_dry_run_json_uses_on_demand_proxy_mode() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);

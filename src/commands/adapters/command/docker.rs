@@ -207,6 +207,7 @@ fn derive_cache_refs(
                 if is_default_branch(branch, context.default_branch.as_deref()) {
                     push_tag(&mut import_ref_tags, "default".to_string());
                     push_tag(&mut promotion_ref_tags, "default".to_string());
+                    push_tag(&mut promotion_ref_tags, fallback_ref_tag.to_string());
                 } else {
                     let branch_alias = branch_alias(branch)?;
                     push_tag(&mut import_ref_tags, branch_alias.clone());
@@ -719,7 +720,7 @@ mod tests {
             plan.oci_cache.cache_from_ref_tags,
             ["default", "buildcache"]
         );
-        assert_eq!(plan.oci_cache.promotion_ref_tags, ["default"]);
+        assert_eq!(plan.oci_cache.promotion_ref_tags, ["default", "buildcache"]);
     }
 
     #[test]
