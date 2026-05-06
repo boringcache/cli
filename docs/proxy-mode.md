@@ -72,7 +72,7 @@ The intended expert overrides are:
 - `BORINGCACHE_PROXY_MIN_FREE_MB` to raise or lower the local free-memory pressure threshold used by adaptive prefetch
 - `BORINGCACHE_PROXY_DEBUG=1` to print detailed proxy diagnostics such as prefetch, tag refresh, blob upload, flush, and per-session lines
 
-Startup prefetch uses a separate auto budget so warmup can hydrate many-object tags quickly before the wrapped tool starts. Many-small and machine-governed tags start with a moderate adaptive window and probe upward when goodput improves. Rate limits pause replacement prefetch spawns for `Retry-After`, and resource pressure holds increases. An explicit `BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY` still caps prefetch by default; `BORINGCACHE_BLOB_PREFETCH_CONCURRENCY` exists for benchmark/proof runs that need to tune startup hydration separately.
+Startup prefetch uses a separate auto budget so warmup can hydrate many-object tags quickly before the wrapped tool starts. GitHub Actions can target 100 startup reads for many-small-object tags, and the adaptive window ramps faster when observed RTT and goodput show the workload is RTT-bound. Rate limits pause replacement prefetch spawns for `Retry-After`, failures back off the window, and resource pressure holds increases. An explicit `BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY` still caps prefetch by default; `BORINGCACHE_BLOB_PREFETCH_CONCURRENCY` exists for benchmark/proof runs that need to tune startup hydration separately.
 
 The proxy keeps normal stderr quiet: one startup line, warnings/errors, and one shutdown summary.
 Use global `--verbose`, `BORINGCACHE_PROXY_DEBUG=1`, or debug-level logging when debugging proxy internals.

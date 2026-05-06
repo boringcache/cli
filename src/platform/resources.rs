@@ -195,6 +195,19 @@ impl SystemResources {
 
         ceiling.max(base).clamp(1, 100)
     }
+
+    pub fn recommended_github_actions_proxy_prefetch_concurrency(&self) -> usize {
+        let base = self.recommended_proxy_prefetch_concurrency(true);
+        if self.cpu_load_percent > 75.0 || self.available_memory_gb < 4.0 {
+            return base;
+        }
+
+        // GitHub-hosted runners are the common many-small-object benchmark
+        // shape. Let startup warmup target the RTT-bound knee; the adaptive
+        // controller still backs off on errors, rate limits, or resource
+        // pressure before the wrapped build starts.
+        base.max(100).clamp(1, 100)
+    }
 }
 
 pub(crate) fn proxy_resource_pressure_high() -> bool {
@@ -491,6 +504,10 @@ mod tests {
         assert_eq!(resources.recommended_download_concurrency(true), 2);
         assert_eq!(resources.recommended_proxy_download_concurrency(true), 8);
         assert_eq!(resources.recommended_proxy_prefetch_concurrency(true), 50);
+        assert_eq!(
+            resources.recommended_github_actions_proxy_prefetch_concurrency(),
+            100
+        );
     }
 
     #[test]

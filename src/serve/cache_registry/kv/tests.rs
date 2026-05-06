@@ -722,6 +722,23 @@ fn startup_prefetch_tuner_increases_when_goodput_improves() {
 }
 
 #[test]
+fn startup_prefetch_tuner_ramps_faster_when_rtt_bound() {
+    let mut state = StartupPrefetchTuningState::new();
+
+    let (next, decision) = tune_startup_prefetch_concurrency(
+        20,
+        100,
+        true,
+        &mut state,
+        startup_prefetch_window(20, 2_000_000, 0, false, 250),
+        false,
+    );
+
+    assert_eq!(next, 30);
+    assert_eq!(decision, StartupPrefetchAdjustment::Increase);
+}
+
+#[test]
 fn startup_prefetch_tuner_halves_on_failures() {
     let mut state = StartupPrefetchTuningState::new();
 
@@ -861,6 +878,7 @@ fn startup_prefetch_rate_limit_hold_pauses_new_spawns() {
     controller.record(&StartupPrefetchTaskReport {
         inserted: false,
         size_bytes: 1,
+        retry_count: 0,
         duration_ms: 50,
         status: Some(StatusCode::TOO_MANY_REQUESTS),
         retry_after: Some(std::time::Duration::from_secs(60)),

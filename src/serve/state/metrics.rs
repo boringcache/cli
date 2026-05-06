@@ -1171,6 +1171,7 @@ struct StartupPrefetchSnapshot {
     already_local: u64,
     inserted: u64,
     failures: u64,
+    retries: u64,
     cold_blobs: u64,
     duration_ms: u64,
     timed_out: bool,
@@ -1287,12 +1288,14 @@ impl PrefetchMetrics {
         already_local: usize,
         inserted: usize,
         failures: usize,
+        retries: usize,
         duration_ms: u64,
     ) {
         if let Ok(mut snapshot) = self.startup.lock() {
             snapshot.already_local = already_local as u64;
             snapshot.inserted = inserted as u64;
             snapshot.failures = failures as u64;
+            snapshot.retries = retries as u64;
             snapshot.duration_ms = duration_ms;
         }
     }
@@ -1439,6 +1442,10 @@ impl PrefetchMetrics {
         hints.insert(
             "startup_prefetch_failures".to_string(),
             snapshot.failures.to_string(),
+        );
+        hints.insert(
+            "startup_prefetch_retries".to_string(),
+            snapshot.retries.to_string(),
         );
         hints.insert(
             "startup_prefetch_cold_blobs".to_string(),

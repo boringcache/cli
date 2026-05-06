@@ -18,6 +18,15 @@ STATUS_POLICY_FIELDS = (
 )
 STATUS_SNAPSHOT_PATTERNS = ("proxy-status-*.json", "status-*.json")
 STATUS_SNAPSHOT_KEYS = (
+    "startup_prefetch_duration_ms",
+    "startup_prefetch_target_blobs",
+    "startup_prefetch_target_bytes",
+    "startup_prefetch_concurrency",
+    "startup_prefetch_initial_concurrency",
+    "startup_prefetch_final_concurrency",
+    "startup_prefetch_max_observed_concurrency",
+    "startup_prefetch_retries",
+    "startup_prefetch_failures",
     "startup_prefetch_oci_total_unique_blobs",
     "startup_prefetch_oci_body_inserted",
     "startup_prefetch_oci_body_failures",
@@ -597,6 +606,18 @@ def main() -> int:
         print(f"request_metrics_status_snapshot_{index}_label={snapshot['label']}")
         print_status_snapshot(f"request_metrics_status_snapshot_{index}", snapshot)
         print_status_snapshot(f"request_metrics_status_{snapshot['label']}", snapshot)
+    for key in (
+        "startup_prefetch_duration_ms",
+        "startup_prefetch_target_blobs",
+        "startup_prefetch_target_bytes",
+        "startup_prefetch_concurrency",
+        "startup_prefetch_initial_concurrency",
+        "startup_prefetch_final_concurrency",
+        "startup_prefetch_max_observed_concurrency",
+        "startup_prefetch_retries",
+        "startup_prefetch_failures",
+    ):
+        print(f"request_metrics_{key}={status_values.get(key, 0)}")
     print(
         "request_metrics_startup_prefetch_oci_hydration="
         f"{','.join(status_snapshots['policies']) if status_snapshots['policies'] else 'unknown'}"

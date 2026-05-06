@@ -424,7 +424,11 @@ fn auto_transfer_concurrency() -> usize {
 fn auto_prefetch_concurrency() -> usize {
     let resources = crate::platform::resources::SystemResources::detect();
     let is_ci = std::env::var("CI").is_ok();
-    resources.recommended_proxy_prefetch_concurrency(is_ci)
+    if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+        resources.recommended_github_actions_proxy_prefetch_concurrency()
+    } else {
+        resources.recommended_proxy_prefetch_concurrency(is_ci)
+    }
 }
 
 fn parse_positive_usize_env(name: &str) -> Option<usize> {

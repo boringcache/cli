@@ -19,6 +19,7 @@ const STARTUP_PREFETCH_GOODPUT_EMA_NEW_WEIGHT: f64 = 0.30;
 const STARTUP_PREFETCH_LATENCY_EMA_OLD_WEIGHT: f64 = 0.80;
 const STARTUP_PREFETCH_LATENCY_EMA_NEW_WEIGHT: f64 = 0.20;
 const STARTUP_PREFETCH_LATENCY_HOLD_MULTIPLIER: u64 = 3;
+const STARTUP_PREFETCH_RTT_FAST_RAMP_MS: u64 = 150;
 const STARTUP_PREFETCH_MEDIUM_BLOB_CAP: usize = 8;
 const STARTUP_PREFETCH_LARGE_BLOB_CAP: usize = 4;
 
@@ -284,6 +285,7 @@ pub(crate) struct BlobPrefetchStats {
     pub(crate) scheduled: usize,
     pub(crate) inserted: usize,
     pub(crate) failures: usize,
+    pub(crate) retries: usize,
     pub(crate) already_local: usize,
     pub(crate) scheduled_bytes: u64,
     pub(crate) duration_ms: u64,
@@ -295,14 +297,20 @@ pub(crate) struct BlobPrefetchStats {
 pub(crate) struct StartupPrefetchBlobError {
     status: StatusCode,
     retry_after: Option<std::time::Duration>,
+    retry_count: usize,
     message: String,
 }
 
 impl StartupPrefetchBlobError {
-    fn from_registry_error(blob: &BlobDescriptor, error: RegistryError) -> Self {
+    fn from_registry_error(
+        blob: &BlobDescriptor,
+        error: RegistryError,
+        retry_count: usize,
+    ) -> Self {
         Self {
             status: error.status,
             retry_after: error.retry_after,
+            retry_count,
             message: format!(
                 "download_blob_to_cache failed for {}: {error:?}",
                 blob.digest
@@ -310,10 +318,11 @@ impl StartupPrefetchBlobError {
         }
     }
 
-    fn exhausted(blob: &BlobDescriptor) -> Self {
+    fn exhausted(blob: &BlobDescriptor, retry_count: usize) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             retry_after: None,
+            retry_count,
             message: format!(
                 "download_blob_to_cache exhausted retries for {}",
                 blob.digest
@@ -328,32 +337,51 @@ impl std::fmt::Display for StartupPrefetchBlobError {
     }
 }
 
+pub(crate) struct StartupPrefetchBlobResult {
+    inserted: bool,
+    retry_count: usize,
+}
+
 pub(crate) async fn preload_single_blob(
     state: AppState,
     cache_entry_id: String,
     blob: BlobDescriptor,
     cached_url: Option<String>,
-) -> Result<bool, StartupPrefetchBlobError> {
+) -> Result<StartupPrefetchBlobResult, StartupPrefetchBlobError> {
     if state
         .blob_read_cache
         .get_handle(&blob.digest)
         .await
         .is_some()
     {
-        return Ok(false);
+        return Ok(StartupPrefetchBlobResult {
+            inserted: false,
+            retry_count: 0,
+        });
     }
 
     let mut retry_delay = std::time::Duration::from_millis(250);
+    let mut retry_count = 0usize;
     for attempt in 1..=PREFETCH_BLOB_DOWNLOAD_ATTEMPTS {
         match download_blob_to_cache(&state, &cache_entry_id, &blob, cached_url.as_deref()).await {
-            Ok(_) => return Ok(true),
+            Ok(_) => {
+                return Ok(StartupPrefetchBlobResult {
+                    inserted: true,
+                    retry_count,
+                });
+            }
             Err(error) if error.status == StatusCode::TOO_MANY_REQUESTS => {
-                return Err(StartupPrefetchBlobError::from_registry_error(&blob, error));
+                return Err(StartupPrefetchBlobError::from_registry_error(
+                    &blob,
+                    error,
+                    retry_count,
+                ));
             }
             Err(error)
                 if attempt < PREFETCH_BLOB_DOWNLOAD_ATTEMPTS
                     && should_retry_prefetch_blob_error(error.status) =>
             {
+                retry_count = retry_count.saturating_add(1);
                 log::debug!(
                     "Prefetch startup blob retry {attempt}/{PREFETCH_BLOB_DOWNLOAD_ATTEMPTS} digest={} status={} after {:?}",
                     short_digest(&blob.digest),
@@ -364,12 +392,16 @@ pub(crate) async fn preload_single_blob(
                 retry_delay = retry_delay.saturating_mul(2);
             }
             Err(error) => {
-                return Err(StartupPrefetchBlobError::from_registry_error(&blob, error));
+                return Err(StartupPrefetchBlobError::from_registry_error(
+                    &blob,
+                    error,
+                    retry_count,
+                ));
             }
         }
     }
 
-    Err(StartupPrefetchBlobError::exhausted(&blob))
+    Err(StartupPrefetchBlobError::exhausted(&blob, retry_count))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -553,9 +585,11 @@ pub(crate) fn tune_startup_prefetch_concurrency(
     }
 
     if improved && current < max {
-        let step = ((current as f64) * 0.10).ceil() as usize;
+        let rtt_bound = p95_ms >= STARTUP_PREFETCH_RTT_FAST_RAMP_MS;
+        let (ratio, minimum_step) = if rtt_bound { (0.50, 10) } else { (0.10, 5) };
+        let step = ((current as f64) * ratio).ceil() as usize;
         return (
-            current.saturating_add(step.max(5)).min(max),
+            current.saturating_add(step.max(minimum_step)).min(max),
             StartupPrefetchAdjustment::Increase,
         );
     }
@@ -704,6 +738,7 @@ impl AdaptiveStartupPrefetch {
 pub(crate) struct StartupPrefetchTaskReport {
     pub(crate) inserted: bool,
     pub(crate) size_bytes: u64,
+    pub(crate) retry_count: usize,
     pub(crate) duration_ms: u64,
     pub(crate) status: Option<StatusCode>,
     pub(crate) retry_after: Option<std::time::Duration>,
@@ -820,6 +855,7 @@ async fn prefetch_blob_targets(
                     stats.failures = stats.failures.saturating_add(1);
                     log::warn!("{log_label} blob failed: {error}");
                 }
+                stats.retries = stats.retries.saturating_add(report.retry_count);
             }
             Err(error) => {
                 stats.failures = stats.failures.saturating_add(1);
@@ -923,6 +959,7 @@ fn spawn_until_target(
                     return StartupPrefetchTaskReport {
                         inserted: false,
                         size_bytes,
+                        retry_count: 0,
                         duration_ms: 0,
                         status: None,
                         retry_after: None,
@@ -935,10 +972,11 @@ fn spawn_until_target(
                 preload_single_blob(state, cache_entry_id, target.blob, target.cached_url).await;
             drop(permit);
             let duration_ms = started_at.elapsed().as_millis() as u64;
-            let (inserted, status, retry_after, error) = match result {
-                Ok(inserted) => (inserted, None, None, None),
+            let (inserted, retry_count, status, retry_after, error) = match result {
+                Ok(result) => (result.inserted, result.retry_count, None, None, None),
                 Err(error) => (
                     false,
+                    error.retry_count,
                     Some(error.status),
                     error.retry_after,
                     Some(error.to_string()),
@@ -947,6 +985,7 @@ fn spawn_until_target(
             StartupPrefetchTaskReport {
                 inserted,
                 size_bytes,
+                retry_count,
                 duration_ms,
                 status,
                 retry_after,
@@ -1150,6 +1189,7 @@ pub(crate) async fn prefetch_all_blobs(
         stats.already_local,
         stats.inserted,
         stats.failures,
+        stats.retries,
         stats.duration_ms,
     );
     state.prefetch_metrics.record_startup_concurrency_observed(
