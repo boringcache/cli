@@ -321,7 +321,7 @@ EOF
 === Phase 2: Dual-Proxy Contention ===
 === Phase 2b: Verify published remote tag after contention flush ===
 === Phase 3: Verification (merged index check) ===
-PASS: both proxies flushed without timeouts/drops
+PASS: proxies finished without timeouts/drops/forced stops
 EOF
       ;;
     docker-buildkit)
