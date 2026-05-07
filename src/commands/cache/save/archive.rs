@@ -260,10 +260,10 @@ pub(super) async fn save_single_archive_entry(
     check_step.complete()?;
 
     if cache_exists && cache_pending && !force {
-        progress_info(&reporter, "  Cache upload in progress; skipping wait");
+        progress_info(&reporter, "  Cache upload in progress; attempting resume");
     }
 
-    if cache_exists && !force {
+    if cache_exists && !cache_pending && !force {
         progress_info(&reporter, "  Cache exists; skipping");
         complete_skipped_step(&mut session, "Creating archive", "skipped — cache exists")?;
         complete_skipped_step(
@@ -519,7 +519,7 @@ pub(super) async fn save_single_archive_entry(
                 create_step.complete()?;
                 progress_info(
                     &reporter,
-                    "  Another job is uploading this cache; skipping wait",
+                    "  Another job is uploading this cache; save deferred",
                 );
                 complete_skipped_step(
                     &mut session,
@@ -546,7 +546,7 @@ pub(super) async fn save_single_archive_entry(
                 session.complete(summary)?;
                 drop(reporter);
                 progress_system.shutdown()?;
-                return Ok(SaveStatus::AlreadyExists);
+                return Ok(SaveStatus::Pending);
             }
 
             create_step.complete()?;
@@ -604,10 +604,11 @@ pub(super) async fn save_single_archive_entry(
 
         let save_status_pending = save_response.status.as_deref() == Some("pending");
         let same_tag = save_response.tag == tag;
+        let mut confirmed_pending = false;
 
         if save_status_pending && save_response.get_archive_urls().is_empty() {
             if same_tag {
-                progress_info(&reporter, "  Cache upload in progress; skipping wait");
+                progress_info(&reporter, "  Cache upload in progress; save deferred");
             } else {
                 progress_info(
                     &reporter,
@@ -653,7 +654,8 @@ pub(super) async fn save_single_archive_entry(
                 Some("ready") => {
                     log::debug!("Tag {} bound synchronously", tag);
                 }
-                Some("pending") => {
+                Some("pending" | "uploading") => {
+                    confirmed_pending = true;
                     log::debug!("Tag {} binding deferred until upload completes", tag);
                     progress_info(&reporter, "  Tag will be bound when upload completes");
                 }
@@ -677,6 +679,12 @@ pub(super) async fn save_single_archive_entry(
         session.complete(summary)?;
         drop(reporter);
         progress_system.shutdown()?;
+        if save_status_pending
+            && save_response.get_archive_urls().is_empty()
+            && (same_tag || confirmed_pending)
+        {
+            return Ok(SaveStatus::Pending);
+        }
         ui::info(&format!(
             "Completed saving {} ({} files, {})",
             tag,

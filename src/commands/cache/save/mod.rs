@@ -18,6 +18,7 @@ enum SaveStatus {
     AlreadyExists,
     Uploaded,
     Skipped,
+    Pending,
 }
 
 async fn shared_save_api_client(shared_client: &OnceCell<ApiClient>) -> Result<ApiClient> {
@@ -48,6 +49,7 @@ pub async fn execute_batch_save(
         force,
         exclude,
         recipient,
+        fail_on_cache_error,
     )
     .await
     {
@@ -69,6 +71,7 @@ async fn execute_batch_save_inner(
     force: bool,
     exclude: Vec<String>,
     recipient: Option<String>,
+    fail_on_cache_error: bool,
 ) -> Result<()> {
     let workspace = crate::command_support::get_workspace_name(workspace)?;
     crate::api::parse_workspace_slug(&workspace)?;
@@ -182,6 +185,13 @@ async fn execute_batch_save_inner(
         match result {
             Ok(SaveStatus::AlreadyExists | SaveStatus::Uploaded) => successful_saves += 1,
             Ok(SaveStatus::Skipped) => {}
+            Ok(SaveStatus::Pending) => {
+                if fail_on_cache_error {
+                    errors.push(anyhow!(
+                        "Cache upload is still pending for {tag}; save did not publish a ready cache entry"
+                    ));
+                }
+            }
             Err(err) => {
                 failed_attempts += 1;
                 errors.push(err.context(format!("Failed to save {}", tag)));
