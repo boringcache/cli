@@ -202,11 +202,12 @@ impl SystemResources {
             return base;
         }
 
-        // GitHub-hosted runners are the common many-small-object benchmark
-        // shape. Let startup warmup target the RTT-bound knee; the adaptive
-        // controller still backs off on errors, rate limits, or resource
-        // pressure before the wrapped build starts.
-        base.max(100).clamp(1, 100)
+        // GitHub-hosted runners are the common many-small-object remote-cache
+        // shape. Let startup warmup target the RTT-bound knee; the blob-shape
+        // governor still caps medium/large objects lower, and the adaptive
+        // controller backs off on errors, rate limits, or resource pressure
+        // before the wrapped build starts.
+        base.max(1_000).clamp(1, 1_000)
     }
 }
 
@@ -506,7 +507,7 @@ mod tests {
         assert_eq!(resources.recommended_proxy_prefetch_concurrency(true), 50);
         assert_eq!(
             resources.recommended_github_actions_proxy_prefetch_concurrency(),
-            100
+            1_000
         );
     }
 

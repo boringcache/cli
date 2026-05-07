@@ -8,8 +8,11 @@ const STARTUP_PREFETCH_MANY_BLOB_COUNT: usize = 1_000;
 const STARTUP_PREFETCH_SMALL_BLOB_BYTES: u64 = 64 * 1024;
 const STARTUP_PREFETCH_MEDIUM_BLOB_BYTES: u64 = 1024 * 1024;
 const STARTUP_PREFETCH_LARGE_BLOB_BYTES: u64 = 8 * 1024 * 1024;
-const STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP: usize = 100;
+const STARTUP_PREFETCH_TARGET_INFLIGHT_BYTES: u64 = 64 * 1024 * 1024;
+const STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP: usize = 1_000;
+const STARTUP_PREFETCH_SMALL_BLOB_CAP: usize = 256;
 const STARTUP_PREFETCH_ADAPTIVE_INITIAL_CONCURRENCY: usize = 20;
+const STARTUP_PREFETCH_MANY_SMALL_INITIAL_CONCURRENCY: usize = 250;
 const STARTUP_PREFETCH_ADAPTIVE_MIN_CONCURRENCY: usize = 10;
 const STARTUP_PREFETCH_ADAPTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 const STARTUP_PREFETCH_GOODPUT_GAIN_THRESHOLD: f64 = 1.15;
@@ -19,9 +22,10 @@ const STARTUP_PREFETCH_GOODPUT_EMA_NEW_WEIGHT: f64 = 0.30;
 const STARTUP_PREFETCH_LATENCY_EMA_OLD_WEIGHT: f64 = 0.80;
 const STARTUP_PREFETCH_LATENCY_EMA_NEW_WEIGHT: f64 = 0.20;
 const STARTUP_PREFETCH_LATENCY_HOLD_MULTIPLIER: u64 = 3;
+const STARTUP_PREFETCH_RETRY_PRESSURE_PER_1000: usize = 10;
 const STARTUP_PREFETCH_RTT_FAST_RAMP_MS: u64 = 150;
-const STARTUP_PREFETCH_MEDIUM_BLOB_CAP: usize = 8;
-const STARTUP_PREFETCH_LARGE_BLOB_CAP: usize = 4;
+const STARTUP_PREFETCH_MEDIUM_BLOB_CAP: usize = 64;
+const STARTUP_PREFETCH_LARGE_BLOB_CAP: usize = 16;
 
 pub(crate) async fn count_missing_local_blobs(state: &AppState, blobs: &[BlobDescriptor]) -> usize {
     let mut missing = 0usize;
@@ -444,29 +448,13 @@ pub(crate) fn adaptive_startup_prefetch_concurrency(
     }
 
     let average_blob_bytes = target_bytes / target_blobs as u64;
-    let (cap, reason) = if target_blobs >= STARTUP_PREFETCH_MANY_BLOB_COUNT
-        && average_blob_bytes <= STARTUP_PREFETCH_SMALL_BLOB_BYTES
-    {
-        (
-            STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP,
-            "many_small_blobs_rtt_bound",
-        )
-    } else if average_blob_bytes >= STARTUP_PREFETCH_LARGE_BLOB_BYTES {
-        (STARTUP_PREFETCH_LARGE_BLOB_CAP, "large_blobs")
-    } else if average_blob_bytes >= STARTUP_PREFETCH_MEDIUM_BLOB_BYTES {
-        (STARTUP_PREFETCH_MEDIUM_BLOB_CAP, "medium_blobs")
-    } else {
-        (max_concurrency, "machine_governor")
-    };
-
+    let profile = StartupPrefetchProfile::select(target_blobs, average_blob_bytes);
+    let cap = profile.concurrency_cap(average_blob_bytes, max_concurrency);
+    let reason = profile.reason();
     let effective_concurrency = max_concurrency.min(cap).min(target_blobs).max(1);
-    let adaptive = matches!(reason, "many_small_blobs_rtt_bound" | "machine_governor")
-        && effective_concurrency > 1;
-    let initial_concurrency = if adaptive {
-        STARTUP_PREFETCH_ADAPTIVE_INITIAL_CONCURRENCY.min(effective_concurrency)
-    } else {
-        effective_concurrency
-    };
+    let adaptive = profile.adaptive() && effective_concurrency > 1;
+    let initial_concurrency =
+        startup_prefetch_initial_concurrency(effective_concurrency, adaptive, reason);
 
     StartupPrefetchConcurrencyPlan {
         max_concurrency,
@@ -476,6 +464,90 @@ pub(crate) fn adaptive_startup_prefetch_concurrency(
         source: "auto",
         reason,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupPrefetchProfile {
+    ManyTinyRttBound,
+    ManySmallIoBound,
+    Medium,
+    Large,
+    MachineGovernor,
+}
+
+impl StartupPrefetchProfile {
+    fn select(target_blobs: usize, average_blob_bytes: u64) -> Self {
+        if average_blob_bytes >= STARTUP_PREFETCH_LARGE_BLOB_BYTES {
+            Self::Large
+        } else if average_blob_bytes >= STARTUP_PREFETCH_MEDIUM_BLOB_BYTES {
+            Self::Medium
+        } else if target_blobs >= STARTUP_PREFETCH_MANY_BLOB_COUNT
+            && average_blob_bytes <= STARTUP_PREFETCH_SMALL_BLOB_BYTES
+        {
+            Self::ManyTinyRttBound
+        } else if target_blobs >= STARTUP_PREFETCH_MANY_BLOB_COUNT {
+            Self::ManySmallIoBound
+        } else {
+            Self::MachineGovernor
+        }
+    }
+
+    fn concurrency_cap(self, average_blob_bytes: u64, max_concurrency: usize) -> usize {
+        let count_cap = match self {
+            Self::ManyTinyRttBound => STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP,
+            Self::ManySmallIoBound => STARTUP_PREFETCH_SMALL_BLOB_CAP,
+            Self::Medium => STARTUP_PREFETCH_MEDIUM_BLOB_CAP,
+            Self::Large => STARTUP_PREFETCH_LARGE_BLOB_CAP,
+            Self::MachineGovernor => max_concurrency,
+        };
+
+        count_cap.min(prefetch_cap_for_inflight_bytes(average_blob_bytes))
+    }
+
+    fn adaptive(self) -> bool {
+        matches!(
+            self,
+            Self::ManyTinyRttBound | Self::ManySmallIoBound | Self::MachineGovernor
+        )
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::ManyTinyRttBound => "many_small_blobs_rtt_bound",
+            Self::ManySmallIoBound => "many_small_blobs_io_bound",
+            Self::Medium => "medium_blobs",
+            Self::Large => "large_blobs",
+            Self::MachineGovernor => "machine_governor",
+        }
+    }
+}
+
+fn prefetch_cap_for_inflight_bytes(average_blob_bytes: u64) -> usize {
+    if average_blob_bytes == 0 {
+        return STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP;
+    }
+
+    STARTUP_PREFETCH_TARGET_INFLIGHT_BYTES
+        .saturating_div(average_blob_bytes)
+        .clamp(1, STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP as u64) as usize
+}
+
+fn startup_prefetch_initial_concurrency(
+    effective_concurrency: usize,
+    adaptive: bool,
+    reason: &str,
+) -> usize {
+    if !adaptive {
+        return effective_concurrency;
+    }
+
+    if reason == "many_small_blobs_rtt_bound"
+        && effective_concurrency > STARTUP_PREFETCH_MANY_SMALL_INITIAL_CONCURRENCY
+    {
+        return STARTUP_PREFETCH_MANY_SMALL_INITIAL_CONCURRENCY;
+    }
+
+    STARTUP_PREFETCH_ADAPTIVE_INITIAL_CONCURRENCY.min(effective_concurrency)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -494,6 +566,7 @@ pub(crate) struct StartupPrefetchWindowSample {
     pub(crate) completed: usize,
     pub(crate) bytes: u64,
     pub(crate) failures: usize,
+    pub(crate) retries: usize,
     pub(crate) rate_limited: bool,
     pub(crate) retry_after: Option<std::time::Duration>,
     pub(crate) p95_ms: u64,
@@ -541,7 +614,7 @@ pub(crate) fn tune_startup_prefetch_concurrency(
         .max(1.0) as u64;
     state.baseline_p95_ms = Some(refreshed_baseline);
 
-    if sample.failures > 0 {
+    if sample.failures > 0 || startup_prefetch_retry_pressure_high(sample) {
         state.smoothed_goodput_bps = None;
         let floor = startup_prefetch_adaptive_floor(max);
         let adjustment = if sample.rate_limited {
@@ -597,6 +670,15 @@ pub(crate) fn tune_startup_prefetch_concurrency(
     (current, StartupPrefetchAdjustment::Hold)
 }
 
+fn startup_prefetch_retry_pressure_high(sample: StartupPrefetchWindowSample) -> bool {
+    sample.retries > 0
+        && sample.retries.saturating_mul(1000)
+            >= sample
+                .completed
+                .max(1)
+                .saturating_mul(STARTUP_PREFETCH_RETRY_PRESSURE_PER_1000)
+}
+
 pub(crate) struct AdaptiveStartupPrefetch {
     current: usize,
     max: usize,
@@ -606,6 +688,7 @@ pub(crate) struct AdaptiveStartupPrefetch {
     completed: usize,
     bytes: u64,
     failures: usize,
+    retries: usize,
     rate_limited: bool,
     retry_after: Option<std::time::Duration>,
     latencies_ms: Vec<u64>,
@@ -623,6 +706,7 @@ impl AdaptiveStartupPrefetch {
             completed: 0,
             bytes: 0,
             failures: 0,
+            retries: 0,
             rate_limited: false,
             retry_after: None,
             latencies_ms: Vec::new(),
@@ -654,6 +738,7 @@ impl AdaptiveStartupPrefetch {
         if report.error.is_some() {
             self.failures = self.failures.saturating_add(1);
         }
+        self.retries = self.retries.saturating_add(report.retry_count);
         if report.status == Some(StatusCode::TOO_MANY_REQUESTS) {
             self.rate_limited = true;
         }
@@ -675,6 +760,7 @@ impl AdaptiveStartupPrefetch {
         self.completed = 0;
         self.bytes = 0;
         self.failures = 0;
+        self.retries = 0;
         self.rate_limited = false;
         self.retry_after = None;
         self.latencies_ms.clear();
@@ -727,6 +813,7 @@ impl AdaptiveStartupPrefetch {
             completed: self.completed,
             bytes: self.bytes,
             failures: self.failures,
+            retries: self.retries,
             rate_limited: self.rate_limited,
             retry_after: self.retry_after,
             p95_ms,

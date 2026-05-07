@@ -1,6 +1,7 @@
 use super::*;
-use crate::api::models::workspace::{
-    WorkspacePagination, WorkspaceSummaryContext, WorkspaceTagsFilter,
+use crate::api::models::{
+    cache::CacheInspectVersions,
+    workspace::{WorkspacePagination, WorkspaceSummaryContext, WorkspaceTagsFilter},
 };
 
 fn sample_tags_response(total: u32, returned: u32) -> WorkspaceTagsResponse {
@@ -105,6 +106,23 @@ fn dashboard_tags_page_keeps_primary_human_tags_sorted_by_recent_activity() {
             .map(|tag| tag.name.as_str())
             .collect::<Vec<_>>(),
         vec!["fresh-primary", "uploaded-only"]
+    );
+}
+
+#[test]
+fn inspect_versions_summary_accepts_retention_based_api_shape() {
+    let versions = CacheInspectVersions {
+        tag: "remote-cache".to_string(),
+        version_count: 19,
+        max_versions: None,
+        retention_days: Some(90),
+        current: true,
+        total_storage_bytes: 216_025_360,
+    };
+
+    assert_eq!(
+        inspect_versions_summary(&versions),
+        "19 retained for remote-cache (90d)"
     );
 }
 

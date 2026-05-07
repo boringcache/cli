@@ -1143,9 +1143,9 @@ fn inspect_modal_lines(modal: &InspectModal) -> (String, Vec<Line<'static>>) {
                     entry.primary_tag.as_deref().unwrap_or("-")
                 )),
                 Line::from(format!(
-                    "Size: {} stored  {} uncompressed  {} compressed",
+                    "Size: {} stored  {} payload  {} compressed",
                     format_bytes(entry.stored_size_bytes),
-                    format_optional_bytes(entry.uncompressed_size),
+                    format_bytes(entry_payload_size(entry)),
                     format_optional_bytes(entry.compressed_size)
                 )),
                 Line::from(format!(
@@ -1174,9 +1174,8 @@ fn inspect_modal_lines(modal: &InspectModal) -> (String, Vec<Line<'static>>) {
 
             if let Some(versions) = &data.versions {
                 lines.push(Line::from(format!(
-                    "Versions: {} of {} retained  {} total storage",
-                    versions.version_count,
-                    versions.max_versions,
+                    "Versions: {}  {} total storage",
+                    inspect_versions_summary(versions),
                     format_bytes(versions.total_storage_bytes)
                 )));
             }
@@ -1226,6 +1225,37 @@ fn format_tag_activity_time(tag: &WorkspaceTagFeedItem) -> String {
 
 fn format_optional_bytes(value: Option<u64>) -> String {
     value.map(format_bytes).unwrap_or_else(|| "-".to_string())
+}
+
+fn entry_payload_size(entry: &crate::api::models::cache::CacheInspectEntry) -> u64 {
+    entry.uncompressed_size.unwrap_or(entry.stored_size_bytes)
+}
+
+fn inspect_versions_summary(versions: &crate::api::models::cache::CacheInspectVersions) -> String {
+    let suffix = if versions.current {
+        ""
+    } else {
+        " (historical)"
+    };
+
+    if let Some(max_versions) = versions.max_versions {
+        return format!(
+            "{} of {} retained for {}{}",
+            versions.version_count, max_versions, versions.tag, suffix
+        );
+    }
+
+    if let Some(retention_days) = versions.retention_days {
+        return format!(
+            "{} retained for {} ({}d){}",
+            versions.version_count, versions.tag, retention_days, suffix
+        );
+    }
+
+    format!(
+        "{} retained for {}{}",
+        versions.version_count, versions.tag, suffix
+    )
 }
 
 fn format_optional_u64(value: Option<u64>) -> String {

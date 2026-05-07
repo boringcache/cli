@@ -701,7 +701,10 @@ pub struct CacheInspectTag {
 pub struct CacheInspectVersions {
     pub tag: String,
     pub version_count: u64,
-    pub max_versions: u64,
+    #[serde(default)]
+    pub max_versions: Option<u64>,
+    #[serde(default)]
+    pub retention_days: Option<u64>,
     pub current: bool,
     pub total_storage_bytes: u64,
 }

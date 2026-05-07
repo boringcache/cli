@@ -14,6 +14,7 @@ struct LsEntrySummary {
     tag: Option<String>,
     status: String,
     total_size_bytes: u64,
+    payload_size_bytes: u64,
     uncompressed_size: Option<u64>,
     compressed_size: Option<u64>,
     file_count: Option<u32>,
@@ -64,23 +65,28 @@ pub async fn execute(
             limit: response.limit,
             entries: entries
                 .into_iter()
-                .map(|entry| LsEntrySummary {
-                    status: if entry.uploaded_at.is_some() {
-                        "ready".to_string()
-                    } else {
-                        "pending".to_string()
-                    },
-                    id: entry.id,
-                    manifest_root_digest: entry.manifest_root_digest,
-                    tag: entry.tag,
-                    total_size_bytes: entry.total_size_bytes,
-                    uncompressed_size: entry.uncompressed_size,
-                    compressed_size: entry.compressed_size,
-                    file_count: entry.file_count,
-                    compression_algorithm: entry.compression_algorithm,
-                    created_at: entry.created_at,
-                    uploaded_at: entry.uploaded_at,
-                    encrypted: entry.encrypted,
+                .map(|entry| {
+                    let payload_size_bytes = payload_size_bytes(&entry);
+
+                    LsEntrySummary {
+                        status: if entry.uploaded_at.is_some() {
+                            "ready".to_string()
+                        } else {
+                            "pending".to_string()
+                        },
+                        id: entry.id,
+                        manifest_root_digest: entry.manifest_root_digest,
+                        tag: entry.tag,
+                        total_size_bytes: entry.total_size_bytes,
+                        payload_size_bytes,
+                        uncompressed_size: entry.uncompressed_size,
+                        compressed_size: entry.compressed_size,
+                        file_count: entry.file_count,
+                        compression_algorithm: entry.compression_algorithm,
+                        created_at: entry.created_at,
+                        uploaded_at: entry.uploaded_at,
+                        encrypted: entry.encrypted,
+                    }
                 })
                 .collect(),
         };
@@ -99,13 +105,13 @@ pub async fn execute(
     if verbose {
         println!(
             "{:<24} {:<20} {:<14} {:<14} {:<16} {:<12}",
-            "TAG", "STATUS", "STORED", "UNCOMPRESSED", "UPLOADED", "COMPRESSION"
+            "TAG", "STATUS", "STORED", "PAYLOAD", "UPLOADED", "COMPRESSION"
         );
         println!("{}", "-".repeat(104));
     } else {
         println!(
             "{:<24} {:<20} {:<14} {:<14} {:<16}",
-            "TAG", "STATUS", "STORED", "UNCOMPRESSED", "UPLOADED"
+            "TAG", "STATUS", "STORED", "PAYLOAD", "UPLOADED"
         );
         println!("{}", "-".repeat(92));
     }
@@ -128,30 +134,27 @@ pub async fn execute(
         };
         let status = build_status_string(base_status, entry.encrypted);
         let stored = format_bytes(entry.total_size_bytes);
-        let uncompressed = entry
-            .uncompressed_size
-            .map(format_bytes)
-            .unwrap_or_else(|| "-".to_string());
+        let payload = format_bytes(payload_size_bytes(entry));
         let created = format_created_at(entry.uploaded_at.as_ref().or(Some(&entry.created_at)));
 
         if verbose {
             let compression = entry.compression_algorithm.as_str();
             println!(
-                "{tag:<24} {status:<20} {stored:<14} {uncompressed:<14} {created:<16} {compression:<12}",
+                "{tag:<24} {status:<20} {stored:<14} {payload:<14} {created:<16} {compression:<12}",
                 tag = tag,
                 status = status,
                 stored = stored,
-                uncompressed = uncompressed,
+                payload = payload,
                 created = created,
                 compression = compression,
             );
         } else {
             println!(
-                "{tag:<24} {status:<20} {stored:<14} {uncompressed:<14} {created:<16}",
+                "{tag:<24} {status:<20} {stored:<14} {payload:<14} {created:<16}",
                 tag = tag,
                 status = status,
                 stored = stored,
-                uncompressed = uncompressed,
+                payload = payload,
                 created = created
             );
         }
@@ -184,6 +187,10 @@ fn build_status_string(base: &str, encrypted: bool) -> String {
     } else {
         base.to_string()
     }
+}
+
+fn payload_size_bytes(entry: &crate::api::models::CacheEntry) -> u64 {
+    entry.uncompressed_size.unwrap_or(entry.total_size_bytes)
 }
 
 fn format_created_at(timestamp: Option<&String>) -> String {
@@ -220,5 +227,24 @@ mod tests {
         let one_hour_ago = now - chrono::Duration::hours(1);
         let formatted = format_created_at(Some(&one_hour_ago.to_rfc3339()));
         assert!(formatted.contains("hour"));
+    }
+
+    #[test]
+    fn payload_size_falls_back_to_stored_size_for_cas_entries() {
+        let entry = crate::api::models::CacheEntry {
+            id: "entry-1".to_string(),
+            manifest_root_digest: "sha256:abc".to_string(),
+            tag: Some("remote-cache".to_string()),
+            total_size_bytes: 1024,
+            uncompressed_size: None,
+            compressed_size: Some(1024),
+            file_count: Some(2),
+            compression_algorithm: "zstd".to_string(),
+            created_at: "2026-05-07T00:00:00Z".to_string(),
+            uploaded_at: Some("2026-05-07T00:00:00Z".to_string()),
+            encrypted: false,
+        };
+
+        assert_eq!(payload_size_bytes(&entry), 1024);
     }
 }

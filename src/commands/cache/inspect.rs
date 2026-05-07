@@ -54,6 +54,8 @@ fn render_inspection(inspection: &CacheInspectResponse) {
     print_field("Stored", &format_bytes(inspection.entry.stored_size_bytes));
     if let Some(size) = inspection.entry.uncompressed_size {
         print_field("Uncompressed", &format_bytes(size));
+    } else if inspection.entry.storage_mode == "cas" {
+        print_field("Payload", &format_bytes(inspection.entry.stored_size_bytes));
     }
     if let Some(size) = inspection.entry.compressed_size {
         print_field("Compressed", &format_bytes(size));
@@ -75,20 +77,7 @@ fn render_inspection(inspection: &CacheInspectResponse) {
         print_field("Manifest", manifest_digest);
     }
     if let Some(versions) = inspection.versions.as_ref() {
-        print_field(
-            "Versions",
-            &format!(
-                "{} / {} kept for {}{}",
-                versions.version_count,
-                versions.max_versions,
-                versions.tag,
-                if versions.current {
-                    ""
-                } else {
-                    " (historical entry)"
-                }
-            ),
-        );
+        print_field("Versions", &versions_summary(versions));
     }
     ui::blank_line();
 
@@ -240,6 +229,33 @@ fn format_millis(value: f64) -> String {
     }
 }
 
+fn versions_summary(versions: &crate::api::models::cache::CacheInspectVersions) -> String {
+    let suffix = if versions.current {
+        ""
+    } else {
+        " (historical entry)"
+    };
+
+    if let Some(max_versions) = versions.max_versions {
+        return format!(
+            "{} / {} kept for {}{}",
+            versions.version_count, max_versions, versions.tag, suffix
+        );
+    }
+
+    if let Some(retention_days) = versions.retention_days {
+        return format!(
+            "{} kept for {} ({}d retention){}",
+            versions.version_count, versions.tag, retention_days, suffix
+        );
+    }
+
+    format!(
+        "{} kept for {}{}",
+        versions.version_count, versions.tag, suffix
+    )
+}
+
 fn parse_inspect_args(
     workspace_or_identifier: String,
     identifier: Option<String>,
@@ -342,7 +358,8 @@ mod tests {
             versions: Some(CacheInspectVersions {
                 tag: "ruby-deps".to_string(),
                 version_count: 2,
-                max_versions: 5,
+                max_versions: Some(5),
+                retention_days: None,
                 current: true,
                 total_storage_bytes: 4096,
             }),
@@ -364,5 +381,22 @@ mod tests {
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["workspace"]["slug"], "org/demo");
         assert_eq!(value["entry"]["id"], "entry-1");
+    }
+
+    #[test]
+    fn versions_summary_accepts_retention_based_api_shape() {
+        let versions = CacheInspectVersions {
+            tag: "remote-cache".to_string(),
+            version_count: 19,
+            max_versions: None,
+            retention_days: Some(90),
+            current: true,
+            total_storage_bytes: 216_025_360,
+        };
+
+        assert_eq!(
+            versions_summary(&versions),
+            "19 kept for remote-cache (90d retention)"
+        );
     }
 }

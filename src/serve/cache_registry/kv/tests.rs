@@ -663,6 +663,30 @@ fn startup_prefetch_concurrency_uses_rtt_bound_cap_for_many_small_blobs() {
 }
 
 #[test]
+fn startup_prefetch_concurrency_uses_high_ci_ceiling_for_many_small_blobs() {
+    let plan = adaptive_startup_prefetch_concurrency(1_000, false, 25_000, 25_000 * 40_000);
+
+    assert_eq!(plan.max_concurrency, 1_000);
+    assert_eq!(plan.effective_concurrency, 1_000);
+    assert_eq!(plan.initial_concurrency, 250);
+    assert!(plan.adaptive);
+    assert_eq!(plan.source, "auto");
+    assert_eq!(plan.reason, "many_small_blobs_rtt_bound");
+}
+
+#[test]
+fn startup_prefetch_concurrency_uses_inflight_budget_for_many_small_io_bound_blobs() {
+    let plan = adaptive_startup_prefetch_concurrency(1_000, false, 2_500, 2_500 * 512 * 1024);
+
+    assert_eq!(plan.max_concurrency, 1_000);
+    assert_eq!(plan.effective_concurrency, 128);
+    assert_eq!(plan.initial_concurrency, 20);
+    assert!(plan.adaptive);
+    assert_eq!(plan.source, "auto");
+    assert_eq!(plan.reason, "many_small_blobs_io_bound");
+}
+
+#[test]
 fn startup_prefetch_concurrency_respects_smaller_machine_ceiling_for_many_small_blobs() {
     let plan = adaptive_startup_prefetch_concurrency(16, false, 5_000, 5_000 * 4_096);
 
@@ -693,11 +717,23 @@ fn startup_prefetch_window(
     rate_limited: bool,
     p95_ms: u64,
 ) -> StartupPrefetchWindowSample {
+    startup_prefetch_window_with_retries(completed, bytes, failures, 0, rate_limited, p95_ms)
+}
+
+fn startup_prefetch_window_with_retries(
+    completed: usize,
+    bytes: u64,
+    failures: usize,
+    retries: usize,
+    rate_limited: bool,
+    p95_ms: u64,
+) -> StartupPrefetchWindowSample {
     StartupPrefetchWindowSample {
         elapsed: std::time::Duration::from_secs(1),
         completed,
         bytes,
         failures,
+        retries,
         rate_limited,
         retry_after: None,
         p95_ms,
@@ -865,6 +901,23 @@ fn startup_prefetch_tuner_rate_limit_halves_with_specific_reason() {
 }
 
 #[test]
+fn startup_prefetch_tuner_treats_retry_pressure_as_backoff_signal() {
+    let mut state = StartupPrefetchTuningState::new();
+
+    let (next, decision) = tune_startup_prefetch_concurrency(
+        250,
+        1_000,
+        true,
+        &mut state,
+        startup_prefetch_window_with_retries(250, 8_000_000, 0, 3, false, 80),
+        false,
+    );
+
+    assert_eq!(next, 125);
+    assert_eq!(decision, StartupPrefetchAdjustment::DropFast);
+}
+
+#[test]
 fn startup_prefetch_rate_limit_hold_pauses_new_spawns() {
     let plan = StartupPrefetchConcurrencyPlan {
         max_concurrency: 100,
@@ -1004,10 +1057,18 @@ fn startup_prefetch_tuner_settles_after_initial_climb() {
 
 #[test]
 fn startup_prefetch_concurrency_caps_large_blobs() {
-    let plan = adaptive_startup_prefetch_concurrency(12, false, 12, 12 * 16 * 1024 * 1024);
+    let plan = adaptive_startup_prefetch_concurrency(1_000, false, 128, 128 * 16 * 1024 * 1024);
 
     assert_eq!(plan.effective_concurrency, 4);
     assert_eq!(plan.reason, "large_blobs");
+}
+
+#[test]
+fn startup_prefetch_concurrency_caps_medium_blobs() {
+    let plan = adaptive_startup_prefetch_concurrency(1_000, false, 1_024, 1_024 * 2 * 1024 * 1024);
+
+    assert_eq!(plan.effective_concurrency, 32);
+    assert_eq!(plan.reason, "medium_blobs");
 }
 
 #[test]
