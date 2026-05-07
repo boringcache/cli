@@ -859,6 +859,83 @@ async fn test_save_fail_on_cache_error_fails_on_pending_archive_upload() {
     test_env::remove_var("HOME");
 }
 
+#[tokio::test]
+async fn test_save_fail_on_cache_error_fails_on_pending_cas_upload() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!("skipping test: networking disabled");
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+
+    let _session_mock = server
+        .mock("GET", "/v2/session")
+        .with_status(200)
+        .with_body(
+            json!({
+                "user": {"name": "Test User", "email": "test@example.com"},
+                "organization": {"name": "Test Org"},
+                "token": {"expires_in_days": 90}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let pending_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
+        .with_status(423)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "error": "locked",
+                "message": "Another upload in progress"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    test_env::set_var("HOME", temp_dir.path());
+
+    let save_dir = temp_dir.path().join("bazel-disk-cache");
+    fs::create_dir_all(save_dir.join("ac")).expect("Failed to create ac dir");
+    fs::create_dir_all(save_dir.join("cas")).expect("Failed to create cas dir");
+    fs::write(save_dir.join("cas").join("blob"), "test content").expect("Failed to write CAS blob");
+
+    let tag_path = format!("pending-cas:{}", save_dir.to_str().unwrap());
+    let output = std::process::Command::new(cli_binary())
+        .args(["save", "test/workspace", &tag_path, "--fail-on-cache-error"])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    assert!(
+        !output.status.success(),
+        "Expected pending strict CAS save to fail, got: {combined}"
+    );
+    assert!(
+        combined.contains("Saved 0/1"),
+        "Pending CAS save should not count as saved, got: {combined}"
+    );
+    assert!(
+        combined.contains("still pending") || combined.to_lowercase().contains("uploading"),
+        "Expected strict pending CAS failure message, got: {combined}"
+    );
+    pending_mock.assert_async().await;
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
+}
+
 mod cache_resolution_tests {
     use boring_cache_cli::api::models::cache::CacheResolutionEntry;
 

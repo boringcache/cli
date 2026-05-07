@@ -602,7 +602,7 @@ pub(super) async fn save_single_archive_entry(
             "skipped — server reports entry already exists",
         )?;
 
-        let save_status_pending = save_response.status.as_deref() == Some("pending");
+        let save_status_pending = save_response.is_pending();
         let same_tag = save_response.tag == tag;
         let mut confirmed_pending = false;
 

@@ -416,10 +416,18 @@ pub(super) async fn sync_to_remote_archive(
             return Ok(());
         }
 
-        if super::manifest_check_is_pending(result) {
-            if verbose {
-                ui::info("  Remote cache publish pending; skipping duplicate publish");
-            }
+        if super::manifest_check_is_pending(result)
+            && super::wait_for_pending_manifest_check_visibility(
+                api_client,
+                workspace,
+                resolved_tag,
+                result,
+                &manifest_root_digest,
+                verbose,
+                require_server_signature,
+            )
+            .await?
+        {
             return Ok(());
         }
     }
@@ -559,6 +567,19 @@ pub(super) async fn sync_to_remote_archive(
     let save_response = api_client.save_entry(workspace, &request).await?;
 
     if save_response.exists {
+        if super::wait_for_pending_save_response_visibility(
+            api_client,
+            workspace,
+            resolved_tag,
+            &save_response,
+            &manifest_root_digest,
+            verbose,
+            require_server_signature,
+        )
+        .await?
+        {
+            return Ok(());
+        }
         if verbose {
             ui::info("  Cache already exists on server");
         }

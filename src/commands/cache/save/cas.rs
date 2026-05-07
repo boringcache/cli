@@ -122,7 +122,7 @@ where
             if is_cache_pending_error(&err) {
                 progress_info(
                     &reporter,
-                    "  Another job is uploading this cache; skipping wait",
+                    "  Another job is uploading this cache; save deferred",
                 );
                 complete_skipped_step(
                     &mut session,
@@ -154,7 +154,7 @@ where
                 session.complete(summary)?;
                 drop(reporter);
                 progress_system.shutdown()?;
-                return Ok(SaveStatus::AlreadyExists);
+                return Ok(SaveStatus::Pending);
             }
 
             session.error(err.to_string())?;
@@ -182,7 +182,7 @@ where
         );
         progress_info(
             &reporter,
-            "  Another job is uploading this tag with a different or incomplete root; skipping save",
+            "  Another job is uploading this tag with a different or incomplete root; save deferred",
         );
         complete_skipped_step(
             &mut session,
@@ -214,7 +214,7 @@ where
         session.complete(summary)?;
         drop(reporter);
         progress_system.shutdown()?;
-        return Ok(SaveStatus::Skipped);
+        return Ok(SaveStatus::Pending);
     }
 
     let resumable_pending_existing =
@@ -244,10 +244,7 @@ where
             "skipped — server reports entry exists",
         )?;
 
-        let save_status_pending = save_response.status.as_deref() == Some("pending");
-        let same_tag = save_response.tag == tag;
-
-        if save_status_pending && same_tag {
+        if save_response.is_pending() {
             complete_skipped_step(
                 &mut session,
                 "Confirming upload",
@@ -276,6 +273,9 @@ where
         session.complete(summary)?;
         drop(reporter);
         progress_system.shutdown()?;
+        if save_response.is_pending() {
+            return Ok(SaveStatus::Pending);
+        }
         return Ok(SaveStatus::AlreadyExists);
     }
 
@@ -383,7 +383,7 @@ where
         if is_cache_pending_error(&err) {
             progress_info(
                 &reporter,
-                "  Another job is uploading this cache; skipping wait",
+                "  Another job is uploading this cache; save deferred",
             );
             let summary = save_summary(
                 bundle.total_size_bytes,
@@ -394,7 +394,7 @@ where
             session.complete(summary)?;
             drop(reporter);
             progress_system.shutdown()?;
-            return Ok(SaveStatus::AlreadyExists);
+            return Ok(SaveStatus::Pending);
         }
 
         session.error(err.to_string())?;

@@ -139,6 +139,11 @@ pub struct SaveResponse {
 }
 
 impl SaveResponse {
+    pub fn is_pending(&self) -> bool {
+        matches!(self.status.as_deref(), Some("pending" | "uploading"))
+            || matches!(self.upload_state.as_deref(), Some("pending" | "uploading"))
+    }
+
     pub fn get_archive_urls(&self) -> &[String] {
         if !self.archive_part_urls.is_empty() {
             &self.archive_part_urls
@@ -159,7 +164,7 @@ impl SaveResponse {
 
     pub fn is_resumable_pending_cas(&self) -> bool {
         self.exists
-            && self.status.as_deref() == Some("pending")
+            && self.is_pending()
             && self.storage_mode.as_deref() == Some("cas")
             && self.upload_session_id.is_some()
             && self.manifest_upload_url.is_some()
@@ -174,10 +179,7 @@ impl SaveResponse {
         &self,
         expected_manifest_root_digest: &str,
     ) -> Option<String> {
-        if !self.exists
-            || self.status.as_deref() != Some("pending")
-            || self.storage_mode.as_deref() != Some("cas")
-        {
+        if !self.exists || !self.is_pending() || self.storage_mode.as_deref() != Some("cas") {
             return None;
         }
 

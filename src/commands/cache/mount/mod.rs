@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::api::models::cache::ManifestCheckResult;
+use crate::api::models::cache::{ManifestCheckResult, SaveResponse};
 use crate::api::{ApiClient, CacheResolutionEntry};
 use crate::ui;
 
@@ -32,7 +32,7 @@ enum RestoreAction {
     NoRemoteCache,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct MountSyncPublication<'a> {
     cache_entry_id: &'a str,
     manifest_root_digest: &'a str,
@@ -54,6 +54,117 @@ fn manifest_check_is_pending(result: &ManifestCheckResult) -> bool {
 
 fn manifest_check_is_ready(result: &ManifestCheckResult) -> bool {
     result.exists && !manifest_check_is_pending(result)
+}
+
+fn pending_manifest_check_publication<'a>(
+    result: &'a ManifestCheckResult,
+    expected_manifest_root_digest: &'a str,
+    tag: &str,
+) -> Result<Option<MountSyncPublication<'a>>> {
+    if !manifest_check_is_pending(result) {
+        return Ok(None);
+    }
+
+    let cache_entry_id = result.cache_entry_id.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("mount sync for {tag} is pending but server did not return cache_entry_id")
+    })?;
+    let manifest_root_digest = result
+        .manifest_root_digest
+        .as_deref()
+        .unwrap_or(expected_manifest_root_digest);
+    if manifest_root_digest != expected_manifest_root_digest {
+        anyhow::bail!(
+            "mount sync for {tag} is pending for unexpected digest {manifest_root_digest}; expected {expected_manifest_root_digest}"
+        );
+    }
+
+    Ok(Some(MountSyncPublication {
+        cache_entry_id,
+        manifest_root_digest,
+    }))
+}
+
+fn pending_save_response_publication<'a>(
+    response: &'a SaveResponse,
+    expected_manifest_root_digest: &'a str,
+    tag: &str,
+) -> Result<Option<MountSyncPublication<'a>>> {
+    if !response.is_pending() {
+        return Ok(None);
+    }
+
+    let manifest_root_digest = response
+        .manifest_root_digest
+        .as_deref()
+        .unwrap_or(expected_manifest_root_digest);
+    if manifest_root_digest != expected_manifest_root_digest {
+        anyhow::bail!(
+            "mount sync for {tag} is pending for unexpected digest {manifest_root_digest}; expected {expected_manifest_root_digest}"
+        );
+    }
+
+    Ok(Some(MountSyncPublication {
+        cache_entry_id: &response.cache_entry_id,
+        manifest_root_digest,
+    }))
+}
+
+pub(super) async fn wait_for_pending_manifest_check_visibility(
+    api_client: &ApiClient,
+    workspace: &str,
+    tag: &str,
+    result: &ManifestCheckResult,
+    expected_manifest_root_digest: &str,
+    verbose: bool,
+    require_server_signature: bool,
+) -> Result<bool> {
+    let Some(publication) =
+        pending_manifest_check_publication(result, expected_manifest_root_digest, tag)?
+    else {
+        return Ok(false);
+    };
+
+    if verbose {
+        ui::info("  Remote cache publish pending; waiting for ready cache");
+    }
+    wait_for_mount_sync_visibility(
+        api_client,
+        workspace,
+        tag,
+        publication,
+        require_server_signature,
+    )
+    .await?;
+    Ok(true)
+}
+
+pub(super) async fn wait_for_pending_save_response_visibility(
+    api_client: &ApiClient,
+    workspace: &str,
+    tag: &str,
+    response: &SaveResponse,
+    expected_manifest_root_digest: &str,
+    verbose: bool,
+    require_server_signature: bool,
+) -> Result<bool> {
+    let Some(publication) =
+        pending_save_response_publication(response, expected_manifest_root_digest, tag)?
+    else {
+        return Ok(false);
+    };
+
+    if verbose {
+        ui::info("  Remote cache publish pending; waiting for ready cache");
+    }
+    wait_for_mount_sync_visibility(
+        api_client,
+        workspace,
+        tag,
+        publication,
+        require_server_signature,
+    )
+    .await?;
+    Ok(true)
 }
 
 async fn wait_for_mount_sync_visibility(
@@ -710,6 +821,84 @@ mod tests {
 
         assert!(manifest_check_is_ready(&result));
         assert!(!manifest_check_is_pending(&result));
+    }
+
+    #[test]
+    fn pending_manifest_check_publication_requires_entry_id() {
+        let result = ManifestCheckResult {
+            tag: "test-tag".to_string(),
+            exists: true,
+            pending: true,
+            manifest_root_digest: Some("sha256:root".to_string()),
+            cache_entry_id: None,
+            content_hash: None,
+            manifest_digest: None,
+            manifest_url: None,
+            compression_algorithm: None,
+            archive_urls: Vec::new(),
+            size: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            uploaded_at: None,
+            status: Some("pending".to_string()),
+            error: None,
+        };
+
+        let error =
+            pending_manifest_check_publication(&result, "sha256:root", "test-tag").unwrap_err();
+        assert!(
+            error.to_string().contains("did not return cache_entry_id"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn pending_manifest_check_publication_rejects_digest_mismatch() {
+        let result = ManifestCheckResult {
+            tag: "test-tag".to_string(),
+            exists: true,
+            pending: true,
+            manifest_root_digest: Some("sha256:old".to_string()),
+            cache_entry_id: Some("entry-1".to_string()),
+            content_hash: None,
+            manifest_digest: None,
+            manifest_url: None,
+            compression_algorithm: None,
+            archive_urls: Vec::new(),
+            size: None,
+            uncompressed_size: None,
+            compressed_size: None,
+            uploaded_at: None,
+            status: Some("pending".to_string()),
+            error: None,
+        };
+
+        let error =
+            pending_manifest_check_publication(&result, "sha256:new", "test-tag").unwrap_err();
+        assert!(
+            error.to_string().contains("unexpected digest"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn pending_save_response_publication_accepts_uploading_state() {
+        let response: SaveResponse = serde_json::from_value(serde_json::json!({
+            "tag": "test-tag",
+            "cache_entry_id": "entry-1",
+            "upload_state": "uploading",
+            "exists": true,
+            "storage_mode": "archive",
+            "manifest_root_digest": "sha256:root",
+            "status": "uploading"
+        }))
+        .unwrap();
+
+        let publication = pending_save_response_publication(&response, "sha256:root", "test-tag")
+            .expect("pending response should be accepted")
+            .expect("pending publication");
+        assert_eq!(publication.cache_entry_id, "entry-1");
+        assert_eq!(publication.manifest_root_digest, "sha256:root");
     }
 
     #[test]
