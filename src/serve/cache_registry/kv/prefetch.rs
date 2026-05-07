@@ -9,10 +9,11 @@ const STARTUP_PREFETCH_SMALL_BLOB_BYTES: u64 = 64 * 1024;
 const STARTUP_PREFETCH_MEDIUM_BLOB_BYTES: u64 = 1024 * 1024;
 const STARTUP_PREFETCH_LARGE_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 const STARTUP_PREFETCH_TARGET_INFLIGHT_BYTES: u64 = 64 * 1024 * 1024;
-const STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP: usize = 1_000;
+const STARTUP_PREFETCH_RTT_BOUND_INFLIGHT_BYTES: u64 = 128 * 1024 * 1024;
+const STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP: usize = 2_000;
 const STARTUP_PREFETCH_SMALL_BLOB_CAP: usize = 256;
 const STARTUP_PREFETCH_ADAPTIVE_INITIAL_CONCURRENCY: usize = 20;
-const STARTUP_PREFETCH_MANY_SMALL_INITIAL_CONCURRENCY: usize = 250;
+const STARTUP_PREFETCH_MANY_SMALL_INITIAL_CONCURRENCY: usize = 2_000;
 const STARTUP_PREFETCH_ADAPTIVE_MIN_CONCURRENCY: usize = 10;
 const STARTUP_PREFETCH_ADAPTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 const STARTUP_PREFETCH_GOODPUT_GAIN_THRESHOLD: f64 = 1.15;
@@ -493,15 +494,18 @@ impl StartupPrefetchProfile {
     }
 
     fn concurrency_cap(self, average_blob_bytes: u64, max_concurrency: usize) -> usize {
-        let count_cap = match self {
-            Self::ManyTinyRttBound => STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP,
+        if self == Self::ManyTinyRttBound {
+            return rtt_bound_prefetch_cap(average_blob_bytes);
+        }
+
+        match self {
             Self::ManySmallIoBound => STARTUP_PREFETCH_SMALL_BLOB_CAP,
             Self::Medium => STARTUP_PREFETCH_MEDIUM_BLOB_CAP,
             Self::Large => STARTUP_PREFETCH_LARGE_BLOB_CAP,
             Self::MachineGovernor => max_concurrency,
-        };
-
-        count_cap.min(prefetch_cap_for_inflight_bytes(average_blob_bytes))
+            Self::ManyTinyRttBound => unreachable!("handled above"),
+        }
+        .min(prefetch_cap_for_inflight_bytes(average_blob_bytes))
     }
 
     fn adaptive(self) -> bool {
@@ -520,6 +524,16 @@ impl StartupPrefetchProfile {
             Self::MachineGovernor => "machine_governor",
         }
     }
+}
+
+fn rtt_bound_prefetch_cap(average_blob_bytes: u64) -> usize {
+    if average_blob_bytes == 0 {
+        return STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP;
+    }
+
+    STARTUP_PREFETCH_RTT_BOUND_INFLIGHT_BYTES
+        .saturating_div(average_blob_bytes)
+        .clamp(1, STARTUP_PREFETCH_MANY_SMALL_BLOB_CAP as u64) as usize
 }
 
 fn prefetch_cap_for_inflight_bytes(average_blob_bytes: u64) -> usize {
@@ -541,10 +555,8 @@ fn startup_prefetch_initial_concurrency(
         return effective_concurrency;
     }
 
-    if reason == "many_small_blobs_rtt_bound"
-        && effective_concurrency > STARTUP_PREFETCH_MANY_SMALL_INITIAL_CONCURRENCY
-    {
-        return STARTUP_PREFETCH_MANY_SMALL_INITIAL_CONCURRENCY;
+    if reason == "many_small_blobs_rtt_bound" {
+        return STARTUP_PREFETCH_MANY_SMALL_INITIAL_CONCURRENCY.min(effective_concurrency);
     }
 
     STARTUP_PREFETCH_ADAPTIVE_INITIAL_CONCURRENCY.min(effective_concurrency)

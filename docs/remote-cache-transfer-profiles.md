@@ -37,15 +37,15 @@ The proxy selects a startup transfer profile from the restored entry:
    - `medium_blobs`: average >= 1 MiB and < 8 MiB.
    - `large_blobs`: average >= 8 MiB.
    - `machine_governor`: smaller tags, still capped by bytes in flight.
-4. Cap concurrency by both object profile and target bytes in flight.
-5. Start adaptive profiles below the ceiling and only climb when throughput improves.
+4. Cap concurrency by object profile. For larger blobs, also cap by the normal bytes-in-flight target. For RTT-bound many-tiny CAS blobs, object latency is the bottleneck, so the profile uses a larger small-object burst budget and can reach the full small-object ceiling.
+5. Start many-tiny RTT-bound profiles at their selected ceiling; start larger adaptive profiles below the ceiling and only climb when throughput improves.
 6. Treat final failures, rate limits, and material retry pressure as backoff signals.
 
-The current target is 64 MiB in flight. That gives the intended behavior:
+The normal target is 64 MiB in flight. The many-tiny RTT-bound profile gets a 128 MiB small-object burst budget because 1,000-2,000 tiny reads still carry modest bytes in flight, while avoiding thousands of serialized object round trips. That gives the intended behavior:
 
 | Shape | Expected profile | Typical cap |
 | --- | --- | ---: |
-| Bazel tiny CAS blobs | `many_small_blobs_rtt_bound` | up to 1,000 |
+| Bazel tiny CAS blobs | `many_small_blobs_rtt_bound` | up to 2,000 |
 | Gradle tiny task artifacts | `machine_governor` or `many_small_blobs_rtt_bound` | up to the tag size/count |
 | Maven/Turbo/Nx medium-small artifacts | `machine_governor` or `many_small_blobs_io_bound` | byte-budgeted |
 | Zed/sccache compiler outputs | `medium_blobs` | about 32-64 |

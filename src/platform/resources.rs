@@ -207,7 +207,7 @@ impl SystemResources {
         // governor still caps medium/large objects lower, and the adaptive
         // controller backs off on errors, rate limits, or resource pressure
         // before the wrapped build starts.
-        base.max(1_000).clamp(1, 1_000)
+        base.max(2_000).clamp(1, 2_000)
     }
 }
 
@@ -507,7 +507,7 @@ mod tests {
         assert_eq!(resources.recommended_proxy_prefetch_concurrency(true), 50);
         assert_eq!(
             resources.recommended_github_actions_proxy_prefetch_concurrency(),
-            1_000
+            2_000
         );
     }
 

@@ -656,7 +656,7 @@ fn startup_prefetch_concurrency_uses_rtt_bound_cap_for_many_small_blobs() {
 
     assert_eq!(plan.max_concurrency, 100);
     assert_eq!(plan.effective_concurrency, 100);
-    assert_eq!(plan.initial_concurrency, 20);
+    assert_eq!(plan.initial_concurrency, 100);
     assert!(plan.adaptive);
     assert_eq!(plan.source, "auto");
     assert_eq!(plan.reason, "many_small_blobs_rtt_bound");
@@ -664,11 +664,11 @@ fn startup_prefetch_concurrency_uses_rtt_bound_cap_for_many_small_blobs() {
 
 #[test]
 fn startup_prefetch_concurrency_uses_high_ci_ceiling_for_many_small_blobs() {
-    let plan = adaptive_startup_prefetch_concurrency(1_000, false, 25_000, 25_000 * 40_000);
+    let plan = adaptive_startup_prefetch_concurrency(2_000, false, 25_000, 25_000 * 40_000);
 
-    assert_eq!(plan.max_concurrency, 1_000);
-    assert_eq!(plan.effective_concurrency, 1_000);
-    assert_eq!(plan.initial_concurrency, 250);
+    assert_eq!(plan.max_concurrency, 2_000);
+    assert_eq!(plan.effective_concurrency, 2_000);
+    assert_eq!(plan.initial_concurrency, 2_000);
     assert!(plan.adaptive);
     assert_eq!(plan.source, "auto");
     assert_eq!(plan.reason, "many_small_blobs_rtt_bound");
