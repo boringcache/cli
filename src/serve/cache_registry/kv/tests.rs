@@ -226,9 +226,6 @@ fn classify_flush_error_treats_receipt_incomplete_publish_as_transient() {
 #[test]
 fn should_clear_flushing_after_flush_skips_ok_path() {
     assert!(!should_clear_flushing_after_flush(&FlushResult::Ok));
-    assert!(should_clear_flushing_after_flush(
-        &FlushResult::AcceptedContention
-    ));
     assert!(should_clear_flushing_after_flush(&FlushResult::Conflict));
     assert!(should_clear_flushing_after_flush(&FlushResult::Error));
     assert!(should_clear_flushing_after_flush(&FlushResult::Permanent));

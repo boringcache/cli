@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use anyhow::{Result, anyhow};
 use tokio::sync::oneshot;
 
 use crate::observability::{self, ObservabilityEvent};
@@ -49,7 +50,7 @@ pub(super) async fn cleanup_runtime_temp_dir(state: &AppState) {
     }
 }
 
-pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
+pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
 
     loop {
@@ -77,9 +78,7 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
             Some(_flush_guard) => {
                 let flush_result = cache_registry::flush_kv_index_on_shutdown(state).await;
                 match flush_result {
-                    cache_registry::FlushResult::Ok
-                    | cache_registry::FlushResult::AcceptedContention
-                    | cache_registry::FlushResult::Permanent => {
+                    cache_registry::FlushResult::Ok | cache_registry::FlushResult::Permanent => {
                         let mut gate = state.kv_next_flush_at.write().await;
                         *gate = None;
                     }
@@ -102,9 +101,13 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
             if pending_entries == 0 {
                 break;
             }
-            eprintln!(
+            let message = format!(
                 "Shutdown: flush timeout reached with {pending_entries} pending entries remaining"
             );
+            eprintln!("{message}");
+            if state.fail_on_cache_error {
+                return Err(anyhow!(message));
+            }
             break;
         }
 
@@ -112,6 +115,7 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) {
     }
 
     super::maintenance::flush_cache_ops_on_shutdown(state).await;
+    Ok(())
 }
 
 pub(super) async fn shutdown_signal(shutdown_requested: Arc<AtomicBool>) {

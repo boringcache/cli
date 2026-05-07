@@ -2,7 +2,6 @@ use super::*;
 
 pub(crate) enum FlushResult {
     Ok,
-    AcceptedContention,
     Conflict,
     Error,
     Permanent,
@@ -86,23 +85,14 @@ pub(crate) async fn flush_kv_index_with_mode(
             FlushResult::Ok
         }
         Err(FlushError::Conflict(msg)) => {
-            if matches!(flush_mode, FlushMode::Shutdown) && is_upload_in_progress_conflict(&msg) {
-                eprintln!(
-                    "KV batch flush: another upload is already publishing this cache; leaving local batch unpublished ({msg})"
-                );
-                cleanup_blob_files(&pending_blob_paths).await;
-                state.kv_last_put.store(0, Ordering::Release);
-                FlushResult::AcceptedContention
-            } else {
-                eprintln!("KV batch flush: skipped — tag conflict ({msg})");
-                let mut pending = state.kv_pending.write().await;
-                let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
-                drop(pending);
-                cleanup_paths(paths_to_cleanup).await;
-                let (base_ms, jitter_ms) = conflict_backoff_window(&msg);
-                set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
-                FlushResult::Conflict
-            }
+            eprintln!("KV batch flush: skipped — tag conflict ({msg})");
+            let mut pending = state.kv_pending.write().await;
+            let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
+            drop(pending);
+            cleanup_paths(paths_to_cleanup).await;
+            let (base_ms, jitter_ms) = conflict_backoff_window(&msg);
+            set_next_flush_at_with_jitter(state, base_ms, jitter_ms).await;
+            FlushResult::Conflict
         }
         Err(FlushError::Transient(msg)) => {
             eprintln!("KV batch flush failed: {msg}");
