@@ -18,6 +18,8 @@ Use `agent-working-contract.md` when implementing CLI behavior or test changes. 
 
 Launch review context lives in `../adr/0009-launch-maintenance-contract-and-performance-review.md`. It records the `.boringcache.toml` maintenance contract, cross-platform behavior, cache scope model, Docker helper boundary, action/web ownership, legacy surface review, and performance guardrails.
 
+Cross-surface complexity follow-up lives in `../../../skills/categories/coding-principles/performance-complexity-hotspots.md`. It records the current CLI and web/API places to keep out of accidental quadratic work.
+
 ## Status legend
 
 - `public-primary`: direct user-facing feature wired from the `src/cli/` module tree
