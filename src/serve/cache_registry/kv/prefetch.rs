@@ -368,7 +368,7 @@ pub(crate) async fn preload_single_blob(
     let mut retry_delay = std::time::Duration::from_millis(250);
     let mut retry_count = 0usize;
     for attempt in 1..=PREFETCH_BLOB_DOWNLOAD_ATTEMPTS {
-        match download_blob_to_cache(&state, &cache_entry_id, &blob, cached_url.as_deref()).await {
+        match prefetch_blob_to_cache(&state, &cache_entry_id, &blob, cached_url.as_deref()).await {
             Ok(_) => {
                 return Ok(StartupPrefetchBlobResult {
                     inserted: true,

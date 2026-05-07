@@ -38,8 +38,9 @@ The proxy selects a startup transfer profile from the restored entry:
    - `large_blobs`: average >= 8 MiB.
    - `machine_governor`: smaller tags, still capped by bytes in flight.
 4. Cap concurrency by object profile. For larger blobs, also cap by the normal bytes-in-flight target. For RTT-bound many-tiny CAS blobs, object latency is the bottleneck, so the profile uses a larger small-object burst budget and can reach the full small-object ceiling.
-5. Start many-tiny RTT-bound profiles at their selected ceiling; start larger adaptive profiles below the ceiling and only climb when throughput improves.
-6. Treat final failures, rate limits, and material retry pressure as backoff signals.
+5. During startup prewarm, let the profile's concurrency be the object-download gate. Do not also serialize it behind the generic on-demand download semaphore, because that turns a 2,000-way many-tiny prefetch plan back into ten object reads at a time.
+6. Start many-tiny RTT-bound profiles at their selected ceiling; start larger adaptive profiles below the ceiling and only climb when throughput improves.
+7. Treat final failures, rate limits, and material retry pressure as backoff signals.
 
 The normal target is 64 MiB in flight. The many-tiny RTT-bound profile gets a 128 MiB small-object burst budget because 1,000-2,000 tiny reads still carry modest bytes in flight, while avoiding thousands of serialized object round trips. That gives the intended behavior:
 

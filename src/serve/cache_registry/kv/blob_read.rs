@@ -100,6 +100,23 @@ pub(crate) async fn do_download_blob_to_cache(
     blob: &BlobDescriptor,
     cached_url: Option<&str>,
 ) -> Result<(BlobReadHandle, BlobReadSource), RegistryError> {
+    do_download_blob_to_cache_with_limiter(
+        state,
+        cache_entry_id,
+        blob,
+        cached_url,
+        BlobDownloadLimiter::Shared,
+    )
+    .await
+}
+
+async fn do_download_blob_to_cache_with_limiter(
+    state: &AppState,
+    cache_entry_id: &str,
+    blob: &BlobDescriptor,
+    cached_url: Option<&str>,
+    limiter: BlobDownloadLimiter,
+) -> Result<(BlobReadHandle, BlobReadSource), RegistryError> {
     if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
         return Ok((cache_handle, BlobReadSource::LocalCache));
     }
@@ -126,12 +143,17 @@ pub(crate) async fn do_download_blob_to_cache(
         }
     };
 
-    let _download_permit = state
-        .blob_download_semaphore
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| RegistryError::internal("Download semaphore closed"))?;
+    let _download_permit = match limiter {
+        BlobDownloadLimiter::Shared => Some(
+            state
+                .blob_download_semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| RegistryError::internal("Download semaphore closed"))?,
+        ),
+        BlobDownloadLimiter::CallerLimited => None,
+    };
 
     if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
         return Ok((cache_handle, BlobReadSource::LocalCache));
@@ -314,6 +336,7 @@ async fn download_blob_to_cache_internal(
     cache_entry_id: &str,
     blob: &BlobDescriptor,
     cached_url: Option<&str>,
+    limiter: BlobDownloadLimiter,
 ) -> Result<BlobReadHandle, RegistryError> {
     let started_at = std::time::Instant::now();
     if let Some(cache_handle) = state.blob_read_cache.get_handle(&blob.digest).await {
@@ -344,8 +367,14 @@ async fn download_blob_to_cache_internal(
                     return Ok(cache_handle);
                 }
 
-                let (cache_handle, source) =
-                    do_download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
+                let (cache_handle, source) = do_download_blob_to_cache_with_limiter(
+                    state,
+                    cache_entry_id,
+                    blob,
+                    cached_url,
+                    limiter,
+                )
+                .await?;
                 emit_blob_read_elapsed_metric(state, cache_entry_id, source, blob, started_at);
                 return Ok(cache_handle);
             }
@@ -397,5 +426,34 @@ pub(crate) async fn download_blob_to_cache(
     blob: &BlobDescriptor,
     cached_url: Option<&str>,
 ) -> Result<BlobReadHandle, RegistryError> {
-    download_blob_to_cache_internal(state, cache_entry_id, blob, cached_url).await
+    download_blob_to_cache_internal(
+        state,
+        cache_entry_id,
+        blob,
+        cached_url,
+        BlobDownloadLimiter::Shared,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BlobDownloadLimiter {
+    Shared,
+    CallerLimited,
+}
+
+pub(crate) async fn prefetch_blob_to_cache(
+    state: &AppState,
+    cache_entry_id: &str,
+    blob: &BlobDescriptor,
+    cached_url: Option<&str>,
+) -> Result<BlobReadHandle, RegistryError> {
+    download_blob_to_cache_internal(
+        state,
+        cache_entry_id,
+        blob,
+        cached_url,
+        BlobDownloadLimiter::CallerLimited,
+    )
+    .await
 }
