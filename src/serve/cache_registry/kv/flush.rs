@@ -53,13 +53,14 @@ pub(crate) async fn flush_kv_index_with_mode(
     let entry_count = pending_entries.len();
 
     let result = match do_flush(state, &pending_entries, &pending_blob_paths, flush_mode).await {
-        Ok((merged_entries, merged_blob_order, cache_entry_id)) => {
+        Ok((merged_entries, merged_blob_order, cache_entry_id, stable_publish)) => {
             {
                 let mut published = state.kv_published_index.write().await;
                 published.update(
                     merged_entries.into_iter().collect(),
                     merged_blob_order,
                     cache_entry_id.clone(),
+                    stable_publish,
                 );
             }
             {
@@ -106,8 +107,15 @@ pub(crate) async fn flush_kv_index_with_mode(
         }
         Err(FlushError::Permanent(msg)) => {
             eprintln!("KV batch flush dropped permanently: {msg}");
-            cleanup_blob_files(&pending_blob_paths).await;
-            state.kv_last_put.store(0, Ordering::Release);
+            if state.fail_on_cache_error {
+                let mut pending = state.kv_pending.write().await;
+                let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
+                drop(pending);
+                cleanup_paths(paths_to_cleanup).await;
+            } else {
+                cleanup_blob_files(&pending_blob_paths).await;
+                state.kv_last_put.store(0, Ordering::Release);
+            }
             FlushResult::Permanent
         }
     };
@@ -124,31 +132,73 @@ pub(crate) fn should_clear_flushing_after_flush(result: &FlushResult) -> bool {
     !matches!(result, FlushResult::Ok)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct KvFlushPublishPlan {
+    pub(crate) tag: String,
+    pub(crate) write_scope_tag: Option<String>,
+    pub(crate) stable: bool,
+}
+
+pub(crate) async fn kv_flush_publish_plan(
+    state: &AppState,
+    flush_mode: FlushMode,
+) -> KvFlushPublishPlan {
+    let write_scope_tag = kv_primary_write_scope_tag(state);
+    if flush_mode == FlushMode::Normal {
+        return KvFlushPublishPlan {
+            tag: kv_checkpoint_tag(state),
+            write_scope_tag,
+            stable: false,
+        };
+    }
+
+    KvFlushPublishPlan {
+        tag: kv_stable_publish_tag(state, write_scope_tag.as_deref()).await,
+        write_scope_tag,
+        stable: true,
+    }
+}
+
+pub(crate) fn kv_checkpoint_tag(state: &AppState) -> String {
+    kv_checkpoint_tag_for_values(&state.registry_root_tag, &state.cache_session_summary_id)
+}
+
+pub(crate) fn kv_checkpoint_tag_for_values(registry_root_tag: &str, session_id: &str) -> String {
+    let root = registry_root_tag.trim();
+    let source = format!("{root}:{session_id}");
+    let suffix = crate::cas_oci::sha256_hex(source.as_bytes());
+    format!("{root}_checkpoint_{}", &suffix[..16])
+}
+
+async fn kv_stable_publish_tag(state: &AppState, primary_write_scope_tag: Option<&str>) -> String {
+    if should_publish_kv_primary_human_tag(state, primary_write_scope_tag).await {
+        primary_write_scope_tag
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| state.registry_root_tag.trim().to_string())
+    } else {
+        state.registry_root_tag.trim().to_string()
+    }
+}
+
 pub(crate) async fn do_flush(
     state: &AppState,
     pending_entries: &BTreeMap<String, BlobDescriptor>,
     pending_blob_paths: &HashMap<String, PathBuf>,
-    _flush_mode: FlushMode,
+    flush_mode: FlushMode,
 ) -> Result<
     (
         BTreeMap<String, BlobDescriptor>,
         Vec<BlobDescriptor>,
         String,
+        bool,
     ),
     FlushError,
 > {
     let flush_started_at = std::time::Instant::now();
     let diagnostics = crate::serve::state::diagnostics_enabled();
-    let primary_write_scope_tag = kv_primary_write_scope_tag(state);
-    let publish_tag =
-        if should_publish_kv_primary_human_tag(state, primary_write_scope_tag.as_deref()).await {
-            primary_write_scope_tag
-                .clone()
-                .unwrap_or_else(|| state.registry_root_tag.trim().to_string())
-        } else {
-            state.registry_root_tag.trim().to_string()
-        };
-    let tag = publish_tag;
+    let publish_plan = kv_flush_publish_plan(state, flush_mode).await;
+    let primary_write_scope_tag = publish_plan.write_scope_tag.clone();
+    let tag = publish_plan.tag.clone();
 
     let (published_snapshot, published_blob_order) = {
         let published = state.kv_published_index.read().await;
@@ -371,12 +421,22 @@ pub(crate) async fn do_flush(
         };
         let confirm_outcome =
             confirm_kv_flush(state, &confirm_cache_entry_id, &confirm_request).await?;
-        let alias_count =
-            bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id, Some(&tag)).await?;
+        let alias_count = if publish_plan.stable {
+            bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id, Some(&tag)).await?
+        } else {
+            0
+        };
         if diagnostics {
             eprintln!(
-                "KV flush publish: tag={} cache_entry_id={} state=published alias_tags={}",
-                tag, confirm_outcome.cache_entry_id, alias_count
+                "KV flush publish: tag={} cache_entry_id={} state={} alias_tags={}",
+                tag,
+                confirm_outcome.cache_entry_id,
+                if publish_plan.stable {
+                    "stable"
+                } else {
+                    "checkpoint"
+                },
+                alias_count
             );
         }
         if diagnostics && alias_count > 0 {
@@ -391,7 +451,12 @@ pub(crate) async fn do_flush(
                 "KV flush: save_entry returned exists=true ({total_count} entries, {blob_count} blobs, digest={manifest_root_digest})"
             );
         }
-        return Ok((entries, merged_blob_order, save_response.cache_entry_id));
+        return Ok((
+            entries,
+            merged_blob_order,
+            save_response.cache_entry_id,
+            publish_plan.stable,
+        ));
     }
     if diagnostics {
         eprintln!(
@@ -498,12 +563,22 @@ pub(crate) async fn do_flush(
     .await?;
     let upload_stats = upload_stats_holder.lock().unwrap().clone();
 
-    let alias_count =
-        bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id, Some(&tag)).await?;
+    let alias_count = if publish_plan.stable {
+        bind_kv_alias_tags(state, &confirm_outcome.cache_entry_id, Some(&tag)).await?
+    } else {
+        0
+    };
     if diagnostics {
         eprintln!(
-            "KV flush publish: tag={} cache_entry_id={} state=published alias_tags={}",
-            tag, confirm_outcome.cache_entry_id, alias_count
+            "KV flush publish: tag={} cache_entry_id={} state={} alias_tags={}",
+            tag,
+            confirm_outcome.cache_entry_id,
+            if publish_plan.stable {
+                "stable"
+            } else {
+                "checkpoint"
+            },
+            alias_count
         );
     }
 
@@ -527,7 +602,12 @@ pub(crate) async fn do_flush(
         );
     }
 
-    Ok((entries, merged_blob_order, save_response.cache_entry_id))
+    Ok((
+        entries,
+        merged_blob_order,
+        save_response.cache_entry_id,
+        publish_plan.stable,
+    ))
 }
 
 type FilteredPendingEntries = (
@@ -630,6 +710,73 @@ pub(crate) async fn bind_kv_alias_tags(
             }
         }
     }
+    Ok(alias_count)
+}
+
+pub(crate) async fn promote_kv_published_checkpoint_on_shutdown(state: &AppState) -> FlushResult {
+    let cache_entry_id = {
+        let published = state.kv_published_index.read().await;
+        if published.is_stable() {
+            return FlushResult::Ok;
+        }
+
+        match published.cache_entry_id() {
+            Some(id) => id.to_string(),
+            None => return FlushResult::Ok,
+        }
+    };
+
+    match publish_kv_stable_tags_for_entry(state, &cache_entry_id).await {
+        Ok(alias_count) => {
+            {
+                let mut published = state.kv_published_index.write().await;
+                let entries = published.entries_snapshot();
+                let blob_order = published.unique_blobs();
+                published.update(
+                    entries.as_ref().clone(),
+                    blob_order,
+                    cache_entry_id.clone(),
+                    true,
+                );
+            }
+            if crate::serve::state::diagnostics_enabled() {
+                eprintln!(
+                    "KV shutdown publish: promoted checkpoint cache_entry_id={} alias_tags={}",
+                    cache_entry_id, alias_count
+                );
+            }
+            FlushResult::Ok
+        }
+        Err(error) => {
+            eprintln!("KV shutdown publish failed: {error:?}");
+            match error {
+                FlushError::Conflict(_) => FlushResult::Conflict,
+                FlushError::Transient(_) => FlushResult::Error,
+                FlushError::Permanent(_) => FlushResult::Permanent,
+            }
+        }
+    }
+}
+
+async fn publish_kv_stable_tags_for_entry(
+    state: &AppState,
+    cache_entry_id: &str,
+) -> Result<usize, FlushError> {
+    let primary_write_scope_tag = kv_primary_write_scope_tag(state);
+    let tag = kv_stable_publish_tag(state, primary_write_scope_tag.as_deref()).await;
+    state
+        .api_client
+        .publish_ready_tag(
+            &state.workspace,
+            &tag,
+            cache_entry_id,
+            primary_write_scope_tag.clone(),
+            "cas",
+        )
+        .await
+        .map_err(|error| classify_flush_error(&error, "stable publish failed"))?;
+
+    let alias_count = bind_kv_alias_tags(state, cache_entry_id, Some(&tag)).await?;
     Ok(alias_count)
 }
 

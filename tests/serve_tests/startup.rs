@@ -143,6 +143,7 @@ async fn test_kv_reads_wait_for_startup_prefetch_completion() {
                 size_bytes: payload.len() as u64,
             }],
             "entry-prefetched".to_string(),
+            true,
         );
     }
 
@@ -1020,6 +1021,7 @@ async fn test_proxy_status_reports_diagnostic_tag_visibility_while_draining() {
             std::collections::HashMap::new(),
             Vec::new(),
             "entry-123".to_string(),
+            true,
         );
     }
 

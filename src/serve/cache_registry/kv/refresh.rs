@@ -134,7 +134,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
     let count = entries.len();
     {
         let mut published = state.kv_published_index.write().await;
-        published.update(entries, blob_order, cache_entry_id.clone());
+        published.update(entries, blob_order, cache_entry_id.clone(), true);
     }
     clear_restore_tag_misses(state);
     if diagnostics {
@@ -241,7 +241,7 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
     let count = entries.len();
     {
         let mut published = state.kv_published_index.write().await;
-        published.update(entries, blob_order, cache_entry_id.clone());
+        published.update(entries, blob_order, cache_entry_id.clone(), true);
     }
     clear_restore_tag_misses(state);
     if diagnostics {

@@ -205,6 +205,7 @@ pub(crate) use kv::lookup_published_blob;
 pub(crate) use kv::maybe_refresh_published_index_for_lookup;
 pub(crate) use kv::poll_tag_version_loop;
 pub(crate) use kv::prefetch_manifest_blobs;
+pub(crate) use kv::promote_kv_published_checkpoint_on_shutdown;
 pub(crate) use kv::put_kv_object;
 pub(crate) use kv::put_kv_object_with_integrity;
 pub(crate) use kv::put_kv_object_with_options;

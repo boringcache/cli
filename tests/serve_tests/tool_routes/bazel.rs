@@ -392,6 +392,7 @@ async fn test_bazel_cas_get_ignores_published_digest_mismatch() {
                 size_bytes: mismatched_payload.len() as u64,
             }],
             "entry-bazel-mismatched-published".to_string(),
+            true,
         );
         published.set_download_url(
             mismatched_digest,

@@ -1137,6 +1137,7 @@ pub(crate) async fn prefetch_manifest_blobs(
                     entries.into_iter().collect(),
                     blob_order,
                     cache_entry_id.clone(),
+                    true,
                 );
             }
             clear_restore_tag_misses(state);

@@ -68,9 +68,12 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
                 pending.entry_count()
             };
             if pending_after_flush == 0 {
-                break;
+                if promote_checkpoint_if_needed(state).await? {
+                    break;
+                }
+            } else {
+                continue;
             }
-            continue;
         }
 
         let flush_guard = cache_registry::try_schedule_flush(state);
@@ -81,6 +84,13 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
                     cache_registry::FlushResult::Ok | cache_registry::FlushResult::Permanent => {
                         let mut gate = state.kv_next_flush_at.write().await;
                         *gate = None;
+                        if matches!(flush_result, cache_registry::FlushResult::Permanent)
+                            && state.fail_on_cache_error
+                        {
+                            return Err(anyhow!(
+                                "Shutdown: cache publish failed permanently; see proxy log for the backend error"
+                            ));
+                        }
                     }
                     cache_registry::FlushResult::Conflict | cache_registry::FlushResult::Error => {
                         let mut gate = state.kv_next_flush_at.write().await;
@@ -98,12 +108,21 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
                 let pending = state.kv_pending.read().await;
                 pending.entry_count()
             };
-            if pending_entries == 0 {
+            let checkpoint_unpromoted = {
+                let published = state.kv_published_index.read().await;
+                !published.is_stable() && published.cache_entry_id().is_some()
+            };
+            if pending_entries == 0 && !checkpoint_unpromoted {
                 break;
             }
-            let message = format!(
-                "Shutdown: flush timeout reached with {pending_entries} pending entries remaining"
-            );
+            let message = if checkpoint_unpromoted {
+                "Shutdown: checkpoint promotion timeout reached; latest cache was not made stable"
+                    .to_string()
+            } else {
+                format!(
+                    "Shutdown: flush timeout reached with {pending_entries} pending entries remaining"
+                )
+            };
             eprintln!("{message}");
             if state.fail_on_cache_error {
                 return Err(anyhow!(message));
@@ -116,6 +135,17 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
 
     super::maintenance::flush_cache_ops_on_shutdown(state).await;
     Ok(())
+}
+
+async fn promote_checkpoint_if_needed(state: &AppState) -> Result<bool> {
+    match cache_registry::promote_kv_published_checkpoint_on_shutdown(state).await {
+        cache_registry::FlushResult::Ok => Ok(true),
+        cache_registry::FlushResult::Permanent if state.fail_on_cache_error => Err(anyhow!(
+            "Shutdown: cache checkpoint could not be promoted; see proxy log for the backend error"
+        )),
+        cache_registry::FlushResult::Permanent => Ok(true),
+        cache_registry::FlushResult::Conflict | cache_registry::FlushResult::Error => Ok(false),
+    }
 }
 
 pub(super) async fn shutdown_signal(shutdown_requested: Arc<AtomicBool>) {

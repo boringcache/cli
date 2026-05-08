@@ -14,6 +14,7 @@ pub struct KvPublishedIndex {
     cache_entry_id: Option<String>,
     download_urls: HashMap<String, CachedUrl>,
     complete: bool,
+    stable: bool,
     last_refresh_at: Option<Instant>,
 }
 
@@ -23,6 +24,7 @@ impl KvPublishedIndex {
         entries: HashMap<String, BlobDescriptor>,
         blob_order: Vec<BlobDescriptor>,
         cache_entry_id: String,
+        stable: bool,
     ) {
         let now = Instant::now();
         let cache_entry_changed = self.cache_entry_id.as_deref() != Some(cache_entry_id.as_str());
@@ -31,6 +33,7 @@ impl KvPublishedIndex {
         self.entries = Arc::new(entries);
         self.blob_order = Arc::new(blob_order);
         self.cache_entry_id = Some(cache_entry_id);
+        self.stable = stable;
         if cache_entry_changed {
             self.download_urls.clear();
         } else {
@@ -49,6 +52,7 @@ impl KvPublishedIndex {
             self.cache_entry_id = Some(cache_entry_id);
             self.entries = Arc::new(HashMap::new());
             self.blob_order = Arc::new(Vec::new());
+            self.stable = true;
         }
 
         let entries = Arc::make_mut(&mut self.entries);
@@ -72,6 +76,7 @@ impl KvPublishedIndex {
         self.cache_entry_id = None;
         self.download_urls.clear();
         self.complete = true;
+        self.stable = true;
         self.last_refresh_at = Some(Instant::now());
     }
 
@@ -81,6 +86,7 @@ impl KvPublishedIndex {
         self.cache_entry_id = None;
         self.download_urls.clear();
         self.complete = false;
+        self.stable = true;
         self.last_refresh_at = None;
     }
 
@@ -156,6 +162,10 @@ impl KvPublishedIndex {
 
     pub fn is_complete(&self) -> bool {
         self.complete
+    }
+
+    pub fn is_stable(&self) -> bool {
+        self.stable
     }
 
     pub fn last_refresh_at(&self) -> Option<Instant> {

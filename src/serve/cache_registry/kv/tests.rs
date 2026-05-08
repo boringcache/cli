@@ -168,6 +168,23 @@ fn upload_in_progress_conflict_detector_is_narrow() {
 }
 
 #[test]
+fn checkpoint_tag_stays_under_registry_root_system_prefix() {
+    let root = crate::proxy::internal_registry_root_tag("grpc-bazel-remote-cache-rolling-main");
+    let checkpoint = kv_checkpoint_tag_for_values(&root, "proxy-summary-test");
+
+    assert!(checkpoint.starts_with(&format!("{root}_checkpoint_")));
+    assert!(server_cache_tag_name(&checkpoint));
+    assert_eq!(
+        checkpoint,
+        kv_checkpoint_tag_for_values(&root, "proxy-summary-test")
+    );
+    assert_ne!(
+        checkpoint,
+        kv_checkpoint_tag_for_values(&root, "other-session")
+    );
+}
+
+#[test]
 fn transient_backoff_window_is_longer_for_write_path_failures() {
     let (base, jitter) = transient_backoff_window("confirm failed: Server error (500)");
     assert_eq!(base, KV_TRANSIENT_WRITE_PATH_BACKOFF_MS);

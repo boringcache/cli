@@ -136,7 +136,12 @@ pub(crate) async fn refresh_published_index_for_lookup(
         } else if entries.is_empty() {
             published.set_empty();
         } else if let Some(cache_entry_id) = cache_entry_id {
-            published.update(entries.into_iter().collect(), blob_order, cache_entry_id);
+            published.update(
+                entries.into_iter().collect(),
+                blob_order,
+                cache_entry_id,
+                true,
+            );
         } else if published_entry_count > 0 {
             log::warn!(
                 "KV lookup refresh: backend returned entries without cache_entry_id; preserving in-memory index"

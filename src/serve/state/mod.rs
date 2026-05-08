@@ -599,6 +599,7 @@ mod tests {
             entries.clone(),
             entries.into_values().collect(),
             "cache-entry".to_string(),
+            true,
         );
         assert!(index.is_complete());
         assert!(index.last_refresh_at().is_some());
@@ -627,6 +628,7 @@ mod tests {
             entries.clone(),
             entries.values().cloned().collect(),
             "cache-entry".to_string(),
+            true,
         );
         index.set_download_url(digest.clone(), "https://example.com/blob".to_string());
         let snapshot = index.snapshot_download_urls();
@@ -640,6 +642,7 @@ mod tests {
             entries.clone(),
             entries.values().cloned().collect(),
             "cache-entry".to_string(),
+            true,
         );
         restored.restore_download_urls(snapshot.clone(), std::time::Duration::from_secs(30));
         assert_eq!(
@@ -652,6 +655,7 @@ mod tests {
             entries.clone(),
             entries.values().cloned().collect(),
             "cache-entry".to_string(),
+            true,
         );
         expired.restore_download_urls(snapshot, DOWNLOAD_URL_TTL);
         assert!(expired.download_url(&digest).is_none());
