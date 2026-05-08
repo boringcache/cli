@@ -28,6 +28,10 @@ This file covers the archive/CAS lifecycle and the read/admin/reporting commands
 | Miss reports | `misses [WORKSPACE]` with `--period`, `--limit`, `--page`, `--json` | `public-primary`, `lightly-used` | `src/commands/cache/misses.rs` | `command_support::resolve_workspace`, `ApiClient`, status render helpers | `tests/integration_tests.rs`, unit tests in `src/commands/cache/misses.rs` | Public but thinly documented. The human-readable report shows warm hit rate, actionable recurring versus first-seen misses, and excluded seed/prewarm traffic when internal/benchmark labels exist; normal proxy runs rely on the automatically attached cache target rather than asking users to label cold/warm phases. |
 | Tag reports | `tags [WORKSPACE]` with `--filter`, `--limit`, `--page`, `--json`; hidden compatibility `--all` is a no-op | `public-primary`, `lightly-used` | `src/commands/cache/tags.rs` | `command_support::resolve_workspace`, `ApiClient`, status render helpers, `progress::format_bytes` | `tests/integration_tests.rs`, unit tests in `src/commands/cache/tags.rs` | Public tag reports show named tags only; raw/internal tag review belongs to the Rails admin workspace audit |
 
+## CI lifecycle gate
+
+CLI CI now runs an explicit `Run core cache path contracts` step after the timed build/test pass. It protects strict pending-save behavior for archive and CAS saves plus proxy shutdown retry behavior. If this gate fails, treat it as a product lifecycle regression rather than a generic test failure: `--fail-on-cache-error` must surface unresolved pending writes, and proxy-backed native cache runs must not silently discard or hide final publish state.
+
 ## Cross-cutting lifecycle modules
 
 | Module family | Used by | Why it matters |

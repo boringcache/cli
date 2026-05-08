@@ -86,6 +86,14 @@ jobs:
             "${COMPILE_REQUESTS}" "${CACHE_HITS}" "${CACHE_MISSES}" "${RUST_HIT_RATE}" \
             > benchmark-results/boringcache-stats.csv
 
+      - name: Run core cache path contracts
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          cargo test --test api_behavior_tests test_save_fail_on_cache_error_fails_on_pending_archive_upload
+          cargo test --test api_behavior_tests test_save_fail_on_cache_error_fails_on_pending_cas_upload
+          cargo test --test run_proxy_e2e_tests test_run_proxy_shutdown_retries_upload_in_progress_contention
+
       - name: Check formatting
         run: cargo fmt -- --check
 
