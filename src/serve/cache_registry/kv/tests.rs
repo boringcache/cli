@@ -199,6 +199,15 @@ fn classify_flush_error_treats_bad_request_as_permanent() {
 }
 
 #[test]
+fn classify_flush_error_treats_server_returned_bad_request_as_permanent() {
+    let error = anyhow::anyhow!(
+        "Server returned 400 Bad Request for https://api.example.test: cache_entry must be pending or ready"
+    );
+    let classified = classify_flush_error(&error, "stable publish failed");
+    assert!(matches!(classified, FlushError::Permanent(_)));
+}
+
+#[test]
 fn kv_confirm_retry_delay_is_capped() {
     assert_eq!(
         kv_confirm_retry_delay(1),

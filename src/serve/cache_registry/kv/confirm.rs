@@ -102,6 +102,7 @@ pub(crate) fn classify_flush_error(error: &anyhow::Error, context: &str) -> Flus
         || lower.contains("invalid or expired token")
         || lower.contains("access forbidden")
         || lower.contains("workspace not found")
+        || lower.contains("cache_entry must be pending or ready")
         || lower.contains("unprocessable");
     if permanent_status || permanent_hint {
         return FlushError::Permanent(message);
@@ -164,5 +165,6 @@ pub(crate) fn has_status_code(lower: &str, code: u16) -> bool {
     let code = code.to_string();
     lower.contains(&format!("http {code}"))
         || lower.contains(&format!("status {code}"))
+        || lower.contains(&format!("returned {code}"))
         || lower.contains(&format!("({code})"))
 }
