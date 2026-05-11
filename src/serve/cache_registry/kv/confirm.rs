@@ -87,6 +87,10 @@ pub(crate) fn classify_flush_error(error: &anyhow::Error, context: &str) -> Flus
         return FlushError::Transient(message);
     }
 
+    if edge_blob_url_planning_bad_request(&lower) {
+        return FlushError::Transient(message);
+    }
+
     let permanent_status = has_status_code(&lower, 400)
         || has_status_code(&lower, 401)
         || has_status_code(&lower, 403)
@@ -109,6 +113,14 @@ pub(crate) fn classify_flush_error(error: &anyhow::Error, context: &str) -> Flus
     }
 
     FlushError::Transient(message)
+}
+
+fn edge_blob_url_planning_bad_request(lower: &str) -> bool {
+    has_status_code(lower, 400)
+        && (lower.contains("/caches/blobs/stage") || lower.contains("/caches/blobs/download-urls"))
+        && (lower.contains("<html")
+            || lower.contains("<title>400 bad request</title>")
+            || lower.contains("nginx"))
 }
 
 pub(crate) async fn confirm_kv_flush(

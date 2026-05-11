@@ -23,7 +23,8 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 const BLOB_CHECK_BATCH_MAX: usize = 10_000;
-const BLOB_URL_BATCH_MAX: usize = 2_000;
+const BLOB_DOWNLOAD_URL_BATCH_MAX: usize = 2_000;
+const BLOB_UPLOAD_URL_BATCH_MAX: usize = 500;
 const BLOB_METRIC_ENDPOINT_OPERATION_CHECK: &str = "cache_blobs_check";
 const BLOB_METRIC_ENDPOINT_OPERATION_UPLOAD_URLS: &str = "cache_blobs_upload_urls";
 const BLOB_METRIC_ENDPOINT_OPERATION_DOWNLOAD_URLS: &str = "cache_blobs_download_urls";
@@ -373,7 +374,11 @@ fn blob_check_batch_max() -> usize {
 }
 
 pub(crate) fn blob_url_batch_max() -> usize {
-    BLOB_URL_BATCH_MAX
+    BLOB_DOWNLOAD_URL_BATCH_MAX
+}
+
+pub(crate) fn blob_upload_url_batch_max() -> usize {
+    BLOB_UPLOAD_URL_BATCH_MAX
 }
 
 fn blob_check_batch_concurrency(chunk_count: usize) -> usize {

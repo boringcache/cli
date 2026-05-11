@@ -55,7 +55,8 @@ fn test_api_batch_concurrency_is_bounded() {
 #[test]
 fn test_blob_batch_maxes_use_fixed_defaults() {
     assert_eq!(blob_check_batch_max(), BLOB_CHECK_BATCH_MAX);
-    assert_eq!(blob_url_batch_max(), BLOB_URL_BATCH_MAX);
+    assert_eq!(blob_url_batch_max(), BLOB_DOWNLOAD_URL_BATCH_MAX);
+    assert_eq!(blob_upload_url_batch_max(), BLOB_UPLOAD_URL_BATCH_MAX);
 }
 
 #[test]
@@ -632,7 +633,7 @@ async fn test_blob_upload_urls_batches_large_requests() {
     let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
         .expect("client should initialize");
 
-    let blobs = (0..(BLOB_URL_BATCH_MAX + 1))
+    let blobs = (0..(BLOB_UPLOAD_URL_BATCH_MAX + 1))
         .map(|index| cache::BlobDescriptor {
             digest: digest_for(index),
             size_bytes: 1,
@@ -745,7 +746,7 @@ async fn test_blob_download_urls_batches_large_requests() {
     let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
         .expect("client should initialize");
 
-    let blobs = (0..(BLOB_URL_BATCH_MAX + 1))
+    let blobs = (0..(BLOB_DOWNLOAD_URL_BATCH_MAX + 1))
         .map(|index| cache::BlobDescriptor {
             digest: digest_for(index),
             size_bytes: 1,

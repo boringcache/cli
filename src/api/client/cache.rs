@@ -232,7 +232,7 @@ impl ApiClient {
         } else {
             Some(cache_entry_id.to_string())
         };
-        let batch_max = blob_url_batch_max();
+        let batch_max = blob_upload_url_batch_max();
         let chunk_count = blobs.len().div_ceil(batch_max);
         let batch_count = chunk_count as u64;
         if chunk_count == 1 {

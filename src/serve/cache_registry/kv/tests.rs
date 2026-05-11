@@ -208,6 +208,24 @@ fn classify_flush_error_treats_server_returned_bad_request_as_permanent() {
 }
 
 #[test]
+fn classify_flush_error_treats_edge_blob_stage_bad_request_as_transient() {
+    let error = anyhow::anyhow!(
+        "HTTP 400 Bad Request from https://api.boringcache.com/v2/workspaces/ns/ws/caches/blobs/stage: <html><head><title>400 Bad Request</title></head><body><center>nginx</center></body></html>"
+    );
+    let classified = classify_flush_error(&error, "blob upload failed");
+    assert!(matches!(classified, FlushError::Transient(_)));
+}
+
+#[test]
+fn classify_flush_error_treats_edge_blob_download_urls_bad_request_as_transient() {
+    let error = anyhow::anyhow!(
+        "HTTP 400 Bad Request from https://api.boringcache.com/v2/workspaces/ns/ws/caches/blobs/download-urls: <html><head><title>400 Bad Request</title></head><body><center>nginx</center></body></html>"
+    );
+    let classified = classify_flush_error(&error, "blob URL planning failed");
+    assert!(matches!(classified, FlushError::Transient(_)));
+}
+
+#[test]
 fn kv_confirm_retry_delay_is_capped() {
     assert_eq!(
         kv_confirm_retry_delay(1),

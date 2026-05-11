@@ -106,13 +106,16 @@ pub(crate) async fn flush_kv_index_with_mode(
             FlushResult::Error
         }
         Err(FlushError::Permanent(msg)) => {
-            eprintln!("KV batch flush dropped permanently: {msg}");
             if state.fail_on_cache_error {
+                eprintln!(
+                    "KV batch flush failed permanently; restored pending batch for strict shutdown retry: {msg}"
+                );
                 let mut pending = state.kv_pending.write().await;
                 let paths_to_cleanup = pending.restore(pending_entries, pending_blob_paths);
                 drop(pending);
                 cleanup_paths(paths_to_cleanup).await;
             } else {
+                eprintln!("KV batch flush dropped permanently: {msg}");
                 cleanup_blob_files(&pending_blob_paths).await;
                 state.kv_last_put.store(0, Ordering::Release);
             }
