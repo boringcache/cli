@@ -1088,10 +1088,22 @@ fn startup_prefetch_concurrency_caps_large_blobs() {
 
 #[test]
 fn startup_prefetch_concurrency_caps_medium_blobs() {
-    let plan = adaptive_startup_prefetch_concurrency(1_000, false, 1_024, 1_024 * 2 * 1024 * 1024);
+    let plan = adaptive_startup_prefetch_concurrency(1_000, false, 128, 128 * 2 * 1024 * 1024);
 
     assert_eq!(plan.effective_concurrency, 32);
+    assert_eq!(plan.initial_concurrency, 32);
+    assert!(!plan.adaptive);
     assert_eq!(plan.reason, "medium_blobs");
+}
+
+#[test]
+fn startup_prefetch_concurrency_uses_larger_budget_for_many_medium_blobs() {
+    let plan = adaptive_startup_prefetch_concurrency(1_000, false, 1_024, 1_024 * 2 * 1024 * 1024);
+
+    assert_eq!(plan.effective_concurrency, 96);
+    assert_eq!(plan.initial_concurrency, 96);
+    assert!(plan.adaptive);
+    assert_eq!(plan.reason, "many_medium_blobs_io_bound");
 }
 
 #[test]
