@@ -81,6 +81,7 @@ async fn test_manifest_hit_returns_decoded_index_json() {
     let download_urls_request = json!({
         "cache_entry_id": "entry-123",
         "verify_storage": true,
+        "live_storage": true,
         "blobs": [
             {"digest": blob_digest, "size_bytes": 5000}
         ]
@@ -177,6 +178,7 @@ async fn test_manifest_misses_when_prefetch_batch_reports_missing_blobs() {
     let batch_request = json!({
         "cache_entry_id": "entry-123",
         "verify_storage": true,
+        "live_storage": true,
         "blobs": [
             {"digest": blob_digest, "size_bytes": 5000}
         ]
@@ -451,6 +453,7 @@ async fn test_blob_get_refreshes_stale_locator_url_after_manifest_return() {
     let batch_request = json!({
         "cache_entry_id": "entry-refresh",
         "verify_storage": true,
+        "live_storage": true,
         "blobs": [
             {"digest": blob_a, "size_bytes": blob_a_content.len() as u64},
             {"digest": blob_b, "size_bytes": 2048}
@@ -1201,6 +1204,7 @@ async fn test_blob_head_after_manifest_resolution_uses_remote_existence_check() 
     let download_urls_request = json!({
         "cache_entry_id": "entry-head-check",
         "verify_storage": true,
+        "live_storage": true,
         "blobs": [
             {"digest": blob_digest, "size_bytes": blob_size}
         ]
