@@ -6,7 +6,7 @@ use crate::api::ApiClient;
 use crate::api::models::cache::{CompleteMultipartRequest, SaveRequest};
 use crate::ci_detection::{CiRunContext, CiSourceRefType, detect_ci_context};
 use crate::manifest::ManifestFile;
-use crate::multipart_upload::{upload_via_part_urls, upload_via_single_url};
+use crate::multipart_upload::{upload_via_part_urls_with_concurrency, upload_via_single_url};
 use crate::progress::{ProgressSession, Summary, TransferProgress};
 use crate::telemetry::StorageMetrics;
 use crate::ui;
@@ -276,6 +276,7 @@ pub(crate) async fn upload_archive_multipart(
     archive_path: &std::path::Path,
     part_urls: &[String],
     upload_id: &str,
+    concurrency: usize,
     progress: &TransferProgress,
     transfer_client: &reqwest::Client,
     api_client: &ApiClient,
@@ -290,12 +291,13 @@ pub(crate) async fn upload_archive_multipart(
         upload_id
     );
 
-    let (uploaded_parts, storage_metrics) = upload_via_part_urls(
+    let (uploaded_parts, storage_metrics) = upload_via_part_urls_with_concurrency(
         archive_path,
         part_urls,
         progress,
         transfer_client,
         upload_headers,
+        concurrency,
     )
     .await?;
 

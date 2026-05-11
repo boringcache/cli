@@ -198,7 +198,7 @@ pub(super) async fn initial_restore_archive(
     let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
     let archive_path = temp_dir.path().join("archive.tar.zst");
 
-    let _bytes_downloaded = crate::commands::restore::download_archive(
+    let _download_outcome = crate::commands::restore::download_archive(
         client,
         archive_url,
         &archive_path,
@@ -608,13 +608,23 @@ pub(super) async fn sync_to_remote_archive(
     let progress = crate::progress::TransferProgress::new_noop();
 
     let archive_etag = if let Some(upload_id) = save_response.get_upload_id() {
+        let upload_plan =
+            crate::cache::archive_transfer::plan_upload(final_compressed_size, archive_urls.len());
+        if verbose {
+            ui::info(&format!(
+                "  Using multipart upload with {} parts, {} workers",
+                archive_urls.len(),
+                upload_plan.concurrency
+            ));
+        }
         let (uploaded_parts, _storage_metrics) =
-            crate::cache::multipart_upload::upload_via_part_urls(
+            crate::cache::multipart_upload::upload_via_part_urls_with_concurrency(
                 final_archive_path.as_ref(),
                 archive_urls,
                 &progress,
                 transfer_client,
                 &save_response.upload_headers,
+                upload_plan.concurrency,
             )
             .await?;
 

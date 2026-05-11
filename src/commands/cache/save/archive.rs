@@ -163,6 +163,7 @@ pub(super) async fn save_single_archive_entry(
     )?;
     let overall_started = Instant::now();
     let mut upload_duration: Option<Duration> = None;
+    let mut archive_upload_plan: Option<crate::cache::archive_transfer::ArchiveTransferPlan> = None;
 
     let step1 = session.start_step("Building manifest".to_string(), None)?;
     let path_buf = PathBuf::from(&path);
@@ -732,6 +733,11 @@ pub(super) async fn save_single_archive_entry(
 
         loop {
             let archive_urls = save_response.get_archive_urls().to_vec();
+            let upload_plan = crate::cache::archive_transfer::plan_upload(
+                total_compressed_size,
+                archive_urls.len(),
+            );
+            archive_upload_plan = Some(upload_plan.clone());
             let progress = TransferProgress::new(
                 reporter.clone(),
                 session_id.clone(),
@@ -762,7 +768,11 @@ pub(super) async fn save_single_archive_entry(
                 if verbose {
                     progress_info(
                         &reporter,
-                        format!("  Using multipart upload with {} parts", archive_urls.len()),
+                        format!(
+                            "  Using multipart upload with {} parts, {} workers",
+                            archive_urls.len(),
+                            upload_plan.concurrency
+                        ),
                     );
                 }
 
@@ -770,6 +780,7 @@ pub(super) async fn save_single_archive_entry(
                     final_archive_path.as_ref(),
                     &archive_urls,
                     upload_id,
+                    upload_plan.concurrency,
                     &progress,
                     api_client.transfer_client(),
                     &api_client,
@@ -781,6 +792,9 @@ pub(super) async fn save_single_archive_entry(
                 .with_context(|| format!("Failed to upload archive parts for {}", tag))
             } else {
                 log::info!("Using single-part upload");
+                if verbose {
+                    progress_info(&reporter, "  Using single-part archive upload");
+                }
                 upload_archive_file(
                     final_archive_path.as_ref(),
                     &archive_urls[0],
@@ -945,11 +959,18 @@ pub(super) async fn save_single_archive_entry(
         uncompressed_size: total_uncompressed_size,
         compressed_size: total_compressed_size,
         file_count,
-        part_count: if save_response.get_upload_id().is_some() {
-            Some(save_response.get_archive_urls().len() as u32)
-        } else {
-            None
-        },
+        part_count: archive_upload_plan
+            .as_ref()
+            .and_then(|plan| plan.part_count()),
+        part_size_mb: archive_upload_plan
+            .as_ref()
+            .and_then(|plan| plan.part_size_mb()),
+        concurrency_level: archive_upload_plan
+            .as_ref()
+            .and_then(|plan| plan.concurrency_level()),
+        streaming_enabled: archive_upload_plan
+            .as_ref()
+            .map(|plan| plan.mode == "stream"),
         storage_metrics: upload_storage_metrics,
     }
     .send(&api_client, &workspace)

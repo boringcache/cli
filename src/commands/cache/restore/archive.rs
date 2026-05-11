@@ -241,7 +241,7 @@ pub(super) async fn process_restore_archive(
         archive_size
     );
 
-    let (bytes_downloaded, download_storage_metrics) = download_archive(
+    let download_outcome = download_archive(
         &client,
         &archive_url,
         &archive_file_path,
@@ -250,6 +250,9 @@ pub(super) async fn process_restore_archive(
     )
     .await
     .context("Archive download failed")?;
+    let bytes_downloaded = download_outcome.bytes_downloaded;
+    let download_storage_metrics = download_outcome.storage_metrics;
+    let archive_transfer_plan = download_outcome.transfer_plan;
 
     if let Some(expected_archive_digest) = manifest
         .archive
@@ -444,11 +447,12 @@ pub(super) async fn process_restore_archive(
             Ok(RestoreOutcome::Restored {
                 tag: hit.tag.clone(),
                 manifest_root_digest: hit.manifest_root_digest.clone(),
-                storage_metrics: download_storage_metrics,
+                storage_metrics: Box::new(download_storage_metrics),
                 total_duration_ms,
                 download_duration_ms,
                 extract_duration_ms,
                 bytes_downloaded,
+                archive_transfer_plan: Some(archive_transfer_plan),
             })
         }
         Err(e) => {

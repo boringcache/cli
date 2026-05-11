@@ -180,10 +180,11 @@ pub(super) async fn process_restore_file(
     Ok(RestoreOutcome::Restored {
         tag: hit.tag.clone(),
         manifest_root_digest: Some(resolved_manifest_root_digest),
-        storage_metrics: download_storage_metrics,
+        storage_metrics: Box::new(download_storage_metrics),
         total_duration_ms,
         download_duration_ms,
         extract_duration_ms,
         bytes_downloaded,
+        archive_transfer_plan: None,
     })
 }

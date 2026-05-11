@@ -429,6 +429,9 @@ where
         } else {
             None
         },
+        part_size_mb: None,
+        concurrency_level: None,
+        streaming_enabled: None,
         storage_metrics: upload_storage_metrics,
     }
     .send(&api_client, &workspace)

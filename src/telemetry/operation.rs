@@ -12,6 +12,9 @@ pub struct SaveMetrics {
     pub compressed_size: u64,
     pub file_count: u32,
     pub part_count: Option<u32>,
+    pub part_size_mb: Option<u32>,
+    pub concurrency_level: Option<u32>,
+    pub streaming_enabled: Option<bool>,
     pub storage_metrics: StorageMetrics,
 }
 
@@ -22,6 +25,10 @@ pub struct RestoreMetrics {
     pub download_duration_ms: u64,
     pub extract_duration_ms: u64,
     pub compressed_size: u64,
+    pub part_count: Option<u32>,
+    pub part_size_mb: Option<u32>,
+    pub concurrency_level: Option<u32>,
+    pub streaming_enabled: Option<bool>,
     pub storage_metrics: StorageMetrics,
 }
 
@@ -38,6 +45,9 @@ struct OperationMetrics {
     compressed_size: Option<u64>,
     file_count: Option<u32>,
     part_count: Option<u32>,
+    part_size_mb: Option<u32>,
+    concurrency_level: Option<u32>,
+    streaming_enabled: Option<bool>,
     storage_metrics: StorageMetrics,
 }
 
@@ -56,6 +66,9 @@ impl From<SaveMetrics> for OperationMetrics {
             compressed_size: Some(m.compressed_size),
             file_count: Some(m.file_count),
             part_count: m.part_count,
+            part_size_mb: m.part_size_mb,
+            concurrency_level: m.concurrency_level,
+            streaming_enabled: m.streaming_enabled,
             storage_metrics: m.storage_metrics,
         }
     }
@@ -75,7 +88,10 @@ impl From<RestoreMetrics> for OperationMetrics {
             uncompressed_size: None,
             compressed_size: Some(m.compressed_size),
             file_count: None,
-            part_count: None,
+            part_count: m.part_count,
+            part_size_mb: m.part_size_mb,
+            concurrency_level: m.concurrency_level,
+            streaming_enabled: m.streaming_enabled,
             storage_metrics: m.storage_metrics,
         }
     }
@@ -134,9 +150,9 @@ impl OperationMetrics {
             disk_speed_estimate_mb_s: None,
             concurrent_operations: None,
             buffer_size_mb: None,
-            part_size_mb: None,
-            concurrency_level: None,
-            streaming_enabled: None,
+            part_size_mb: self.part_size_mb,
+            concurrency_level: self.concurrency_level,
+            streaming_enabled: self.streaming_enabled,
             compression_level: None,
             compression_threads: None,
             benchmark_throughput_mb_s: None,

@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod archive;
+pub(crate) mod archive_transfer;
 pub mod cas_file;
 pub mod cas_oci;
 pub mod cas_publish;

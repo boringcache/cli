@@ -404,6 +404,26 @@ pub(crate) async fn download_range(
     let storage_metrics = StorageMetrics::from_headers(response.headers());
 
     let status = response.status();
+    if status != reqwest::StatusCode::PARTIAL_CONTENT {
+        let error_body = response.text().await.unwrap_or_default();
+        log::error!(
+            "Download range {}-{} returned HTTP {} instead of 206 Partial Content - {}",
+            start,
+            end,
+            status,
+            error_body
+        );
+        anyhow::bail!(
+            "Range download expected HTTP 206 Partial Content, got HTTP {} - {}",
+            status,
+            if error_body.is_empty() {
+                status.canonical_reason().unwrap_or("Unknown error")
+            } else {
+                &error_body
+            }
+        );
+    }
+
     if !status.is_success() {
         let error_body = response.text().await.unwrap_or_default();
         log::error!(

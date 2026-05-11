@@ -622,6 +622,7 @@ async fn execute_batch_restore_inner(
                 download_duration_ms,
                 extract_duration_ms,
                 bytes_downloaded,
+                archive_transfer_plan,
             })) => {
                 crate::telemetry::RestoreMetrics {
                     tag: tag.clone(),
@@ -630,7 +631,19 @@ async fn execute_batch_restore_inner(
                     download_duration_ms,
                     extract_duration_ms,
                     compressed_size: bytes_downloaded,
-                    storage_metrics,
+                    storage_metrics: *storage_metrics,
+                    concurrency_level: archive_transfer_plan
+                        .as_ref()
+                        .and_then(|plan| plan.concurrency_level()),
+                    part_size_mb: archive_transfer_plan
+                        .as_ref()
+                        .and_then(|plan| plan.part_size_mb()),
+                    part_count: archive_transfer_plan
+                        .as_ref()
+                        .and_then(|plan| plan.part_count()),
+                    streaming_enabled: archive_transfer_plan
+                        .as_ref()
+                        .map(|plan| plan.mode == "stream"),
                 }
                 .send(&api_client, &workspace)
                 .await;
@@ -844,11 +857,12 @@ enum RestoreOutcome {
     Restored {
         tag: String,
         manifest_root_digest: Option<String>,
-        storage_metrics: StorageMetrics,
+        storage_metrics: Box<StorageMetrics>,
         total_duration_ms: u64,
         download_duration_ms: u64,
         extract_duration_ms: u64,
         bytes_downloaded: u64,
+        archive_transfer_plan: Option<crate::cache::archive_transfer::ArchiveTransferPlan>,
     },
     Skipped {
         tag: String,
@@ -1001,14 +1015,14 @@ async fn ensure_empty_target(path: &str) -> Result<EnsureTargetStatus> {
     Ok(EnsureTargetStatus::Ready)
 }
 
-const PARALLEL_DOWNLOAD_THRESHOLD: u64 = 50 * 1024 * 1024;
-
-fn calculate_download_concurrency() -> usize {
-    crate::cas_transport::calculate_download_concurrency()
-}
-
 fn download_buffer_size() -> usize {
     crate::cas_transport::download_buffer_size()
+}
+
+pub(crate) struct ArchiveDownloadOutcome {
+    pub bytes_downloaded: u64,
+    pub storage_metrics: StorageMetrics,
+    pub transfer_plan: crate::cache::archive_transfer::ArchiveTransferPlan,
 }
 
 pub(crate) async fn probe_archive_size(client: &reqwest::Client, url: &str) -> Option<u64> {
@@ -1055,24 +1069,48 @@ pub(crate) async fn download_archive(
     file_path: &Path,
     total_size: u64,
     progress: Option<&TransferProgress>,
-) -> Result<(u64, StorageMetrics)> {
-    if total_size < PARALLEL_DOWNLOAD_THRESHOLD {
-        return download_sequential(client, url, file_path, progress).await;
+) -> Result<ArchiveDownloadOutcome> {
+    let should_probe_range =
+        total_size >= crate::cache::archive_transfer::parallel_download_threshold();
+    let range_supported = if should_probe_range {
+        probe_archive_range_support(client, url).await
+    } else {
+        false
+    };
+    let plan = crate::cache::archive_transfer::plan_download(total_size, range_supported);
+
+    if plan.mode == "stream" {
+        log::info!(
+            "Archive download plan: streaming {}, profile={} ({})",
+            crate::progress::format_bytes(total_size),
+            plan.profile,
+            plan.reason
+        );
+        let (bytes_downloaded, storage_metrics) =
+            download_sequential(client, url, file_path, progress).await?;
+        return Ok(ArchiveDownloadOutcome {
+            bytes_downloaded,
+            storage_metrics,
+            transfer_plan: plan,
+        });
     }
 
-    let concurrency = calculate_download_concurrency();
-    let min_part_size: u64 = 8 * 1024 * 1024;
-    let max_part_size: u64 = 64 * 1024 * 1024;
-    let target_parts = (concurrency * 2).max(8) as u64;
-    let part_size = (total_size / target_parts).clamp(min_part_size, max_part_size);
-    let num_parts = total_size.div_ceil(part_size);
+    let concurrency = plan.concurrency;
+    let part_size = plan
+        .part_size
+        .ok_or_else(|| anyhow!("ranged archive plan missing part size"))?;
+    let num_parts = plan
+        .part_count
+        .ok_or_else(|| anyhow!("ranged archive plan missing part count"))?;
 
     log::info!(
-        "Parallel download: {} in {} parts ({} each), {} connections",
+        "Archive download plan: {} in {} parts ({} each), {} connections, profile={} ({})",
         crate::progress::format_bytes(total_size),
         num_parts,
         crate::progress::format_bytes(part_size),
-        concurrency
+        concurrency,
+        plan.profile,
+        plan.reason
     );
 
     let file = tokio::fs::OpenOptions::new()
@@ -1158,7 +1196,42 @@ pub(crate) async fn download_archive(
         );
     }
 
-    Ok((total_downloaded, first_storage_metrics.unwrap_or_default()))
+    Ok(ArchiveDownloadOutcome {
+        bytes_downloaded: total_downloaded,
+        storage_metrics: first_storage_metrics.unwrap_or_default(),
+        transfer_plan: plan,
+    })
+}
+
+async fn probe_archive_range_support(client: &reqwest::Client, url: &str) -> bool {
+    let response = match send_transfer_request_with_retry("Archive range probe", || async {
+        Ok(client
+            .get(url)
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .send()
+            .await?)
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            log::warn!("Archive range probe failed; falling back to streaming download: {err}");
+            return false;
+        }
+    };
+
+    if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        return true;
+    }
+
+    if !response.status().is_success() {
+        log::warn!(
+            "Archive range probe returned HTTP {}; falling back to streaming download",
+            response.status()
+        );
+    }
+
+    false
 }
 
 async fn download_sequential(

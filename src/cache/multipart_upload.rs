@@ -155,20 +155,20 @@ pub async fn upload_via_single_url_range(
     Ok((extract_etag(&response), storage_metrics))
 }
 
-pub async fn upload_via_part_urls(
+pub async fn upload_via_part_urls_with_concurrency(
     archive_path: &Path,
     part_urls: &[String],
     progress: &TransferProgress,
     client: &Client,
     upload_headers: &HashMap<String, String>,
+    concurrency: usize,
 ) -> Result<(Vec<MultipartPart>, StorageMetrics)> {
     anyhow::ensure!(!part_urls.is_empty(), "multipart upload URLs missing");
 
     let file_size = tokio::fs::metadata(archive_path).await?.len();
     let part_size = file_size.div_ceil(part_urls.len() as u64);
 
-    let concurrency = calculate_upload_concurrency();
-    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
 
     let archive_path = archive_path.to_path_buf();
     let progress = progress.clone();
@@ -378,31 +378,6 @@ fn chunk_size_for_system() -> usize {
 
 fn has_header(headers: &HashMap<String, String>, target: &str) -> bool {
     headers.keys().any(|key| key.eq_ignore_ascii_case(target))
-}
-
-fn calculate_upload_concurrency() -> usize {
-    use crate::platform::resources::{DiskType, MemoryStrategy, SystemResources};
-
-    let resources = SystemResources::detect();
-
-    let base_concurrency: usize = match resources.memory_strategy {
-        MemoryStrategy::Balanced => 2,
-        MemoryStrategy::Aggressive => 3,
-        MemoryStrategy::UltraAggressive => 4,
-    };
-
-    let disk_adjusted: usize = match resources.disk_type {
-        DiskType::NvmeSsd => base_concurrency + 1,
-        DiskType::SataSsd => base_concurrency,
-    };
-
-    let cpu_adjusted: usize = if resources.cpu_load_percent > 75.0 {
-        disk_adjusted.saturating_sub(1).max(1)
-    } else {
-        disk_adjusted
-    };
-
-    cpu_adjusted.min(6)
 }
 
 #[cfg(test)]

@@ -128,6 +128,7 @@ Owner: cache lifecycle support (`support-primary`)
 - `src/cache/mod.rs`
 - `src/cache/adapter.rs`
 - `src/cache/archive.rs`
+- `src/cache/archive_transfer.rs`
 - `src/cache/cas_file.rs`
 - `src/cache/cas_oci.rs`
 - `src/cache/cas_publish.rs`
