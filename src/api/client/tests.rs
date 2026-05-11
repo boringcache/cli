@@ -831,6 +831,69 @@ async fn test_blob_download_urls_can_verify_storage() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn test_blob_download_urls_can_request_live_storage_verification() {
+    let _guard = test_env::lock();
+
+    if !networking_available() {
+        eprintln!(
+            "skipping test_blob_download_urls_can_request_live_storage_verification: networking disabled in sandbox"
+        );
+        return;
+    }
+
+    let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+    let original_home = std::env::var("HOME").ok();
+    test_env::set_var("HOME", temp_home.path());
+
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/v2/workspaces/ns/ws/caches/blobs/download-urls")
+        .match_header("authorization", "Bearer test-token")
+        .match_header("content-type", "application/json")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-live",
+            "verify_storage": true,
+            "live_storage": true,
+            "blobs": [{
+                "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "size_bytes": 42
+            }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"download_urls":[{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","url":"https://example.com/download"}],"missing":[]}"#,
+        )
+        .create_async()
+        .await;
+
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+        .expect("client should initialize");
+
+    let blobs = vec![cache::BlobDescriptor {
+        digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            .to_string(),
+        size_bytes: 42,
+    }];
+
+    let response = client
+        .blob_download_urls_live_verified("ns/ws", "entry-live", &blobs)
+        .await
+        .expect("blob download urls should succeed");
+    assert_eq!(response.download_urls.len(), 1);
+
+    mock.assert_async().await;
+
+    if let Some(home) = original_home {
+        test_env::set_var("HOME", home);
+    }
+    test_env::remove_var("BORINGCACHE_API_URL");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_cache_inspect_request() {
     let _guard = test_env::lock();
 

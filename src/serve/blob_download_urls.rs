@@ -15,12 +15,38 @@ pub(crate) async fn resolve_verified_blob_download_urls(
     blobs: &[BlobDescriptor],
     timeout: Duration,
 ) -> Result<ResolvedBlobDownloadUrls, String> {
-    let response = tokio::time::timeout(
-        timeout,
-        state
-            .api_client
-            .blob_download_urls_verified(&state.workspace, cache_entry_id, blobs),
-    )
+    resolve_blob_download_urls(state, cache_entry_id, blobs, timeout, false).await
+}
+
+pub(crate) async fn resolve_live_verified_blob_download_urls(
+    state: &AppState,
+    cache_entry_id: &str,
+    blobs: &[BlobDescriptor],
+    timeout: Duration,
+) -> Result<ResolvedBlobDownloadUrls, String> {
+    resolve_blob_download_urls(state, cache_entry_id, blobs, timeout, true).await
+}
+
+async fn resolve_blob_download_urls(
+    state: &AppState,
+    cache_entry_id: &str,
+    blobs: &[BlobDescriptor],
+    timeout: Duration,
+    live_storage: bool,
+) -> Result<ResolvedBlobDownloadUrls, String> {
+    let response = tokio::time::timeout(timeout, async {
+        if live_storage {
+            state
+                .api_client
+                .blob_download_urls_live_verified(&state.workspace, cache_entry_id, blobs)
+                .await
+        } else {
+            state
+                .api_client
+                .blob_download_urls_verified(&state.workspace, cache_entry_id, blobs)
+                .await
+        }
+    })
     .await
     .map_err(|_| format!("timed out after {}s", timeout.as_secs()))?
     .map_err(|error| error.to_string())?;

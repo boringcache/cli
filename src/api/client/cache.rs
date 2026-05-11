@@ -394,6 +394,24 @@ impl ApiClient {
         blobs: &[crate::api::models::cache::BlobDescriptor],
         verify_storage: bool,
     ) -> Result<crate::api::models::cache::BlobDownloadUrlsResponse> {
+        self.blob_download_urls_with_options(
+            workspace,
+            cache_entry_id,
+            blobs,
+            verify_storage,
+            false,
+        )
+        .await
+    }
+
+    async fn blob_download_urls_with_options(
+        &self,
+        workspace: &str,
+        cache_entry_id: &str,
+        blobs: &[crate::api::models::cache::BlobDescriptor],
+        verify_storage: bool,
+        live_storage: bool,
+    ) -> Result<crate::api::models::cache::BlobDownloadUrlsResponse> {
         ensure!(
             !cache_entry_id.trim().is_empty(),
             "cache_entry_id must not be empty"
@@ -408,6 +426,7 @@ impl ApiClient {
                 cache_entry_id: cache_entry_id.to_string(),
                 blobs: blobs.to_vec(),
                 verify_storage: verify_storage.then_some(true),
+                live_storage: live_storage.then_some(true),
             };
             return self
                 .post_v2_with_request_metrics(
@@ -442,6 +461,7 @@ impl ApiClient {
                     cache_entry_id,
                     blobs: chunk,
                     verify_storage: verify_storage.then_some(true),
+                    live_storage: live_storage.then_some(true),
                 };
                 let response = client
                 .post_v2_with_request_metrics::<
@@ -482,6 +502,16 @@ impl ApiClient {
         blobs: &[crate::api::models::cache::BlobDescriptor],
     ) -> Result<crate::api::models::cache::BlobDownloadUrlsResponse> {
         self.blob_download_urls(workspace, cache_entry_id, blobs, true)
+            .await
+    }
+
+    pub async fn blob_download_urls_live_verified(
+        &self,
+        workspace: &str,
+        cache_entry_id: &str,
+        blobs: &[crate::api::models::cache::BlobDescriptor],
+    ) -> Result<crate::api::models::cache::BlobDownloadUrlsResponse> {
+        self.blob_download_urls_with_options(workspace, cache_entry_id, blobs, true, true)
             .await
     }
 

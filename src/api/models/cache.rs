@@ -590,6 +590,8 @@ pub struct BlobDownloadUrlsRequest {
     pub blobs: Vec<BlobDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verify_storage: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_storage: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

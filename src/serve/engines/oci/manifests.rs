@@ -654,7 +654,7 @@ async fn verified_manifest_blob_download_urls(
         )));
     }
 
-    let resolved = crate::serve::blob_download_urls::resolve_verified_blob_download_urls(
+    let resolved = crate::serve::blob_download_urls::resolve_live_verified_blob_download_urls(
         state,
         cache_entry_id,
         blob_descriptors,
