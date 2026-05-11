@@ -101,3 +101,17 @@ fn parse_cli_connect_expiry_rejects_invalid() {
     let parsed = parse_cli_connect_expiry("not-a-time");
     assert!(parsed.is_none());
 }
+
+#[test]
+fn normalize_workspace_path_accepts_lowercase_github_shape() {
+    assert_eq!(
+        normalize_workspace_path("BoringCache/Benchmark-Hugo").unwrap(),
+        "boringcache/benchmark-hugo"
+    );
+}
+
+#[test]
+fn normalize_workspace_path_rejects_repo_names_that_do_not_fit_workspace_slugs() {
+    let err = normalize_workspace_path("boringcache/benchmark.hugo").unwrap_err();
+    assert!(err.to_string().contains("Invalid workspace"));
+}

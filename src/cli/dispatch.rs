@@ -439,6 +439,13 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
         Commands::Onboard(args) => {
             commands::onboard::execute(
                 args.path,
+                args.workspace,
+                args.create_workspace,
+                args.create_ci_tokens,
+                args.github_secrets,
+                args.github_repo,
+                args.rotate_ci_tokens,
+                args.workspace_name,
                 args.email,
                 args.name,
                 args.username,

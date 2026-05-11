@@ -23,6 +23,15 @@ Useful variants:
 # Apply detected changes directly
 boringcache onboard --apply
 
+# Agent/CI friendly: create or verify the workspace, set split GitHub secrets,
+# apply repo edits, and print a machine-readable summary.
+boringcache onboard \
+  --workspace my-org/app \
+  --create-workspace \
+  --github-secrets \
+  --apply \
+  --json
+
 # Avoid trying to open a browser automatically
 boringcache onboard --manual
 
@@ -30,6 +39,13 @@ boringcache onboard --manual
 boringcache onboard --email you@example.com
 boringcache onboard --email you@example.com --name "Jane Doe" --username janedoe
 ```
+
+With `--workspace --apply`, onboard writes or verifies the repo `workspace`
+setting even when the repo has CI files that do not need optimization.
+
+`--github-secrets` uses the GitHub CLI to set `BORINGCACHE_RESTORE_TOKEN` and
+`BORINGCACHE_SAVE_TOKEN` without printing token values. If both secrets already
+exist, it leaves them alone; pass `--rotate-ci-tokens` to replace them.
 
 If onboard writes `.boringcache.toml`, later commands can use semantic entries and profiles instead of repeating raw `tag:path` pairs:
 

@@ -18,6 +18,42 @@ pub struct Workspace {
     pub updated_at: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct WorkspaceProvisionRequest {
+    pub workspace: WorkspaceProvisionParams,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceProvisionParams {
+    pub slug: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WorkspaceProvisionResponse {
+    pub id: Value,
+    pub name: String,
+    pub slug: String,
+    #[serde(default)]
+    pub organization: Option<Value>,
+    #[serde(default)]
+    pub cache_entries_count: u32,
+    #[serde(default)]
+    pub total_cache_size: u64,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub provisioned: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub created: bool,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct WorkspaceStatusResponse {
     pub workspace: WorkspaceStatusWorkspace,

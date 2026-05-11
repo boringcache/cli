@@ -12,6 +12,13 @@ impl ApiClient {
         self.get_v2("workspaces").await
     }
 
+    pub async fn provision_workspace(
+        &self,
+        body: &crate::api::models::workspace::WorkspaceProvisionRequest,
+    ) -> Result<crate::api::models::workspace::WorkspaceProvisionResponse> {
+        self.post_v2("workspaces", body).await
+    }
+
     pub async fn workspace_status(
         &self,
         workspace: &str,

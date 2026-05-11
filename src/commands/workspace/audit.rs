@@ -99,7 +99,7 @@ pub async fn execute(path: Option<String>, write: bool, json_output: bool) -> Re
     execute_with_paths(path, Vec::new(), write, json_output).await
 }
 
-fn discover_repo_root(start_dir: &Path) -> Result<PathBuf> {
+pub(crate) fn discover_repo_root(start_dir: &Path) -> Result<PathBuf> {
     if let Some(loaded) = discover(start_dir)? {
         return Ok(loaded.root);
     }

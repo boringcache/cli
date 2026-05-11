@@ -90,6 +90,57 @@ pub struct OnboardArgs {
     #[arg(help = "Path to a specific CI/CD file to scan (scans project if omitted)")]
     pub path: Option<String>,
 
+    #[arg(
+        long,
+        value_name = "NAMESPACE/WORKSPACE",
+        help = "Workspace to write into repo config and optionally provision"
+    )]
+    pub workspace: Option<String>,
+
+    #[arg(
+        long,
+        requires = "workspace",
+        help = "Create or verify the workspace through the API"
+    )]
+    pub create_workspace: bool,
+
+    #[arg(
+        long,
+        requires = "workspace",
+        help = "Create split restore/save CI tokens for the workspace"
+    )]
+    pub create_ci_tokens: bool,
+
+    #[arg(
+        long,
+        requires = "workspace",
+        help = "Set BORINGCACHE_RESTORE_TOKEN and BORINGCACHE_SAVE_TOKEN GitHub repository secrets"
+    )]
+    pub github_secrets: bool,
+
+    #[arg(
+        long,
+        requires = "github_secrets",
+        value_name = "OWNER/REPO",
+        help = "GitHub repository for secret updates; defaults to --workspace"
+    )]
+    pub github_repo: Option<String>,
+
+    #[arg(
+        long,
+        requires = "github_secrets",
+        help = "Rotate GitHub CI secrets even when both split token secrets already exist"
+    )]
+    pub rotate_ci_tokens: bool,
+
+    #[arg(
+        long,
+        requires = "workspace",
+        value_name = "NAME",
+        help = "Display name to use when creating the workspace"
+    )]
+    pub workspace_name: Option<String>,
+
     #[arg(long, help = "Start onboarding by email for this CLI session")]
     pub email: Option<String>,
 

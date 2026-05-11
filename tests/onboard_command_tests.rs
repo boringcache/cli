@@ -30,6 +30,94 @@ fn apply_test_env(cmd: &mut Command) -> &mut Command {
 }
 
 #[test]
+fn onboard_workspace_apply_writes_repo_workspace_config_without_ci_files() {
+    let temp_dir = TempDir::new().expect("temp dir");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .env("HOME", temp_dir.path())
+        .current_dir(temp_dir.path())
+        .args([
+            "onboard",
+            "--workspace",
+            "boringcache/benchmark-hugo",
+            "--apply",
+            "--json",
+        ])
+        .output()
+        .expect("run onboard --workspace --apply --json");
+
+    assert!(
+        output.status.success(),
+        "onboard should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config = std::fs::read_to_string(temp_dir.path().join(".boringcache.toml"))
+        .expect("read repo config");
+    assert!(
+        config.contains("workspace = \"boringcache/benchmark-hugo\""),
+        "config: {config}"
+    );
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse onboard json");
+    assert_eq!(
+        body["repo_config"]["workspace"],
+        "boringcache/benchmark-hugo"
+    );
+    assert_eq!(body["repo_config"]["wrote"], true);
+}
+
+#[test]
+fn onboard_workspace_apply_writes_repo_workspace_config_when_ci_needs_no_changes() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(temp_dir.path().join(".github/workflows")).expect("workflow dir");
+    std::fs::write(
+        temp_dir.path().join(".github/workflows/ci.yml"),
+        "name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: echo ok\n",
+    )
+    .expect("write workflow");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .env("HOME", temp_dir.path())
+        .current_dir(temp_dir.path())
+        .args([
+            "onboard",
+            "--workspace",
+            "boringcache/benchmark-hugo",
+            "--apply",
+            "--json",
+        ])
+        .output()
+        .expect("run onboard --workspace --apply --json");
+
+    assert!(
+        output.status.success(),
+        "onboard should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config = std::fs::read_to_string(temp_dir.path().join(".boringcache.toml"))
+        .expect("read repo config");
+    assert!(
+        config.contains("workspace = \"boringcache/benchmark-hugo\""),
+        "config: {config}"
+    );
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse onboard json");
+    assert_eq!(
+        body["repo_config"]["workspace"],
+        "boringcache/benchmark-hugo"
+    );
+    assert_eq!(body["repo_config"]["wrote"], true);
+}
+
+#[test]
 fn onboard_apply_seeds_repo_config_from_scanned_manual_tags() {
     let temp_dir = TempDir::new().expect("temp dir");
     std::fs::create_dir_all(temp_dir.path().join(".github/workflows")).expect("workflow dir");

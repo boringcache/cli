@@ -2,6 +2,10 @@ use crate::api::client::ApiClient;
 use crate::api::models::optimize::{
     OptimizeFileRequest, OptimizeFileResult, OptimizeRequest, OptimizeResponse,
 };
+use crate::api::models::workspace::{
+    WorkspaceProvisionParams, WorkspaceProvisionRequest, WorkspaceTokenPairCreateParams,
+    WorkspaceTokenPairCreateRequest, WorkspaceTokenPairResponse,
+};
 use crate::config::{self, Config};
 use crate::optimize::detect::{detect_ci_type, score_relevance};
 use crate::optimize::transform::{
@@ -10,12 +14,14 @@ use crate::optimize::transform::{
 use crate::optimize::{CiType, FileRelevance, MAX_FILES_PER_REQUEST};
 use crate::types::Result;
 use crate::ui;
+use anyhow::Context;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
-use std::collections::HashMap;
-use std::io::IsTerminal;
+use std::collections::{HashMap, HashSet};
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -102,9 +108,70 @@ impl CliEmailAuthOptions {
     }
 }
 
+#[derive(Debug, Default, Serialize)]
+struct OnboardAutomationReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace: Option<WorkspaceAutomationReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo_config: Option<RepoConfigAutomationReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ci_tokens: Option<CiTokenAutomationReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    github_secrets: Option<GithubSecretsAutomationReport>,
+    optimize_results: Vec<OptimizeFileResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceAutomationReport {
+    slug: String,
+    created: bool,
+    provisioned: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RepoConfigAutomationReport {
+    path: String,
+    workspace: String,
+    wrote: bool,
+    added_entries: usize,
+    added_profiles: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct CiTokenAutomationReport {
+    status: String,
+    restore_token_id: String,
+    save_token_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restore_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    save_value: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct GithubSecretsAutomationReport {
+    repo: String,
+    status: String,
+    updated: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RepoWorkspaceConfigResult {
+    path: PathBuf,
+    workspace: String,
+    wrote: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
     path: Option<String>,
+    workspace: Option<String>,
+    create_workspace: bool,
+    create_ci_tokens: bool,
+    github_secrets: bool,
+    github_repo: Option<String>,
+    rotate_ci_tokens: bool,
+    workspace_name: Option<String>,
     email: Option<String>,
     name: Option<String>,
     username: Option<String>,
@@ -113,6 +180,18 @@ pub async fn execute(
     manual: bool,
     json_output: bool,
 ) -> Result<()> {
+    let target_workspace = workspace
+        .as_deref()
+        .map(normalize_workspace_path)
+        .transpose()?;
+    let automation_requested = target_workspace.is_some()
+        || create_workspace
+        || create_ci_tokens
+        || github_secrets
+        || github_repo.is_some();
+    let effective_create_ci_tokens = create_ci_tokens || github_secrets;
+    let mut automation_report = OnboardAutomationReport::default();
+
     if !json_output && std::io::stdin().is_terminal() {
         let needs_auth = if optimize_auth_configured() {
             let client = ApiClient::new()?;
@@ -149,6 +228,41 @@ pub async fn execute(
         }
     }
 
+    if let Some(workspace) = target_workspace.as_deref() {
+        if create_workspace {
+            let response = provision_workspace(workspace, workspace_name.as_deref()).await?;
+            if !json_output {
+                let action = if response.created {
+                    "Created workspace"
+                } else {
+                    "Workspace already exists"
+                };
+                ui::info(&format!("{action}: {}", response.slug));
+            }
+            automation_report.workspace = Some(WorkspaceAutomationReport {
+                slug: response.slug,
+                created: response.created,
+                provisioned: response.provisioned,
+            });
+        }
+
+        if github_secrets {
+            let repo = github_repo.clone().unwrap_or_else(|| workspace.to_string());
+            let secret_report = ensure_github_split_secrets(
+                workspace,
+                &repo,
+                rotate_ci_tokens,
+                json_output,
+                &mut automation_report,
+            )
+            .await?;
+            automation_report.github_secrets = Some(secret_report);
+        } else if effective_create_ci_tokens {
+            let token_pair = create_ci_token_pair(workspace).await?;
+            automation_report.ci_tokens = Some(ci_token_report(&token_pair, true));
+        }
+    }
+
     let files = if let Some(ref path) = path {
         scan_single_file(path)?
     } else {
@@ -156,8 +270,23 @@ pub async fn execute(
     };
 
     if files.is_empty() {
+        if auto_apply && let Some(workspace) = target_workspace.as_deref() {
+            let config_result = ensure_repo_workspace_config(workspace)?;
+            automation_report.repo_config = Some(RepoConfigAutomationReport {
+                path: config_result.path.display().to_string(),
+                workspace: config_result.workspace,
+                wrote: config_result.wrote,
+                added_entries: 0,
+                added_profiles: 0,
+            });
+        }
+
         if json_output {
-            println!("{{\"results\":[]}}");
+            if automation_requested {
+                println!("{}", serde_json::to_string_pretty(&automation_report)?);
+            } else {
+                println!("{{\"results\":[]}}");
+            }
         } else {
             ui::info("No CI/CD configuration files found.");
             ui::blank_line();
@@ -222,11 +351,26 @@ pub async fn execute(
         .collect();
 
     if sendable.is_empty() {
+        if auto_apply && let Some(workspace) = target_workspace.as_deref() {
+            let config_result = ensure_repo_workspace_config(workspace)?;
+            automation_report.repo_config = Some(RepoConfigAutomationReport {
+                path: config_result.path.display().to_string(),
+                workspace: config_result.workspace,
+                wrote: config_result.wrote,
+                added_entries: 0,
+                added_profiles: 0,
+            });
+        }
+
         if !json_output {
             ui::info("No files need optimization.");
             print_repo_config_tip();
         } else {
-            println!("{{\"results\":[]}}");
+            if automation_requested {
+                println!("{}", serde_json::to_string_pretty(&automation_report)?);
+            } else {
+                println!("{{\"results\":[]}}");
+            }
         }
         return Ok(());
     }
@@ -289,12 +433,13 @@ pub async fn execute(
         }
     }
 
-    if json_output {
+    if json_output && !automation_requested {
         let response = OptimizeResponse { results };
         println!("{}", serde_json::to_string_pretty(&response)?);
         return Ok(());
     }
 
+    automation_report.optimize_results = results.clone();
     let mut files_to_apply: Vec<ProposedChange<'_>> = Vec::new();
     let sendable_by_path: HashMap<&str, &ScannedFile> = sendable
         .iter()
@@ -304,11 +449,13 @@ pub async fn execute(
     for result in &results {
         let original_file = sendable_by_path.get(result.path.as_str()).copied();
 
-        println!("── {} ──", result.path);
+        if !json_output {
+            println!("── {} ──", result.path);
+        }
 
         match result.status.as_str() {
             "optimized" => {
-                if !result.changes.is_empty() {
+                if !json_output && !result.changes.is_empty() {
                     println!("Changes:");
                     for (i, change) in result.changes.iter().enumerate() {
                         println!("  {}. {}", i + 1, change.description);
@@ -320,16 +467,20 @@ pub async fn execute(
                     (&result.optimized_content, original_file)
                 {
                     if let Err(reason) = validate_output(&original.content, optimized) {
-                        ui::error(&format!("Output validation failed: {}", reason));
-                        println!();
+                        if !json_output {
+                            ui::error(&format!("Output validation failed: {}", reason));
+                            println!();
+                        }
                         continue;
                     }
 
                     let final_content = preserve_trailing_newline(&original.content, optimized);
                     let analysis =
                         analyze_optimization(&original.content, &final_content, original.ci_type);
-                    print_colored_diff(&original.content, &final_content);
-                    print_analysis(&analysis);
+                    if !json_output {
+                        print_colored_diff(&original.content, &final_content);
+                        print_analysis(&analysis);
+                    }
                     files_to_apply.push(ProposedChange {
                         file: original,
                         content: final_content,
@@ -338,35 +489,60 @@ pub async fn execute(
                 }
             }
             "no_changes" => {
-                ui::info("Already optimized or no deterministic migration available.");
+                if !json_output {
+                    ui::info("Already optimized or no deterministic migration available.");
+                }
             }
             "error" => {
-                if let Some(err) = &result.error {
-                    ui::error(err);
-                } else {
-                    ui::error("Unknown error");
+                if !json_output {
+                    if let Some(err) = &result.error {
+                        ui::error(err);
+                    } else {
+                        ui::error("Unknown error");
+                    }
                 }
             }
             other => {
-                ui::warn(&format!("Unexpected status: {}", other));
+                if !json_output {
+                    ui::warn(&format!("Unexpected status: {}", other));
+                }
             }
         }
 
-        if let Some(explanation) = &result.explanation
+        if !json_output
+            && let Some(explanation) = &result.explanation
             && !explanation.is_empty()
         {
             println!();
             ui::info(explanation);
         }
 
-        println!();
+        if !json_output {
+            println!();
+        }
     }
 
     if files_to_apply.is_empty() {
+        if auto_apply && let Some(workspace) = target_workspace.as_deref() {
+            let config_result = ensure_repo_workspace_config(workspace)?;
+            automation_report.repo_config = Some(RepoConfigAutomationReport {
+                path: config_result.path.display().to_string(),
+                workspace: config_result.workspace,
+                wrote: config_result.wrote,
+                added_entries: 0,
+                added_profiles: 0,
+            });
+        }
+        if json_output && automation_requested {
+            println!("{}", serde_json::to_string_pretty(&automation_report)?);
+        }
         return Ok(());
     }
 
     if dry_run {
+        if json_output && automation_requested {
+            println!("{}", serde_json::to_string_pretty(&automation_report)?);
+        }
         return Ok(());
     }
 
@@ -375,7 +551,7 @@ pub async fn execute(
         .filter(|change| change.analysis.risk.level == RiskLevel::High)
         .count();
 
-    if high_risk_count > 0 {
+    if !json_output && high_risk_count > 0 {
         ui::warn(&format!(
             "{} high-risk change{} detected. Review the risk report before applying.",
             high_risk_count,
@@ -388,19 +564,25 @@ pub async fn execute(
     } else if std::io::stdin().is_terminal() {
         prompt_apply()?
     } else {
-        ui::info("Use --apply to apply changes non-interactively.");
+        if !json_output {
+            ui::info("Use --apply to apply changes non-interactively.");
+        }
         false
     };
 
     let allow_high_risk = if high_risk_count == 0 {
         true
     } else if auto_apply {
-        ui::warn("Skipping high-risk changes in --apply mode for safety.");
+        if !json_output {
+            ui::warn("Skipping high-risk changes in --apply mode for safety.");
+        }
         false
     } else if std::io::stdin().is_terminal() {
         prompt_apply_high_risk()?
     } else {
-        ui::warn("Use interactive mode to apply high-risk changes after review.");
+        if !json_output {
+            ui::warn("Use interactive mode to apply high-risk changes after review.");
+        }
         false
     };
 
@@ -408,24 +590,36 @@ pub async fn execute(
         let mut written = 0usize;
         for change in &files_to_apply {
             if change.analysis.risk.level == RiskLevel::High && !allow_high_risk {
-                ui::warn(&format!(
-                    "Skipped high-risk change: {}",
-                    change.file.display_path
-                ));
+                if !json_output {
+                    ui::warn(&format!(
+                        "Skipped high-risk change: {}",
+                        change.file.display_path
+                    ));
+                }
                 continue;
             }
 
             std::fs::write(&change.file.path, &change.content)?;
-            ui::info(&format!("Written: {}", change.file.display_path));
+            if !json_output {
+                ui::info(&format!("Written: {}", change.file.display_path));
+            }
             written += 1;
         }
 
         if written == 0 {
-            ui::warn("No files were written.");
+            if !json_output {
+                ui::warn("No files were written.");
+            }
         } else {
             let repo_config = seed_repo_config_from_files(&files)?;
-            ui::blank_line();
-            if let Some(result) = &repo_config {
+            let workspace_config = target_workspace
+                .as_deref()
+                .map(ensure_repo_workspace_config)
+                .transpose()?;
+            if !json_output {
+                ui::blank_line();
+            }
+            if !json_output && let Some(result) = &repo_config {
                 ui::info(&format!(
                     "Seeded repo config: {}",
                     result.config_path.display()
@@ -443,28 +637,246 @@ pub async fn execute(
                 ));
                 ui::blank_line();
             }
-            ui::info("Done! Next steps:");
-            ui::info("  1. Review: git diff");
-            ui::info("  2. Commit and push to trigger your first cached CI run");
-            if let Some(result) = repo_config {
-                ui::info(&format!(
-                    "  3. Review repo config: {}",
-                    result.config_path.display()
-                ));
-            } else {
-                print_repo_config_tip();
+            if let Some(result) = workspace_config {
+                automation_report.repo_config = Some(RepoConfigAutomationReport {
+                    path: result.path.display().to_string(),
+                    workspace: result.workspace,
+                    wrote: result.wrote || repo_config.as_ref().is_some_and(|r| r.wrote),
+                    added_entries: repo_config.as_ref().map(|r| r.added_entries).unwrap_or(0),
+                    added_profiles: repo_config.as_ref().map(|r| r.added_profiles).unwrap_or(0),
+                });
             }
+            if !json_output {
+                ui::info("Done! Next steps:");
+                ui::info("  1. Review: git diff");
+                ui::info("  2. Commit and push to trigger your first cached CI run");
+                if let Some(result) = repo_config {
+                    ui::info(&format!(
+                        "  3. Review repo config: {}",
+                        result.config_path.display()
+                    ));
+                } else {
+                    print_repo_config_tip();
+                }
 
-            if let Ok(config) = Config::load()
-                && let Some(ref ws) = config.default_workspace
-            {
-                ui::blank_line();
-                ui::info(&format!("Your workspace: {}", ws));
+                if let Ok(config) = Config::load()
+                    && let Some(ref ws) = config.default_workspace
+                {
+                    ui::blank_line();
+                    ui::info(&format!("Your workspace: {}", ws));
+                }
             }
         }
     }
 
+    if json_output && automation_requested {
+        println!("{}", serde_json::to_string_pretty(&automation_report)?);
+    }
+
     Ok(())
+}
+
+async fn provision_workspace(
+    workspace: &str,
+    workspace_name: Option<&str>,
+) -> Result<crate::api::models::workspace::WorkspaceProvisionResponse> {
+    let client = ApiClient::for_admin()?;
+    client
+        .provision_workspace(&WorkspaceProvisionRequest {
+            workspace: WorkspaceProvisionParams {
+                slug: workspace.to_string(),
+                name: workspace_name.map(ToOwned::to_owned),
+                description: None,
+                visibility: Some("private".to_string()),
+            },
+        })
+        .await
+}
+
+async fn create_ci_token_pair(workspace: &str) -> Result<WorkspaceTokenPairResponse> {
+    let client = ApiClient::for_admin()?;
+    client
+        .create_workspace_token_pair(
+            workspace,
+            &WorkspaceTokenPairCreateRequest {
+                token_pair: WorkspaceTokenPairCreateParams {
+                    name_prefix: Some("GitHub Actions".to_string()),
+                    save_tag_prefixes: Vec::new(),
+                    expiration_preset: None,
+                    custom_expires_on: None,
+                },
+            },
+        )
+        .await
+}
+
+async fn ensure_github_split_secrets(
+    workspace: &str,
+    repo: &str,
+    rotate: bool,
+    json_output: bool,
+    automation_report: &mut OnboardAutomationReport,
+) -> Result<GithubSecretsAutomationReport> {
+    let existing = github_existing_secret_names(repo)?;
+    let required = ["BORINGCACHE_RESTORE_TOKEN", "BORINGCACHE_SAVE_TOKEN"];
+
+    if !rotate && required.iter().all(|name| existing.contains(*name)) {
+        if !json_output {
+            ui::info(&format!("GitHub secrets already set for {repo}."));
+        }
+        return Ok(GithubSecretsAutomationReport {
+            repo: repo.to_string(),
+            status: "already_set".to_string(),
+            updated: Vec::new(),
+        });
+    }
+
+    let token_pair = create_ci_token_pair(workspace).await?;
+    set_github_secret(repo, "BORINGCACHE_RESTORE_TOKEN", &token_pair.restore.value)?;
+    set_github_secret(repo, "BORINGCACHE_SAVE_TOKEN", &token_pair.save.value)?;
+
+    if !json_output {
+        ui::info(&format!("Updated GitHub BoringCache secrets for {repo}."));
+    }
+
+    automation_report.ci_tokens = Some(ci_token_report(&token_pair, false));
+
+    Ok(GithubSecretsAutomationReport {
+        repo: repo.to_string(),
+        status: if rotate {
+            "rotated".to_string()
+        } else {
+            "updated".to_string()
+        },
+        updated: required.iter().map(|name| name.to_string()).collect(),
+    })
+}
+
+fn ci_token_report(
+    token_pair: &WorkspaceTokenPairResponse,
+    reveal_values: bool,
+) -> CiTokenAutomationReport {
+    CiTokenAutomationReport {
+        status: "created".to_string(),
+        restore_token_id: token_pair.restore.token.id.clone(),
+        save_token_id: token_pair.save.token.id.clone(),
+        restore_value: reveal_values.then(|| token_pair.restore.value.clone()),
+        save_value: reveal_values.then(|| token_pair.save.value.clone()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubSecretListItem {
+    name: String,
+}
+
+fn github_existing_secret_names(repo: &str) -> Result<HashSet<String>> {
+    let output = Command::new("gh")
+        .args(["secret", "list", "--repo", repo, "--json", "name"])
+        .output()
+        .with_context(
+            || "Failed to run `gh secret list`. Install GitHub CLI and authenticate it.",
+        )?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "gh secret list failed for {repo}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let secrets: Vec<GithubSecretListItem> = serde_json::from_slice(&output.stdout)
+        .with_context(|| "Failed to parse `gh secret list --json name` output")?;
+    Ok(secrets.into_iter().map(|secret| secret.name).collect())
+}
+
+fn set_github_secret(repo: &str, name: &str, value: &str) -> Result<()> {
+    let mut child = Command::new("gh")
+        .args(["secret", "set", name, "--repo", repo])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to run `gh secret set {name}`"))?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("Failed to open stdin for `gh secret set`")?;
+        stdin
+            .write_all(value.as_bytes())
+            .with_context(|| format!("Failed to pass {name} to `gh secret set`"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("Failed to wait for `gh secret set {name}`"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "gh secret set {name} failed for {repo}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    Ok(())
+}
+
+fn ensure_repo_workspace_config(workspace: &str) -> Result<RepoWorkspaceConfigResult> {
+    let cwd = std::env::current_dir().context("Failed to read current directory")?;
+    let root = crate::commands::audit::discover_repo_root(&cwd)?;
+    let loaded = crate::project_config::discover(&root)?;
+    let config_path = loaded
+        .as_ref()
+        .map(|loaded| loaded.path.clone())
+        .unwrap_or_else(|| root.join(".boringcache.toml"));
+    let mut config = loaded.map(|loaded| loaded.config).unwrap_or_default();
+
+    let wrote = config.workspace.as_deref() != Some(workspace);
+    if wrote {
+        config.workspace = Some(workspace.to_string());
+        let contents = toml::to_string_pretty(&config).context("Failed to render repo config")?;
+        std::fs::write(&config_path, contents)
+            .with_context(|| format!("Failed to write {}", config_path.display()))?;
+    }
+
+    Ok(RepoWorkspaceConfigResult {
+        path: config_path,
+        workspace: workspace.to_string(),
+        wrote,
+    })
+}
+
+fn normalize_workspace_path(raw: &str) -> Result<String> {
+    let normalized = raw.trim().to_lowercase();
+    let parts: Vec<&str> = normalized.split('/').collect();
+    if parts.len() != 2
+        || !valid_workspace_slug_part(parts[0])
+        || !valid_workspace_slug_part(parts[1])
+    {
+        anyhow::bail!(
+            "Invalid workspace '{}'. Use namespace/workspace with lowercase letters, numbers, and hyphens.",
+            raw
+        );
+    }
+
+    Ok(normalized)
+}
+
+fn valid_workspace_slug_part(value: &str) -> bool {
+    value.len() >= 2
+        && value.len() <= 50
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        && value
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        && value
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
 }
 
 fn print_repo_config_tip() {
