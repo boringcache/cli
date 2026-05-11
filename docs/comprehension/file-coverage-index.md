@@ -247,6 +247,7 @@ Owner: proxy runtime (`support-primary` / `internal-only`)
 - `src/proxy/tags.rs`
 - `src/serve/mod.rs`
 - `src/serve/cas_publish.rs`
+- `src/serve/local_blob_stream.rs`
 - `src/serve/engines/mod.rs`
 - `src/serve/engines/bazel.rs`
 - `src/serve/engines/go_cache.rs`

@@ -27,7 +27,10 @@ pub(crate) async fn serve_local_blob(
     let file = tokio::fs::File::open(path)
         .await
         .map_err(|e| RegistryError::internal(format!("Failed to open local blob: {e}")))?;
-    let stream = ReaderStream::new(file);
+    let stream = ReaderStream::with_capacity(
+        file,
+        crate::serve::local_blob_stream::buffer_bytes_for(blob.size_bytes),
+    );
 
     Ok((StatusCode::OK, headers, Body::from_stream(stream)).into_response())
 }

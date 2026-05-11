@@ -842,7 +842,10 @@ async fn cached_blob_body(
             .await
             .map_err(|e| OciError::internal(format!("Failed to seek cached blob: {e}")))?;
     }
-    let stream = ReaderStream::new(file.take(size_bytes));
+    let stream = ReaderStream::with_capacity(
+        file.take(size_bytes),
+        crate::serve::local_blob_stream::buffer_bytes_for(size_bytes),
+    );
     Ok(Body::from_stream(stream))
 }
 

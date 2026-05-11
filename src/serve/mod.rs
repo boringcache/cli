@@ -3,6 +3,7 @@ pub mod cache_registry;
 pub mod cas_publish;
 pub(crate) mod engines;
 pub mod http;
+pub(crate) mod local_blob_stream;
 mod runtime;
 pub mod state;
 

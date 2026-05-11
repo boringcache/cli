@@ -304,7 +304,10 @@ pub(crate) async fn serve_backend_blob(
             .await
             .map_err(|e| RegistryError::internal(format!("Failed to seek cached blob: {e}")))?;
     }
-    let stream = ReaderStream::new(file.take(cache_handle.size_bytes()));
+    let stream = ReaderStream::with_capacity(
+        file.take(cache_handle.size_bytes()),
+        crate::serve::local_blob_stream::buffer_bytes_for(cache_handle.size_bytes()),
+    );
 
     Ok((StatusCode::OK, response_headers, Body::from_stream(stream)).into_response())
 }
