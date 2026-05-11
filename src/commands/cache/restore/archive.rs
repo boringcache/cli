@@ -445,6 +445,7 @@ pub(super) async fn process_restore_archive(
             let total_duration_ms = download_duration_ms + extract_duration_ms;
 
             Ok(RestoreOutcome::Restored {
+                tool: "archive".to_string(),
                 tag: hit.tag.clone(),
                 manifest_root_digest: hit.manifest_root_digest.clone(),
                 storage_metrics: Box::new(download_storage_metrics),

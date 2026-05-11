@@ -172,16 +172,6 @@ impl ApiClient {
         }
     }
 
-    pub async fn send_metrics(
-        &self,
-        workspace: &str,
-        params: crate::api::models::MetricsParams,
-    ) -> Result<()> {
-        let url = self.workspace_endpoint(workspace, "metrics")?;
-        let _response: serde_json::Value = self.post_v2(&url, &params).await?;
-        Ok(())
-    }
-
     pub async fn send_cache_rollups(
         &self,
         workspace: &str,

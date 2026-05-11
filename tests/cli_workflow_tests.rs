@@ -432,7 +432,7 @@ async fn test_restore_warns_on_invalid_signature_with_encrypted_manifest() {
         .await;
 
     let _metrics_mock = server
-        .mock("POST", "/v2/workspaces/test/workspace/metrics")
+        .mock("POST", "/v2/workspaces/test/workspace/cache-rollups")
         .with_status(200)
         .with_body("{}")
         .create_async()
@@ -793,7 +793,7 @@ async fn test_save_workflow_success() {
         .await;
 
     let _metrics_mock = server
-        .mock("POST", "/v2/workspaces/test/workspace/metrics")
+        .mock("POST", "/v2/workspaces/test/workspace/cache-rollups")
         .with_status(201)
         .with_body(json!({"status": "success", "metric_id": "metric-456"}).to_string())
         .create_async()
@@ -960,7 +960,7 @@ async fn test_restore_ignores_archive_with_digest_mismatch() {
         .await;
 
     let _metrics_mock = server
-        .mock("POST", "/v2/workspaces/test/workspace/metrics")
+        .mock("POST", "/v2/workspaces/test/workspace/cache-rollups")
         .with_status(200)
         .with_body("{}")
         .create_async()
@@ -1186,7 +1186,7 @@ async fn test_run_workflow_restore_then_save_lifecycle_success() {
         .await;
 
     let _metrics_mock = server
-        .mock("POST", "/v2/workspaces/test/workspace/metrics")
+        .mock("POST", "/v2/workspaces/test/workspace/cache-rollups")
         .with_status(201)
         .with_body(json!({"status": "ok"}).to_string())
         .create_async()
@@ -2266,7 +2266,7 @@ async fn test_save_workflow_with_force_flag() {
         .await;
 
     let _metrics_mock = server
-        .mock("POST", "/v2/workspaces/test/workspace/metrics")
+        .mock("POST", "/v2/workspaces/test/workspace/cache-rollups")
         .with_status(201)
         .with_body(json!({"status": "success", "metric_id": "metric-789"}).to_string())
         .create_async()
@@ -2364,7 +2364,7 @@ async fn test_save_workflow_without_force_flag_skips_existing() {
         .await;
 
     let _metrics_mock = server
-        .mock("POST", "/v2/workspaces/test/workspace/metrics")
+        .mock("POST", "/v2/workspaces/test/workspace/cache-rollups")
         .with_status(201)
         .with_body(json!({"status": "success"}).to_string())
         .create_async()

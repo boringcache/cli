@@ -615,6 +615,7 @@ async fn execute_batch_restore_inner(
         let task_result = task.await;
         match task_result {
             Ok(Ok(RestoreOutcome::Restored {
+                tool,
                 tag,
                 manifest_root_digest,
                 storage_metrics,
@@ -625,6 +626,7 @@ async fn execute_batch_restore_inner(
                 archive_transfer_plan,
             })) => {
                 crate::telemetry::RestoreMetrics {
+                    tool,
                     tag: tag.clone(),
                     manifest_root_digest,
                     total_duration_ms,
@@ -855,6 +857,7 @@ async fn enrich_hits_with_manifest_data(
 #[derive(Debug)]
 enum RestoreOutcome {
     Restored {
+        tool: String,
         tag: String,
         manifest_root_digest: Option<String>,
         storage_metrics: Box<StorageMetrics>,

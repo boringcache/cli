@@ -951,6 +951,7 @@ pub(super) async fn save_single_archive_entry(
     );
 
     SaveMetrics {
+        tool: "archive".to_string(),
         tag,
         manifest_root_digest,
         total_duration_ms: total_elapsed.as_millis() as u64,

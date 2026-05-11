@@ -3,14 +3,12 @@ use serde::{Deserialize, Serialize};
 pub mod cache;
 pub mod cache_rollups;
 pub mod cli_connect;
-pub mod metrics;
 pub mod optimize;
 pub mod workspace;
 
 pub use cache::*;
 pub use cache_rollups::*;
 pub use cli_connect::*;
-pub use metrics::*;
 pub use optimize::*;
 pub use workspace::*;
 

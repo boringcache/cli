@@ -792,15 +792,15 @@ pub(crate) async fn resolve_oci_download_url(
         )));
     }
 
-    let url = crate::serve::blob_download_urls::resolve_verified_blob_download_url(
+    let mut resolved = crate::serve::blob_download_urls::resolve_live_verified_blob_download_urls(
         state,
         cache_entry_id,
-        blob_desc,
+        std::slice::from_ref(blob_desc),
         OCI_API_CALL_TIMEOUT,
     )
     .await
-    .map_err(|error| OciError::internal(format!("Failed to get blob download URL: {error}")))?
-    .ok_or_else(|| {
+    .map_err(|error| OciError::internal(format!("Failed to get blob download URL: {error}")))?;
+    let url = resolved.urls.remove(digest).ok_or_else(|| {
         state.oci_negative_cache.insert_download_url_miss(
             &state.workspace,
             &state.registry_root_tag,

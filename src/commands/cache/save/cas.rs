@@ -416,6 +416,8 @@ where
 
     let total_elapsed = overall_started.elapsed();
     SaveMetrics {
+        tool: crate::telemetry::canonical_tool_for_cas_layout(bundle.cas_layout.as_deref())
+            .to_string(),
         tag,
         manifest_root_digest: bundle.manifest_root_digest,
         total_duration_ms: total_elapsed.as_millis() as u64,

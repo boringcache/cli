@@ -462,6 +462,7 @@ async fn test_blob_get_refreshes_stale_locator_url_after_manifest_return() {
     let single_request = json!({
         "cache_entry_id": "entry-refresh",
         "verify_storage": true,
+        "live_storage": true,
         "blobs": [
             {"digest": blob_a, "size_bytes": blob_a_content.len() as u64}
         ]

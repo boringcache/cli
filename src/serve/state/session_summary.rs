@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
+use crate::ci_detection::CiRunContext;
 use crate::ci_detection::CiSourceRefType;
 use crate::serve::engines::oci::blobs;
 
@@ -48,6 +49,69 @@ pub struct CacheSessionRunIdentity {
 }
 
 impl CacheSessionRunIdentity {
+    pub(crate) fn detect(
+        workspace: &str,
+        session_id: &str,
+        run_context: Option<&CiRunContext>,
+    ) -> Self {
+        if let Some(context) = run_context {
+            return Self::from_ci_context(workspace, context);
+        }
+
+        Self::local(workspace, session_id)
+    }
+
+    fn from_ci_context(workspace: &str, context: &CiRunContext) -> Self {
+        let run_repository = context
+            .repository
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(workspace);
+        let uid = format!(
+            "{}:{}:{}",
+            context.provider, run_repository, context.run_uid
+        );
+
+        Self {
+            kind: Some("ci".to_string()),
+            uid: Some(uid),
+            provider: Some(context.provider.clone()),
+            provider_run_uid: Some(context.run_uid.clone()),
+            attempt: context.run_attempt.clone(),
+            repository: context.repository.clone(),
+            source_ref_type: Some(ci_ref_type_name(context.source_ref_type).to_string()),
+            source_ref_name: context.source_ref_name.clone(),
+            change_number: context.pull_request_number.map(|number| number.to_string()),
+            pull_request_number: context.pull_request_number.map(|number| number.to_string()),
+            commit_sha: context.commit_sha.clone(),
+            run_started_at: context.run_started_at.clone(),
+        }
+    }
+
+    fn local(workspace: &str, session_id: &str) -> Self {
+        let uid = format!("local:{workspace}:{session_id}");
+        let local_git = local_git_identity();
+
+        Self {
+            kind: Some("local".to_string()),
+            uid: Some(uid),
+            provider: Some("local".to_string()),
+            provider_run_uid: Some(session_id.to_string()),
+            repository: local_git
+                .as_ref()
+                .and_then(|identity| identity.repository.clone()),
+            source_ref_type: local_git
+                .as_ref()
+                .map(|identity| identity.source_ref_type.clone())
+                .or_else(|| Some("local".to_string())),
+            source_ref_name: local_git
+                .as_ref()
+                .and_then(|identity| identity.source_ref_name.clone()),
+            commit_sha: local_git.and_then(|identity| identity.commit_sha),
+            ..Self::default()
+        }
+    }
+
     pub fn summary_json(&self, summary_session_id: &str) -> Value {
         let mut object = serde_json::Map::new();
 
@@ -249,57 +313,11 @@ fn storage_summary(oci_engine: &BTreeMap<String, String>) -> Value {
 }
 
 pub fn cache_session_run_identity(state: &AppState) -> CacheSessionRunIdentity {
-    if let Some(context) = &state.proxy_ci_run_context {
-        let run_repository = context
-            .repository
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(&state.workspace);
-        let uid = format!(
-            "{}:{}:{}",
-            context.provider, run_repository, context.run_uid
-        );
-
-        return CacheSessionRunIdentity {
-            kind: Some("ci".to_string()),
-            uid: Some(uid),
-            provider: Some(context.provider.clone()),
-            provider_run_uid: Some(context.run_uid.clone()),
-            attempt: context.run_attempt.clone(),
-            repository: context.repository.clone(),
-            source_ref_type: Some(ci_ref_type_name(context.source_ref_type).to_string()),
-            source_ref_name: context.source_ref_name.clone(),
-            change_number: context.pull_request_number.map(|number| number.to_string()),
-            pull_request_number: context.pull_request_number.map(|number| number.to_string()),
-            commit_sha: context.commit_sha.clone(),
-            run_started_at: context.run_started_at.clone(),
-        };
-    }
-
-    let uid = format!(
-        "local:{}:{}",
-        state.workspace, state.cache_session_summary_id
-    );
-    let local_git = local_git_identity();
-
-    CacheSessionRunIdentity {
-        kind: Some("local".to_string()),
-        uid: Some(uid),
-        provider: Some("local".to_string()),
-        provider_run_uid: Some(state.cache_session_summary_id.clone()),
-        repository: local_git
-            .as_ref()
-            .and_then(|identity| identity.repository.clone()),
-        source_ref_type: local_git
-            .as_ref()
-            .map(|identity| identity.source_ref_type.clone())
-            .or_else(|| Some("local".to_string())),
-        source_ref_name: local_git
-            .as_ref()
-            .and_then(|identity| identity.source_ref_name.clone()),
-        commit_sha: local_git.and_then(|identity| identity.commit_sha),
-        ..CacheSessionRunIdentity::default()
-    }
+    CacheSessionRunIdentity::detect(
+        &state.workspace,
+        &state.cache_session_summary_id,
+        state.proxy_ci_run_context.as_ref(),
+    )
 }
 
 pub fn cache_session_identity(state: &AppState) -> Value {
