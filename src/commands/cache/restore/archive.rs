@@ -453,6 +453,7 @@ pub(super) async fn process_restore_archive(
                 download_duration_ms,
                 extract_duration_ms,
                 bytes_downloaded,
+                retry_count: download_outcome.retry_count,
                 archive_transfer_plan: Some(archive_transfer_plan),
             })
         }

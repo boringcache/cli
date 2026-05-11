@@ -434,6 +434,10 @@ where
         part_size_mb: None,
         concurrency_level: None,
         streaming_enabled: None,
+        transfer_profile: Some("cas_blob_upload".to_string()),
+        transfer_reason: Some("native CAS save".to_string()),
+        retry_count: 0,
+        error_count: 0,
         storage_metrics: upload_storage_metrics,
     }
     .send(&api_client, &workspace)

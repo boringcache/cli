@@ -20,6 +20,10 @@ pub struct SaveMetrics {
     pub part_size_mb: Option<u32>,
     pub concurrency_level: Option<u32>,
     pub streaming_enabled: Option<bool>,
+    pub transfer_profile: Option<String>,
+    pub transfer_reason: Option<String>,
+    pub retry_count: u32,
+    pub error_count: u32,
     pub storage_metrics: StorageMetrics,
 }
 
@@ -35,6 +39,10 @@ pub struct RestoreMetrics {
     pub part_size_mb: Option<u32>,
     pub concurrency_level: Option<u32>,
     pub streaming_enabled: Option<bool>,
+    pub transfer_profile: Option<String>,
+    pub transfer_reason: Option<String>,
+    pub retry_count: u32,
+    pub error_count: u32,
     pub storage_metrics: StorageMetrics,
 }
 
@@ -55,6 +63,10 @@ struct OperationMetrics {
     part_size_mb: Option<u32>,
     concurrency_level: Option<u32>,
     streaming_enabled: Option<bool>,
+    transfer_profile: Option<String>,
+    transfer_reason: Option<String>,
+    retry_count: u32,
+    error_count: u32,
     storage_metrics: StorageMetrics,
 }
 
@@ -77,6 +89,10 @@ impl From<SaveMetrics> for OperationMetrics {
             part_size_mb: m.part_size_mb,
             concurrency_level: m.concurrency_level,
             streaming_enabled: m.streaming_enabled,
+            transfer_profile: m.transfer_profile,
+            transfer_reason: m.transfer_reason,
+            retry_count: m.retry_count,
+            error_count: m.error_count,
             storage_metrics: m.storage_metrics,
         }
     }
@@ -101,6 +117,10 @@ impl From<RestoreMetrics> for OperationMetrics {
             part_size_mb: m.part_size_mb,
             concurrency_level: m.concurrency_level,
             streaming_enabled: m.streaming_enabled,
+            transfer_profile: m.transfer_profile,
+            transfer_reason: m.transfer_reason,
+            retry_count: m.retry_count,
+            error_count: m.error_count,
             storage_metrics: m.storage_metrics,
         }
     }
@@ -261,8 +281,8 @@ impl OperationMetrics {
             Value::from(self.part_count.unwrap_or(1).max(1)),
         );
         object.insert("bytes".to_string(), Value::from(self.bytes_total()));
-        object.insert("retry_count".to_string(), Value::from(0));
-        object.insert("error_count".to_string(), Value::from(0));
+        object.insert("retry_count".to_string(), Value::from(self.retry_count));
+        object.insert("error_count".to_string(), Value::from(self.error_count));
 
         if let Some(value) = body_duration_ms {
             object.insert("body_duration_ms".to_string(), Value::from(value));
@@ -291,6 +311,17 @@ impl OperationMetrics {
         insert_optional_u32(&mut object, "part_count", self.part_count);
         insert_optional_u32(&mut object, "part_size_mb", self.part_size_mb);
         insert_optional_u32(&mut object, "concurrency_level", self.concurrency_level);
+        insert_optional_string(
+            &mut object,
+            "selected_transfer_profile",
+            self.transfer_profile.as_ref(),
+        );
+        insert_optional_string(
+            &mut object,
+            "transfer_profile_reason",
+            self.transfer_reason.as_ref(),
+        );
+        insert_optional_string(&mut object, "runner_region", runner_region().as_ref());
         if let Some(value) = self.streaming_enabled {
             object.insert("streaming_enabled".to_string(), Value::from(value));
         }
@@ -305,6 +336,9 @@ impl OperationMetrics {
         hints.insert("tool".to_string(), self.tool.clone());
         hints.insert("adapter".to_string(), self.tool.clone());
         hints.insert("cache_tag".to_string(), self.tag.clone());
+        if let Some(region) = runner_region() {
+            hints.insert("runner_region".to_string(), region);
+        }
         if let Some(digest) = self.manifest_root_digest.as_ref()
             && !digest.trim().is_empty()
         {
@@ -403,6 +437,30 @@ fn insert_optional_u32(object: &mut serde_json::Map<String, Value>, key: &str, v
     }
 }
 
+fn runner_region() -> Option<String> {
+    [
+        "BORINGCACHE_RUNNER_REGION",
+        "RUNNER_REGION",
+        "ACTIONS_RUNNER_REGION",
+        "GITHUB_ACTIONS_RUNNER_REGION",
+        "CI_RUNNER_REGION",
+        "AZURE_REGION",
+        "AWS_REGION",
+        "GOOGLE_CLOUD_REGION",
+        "REGION",
+    ]
+    .iter()
+    .find_map(|key| {
+        let value = std::env::var(key).ok()?;
+        let value = value.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    })
+}
+
 impl SaveMetrics {
     pub async fn send(self, api_client: &ApiClient, workspace: &str) {
         OperationMetrics::from(self)
@@ -439,6 +497,10 @@ mod tests {
             part_size_mb: Some(64),
             concurrency_level: Some(8),
             streaming_enabled: Some(false),
+            transfer_profile: Some("large_archive_multipart".to_string()),
+            transfer_reason: Some("large archive on CI runner".to_string()),
+            retry_count: 2,
+            error_count: 0,
             storage_metrics: StorageMetrics {
                 region: Some("iad".to_string()),
                 cache_status: Some("hit".to_string()),
@@ -490,6 +552,15 @@ mod tests {
         assert_eq!(summary["storage"]["concurrency_level"], 8);
         assert_eq!(summary["storage"]["streaming_enabled"], false);
         assert_eq!(summary["storage"]["throughput_mbps"], 80.0);
+        assert_eq!(
+            summary["storage"]["selected_transfer_profile"],
+            "large_archive_multipart"
+        );
+        assert_eq!(
+            summary["storage"]["transfer_profile_reason"],
+            "large archive on CI runner"
+        );
+        assert_eq!(summary["storage"]["retry_count"], 2);
     }
 
     #[test]

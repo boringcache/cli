@@ -14,8 +14,9 @@ use crate::cache::archive::{TarArchiveInfo, create_tar_archive};
 use crate::command_support::save_support::{
     apply_detected_ci_context, archive_cache_root_digest, build_manifest_bytes,
     complete_skipped_step, format_phase_duration, format_phase_duration_ms,
-    manifest_files_from_draft, progress_info, progress_warning, upload_archive_file,
-    upload_archive_multipart, upload_manifest,
+    manifest_files_from_draft, progress_info, progress_warning,
+    upload_archive_file_with_retry_count, upload_archive_multipart_with_retry_count,
+    upload_manifest,
 };
 use crate::manifest::diff::compute_digest_from_draft;
 use crate::manifest::{EntryType, ManifestBuilder};
@@ -708,6 +709,7 @@ pub(super) async fn save_single_archive_entry(
 
     let mut archive_etag: Option<String> = None;
     let mut upload_storage_metrics = StorageMetrics::default();
+    let mut archive_upload_retry_count = 0u32;
 
     if !needs_upload {
         complete_skipped_step(
@@ -776,7 +778,7 @@ pub(super) async fn save_single_archive_entry(
                     );
                 }
 
-                upload_archive_multipart(
+                upload_archive_multipart_with_retry_count(
                     final_archive_path.as_ref(),
                     &archive_urls,
                     upload_id,
@@ -795,7 +797,7 @@ pub(super) async fn save_single_archive_entry(
                 if verbose {
                     progress_info(&reporter, "  Using single-part archive upload");
                 }
-                upload_archive_file(
+                upload_archive_file_with_retry_count(
                     final_archive_path.as_ref(),
                     &archive_urls[0],
                     &progress,
@@ -807,9 +809,11 @@ pub(super) async fn save_single_archive_entry(
             };
 
             match upload_result {
-                Ok((etag, metrics)) => {
+                Ok((etag, metrics, retry_count)) => {
                     archive_etag = etag;
                     upload_storage_metrics = metrics;
+                    archive_upload_retry_count =
+                        archive_upload_retry_count.saturating_add(retry_count);
                     upload_duration = Some(upload_started.elapsed());
                     break;
                 }
@@ -819,6 +823,7 @@ pub(super) async fn save_single_archive_entry(
                         && multipart_retry_count < 1 =>
                 {
                     multipart_retry_count += 1;
+                    archive_upload_retry_count = archive_upload_retry_count.saturating_add(1);
                     progress_warning(
                         &reporter,
                         "  Multipart upload session disappeared; retrying once with a fresh upload session",
@@ -972,6 +977,14 @@ pub(super) async fn save_single_archive_entry(
         streaming_enabled: archive_upload_plan
             .as_ref()
             .map(|plan| plan.mode == "stream"),
+        transfer_profile: archive_upload_plan
+            .as_ref()
+            .map(|plan| plan.profile.to_string()),
+        transfer_reason: archive_upload_plan
+            .as_ref()
+            .map(|plan| plan.reason.to_string()),
+        retry_count: archive_upload_retry_count,
+        error_count: 0,
         storage_metrics: upload_storage_metrics,
     }
     .send(&api_client, &workspace)

@@ -64,7 +64,9 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<reqwest::Response>>,
 {
-    send_transfer_request_with_retry_impl(operation_name, send_request, false).await
+    let (response, _) =
+        send_transfer_request_with_retry_impl(operation_name, send_request, false).await?;
+    Ok(response)
 }
 
 pub(crate) async fn send_manifest_request_with_retry<F, Fut>(
@@ -75,14 +77,27 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<reqwest::Response>>,
 {
-    send_transfer_request_with_retry_impl(operation_name, send_request, true).await
+    let (response, _) =
+        send_transfer_request_with_retry_impl(operation_name, send_request, true).await?;
+    Ok(response)
+}
+
+pub(crate) async fn send_transfer_request_with_retry_count<F, Fut>(
+    operation_name: &str,
+    send_request: F,
+) -> Result<(reqwest::Response, u32)>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response>>,
+{
+    send_transfer_request_with_retry_impl(operation_name, send_request, false).await
 }
 
 async fn send_transfer_request_with_retry_impl<F, Fut>(
     operation_name: &str,
     mut send_request: F,
     retry_not_found: bool,
-) -> Result<reqwest::Response>
+) -> Result<(reqwest::Response, u32)>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<reqwest::Response>>,
@@ -103,7 +118,7 @@ where
                     sleep(delay).await;
                     continue;
                 }
-                return Ok(response);
+                return Ok((response, attempt.saturating_sub(1)));
             }
             Err(err) => {
                 let retryable = err

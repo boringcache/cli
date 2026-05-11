@@ -6,7 +6,9 @@ use crate::api::ApiClient;
 use crate::api::models::cache::{CompleteMultipartRequest, SaveRequest};
 use crate::ci_detection::{CiRunContext, CiSourceRefType, detect_ci_context};
 use crate::manifest::ManifestFile;
-use crate::multipart_upload::{upload_via_part_urls_with_concurrency, upload_via_single_url};
+use crate::multipart_upload::{
+    upload_via_part_urls_with_concurrency_and_retry_count, upload_via_single_url_with_retry_count,
+};
 use crate::progress::{ProgressSession, Summary, TransferProgress};
 use crate::telemetry::StorageMetrics;
 use crate::ui;
@@ -248,20 +250,20 @@ pub(crate) fn serialize_manifest(
     Ok(buffer)
 }
 
-pub(crate) async fn upload_archive_file(
+pub(crate) async fn upload_archive_file_with_retry_count(
     archive_path: &std::path::Path,
     upload_url: &str,
     progress: &TransferProgress,
     transfer_client: &reqwest::Client,
     upload_headers: &std::collections::HashMap<String, String>,
-) -> Result<(Option<String>, StorageMetrics)> {
+) -> Result<(Option<String>, StorageMetrics, u32)> {
     log::debug!(
         "Starting archive upload: path={} url={}",
         archive_path.display(),
         upload_url
     );
 
-    upload_via_single_url(
+    upload_via_single_url_with_retry_count(
         archive_path,
         upload_url,
         progress,
@@ -272,7 +274,7 @@ pub(crate) async fn upload_archive_file(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn upload_archive_multipart(
+pub(crate) async fn upload_archive_multipart_with_retry_count(
     archive_path: &std::path::Path,
     part_urls: &[String],
     upload_id: &str,
@@ -283,7 +285,7 @@ pub(crate) async fn upload_archive_multipart(
     workspace: &str,
     cache_entry_id: &str,
     upload_headers: &std::collections::HashMap<String, String>,
-) -> Result<(Option<String>, StorageMetrics)> {
+) -> Result<(Option<String>, StorageMetrics, u32)> {
     log::info!(
         "Starting multipart archive upload: path={} parts={} upload_id={}",
         archive_path.display(),
@@ -291,15 +293,16 @@ pub(crate) async fn upload_archive_multipart(
         upload_id
     );
 
-    let (uploaded_parts, storage_metrics) = upload_via_part_urls_with_concurrency(
-        archive_path,
-        part_urls,
-        progress,
-        transfer_client,
-        upload_headers,
-        concurrency,
-    )
-    .await?;
+    let (uploaded_parts, storage_metrics, retry_count) =
+        upload_via_part_urls_with_concurrency_and_retry_count(
+            archive_path,
+            part_urls,
+            progress,
+            transfer_client,
+            upload_headers,
+            concurrency,
+        )
+        .await?;
 
     let response = api_client
         .complete_multipart(
@@ -313,7 +316,7 @@ pub(crate) async fn upload_archive_multipart(
         .await
         .context("Failed to finalize multipart upload")?;
 
-    Ok((Some(response.archive_etag), storage_metrics))
+    Ok((Some(response.archive_etag), storage_metrics, retry_count))
 }
 
 pub(crate) fn format_phase_duration(duration: Duration) -> String {

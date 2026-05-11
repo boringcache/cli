@@ -12,7 +12,7 @@ use crate::api::{ApiClient, CacheResolutionEntry};
 use crate::command_support::RestoreSpec;
 use crate::progress::{Summary, System as ProgressSystem, TransferProgress};
 use crate::telemetry::StorageMetrics;
-use crate::transfer::send_transfer_request_with_retry;
+use crate::transfer::{send_transfer_request_with_retry, send_transfer_request_with_retry_count};
 use crate::ui;
 use anyhow::{Context, Error, Result, anyhow};
 use std::collections::{HashMap, HashSet};
@@ -623,6 +623,7 @@ async fn execute_batch_restore_inner(
                 download_duration_ms,
                 extract_duration_ms,
                 bytes_downloaded,
+                retry_count,
                 archive_transfer_plan,
             })) => {
                 crate::telemetry::RestoreMetrics {
@@ -646,6 +647,14 @@ async fn execute_batch_restore_inner(
                     streaming_enabled: archive_transfer_plan
                         .as_ref()
                         .map(|plan| plan.mode == "stream"),
+                    transfer_profile: archive_transfer_plan
+                        .as_ref()
+                        .map(|plan| plan.profile.to_string()),
+                    transfer_reason: archive_transfer_plan
+                        .as_ref()
+                        .map(|plan| plan.reason.to_string()),
+                    retry_count,
+                    error_count: 0,
                 }
                 .send(&api_client, &workspace)
                 .await;
@@ -865,6 +874,7 @@ enum RestoreOutcome {
         download_duration_ms: u64,
         extract_duration_ms: u64,
         bytes_downloaded: u64,
+        retry_count: u32,
         archive_transfer_plan: Option<crate::cache::archive_transfer::ArchiveTransferPlan>,
     },
     Skipped {
@@ -1026,6 +1036,7 @@ pub(crate) struct ArchiveDownloadOutcome {
     pub bytes_downloaded: u64,
     pub storage_metrics: StorageMetrics,
     pub transfer_plan: crate::cache::archive_transfer::ArchiveTransferPlan,
+    pub retry_count: u32,
 }
 
 pub(crate) async fn probe_archive_size(client: &reqwest::Client, url: &str) -> Option<u64> {
@@ -1089,12 +1100,13 @@ pub(crate) async fn download_archive(
             plan.profile,
             plan.reason
         );
-        let (bytes_downloaded, storage_metrics) =
+        let (bytes_downloaded, storage_metrics, retry_count) =
             download_sequential(client, url, file_path, progress).await?;
         return Ok(ArchiveDownloadOutcome {
             bytes_downloaded,
             storage_metrics,
             transfer_plan: plan,
+            retry_count,
         });
     }
 
@@ -1148,7 +1160,7 @@ pub(crate) async fn download_archive(
                 .acquire_owned()
                 .await
                 .map_err(|e| anyhow!("Archive download semaphore closed: {e}"))?;
-            let result = crate::cas_transport::download_range(
+            let result = crate::cas_transport::download_range_with_retry_count(
                 &client,
                 &url,
                 &file_path,
@@ -1175,12 +1187,14 @@ pub(crate) async fn download_archive(
     let mut total_downloaded = 0u64;
     let mut errors: Vec<String> = Vec::new();
     let mut first_storage_metrics: Option<StorageMetrics> = None;
+    let mut retry_count = 0u32;
 
     for (idx, task) in tasks.into_iter().enumerate() {
         let task_result = task.await;
         match task_result {
-            Ok(Ok((bytes, metrics))) => {
+            Ok(Ok((bytes, metrics, part_retry_count))) => {
                 total_downloaded += bytes;
+                retry_count = retry_count.saturating_add(part_retry_count);
 
                 if first_storage_metrics.is_none() {
                     first_storage_metrics = Some(metrics);
@@ -1203,6 +1217,7 @@ pub(crate) async fn download_archive(
         bytes_downloaded: total_downloaded,
         storage_metrics: first_storage_metrics.unwrap_or_default(),
         transfer_plan: plan,
+        retry_count,
     })
 }
 
@@ -1242,16 +1257,18 @@ async fn download_sequential(
     url: &str,
     file_path: &Path,
     progress: Option<&TransferProgress>,
-) -> Result<(u64, StorageMetrics)> {
+) -> Result<(u64, StorageMetrics, u32)> {
     use futures_util::StreamExt;
     use tokio::io::BufWriter;
 
-    let response = send_transfer_request_with_retry("Archive download", || async {
-        Ok(client.get(url).send().await?)
-    })
-    .await?
-    .error_for_status()
-    .context("Archive download failed")?;
+    let (response, retry_count) =
+        send_transfer_request_with_retry_count("Archive download", || async {
+            Ok(client.get(url).send().await?)
+        })
+        .await?;
+    let response = response
+        .error_for_status()
+        .context("Archive download failed")?;
 
     let storage_metrics = StorageMetrics::from_headers(response.headers());
 
@@ -1277,7 +1294,7 @@ async fn download_sequential(
     }
 
     writer.flush().await?;
-    Ok((bytes_downloaded, storage_metrics))
+    Ok((bytes_downloaded, storage_metrics, retry_count))
 }
 
 fn format_phase_duration(duration: Duration) -> String {

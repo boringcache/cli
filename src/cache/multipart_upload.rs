@@ -1,7 +1,7 @@
 use crate::api::models::cache::MultipartPart;
 use crate::progress::TransferProgress;
 use crate::telemetry::StorageMetrics;
-use crate::transfer::send_transfer_request_with_retry;
+use crate::transfer::send_transfer_request_with_retry_count;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -51,12 +51,30 @@ pub async fn upload_via_single_url(
     client: &Client,
     upload_headers: &HashMap<String, String>,
 ) -> Result<(Option<String>, StorageMetrics)> {
+    let (etag, metrics, _) = upload_via_single_url_with_retry_count(
+        archive_path,
+        upload_url,
+        progress,
+        client,
+        upload_headers,
+    )
+    .await?;
+    Ok((etag, metrics))
+}
+
+pub async fn upload_via_single_url_with_retry_count(
+    archive_path: &Path,
+    upload_url: &str,
+    progress: &TransferProgress,
+    client: &Client,
+    upload_headers: &HashMap<String, String>,
+) -> Result<(Option<String>, StorageMetrics, u32)> {
     let file_size = tokio::fs::metadata(archive_path)
         .await
         .with_context(|| format!("Failed to read archive metadata {}", archive_path.display()))?
         .len();
 
-    upload_via_single_url_range(
+    upload_via_single_url_range_with_retry_count(
         archive_path,
         0,
         file_size,
@@ -77,6 +95,28 @@ pub async fn upload_via_single_url_range(
     client: &Client,
     upload_headers: &HashMap<String, String>,
 ) -> Result<(Option<String>, StorageMetrics)> {
+    let (etag, metrics, _) = upload_via_single_url_range_with_retry_count(
+        archive_path,
+        offset,
+        size,
+        upload_url,
+        progress,
+        client,
+        upload_headers,
+    )
+    .await?;
+    Ok((etag, metrics))
+}
+
+pub async fn upload_via_single_url_range_with_retry_count(
+    archive_path: &Path,
+    offset: u64,
+    size: u64,
+    upload_url: &str,
+    progress: &TransferProgress,
+    client: &Client,
+    upload_headers: &HashMap<String, String>,
+) -> Result<(Option<String>, StorageMetrics, u32)> {
     let file_size = tokio::fs::metadata(archive_path)
         .await
         .with_context(|| format!("Failed to read archive metadata {}", archive_path.display()))?
@@ -90,50 +130,51 @@ pub async fn upload_via_single_url_range(
         archive_path.display()
     );
 
-    let response = send_transfer_request_with_retry("Archive upload", || async {
-        let file = File::open(archive_path)
-            .await
-            .with_context(|| format!("Failed to open archive {}", archive_path.display()))?;
-        let mut reader = tokio::io::BufReader::with_capacity(STREAM_CHUNK_SIZE, file);
-        if offset > 0 {
-            reader
-                .seek(tokio::io::SeekFrom::Start(offset))
+    let (response, retry_count) =
+        send_transfer_request_with_retry_count("Archive upload", || async {
+            let file = File::open(archive_path)
                 .await
-                .context("Failed to seek archive for upload")?;
-        }
-        let reader = reader.take(size);
-        let reader = ReaderStream::with_capacity(reader, STREAM_CHUNK_SIZE);
-        let progress_clone = progress.clone();
-        let stream = reader.map(move |chunk_result| match chunk_result {
-            Ok(chunk) => {
-                if let Err(err) = progress_clone.record_bytes(chunk.len() as u64) {
-                    log::warn!("Failed to update upload progress: {err}");
-                }
-                Ok(chunk)
+                .with_context(|| format!("Failed to open archive {}", archive_path.display()))?;
+            let mut reader = tokio::io::BufReader::with_capacity(STREAM_CHUNK_SIZE, file);
+            if offset > 0 {
+                reader
+                    .seek(tokio::io::SeekFrom::Start(offset))
+                    .await
+                    .context("Failed to seek archive for upload")?;
             }
-            Err(err) => Err(err),
-        });
+            let reader = reader.take(size);
+            let reader = ReaderStream::with_capacity(reader, STREAM_CHUNK_SIZE);
+            let progress_clone = progress.clone();
+            let stream = reader.map(move |chunk_result| match chunk_result {
+                Ok(chunk) => {
+                    if let Err(err) = progress_clone.record_bytes(chunk.len() as u64) {
+                        log::warn!("Failed to update upload progress: {err}");
+                    }
+                    Ok(chunk)
+                }
+                Err(err) => Err(err),
+            });
 
-        let mut request = client.put(upload_url);
+            let mut request = client.put(upload_url);
 
-        if !has_header(upload_headers, "content-type") {
-            request = request.header("content-type", "application/octet-stream");
-        }
-        if !has_header(upload_headers, "content-length") {
-            request = request.header("content-length", size.to_string());
-        }
+            if !has_header(upload_headers, "content-type") {
+                request = request.header("content-type", "application/octet-stream");
+            }
+            if !has_header(upload_headers, "content-length") {
+                request = request.header("content-length", size.to_string());
+            }
 
-        for (key, value) in upload_headers {
-            request = request.header(key.as_str(), value.as_str());
-        }
+            for (key, value) in upload_headers {
+                request = request.header(key.as_str(), value.as_str());
+            }
 
-        request
-            .body(reqwest::Body::wrap_stream(stream))
-            .send()
-            .await
-            .context("Failed to upload archive")
-    })
-    .await?;
+            request
+                .body(reqwest::Body::wrap_stream(stream))
+                .send()
+                .await
+                .context("Failed to upload archive")
+        })
+        .await?;
 
     let storage_metrics = StorageMetrics::from_headers(response.headers());
 
@@ -152,7 +193,7 @@ pub async fn upload_via_single_url_range(
         );
     }
 
-    Ok((extract_etag(&response), storage_metrics))
+    Ok((extract_etag(&response), storage_metrics, retry_count))
 }
 
 pub async fn upload_via_part_urls_with_concurrency(
@@ -163,6 +204,26 @@ pub async fn upload_via_part_urls_with_concurrency(
     upload_headers: &HashMap<String, String>,
     concurrency: usize,
 ) -> Result<(Vec<MultipartPart>, StorageMetrics)> {
+    let (parts, metrics, _) = upload_via_part_urls_with_concurrency_and_retry_count(
+        archive_path,
+        part_urls,
+        progress,
+        client,
+        upload_headers,
+        concurrency,
+    )
+    .await?;
+    Ok((parts, metrics))
+}
+
+pub async fn upload_via_part_urls_with_concurrency_and_retry_count(
+    archive_path: &Path,
+    part_urls: &[String],
+    progress: &TransferProgress,
+    client: &Client,
+    upload_headers: &HashMap<String, String>,
+    concurrency: usize,
+) -> Result<(Vec<MultipartPart>, StorageMetrics, u32)> {
     anyhow::ensure!(!part_urls.is_empty(), "multipart upload URLs missing");
 
     let file_size = tokio::fs::metadata(archive_path).await?.len();
@@ -199,7 +260,7 @@ pub async fn upload_via_part_urls_with_concurrency(
                 .await
                 .map_err(|e| anyhow::anyhow!("Multipart upload semaphore closed: {e}"))?;
 
-            let (etag, metrics) = upload_single_part(
+            let (etag, metrics, retry_count) = upload_single_part(
                 &archive_path,
                 &url,
                 part_number,
@@ -212,9 +273,10 @@ pub async fn upload_via_part_urls_with_concurrency(
             .await
             .with_context(|| format!("Failed to upload part {part_number}/{total_parts}"))?;
 
-            Ok::<(MultipartPart, StorageMetrics), anyhow::Error>((
+            Ok::<(MultipartPart, StorageMetrics, u32), anyhow::Error>((
                 MultipartPart { part_number, etag },
                 metrics,
+                retry_count,
             ))
         });
 
@@ -223,9 +285,11 @@ pub async fn upload_via_part_urls_with_concurrency(
 
     let mut uploaded_parts = Vec::with_capacity(tasks.len());
     let mut first_storage_metrics: Option<StorageMetrics> = None;
+    let mut retry_count = 0u32;
 
     for task in tasks {
-        let (part, metrics) = task.await.context("Upload task panicked")??;
+        let (part, metrics, part_retry_count) = task.await.context("Upload task panicked")??;
+        retry_count = retry_count.saturating_add(part_retry_count);
         if first_storage_metrics.is_none() {
             first_storage_metrics = Some(metrics);
         }
@@ -234,7 +298,11 @@ pub async fn upload_via_part_urls_with_concurrency(
 
     uploaded_parts.sort_by_key(|part| part.part_number);
 
-    Ok((uploaded_parts, first_storage_metrics.unwrap_or_default()))
+    Ok((
+        uploaded_parts,
+        first_storage_metrics.unwrap_or_default(),
+        retry_count,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -247,7 +315,7 @@ async fn upload_single_part(
     progress: &TransferProgress,
     client: &Client,
     upload_headers: &HashMap<String, String>,
-) -> Result<(String, StorageMetrics)> {
+) -> Result<(String, StorageMetrics, u32)> {
     log::info!(
         "Uploading part {} offset {} ({} bytes)",
         part_number,
@@ -258,64 +326,65 @@ async fn upload_single_part(
     let chunk_size = chunk_size_for_system();
     let operation_name = format!("Upload part {}", part_number);
 
-    let response = send_transfer_request_with_retry(operation_name.as_str(), || async {
-        let file = File::open(archive_path)
-            .await
-            .with_context(|| format!("Failed to open archive {}", archive_path.display()))?;
-        let mut reader = tokio::io::BufReader::with_capacity(chunk_size, file);
-        reader
-            .seek(tokio::io::SeekFrom::Start(offset))
-            .await
-            .context("Failed to seek archive for multipart upload")?;
+    let (response, retry_count) =
+        send_transfer_request_with_retry_count(operation_name.as_str(), || async {
+            let file = File::open(archive_path)
+                .await
+                .with_context(|| format!("Failed to open archive {}", archive_path.display()))?;
+            let mut reader = tokio::io::BufReader::with_capacity(chunk_size, file);
+            reader
+                .seek(tokio::io::SeekFrom::Start(offset))
+                .await
+                .context("Failed to seek archive for multipart upload")?;
 
-        let bytes_to_stream = size;
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(4);
-        let progress_clone = progress.clone();
+            let bytes_to_stream = size;
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(4);
+            let progress_clone = progress.clone();
 
-        let send_task = tokio::spawn(async move {
-            let mut reader = reader;
-            let mut remaining = bytes_to_stream;
-            while remaining > 0 {
-                let to_read = remaining.min(chunk_size as u64) as usize;
-                let mut buffer = vec![0u8; to_read];
-                if let Err(err) = reader.read_exact(&mut buffer).await {
-                    let _ = tx.send(Err(err)).await;
-                    return;
+            let send_task = tokio::spawn(async move {
+                let mut reader = reader;
+                let mut remaining = bytes_to_stream;
+                while remaining > 0 {
+                    let to_read = remaining.min(chunk_size as u64) as usize;
+                    let mut buffer = vec![0u8; to_read];
+                    if let Err(err) = reader.read_exact(&mut buffer).await {
+                        let _ = tx.send(Err(err)).await;
+                        return;
+                    }
+                    remaining -= to_read as u64;
+                    if tx.send(Ok(buffer)).await.is_err() {
+                        return;
+                    }
+                    if let Err(err) = progress_clone.record_bytes(to_read as u64) {
+                        log::warn!("Failed to update multipart progress: {err}");
+                    }
                 }
-                remaining -= to_read as u64;
-                if tx.send(Ok(buffer)).await.is_err() {
-                    return;
-                }
-                if let Err(err) = progress_clone.record_bytes(to_read as u64) {
-                    log::warn!("Failed to update multipart progress: {err}");
-                }
+            });
+
+            let mut request = client.put(url);
+
+            if !has_header(upload_headers, "content-type") {
+                request = request.header("content-type", "application/octet-stream");
             }
-        });
+            if !has_header(upload_headers, "content-length") {
+                request = request.header("content-length", size.to_string());
+            }
 
-        let mut request = client.put(url);
+            for (key, value) in upload_headers.iter() {
+                request = request.header(key.as_str(), value.as_str());
+            }
 
-        if !has_header(upload_headers, "content-type") {
-            request = request.header("content-type", "application/octet-stream");
-        }
-        if !has_header(upload_headers, "content-length") {
-            request = request.header("content-length", size.to_string());
-        }
+            let response = request
+                .body(reqwest::Body::wrap_stream(ReceiverStream::new(rx)))
+                .send()
+                .await
+                .with_context(|| format!("Failed to upload part {}", part_number))?;
 
-        for (key, value) in upload_headers.iter() {
-            request = request.header(key.as_str(), value.as_str());
-        }
+            let _ = send_task.await;
 
-        let response = request
-            .body(reqwest::Body::wrap_stream(ReceiverStream::new(rx)))
-            .send()
-            .await
-            .with_context(|| format!("Failed to upload part {}", part_number))?;
-
-        let _ = send_task.await;
-
-        Ok(response)
-    })
-    .await?;
+            Ok(response)
+        })
+        .await?;
 
     let storage_metrics = StorageMetrics::from_headers(response.headers());
 
@@ -357,7 +426,7 @@ async fn upload_single_part(
     let etag = extract_etag(&response)
         .ok_or_else(|| anyhow::anyhow!("Upload response missing ETag for part {}", part_number))?;
 
-    Ok((etag, storage_metrics))
+    Ok((etag, storage_metrics, retry_count))
 }
 
 fn extract_etag(response: &reqwest::Response) -> Option<String> {

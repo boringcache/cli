@@ -187,6 +187,7 @@ pub(super) async fn process_restore_file(
         download_duration_ms,
         extract_duration_ms,
         bytes_downloaded,
+        retry_count: 0,
         archive_transfer_plan: None,
     })
 }

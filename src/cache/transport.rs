@@ -8,7 +8,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 use crate::progress::TransferProgress;
 use crate::telemetry::StorageMetrics;
-use crate::transfer::send_transfer_request_with_retry;
+use crate::transfer::{send_transfer_request_with_retry, send_transfer_request_with_retry_count};
 
 const PARALLEL_DOWNLOAD_THRESHOLD: u64 = 8 * 1024 * 1024;
 
@@ -392,14 +392,40 @@ pub(crate) async fn download_range(
     progress: Option<&TransferProgress>,
     digest_tx: Option<mpsc::Sender<(u64, axum::body::Bytes)>>,
 ) -> Result<(u64, StorageMetrics)> {
-    let response = send_transfer_request_with_retry("Range download", || async {
-        Ok(client
-            .get(url)
-            .header(reqwest::header::RANGE, format!("bytes={}-{}", start, end))
-            .send()
-            .await?)
-    })
+    let (bytes, metrics, _) = download_range_with_retry_count(
+        client,
+        url,
+        file_path,
+        start,
+        end,
+        expected_size,
+        progress,
+        digest_tx,
+    )
     .await?;
+    Ok((bytes, metrics))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn download_range_with_retry_count(
+    client: &reqwest::Client,
+    url: &str,
+    file_path: &Path,
+    start: u64,
+    end: u64,
+    expected_size: u64,
+    progress: Option<&TransferProgress>,
+    digest_tx: Option<mpsc::Sender<(u64, axum::body::Bytes)>>,
+) -> Result<(u64, StorageMetrics, u32)> {
+    let (response, retry_count) =
+        send_transfer_request_with_retry_count("Range download", || async {
+            Ok(client
+                .get(url)
+                .header(reqwest::header::RANGE, format!("bytes={}-{}", start, end))
+                .send()
+                .await?)
+        })
+        .await?;
 
     let storage_metrics = StorageMetrics::from_headers(response.headers());
 
@@ -487,7 +513,7 @@ pub(crate) async fn download_range(
         anyhow::bail!("Incomplete: {} < {}", bytes_written, expected_size);
     }
 
-    Ok((expected_size, storage_metrics))
+    Ok((expected_size, storage_metrics, retry_count))
 }
 
 pub(crate) fn calculate_download_concurrency() -> usize {
