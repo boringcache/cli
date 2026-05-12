@@ -103,6 +103,10 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
             }
         }
 
+        if promote_checkpoint_if_no_pending_entries(state).await? {
+            break;
+        }
+
         if std::time::Instant::now() >= deadline {
             let pending_entries = {
                 let pending = state.kv_pending.read().await;
@@ -135,6 +139,19 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
 
     super::maintenance::flush_cache_ops_on_shutdown(state).await;
     Ok(())
+}
+
+async fn promote_checkpoint_if_no_pending_entries(state: &AppState) -> Result<bool> {
+    let pending_entries = {
+        let pending = state.kv_pending.read().await;
+        pending.entry_count()
+    };
+
+    if pending_entries == 0 {
+        promote_checkpoint_if_needed(state).await
+    } else {
+        Ok(false)
+    }
 }
 
 async fn promote_checkpoint_if_needed(state: &AppState) -> Result<bool> {
