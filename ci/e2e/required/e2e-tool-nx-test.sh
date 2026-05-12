@@ -125,7 +125,7 @@ wait_for_proxy "${PROXY_PORT}"
 NX_MARKER="${NX_LOG_DIR}/nx-marker.txt"
 NX_AUTH_TOKEN="nx-e2e-token"
 
-echo "=== Phase 1: Cold Nx build (seed remote cache) ==="
+echo "=== Phase 1: Cold Nx build (populate remote cache) ==="
 COLD_CACHE_DIR="${NX_LOG_DIR}/nx-cache-cold"
 COLD_LOG="${NX_LOG_DIR}/cold-build.log"
 COLD_START="$(date +%s)"

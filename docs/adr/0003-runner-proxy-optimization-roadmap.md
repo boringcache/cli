@@ -183,7 +183,7 @@ Before claiming an optimization win:
 - current metadata-only Docker E2E remains green;
 - OCI manifest-contract tests remain green;
 - range `206`/`416`, digest `ETag`, upload resume, empty finalize reuse, and mount semantics remain covered;
-- PostHog or equivalent real-project benchmark classifies runs as steady, reseed, or fresh before comparing wall time;
+- PostHog or equivalent real-project benchmark classifies runs as steady, cache bootstrap/update, or fresh before comparing wall time;
 - artifacts include proxy status snapshots and request metrics summary;
 - the comparison separates BuildKit rebuild/export time from proxy remote body wait.
 

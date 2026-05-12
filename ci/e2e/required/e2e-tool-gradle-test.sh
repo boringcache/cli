@@ -138,7 +138,7 @@ wait_for_proxy "${PROXY_PORT}"
 COLD_GRADLE_HOME="${GRADLE_LOG_DIR}/gradle-home-cold"
 WARM_GRADLE_HOME="${GRADLE_LOG_DIR}/gradle-home-warm"
 
-echo "=== Phase 1: Cold Gradle build (seed build cache) ==="
+echo "=== Phase 1: Cold Gradle build (populate build cache) ==="
 COLD_LOG="${GRADLE_LOG_DIR}/cold-build.log"
 COLD_START="$(date +%s)"
 (

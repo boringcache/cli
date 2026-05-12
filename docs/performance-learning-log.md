@@ -11,7 +11,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
 ## 2026-04-22 - Docker benchmark diagnostics after proxy flush
 
 - Post-fix benchmark artifacts now prove the diagnostics ordering fix beyond
-  the first PostHog rerun: BoringCache seed diagnostics contain structured
+  the first PostHog rerun: BoringCache benchmark diagnostics contain structured
   `cache_session_summary` for PostHog fresh `24795871449`, PostHog rolling
   `24795877370`, Hugo fresh `24796205506`, Hugo rolling `24796211023`,
   Immich rolling `24796581326`, and Mastodon rolling `24796581317`.
@@ -24,18 +24,20 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   `f0835d06f8d63887cc58142f079e49b586116923`; Mastodon rolling used
   `d1796634991a77189fa29f462c6102e81e30dd42` and upstream
   `c4eec632b92c800ae38dba111c4c76e63bb1c0de`.
-- All checked BoringCache seed jobs used `boringcache/one@v1` at
+- All checked BoringCache cold/commit jobs used `boringcache/one@v1` at
   `c7bf06c1b6753a50890a78204e38acbaeec3c2b8`, CLI `v1.12.46`, Docker
   registry cache `mode=max`, and OCI hydration `metadata-only`.
-- Fresh lanes: PostHog completed cold+warm with `cold_seconds=845`,
+- Fresh lanes: PostHog completed cold build plus warm rerun with `cold_seconds=845`,
   `warm1_seconds=10`, `export_seconds=430.9`, and summary
   `duration_ms=838102`, `oci_engine_graph_descriptors=85`,
   `oci_engine_proof_bytes=6302509102`, `oci_engine_publish_total_duration_ms=10607`.
-  Hugo completed cold+warm with `cold_seconds=173`, `warm1_seconds=9`,
+  Hugo completed cold build plus warm rerun with `cold_seconds=173`, `warm1_seconds=9`,
   `export_seconds=24.4`, and summary `duration_ms=167601`,
   `oci_engine_graph_descriptors=20`, `oci_engine_proof_bytes=356114210`,
   `oci_engine_publish_total_duration_ms=3610`.
-- Rolling lanes are reseed samples, not steady-state samples: PostHog had
+- Rolling lanes are commit-build samples. In this cohort the rolling cache was
+  not yet steady after cache-scope changes, so treat these as cache-bootstrap
+  investigation samples rather than steady-state samples: PostHog had
   `new_blob_count=31`, `body_remote_fetches=52`, `body_remote_bytes=2181928865`,
   and `export_seconds=323.1`; Hugo had `new_blob_count=14` and
   `export_seconds=26.9`; Immich had `new_blob_count=55` and
@@ -99,22 +101,22 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
 - Same-ref PostHog rolling signal before the next upstream sync:
   - Run `24673108689` used `boringcache/one@v1` at `e22cc5a` and CLI `v1.12.40`.
   - Proxy readiness dropped to `0.8s` with `metadata-only`; the prior strict body hydration run had waited about `119s` to prefetch about `5.8GB`.
-  - Seed build wall time was `9s`; total run was `2m10s`.
+  - Commit build wall time was `9s`; total run was `2m10s`.
   - BuildKit imported the registry cache manifest, `cached_steps=67`, and cache export was `3.7s`.
   - OCI body diagnostics: `startup_body_inserted=0`, `startup_body_failures=0`, `startup_body_cold_blobs=84`, `body_remote_fetches=1`, `body_remote_bytes=27412`, `body_remote_duration_ms=194`.
   - Publish diagnostics: `upload_requested_blobs=84`, `upload_already_present=84`, `new_blob_count=0`, `upload_batch_seconds=0.269`, no registry 4xx/5xx or digest failures. This is the clean warm/product-path signal.
 - New-upstream PostHog rolling cohort after sync to `0272b80f663cf9de0ef03ad60325540402ac9ad7`:
   - BC rolling run `24673312060` finished in `12m54s`; AC rolling run `24673311004` finished in `20m49s`.
-  - The BC artifact correctly classified the run as a reseed, not steady state: `new_blob_count=32`, `upload_requested_blobs=84`, `upload_already_present=52`, `body_remote_fetches=51`, `body_remote_bytes=2164140408`, `body_remote_duration_ms=30027`, and BuildKit cache export `339.1s`.
+  - The BC artifact correctly classified the run as a cache update/bootstrap sample, not steady state: `new_blob_count=32`, `upload_requested_blobs=84`, `upload_already_present=52`, `body_remote_fetches=51`, `body_remote_bytes=2164140408`, `body_remote_duration_ms=30027`, and BuildKit cache export `339.1s`.
   - Backend publish was not the long pole: `oci_blob_upload_batch` was `9.501s`, manifest commit was about `81ms`, and later publish phases were short. Most of the wall time was BuildKit rebuilding/exporting the changed graph.
-  - Use this run as a changed-upstream reseed sample, not as a warm headline.
-- Same-upstream rerun after the reseed:
-  - BC rolling run `24674563294` finished in `1m55s`; seed build wall time was `10s`.
+  - Use this run as a changed-upstream commit-build cache-update sample, not as a warm headline.
+- Same-upstream rerun after the cache update:
+  - BC rolling run `24674563294` finished in `1m55s`; commit build wall time was `10s`.
   - It still imported the cache with `cached_steps=67`, proxy readiness stayed fast, cache export was `4.0s`, and body read-through was only one `27401` byte fetch.
-  - The artifact still classified it as a reseed because `new_blob_count=1` and `upload_already_present=83`. Treat this as a near-warm signal, but not a formal zero-new-blob steady-state sample.
+  - The legacy artifact still classified it as `rolling_reseed` because `new_blob_count=1` and `upload_already_present=83`. Treat this as a near-warm signal, but not a formal zero-new-blob steady-state sample.
   - The diagnostics also showed `oci_engine_miss_blob_locator=1` and `oci_engine_proof_upload_session=1`; investigate why one small blob still needed an upload-session proof on the second same-ref run before claiming perfect steady state.
 - Fresh lane note:
-  - BC fresh run `24673306681` completed the seed build and the layer-miss scenario, but the workflow failed in `Scenario (warm1)` during GitHub runner action download: `An action could not be found at the URI 'https://api.github.com/repos/boringcache/one/tarball/e22cc5a...'`.
+  - BC fresh run `24673306681` completed the cold build and the layer-miss scenario, but the workflow failed in `Scenario (warm1)` during GitHub runner action download: `An action could not be found at the URI 'https://api.github.com/repos/boringcache/one/tarball/e22cc5a...'`.
   - That failure happened in the GitHub Actions setup step while fetching `boringcache/one@v1`, after the tag move, not in the BoringCache proxy or BuildKit path. Rerun fresh after action tarball availability settles before using it for warm/stale conclusions.
   - AC fresh run `24673306674` succeeded for the same upstream commit.
 - Benchmark artifact fix:
@@ -124,11 +126,11 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Docker benchmark workflows use the `boringcache/one` Docker mode and CLI-planned registry-cache refs.
   - Keep BoringCache restore/save tokens on the action/proxy and storage-probe steps for these OCI registry-cache benchmarks.
 - Guardrails:
-  - Rolling comparisons must use the same upstream ref and the same workflow graph. The first run after an upstream, Dockerfile, action, CLI, cache tag, or hydration-policy change is allowed to reseed.
+  - Rolling comparisons must use the same upstream ref and the same workflow graph. The first run after an upstream, Dockerfile, action, CLI, cache tag, or hydration-policy change may need a cache bootstrap/update and should be labeled that way.
   - A valid Docker steady-state sample needs cache import success, high cached-step count, `new_blob_count == 0`, short BuildKit export, no widespread import-time remote body reads, no startup body failures, and no registry 4xx/5xx or digest failures.
   - `oci_body_remote_fetches` is not a failure under `metadata-only`; it is the expected on-demand read-through counter. Judge it by count, bytes, duration, and whether it persists on the second same-ref run.
   - If comparing `metadata-only`, `bodies-background`, and `bodies-before-ready`, do it as a diagnostic rolling-only matrix with policy-suffixed cache tags. Do not run hydration variants in parallel against the same registry cache refs, or they will write into each other's cache state.
-  - Keep benchmark pass/fail focused on body read-through metrics, startup hydration failures, BuildKit import/export wall time, new blob count/upload plan, publish phase timings, and registry/digest errors. Do not compare total run wall time without classifying reseed versus steady state.
+  - Keep benchmark pass/fail focused on body read-through metrics, startup hydration failures, BuildKit import/export wall time, new blob count/upload plan, publish phase timings, and registry/digest errors. Do not compare total run wall time without classifying cache bootstrap/update versus steady state.
 
 ## 2026-04-20 - OCI engine isolation before BuildKit matrix
 
@@ -163,7 +165,7 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Strict local-edge replay must isolate the proxy blob cache (`E2E_BLOB_CACHE_SCOPE=per-proxy`). Otherwise a same-machine proxy restart can reuse the previous read-through blob cache and hide the cold body-plane cost.
   - 84-layer, 32 MiB random-body replay through local Rails/Tigris passed all three policies. With per-proxy body-cache isolation, metadata-only had 86 cold selected bodies and fetched about 33.6 MB remotely during warm reads; `bodies-before-ready` inserted all 86 selected bodies before readiness in about 2.7s and avoided restart-warm remote body fetches; `bodies-background` inserted all 86 selected bodies in about 2.2s and also avoided restart-warm remote body fetches when it won the race.
 - Harness/product-DX lessons:
-  - The debug path must keep the benchmark graph stable when testing a new `cli_ref`. A real binary copied into a Docker build context is a BuildKit input and can legitimately reseed after a binary change.
+  - The debug path must keep the benchmark graph stable when testing a new `cli_ref`. A real binary copied into a Docker build context is a BuildKit input and can legitimately require a cache reset after a binary change.
   - Local Docker-on-macOS validation needs separate proxy and registry hosts because a `docker-container` builder resolves `localhost` inside the Linux VM/Colima context.
   - macOS Bash 3 with `set -u` needs empty-array guards in E2E harnesses.
 - Review of the core-engine rewrite recommendation:

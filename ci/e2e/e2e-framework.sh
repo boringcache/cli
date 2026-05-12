@@ -376,14 +376,14 @@ EOF
       ;;
     tool-turbo)
       cat <<'EOF'
-=== Phase 1: Cold Turbo build (seed remote cache) ===
+=== Phase 1: Cold Turbo build (populate remote cache) ===
 === Phase 2: Warm Turbo build (remote cache hit) ===
 Turbo tool e2e passed
 EOF
       ;;
     tool-nx)
       cat <<'EOF'
-=== Phase 1: Cold Nx build (seed remote cache) ===
+=== Phase 1: Cold Nx build (populate remote cache) ===
 === Phase 2: Warm Nx build (remote cache hit) ===
 Nx tool e2e passed
 EOF
@@ -397,21 +397,21 @@ EOF
       ;;
     tool-bazel)
       cat <<'EOF'
-=== Phase 1: Cold Bazel build (seed remote cache) ===
+=== Phase 1: Cold Bazel build (populate remote cache) ===
 === Phase 2: Warm Bazel build (remote cache hit) ===
 Bazel tool e2e passed
 EOF
       ;;
     tool-maven)
       cat <<'EOF'
-=== Phase 1: Cold Maven build (seed build cache) ===
+=== Phase 1: Cold Maven build (populate build cache) ===
 === Phase 2: Warm Maven build (cache hit) ===
 Maven tool e2e passed
 EOF
       ;;
     tool-gradle)
       cat <<'EOF'
-=== Phase 1: Cold Gradle build (seed build cache) ===
+=== Phase 1: Cold Gradle build (populate build cache) ===
 === Phase 2: Warm Gradle build (remote cache hit) ===
 Gradle tool e2e passed
 EOF

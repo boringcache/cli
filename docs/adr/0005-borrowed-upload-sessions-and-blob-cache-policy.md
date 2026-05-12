@@ -128,7 +128,7 @@ Before and after the behavior change, record:
 - upload bytes read from owned temp file;
 - upload bytes read from borrowed cache handle.
 
-These metrics should make it clear whether the change removes material local disk traffic in Docker warm/reseed runs.
+These metrics should make it clear whether the change removes material local disk traffic in Docker warm/cache-bootstrap runs.
 
 ## Blob Cache Policy
 

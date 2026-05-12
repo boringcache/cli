@@ -95,7 +95,7 @@ wait_for_proxy "${PROXY_PORT}"
 COLD_OUTPUT_BASE="${BAZEL_LOG_DIR}/output-base-cold"
 WARM_OUTPUT_BASE="${BAZEL_LOG_DIR}/output-base-warm"
 
-echo "=== Phase 1: Cold Bazel build (seed remote cache) ==="
+echo "=== Phase 1: Cold Bazel build (populate remote cache) ==="
 COLD_LOG="${BAZEL_LOG_DIR}/cold-build.log"
 COLD_START="$(date +%s)"
 (

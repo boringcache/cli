@@ -152,7 +152,7 @@ Exact names can change to match the current `OciEngineDiagnostics` style, but th
 4. Wire only eligible full-body GET misses through the helper.
 5. Preserve existing response headers: `Docker-Content-Digest`, digest `ETag`, `Content-Type`, `Content-Length`, `Accept-Ranges`, and distribution API version.
 6. Add unit tests for threshold selection, final-chunk verification failure, temp cleanup, and non-eligible fallback.
-7. Add an integration/E2E comparison for metadata-only Docker warm/reseed behavior.
+7. Add an integration/E2E comparison for metadata-only Docker warm/cache-bootstrap behavior.
 
 ## Implementation Progress
 
@@ -207,7 +207,7 @@ Benchmark proof is still pending before launch claims rely on the new default. T
 - a stream-through-enabled artifact for the same workload and ref class;
 - client first-byte wait, upstream TTFB, upstream body duration, verification duration, cache-promotion result, and follower-wait counters;
 - digest-mismatch and mid-stream-failure evidence showing no local cache population;
-- a run classification that separates fresh, reseed, and steady warm behavior.
+- a run classification that separates fresh, cache bootstrap/update, and steady warm behavior.
 
 ## Acceptance Gates
 

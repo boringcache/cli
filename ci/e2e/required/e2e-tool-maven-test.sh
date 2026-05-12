@@ -119,7 +119,7 @@ wait_for_proxy "${PROXY_PORT}"
 COLD_M2="${MAVEN_LOG_DIR}/cold/repository"
 WARM_M2="${MAVEN_LOG_DIR}/warm/repository"
 
-echo "=== Phase 1: Cold Maven build (seed build cache) ==="
+echo "=== Phase 1: Cold Maven build (populate build cache) ==="
 COLD_LOG="${MAVEN_LOG_DIR}/cold-build.log"
 COLD_START="$(date +%s)"
 (

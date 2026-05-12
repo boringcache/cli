@@ -110,11 +110,11 @@ Each benchmark bundle must record:
 - CLI version/ref and action ref;
 - web deploy SHA or API revision when Rails is used;
 - benchmark repo/ref, upstream project ref, workflow run URL, runner type, and cache mode;
-- cold, warm, rolling-reseed, and stale-promotion classification where relevant;
+- cold, warm, rolling cache-bootstrap/reset, and stale-promotion classification where relevant;
 - wall-clock job time, build-tool time, restore/import time, save/export time, and storage transfer bytes when measurable;
 - `cache_session_summary`, OCI blob counts/bytes, upload-requested versus already-present blobs, cache-root publish/promotion status, and any BuildKit import/export diagnostics.
 
-Do not reuse artifacts from stale Docker experiments or invalid same-branch reseeds as launch proof.
+Do not reuse artifacts from stale Docker experiments or invalid same-branch cache bootstraps/resets as launch proof.
 
 Evidence note, 2026-04-22: post-fix Docker artifacts prove that benchmark
 diagnostics can now retain `cache_session_summary` after the harness flushes

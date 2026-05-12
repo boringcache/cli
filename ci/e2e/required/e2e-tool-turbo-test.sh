@@ -96,7 +96,7 @@ export BORINGCACHE_PROXY_METADATA_HINTS="project=e2e-tool-turbo,tool=turborepo"
 start_proxy "${BINARY}" "${WORKSPACE}" "${TAG}" "${PROXY_PORT}" "${TURBO_LOG_DIR}/proxy.log"
 wait_for_proxy "${PROXY_PORT}"
 
-echo "=== Phase 1: Cold Turbo build (seed remote cache) ==="
+echo "=== Phase 1: Cold Turbo build (populate remote cache) ==="
 COLD_CACHE_DIR="${TURBO_LOG_DIR}/turbo-cache-cold"
 COLD_LOG="${TURBO_LOG_DIR}/cold-build.log"
 COLD_START="$(date +%s)"

@@ -79,7 +79,7 @@ Every session summary should preserve correlation fields whenever the runner, ac
 - storage provider/mode and object-store region when known;
 - benchmark run id, scenario, and classification when the harness enriches the trace.
 
-Facts that affect product defaults should be backend-visible eventually, not only local JSONL. The CLI can emit the first summary, but Rails/action/benchmark enrichment should make it possible to answer: which cache plane was slow, which alias/root was used, which blobs were reused, what it cost, and whether the run was fresh, reseed, steady, or unknown.
+Facts that affect product defaults should be backend-visible eventually, not only local JSONL. The CLI can emit the first summary, but Rails/action/benchmark enrichment should make it possible to answer: which cache plane was slow, which alias/root was used, which blobs were reused, what it cost, and whether the run was fresh, cache bootstrap/update, steady, or unknown.
 
 The canonical web/API decision for session-summary ingestion, backend persistence, rollups, and operator insight lives in:
 
@@ -208,8 +208,8 @@ Where available from the action, Docker wrapper, or benchmark harness, attach:
 - cached step count;
 - new blob count;
 - new blob bytes;
-- seed/build wall time;
-- run classification: `steady`, `reseed`, `fresh`, or `unknown`.
+- build wall time;
+- run classification: `steady`, `cache_bootstrap`, `fresh`, or `unknown`.
 
 Do not make the CLI depend on fragile BuildKit log parsing for ordinary local use. It is acceptable for the GitHub Action and benchmark harness to enrich the session trace when they can observe these values.
 
