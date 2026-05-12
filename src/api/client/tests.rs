@@ -26,7 +26,6 @@ fn test_url_building() {
         client: Client::new(),
         transfer_client: Client::new(),
         base_url: "https://api.example.com".to_string(),
-        v1_base_url: "https://api.example.com/v1".to_string(),
         v2_base_url: "https://api.example.com/v2".to_string(),
         auth_token: None,
         capabilities: Arc::new(RwLock::new(None)),
@@ -105,38 +104,33 @@ fn test_transfer_http2_enabled_respects_true_and_unknown_values() {
 }
 
 #[test]
-fn test_derive_api_base_urls_from_v1() {
-    let (v1, v2) = derive_api_base_urls("https://api.example.com/v1");
-    assert_eq!(v1, "https://api.example.com/v1");
-    assert_eq!(v2, "https://api.example.com/v2");
+fn test_derive_api_base_url_from_versioned_input() {
+    let url = derive_api_base_url("https://api.example.com/v7");
+    assert_eq!(url, "https://api.example.com/v2");
 }
 
 #[test]
-fn test_derive_api_base_urls_from_v2() {
-    let (v1, v2) = derive_api_base_urls("https://api.example.com/v2");
-    assert_eq!(v1, "https://api.example.com/v1");
-    assert_eq!(v2, "https://api.example.com/v2");
+fn test_derive_api_base_url_from_v2() {
+    let url = derive_api_base_url("https://api.example.com/v2");
+    assert_eq!(url, "https://api.example.com/v2");
 }
 
 #[test]
-fn test_derive_api_base_urls_from_unversioned_remote() {
-    let (v1, v2) = derive_api_base_urls("https://api.example.com");
-    assert_eq!(v1, "https://api.example.com/v1");
-    assert_eq!(v2, "https://api.example.com/v2");
+fn test_derive_api_base_url_from_unversioned_remote() {
+    let url = derive_api_base_url("https://api.example.com");
+    assert_eq!(url, "https://api.example.com/v2");
 }
 
 #[test]
-fn test_derive_api_base_urls_from_unversioned_localhost() {
-    let (v1, v2) = derive_api_base_urls("http://127.0.0.1:1234");
-    assert_eq!(v1, "http://127.0.0.1:1234/v1");
-    assert_eq!(v2, "http://127.0.0.1:1234/v2");
+fn test_derive_api_base_url_from_unversioned_localhost() {
+    let url = derive_api_base_url("http://127.0.0.1:1234");
+    assert_eq!(url, "http://127.0.0.1:1234/v2");
 }
 
 #[test]
-fn test_derive_api_base_urls_from_empty_input_uses_default_base() {
-    let (v1, v2) = derive_api_base_urls("   ");
-    assert_eq!(v1, "https://api.boringcache.com/v1");
-    assert_eq!(v2, "https://api.boringcache.com/v2");
+fn test_derive_api_base_url_from_empty_input_uses_default_base() {
+    let url = derive_api_base_url("   ");
+    assert_eq!(url, "https://api.boringcache.com/v2");
 }
 
 #[test]
@@ -157,7 +151,7 @@ fn test_default_base_url_matches_config() {
         test_env::set_var("HOME", home);
     }
 
-    let (_v1, expected_v2) = derive_api_base_urls(crate::config::Config::default_api_url_value());
+    let expected_v2 = derive_api_base_url(crate::config::Config::default_api_url_value());
     assert_eq!(client.base_url(), expected_v2);
 }
 
@@ -200,7 +194,6 @@ async fn test_authenticated_builder_errors_do_not_retry() {
         client: Client::new(),
         transfer_client: Client::new(),
         base_url: "https://api.example.com/v2".to_string(),
-        v1_base_url: "https://api.example.com/v1".to_string(),
         v2_base_url: "https://api.example.com/v2".to_string(),
         auth_token: Some("test-token\n".to_string()),
         capabilities: Arc::new(RwLock::new(None)),
@@ -227,7 +220,6 @@ async fn test_public_builder_errors_do_not_retry() {
         client: Client::new(),
         transfer_client: Client::new(),
         base_url: "https://api.example.com/v2".to_string(),
-        v1_base_url: "https://api.example.com/v1".to_string(),
         v2_base_url: "https://api.example.com/v2".to_string(),
         auth_token: None,
         capabilities: Arc::new(RwLock::new(None)),
@@ -277,7 +269,7 @@ fn test_format_error_message_includes_details() {
     }"#;
 
     let payload = parse_error_payload(body).expect("payload should parse");
-    let url = reqwest::Url::parse("https://api.boringcache.com/v1/test").unwrap();
+    let url = reqwest::Url::parse("https://api.boringcache.com/v2/test").unwrap();
     let message =
         format_error_message(StatusCode::UNPROCESSABLE_ENTITY, &url, Some(&payload), body);
 
@@ -289,7 +281,7 @@ fn test_format_error_message_includes_details() {
 
 #[test]
 fn test_format_error_message_fallback() {
-    let url = reqwest::Url::parse("https://api.boringcache.com/v1/test").unwrap();
+    let url = reqwest::Url::parse("https://api.boringcache.com/v2/test").unwrap();
     let message = format_error_message(StatusCode::BAD_REQUEST, &url, None, "plain error body");
     assert!(message.contains("plain error body"));
 }

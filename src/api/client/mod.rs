@@ -16,7 +16,6 @@ use anyhow::{Context, ensure};
 use log::debug;
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -35,7 +34,6 @@ const CACHE_METRIC_ENDPOINT_OPERATION_UPLOAD_SESSION_BLOB_RECEIPTS: &str =
 const CACHE_METRIC_ENDPOINT_OPERATION_UPLOAD_SESSION_MANIFEST_RECEIPT: &str =
     "upload_session_commit_manifest";
 const REQUEST_METRIC_SOURCE_CLI: &str = "cli";
-const API_VERSION_V1: &str = "v1";
 const API_VERSION_V2: &str = "v2";
 const FALLBACK_API_BASE_URL: &str = "https://api.boringcache.com";
 const CONFIRM_PUBLISH_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_CONFIRM_PUBLISH_TIMEOUT_SECS";
@@ -105,7 +103,6 @@ pub struct ApiClient {
     client: Client,
     transfer_client: Client,
     base_url: String,
-    v1_base_url: String,
     v2_base_url: String,
     auth_token: Option<String>,
     capabilities: Arc<RwLock<Option<CapabilityFlags>>>,
@@ -411,7 +408,7 @@ fn map_request_send_error(err: reqwest::Error) -> anyhow::Error {
     boringcache_error.into()
 }
 
-pub(crate) fn derive_api_base_urls(configured_base_url: &str) -> (String, String) {
+pub(crate) fn derive_api_base_url(configured_base_url: &str) -> String {
     let configured = configured_base_url.trim().trim_end_matches('/');
     let default = crate::config::Config::default_api_url_value()
         .trim()
@@ -425,25 +422,23 @@ pub(crate) fn derive_api_base_urls(configured_base_url: &str) -> (String, String
     } else {
         configured
     };
-    let trimmed = base.to_string();
-    let lower = base.to_ascii_lowercase();
-    let v1_suffix = format!("/{}", API_VERSION_V1);
-    let v2_suffix = format!("/{}", API_VERSION_V2);
+    let api_root = strip_trailing_api_version(base);
+    format!("{api_root}/{API_VERSION_V2}")
+}
 
-    if lower.ends_with(&v1_suffix) {
-        let prefix = &trimmed[..trimmed.len() - v1_suffix.len()];
-        return (trimmed.clone(), format!("{prefix}/{API_VERSION_V2}"));
+fn strip_trailing_api_version(base: &str) -> &str {
+    let Some((prefix, segment)) = base.rsplit_once('/') else {
+        return base;
+    };
+    let Some(digits) = segment.strip_prefix(['v', 'V']) else {
+        return base;
+    };
+
+    if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        prefix
+    } else {
+        base
     }
-
-    if lower.ends_with(&v2_suffix) {
-        let prefix = &trimmed[..trimmed.len() - v2_suffix.len()];
-        return (format!("{prefix}/{API_VERSION_V1}"), trimmed);
-    }
-
-    (
-        format!("{trimmed}/{API_VERSION_V1}"),
-        format!("{trimmed}/{API_VERSION_V2}"),
-    )
 }
 
 fn api_batch_concurrency(chunk_count: usize) -> usize {

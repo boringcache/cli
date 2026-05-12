@@ -53,51 +53,33 @@ impl ApiClient {
     }
 
     async fn fetch_capabilities(&self) -> Result<CapabilityFlags> {
-        let mut candidates = Vec::new();
-        if !self.v2_base_url.is_empty() {
-            candidates.push(self.v2_base_url.clone());
-        }
-        if !self.v1_base_url.is_empty() {
-            candidates.push(self.v1_base_url.clone());
-        }
-        if !self.base_url.is_empty() {
-            candidates.push(self.base_url.clone());
-        }
-
-        let mut seen = HashSet::new();
-        for base in candidates {
-            if !seen.insert(base.clone()) {
-                continue;
+        let url = self.build_v2_url("capabilities");
+        debug!("GET {}", url);
+        let response = self
+            .send_authenticated_request(self.client.get(&url))
+            .await?;
+        match response.status() {
+            status if status.is_success() => {
+                let payload: CapabilityResponse = response
+                    .json()
+                    .await
+                    .context("Failed to parse capabilities response")?;
+                debug!(
+                    "Capabilities negotiated from {}: entry_create_v2={} blob_stage_v2={} tag_publish_v2={} registry_path_tags={} finalize_only_v2={}",
+                    url,
+                    payload.features.entry_create_v2,
+                    payload.features.blob_stage_v2,
+                    payload.features.tag_publish_v2,
+                    payload.features.registry_path_tags,
+                    payload.features.finalize_only_v2
+                );
+                Ok(payload.features)
             }
-
-            let url = Self::build_url_from_base(&base, "capabilities");
-            debug!("GET {}", url);
-            let response = self
-                .send_authenticated_request(self.client.get(&url))
-                .await?;
-            match response.status() {
-                status if status.is_success() => {
-                    let payload: CapabilityResponse = response
-                        .json()
-                        .await
-                        .context("Failed to parse capabilities response")?;
-                    debug!(
-                        "Capabilities negotiated from {}: entry_create_v2={} blob_stage_v2={} tag_publish_v2={} registry_path_tags={} finalize_only_v2={}",
-                        url,
-                        payload.features.entry_create_v2,
-                        payload.features.blob_stage_v2,
-                        payload.features.tag_publish_v2,
-                        payload.features.registry_path_tags,
-                        payload.features.finalize_only_v2
-                    );
-                    return Ok(payload.features);
-                }
-                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => continue,
-                _ => return Err(self.create_error_from_response(response).await),
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => {
+                Ok(CapabilityFlags::default())
             }
+            _ => Err(self.create_error_from_response(response).await),
         }
-
-        Ok(CapabilityFlags::default())
     }
 
     async fn tag_pointer_v2(&self, workspace: &str, tag: &str) -> Result<Option<TagPointer>> {

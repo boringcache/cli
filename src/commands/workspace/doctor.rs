@@ -30,7 +30,6 @@ struct DoctorReport {
 struct ApiReport {
     configured_url: String,
     source: ValueSource,
-    v1_url: String,
     v2_url: String,
 }
 
@@ -114,11 +113,10 @@ pub async fn execute(workspace: Option<String>, json_output: bool) -> Result<()>
     let workspace_probe = collect_workspace(workspace, &restore).await;
 
     let configured_url = crate::config::Config::get_api_url(None).unwrap_or_default();
-    let (v1_url, v2_url) = crate::api::client::derive_api_base_urls(&configured_url);
+    let v2_url = crate::api::client::derive_api_base_url(&configured_url);
     let api = ApiReport {
         configured_url,
         source: api_url_source(),
-        v1_url,
         v2_url,
     };
 
@@ -556,7 +554,6 @@ fn render_report(report: &DoctorReport) {
     println!("API");
     print_field("URL", &report.api.configured_url);
     print_field("Source", &format_source(&report.api.source));
-    print_field("v1", &report.api.v1_url);
     print_field("v2", &report.api.v2_url);
     ui::blank_line();
 
@@ -730,7 +727,6 @@ mod tests {
                     kind: "env".to_string(),
                     detail: Some("BORINGCACHE_API_URL".to_string()),
                 },
-                v1_url: "https://api.example.test/v1".to_string(),
                 v2_url: "https://api.example.test/v2".to_string(),
             },
             workspace: WorkspaceReport {

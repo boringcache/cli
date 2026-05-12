@@ -191,7 +191,7 @@ Owner: transport/model layer (`support-primary`)
 Notes:
 
 - some DTO fields are intentionally shape-only and marked `allow(dead_code)`
-- capability negotiation and publish polling live in this layer and are active
+- capability negotiation and publish polling live in this layer and are active; Rails API transport is v2-only
 - `src/api/client/workspace.rs` also owns the v2 workspace provision call used by `onboard --create-workspace`
 
 ## Config, planning, platform, optimize, and UI support

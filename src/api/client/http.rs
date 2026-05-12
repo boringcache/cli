@@ -72,22 +72,20 @@ impl ApiClient {
 
         let configured_base_url =
             base_url.unwrap_or_else(|| crate::config::Config::default_api_url_value().to_string());
-        let (v1_base_url, v2_base_url) = derive_api_base_urls(&configured_base_url);
+        let v2_base_url = derive_api_base_url(&configured_base_url);
 
         let client = Self {
             client,
             transfer_client,
             base_url: v2_base_url.clone(),
-            v1_base_url,
             v2_base_url,
             auth_token,
             capabilities: Arc::new(RwLock::new(None)),
         };
 
         debug!(
-            "ApiClient configured base_url={} v1_base_url={} token_configured={}",
+            "ApiClient configured base_url={} token_configured={}",
             client.base_url,
-            client.v1_base_url,
             client.auth_token.is_some()
         );
 
@@ -104,10 +102,6 @@ impl ApiClient {
 
     pub fn base_url(&self) -> &str {
         &self.base_url
-    }
-
-    pub fn v1_base_url(&self) -> &str {
-        &self.v1_base_url
     }
 
     pub fn v2_base_url(&self) -> &str {
@@ -130,10 +124,6 @@ impl ApiClient {
 
     pub fn build_url(&self, endpoint: &str) -> String {
         Self::build_url_from_base(&self.base_url, endpoint)
-    }
-
-    pub fn build_v1_url(&self, endpoint: &str) -> String {
-        Self::build_url_from_base(&self.v1_base_url, endpoint)
     }
 
     pub fn build_v2_url(&self, endpoint: &str) -> String {
@@ -167,13 +157,6 @@ impl ApiClient {
         self.get_v2(endpoint).await
     }
 
-    pub async fn get_v1<T>(&self, endpoint: &str) -> Result<T>
-    where
-        T: for<'de> Deserialize<'de>,
-    {
-        self.get_with_base(&self.v1_base_url, endpoint).await
-    }
-
     pub async fn get_v2<T>(&self, endpoint: &str) -> Result<T>
     where
         T: for<'de> Deserialize<'de>,
@@ -205,14 +188,6 @@ impl ApiClient {
         R: for<'de> Deserialize<'de>,
     {
         self.post_v2(endpoint, body).await
-    }
-
-    pub async fn post_v1<T, R>(&self, endpoint: &str, body: &T) -> Result<R>
-    where
-        T: Serialize,
-        R: for<'de> Deserialize<'de>,
-    {
-        self.post_with_base(&self.v1_base_url, endpoint, body).await
     }
 
     pub async fn post_v2<T, R>(&self, endpoint: &str, body: &T) -> Result<R>
@@ -520,15 +495,6 @@ impl ApiClient {
         R: for<'de> Deserialize<'de>,
     {
         self.patch_v2(endpoint, body).await
-    }
-
-    pub async fn patch_v1<T, R>(&self, endpoint: &str, body: &T) -> Result<R>
-    where
-        T: Serialize,
-        R: for<'de> Deserialize<'de>,
-    {
-        self.patch_with_base(&self.v1_base_url, endpoint, body)
-            .await
     }
 
     pub async fn patch_v2<T, R>(&self, endpoint: &str, body: &T) -> Result<R>
