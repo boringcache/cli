@@ -489,13 +489,6 @@ pub struct TagsArgs {
     pub filter: Option<String>,
 
     #[arg(
-        long,
-        hide = true,
-        help = "Compatibility no-op; internal tags are admin-only"
-    )]
-    pub all: bool,
-
-    #[arg(
         short,
         long,
         default_value = "20",

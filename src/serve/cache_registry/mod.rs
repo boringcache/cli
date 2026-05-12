@@ -204,13 +204,13 @@ pub(crate) use kv::kv_publish_tags_visible;
 pub(crate) use kv::lookup_published_blob;
 pub(crate) use kv::maybe_refresh_published_index_for_lookup;
 pub(crate) use kv::poll_tag_version_loop;
-pub(crate) use kv::prefetch_manifest_blobs;
 pub(crate) use kv::promote_kv_published_checkpoint_on_shutdown;
 pub(crate) use kv::put_kv_object;
 pub(crate) use kv::put_kv_object_with_integrity;
 pub(crate) use kv::put_kv_object_with_options;
 pub(crate) use kv::refresh_kv_index;
 pub(crate) use kv::resolve_kv_entries;
+pub(crate) use kv::run_startup_warmup;
 pub(crate) use kv::try_schedule_flush;
 
 pub async fn dispatch_root(

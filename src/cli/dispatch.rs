@@ -424,7 +424,6 @@ pub async fn execute(cli: Cli, require_server_signature: bool) -> Result<()> {
             commands::tags::execute(
                 args.workspace,
                 args.filter,
-                args.all,
                 args.limit,
                 args.page,
                 args.json,

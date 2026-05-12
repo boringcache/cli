@@ -484,9 +484,6 @@ Notes:
 
 After this file was added, the remaining ambiguity is not "what file exists" but "how active is it":
 
-- telemetry collector path
-- retry behavior in `src/retry_resume/{mod,config,policy}.rs`
-- some optimize helpers marked `allow(dead_code)`
 - some API model fields kept for schema compatibility
 
 Those are all accounted for above and in `support-and-reachability.md`.

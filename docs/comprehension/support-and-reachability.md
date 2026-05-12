@@ -46,9 +46,6 @@ This file answers two questions:
 
 | Item | Why it looks weak |
 | --- | --- |
-| `optimize::CiType::deterministic_supported` | explicitly marked with `allow(dead_code)` |
-| `optimize::transform::no_changes_result` | explicitly marked with `allow(dead_code)` |
-| `optimize::transform::error_result` | explicitly marked with `allow(dead_code)` |
 | `api::client::CapabilityFlags` fields | some fields are negotiated and logged, but the type itself carries `allow(dead_code)` because not every field is read everywhere |
 | several workspace DTO fields | shape-only compatibility fields carry `allow(dead_code)` in `src/api/models/workspace.rs` |
 
@@ -62,7 +59,7 @@ What it did find instead:
 - the proxy surface is intentionally split between `cache-registry` as the standalone proxy and wrapper paths like `run --proxy` or adapter commands that temporarily start it
 - supported advanced helper command with thinner docs/tests: `go-cacheprog`
 - the remaining compatibility entrypoint is `delete` for `rm`
-- weakly connected support code is now mostly the explicit `allow(dead_code)` optimize helpers and schema-compat DTO fields listed above; retry plumbing is active and the old telemetry collector path is gone
+- weakly connected support code is now mostly schema-compat DTO fields listed above; retry plumbing is active and the old telemetry collector path is gone
 
 ## Practical maintenance guidance
 

@@ -1,4 +1,4 @@
-use crate::api::models::optimize::{OptimizeChange, OptimizeFileResult};
+use crate::api::models::optimize::OptimizeChange;
 
 use super::{CiType, rules_buildkite, rules_circleci, rules_github_actions, rules_gitlab_ci};
 
@@ -191,32 +191,6 @@ pub fn preserve_trailing_newline(original: &str, optimized: &str) -> String {
         (true, false) => format!("{}\n", optimized),
         (false, true) => optimized.trim_end_matches('\n').to_string(),
         _ => optimized.to_string(),
-    }
-}
-
-#[allow(dead_code)]
-pub fn no_changes_result(path: String, ci_type: CiType, reason: String) -> OptimizeFileResult {
-    OptimizeFileResult {
-        path,
-        status: "no_changes".to_string(),
-        detected_type: ci_type.api_key().map(str::to_string),
-        optimized_content: None,
-        changes: vec![],
-        explanation: Some(reason),
-        error: None,
-    }
-}
-
-#[allow(dead_code)]
-pub fn error_result(path: String, ci_type: CiType, error: String) -> OptimizeFileResult {
-    OptimizeFileResult {
-        path,
-        status: "error".to_string(),
-        detected_type: ci_type.api_key().map(str::to_string),
-        optimized_content: None,
-        changes: vec![],
-        explanation: None,
-        error: Some(error),
     }
 }
 

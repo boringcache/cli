@@ -55,14 +55,6 @@ impl CiType {
             Self::Unknown => None,
         }
     }
-
-    #[allow(dead_code)]
-    pub fn deterministic_supported(self) -> bool {
-        matches!(
-            self,
-            Self::GitHubActions | Self::CircleCi | Self::GitLabCi | Self::Buildkite
-        )
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

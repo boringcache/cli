@@ -1114,7 +1114,7 @@ fn spawn_until_target(
     }
 }
 
-pub(crate) async fn prefetch_manifest_blobs(
+pub(crate) async fn run_startup_warmup(
     state: &AppState,
     require_full_warm: bool,
     oci_prefetch_refs: Vec<(String, String)>,

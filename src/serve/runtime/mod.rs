@@ -222,7 +222,7 @@ fn spawn_startup_prefetch(
             .saturating_sub(std::time::Duration::from_secs(5));
         if tokio::time::timeout(
             timeout,
-            crate::serve::cache_registry::prefetch_manifest_blobs(
+            crate::serve::cache_registry::run_startup_warmup(
                 &prefetch_state,
                 startup_warm,
                 oci_prefetch_refs,

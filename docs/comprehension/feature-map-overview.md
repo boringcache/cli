@@ -86,5 +86,4 @@ These are the biggest orchestration files and usually the first places to revisi
 ### Present but intentionally hidden or weakly connected
 
 - `run` planner-only flags
-- helper-style optimize functions with `allow(dead_code)`
 - shape-only API DTO fields marked `allow(dead_code)`

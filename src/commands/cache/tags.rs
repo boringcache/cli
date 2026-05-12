@@ -5,7 +5,6 @@ use anyhow::Result;
 pub async fn execute(
     workspace_option: Option<String>,
     filter: Option<String>,
-    include_system: bool,
     limit: u32,
     page: u32,
     json_output: bool,
@@ -18,9 +17,6 @@ pub async fn execute(
     )
     .await?;
     let offset = (page.saturating_sub(1)).saturating_mul(limit);
-    if include_system && !json_output {
-        crate::ui::warn("Internal cache entries are available in the admin workspace audit.");
-    }
     let response = api_client
         .workspace_tags(&workspace, filter.as_deref(), false, limit, offset)
         .await?;
