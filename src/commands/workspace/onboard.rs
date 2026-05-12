@@ -1,6 +1,6 @@
 use crate::api::client::ApiClient;
 use crate::api::models::optimize::{
-    OptimizeFileRequest, OptimizeFileResult, OptimizeRequest, OptimizeResponse,
+    OptimizeChange, OptimizeFileRequest, OptimizeFileResult, OptimizeRequest, OptimizeResponse,
 };
 use crate::api::models::workspace::{
     WorkspaceProvisionParams, WorkspaceProvisionRequest, WorkspaceTokenPairCreateParams,
@@ -180,19 +180,20 @@ pub async fn execute(
     manual: bool,
     json_output: bool,
 ) -> Result<()> {
-    let target_workspace = workspace
+    let mut target_workspace = workspace
         .as_deref()
         .map(normalize_workspace_path)
         .transpose()?;
-    let automation_requested = target_workspace.is_some()
+    let explicit_automation_requested = target_workspace.is_some()
         || create_workspace
         || create_ci_tokens
         || github_secrets
         || github_repo.is_some();
     let effective_create_ci_tokens = create_ci_tokens || github_secrets;
     let mut automation_report = OnboardAutomationReport::default();
+    let interactive = !json_output && std::io::stdin().is_terminal();
 
-    if !json_output && std::io::stdin().is_terminal() {
+    if interactive {
         let needs_auth = if optimize_auth_configured() {
             let client = ApiClient::new()?;
             let session_result = client.get_session_info().await;
@@ -228,8 +229,25 @@ pub async fn execute(
         }
     }
 
+    let interactive_workspace_selection = if interactive && target_workspace.is_none() {
+        select_interactive_workspace_for_repo().await?
+    } else {
+        None
+    };
+
+    if let Some(selection) = &interactive_workspace_selection {
+        target_workspace = Some(selection.workspace.clone());
+    }
+
+    let automation_requested = explicit_automation_requested || target_workspace.is_some();
+
     if let Some(workspace) = target_workspace.as_deref() {
-        if create_workspace {
+        let should_provision_workspace = create_workspace
+            || interactive_workspace_selection
+                .as_ref()
+                .is_some_and(|selection| selection.should_provision);
+
+        if should_provision_workspace {
             let response = provision_workspace(workspace, workspace_name.as_deref()).await?;
             if !json_output {
                 let action = if response.created {
@@ -260,6 +278,21 @@ pub async fn execute(
         } else if effective_create_ci_tokens {
             let token_pair = create_ci_token_pair(workspace).await?;
             automation_report.ci_tokens = Some(ci_token_report(&token_pair, true));
+        }
+
+        if interactive && !dry_run {
+            record_repo_workspace_config(workspace, &mut automation_report)?;
+        }
+
+        if interactive && !github_secrets && !dry_run {
+            maybe_setup_github_secrets_interactively(
+                workspace,
+                github_repo.as_deref(),
+                rotate_ci_tokens,
+                json_output,
+                &mut automation_report,
+            )
+            .await?;
         }
     }
 
@@ -406,22 +439,36 @@ pub async fn execute(
                     ui::blank_line();
                 }
 
-                let api_files: Vec<OptimizeFileRequest> = api_fallback
-                    .iter()
-                    .map(|f| OptimizeFileRequest {
-                        path: f.display_path.clone(),
-                        content: f.content.clone(),
-                        input_type: f.ci_type.api_key().map(String::from),
-                    })
-                    .collect();
-
-                let request = OptimizeRequest { files: api_files };
                 let client = ApiClient::new()?;
-                let response: OptimizeResponse = client.optimize(&request).await?;
-                results.extend(response.results);
+                for file in api_fallback {
+                    let request = OptimizeRequest {
+                        files: vec![OptimizeFileRequest {
+                            path: file.display_path.clone(),
+                            content: file.content.clone(),
+                            input_type: file.ci_type.api_key().map(String::from),
+                        }],
+                    };
+
+                    match client.optimize(&request).await {
+                        Ok(response) => results.extend(response.results),
+                        Err(error) => {
+                            if results.is_empty() && !automation_requested {
+                                return Err(error);
+                            }
+
+                            if !json_output {
+                                ui::warn(&format!(
+                                    "AI assist fallback failed for {}: {error}",
+                                    file.display_path
+                                ));
+                            }
+                            results.push(ai_fallback_error_result(file, &error));
+                        }
+                    }
+                }
             }
             Err(error) => {
-                if results.is_empty() {
+                if results.is_empty() && !automation_requested {
                     return Err(error);
                 }
 
@@ -429,9 +476,22 @@ pub async fn execute(
                     ui::warn(&format!("Skipping AI assist fallback: {error}"));
                     ui::blank_line();
                 }
+                results.extend(
+                    api_fallback
+                        .iter()
+                        .map(|file| ai_fallback_error_result(file, &error)),
+                );
             }
         }
     }
+
+    let repo_workspace_for_generated_workflows = target_workspace
+        .clone()
+        .or_else(|| discover_repo_config_workspace().ok().flatten());
+    prefer_repo_config_workspace_in_results(
+        &mut results,
+        repo_workspace_for_generated_workflows.as_deref(),
+    );
 
     if json_output && !automation_requested {
         let response = OptimizeResponse { results };
@@ -676,6 +736,177 @@ pub async fn execute(
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct WorkspaceSelection {
+    workspace: String,
+    should_provision: bool,
+}
+
+async fn select_interactive_workspace_for_repo() -> Result<Option<WorkspaceSelection>> {
+    if let Some(workspace) = discover_repo_config_workspace()? {
+        ui::info(&format!("Using repo workspace: {workspace}"));
+        return Ok(Some(WorkspaceSelection {
+            workspace,
+            should_provision: false,
+        }));
+    }
+
+    let client = ApiClient::new()?;
+    let mut workspaces = match client.list_workspaces().await {
+        Ok(workspaces) => workspaces,
+        Err(error) => {
+            ui::warn(&format!("Could not list workspaces automatically: {error}"));
+            Vec::new()
+        }
+    };
+    workspaces.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.slug.cmp(&b.slug)));
+
+    if workspaces.is_empty() {
+        ui::blank_line();
+        ui::info("No workspaces are visible for this token yet.");
+        let workspace = normalize_workspace_path(&prompt_non_empty(
+            "Workspace to create or use (namespace/workspace): ",
+        )?)?;
+        return Ok(Some(WorkspaceSelection {
+            workspace,
+            should_provision: true,
+        }));
+    }
+
+    if workspaces.len() == 1 {
+        let workspace = workspaces[0].slug.clone();
+        ui::info(&format!("Using workspace: {workspace}"));
+        return Ok(Some(WorkspaceSelection {
+            workspace,
+            should_provision: false,
+        }));
+    }
+
+    ui::blank_line();
+    ui::info("Choose the workspace for this repo:");
+    for (index, workspace) in workspaces.iter().enumerate() {
+        ui::info(&format!(
+            "  {}. {} ({})",
+            index + 1,
+            workspace.name,
+            workspace.slug
+        ));
+    }
+
+    loop {
+        let raw = prompt_non_empty("Workspace number, or namespace/workspace to create/use: ")?;
+        if let Ok(value) = raw.parse::<usize>()
+            && value >= 1
+            && value <= workspaces.len()
+        {
+            return Ok(Some(WorkspaceSelection {
+                workspace: workspaces[value - 1].slug.clone(),
+                should_provision: false,
+            }));
+        }
+
+        match normalize_workspace_path(&raw) {
+            Ok(workspace) => {
+                let should_provision = !workspaces
+                    .iter()
+                    .any(|candidate| candidate.slug == workspace);
+                return Ok(Some(WorkspaceSelection {
+                    workspace,
+                    should_provision,
+                }));
+            }
+            Err(_) => ui::warn("Invalid selection. Enter a listed number or namespace/workspace."),
+        }
+    }
+}
+
+fn discover_repo_config_workspace() -> Result<Option<String>> {
+    let cwd = std::env::current_dir().context("Failed to read current directory")?;
+    let root = crate::commands::audit::discover_repo_root(&cwd)?;
+    let Some(loaded) = crate::project_config::discover(&root)? else {
+        return Ok(None);
+    };
+    loaded
+        .config
+        .workspace
+        .as_deref()
+        .map(normalize_workspace_path)
+        .transpose()
+}
+
+fn record_repo_workspace_config(
+    workspace: &str,
+    automation_report: &mut OnboardAutomationReport,
+) -> Result<()> {
+    let config_result = ensure_repo_workspace_config(workspace)?;
+    if config_result.wrote {
+        ui::info(&format!(
+            "Saved repo workspace config: {}",
+            config_result.path.display()
+        ));
+    } else {
+        ui::info(&format!(
+            "Repo workspace config already set: {}",
+            config_result.path.display()
+        ));
+    }
+
+    automation_report.repo_config = Some(RepoConfigAutomationReport {
+        path: config_result.path.display().to_string(),
+        workspace: config_result.workspace,
+        wrote: config_result.wrote,
+        added_entries: 0,
+        added_profiles: 0,
+    });
+
+    Ok(())
+}
+
+async fn maybe_setup_github_secrets_interactively(
+    workspace: &str,
+    explicit_repo: Option<&str>,
+    rotate: bool,
+    json_output: bool,
+    automation_report: &mut OnboardAutomationReport,
+) -> Result<()> {
+    let repo = explicit_repo
+        .map(ToOwned::to_owned)
+        .or_else(infer_github_repo_from_origin);
+    let Some(repo) = repo else {
+        ui::warn("Could not infer a GitHub repository from git remote origin.");
+        ui::info(
+            "Skip GitHub secrets for now, or rerun with --github-secrets --github-repo OWNER/REPO.",
+        );
+        return Ok(());
+    };
+
+    if !prompt_yes_no(
+        &format!("Set GitHub Actions BoringCache secrets for {repo}? [Y/n] "),
+        true,
+    )? {
+        ui::info("Skipped GitHub secrets.");
+        return Ok(());
+    }
+
+    match ensure_github_split_secrets(workspace, &repo, rotate, json_output, automation_report)
+        .await
+    {
+        Ok(secret_report) => {
+            automation_report.github_secrets = Some(secret_report);
+        }
+        Err(error) => {
+            ui::warn(&format!(
+                "Could not set GitHub secrets automatically: {error}"
+            ));
+            ui::info(&format!(
+                "After authenticating GitHub CLI, rerun: boringcache onboard --workspace {workspace} --github-secrets --github-repo {repo}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 async fn provision_workspace(
     workspace: &str,
     workspace_name: Option<&str>,
@@ -768,6 +999,46 @@ fn ci_token_report(
 #[derive(Debug, Deserialize)]
 struct GithubSecretListItem {
     name: String,
+}
+
+fn infer_github_repo_from_origin() -> Option<String> {
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let remote = String::from_utf8(output.stdout).ok()?;
+    parse_github_repo_from_remote(&remote)
+}
+
+fn parse_github_repo_from_remote(remote: &str) -> Option<String> {
+    let remote = remote.trim().trim_end_matches('/');
+    let path = remote
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote.strip_prefix("https://github.com/"))
+        .or_else(|| remote.strip_prefix("http://github.com/"))
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))?;
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut parts = path.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if parts.next().is_some() || !valid_github_repo_part(owner) || !valid_github_repo_part(repo) {
+        return None;
+    }
+
+    Some(format!("{owner}/{repo}"))
+}
+
+fn valid_github_repo_part(part: &str) -> bool {
+    !part.is_empty()
+        && !part.starts_with('.')
+        && !part.ends_with('.')
+        && part
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
 }
 
 fn github_existing_secret_names(repo: &str) -> Result<HashSet<String>> {
@@ -948,6 +1219,115 @@ fn run_deterministic_pass<'a>(
     }
 
     (results, api_fallback)
+}
+
+fn ai_fallback_error_result(file: &ScannedFile, error: &anyhow::Error) -> OptimizeFileResult {
+    OptimizeFileResult {
+        path: file.display_path.clone(),
+        status: "error".to_string(),
+        detected_type: file.ci_type.api_key().map(str::to_string),
+        optimized_content: None,
+        changes: Vec::new(),
+        explanation: Some(
+            "AI assist fallback did not complete. Core onboarding can continue.".to_string(),
+        ),
+        error: Some(error.to_string()),
+    }
+}
+
+fn prefer_repo_config_workspace_in_results(
+    results: &mut [OptimizeFileResult],
+    repo_workspace: Option<&str>,
+) {
+    if repo_workspace.is_none() {
+        return;
+    }
+
+    for result in results {
+        let Some(content) = result.optimized_content.as_deref() else {
+            continue;
+        };
+        let normalized = strip_dynamic_github_workspace_from_boringcache_steps(content);
+        if normalized == content {
+            continue;
+        }
+
+        result.optimized_content = Some(normalized);
+        result.changes.push(OptimizeChange {
+            description: "Let boringcache/one resolve the workspace from .boringcache.toml"
+                .to_string(),
+            before_snippet: Some("workspace: ${{ github.repository }}".to_string()),
+            after_snippet: None,
+        });
+    }
+}
+
+fn strip_dynamic_github_workspace_from_boringcache_steps(content: &str) -> String {
+    let has_trailing_newline = content.ends_with('\n');
+    let mut rebuilt = Vec::new();
+    let mut removed = false;
+    let mut boringcache_step_indent = None;
+
+    for line in content.lines() {
+        let indent = count_leading_spaces(line);
+        let trimmed = line.trim_start();
+
+        if let Some(step_indent) = boringcache_step_indent
+            && !trimmed.is_empty()
+            && indent <= step_indent
+            && trimmed.starts_with("- ")
+            && !line_is_boringcache_action_reference(line)
+        {
+            boringcache_step_indent = None;
+        }
+
+        if line_is_boringcache_action_reference(line) {
+            boringcache_step_indent = Some(boringcache_step_indent_for_line(line));
+        }
+
+        if boringcache_step_indent.is_some() && line_is_dynamic_github_workspace_input(line) {
+            removed = true;
+            continue;
+        }
+
+        rebuilt.push(line);
+    }
+
+    if !removed {
+        return content.to_string();
+    }
+
+    let mut output = rebuilt.join("\n");
+    if has_trailing_newline {
+        output.push('\n');
+    }
+    output
+}
+
+fn line_is_boringcache_action_reference(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("- uses: boringcache/one")
+        || trimmed.starts_with("uses: boringcache/one")
+        || trimmed.starts_with("- uses: \"boringcache/one")
+        || trimmed.starts_with("uses: \"boringcache/one")
+        || trimmed.starts_with("- uses: 'boringcache/one")
+        || trimmed.starts_with("uses: 'boringcache/one")
+}
+
+fn boringcache_step_indent_for_line(line: &str) -> usize {
+    let indent = count_leading_spaces(line);
+    if line.trim_start().starts_with("- ") {
+        indent
+    } else {
+        indent.saturating_sub(2)
+    }
+}
+
+fn line_is_dynamic_github_workspace_input(line: &str) -> bool {
+    let Some(value) = line.trim_start().strip_prefix("workspace:") else {
+        return false;
+    };
+    value.contains("github.repository")
 }
 
 fn scan_single_file(path: &str) -> Result<Vec<ScannedFile>> {

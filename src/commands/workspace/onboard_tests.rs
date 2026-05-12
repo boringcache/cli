@@ -115,3 +115,88 @@ fn normalize_workspace_path_rejects_repo_names_that_do_not_fit_workspace_slugs()
     let err = normalize_workspace_path("boringcache/benchmark.hugo").unwrap_err();
     assert!(err.to_string().contains("Invalid workspace"));
 }
+
+#[test]
+fn parse_github_repo_from_remote_accepts_common_origin_shapes() {
+    assert_eq!(
+        parse_github_repo_from_remote("git@github.com:boringbuild/runner.git"),
+        Some("boringbuild/runner".to_string())
+    );
+    assert_eq!(
+        parse_github_repo_from_remote("https://github.com/boringcache/cli.git\n"),
+        Some("boringcache/cli".to_string())
+    );
+    assert_eq!(
+        parse_github_repo_from_remote("ssh://git@github.com/Owner/repo_name.git"),
+        Some("Owner/repo_name".to_string())
+    );
+}
+
+#[test]
+fn parse_github_repo_from_remote_rejects_non_github_or_nested_paths() {
+    assert_eq!(
+        parse_github_repo_from_remote("git@gitlab.com:org/repo.git"),
+        None
+    );
+    assert_eq!(
+        parse_github_repo_from_remote("https://github.com/org/repo/extra.git"),
+        None
+    );
+}
+
+#[test]
+fn strips_dynamic_github_workspace_from_boringcache_steps() {
+    let input = r#"jobs:
+  test:
+    steps:
+      - uses: boringcache/one@v1
+        with:
+          workspace: ${{ github.repository }}
+          path: node_modules
+      - uses: other/action@v1
+        with:
+          workspace: ${{ github.repository }}
+"#;
+
+    let output = strip_dynamic_github_workspace_from_boringcache_steps(input);
+
+    assert!(!output.contains("          workspace: ${{ github.repository }}\n          path:"));
+    assert!(output.contains("          path: node_modules"));
+    assert!(output.contains("      - uses: other/action@v1"));
+    assert!(output.contains("          workspace: ${{ github.repository }}\n"));
+    assert!(output.ends_with('\n'));
+}
+
+#[test]
+fn strips_dynamic_github_workspace_when_uses_is_named_step_child() {
+    let input = r#"jobs:
+  test:
+    steps:
+      - name: Cache
+        uses: boringcache/one@v1
+        with:
+          workspace: "${{ github.repository }}"
+          entries: deps:node_modules
+"#;
+
+    let output = strip_dynamic_github_workspace_from_boringcache_steps(input);
+
+    assert!(!output.contains("workspace:"));
+    assert!(output.contains("          entries: deps:node_modules"));
+}
+
+#[test]
+fn leaves_explicit_workspace_inputs_alone() {
+    let input = r#"jobs:
+  test:
+    steps:
+      - uses: boringcache/one@v1
+        with:
+          workspace: boring-build/runner
+          path: node_modules
+"#;
+
+    let output = strip_dynamic_github_workspace_from_boringcache_steps(input);
+
+    assert_eq!(output, input);
+}

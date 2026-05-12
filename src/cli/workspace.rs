@@ -87,7 +87,9 @@ pub struct WorkspacesArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct OnboardArgs {
-    #[arg(help = "Path to a specific CI/CD file to scan (scans project if omitted)")]
+    #[arg(
+        help = "Path to a specific CI/CD file to scan (plain onboard connects, chooses a workspace, and scans the project)"
+    )]
     pub path: Option<String>,
 
     #[arg(
