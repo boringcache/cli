@@ -154,6 +154,17 @@ check_referrers_body "${FILTER_BODY}" "${MANIFEST_DIGEST}" "${ARTIFACT_TYPE}"
 
 echo "=== Phase 2: Restart proxy and verify persisted referrers ==="
 stop_proxy
+if ! verify_remote_tag_visible \
+  "${BINARY}" \
+  "${WORKSPACE}" \
+  "${REGISTRY_ROOT_TAG}" \
+  "${LOG_DIR}/publish-check-root" \
+  1 \
+  "${VISIBILITY_ATTEMPTS}" \
+  "${VISIBILITY_SLEEP_SECS}" \
+  "${PROXY_LOG}"; then
+  exit 1
+fi
 start_proxy "${BINARY}" "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" "${PROXY_PORT}" "${PROXY_RESTART_LOG}" "--fail-on-cache-error"
 wait_for_proxy "${PROXY_PORT}"
 
