@@ -157,9 +157,11 @@ stop_proxy
 start_proxy "${BINARY}" "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" "${PROXY_PORT}" "${PROXY_RESTART_LOG}" "--fail-on-cache-error"
 wait_for_proxy "${PROXY_PORT}"
 
-curl -sS -D "${RESTART_GET_HEADERS}" -o "${RESTART_GET_BODY}" \
+curl_get_with_status_retry \
+  "${RESTART_GET_HEADERS}" \
+  "${RESTART_GET_BODY}" \
+  200 \
   "http://${PROXY_HOST}:${PROXY_PORT}/v2/${OCI_NAME}/manifests/${MANIFEST_DIGEST}"
-assert_status "${RESTART_GET_HEADERS}" 200
 assert_header "${RESTART_GET_HEADERS}" "Content-Type" "application/vnd.oci.artifact.manifest.v1+json"
 cmp -s "${MANIFEST_FILE}" "${RESTART_GET_BODY}"
 
