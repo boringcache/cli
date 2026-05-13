@@ -1091,7 +1091,7 @@ async fn stream_oci_blob_body(
     }
 
     let verify_started_at = std::time::Instant::now();
-    let actual_digest = format!("sha256:{:x}", hasher.finalize());
+    let actual_digest = format!("sha256:{}", hex::encode(hasher.finalize()));
     let verify_duration_ms = verify_started_at.elapsed().as_millis() as u64;
     state.oci_engine_diagnostics.record_storage_get(
         written,
@@ -1341,7 +1341,7 @@ async fn download_oci_blob_to_cache(
             .map_err(|e| OciError::internal(format!("Failed to flush temp blob file: {e}")))?;
 
         let verify_started_at = std::time::Instant::now();
-        let actual_digest = format!("sha256:{:x}", hasher.finalize());
+        let actual_digest = format!("sha256:{}", hex::encode(hasher.finalize()));
         let verify_duration_ms = verify_started_at.elapsed().as_millis() as u64;
         state.oci_engine_diagnostics.record_storage_get(
             written,

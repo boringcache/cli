@@ -726,7 +726,7 @@ async fn write_body_to_file(
 
     Ok(WrittenBody {
         bytes_written,
-        digest: format!("sha256:{:x}", hasher.finalize()),
+        digest: format!("sha256:{}", hex::encode(hasher.finalize())),
     })
 }
 
@@ -768,7 +768,7 @@ async fn read_open_file_digest_and_size(
         size = size.saturating_add(read as u64);
     }
 
-    Ok((size, format!("sha256:{:x}", hasher.finalize())))
+    Ok((size, format!("sha256:{}", hex::encode(hasher.finalize()))))
 }
 
 async fn resolve_empty_finalize_reuse(

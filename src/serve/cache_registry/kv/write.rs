@@ -550,6 +550,6 @@ pub(crate) async fn write_body_to_temp_file(
     }
 
     put_probe.stage("body_ingest_done");
-    let digest = format!("sha256:{:x}", hasher.finalize());
+    let digest = format!("sha256:{}", hex::encode(hasher.finalize()));
     Ok((path, total_size, digest))
 }

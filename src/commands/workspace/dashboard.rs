@@ -198,14 +198,14 @@ impl DashboardApp {
             terminal.draw(|frame| self.draw(frame))?;
 
             if event::poll(Duration::from_millis(250))? {
-                match event::read()? {
+                let should_exit = match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        if self.handle_key(key).await? {
-                            break;
-                        }
+                        self.handle_key(key).await?
                     }
-                    Event::Resize(_, _) => {}
-                    _ => {}
+                    _ => false,
+                };
+                if should_exit {
+                    break;
                 }
             }
 
@@ -238,11 +238,10 @@ impl DashboardApp {
             KeyCode::Down | KeyCode::Char('j') => self.select_next_tag(),
             KeyCode::Up | KeyCode::Char('k') => self.select_previous_tag(),
             KeyCode::Home | KeyCode::Char('g') => self.selected_tag = 0,
-            KeyCode::End | KeyCode::Char('G') => {
-                if !self.tags.tags.is_empty() {
-                    self.selected_tag = self.tags.tags.len() - 1;
-                }
+            KeyCode::End | KeyCode::Char('G') if !self.tags.tags.is_empty() => {
+                self.selected_tag = self.tags.tags.len() - 1;
             }
+            KeyCode::End | KeyCode::Char('G') => {}
             KeyCode::PageDown | KeyCode::Char('n') => self.next_page().await,
             KeyCode::PageUp | KeyCode::Char('p') => self.previous_page().await,
             KeyCode::Tab => self.side_panel = self.side_panel.next(),

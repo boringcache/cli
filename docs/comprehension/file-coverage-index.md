@@ -408,6 +408,7 @@ Owner: repo operations support (`support-primary`)
 
 ### GitHub Actions workflows
 
+- `.github/dependabot.yml`
 - `.github/workflows/ci.yml`
 - `.github/workflows/e2e.yml`
 - `.github/workflows/publish-images.yml`

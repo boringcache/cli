@@ -269,7 +269,7 @@ pub(crate) async fn poll_tag_version_loop(state: &AppState) {
         } else {
             KV_VERSION_POLL_IDLE_SECS * 1000
         };
-        let jitter = rand::thread_rng().gen_range(0..=KV_VERSION_POLL_JITTER_MS * 2);
+        let jitter = rand::random_range(0..=KV_VERSION_POLL_JITTER_MS * 2);
         let sleep_ms = base_ms.saturating_sub(KV_VERSION_POLL_JITTER_MS) + jitter;
         tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
 

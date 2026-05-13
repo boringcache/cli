@@ -2,7 +2,7 @@
 name = "boring_cache_cli"
 version = "1.12.79"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 authors = ["BoringCache Team"]
 description = "High-performance cache management CLI for CI/CD workflows"
 license-file = "LICENSE.md"
@@ -43,7 +43,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", default-features = false }
 ciborium = "0.2"
-toml = "0.8"
+toml = "1.1"
 
 # Error handling
 anyhow = "1.0"
@@ -53,7 +53,7 @@ thiserror = "2.0"
 crossbeam-channel = "0.5"
 humansize = "2"
 crossterm = "0.29"
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 
 # Compression backend
 zstd = { version = "0.13", default-features = false, features = ["zstdmt"] }
@@ -66,7 +66,7 @@ dirs = "6.0"
 rpassword = "7.3"
 
 # Crypto - minimal features for content hashing
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 
 # Encryption - Age encryption for client-side encryption (optional feature)
@@ -74,7 +74,7 @@ age = { version = "0.11", features = ["armor"] }
 
 # Signing - Ed25519 for artifact signing
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
-rand = "0.8"
+rand = "0.10"
 base64 = "0.22"
 
 # Archive creation
@@ -107,7 +107,7 @@ notify-debouncer-mini = "0.7"
 ctrlc = "3.5"
 
 # Diff generation for onboard command
-similar = "2"
+similar = "3"
 
 # URL handling - minimal
 urlencoding = { version = "2.1", default-features = false }

@@ -589,8 +589,6 @@ async fn process_replication_work(state: &AppState, urgent: bool, consecutive_fa
     }
 
     if *consecutive_failures > 0 {
-        use rand::Rng;
-
         let base_secs: u64 = match *consecutive_failures {
             1 => 2,
             2 => 5,
@@ -598,7 +596,7 @@ async fn process_replication_work(state: &AppState, urgent: bool, consecutive_fa
             4 => 30,
             _ => 60,
         };
-        let jitter_ms: u64 = rand::thread_rng().gen_range(0..3000);
+        let jitter_ms: u64 = rand::random_range(0..3000);
         tokio::time::sleep(std::time::Duration::from_millis(
             base_secs * 1000 + jitter_ms,
         ))

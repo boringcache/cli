@@ -378,7 +378,7 @@ fn calculate_file_hash(path: &Path, hash_algorithm: HashAlgorithm) -> Result<Str
                 }
                 hasher.update(&buffer[..read]);
             }
-            Ok(format!("sha256:{:x}", hasher.finalize()))
+            Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
         }
     }
 }

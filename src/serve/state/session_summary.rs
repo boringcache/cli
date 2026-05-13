@@ -271,14 +271,13 @@ fn storage_summary(oci_engine: &BTreeMap<String, String>) -> Value {
         object.insert("error_count".to_string(), Value::from(error_count));
         object.insert("timeout_count".to_string(), Value::from(timeout_count));
 
-        if request_count > 0 {
-            object.insert(
-                "ttfb_ms".to_string(),
-                Value::from(ttfb_ms_sum / request_count),
-            );
+        if let Some(ttfb_ms) = ttfb_ms_sum.checked_div(request_count) {
+            object.insert("ttfb_ms".to_string(), Value::from(ttfb_ms));
+        }
+        if let Some(body_duration_ms) = body_duration_ms_sum.checked_div(request_count) {
             object.insert(
                 "body_duration_ms".to_string(),
-                Value::from(body_duration_ms_sum / request_count),
+                Value::from(body_duration_ms),
             );
         }
         object.insert("ttfb_ms_sum".to_string(), Value::from(ttfb_ms_sum));

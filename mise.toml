@@ -1,5 +1,5 @@
 [tools]
-rust = "1.94.1"
+rust = "1.95.0"
 
 [tasks.env]
 run = "./scripts/cargo-flow.sh env"

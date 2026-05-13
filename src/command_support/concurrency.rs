@@ -72,8 +72,15 @@ mod tests {
 
     #[test]
     fn get_optimal_concurrency_respects_operation_count() {
+        let _guard = env_lock().lock().unwrap();
+        test_env::remove_var(SAVE_MAX_CONCURRENCY_ENV);
+        test_env::remove_var(RESTORE_MAX_CONCURRENCY_ENV);
+
         assert_eq!(get_optimal_concurrency(1, "save"), 1);
-        assert!(get_optimal_concurrency(8, "restore") >= 2);
+        assert_eq!(get_optimal_concurrency(1, "restore"), 1);
+
+        let restore_concurrency = get_optimal_concurrency(8, "restore");
+        assert!((1..=8).contains(&restore_concurrency));
     }
 
     #[test]

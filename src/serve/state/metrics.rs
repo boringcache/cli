@@ -48,16 +48,8 @@ impl BlobReadMetrics {
         let local_duration_ms = self.local_duration_ms.load(Ordering::Acquire);
         let remote_duration_ms = self.remote_duration_ms.load(Ordering::Acquire);
         let local_hit_rate_pct = ((local_count as f64 / total_count as f64) * 100.0).round();
-        let local_avg_ms = if local_count == 0 {
-            0
-        } else {
-            local_duration_ms / local_count
-        };
-        let remote_avg_ms = if remote_count == 0 {
-            0
-        } else {
-            remote_duration_ms / remote_count
-        };
+        let local_avg_ms = local_duration_ms.checked_div(local_count).unwrap_or(0);
+        let remote_avg_ms = remote_duration_ms.checked_div(remote_count).unwrap_or(0);
 
         BTreeMap::from([
             ("blob_read_local_count".to_string(), local_count.to_string()),
@@ -1455,14 +1447,24 @@ impl PrefetchMetrics {
             "startup_prefetch_duration_ms".to_string(),
             snapshot.duration_ms.to_string(),
         );
-        if snapshot.duration_ms > 0 {
+        if let Some(blobs_per_sec) = snapshot
+            .inserted
+            .saturating_mul(1000)
+            .checked_div(snapshot.duration_ms)
+        {
             hints.insert(
                 "startup_prefetch_blobs_per_sec".to_string(),
-                ((snapshot.inserted.saturating_mul(1000)) / snapshot.duration_ms).to_string(),
+                blobs_per_sec.to_string(),
             );
+        }
+        if let Some(bytes_per_sec) = snapshot
+            .target_bytes
+            .saturating_mul(1000)
+            .checked_div(snapshot.duration_ms)
+        {
             hints.insert(
                 "startup_prefetch_bytes_per_sec".to_string(),
-                ((snapshot.target_bytes.saturating_mul(1000)) / snapshot.duration_ms).to_string(),
+                bytes_per_sec.to_string(),
             );
         }
         if snapshot.timed_out {
@@ -1642,10 +1644,14 @@ impl KvBlobUploadMetrics {
             "kv_upload_final_concurrency_max".to_string(),
             snapshot.max_final_concurrency.to_string(),
         );
-        if snapshot.duration_ms > 0 {
+        if let Some(blobs_per_sec) = snapshot
+            .uploaded_blobs
+            .saturating_mul(1000)
+            .checked_div(snapshot.duration_ms)
+        {
             hints.insert(
                 "kv_upload_blobs_per_sec".to_string(),
-                ((snapshot.uploaded_blobs.saturating_mul(1000)) / snapshot.duration_ms).to_string(),
+                blobs_per_sec.to_string(),
             );
         }
         if let Some(source) = &snapshot.last_concurrency_source {

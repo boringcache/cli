@@ -2,7 +2,6 @@ pub mod policy;
 
 use anyhow::{Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
 use sha2::Digest as _;
 use std::path::Path;
 
@@ -16,7 +15,9 @@ pub struct SigningConfig {
 }
 
 pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
-    let signing_key = SigningKey::generate(&mut OsRng);
+    let mut key_bytes = [0u8; 32];
+    rand::fill(&mut key_bytes);
+    let signing_key = SigningKey::from_bytes(&key_bytes);
     let verifying_key = signing_key.verifying_key();
     (signing_key, verifying_key)
 }

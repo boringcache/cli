@@ -28,7 +28,7 @@ pub(crate) async fn set_next_flush_at_with_jitter(state: &AppState, base_ms: u64
     let jitter = if jitter_ms == 0 {
         0
     } else {
-        rand::thread_rng().gen_range(0..jitter_ms)
+        rand::random_range(0..jitter_ms)
     };
     let backoff = std::time::Duration::from_millis(base_ms + jitter);
     let mut next = state.kv_next_flush_at.write().await;

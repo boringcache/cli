@@ -290,7 +290,7 @@ pub(crate) async fn stream_blob_to_file(
             .map_err(|e| RegistryError::internal(format!("Failed to flush temp file: {e}")))?;
         drop(file);
 
-        let actual_digest = format!("sha256:{:x}", hasher.finalize());
+        let actual_digest = format!("sha256:{}", hex::encode(hasher.finalize()));
         if actual_digest.eq_ignore_ascii_case(&expected_digest) {
             return Ok(written);
         }
