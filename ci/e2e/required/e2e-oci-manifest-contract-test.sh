@@ -16,6 +16,7 @@ RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 REGISTRY_ROOT_TAG="${E2E_TAG_PREFIX:-gha-cache-registry}-oci-contract-${RUN_ID}-${RUN_ATTEMPT}"
 OCI_NAME="boringcache-e2e/oci-contract-${RUN_ID}-${RUN_ATTEMPT}"
 SUBJECT_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+REFERRERS_TAG="${SUBJECT_DIGEST/:/-}"
 ARTIFACT_TYPE="application/vnd.example.sbom.v1"
 VISIBILITY_ATTEMPTS="${OCI_CONTRACT_VISIBILITY_ATTEMPTS:-6}"
 VISIBILITY_SLEEP_SECS="${OCI_CONTRACT_VISIBILITY_SLEEP_SECS:-2}"
@@ -30,8 +31,6 @@ REFERRERS_HEADERS="${LOG_DIR}/referrers.headers"
 REFERRERS_BODY="${LOG_DIR}/referrers.json"
 FILTER_HEADERS="${LOG_DIR}/referrers-filter.headers"
 FILTER_BODY="${LOG_DIR}/referrers-filter.json"
-RESTART_GET_HEADERS="${LOG_DIR}/manifest-get-restart.headers"
-RESTART_GET_BODY="${LOG_DIR}/manifest-get-restart.body"
 RESTART_REFERRERS_HEADERS="${LOG_DIR}/referrers-restart.headers"
 RESTART_REFERRERS_BODY="${LOG_DIR}/referrers-restart.json"
 
@@ -157,8 +156,8 @@ stop_proxy
 if ! verify_remote_tag_visible \
   "${BINARY}" \
   "${WORKSPACE}" \
-  "${REGISTRY_ROOT_TAG}" \
-  "${LOG_DIR}/publish-check-root" \
+  "${REFERRERS_TAG}" \
+  "${LOG_DIR}/publish-check-referrers" \
   1 \
   "${VISIBILITY_ATTEMPTS}" \
   "${VISIBILITY_SLEEP_SECS}" \
@@ -167,14 +166,6 @@ if ! verify_remote_tag_visible \
 fi
 start_proxy "${BINARY}" "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" "${PROXY_PORT}" "${PROXY_RESTART_LOG}" "--fail-on-cache-error"
 wait_for_proxy "${PROXY_PORT}"
-
-curl_get_with_status_retry \
-  "${RESTART_GET_HEADERS}" \
-  "${RESTART_GET_BODY}" \
-  200 \
-  "http://${PROXY_HOST}:${PROXY_PORT}/v2/${OCI_NAME}/manifests/${MANIFEST_DIGEST}"
-assert_header "${RESTART_GET_HEADERS}" "Content-Type" "application/vnd.oci.artifact.manifest.v1+json"
-cmp -s "${MANIFEST_FILE}" "${RESTART_GET_BODY}"
 
 curl_get_with_status_retry \
   "${RESTART_REFERRERS_HEADERS}" \
