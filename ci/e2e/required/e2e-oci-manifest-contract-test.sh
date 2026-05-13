@@ -17,6 +17,8 @@ REGISTRY_ROOT_TAG="${E2E_TAG_PREFIX:-gha-cache-registry}-oci-contract-${RUN_ID}-
 OCI_NAME="boringcache-e2e/oci-contract-${RUN_ID}-${RUN_ATTEMPT}"
 SUBJECT_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 ARTIFACT_TYPE="application/vnd.example.sbom.v1"
+VISIBILITY_ATTEMPTS="${OCI_CONTRACT_VISIBILITY_ATTEMPTS:-6}"
+VISIBILITY_SLEEP_SECS="${OCI_CONTRACT_VISIBILITY_SLEEP_SECS:-2}"
 PROXY_LOG="${LOG_DIR}/proxy.log"
 PROXY_RESTART_LOG="${LOG_DIR}/proxy-restart.log"
 MANIFEST_FILE="${LOG_DIR}/subject-manifest.json"
@@ -52,6 +54,31 @@ assert_status() {
     cat "${headers}"
     exit 1
   fi
+}
+
+curl_get_with_status_retry() {
+  local headers="$1"
+  local body="$2"
+  local expected="$3"
+  local url="$4"
+  local attempts="${5:-${VISIBILITY_ATTEMPTS}}"
+  local sleep_secs="${6:-${VISIBILITY_SLEEP_SECS}}"
+  local attempt
+
+  for attempt in $(seq 1 "$attempts"); do
+    if curl -sS -D "${headers}" -o "${body}" "${url}" \
+      && grep -Eq "^HTTP/.* ${expected} " "${headers}"; then
+      return 0
+    fi
+
+    if (( attempt < attempts )); then
+      echo "WARNING: expected HTTP ${expected} from ${url} (attempt ${attempt}/${attempts}); retrying in ${sleep_secs}s"
+      cat "${headers}" || true
+      sleep "${sleep_secs}"
+    fi
+  done
+
+  assert_status "${headers}" "${expected}"
 }
 
 assert_header() {
@@ -135,9 +162,11 @@ assert_status "${RESTART_GET_HEADERS}" 200
 assert_header "${RESTART_GET_HEADERS}" "Content-Type" "application/vnd.oci.artifact.manifest.v1+json"
 cmp -s "${MANIFEST_FILE}" "${RESTART_GET_BODY}"
 
-curl -sS -D "${RESTART_REFERRERS_HEADERS}" -o "${RESTART_REFERRERS_BODY}" \
+curl_get_with_status_retry \
+  "${RESTART_REFERRERS_HEADERS}" \
+  "${RESTART_REFERRERS_BODY}" \
+  200 \
   "http://${PROXY_HOST}:${PROXY_PORT}/v2/${OCI_NAME}/referrers/${SUBJECT_DIGEST}"
-assert_status "${RESTART_REFERRERS_HEADERS}" 200
 assert_header "${RESTART_REFERRERS_HEADERS}" "Content-Type" "application/vnd.oci.image.index.v1+json"
 check_referrers_body "${RESTART_REFERRERS_BODY}" "${MANIFEST_DIGEST}" "${ARTIFACT_TYPE}"
 
