@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use super::error::OciError;
-use crate::serve::state::{AppState, digest_tag, legacy_ref_tag_for_input, ref_tag_for_input};
+use crate::serve::state::{AppState, legacy_ref_tag_for_input, ref_tag_for_input};
 use crate::tag_utils::{TagResolver, server_cache_tag_name};
 
 pub(crate) fn scoped_restore_tags(
@@ -11,11 +11,15 @@ pub(crate) fn scoped_restore_tags(
     name: &str,
     reference: &str,
 ) -> Vec<String> {
+    let mut tags = Vec::new();
+    if server_cache_tag_name(reference) {
+        tags.push(reference.to_string());
+    }
+
     let scoped_input = format!("{name}:{reference}");
     let scoped_candidates = tag_resolver
         .effective_restore_tags(&scoped_input)
         .unwrap_or_else(|_| vec![scoped_input]);
-    let mut tags = Vec::new();
     for scoped in scoped_candidates {
         let current = current_ref_tag(configured_human_tags, registry_root_tag, &scoped);
         if !tags.contains(&current) {
@@ -36,6 +40,10 @@ pub(crate) fn scoped_save_tag(
     name: &str,
     reference: &str,
 ) -> Result<String, OciError> {
+    if server_cache_tag_name(reference) {
+        return Ok(reference.to_string());
+    }
+
     let scoped = fallible_effective_ref_input(tag_resolver, name, reference)?;
     Ok(current_ref_tag(
         configured_human_tags,
@@ -49,6 +57,10 @@ pub(crate) fn scoped_write_scope_tag(
     name: &str,
     reference: &str,
 ) -> Result<String, OciError> {
+    if server_cache_tag_name(reference) {
+        return Ok(reference.to_string());
+    }
+
     let scoped_input = format!("{name}:{reference}");
     tag_resolver
         .effective_save_tag(&scoped_input)
@@ -62,6 +74,10 @@ pub(crate) fn scoped_legacy_alias_binding(
     name: &str,
     reference: &str,
 ) -> Result<Option<AliasBinding>, OciError> {
+    if server_cache_tag_name(reference) {
+        return Ok(None);
+    }
+
     let scoped = fallible_effective_ref_input(tag_resolver, name, reference)?;
     let current = current_ref_tag(configured_human_tags, registry_root_tag, &scoped);
     let legacy = legacy_ref_tag(registry_root_tag, &scoped);
@@ -145,22 +161,13 @@ pub(crate) struct AliasBinding {
 
 pub(crate) fn alias_tags_for_manifest(
     primary_tag: &str,
-    manifest_digest: &str,
-    primary_write_scope_tag: Option<&str>,
+    _manifest_digest: &str,
+    _primary_write_scope_tag: Option<&str>,
     configured_human_tags: &[String],
     additional_aliases: &[AliasBinding],
 ) -> Vec<AliasBinding> {
     let mut seen = HashSet::new();
     let mut aliases = Vec::new();
-
-    let digest_alias = digest_tag(manifest_digest);
-    if digest_alias != primary_tag && seen.insert(digest_alias.clone()) {
-        aliases.push(AliasBinding {
-            tag: digest_alias,
-            write_scope_tag: primary_write_scope_tag.map(ToOwned::to_owned),
-            required: false,
-        });
-    }
 
     for human_tag in configured_human_tags {
         if human_tag != primary_tag && seen.insert(human_tag.clone()) {

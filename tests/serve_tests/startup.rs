@@ -529,7 +529,7 @@ async fn test_oci_prefetch_ref_indexes_manifest_before_ready() {
     );
     let oci_tag = scoped_ref_tag("img", "v1");
     let legacy_oci_tag = legacy_scoped_ref_tag("img", "v1");
-    let oci_entries_input = format!("{oci_tag},{legacy_oci_tag}");
+    let oci_entries_input = format!("v1,{oci_tag},{legacy_oci_tag}");
     let oci_entries = urlencoding::encode(&oci_entries_input);
 
     let oci_restore_mock = server
@@ -692,7 +692,7 @@ async fn test_oci_prefetch_ref_can_hydrate_bodies_before_ready() {
     );
     let oci_tag = scoped_ref_tag("img", "v1");
     let legacy_oci_tag = legacy_scoped_ref_tag("img", "v1");
-    let oci_entries_input = format!("{oci_tag},{legacy_oci_tag}");
+    let oci_entries_input = format!("v1,{oci_tag},{legacy_oci_tag}");
     let oci_entries = urlencoding::encode(&oci_entries_input);
 
     let oci_restore_mock = server

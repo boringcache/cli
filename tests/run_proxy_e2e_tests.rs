@@ -2,7 +2,6 @@
 
 use mockito::{Matcher, Server};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
@@ -18,13 +17,6 @@ fn cli_binary() -> PathBuf {
                 .unwrap()
                 .join("target/debug/boringcache")
         })
-}
-
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind random port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
 }
 
 #[test]
@@ -96,7 +88,6 @@ phase="$(printf '%s\n' "$status_headers" | awk -F': ' 'tolower($1) == "x-boringc
 #[test]
 fn test_run_proxy_propagates_child_exit_code() {
     let temp_dir = TempDir::new().expect("temp dir");
-    let port = free_port().to_string();
     let output = Command::new(cli_binary())
         .args([
             "run",
@@ -109,7 +100,7 @@ fn test_run_proxy_propagates_child_exit_code() {
             "--host",
             "127.0.0.1",
             "--port",
-            &port,
+            "0",
             "--",
             "sh",
             "-c",
@@ -230,12 +221,10 @@ fn test_run_proxy_warm_start_continues_when_backend_cannot_hydrate() {
 fn test_run_proxy_sends_provider_neutral_ci_context_to_save_request() {
     let temp_dir = TempDir::new().expect("temp dir");
     let mut server = Server::new();
-    let root_tag = format!("bc_registry_root_v2_{:x}", Sha256::digest(b"main"));
+    let tag = "main";
     let workspace_path = "/v2/workspaces/test-org/test-workspace";
-    let root_pointer_path = format!("{workspace_path}/caches/tags/{root_tag}/pointer");
-    let root_publish_path = format!("{workspace_path}/caches/tags/{root_tag}/publish");
-    let alias_pointer_path = format!("{workspace_path}/caches/tags/main/pointer");
-    let alias_publish_path = format!("{workspace_path}/caches/tags/main/publish");
+    let pointer_path = format!("{workspace_path}/caches/tags/{tag}/pointer");
+    let publish_path = format!("{workspace_path}/caches/tags/{tag}/publish");
 
     let capabilities_mock = server
         .mock("GET", "/v2/capabilities")
@@ -259,7 +248,7 @@ fn test_run_proxy_sends_provider_neutral_ci_context_to_save_request() {
         .match_header("authorization", "Bearer test-save-token")
         .match_body(Matcher::PartialJson(json!({
             "cache": {
-                "tag": root_tag,
+                "tag": tag,
                 "write_scope_tag": "main",
                 "storage_mode": "cas",
                 "cas_layout": "file-v1",
@@ -277,7 +266,7 @@ fn test_run_proxy_sends_provider_neutral_ci_context_to_save_request() {
         .with_header("content-type", "application/json")
         .with_body(
             json!({
-                "tag": root_tag,
+                "tag": tag,
                 "cache_entry_id": "entry-provider-neutral",
                 "exists": true,
                 "storage_mode": "cas",
@@ -303,42 +292,14 @@ fn test_run_proxy_sends_provider_neutral_ci_context_to_save_request() {
         .expect(1)
         .create();
 
-    let root_pointer_mock = server
-        .mock("GET", root_pointer_path.as_str())
+    let pointer_mock = server
+        .mock("GET", pointer_path.as_str())
         .match_header("authorization", "Bearer test-save-token")
         .with_status(404)
         .expect(1)
         .create();
-    let root_publish_mock = server
-        .mock("PUT", root_publish_path.as_str())
-        .match_header("authorization", "Bearer test-save-token")
-        .match_header("if-match", "0")
-        .match_body(Matcher::PartialJson(json!({
-            "cache_entry_id": "entry-provider-neutral",
-            "publish_mode": "cas",
-            "write_scope_tag": "main"
-        })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "version": "1",
-                "cache_entry_id": "entry-provider-neutral",
-                "status": "ready"
-            })
-            .to_string(),
-        )
-        .expect(1)
-        .create();
-
-    let alias_pointer_mock = server
-        .mock("GET", alias_pointer_path.as_str())
-        .match_header("authorization", "Bearer test-save-token")
-        .with_status(404)
-        .expect(1)
-        .create();
-    let alias_publish_mock = server
-        .mock("PUT", alias_publish_path.as_str())
+    let publish_mock = server
+        .mock("PUT", publish_path.as_str())
         .match_header("authorization", "Bearer test-save-token")
         .match_header("if-match", "0")
         .match_body(Matcher::PartialJson(json!({
@@ -423,10 +384,8 @@ curl -fsS \
     capabilities_mock.assert();
     save_mock.assert();
     stage_mock.assert();
-    root_pointer_mock.assert();
-    root_publish_mock.assert();
-    alias_pointer_mock.assert();
-    alias_publish_mock.assert();
+    pointer_mock.assert();
+    publish_mock.assert();
 }
 
 #[test]

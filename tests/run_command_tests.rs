@@ -1813,21 +1813,26 @@ fn test_docker_dry_run_json_injects_cache_flags() {
     assert_eq!(parsed["adapter"], "docker");
     assert_eq!(parsed["tag"], "docker-main");
     assert_eq!(parsed["proxy"]["endpoint_host"], "host.docker.internal");
+    let resolved_tag = "docker-main-macos-26-arm64";
     assert_eq!(
         parsed["oci_cache"]["registry_ref"],
-        "host.docker.internal:5000/cache:buildcache"
+        format!("host.docker.internal:5000/cache:{resolved_tag}")
     );
     assert_eq!(
         parsed["oci_cache"]["cache_from"],
-        "type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true"
+        format!(
+            "type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},registry.insecure=true"
+        )
     );
     assert_eq!(
         parsed["oci_cache"]["cache_to"],
-        "type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max,registry.insecure=true"
+        format!(
+            "type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},mode=max,registry.insecure=true"
+        )
     );
     assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
-        serde_json::json!(["cache@buildcache"])
+        serde_json::json!([format!("cache@{resolved_tag}")])
     );
     let command = parsed["command"]
         .as_array()
@@ -1835,12 +1840,14 @@ fn test_docker_dry_run_json_injects_cache_flags() {
         .iter()
         .map(|value| value.as_str().unwrap_or_default())
         .collect::<Vec<_>>();
-    assert!(
-        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true")
+    let expected_cache_from = format!(
+        "--cache-from=type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},registry.insecure=true"
     );
-    assert!(command.contains(
-        &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max,registry.insecure=true"
-    ));
+    let expected_cache_to = format!(
+        "--cache-to=type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},mode=max,registry.insecure=true"
+    );
+    assert!(command.contains(&expected_cache_from.as_str()));
+    assert!(command.contains(&expected_cache_to.as_str()));
 }
 
 #[test]
@@ -1881,13 +1888,18 @@ fn test_buildkit_dry_run_json_injects_cache_flags() {
     assert_eq!(parsed["adapter"], "buildkit");
     assert_eq!(parsed["tag"], "docker-main");
     assert_eq!(parsed["proxy"]["metadata_hints"]["tool"], "oci");
+    let resolved_tag = "docker-main-macos-26-arm64";
     assert_eq!(
         parsed["oci_cache"]["cache_from"],
-        "type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true"
+        format!(
+            "type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},registry.insecure=true"
+        )
     );
     assert_eq!(
         parsed["oci_cache"]["cache_to"],
-        "type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max,registry.insecure=true"
+        format!(
+            "type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},mode=max,registry.insecure=true"
+        )
     );
 
     let command = parsed["command"]
@@ -1900,7 +1912,7 @@ fn test_buildkit_dry_run_json_injects_cache_flags() {
         command
             .windows(2)
             .filter(|args| args[0] == "--import-cache"
-                && args[1] == "type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true")
+                && args[1] == format!("type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},registry.insecure=true"))
             .count(),
         1
     );
@@ -1908,14 +1920,14 @@ fn test_buildkit_dry_run_json_injects_cache_flags() {
         command
             .windows(2)
             .filter(|args| args[0] == "--export-cache"
-                && args[1] == "type=registry,ref=host.docker.internal:5000/cache:buildcache,mode=max,registry.insecure=true")
+                && args[1] == format!("type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},mode=max,registry.insecure=true"))
             .count(),
         1
     );
 }
 
 #[test]
-fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
+fn test_docker_dry_run_json_rejects_old_ref_alias_flags() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);
     let output = command
@@ -1946,80 +1958,67 @@ fn test_docker_dry_run_json_plans_immutable_run_ref_and_aliases() {
             ".",
         ])
         .output()
-        .expect("Failed to execute docker immutable dry-run command");
+        .expect("Failed to execute docker dry-run command with old ref flags");
 
     assert!(
-        output.status.success(),
-        "Dry-run should succeed, stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "Dry-run should fail when old alias flags are used"
     );
-
-    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
-    assert_schema_version(&parsed);
-    assert_proxy_metadata_hints_are_cli_replayable(&parsed);
-    assert_eq!(
-        parsed["oci_cache"]["registry_ref"],
-        "host.docker.internal:5000/cache:run-123-attempt-1"
-    );
-    assert_eq!(
-        parsed["oci_cache"]["cache_from_refs"],
-        serde_json::json!([
-            "type=registry,ref=host.docker.internal:5000/cache:branch-main,registry.insecure=true",
-            "type=registry,ref=host.docker.internal:5000/cache:default,registry.insecure=true"
-        ])
-    );
-    assert_eq!(
-        parsed["oci_cache"]["cache_from_ref_tags"],
-        serde_json::json!(["branch-main", "default"])
-    );
-    assert_eq!(
-        parsed["oci_cache"]["cache_to"],
-        "type=registry,ref=host.docker.internal:5000/cache:run-123-attempt-1,mode=max,registry.insecure=true"
-    );
-    assert_eq!(
-        parsed["oci_cache"]["immutable_run_ref_tag"],
-        "run-123-attempt-1"
-    );
-    assert_eq!(
-        parsed["oci_cache"]["promotion_ref_tags"],
-        serde_json::json!(["branch-main", "default"])
-    );
-    assert_eq!(
-        parsed["proxy"]["oci_prefetch_refs"],
-        serde_json::json!(["cache@branch-main", "cache@default"])
-    );
-    assert_eq!(
-        parsed["proxy"]["metadata_hints"]["docker_immutable_run_ref"],
-        "run-123-attempt-1"
-    );
-    assert_eq!(
-        parsed["proxy"]["metadata_hints"]["docker_alias_promotion_refs"],
-        "branch-main/default"
-    );
-    assert_eq!(
-        parsed["proxy"]["metadata_hints"]["docker_cache_from_refs"],
-        Value::Null
-    );
-
-    let command = parsed["command"]
-        .as_array()
-        .expect("command array")
-        .iter()
-        .map(|value| value.as_str().unwrap_or_default())
-        .collect::<Vec<_>>();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:branch-main,registry.insecure=true")
+        stderr.contains("Docker cache ref overrides are no longer needed"),
+        "{stderr}"
     );
-    assert!(
-        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:default,registry.insecure=true")
-    );
-    assert!(command.contains(
-        &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:run-123-attempt-1,mode=max,registry.insecure=true"
-    ));
 }
 
 #[test]
-fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
+fn test_docker_dry_run_json_rejects_old_ref_alias_config() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::write(
+        temp_dir.path().join(".boringcache.toml"),
+        r#"
+workspace = "test-org/test-workspace"
+
+[adapters.docker]
+cache-ref-tag = "legacy-docker-cache"
+"#,
+    )
+    .expect("write repo config");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args([
+            "docker",
+            "--tag",
+            "docker-main",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--dry-run",
+            "--json",
+            "--",
+            "docker",
+            "buildx",
+            "build",
+            ".",
+        ])
+        .output()
+        .expect("Failed to execute docker dry-run command with old ref config");
+
+    assert!(
+        !output.status.success(),
+        "Dry-run should fail when old alias config is used"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Docker cache ref overrides are no longer needed"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn test_docker_dry_run_json_uses_github_actions_human_tag() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);
     let output = command
@@ -2061,32 +2060,26 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
     assert_schema_version(&parsed);
     assert_proxy_metadata_hints_are_cli_replayable(&parsed);
+    let resolved_tag = "docker-main-macos-26-arm64";
     assert_eq!(
         parsed["oci_cache"]["registry_ref"],
-        "host.docker.internal:5000/cache:run-gha-123456789-attempt-2"
+        format!("host.docker.internal:5000/cache:{resolved_tag}")
     );
     assert_eq!(
         parsed["oci_cache"]["cache_from_refs"],
-        serde_json::json!([
-            "type=registry,ref=host.docker.internal:5000/cache:pr-42,registry.insecure=true",
-            "type=registry,ref=host.docker.internal:5000/cache:default,registry.insecure=true"
-        ])
+        serde_json::json!([format!(
+            "type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},registry.insecure=true"
+        )])
     );
     assert_eq!(
         parsed["oci_cache"]["cache_from_ref_tags"],
-        serde_json::json!(["pr-42", "default"])
+        serde_json::json!([resolved_tag])
     );
     assert_eq!(
         parsed["oci_cache"]["cache_to"],
-        "type=registry,ref=host.docker.internal:5000/cache:run-gha-123456789-attempt-2,mode=max,registry.insecure=true"
-    );
-    assert_eq!(
-        parsed["oci_cache"]["immutable_run_ref_tag"],
-        "run-gha-123456789-attempt-2"
-    );
-    assert_eq!(
-        parsed["oci_cache"]["promotion_ref_tags"],
-        serde_json::json!(["pr-42"])
+        format!(
+            "type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},mode=max,registry.insecure=true"
+        )
     );
     assert_eq!(
         parsed["oci_cache"]["run_metadata"]["provider"],
@@ -2106,19 +2099,11 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
     );
     assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
-        serde_json::json!(["cache@pr-42", "cache@default"])
-    );
-    assert_eq!(
-        parsed["proxy"]["metadata_hints"]["docker_immutable_run_ref"],
-        "run-gha-123456789-attempt-2"
+        serde_json::json!([format!("cache@{resolved_tag}")])
     );
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["docker_cache_ref_tag"],
-        "run-gha-123456789-attempt-2"
-    );
-    assert_eq!(
-        parsed["proxy"]["metadata_hints"]["docker_alias_promotion_refs"],
-        "pr-42"
+        resolved_tag
     );
     assert_eq!(parsed["proxy"]["metadata_hints"]["project"], "widgets");
     assert_eq!(
@@ -2145,21 +2130,20 @@ fn test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases() {
         .iter()
         .map(|value| value.as_str().unwrap_or_default())
         .collect::<Vec<_>>();
-    assert!(
-        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:pr-42,registry.insecure=true")
+    let expected_cache_from = format!(
+        "--cache-from=type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},registry.insecure=true"
     );
+    assert!(command.contains(&expected_cache_from.as_str()));
     assert!(!command.contains(
         &"--cache-from=type=registry,ref=host.docker.internal:5000/cache:branch-feature-docker-cache,registry.insecure=true"
     ));
     assert!(
-        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:default,registry.insecure=true")
-    );
-    assert!(
         !command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true")
     );
-    assert!(command.contains(
-        &"--cache-to=type=registry,ref=host.docker.internal:5000/cache:run-gha-123456789-attempt-2,mode=max,registry.insecure=true"
-    ));
+    let expected_cache_to = format!(
+        "--cache-to=type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},mode=max,registry.insecure=true"
+    );
+    assert!(command.contains(&expected_cache_to.as_str()));
 }
 
 #[test]
@@ -2203,29 +2187,24 @@ fn test_docker_dry_run_json_uses_single_default_branch_alias() {
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
     assert_schema_version(&parsed);
     assert_proxy_metadata_hints_are_cli_replayable(&parsed);
+    let resolved_tag = "docker-main-macos-26-arm64";
     assert_eq!(
         parsed["oci_cache"]["cache_from_ref_tags"],
-        serde_json::json!(["default"])
-    );
-    assert_eq!(
-        parsed["oci_cache"]["promotion_ref_tags"],
-        serde_json::json!(["default"])
+        serde_json::json!([resolved_tag])
     );
     assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
-        serde_json::json!(["cache@default"])
-    );
-    assert_eq!(
-        parsed["proxy"]["metadata_hints"]["docker_alias_promotion_refs"],
-        "default"
+        serde_json::json!([format!("cache@{resolved_tag}")])
     );
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["docker_cache_ref_tag"],
-        "run-gha-987654321-attempt-1"
+        resolved_tag
     );
     assert_eq!(
         parsed["oci_cache"]["cache_to"],
-        "type=registry,ref=host.docker.internal:5000/cache:run-gha-987654321-attempt-1,mode=max,registry.insecure=true"
+        format!(
+            "type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},mode=max,registry.insecure=true"
+        )
     );
 }
 
@@ -2275,9 +2254,11 @@ fn test_docker_read_only_dry_run_json_uses_on_demand_proxy_mode() {
         .iter()
         .map(|value| value.as_str().unwrap_or_default())
         .collect::<Vec<_>>();
-    assert!(
-        command.contains(&"--cache-from=type=registry,ref=host.docker.internal:5000/cache:buildcache,registry.insecure=true")
+    let resolved_tag = "docker-main-macos-26-arm64";
+    let expected_cache_from = format!(
+        "--cache-from=type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},registry.insecure=true"
     );
+    assert!(command.contains(&expected_cache_from.as_str()));
     assert!(!command.iter().any(|arg| arg.starts_with("--cache-to=")));
 }
 
@@ -2319,7 +2300,7 @@ fn test_docker_dry_run_json_accepts_expert_oci_hydration_policy() {
     assert_eq!(parsed["proxy"]["oci_hydration"], "bodies-background");
     assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
-        serde_json::json!(["cache@buildcache"])
+        serde_json::json!(["cache@docker-main-macos-26-arm64"])
     );
 }
 
@@ -2352,10 +2333,5 @@ fn test_docker_dry_run_rejects_embedded_ref_tag_syntax() {
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(
-            "Use --tag for the proxy cache tag and --cache-ref-tag for the OCI cache tag"
-        ),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("Invalid --tag"), "stderr: {stderr}");
 }

@@ -194,7 +194,7 @@ fn test_docker_command_help() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Usage: boringcache docker"));
     assert!(stdout.contains("--cache-mode"));
-    assert!(stdout.contains("--cache-ref-tag"));
+    assert!(!stdout.contains("--cache-ref-tag"));
 }
 
 #[test]

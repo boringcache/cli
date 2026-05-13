@@ -137,7 +137,7 @@ mod tests {
         let plan = AdapterKind::Sccache.proxy_env_plan(
             &context,
             &super::super::AdapterCommandOptions {
-                cache_ref_tag: "buildcache".to_string(),
+                buildkit_cache_tag: "buildcache".to_string(),
                 cache_mode: "max".to_string(),
                 read_only: false,
                 docker_oci_cache: None,
@@ -177,7 +177,7 @@ mod tests {
         let plan = AdapterKind::Sccache.proxy_env_plan(
             &context,
             &super::super::AdapterCommandOptions {
-                cache_ref_tag: "buildcache".to_string(),
+                buildkit_cache_tag: "buildcache".to_string(),
                 cache_mode: "max".to_string(),
                 read_only: false,
                 docker_oci_cache: None,
@@ -208,7 +208,7 @@ mod tests {
         let plan = AdapterKind::Sccache.proxy_env_plan(
             &context,
             &super::super::AdapterCommandOptions {
-                cache_ref_tag: "buildcache".to_string(),
+                buildkit_cache_tag: "buildcache".to_string(),
                 cache_mode: "max".to_string(),
                 read_only: false,
                 docker_oci_cache: None,

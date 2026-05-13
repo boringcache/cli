@@ -7,7 +7,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = scoped_ref_tag("my-cache", "main");
+    let primary_tag = "main".to_string();
     let alias_tag = digest_tag(&manifest_digest);
     let legacy_alias_tag = legacy_scoped_ref_tag("my-cache", "main");
 
@@ -124,7 +124,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let alias_confirm_mock = server
@@ -145,7 +145,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let legacy_alias_publish_path = format!(
@@ -169,7 +169,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let legacy_alias_confirm_mock = server
@@ -191,7 +191,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
 
@@ -241,7 +241,7 @@ async fn test_manifest_put_degrades_when_primary_confirm_is_locked() {
     state.fail_on_cache_error = false;
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
-    let primary_tag = scoped_ref_tag("my-cache", "main");
+    let primary_tag = "main".to_string();
 
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -366,7 +366,7 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = scoped_ref_tag("my-cache", "main");
+    let primary_tag = "main".to_string();
     let alias_tag = digest_tag(&manifest_digest);
 
     let primary_save_mock = server
@@ -482,7 +482,7 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let alias_confirm_mock = server
@@ -503,7 +503,7 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
 
@@ -536,7 +536,7 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
 }
 
 #[tokio::test]
-async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
+async fn test_two_human_refs_promote_same_alias_without_losing_roots() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.oci_alias_promotion_refs = vec!["branch-main".to_string()];
@@ -547,7 +547,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
         primary_tag: String,
     }
 
-    let branch_alias_tag = scoped_ref_tag("cache", "branch-main");
+    let branch_alias_tag = "branch-main".to_string();
     let branch_legacy_alias_tag = legacy_scoped_ref_tag("cache", "branch-main");
     let branch_pointer_path = format!(
         "/v2/workspaces/org/repo/caches/tags/{}/pointer",
@@ -592,7 +592,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
         let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
         let manifest_root_digest =
             cas_oci::prefixed_sha256_digest(&make_oci_publish_pointer(&manifest_body));
-        let primary_tag = scoped_ref_tag("cache", reference);
+        let primary_tag = reference.to_string();
         let primary_legacy_alias_tag = legacy_scoped_ref_tag("cache", reference);
         let digest_alias_tag = digest_tag(&manifest_digest);
 
@@ -717,7 +717,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
                 })
                 .to_string(),
             )
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
         mocks.push(digest_pointer_mock);
@@ -749,7 +749,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
                 })
                 .to_string(),
             )
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
         mocks.push(digest_alias_confirm_mock);
@@ -771,7 +771,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
                 })
                 .to_string(),
             )
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
         mocks.push(primary_legacy_alias_pointer_mock);
@@ -804,7 +804,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
                 })
                 .to_string(),
             )
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
         mocks.push(primary_legacy_alias_confirm_mock);
@@ -834,7 +834,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
             .match_header("if-match", "branch-version")
             .match_body(Matcher::PartialJson(json!({
                 "cache_entry_id": entry_prefix,
-                "write_scope_tag": "cache:branch-main",
+                "write_scope_tag": "branch-main",
                 "publish_mode": "cas"
             })))
             .with_status(200)
@@ -872,7 +872,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
                 })
                 .to_string(),
             )
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
         mocks.push(branch_legacy_alias_pointer_mock);
@@ -905,7 +905,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
                 })
                 .to_string(),
             )
-            .expect(1)
+            .expect(0)
             .create_async()
             .await;
         mocks.push(branch_legacy_alias_confirm_mock);
@@ -953,7 +953,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
         assert_eq!(body.as_ref(), case.manifest_body.as_slice());
         assert!(
             state.oci_manifest_cache.get(&case.primary_tag).is_some(),
-            "primary run ref {} should stay cached",
+            "primary human ref {} should stay cached",
             case.reference
         );
     }
@@ -981,7 +981,7 @@ async fn test_two_immutable_run_refs_promote_same_alias_without_losing_roots() {
         diagnostics
             .get("oci_engine_alias_promotion_unchanged")
             .map(String::as_str),
-        Some("6")
+        None
     );
     assert_eq!(
         diagnostics
@@ -1014,7 +1014,7 @@ async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers()
     }))
     .unwrap();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = scoped_ref_tag("my-cache", "main");
+    let primary_tag = "main".to_string();
 
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -1096,7 +1096,7 @@ async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers()
 
     let referrers_reference =
         "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    let referrers_tag = scoped_ref_tag("my-cache", referrers_reference);
+    let referrers_tag = referrers_reference.to_string();
     let referrers_restore_miss_mock = server
         .mock(
             "GET",
@@ -1271,7 +1271,7 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
     let primary_tag = digest_tag(&manifest_digest);
-    let latest_alias_tag = scoped_ref_tag("my-cache", "latest");
+    let latest_alias_tag = "latest".to_string();
     let legacy_latest_alias_tag = legacy_scoped_ref_tag("my-cache", "latest");
 
     let primary_save_mock = server
@@ -1432,7 +1432,7 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let legacy_latest_alias_confirm_mock = server
@@ -1454,7 +1454,7 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
 
@@ -1716,9 +1716,8 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
         .await;
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
-    let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = namespaced_scoped_ref_tag("human-alias", "my-cache", "main");
-    let digest_alias_tag = digest_tag(&manifest_digest);
+    let primary_tag = "main".to_string();
+    let digest_alias_tag = "human-alias";
 
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -1802,11 +1801,11 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
 
     let digest_alias_publish_path = format!(
         "/v2/workspaces/org/repo/caches/tags/{}/publish",
-        urlencoding::encode(&digest_alias_tag)
+        urlencoding::encode(digest_alias_tag)
     );
     let digest_alias_pointer_path = format!(
         "/v2/workspaces/org/repo/caches/tags/{}/pointer",
-        urlencoding::encode(&digest_alias_tag)
+        urlencoding::encode(digest_alias_tag)
     );
     let digest_alias_pointer_mock = server
         .mock("GET", digest_alias_pointer_path.as_str())
@@ -1884,7 +1883,7 @@ async fn test_manifest_put_fails_required_human_alias_after_skipping_optional_al
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = namespaced_scoped_ref_tag("human-alias", "my-cache", "main");
+    let primary_tag = "main".to_string();
     let digest_alias_tag = digest_tag(&manifest_digest);
     let legacy_alias_tag = legacy_scoped_ref_tag("my-cache", "main");
 
@@ -1982,7 +1981,7 @@ async fn test_manifest_put_fails_required_human_alias_after_skipping_optional_al
         .with_status(404)
         .with_header("content-type", "application/json")
         .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let digest_alias_publish_error_mock = server
@@ -1996,7 +1995,7 @@ async fn test_manifest_put_fails_required_human_alias_after_skipping_optional_al
         .with_status(500)
         .with_header("content-type", "application/json")
         .with_body(r#"{"error":"backend unavailable"}"#)
-        .expect_at_least(1)
+        .expect(0)
         .create_async()
         .await;
 

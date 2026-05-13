@@ -58,8 +58,7 @@ pub async fn execute(
             None,
         )?;
 
-        let proxy_root_tag = crate::proxy::internal_registry_root_tag(&platform_tag);
-        let tags_to_delete = vec![platform_tag.clone(), proxy_root_tag.clone()];
+        let tags_to_delete = vec![platform_tag.clone()];
 
         let delete_result = api_client.delete(&workspace, &tags_to_delete).await;
 
@@ -77,10 +76,6 @@ pub async fn execute(
                         )
                     })?;
 
-                let proxy_deleted = results
-                    .iter()
-                    .any(|item| item.tag == proxy_root_tag && item.status == "deleted");
-
                 match response.status.as_str() {
                     "deleted" => {
                         let summary = Summary {
@@ -94,9 +89,7 @@ pub async fn execute(
                         drop(reporter);
                         progress_system.shutdown()?;
 
-                        if proxy_deleted {
-                            ui::info("Cache entry and proxy data deleted");
-                        } else if verbose {
+                        if verbose {
                             ui::info("Background cleanup scheduled for storage objects");
                         } else {
                             ui::info("Cache entry deleted");
@@ -106,13 +99,9 @@ pub async fn execute(
                         drop(reporter);
                         progress_system.shutdown()?;
 
-                        if proxy_deleted {
-                            ui::info("Proxy data deleted");
-                        } else {
-                            ui::warn(&format!("No cache entry found for tag: {}", platform_tag));
-                            if verbose && let Some(error) = &response.error {
-                                ui::info(error);
-                            }
+                        ui::warn(&format!("No cache entry found for tag: {}", platform_tag));
+                        if verbose && let Some(error) = &response.error {
+                            ui::info(error);
                         }
                     }
                     _ => {
@@ -174,28 +163,6 @@ fn parse_delete_args(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn proxy_root_tag_matches_serve_derivation() {
-        let tag = "grpc-bazel-remote-cache-ubuntu-24-x86_64";
-        let root = crate::proxy::internal_registry_root_tag(tag);
-        assert!(root.starts_with("bc_registry_root_v2_"));
-        assert_eq!(root.len(), "bc_registry_root_v2_".len() + 64);
-    }
-
-    #[test]
-    fn proxy_root_tag_is_deterministic() {
-        let a = crate::proxy::internal_registry_root_tag("my-cache-tag");
-        let b = crate::proxy::internal_registry_root_tag("my-cache-tag");
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn proxy_root_tag_differs_for_different_human_tags() {
-        let a = crate::proxy::internal_registry_root_tag("tag-a");
-        let b = crate::proxy::internal_registry_root_tag("tag-b");
-        assert_ne!(a, b);
-    }
 
     #[test]
     fn parse_delete_args_accepts_default_workspace_mode() {

@@ -60,42 +60,35 @@ check, but it must not become a second branch/default/PR scope planner.
 
 ## Proxy And Adapter Restore
 
-Proxy startup resolves one write root and an ordered list of restore roots from
+Proxy startup resolves one write tag and an ordered list of restore tags from
 the same `TagResolver` model. Bazel, sccache, Go, Turbo, Nx, Gradle, Maven, and
 raw `cache-registry` therefore reuse branch/default/PR behavior without each
 adapter carrying its own GitHub cache rules.
 
-Rooted OCI aliases live under the proxy's primary human tag namespace. Valid
-human tags use Rails `registry_path_tags` when available; unsupported explicit
-tag names stay on the legacy root path. Hidden compatibility root-hash aliases
-are migration reads/writes only, not a new shared fallback family.
+Those proxy tags are human cache-head tags. New CLI code does not derive
+`bc_registry_root_v2_*`, checkpoint, or `oci_ref_*` aliases as separate cache
+identity; those names are backend/protocol compatibility for old clients.
 
 ## Docker And BuildKit
 
 Docker and BuildKit registry-cache refs follow the same current/base/default
-accessibility model, with OCI-shaped aliases instead of archive tag names:
+accessibility model, using the resolved human tags directly:
 
-- default branch imports/promotes the default alias;
-- trusted non-default branches import branch then default and promote branch;
+- default branch imports/exports the default human tag;
+- trusted non-default branches import branch then default and export branch;
 - PRs import base/default by default and do not read the PR head-branch alias;
-- PRs with explicit save permission import PR then base/default and promote
-  only the PR alias;
-- local/no-CI runs keep the single legacy `buildcache` ref unless an explicit
-  cache ref override is supplied.
-- Default-branch Docker aliases now converge on `default`. Older caches that
-  only exist under `branch-main` or `branch-master` may look cold until a
-  default-branch run republishes the canonical alias, or until an explicit
-  hidden import override is used for a one-off migration.
+- PRs with explicit save permission import PR then base/default and export only
+  the PR human tag;
+- local/no-CI runs use the explicitly resolved human tag.
 
-The action may probe planned OCI import refs after starting the proxy. It may
-use the first readable planned ref immediately instead of waiting for every
-earlier miss to time out. Missing PR refs on restore-only PRs are expected
-misses, not evidence that the PR should gain branch/default write access.
+The action may probe planned OCI import refs after starting the proxy. Missing
+PR refs on restore-only PRs are expected misses, not evidence that the PR should
+gain branch/default write access.
 
 ## Ownership
 
 - CLI owns generated tag scope, platform/git suffixing, repo-config planning,
-  adapter defaults, proxy root planning, and Docker/BuildKit ref planning.
+  adapter defaults, proxy tag planning, and Docker/BuildKit ref planning.
 - `boringcache/one` owns GitHub Actions input validation, token selection,
   runtime setup, action outputs, `restore-keys` compatibility, and proxy/readiness
   orchestration. It passes provider metadata and explicit inputs into the CLI;

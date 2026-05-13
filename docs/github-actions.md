@@ -82,11 +82,11 @@ You can still override a configured adapter from the workflow when needed:
 ```
 
 Use `boringcache/one@v1` when you want the action to keep owning tool setup such as Bazel rc files, Maven or Gradle cache config, buildx setup, or container networking.
-When you run `boringcache docker` directly in GitHub Actions, the CLI derives Docker registry-cache run refs and aliases from GitHub metadata automatically. The action path passes the same provider-neutral metadata so Docker cache artifacts report the immutable run ref, import aliases, and promotion aliases.
+When you run `boringcache docker` directly in GitHub Actions, the CLI derives the same branch/default/PR human tags from GitHub metadata that archive and proxy flows use. The action path passes provider-neutral metadata so Docker cache artifacts report the resolved human import/export tags and CI context.
 
 For Docker and BuildKit registry caches on pull requests, restore-only is the default.
-A PR-scoped ref such as `/cache:pr-3208` may be absent and return 404, so restore-only PRs import the CLI-planned base/default aliases without gaining write access.
-If a workflow intentionally wants PR-scoped Docker writes, give the job a save-capable token and set `save-on-pull-request: true`; do that only when the PR write scope is isolated, not merely to make the PR ref exist. In PR context, the derived write target is the PR alias.
+A PR-scoped human tag may be absent and return 404, so restore-only PRs import the CLI-planned base/default tags without gaining write access.
+If a workflow intentionally wants PR-scoped Docker writes, give the job a save-capable token and set `save-on-pull-request: true`; do that only when the PR write scope is isolated, not merely to make the PR tag exist. In PR context, the derived write target is the PR human tag.
 
 Keep the proxy story simple in CI too:
 

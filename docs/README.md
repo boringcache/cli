@@ -25,7 +25,7 @@ If you are working on the CLI repo itself:
 - [OCI large blob stream-through ADR](adr/0004-oci-large-blob-stream-through.md)
 - [Borrowed upload sessions and blob cache policy ADR](adr/0005-borrowed-upload-sessions-and-blob-cache-policy.md)
 - [Cache session trace and OCI negative cache ADR](adr/0006-cache-session-trace-and-oci-negative-cache.md)
-- [Docker immutable run refs and alias promotion ADR](adr/0007-docker-immutable-run-refs-and-alias-promotion.md)
+- [Docker registry-cache identity ADR](adr/0007-docker-immutable-run-refs-and-alias-promotion.md)
 - [OCI mistake ledger](oci-mistake-ledger.md)
 - [sccache mistake ledger](sccache-mistake-ledger.md)
 - [Bazel mistake ledger](bazel-mistake-ledger.md)

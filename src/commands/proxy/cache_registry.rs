@@ -105,8 +105,7 @@ pub(crate) fn planned_cache_ref(
     no_platform: bool,
     no_git: bool,
 ) -> Result<String> {
-    let tag_resolver = build_tag_resolver(no_platform, no_git)?;
-    let tag_config = resolve_registry_tag_config(&tag_resolver, tag, false)?;
+    let tag_config = resolve_registry_tag_config_for_options(tag, no_platform, no_git, false)?;
     Ok(format!(
         "{}:{}/cache:{}",
         endpoint_host, port, tag_config.configured_human_tags[0]
@@ -289,10 +288,20 @@ pub async fn start_proxy_background(
 }
 
 #[derive(Debug)]
-struct RegistryTagConfig {
-    registry_root_tag: String,
-    configured_human_tags: Vec<String>,
-    registry_restore_root_tags: Vec<String>,
+pub(crate) struct RegistryTagConfig {
+    pub(crate) registry_root_tag: String,
+    pub(crate) configured_human_tags: Vec<String>,
+    pub(crate) registry_restore_root_tags: Vec<String>,
+}
+
+pub(crate) fn resolve_registry_tag_config_for_options(
+    raw_tags: &str,
+    no_platform: bool,
+    no_git: bool,
+    read_only: bool,
+) -> Result<RegistryTagConfig> {
+    let tag_resolver = build_tag_resolver(no_platform, no_git)?;
+    resolve_registry_tag_config(&tag_resolver, raw_tags, read_only)
 }
 
 fn resolve_registry_tag_config(
@@ -322,12 +331,11 @@ fn resolve_registry_tag_config(
     }
     ensure!(!resolved_tags.is_empty(), "Tag must not be empty");
 
-    let registry_root_tag = crate::proxy::internal_registry_root_tag(&resolved_tags[0]);
+    let registry_root_tag = resolved_tags[0].clone();
     let mut registry_restore_root_tags = Vec::new();
     for restore_tag in restore_tags {
-        let registry_restore_root_tag = crate::proxy::internal_registry_root_tag(&restore_tag);
-        if !registry_restore_root_tags.contains(&registry_restore_root_tag) {
-            registry_restore_root_tags.push(registry_restore_root_tag);
+        if !registry_restore_root_tags.contains(&restore_tag) {
+            registry_restore_root_tags.push(restore_tag);
         }
     }
     if registry_restore_root_tags.is_empty() {
@@ -621,18 +629,12 @@ mod tests {
     fn root_tag_without_aliases() {
         let resolver = TagResolver::new(None, GitContext::default(), false);
         let config = resolve_registry_tag_config(&resolver, "registry-root", false).unwrap();
-        assert_eq!(
-            config.registry_root_tag,
-            crate::proxy::internal_registry_root_tag("registry-root")
-        );
+        assert_eq!(config.registry_root_tag, "registry-root");
         assert_eq!(
             config.configured_human_tags,
             vec!["registry-root".to_string()]
         );
-        assert_eq!(
-            config.registry_restore_root_tags,
-            vec![crate::proxy::internal_registry_root_tag("registry-root")]
-        );
+        assert_eq!(config.registry_restore_root_tags, vec!["registry-root"]);
     }
 
     #[test]
@@ -645,10 +647,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            config.registry_root_tag,
-            crate::proxy::internal_registry_root_tag("registry-root")
-        );
+        assert_eq!(config.registry_root_tag, "registry-root");
         assert_eq!(
             config.configured_human_tags,
             vec![
@@ -675,16 +674,10 @@ mod tests {
 
         let config = resolve_registry_tag_config(&resolver, "registry-root", false).unwrap();
 
-        assert_eq!(
-            config.registry_root_tag,
-            crate::proxy::internal_registry_root_tag("registry-root-branch-feature-x")
-        );
+        assert_eq!(config.registry_root_tag, "registry-root-branch-feature-x");
         assert_eq!(
             config.registry_restore_root_tags,
-            vec![
-                crate::proxy::internal_registry_root_tag("registry-root-branch-feature-x"),
-                crate::proxy::internal_registry_root_tag("registry-root"),
-            ]
+            vec!["registry-root-branch-feature-x", "registry-root"]
         );
     }
 
@@ -705,19 +698,16 @@ mod tests {
         let read_only = resolve_registry_tag_config(&resolver, "registry-root", true).unwrap();
         assert_eq!(
             read_only.registry_restore_root_tags,
-            vec![
-                crate::proxy::internal_registry_root_tag("registry-root-branch-release-1"),
-                crate::proxy::internal_registry_root_tag("registry-root"),
-            ]
+            vec!["registry-root-branch-release-1", "registry-root"]
         );
 
         let writable = resolve_registry_tag_config(&resolver, "registry-root", false).unwrap();
         assert_eq!(
             writable.registry_restore_root_tags,
             vec![
-                crate::proxy::internal_registry_root_tag("registry-root-pr-42"),
-                crate::proxy::internal_registry_root_tag("registry-root-branch-release-1"),
-                crate::proxy::internal_registry_root_tag("registry-root"),
+                "registry-root-pr-42",
+                "registry-root-branch-release-1",
+                "registry-root"
             ]
         );
     }
@@ -857,10 +847,7 @@ mod tests {
             ("ci_run_attempt".to_string(), "2".to_string()),
             ("ci_commit_sha".to_string(), "a".repeat(40)),
             ("docker_cache_ref_tag".to_string(), "buildcache".to_string()),
-            (
-                "docker_alias_promotion_refs".to_string(),
-                "main".to_string(),
-            ),
+            ("docker_cache_from_refs".to_string(), "main".to_string()),
         ]);
 
         inject_cache_target_metadata_hints(&mut hints, &["main-cache".to_string()], "root");

@@ -55,12 +55,12 @@ The config should store semantic intent. The planner should derive runner-specif
 - OS and architecture suffixes;
 - branch/default/PR suffixes;
 - CI provider metadata;
-- Docker immutable run refs and alias promotion refs;
+- Docker/BuildKit human-tag import/export refs;
 - endpoint hosts such as `host.docker.internal` when the builder runs in another container.
 
 Implementation note, 2026-04-23: adapter repo config now accepts the same
 kebab-case spellings users see in CLI help for repeated proxy fields such as
-`no-platform`, `no-git`, `read-only`, `cache-mode`, `cache-ref-tag`, and
+`no-platform`, `no-git`, `read-only`, `cache-mode`, and
 `endpoint-host`, with snake_case aliases preserved. This keeps `.boringcache.toml`
 as the first-class place to remove repeated flag wiring for both local CLI use
 and external helpers that ask the CLI for a plan.
@@ -168,4 +168,4 @@ The hidden planner flags for `run --dry-run --json` are implementation surface f
 - Add a first-class config drift check if `audit --json` is not enough for launch messaging.
 - Make action archive planning avoid per-raw-entry CLI dry-run calls when a repo config exists.
 - Add cross-platform audit warnings for entries that look portable but still use platform suffixing, and for entries that look binary but opt out of platform suffixing.
-- Keep release/default claims blocked until benchmark artifacts pass the launch-proof validator with CLI version, action ref, cache mode, immutable run refs, alias promotion status, diagnostics numbers, and `cache_session_summary`.
+- Keep release/default claims blocked until benchmark artifacts pass the launch-proof validator with CLI version, action ref, cache mode, resolved human Docker tags, diagnostics numbers, and `cache_session_summary`.

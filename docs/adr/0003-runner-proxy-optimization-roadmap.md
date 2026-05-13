@@ -39,8 +39,8 @@ Relevant source facts:
 - OCI blob responses are digest-addressed and clients are expected to verify requested digests. That makes stream-through viable for OCI blobs if BoringCache verifies before storing.
 - OCI registries should support Range for blobs, and `HEAD`/`404` have explicit existence semantics. That grounds range handling and short-lived negative caching for confirmed misses.
 - OCI push uploads blobs first and manifest last; registries may reject manifests whose non-subject descriptors are missing. That grounds `PresentBlob` proof and borrowed upload-session work.
-- Docker registry cache is a separate cache image location, requires explicit import/export, supports `mode=max`, and can import multiple remote caches. That grounds multiple `--cache-from` aliases and immutable run refs.
-- Docker warns that writing the same cache location twice overwrites previous cache data. That grounds atomic alias promotion instead of same-tag destructive writes.
+- Docker registry cache is a separate cache image location, requires explicit import/export, supports `mode=max`, and can import multiple remote caches. That grounds multiple human-tag `--cache-from` candidates.
+- Docker warns that writing the same cache location twice overwrites previous cache data. ADR 0007 explored immutable aliases for that risk; the revised new path trades that complexity for one human cache head per resolved tag.
 - BuildKit registry cache uses normal registry resolver/fetcher/pusher plumbing. BoringCache should therefore keep behaving like an OCI registry/proxy instead of inventing a Docker-specific side protocol.
 - BuildKit GitHub Actions cache has scope, index, timeout, and branch-like behavior. That is useful comparison evidence for session trace fields and alias/run-scope metadata, even though BoringCache should not copy the GHA backend shape directly.
 
@@ -66,7 +66,7 @@ This roadmap is implemented through narrower ADRs:
 - ADR 0004 owns large OCI blob stream-through.
 - ADR 0005 owns borrowed upload-session bodies and blob-cache policy.
 - ADR 0006 owns the per-session cache trace, OCI negative cache, and singleflight/coalescing metrics.
-- ADR 0007 owns Docker immutable run refs and atomic alias promotion across CLI/action/Rails.
+- ADR 0007 owns Docker registry-cache identity and the revision from immutable run refs to human-tag cache heads.
 
 ADR 0002 remains the source-backed OCI protocol contract. ADR 0003 does not replace it; it defines the next optimization sequence after the first OCI engine extraction.
 
@@ -81,7 +81,7 @@ This CLI ADR owns runner/proxy ordering. The web ADR owns Rails schema, API, sta
 As of 2026-04-21, this roadmap is documentation-aligned for hidden/internal implementation. It is not benchmark-proof-complete.
 
 - ADR 0006 is the first-party insight spine: session trace, singleflight counters, negative cache, and later backend/action enrichment.
-- ADR 0007 is the correctness and control-plane spine: immutable run refs, alias promotion, and stale-writer visibility.
+- ADR 0007 is the Docker cache-identity spine: human-tag cache heads for new CLI paths, with old alias-promotion work retained as compatibility/race context.
 - ADR 0005 is the local disk-efficiency spine: borrowed upload-session bodies, cache leases, and later admission policy.
 - ADR 0004 is the large-body latency spine: stream-through for eligible OCI blob GET misses, default-off until benchmarked.
 
@@ -129,11 +129,11 @@ Add the trace and cache behavior from ADR 0006. The first metrics should cover t
 
 Also add OCI miss suppression for confirmed short-lived misses and expose leader/follower/wait counts for the existing flight helpers. This creates a baseline before changing behavior and prevents repeated concurrent BuildKit probes from doing duplicate backend work.
 
-### Phase 2: Immutable Run Refs And Alias Promotion
+### Phase 2: Docker Cache Identity
 
-Implement the design in ADR 0007. Parallel same-tag writes remain a correctness and benchmark-noise issue. Handle them with immutable roots and atomic alias promotion, not by locking the whole BuildKit run in the CLI.
+Implement the revised design in ADR 0007. Parallel same-tag writes remain a correctness and benchmark-noise issue, but normal users should see one resolved human cache tag rather than a second layer of Docker-specific run/root aliases.
 
-This phase can begin as a design/API contract track while Phase 1 instrumentation lands. Rails owns alias policy and atomicity; CLI/action owns valid OCI ref planning, `--cache-to` run refs, selected `--cache-from` aliases, and diagnostics.
+This phase can begin as a design/API contract track while Phase 1 instrumentation lands. Rails owns backend compatibility for old system names; CLI/action owns valid OCI ref planning, selected human-tag imports/exports, and diagnostics.
 
 ### Phase 3: Borrowed Upload-Session Bodies
 

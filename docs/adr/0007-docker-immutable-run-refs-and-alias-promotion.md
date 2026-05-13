@@ -1,7 +1,9 @@
 # ADR 0007: Docker Immutable Run Refs And Alias Promotion
 
-Status: accepted; CI derivation, metadata transport, alias-root binding, and same-alias E2E implemented; default rollout pending released-path benchmark proof
+Status: revised; immutable run-ref planning is superseded by human-tag cache heads for new CLI paths
 Date: 2026-04-20
+
+Update, 2026-05-13: the immutable run-ref design solved a real race, but it made normal cache identity too hard to reason about. The maintained new CLI path now uses the resolved human tag as the BuildKit registry ref, proxy tag, backend cache-entry tag, and human-visible cache head. Branch/default/PR behavior still comes from `TagResolver`, but the ordered candidates are human tags, not derived `oci_ref_*`, `oci_digest_*`, run-ref, or root aliases. Backend compatibility may still accept old system names from older CLIs, but new CLI code must not generate them as first-class cache tags. The historical design below remains useful context for old-client compatibility and concurrency risk, not the current implementation target.
 
 ## Context
 
@@ -89,11 +91,11 @@ docker-cache/default
 docker-cache/recent/<n>
 ```
 
-The CLI can encode logical identities into OCI-safe tags using readable scoped ref tags with a short hash suffix for stability. The primary proxy human tag is the canonical rooted OCI namespace; legacy root-hash aliases stay as migration compatibility bindings only. User-facing inputs should stay simple:
+Historical run-ref planning encoded logical identities into OCI-safe tags using readable scoped ref tags with a short hash suffix for stability. The revised new-CLI contract keeps user-facing inputs simpler:
 
-- `--tag` remains the proxy cache tag or logical cache family;
-- `--cache-ref-tag` remains the Docker OCI cache tag override;
-- action-level run-ref and alias controls start hidden/internal until benchmarked.
+- `--tag` is the resolved human cache tag and the BuildKit registry ref;
+- `--cache-ref-tag` and hidden run/from/promote ref controls are rejected in the new CLI;
+- legacy root/ref aliases are backend compatibility inputs only.
 
 ## Rails/API Contract
 
@@ -221,7 +223,7 @@ This is required so benchmark artifacts can explain whether a same-tag race affe
 
 ## Implementation Progress
 
-The first hidden CLI/Rails slice is implemented:
+The earlier hidden CLI/Rails slice was implemented before this ADR revision:
 
 - `boringcache docker` accepts hidden `--cache-run-ref-tag`, repeatable `--cache-from-ref-tag`, and repeatable `--cache-promote-ref-tag`;
 - dry-run JSON reports immutable run ref, import refs, and promotion refs;
@@ -267,14 +269,12 @@ Documentation, hidden CLI/Rails contract fields, automatic CLI-side CI derivatio
 
 Focused evidence now available:
 
-- `test_two_immutable_run_refs_promote_same_alias_without_losing_roots` runs two proxy manifest publishes for immutable refs `run-a` and `run-b`, both promoting `branch-main`;
-- both immutable primary refs remain locally readable after the alias updates;
-- alias diagnostics record one `promoted`, one `ignored_stale`, and no failed promotion.
+- `resolve_docker_plan_uses_resolved_human_tags` proves Docker import/export refs come from resolved human tag candidates;
+- `resolve_docker_plan_rejects_old_ref_overrides`, `test_docker_dry_run_json_rejects_old_ref_alias_flags`, and `test_docker_dry_run_json_rejects_old_ref_alias_config` prove old ref override controls are migration errors;
+- `test_docker_dry_run_json_uses_github_actions_human_tag` proves GitHub Actions metadata resolves a human cache head instead of generating run refs;
+- `test_two_human_refs_promote_same_alias_without_losing_roots` keeps the direct OCI alias-promotion proof for backend ordering behavior while using human primary refs;
 - `detects_provider_neutral_run_context` and `detects_github_actions_run_context` cover provider-neutral and GitHub Actions run metadata detection;
 - `does_not_create_run_context_for_local_or_generic_ci_without_run_identity` proves local runs and generic CI labels do not create first-class run metadata without a provider/run id;
-- `resolve_docker_plan_derives_branch_aliases_from_ci_run_context` covers default-branch import/promotion alias planning;
-- `resolve_docker_plan_writes_pr_scope_without_head_branch_fallback` covers PR-context planning where the PR alias is imported and promoted only when PR writes are enabled;
-- `test_docker_dry_run_json_derives_github_actions_run_refs_and_aliases` proves dry-run JSON and injected Docker flags for a GitHub Actions PR context: immutable run ref, PR/default imports, PR-only derived promotion, and CI metadata hints.
 - CLI save/publish request models now carry provider-neutral run metadata (`ci_run_uid`, attempt, ref type/name, default branch, PR number, commit SHA, and run start time) from detected run context, not from capped hints, so Rails can order alias promotions without knowing which CI produced the build. The shared save helper now applies that context to archive saves, CAS saves, and mount archive syncs; local runs and generic CI labels still send no first-class run ordering fields unless a provider/run id is detected.
 - Rails local tests prove `ci_run_started_at` beats upload completion time for alias promotion, so an older run that finishes later does not replace a newer run's branch alias.
 - `boringcache/one` local release-prep surfaces Docker cache run refs, import refs, promotion refs, and provider-neutral CI metadata as action outputs, and unit coverage proves a generated GitHub run-start timestamp is shared by the CLI dry-run and proxy process.

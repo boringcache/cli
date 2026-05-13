@@ -55,7 +55,7 @@ struct ProxyEnvPlan {
 
 #[derive(Debug, Clone)]
 struct AdapterCommandOptions {
-    cache_ref_tag: String,
+    buildkit_cache_tag: String,
     cache_mode: String,
     read_only: bool,
     docker_oci_cache: Option<docker::OciCachePlan>,
@@ -348,6 +348,12 @@ pub async fn adapter_execute(
     )
     .unwrap_or_else(|| "max".to_string());
     docker::validate_cache_mode(&docker_cache_mode)?;
+    let proxy_tag_config = cache_registry::resolve_registry_tag_config_for_options(
+        &raw_tag,
+        no_platform,
+        no_git,
+        effective_read_only,
+    )?;
     let docker_plan = if matches!(kind, AdapterKind::Docker | AdapterKind::Buildkit) {
         let cache_from_ref_tags = project_config::prefer_cli_list(
             &adapter_config.cache_from_ref_tags,
@@ -363,17 +369,18 @@ pub async fn adapter_execute(
             .run_context()
             .cloned();
         let plan = docker::resolve_docker_plan(docker::ResolveDockerPlanInput {
-            raw_tag: &raw_tag,
-            explicit_cache_ref_tag: project_config::prefer_cli_scalar(
+            human_cache_tag: &proxy_tag_config.registry_root_tag,
+            human_cache_restore_tags: &proxy_tag_config.registry_restore_root_tags,
+            legacy_explicit_cache_ref_tag: project_config::prefer_cli_scalar(
                 adapter_config.cache_ref_tag.as_deref(),
                 args.cache_ref_tag.as_deref(),
             ),
-            explicit_cache_run_ref_tag: project_config::prefer_cli_scalar(
+            legacy_explicit_cache_run_ref_tag: project_config::prefer_cli_scalar(
                 adapter_config.cache_run_ref_tag.as_deref(),
                 args.cache_run_ref_tag.as_deref(),
             ),
-            explicit_cache_from_ref_tags: &cache_from_ref_tags,
-            explicit_cache_promote_ref_tags: &cache_promote_ref_tags,
+            legacy_explicit_cache_from_ref_tags: &cache_from_ref_tags,
+            legacy_explicit_cache_promote_ref_tags: &cache_promote_ref_tags,
             endpoint_host: &advertised_endpoint_host,
             port,
             cache_mode: &docker_cache_mode,
@@ -398,15 +405,6 @@ pub async fn adapter_execute(
             .unwrap_or(&plan.oci_cache.ref_tag);
         generated_proxy_metadata_hints
             .push(("docker_cache_ref_tag", diagnostic_ref_tag.to_string()));
-        if let Some(run_ref) = plan.oci_cache.immutable_run_ref_tag.as_deref() {
-            generated_proxy_metadata_hints.push(("docker_immutable_run_ref", run_ref.to_string()));
-        }
-        if !plan.oci_cache.promotion_ref_tags.is_empty() {
-            generated_proxy_metadata_hints.push((
-                "docker_alias_promotion_refs",
-                plan.oci_cache.promotion_ref_tags.join("/"),
-            ));
-        }
         if let Some(run_metadata) = plan.oci_cache.run_metadata.as_ref() {
             generated_proxy_metadata_hints.push(("ci_provider", run_metadata.provider.clone()));
             if let Some(run_started_at) = run_metadata.run_started_at.as_deref() {
@@ -469,7 +467,7 @@ pub async fn adapter_execute(
         .map(|(name, reference)| format!("{name}@{reference}"))
         .collect::<Vec<_>>();
     let tag = raw_tag.clone();
-    let docker_cache_ref_tag = docker_plan
+    let buildkit_cache_tag = docker_plan
         .as_ref()
         .map(|plan| plan.oci_cache.ref_tag.clone())
         .or_else(|| {
@@ -485,7 +483,7 @@ pub async fn adapter_execute(
         .map(|value| setup_plan::resolve_setup_path_string(value, &current_dir))
         .transpose()?;
     let command_options = AdapterCommandOptions {
-        cache_ref_tag: docker_cache_ref_tag,
+        buildkit_cache_tag,
         cache_mode: docker_cache_mode,
         read_only: effective_read_only,
         docker_oci_cache: docker_plan.as_ref().map(|plan| plan.oci_cache.clone()),
@@ -656,10 +654,7 @@ pub async fn adapter_execute(
         startup_warm,
         fail_on_cache_error,
         effective_read_only,
-        docker_plan
-            .as_ref()
-            .map(|plan| plan.oci_cache.promotion_ref_tags.clone())
-            .unwrap_or_default(),
+        Vec::new(),
     )
     .await
     .map_err(|error| ExitCodeError::with_message(EXIT_CONFIG, format!("{:#}", error)))?;

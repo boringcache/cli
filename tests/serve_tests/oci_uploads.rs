@@ -811,7 +811,7 @@ async fn test_manifest_put_uses_remote_proof_after_empty_finalize_reuse() {
         .create_async()
         .await;
 
-    let primary_tag = scoped_ref_tag("my-cache", "main");
+    let primary_tag = "main".to_string();
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
         .match_header("authorization", "Bearer test-token")
@@ -1050,7 +1050,7 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
     })
     .to_string();
     let manifest_digest = cas_oci::prefixed_sha256_digest(manifest_body.as_bytes());
-    let primary_tag = scoped_ref_tag("my-cache", "main");
+    let primary_tag = "main".to_string();
     let alias_tag = digest_tag(&manifest_digest);
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -1187,7 +1187,7 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
     let alias_confirm_mock = server
@@ -1208,7 +1208,7 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
             })
             .to_string(),
         )
-        .expect(1)
+        .expect(0)
         .create_async()
         .await;
 

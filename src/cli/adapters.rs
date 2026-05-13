@@ -87,13 +87,17 @@ pub struct AdapterArgs {
     #[arg(long, help = "Docker cache export mode (default: max)")]
     pub cache_mode: Option<String>,
 
-    #[arg(long, help = "Docker registry cache tag (default: buildcache)")]
+    #[arg(
+        long,
+        hide = true,
+        help = "Deprecated: use --tag for Docker cache refs"
+    )]
     pub cache_ref_tag: Option<String>,
 
     #[arg(
         long = "cache-run-ref-tag",
         hide = true,
-        help = "Expert: immutable Docker registry cache ref tag for this run"
+        help = "Deprecated: old Docker cache run-ref override"
     )]
     pub cache_run_ref_tag: Option<String>,
 
@@ -101,7 +105,7 @@ pub struct AdapterArgs {
         long = "cache-from-ref-tag",
         value_name = "TAG",
         hide = true,
-        help = "Expert: Docker registry cache ref tag to import (repeatable)"
+        help = "Deprecated: old Docker cache import-ref override"
     )]
     pub cache_from_ref_tag: Vec<String>,
 
@@ -109,7 +113,7 @@ pub struct AdapterArgs {
         long = "cache-promote-ref-tag",
         value_name = "TAG",
         hide = true,
-        help = "Expert: Docker registry cache alias ref tag to promote after export (repeatable)"
+        help = "Deprecated: old Docker cache promotion-ref override"
     )]
     pub cache_promote_ref_tag: Vec<String>,
 

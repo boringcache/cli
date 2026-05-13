@@ -46,7 +46,7 @@ boringcache docker --tag docker-cache -- docker buildx build .
 
 `boringcache docker` injects `--cache-from` and `--cache-to` for you.
 Do not pass those flags yourself.
-Use `--cache-ref-tag` and `--cache-mode` only when you need to override the OCI cache ref or export mode.
+Use `--cache-mode` only when you need to change the BuildKit export mode.
 
 Direct BuildKit runs use the same OCI cache plan:
 
@@ -65,24 +65,19 @@ boringcache buildkit --tag docker-cache -- buildctl build --frontend dockerfile.
 `boringcache buildkit` injects `--import-cache` and `--export-cache` for `buildctl build`.
 Keep builder installation, daemon lifecycle, QEMU/binfmt, and Docker container networking in the caller's runtime setup.
 
-Docker has two cache tag concepts:
+Docker has one BoringCache tag concept:
 
-- `--tag docker-cache` selects the BoringCache proxy cache family.
-- `--cache-ref-tag buildcache` selects the local/no-CI BuildKit OCI ref tag under that family, such as `/cache:buildcache`. You can omit it when you want `buildcache`, because that is the local default.
+- `--tag docker-cache` selects the resolved human cache tag, and the CLI uses that same tag for the BuildKit registry ref and backend cache entry.
 
-In GitHub Actions or another CI environment that provides BoringCache CI metadata, the adapter derives an immutable run ref plus PR/branch/default cache aliases.
-It plans the standard CI import set and injects every planned `--cache-from` ref before the run-scoped `--cache-to` ref:
+In GitHub Actions or another CI environment that provides BoringCache CI metadata, the adapter applies the shared branch/default/PR restore ordering as human tags.
+It injects the planned human-tag imports and exports the resolved write tag:
 
 ```text
---cache-from .../cache:pr-3208
---cache-from .../cache:branch-feature-docker-cache
---cache-from .../cache:default
---cache-to   .../cache:run-gha-24771923434-attempt-1
+--cache-from .../cache:docker-cache-pr-3208-ubuntu-24-x86_64
+--cache-from .../cache:docker-cache-main-ubuntu-24-x86_64
+--cache-to   .../cache:docker-cache-pr-3208-ubuntu-24-x86_64
 ```
 
-In CI, default-branch runs read/write `default`, trusted non-default branches read branch then default and write branch, restore-only PRs read base/default, and PR save-enabled runs read/write `pr-<number>` plus default fallback.
-On restore-only PR runs, the PR-scoped ref may not exist yet and may return 404. That is expected; BuildKit should continue with the remaining base/default refs. Enable PR saves only when you intentionally want PR-scoped writes. PR-context saves promote the PR alias by default.
-Local Docker runs without CI metadata keep the single `buildcache` OCI ref unless provider-neutral CI metadata or expert hidden overrides are supplied.
 BoringCache backs the BuildKit registry cache through the Docker and direct BuildKit adapters.
 By default the Docker path warms the selected OCI manifest, blob URLs, and blob bodies before BuildKit starts.
 That keeps the normal path simple: a warm BuildKit run should read cache bodies through the local proxy instead of discovering remote body reads after the manifest hit.

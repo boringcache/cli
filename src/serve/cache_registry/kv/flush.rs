@@ -147,13 +147,7 @@ pub(crate) async fn kv_flush_publish_plan(
     flush_mode: FlushMode,
 ) -> KvFlushPublishPlan {
     let write_scope_tag = kv_primary_write_scope_tag(state);
-    if flush_mode == FlushMode::Normal {
-        return KvFlushPublishPlan {
-            tag: kv_checkpoint_tag(state),
-            write_scope_tag,
-            stable: false,
-        };
-    }
+    let _ = flush_mode;
 
     KvFlushPublishPlan {
         tag: kv_stable_publish_tag(state, write_scope_tag.as_deref()).await,
@@ -162,10 +156,7 @@ pub(crate) async fn kv_flush_publish_plan(
     }
 }
 
-pub(crate) fn kv_checkpoint_tag(state: &AppState) -> String {
-    kv_checkpoint_tag_for_values(&state.registry_root_tag, &state.cache_session_summary_id)
-}
-
+#[cfg(test)]
 pub(crate) fn kv_checkpoint_tag_for_values(registry_root_tag: &str, session_id: &str) -> String {
     let root = registry_root_tag.trim();
     let source = format!("{root}:{session_id}");
@@ -174,13 +165,9 @@ pub(crate) fn kv_checkpoint_tag_for_values(registry_root_tag: &str, session_id: 
 }
 
 async fn kv_stable_publish_tag(state: &AppState, primary_write_scope_tag: Option<&str>) -> String {
-    if should_publish_kv_primary_human_tag(state, primary_write_scope_tag).await {
-        primary_write_scope_tag
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| state.registry_root_tag.trim().to_string())
-    } else {
-        state.registry_root_tag.trim().to_string()
-    }
+    primary_write_scope_tag
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| state.registry_root_tag.trim().to_string())
 }
 
 pub(crate) async fn do_flush(
@@ -781,24 +768,6 @@ async fn publish_kv_stable_tags_for_entry(
 
     let alias_count = bind_kv_alias_tags(state, cache_entry_id, Some(&tag)).await?;
     Ok(alias_count)
-}
-
-async fn should_publish_kv_primary_human_tag(
-    state: &AppState,
-    primary_write_scope_tag: Option<&str>,
-) -> bool {
-    let Some(primary_tag) = primary_write_scope_tag else {
-        return false;
-    };
-    let primary_tag = primary_tag.trim();
-    if !server_cache_tag_name(primary_tag) {
-        return false;
-    }
-    if crate::proxy::internal_registry_root_tag(primary_tag) != state.registry_root_tag {
-        return false;
-    }
-
-    state.api_client.supports_registry_path_tags().await
 }
 
 pub(crate) fn server_cache_tag_name(tag: &str) -> bool {

@@ -342,7 +342,6 @@ fail-on-cache-error = true
 skip-save = true
 save-on-failure = true
 cache-mode = "min"
-cache-ref-tag = "turbo-buildcache"
 port = 5001
 endpoint-host = "host.docker.internal"
 sccache-key-prefix = "rust/ci"
@@ -367,7 +366,7 @@ sccache-key-prefix = "rust/ci"
         assert!(adapter.skip_save);
         assert!(adapter.save_on_failure);
         assert_eq!(adapter.cache_mode.as_deref(), Some("min"));
-        assert_eq!(adapter.cache_ref_tag.as_deref(), Some("turbo-buildcache"));
+        assert_eq!(adapter.cache_ref_tag.as_deref(), None);
         assert_eq!(adapter.port, Some(5001));
         assert_eq!(
             adapter.endpoint_host.as_deref(),

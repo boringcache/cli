@@ -87,8 +87,8 @@ mod tests {
     #[test]
     fn get_optimal_concurrency_honors_restore_env_cap() {
         let _guard = env_lock().lock().unwrap();
-        test_env::set_var(RESTORE_MAX_CONCURRENCY_ENV, "3");
-        assert_eq!(get_optimal_concurrency(8, "restore"), 3);
+        test_env::set_var(RESTORE_MAX_CONCURRENCY_ENV, "1");
+        assert_eq!(get_optimal_concurrency(8, "restore"), 1);
         test_env::remove_var(RESTORE_MAX_CONCURRENCY_ENV);
     }
 

@@ -1,7 +1,8 @@
 use super::*;
+use crate::serve::http::oci_tags::scoped_write_scope_tag;
 
 #[test]
-fn scoped_save_tag_applies_git_suffix() {
+fn scoped_save_tag_keeps_human_reference_first_class() {
     let resolver = TagResolver::new(
         None,
         GitContext {
@@ -19,17 +20,14 @@ fn scoped_save_tag_applies_git_suffix() {
         &["buildcache".to_string()],
         "registry-root",
         "buildkit-cache",
-        "main",
+        "posthog-run-main-ubuntu-24-x86_64",
     )
     .unwrap();
-    assert_eq!(
-        tag,
-        ref_tag_for_input("buildcache:buildkit-cache:main-branch-feature-x")
-    );
+    assert_eq!(tag, "posthog-run-main-ubuntu-24-x86_64");
 }
 
 #[test]
-fn scoped_restore_tags_use_human_root_and_legacy_compat_tags() {
+fn scoped_restore_tags_use_human_reference_directly() {
     let resolver = TagResolver::new(
         None,
         GitContext {
@@ -47,21 +45,28 @@ fn scoped_restore_tags_use_human_root_and_legacy_compat_tags() {
         &["buildcache".to_string()],
         "registry-root",
         "buildkit-cache",
-        "main",
+        "posthog-run-main-ubuntu-24-x86_64",
     );
     assert_eq!(
         tags,
         vec![
-            ref_tag_for_input("buildcache:buildkit-cache:main-branch-feature-x"),
-            legacy_ref_tag_for_input("registry-root:buildkit-cache:main-branch-feature-x"),
-            ref_tag_for_input("buildcache:buildkit-cache:main"),
-            legacy_ref_tag_for_input("registry-root:buildkit-cache:main"),
+            "posthog-run-main-ubuntu-24-x86_64".to_string(),
+            ref_tag_for_input(
+                "buildcache:buildkit-cache:posthog-run-main-ubuntu-24-x86_64-branch-feature-x"
+            ),
+            legacy_ref_tag_for_input(
+                "registry-root:buildkit-cache:posthog-run-main-ubuntu-24-x86_64-branch-feature-x"
+            ),
+            ref_tag_for_input("buildcache:buildkit-cache:posthog-run-main-ubuntu-24-x86_64"),
+            legacy_ref_tag_for_input(
+                "registry-root:buildkit-cache:posthog-run-main-ubuntu-24-x86_64"
+            ),
         ]
     );
 }
 
 #[test]
-fn scoped_restore_tags_without_root_use_readable_and_legacy_unscoped_tags() {
+fn scoped_restore_tags_keep_legacy_ref_shape_only_for_non_human_references() {
     let resolver = TagResolver::new(
         None,
         GitContext {
@@ -74,20 +79,20 @@ fn scoped_restore_tags_without_root_use_readable_and_legacy_unscoped_tags() {
         true,
     );
 
-    let tags = scoped_restore_tags(&resolver, &[], "", "buildkit-cache", "main");
+    let tags = scoped_restore_tags(&resolver, &[], "", "buildkit-cache", "repo/image:main");
     assert_eq!(
         tags,
         vec![
-            ref_tag_for_input("buildkit-cache:main-branch-feature-x"),
-            legacy_ref_tag_for_input("buildkit-cache:main-branch-feature-x"),
-            ref_tag_for_input("buildkit-cache:main"),
-            legacy_ref_tag_for_input("buildkit-cache:main"),
+            ref_tag_for_input("buildkit-cache:repo/image:main-branch-feature-x"),
+            legacy_ref_tag_for_input("buildkit-cache:repo/image:main-branch-feature-x"),
+            ref_tag_for_input("buildkit-cache:repo/image:main"),
+            legacy_ref_tag_for_input("buildkit-cache:repo/image:main"),
         ]
     );
 }
 
 #[test]
-fn scoped_save_tag_on_default_branch_uses_base() {
+fn scoped_save_tag_on_default_branch_keeps_human_reference() {
     let resolver = TagResolver::new(
         None,
         GitContext {
@@ -105,14 +110,14 @@ fn scoped_save_tag_on_default_branch_uses_base() {
         &["buildcache".to_string()],
         "registry-root",
         "buildkit-cache",
-        "main",
+        "docker-main",
     )
     .unwrap();
-    assert_eq!(tag, ref_tag_for_input("buildcache:buildkit-cache:main"));
+    assert_eq!(tag, "docker-main");
 }
 
 #[test]
-fn scoped_save_tag_applies_platform_suffix() {
+fn scoped_write_scope_tag_keeps_human_reference() {
     let resolver = TagResolver::new(
         Some(Platform::new_for_testing(
             "linux",
@@ -124,22 +129,12 @@ fn scoped_save_tag_applies_platform_suffix() {
         false,
     );
 
-    let tag = scoped_save_tag(
-        &resolver,
-        &["buildcache".to_string()],
-        "registry-root",
-        "buildkit-cache",
-        "main",
-    )
-    .unwrap();
-    assert_eq!(
-        tag,
-        ref_tag_for_input("buildcache:buildkit-cache:main-ubuntu-22-x86_64")
-    );
+    let tag = scoped_write_scope_tag(&resolver, "buildkit-cache", "docker-main").unwrap();
+    assert_eq!(tag, "docker-main");
 }
 
 #[test]
-fn alias_tags_include_digest_and_human_alias_when_distinct() {
+fn alias_tags_include_human_alias_when_distinct() {
     let tags = alias_tags_for_manifest(
         "oci_ref_primary",
         "sha256:abc123",
@@ -149,18 +144,11 @@ fn alias_tags_include_digest_and_human_alias_when_distinct() {
     );
     assert_eq!(
         tags,
-        vec![
-            AliasBinding {
-                tag: "oci_digest_abc123".to_string(),
-                write_scope_tag: Some("posthog-build:pr-123".to_string()),
-                required: false
-            },
-            AliasBinding {
-                tag: "posthog-docker-build".to_string(),
-                write_scope_tag: None,
-                required: true
-            }
-        ]
+        vec![AliasBinding {
+            tag: "posthog-docker-build".to_string(),
+            write_scope_tag: None,
+            required: true
+        }]
     );
 }
 
@@ -193,11 +181,6 @@ fn alias_tags_include_multiple_human_aliases() {
         tags,
         vec![
             AliasBinding {
-                tag: "oci_digest_abc123".to_string(),
-                write_scope_tag: Some("posthog-build:pr-123".to_string()),
-                required: false
-            },
-            AliasBinding {
                 tag: "posthog-build".to_string(),
                 write_scope_tag: None,
                 required: true
@@ -223,18 +206,11 @@ fn alias_tags_keep_invalid_human_aliases_best_effort() {
 
     assert_eq!(
         tags,
-        vec![
-            AliasBinding {
-                tag: "oci_digest_abc123".to_string(),
-                write_scope_tag: Some("posthog-build:pr-123".to_string()),
-                required: false
-            },
-            AliasBinding {
-                tag: "docker/main".to_string(),
-                write_scope_tag: None,
-                required: false
-            },
-        ]
+        vec![AliasBinding {
+            tag: "docker/main".to_string(),
+            write_scope_tag: None,
+            required: false
+        }]
     );
 }
 

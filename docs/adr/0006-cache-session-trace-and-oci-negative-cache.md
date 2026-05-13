@@ -75,7 +75,7 @@ Every session summary should preserve correlation fields whenever the runner, ac
 - session id;
 - CLI version and release ref when known;
 - CI provider, provider run uid, attempt, branch/ref, PR number, commit SHA, and run timestamps when known;
-- immutable run ref, import aliases, promotion aliases, and promotion result when ADR 0007 is active;
+- resolved human Docker/BuildKit import/export tags, plus legacy alias state only when old-client compatibility is being exercised;
 - storage provider/mode and object-store region when known;
 - benchmark run id, scenario, and classification when the harness enriches the trace.
 
@@ -244,7 +244,7 @@ Suggested TTL:
 Negative cache keys must include enough scope to avoid cross-ref pollution:
 
 - workspace;
-- registry root tag;
+- resolved human registry tag;
 - OCI repository name;
 - reference or digest;
 - cache entry id where relevant;
@@ -255,7 +255,7 @@ Invalidate negative cache entries when:
 - a blob upload finalizes locally for the digest;
 - a manifest PUT succeeds;
 - startup prefetch or on-demand restore populates the locator;
-- the registry root tag generation changes;
+- the resolved registry tag generation changes;
 - cache-registry publish/flush refreshes local index state.
 
 ## Implementation Plan
@@ -286,7 +286,7 @@ The first CLI baseline is implemented:
 - shutdown also finalizes any still-active cache-op sessions before that last Rails batch, so short-lived proxy runs persist real tool-session hit/miss rows and metadata hints instead of landing only the synthetic `proxy-summary-*` row;
 - `ci/e2e/request-metrics-summary.py` promotes session summary fields, OCI upload-plan reuse counts, and new status snapshot keys into artifact env output;
 - the OCI protocol tests cover the PostHog-shaped transition where a blob `HEAD` miss is followed by local upload, manifest publish, negative-cache invalidation, and a later successful `HEAD`.
-- Docker adapter planning now carries provider-neutral CI run metadata into dry-run JSON and proxy metadata hints, including provider, run uid/attempt, ref type/name, default branch, PR number, commit SHA, immutable run ref, import refs, and promotion aliases when ADR 0007 derivation is active.
+- Docker adapter planning now carries provider-neutral CI run metadata into dry-run JSON and proxy metadata hints, including provider, run uid/attempt, ref type/name, default branch, PR number, commit SHA, and the resolved human import/export tags.
 - startup download-url preload uses the normal API request retry path, and startup blob body warm retries transient URL/storage failures; these are read/transport retries, not publish-readiness polling.
 - the proxy summary now posts `cache_session_summary.v2` and keeps OCI storage GET evidence in the same provider-neutral `storage` shape used by the web ADR 0008 archive/CAS metrics bridge: direction, bytes, request count, TTFB/body duration, throughput, retry/error/timeout counts, and region/cache-status/block-location when the storage response headers provide them. Raw `oci_engine_storage_*` counters remain in the section for compatibility and low-level debug.
 - `status`, `sessions`, and the TUI dashboard now accept the optional web ADR 0008 customer-safe session `review` payload. Human output renders only non-clear action/service review lines, JSON output preserves the review object, and old web APIs that omit the field remain compatible.
@@ -312,7 +312,7 @@ Follow-up commits changed that status:
 
 The remaining failed E2E leg at that point was `Registry / Prefetch Smoke`. It stopped after the remote tag hit check because the tag-pointer helper did not expose a `cache_entry_id` before the added blob URL convergence check. The corrected proof removed that publish-readiness check and proved fresh-cache prefetch/read behavior directly. If receipts cannot make the root immediately readable, publish should fail and surface the receipt commit error instead of sleeping for async verification. Normal retries for API timeouts, transient network failures, or stale download URLs remain valid.
 
-The subsequent Cross-Runner Verify failure after the web deploy was not evidence for blob download lag by itself: the seed runner had proved the human tag, while the fresh reader could not resolve the internal registry root tag. That is tracked under ADR 0007 as an alias/root duplicate-entry issue. The local CLI fix binds aliases to the confirmed root entry and adds seed-side internal-root visibility proof so later failures can be classified as either root visibility, blob download, or negative-cache problems instead of being collapsed into one "fresh reader missed" symptom.
+The subsequent Cross-Runner Verify failure after the web deploy was not evidence for blob download lag by itself: the seed runner had proved the human tag, while the fresh reader could not resolve the old internal registry root tag. That alias/root split is now historical ADR 0007 context; the revised new-CLI path publishes and reads the human tag directly so later failures should be classified against human-tag visibility, blob download, or negative-cache behavior instead of a separate root alias.
 
 Remote proof after those corrections:
 
@@ -401,7 +401,7 @@ Release status after follow-up work:
 - `v1.12.60` defaults to CLI release `v1.12.42` and `verify: none`;
 - public CLI `main` is at `5fd0203`, versioned as unreleased `v1.12.43`, and includes same-alias E2E/adapter-engine follow-ups after the `v1.12.42` tag;
 - the failed PostHog benchmark did not exercise the follow-up OCI fixes available on the later released action/CLI pair, so it should not be used as proof against the current released default;
-- future benchmark claims still need artifacts that record action ref, CLI version, cache mode, OCI hydration mode, immutable run ref state, alias promotion status, and `cache_session_summary`.
+- future benchmark claims still need artifacts that record action ref, CLI version, cache mode, OCI hydration mode, resolved human Docker tags, and `cache_session_summary`.
 
 The required proof is a focused OCI protocol E2E plus release-path registry E2E, not a benchmark-only assertion:
 

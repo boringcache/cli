@@ -19,7 +19,7 @@ This file tracks only product intent that is not fully settled by the current co
 - `cache-registry` is the explicit raw proxy command.
 - `run --proxy` temporarily starts that same proxy for one command.
 - `/_boringcache/status` is the operator/harness lifecycle endpoint, not the cache protocol surface.
-- Rooted OCI ref aliases use the proxy's primary human tag namespace as the canonical truth. Legacy root-hash aliases are compatibility-only during migration, and shared unscoped aliases are not part of rooted restore.
+- Proxy cache heads use resolved human tags as canonical truth. Legacy root-hash and OCI ref aliases are backend/protocol compatibility inputs for old clients, not new CLI tag identities.
 - `.boringcache.toml` is the canonical repo config filename.
 - `.boringcache.toml` is the durable repo cache plan across local and CI; the CLI is the only local planner for it.
 - `doctor` plus `audit` are the current maintenance loop after onboard. Future `lint` or `rescan` naming should wrap those planner/audit paths, not create new config truth.
@@ -40,9 +40,9 @@ The current ADR set is aligned on implementation direction. Public CLI `main` ha
 - receipt commit failure, including a backend "blob not yet verified" confirm response, should continue to fail OCI/KV publish instead of waiting for asynchronous storage verification;
 - Rails v2 CAS publish is receipt-strict locally: pending CAS roots need manifest/blob receipts before visibility, with async blob verification retained only as audit/repair;
 - E2E publish/read checks now fail fast by default: remote tag verification has one attempt, local post-save visibility checks do not poll, prefetch seed does not wait for publish-settled before shutdown, Docker registry export retries are opt-in, and any retry must be an explicit diagnostic override rather than a hidden correctness dependency;
-- first-party action and benchmark workflows still need to artifact provider-neutral Docker run metadata, immutable run ref state, import aliases, promotion aliases, promotion status, CLI version, action ref, and session trace; `/_boringcache/status` now carries the live `session_summary`, but the released-path benchmark proof still needs fresh artifacts after that change;
+- first-party action and benchmark workflows still need to artifact provider-neutral Docker run metadata, resolved human import/export tags, CLI version, action ref, and session trace; `/_boringcache/status` now carries the live `session_summary`, but the released-path benchmark proof still needs fresh artifacts after that change;
 - action/proxy/save metadata transport now preserves `ci_run_started_at` or another Rails ordering field through first-class CLI save request fields when a full provider-neutral run context is detected; capped metadata hints remain replay/debug labels and do not create ordering fields by themselves. Direct `cache-registry` same-alias proof must scope `BORINGCACHE_CI_*` fields into each proxy process instead of relying on metadata hints;
-- CI-derived Docker imports no longer append the legacy `buildcache` fallback. The standard CI path is default, branch/default, or PR/default depending on source scope; local/no-CI runs keep `buildcache` as the single compatibility ref.
+- Docker/BuildKit imports and exports now use resolved human tags directly. The standard CI path is the same default, branch/default, or PR/default human-tag ordering used by the rest of the CLI.
 - stream-through now defaults on for eligible OCI full-body blob `GET` misses at 32 MiB and has local Docker activation proof for single-large-layer and multi-layer graphs, but launch performance claims still need first-byte/body-wait benchmark artifacts; cache-admission changes remain benchmark-gated before any default policy change.
 
 ### 2. Machine-Readable Output Contracts
