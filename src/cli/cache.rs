@@ -485,7 +485,7 @@ pub struct TagsArgs {
     #[arg(help = "Workspace name (org/project or user/project)")]
     pub workspace: Option<String>,
 
-    #[arg(long, help = "Filter tags by substring")]
+    #[arg(long, help = "Filter tags by prefix")]
     pub filter: Option<String>,
 
     #[arg(
