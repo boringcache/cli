@@ -124,7 +124,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
             })
             .to_string(),
         )
-        .expect(0)
+        .expect(1)
         .create_async()
         .await;
     let alias_confirm_mock = server
@@ -133,6 +133,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
         .match_header("if-match", "5")
         .match_body(Matcher::PartialJson(json!({
             "cache_entry_id": "entry-primary",
+            "write_scope_tag": "main",
             "publish_mode": "cas"
         })))
         .with_status(200)
@@ -145,7 +146,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
             })
             .to_string(),
         )
-        .expect(0)
+        .expect(1)
         .create_async()
         .await;
     let legacy_alias_publish_path = format!(
@@ -359,7 +360,7 @@ async fn test_manifest_put_degrades_when_primary_confirm_is_locked() {
 }
 
 #[tokio::test]
-async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
+async fn test_manifest_put_binds_digest_alias() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.fail_on_cache_error = false;
@@ -482,7 +483,7 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
             })
             .to_string(),
         )
-        .expect(0)
+        .expect(1)
         .create_async()
         .await;
     let alias_confirm_mock = server
@@ -491,19 +492,20 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
         .match_header("if-match", "5")
         .match_body(Matcher::PartialJson(json!({
             "cache_entry_id": "entry-primary",
-            "publish_mode": "cas"
+            "publish_mode": "cas",
+            "write_scope_tag": "main"
         })))
-        .with_status(423)
+        .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!({
-                "error": "tag is locked",
-                "message": "tag is locked",
-                "code": "tag_locked"
+                "version": "6",
+                "status": "ok",
+                "cache_entry_id": "entry-primary"
             })
             .to_string(),
         )
-        .expect(0)
+        .expect(1)
         .create_async()
         .await;
 
@@ -717,7 +719,7 @@ async fn test_two_human_refs_promote_same_alias_without_losing_entries() {
                 })
                 .to_string(),
             )
-            .expect(0)
+            .expect(1)
             .create_async()
             .await;
         mocks.push(digest_pointer_mock);
@@ -749,7 +751,7 @@ async fn test_two_human_refs_promote_same_alias_without_losing_entries() {
                 })
                 .to_string(),
             )
-            .expect(0)
+            .expect(1)
             .create_async()
             .await;
         mocks.push(digest_alias_confirm_mock);
@@ -1015,6 +1017,26 @@ async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers()
     .unwrap();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
     let primary_tag = "main".to_string();
+    let digest_alias_tag = oci_digest_tag(&manifest_digest);
+    let referrers_reference =
+        "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let referrers_tag = referrers_reference.to_string();
+    let referrers_body = serde_json::to_vec(&json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{
+            "mediaType": "application/vnd.oci.artifact.manifest.v1+json",
+            "digest": manifest_digest,
+            "size": manifest_body.len() as u64,
+            "artifactType": "application/vnd.example.sbom.v1",
+            "annotations": {
+                "org.example.kind": "sbom"
+            }
+        }]
+    }))
+    .unwrap();
+    let referrers_digest_alias_tag =
+        oci_digest_tag(&cas_oci::prefixed_sha256_digest(&referrers_body));
 
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -1094,9 +1116,53 @@ async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers()
         .create_async()
         .await;
 
-    let referrers_reference =
-        "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    let referrers_tag = referrers_reference.to_string();
+    let digest_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&digest_alias_tag)
+    );
+    let digest_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&digest_alias_tag)
+    );
+    let digest_pointer_mock = server
+        .mock("GET", digest_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "9",
+                "cache_entry_id": "entry-primary-subject-digest",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let digest_confirm_mock = server
+        .mock("PUT", digest_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "9")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary-subject",
+            "write_scope_tag": "main",
+            "publish_mode": "cas"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "10",
+                "status": "ok",
+                "cache_entry_id": "entry-primary-subject"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
     let referrers_restore_miss_mock = server
         .mock(
             "GET",
@@ -1192,6 +1258,53 @@ async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers()
         .create_async()
         .await;
 
+    let referrers_digest_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&referrers_digest_alias_tag)
+    );
+    let referrers_digest_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&referrers_digest_alias_tag)
+    );
+    let referrers_digest_pointer_mock = server
+        .mock("GET", referrers_digest_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "11",
+                "cache_entry_id": "entry-referrers-digest",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let referrers_digest_confirm_mock = server
+        .mock("PUT", referrers_digest_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "11")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-referrers",
+            "write_scope_tag": referrers_tag,
+            "publish_mode": "cas"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "12",
+                "status": "ok",
+                "cache_entry_id": "entry-referrers"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
     let response = tower::ServiceExt::oneshot(
         build_router(state.clone()),
         Request::builder()
@@ -1256,11 +1369,15 @@ async fn test_manifest_put_with_subject_emits_oci_subject_and_serves_referrers()
     primary_pointer_upload_mock.assert_async().await;
     primary_pointer_mock.assert_async().await;
     primary_confirm_mock.assert_async().await;
+    digest_pointer_mock.assert_async().await;
+    digest_confirm_mock.assert_async().await;
     referrers_restore_miss_mock.assert_async().await;
     referrers_save_mock.assert_async().await;
     referrers_pointer_upload_mock.assert_async().await;
     referrers_pointer_mock.assert_async().await;
     referrers_confirm_mock.assert_async().await;
+    referrers_digest_pointer_mock.assert_async().await;
+    referrers_digest_confirm_mock.assert_async().await;
 }
 
 #[tokio::test]
@@ -1717,6 +1834,8 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let primary_tag = "main".to_string();
+    let protocol_digest_alias_tag =
+        oci_digest_tag(&cas_oci::prefixed_sha256_digest(&manifest_body));
     let digest_alias_tag = "human-alias";
 
     let primary_save_mock = server
@@ -1799,6 +1918,46 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
         .create_async()
         .await;
 
+    let protocol_digest_alias_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&protocol_digest_alias_tag)
+    );
+    let protocol_digest_alias_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&protocol_digest_alias_tag)
+    );
+    let protocol_digest_alias_pointer_mock = server
+        .mock("GET", protocol_digest_alias_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(404)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
+        .expect(1)
+        .create_async()
+        .await;
+    let protocol_digest_alias_publish_mock = server
+        .mock("PUT", protocol_digest_alias_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "0")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary",
+            "publish_mode": "cas",
+            "write_scope_tag": "main"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "4",
+                "status": "ok",
+                "cache_entry_id": "entry-primary"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
     let digest_alias_publish_path = format!(
         "/v2/workspaces/org/repo/caches/tags/{}/publish",
         urlencoding::encode(digest_alias_tag)
@@ -1852,13 +2011,15 @@ async fn test_manifest_put_fails_on_alias_error_in_strict_mode() {
     pointer_upload_mock.assert_async().await;
     primary_pointer_mock.assert_async().await;
     primary_confirm_mock.assert_async().await;
+    protocol_digest_alias_pointer_mock.assert_async().await;
+    protocol_digest_alias_publish_mock.assert_async().await;
     digest_alias_pointer_mock.assert_async().await;
     digest_alias_publish_error_mock.assert_async().await;
     capabilities_mock.assert_async().await;
 }
 
 #[tokio::test]
-async fn test_manifest_put_fails_required_human_alias_after_skipping_optional_alias_error() {
+async fn test_manifest_put_fails_required_human_alias_after_writing_digest_alias() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.configured_human_tags = vec!["human-alias".to_string()];
@@ -1981,21 +2142,29 @@ async fn test_manifest_put_fails_required_human_alias_after_skipping_optional_al
         .with_status(404)
         .with_header("content-type", "application/json")
         .with_body(r#"{"error":"Tag not found","current_version":"0"}"#)
-        .expect(0)
+        .expect(1)
         .create_async()
         .await;
-    let digest_alias_publish_error_mock = server
+    let digest_alias_publish_mock = server
         .mock("PUT", digest_alias_publish_path.as_str())
         .match_header("authorization", "Bearer test-token")
         .match_header("if-match", "0")
         .match_body(Matcher::PartialJson(json!({
             "cache_entry_id": "entry-primary",
-            "publish_mode": "cas"
+            "publish_mode": "cas",
+            "write_scope_tag": "main"
         })))
-        .with_status(500)
+        .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(r#"{"error":"backend unavailable"}"#)
-        .expect(0)
+        .with_body(
+            json!({
+                "version": "4",
+                "status": "ok",
+                "cache_entry_id": "entry-primary"
+            })
+            .to_string(),
+        )
+        .expect(1)
         .create_async()
         .await;
 
@@ -2118,7 +2287,7 @@ async fn test_manifest_put_fails_required_human_alias_after_skipping_optional_al
     primary_pointer_mock.assert_async().await;
     primary_confirm_mock.assert_async().await;
     digest_alias_pointer_mock.assert_async().await;
-    digest_alias_publish_error_mock.assert_async().await;
+    digest_alias_publish_mock.assert_async().await;
     human_alias_save_mock.assert_async().await;
     human_alias_pointer_mock.assert_async().await;
     human_alias_confirm_mock.assert_async().await;

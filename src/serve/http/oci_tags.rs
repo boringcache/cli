@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 
 use super::error::OciError;
-use crate::serve::state::{AppState, legacy_oci_ref_tag_for_input, readable_oci_ref_tag_for_input};
+use crate::serve::state::{
+    AppState, legacy_oci_ref_tag_for_input, oci_digest_tag, readable_oci_ref_tag_for_input,
+};
 use crate::tag_utils::{TagResolver, server_cache_tag_name};
 
 // Human OCI references are cache heads. These helpers only manufacture
@@ -165,13 +167,22 @@ pub(crate) struct AliasBinding {
 
 pub(crate) fn alias_tags_for_manifest(
     primary_tag: &str,
-    _manifest_digest: &str,
-    _primary_write_scope_tag: Option<&str>,
+    manifest_digest: &str,
+    primary_write_scope_tag: Option<&str>,
     configured_human_tags: &[String],
     additional_aliases: &[AliasBinding],
 ) -> Vec<AliasBinding> {
     let mut seen = HashSet::new();
     let mut aliases = Vec::new();
+
+    let digest_tag = oci_digest_tag(manifest_digest);
+    if digest_tag != primary_tag && seen.insert(digest_tag.clone()) {
+        aliases.push(AliasBinding {
+            tag: digest_tag,
+            write_scope_tag: primary_write_scope_tag.map(ToOwned::to_owned),
+            required: true,
+        });
+    }
 
     for human_tag in configured_human_tags {
         if human_tag != primary_tag && seen.insert(human_tag.clone()) {
@@ -210,12 +221,16 @@ pub(crate) async fn bind_alias_tag(
         .await
     {
         Ok(response) => {
-            state
-                .oci_engine_diagnostics
-                .record_alias_promotion(response.promotion_status.as_deref());
+            if !alias_tag.starts_with("oci_digest_") {
+                state
+                    .oci_engine_diagnostics
+                    .record_alias_promotion(response.promotion_status.as_deref());
+            }
         }
         Err(error) => {
-            state.oci_engine_diagnostics.record_alias_promotion(None);
+            if !alias_tag.starts_with("oci_digest_") {
+                state.oci_engine_diagnostics.record_alias_promotion(None);
+            }
             return Err(format!("confirm failed: {error}"));
         }
     }

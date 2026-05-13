@@ -33,6 +33,7 @@ const CACHE_METRIC_ENDPOINT_OPERATION_UPLOAD_SESSION_BLOB_RECEIPTS: &str =
     "upload_session_commit_blobs";
 const CACHE_METRIC_ENDPOINT_OPERATION_UPLOAD_SESSION_MANIFEST_RECEIPT: &str =
     "upload_session_commit_manifest";
+const CACHE_METRIC_ENDPOINT_OPERATION_ROLLUP_INGEST: &str = "cache_rollups_ingest";
 const REQUEST_METRIC_SOURCE_CLI: &str = "cli";
 const API_VERSION_V2: &str = "v2";
 const FALLBACK_API_BASE_URL: &str = "https://api.boringcache.com";

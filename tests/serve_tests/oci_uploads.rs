@@ -786,6 +786,18 @@ async fn test_manifest_put_uses_remote_proof_after_empty_finalize_reuse() {
     assert_eq!(finalize_response.status(), StatusCode::CREATED);
 
     let descriptor_size = 10u64;
+    let manifest_body = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": blob_digest,
+            "size": descriptor_size
+        },
+        "layers": []
+    })
+    .to_string();
+    let alias_tag = oci_digest_tag(&cas_oci::prefixed_sha256_digest(manifest_body.as_bytes()));
     let _descriptor_check_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
         .match_header("authorization", "Bearer test-token")
@@ -917,17 +929,52 @@ async fn test_manifest_put_uses_remote_proof_after_empty_finalize_reuse() {
         .create_async()
         .await;
 
-    let manifest_body = json!({
-        "schemaVersion": 2,
-        "mediaType": "application/vnd.oci.image.manifest.v1+json",
-        "config": {
-            "mediaType": "application/vnd.oci.image.config.v1+json",
-            "digest": blob_digest,
-            "size": descriptor_size
-        },
-        "layers": []
-    })
-    .to_string();
+    let alias_publish_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/publish",
+        urlencoding::encode(&alias_tag)
+    );
+    let alias_pointer_path = format!(
+        "/v2/workspaces/org/repo/caches/tags/{}/pointer",
+        urlencoding::encode(&alias_tag)
+    );
+    let alias_pointer_mock = server
+        .mock("GET", alias_pointer_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "5",
+                "cache_entry_id": "entry-alias",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let alias_confirm_mock = server
+        .mock("PUT", alias_publish_path.as_str())
+        .match_header("authorization", "Bearer test-token")
+        .match_header("if-match", "5")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-primary",
+            "write_scope_tag": "main",
+            "publish_mode": "cas"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "6",
+                "status": "ok",
+                "cache_entry_id": "entry-primary"
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
 
     let app = build_router(state);
     let response = tower::ServiceExt::oneshot(
@@ -948,6 +995,8 @@ async fn test_manifest_put_uses_remote_proof_after_empty_finalize_reuse() {
     pointer_upload_mock.assert_async().await;
     primary_pointer_mock.assert_async().await;
     primary_confirm_mock.assert_async().await;
+    alias_pointer_mock.assert_async().await;
+    alias_confirm_mock.assert_async().await;
 }
 
 #[tokio::test]
@@ -1187,7 +1236,7 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
             })
             .to_string(),
         )
-        .expect(0)
+        .expect(1)
         .create_async()
         .await;
     let alias_confirm_mock = server
@@ -1196,6 +1245,7 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
         .match_header("if-match", "5")
         .match_body(Matcher::PartialJson(json!({
             "cache_entry_id": "entry-primary",
+            "write_scope_tag": "main",
             "publish_mode": "cas"
         })))
         .with_status(200)
@@ -1208,7 +1258,7 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
             })
             .to_string(),
         )
-        .expect(0)
+        .expect(1)
         .create_async()
         .await;
 

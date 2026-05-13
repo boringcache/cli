@@ -178,7 +178,21 @@ impl ApiClient {
         batch: crate::api::models::cache_rollups::BatchParams,
     ) -> Result<()> {
         let url = self.workspace_endpoint(workspace, "cache-rollups")?;
-        let _response: serde_json::Value = self.post_v2(&url, &batch).await?;
+        let chunks = batch.split_for_ingest();
+        let batch_count = chunks.len() as u64;
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let batch_size = chunk.record_count() as u64;
+            let _response: serde_json::Value = self
+                .post_v2_with_request_metrics(
+                    &url,
+                    &chunk,
+                    CACHE_METRIC_ENDPOINT_OPERATION_ROLLUP_INGEST,
+                    Some(index as u64 + 1),
+                    Some(batch_count),
+                    Some(batch_size),
+                )
+                .await?;
+        }
         Ok(())
     }
 }
