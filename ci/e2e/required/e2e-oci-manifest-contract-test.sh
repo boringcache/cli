@@ -106,8 +106,9 @@ with open(sys.argv[1], "r", encoding="utf-8") as handle:
 assert payload["schemaVersion"] == 2, payload
 assert payload["mediaType"] == "application/vnd.oci.image.index.v1+json", payload
 manifests = payload["manifests"]
-assert len(manifests) == 1, manifests
-descriptor = manifests[0]
+matches = [descriptor for descriptor in manifests if descriptor.get("digest") == sys.argv[2]]
+assert len(matches) == 1, manifests
+descriptor = matches[0]
 assert descriptor["digest"] == sys.argv[2], descriptor
 assert descriptor["artifactType"] == sys.argv[3], descriptor
 assert descriptor["annotations"]["org.example.kind"] == "sbom", descriptor
