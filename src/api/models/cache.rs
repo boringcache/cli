@@ -696,7 +696,6 @@ pub struct CacheInspectEntry {
 pub struct CacheInspectTag {
     pub name: String,
     pub primary: bool,
-    pub system: bool,
     pub created_at: String,
     pub updated_at: String,
 }

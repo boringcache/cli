@@ -8,7 +8,7 @@ async fn test_manifest_put_confirms_alias_when_alias_save_exists() {
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
     let primary_tag = "main".to_string();
-    let alias_tag = digest_tag(&manifest_digest);
+    let alias_tag = oci_digest_tag(&manifest_digest);
     let legacy_alias_tag = legacy_scoped_ref_tag("my-cache", "main");
 
     let primary_save_mock = server
@@ -367,7 +367,7 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
     let primary_tag = "main".to_string();
-    let alias_tag = digest_tag(&manifest_digest);
+    let alias_tag = oci_digest_tag(&manifest_digest);
 
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -536,7 +536,7 @@ async fn test_manifest_put_skips_alias_when_confirm_is_locked() {
 }
 
 #[tokio::test]
-async fn test_two_human_refs_promote_same_alias_without_losing_roots() {
+async fn test_two_human_refs_promote_same_alias_without_losing_entries() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
     state.oci_alias_promotion_refs = vec!["branch-main".to_string()];
@@ -594,7 +594,7 @@ async fn test_two_human_refs_promote_same_alias_without_losing_roots() {
             cas_oci::prefixed_sha256_digest(&make_oci_publish_pointer(&manifest_body));
         let primary_tag = reference.to_string();
         let primary_legacy_alias_tag = legacy_scoped_ref_tag("cache", reference);
-        let digest_alias_tag = digest_tag(&manifest_digest);
+        let digest_alias_tag = oci_digest_tag(&manifest_digest);
 
         let primary_save_mock = server
             .mock("POST", "/v2/workspaces/org/repo/caches")
@@ -1270,7 +1270,7 @@ async fn test_manifest_put_by_digest_binds_latest_alias() {
 
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
-    let primary_tag = digest_tag(&manifest_digest);
+    let primary_tag = oci_digest_tag(&manifest_digest);
     let latest_alias_tag = "latest".to_string();
     let legacy_latest_alias_tag = legacy_scoped_ref_tag("my-cache", "latest");
 
@@ -1884,7 +1884,7 @@ async fn test_manifest_put_fails_required_human_alias_after_skipping_optional_al
     let manifest_body = br#"{"schemaVersion":2}"#.to_vec();
     let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
     let primary_tag = "main".to_string();
-    let digest_alias_tag = digest_tag(&manifest_digest);
+    let digest_alias_tag = oci_digest_tag(&manifest_digest);
     let legacy_alias_tag = legacy_scoped_ref_tag("my-cache", "main");
 
     let primary_save_mock = server

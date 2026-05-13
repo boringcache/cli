@@ -6,9 +6,9 @@ These ADRs are living decision records. When ADR-tracked work lands, update the 
 
 CLI ADRs own runner, proxy, adapter, local cache, and BuildKit-facing behavior.
 
-Web/API control-plane decisions live in the web repo. The canonical counterpart for the current cache-root, alias-promotion, session-insight, blob-truth, and restore-policy direction is:
+Web/API control-plane decisions live in the web repo. The canonical counterpart for the current cache-entry, alias-promotion, session-insight, blob-truth, and restore-policy direction is:
 
-- `web/docs/adr/0001-cache-control-plane-roots-aliases-and-session-insight.md`
+- `web/docs/adr/0001-cache-control-plane-tags-entries-and-session-insight.md`
 - `web/docs/adr/0008-unified-cache-telemetry-contract.md` for the cross-stack telemetry contract shared by archive, proxy, backend API, runner headroom, storage, lifecycle health, JSONL event persistence, two-sided eval loops, first-class MCP/LLM interpretation, TUI-first diagnostics, benchmark artifacts, and legacy metrics/web UI retirement.
 
 When a CLI ADR needs Rails schema, endpoint, or state-machine behavior, describe the CLI requirement here and update the web ADR as the API source of truth.
@@ -32,7 +32,7 @@ Docs-ready is not the same as rollout-ready. If testing or benchmark proof is de
 | [0004](0004-oci-large-blob-stream-through.md) | accepted; default-on at 32 MiB, launch rollout pending benchmark proof | Large OCI blob stream-through | First-byte/body-wait comparison artifacts before launch claims rely on the default threshold |
 | [0005](0005-borrowed-upload-sessions-and-blob-cache-policy.md) | accepted for hidden implementation; cache-policy rollout pending benchmark proof | Borrowed upload-session bodies and later blob-cache policy | Large-layer disk-copy/cache-policy evidence; required registry E2E is green through CLI main `5fd0203` without post-publish blob URL readiness polling |
 | [0006](0006-cache-session-trace-and-oci-negative-cache.md) | accepted as first-party insight baseline; proxy v2 storage summary implemented; backend/action enrichment pending | Session trace, negative cache, and platform insight spine | Backend/action enrichment and artifact validation after CLI E2E run `24767673291`; released-path proof still needed |
-| [0007](0007-docker-immutable-run-refs-and-alias-promotion.md) | revised; immutable run-ref planning superseded by human-tag cache heads for new CLI paths | Docker/BuildKit registry-cache identity and old alias compatibility context | New CLI uses resolved human tags for BuildKit import/export refs; old alias-promotion evidence remains compatibility/race context |
+| [0007](0007-docker-human-tag-registry-identity.md) | accepted for new CLI paths | Docker/BuildKit registry-cache identity follows resolved human cache tags | Old generated ref controls are migration errors; protocol aliases remain internal compatibility state only |
 | [0008](0008-unified-repo-config-plan-lifecycle.md) | accepted launch-readiness decision | `.boringcache.toml` as durable repo cache plan, with CLI-owned planning, cache scope, and doctor/audit maintenance | Version dry-run schemas, add drift checks where needed, and keep action/web/copy aligned on the same setup path |
 | [0009](0009-launch-maintenance-contract-and-performance-review.md) | accepted launch-readiness review | Current CLI launch audit for maintenance UX, cross-platform behavior, cache scope, action/web boundaries, legacy surface review, and performance guardrails | Version JSON schemas, add drift/lint surface if needed, reduce action per-entry planning, and keep local Rails-backed adapter E2E current |
 

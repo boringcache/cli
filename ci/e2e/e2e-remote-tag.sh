@@ -37,11 +37,11 @@ latest_proxy_log_publish_line() {
   [[ -f "$proxy_log" ]] || return 1
 
   if [[ -n "$tag" ]]; then
-    grep -E "KV flush (root )?publish:" "$proxy_log" \
+    grep -E "KV flush publish:" "$proxy_log" \
       | grep -F "tag=${tag} " \
       | tail -n 1 || true
   else
-    grep -E "KV flush (root )?publish:" "$proxy_log" \
+    grep -E "KV flush publish:" "$proxy_log" \
       | tail -n 1 || true
   fi
 }
@@ -60,7 +60,7 @@ latest_proxy_log_cache_entry_id() {
   printf '%s\n' "$line" | sed -n 's/.*cache_entry_id=\([^[:space:]]*\).*/\1/p'
 }
 
-latest_proxy_log_root_tag() {
+latest_proxy_log_published_tag() {
   local proxy_log="$1"
   local line
 
@@ -161,6 +161,13 @@ verify_remote_tag_visible() {
     echo "ERROR: remote tag ${tag} did not converge to cache_entry_id=${expected_cache_entry_id} (hits=${REMOTE_TAG_CHECK_HITS:-0}, pending=${REMOTE_TAG_CHECK_PENDING:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0}, observed_cache_entry_id=${REMOTE_TAG_CHECK_CACHE_ENTRY_ID:-})"
   else
     echo "ERROR: remote tag ${tag} is not published (hits=${REMOTE_TAG_CHECK_HITS:-0}, pending=${REMOTE_TAG_CHECK_PENDING:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0})"
+  fi
+  if (( ${REMOTE_TAG_CHECK_PENDING:-0} > 0 )); then
+    echo "ERROR: remote tag ${tag} is still pending; publish receipts did not settle before the visibility gate"
+  fi
+  if [[ -n "${REMOTE_TAG_CHECK_FILE:-}" && -f "${REMOTE_TAG_CHECK_FILE}" ]]; then
+    echo "--- remote tag check json ---"
+    cat "${REMOTE_TAG_CHECK_FILE}" || true
   fi
   if [[ -n "$proxy_log" && -f "$proxy_log" ]]; then
     echo "--- proxy log tail ---"

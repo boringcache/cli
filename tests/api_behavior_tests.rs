@@ -943,7 +943,7 @@ mod cache_resolution_tests {
     fn test_cache_resolution_entry_has_pending_and_error_fields() {
         let entry = CacheResolutionEntry {
             tag: "test".to_string(),
-            primary_tag: Some("test-root".to_string()),
+            primary_tag: Some("test-primary".to_string()),
             signature_tag: Some("test-signature-tag".to_string()),
             status: "pending".to_string(),
             cache_entry_id: None,

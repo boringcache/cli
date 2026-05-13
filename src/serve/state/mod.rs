@@ -94,8 +94,8 @@ pub struct AppState {
     pub read_only: bool,
     pub tag_resolver: TagResolver,
     pub configured_human_tags: Vec<String>,
-    pub registry_root_tag: String,
-    pub registry_restore_root_tags: Vec<String>,
+    pub primary_cache_tag: String,
+    pub restore_cache_tags: Vec<String>,
     pub oci_alias_promotion_refs: Vec<String>,
     pub proxy_metadata_hints: BTreeMap<String, String>,
     pub proxy_skip_rules: Arc<Vec<ProxySkipRule>>,
@@ -239,9 +239,9 @@ mod tests {
     }
 
     #[test]
-    fn ref_tag_is_deterministic() {
-        let tag1 = ref_tag("my-cache", "main");
-        let tag2 = ref_tag("my-cache", "main");
+    fn oci_ref_tag_is_deterministic() {
+        let tag1 = oci_ref_tag("my-cache", "main");
+        let tag2 = oci_ref_tag("my-cache", "main");
         assert_eq!(tag1, tag2);
         assert_eq!(
             tag1,
@@ -253,27 +253,27 @@ mod tests {
     }
 
     #[test]
-    fn ref_tag_differs_for_different_inputs() {
-        let tag1 = ref_tag("my-cache", "main");
-        let tag2 = ref_tag("my-cache", "dev");
+    fn oci_ref_tag_differs_for_different_inputs() {
+        let tag1 = oci_ref_tag("my-cache", "main");
+        let tag2 = oci_ref_tag("my-cache", "dev");
         assert_ne!(tag1, tag2);
     }
 
     #[test]
-    fn legacy_ref_tag_keeps_hash_only_shape() {
-        let tag = legacy_ref_tag_for_input("my-cache:main");
+    fn legacy_oci_ref_tag_keeps_hash_only_shape() {
+        let tag = legacy_oci_ref_tag_for_input("my-cache:main");
         assert_eq!(tag, format!("oci_ref_{}", sha256_hex(b"my-cache:main")));
     }
 
     #[test]
-    fn digest_tag_strips_prefix() {
-        let tag = digest_tag("sha256:abc123def456");
+    fn oci_digest_tag_strips_prefix() {
+        let tag = oci_digest_tag("sha256:abc123def456");
         assert_eq!(tag, "oci_digest_abc123def456");
     }
 
     #[test]
-    fn digest_tag_handles_bare_hex() {
-        let tag = digest_tag("abc123def456");
+    fn oci_digest_tag_handles_bare_hex() {
+        let tag = oci_digest_tag("abc123def456");
         assert_eq!(tag, "oci_digest_abc123def456");
     }
 

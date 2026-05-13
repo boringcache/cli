@@ -6,8 +6,8 @@ use crate::platform::Platform;
 use crate::serve::engines::oci::{PresentBlob, PresentBlobSource, ensure_manifest_blobs_present};
 use crate::serve::state::{
     BlobLocatorCache, BlobReadCache, BlobReadMetrics, KvPendingStore, KvPublishedIndex,
-    UploadSession, UploadSessionBody, UploadSessionStore, legacy_ref_tag_for_input,
-    ref_tag_for_input,
+    UploadSession, UploadSessionBody, UploadSessionStore, legacy_oci_ref_tag_for_input,
+    readable_oci_ref_tag_for_input,
 };
 use crate::tag_utils::TagResolver;
 use axum::body::Bytes;
@@ -36,8 +36,8 @@ fn test_state() -> AppState {
         read_only: false,
         tag_resolver: TagResolver::new(None, GitContext::default(), false),
         configured_human_tags: Vec::new(),
-        registry_root_tag: "registry".to_string(),
-        registry_restore_root_tags: vec!["registry".to_string()],
+        primary_cache_tag: "registry".to_string(),
+        restore_cache_tags: vec!["registry".to_string()],
         oci_alias_promotion_refs: Vec::new(),
         proxy_metadata_hints: std::collections::BTreeMap::new(),
         proxy_skip_rules: Arc::new(Vec::new()),

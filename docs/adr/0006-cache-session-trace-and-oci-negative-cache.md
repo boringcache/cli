@@ -79,11 +79,11 @@ Every session summary should preserve correlation fields whenever the runner, ac
 - storage provider/mode and object-store region when known;
 - benchmark run id, scenario, and classification when the harness enriches the trace.
 
-Facts that affect product defaults should be backend-visible eventually, not only local JSONL. The CLI can emit the first summary, but Rails/action/benchmark enrichment should make it possible to answer: which cache plane was slow, which alias/root was used, which blobs were reused, what it cost, and whether the run was fresh, cache bootstrap/update, steady, or unknown.
+Facts that affect product defaults should be backend-visible eventually, not only local JSONL. The CLI can emit the first summary, but Rails/action/benchmark enrichment should make it possible to answer: which cache plane was slow, which alias/entry was used, which blobs were reused, what it cost, and whether the run was fresh, cache bootstrap/update, steady, or unknown.
 
 The canonical web/API decision for session-summary ingestion, backend persistence, rollups, and operator insight lives in:
 
-- `web/docs/adr/0001-cache-control-plane-roots-aliases-and-session-insight.md`
+- `web/docs/adr/0001-cache-control-plane-tags-entries-and-session-insight.md`
 
 This CLI ADR owns emitted runner/proxy fields and local negative-cache behavior. The web ADR owns backend storage, reporting, API shape, and product/operator visibility.
 
@@ -220,7 +220,7 @@ Add short-lived negative cache entries for confirmed OCI misses.
 Initial miss classes:
 
 - manifest ref missing after restore candidates are checked;
-- blob locator missing for `(registry_root_tag, name, digest)`;
+- blob locator missing for `(primary_cache_tag, name, digest)`;
 - verified download URL API reports digest missing for a known cache entry;
 - remote blob existence check confirms missing.
 
@@ -310,9 +310,9 @@ Follow-up commits changed that status:
 - On the `c28a7c1` remote run, CLI CI passed and E2E proved `Registry / Docker BuildKit` plus `Cache Registry / Cross-Runner Verify`.
 - Proxy shutdown now waits only for local pending flush completion and does not poll tag pointers after a successful publish. Rails receipt/publish success is the visibility contract; post-publish polling belongs only in explicit diagnostic checks.
 
-The remaining failed E2E leg at that point was `Registry / Prefetch Smoke`. It stopped after the remote tag hit check because the tag-pointer helper did not expose a `cache_entry_id` before the added blob URL convergence check. The corrected proof removed that publish-readiness check and proved fresh-cache prefetch/read behavior directly. If receipts cannot make the root immediately readable, publish should fail and surface the receipt commit error instead of sleeping for async verification. Normal retries for API timeouts, transient network failures, or stale download URLs remain valid.
+The remaining failed E2E leg at that point was `Registry / Prefetch Smoke`. It stopped after the remote tag hit check because the tag-pointer helper did not expose a `cache_entry_id` before the added blob URL convergence check. The corrected proof removed that publish-readiness check and proved fresh-cache prefetch/read behavior directly. If receipts cannot make the entry immediately readable, publish should fail and surface the receipt commit error instead of sleeping for async verification. Normal retries for API timeouts, transient network failures, or stale download URLs remain valid.
 
-The subsequent Cross-Runner Verify failure after the web deploy was not evidence for blob download lag by itself: the seed runner had proved the human tag, while the fresh reader could not resolve the old internal registry root tag. That alias/root split is now historical ADR 0007 context; the revised new-CLI path publishes and reads the human tag directly so later failures should be classified against human-tag visibility, blob download, or negative-cache behavior instead of a separate root alias.
+The subsequent Cross-Runner Verify failure after the web deploy was not evidence for blob download lag by itself: the seed runner had proved the human tag, while the fresh reader could not resolve the old internal transport tag. That alias/entry split is now historical ADR 0007 context; the revised new-CLI path publishes and reads the human tag directly so later failures should be classified against human-tag visibility, blob download, or negative-cache behavior instead of a separate transport alias.
 
 Remote proof after those corrections:
 
@@ -365,7 +365,7 @@ The later proof bundle must attach:
 - status snapshots plus request metrics for phase-level debugging;
 - a backend-visible summary row and artifact-promoted summary fields that keep Rails, storage, OCI, singleflight, local cache, and BuildKit sections distinct;
 - evidence that confirmed OCI misses are cached briefly and invalidated by local writes/publish;
-- evidence that blob and manifest receipt commit failures fail publish instead of exposing a root that depends on asynchronous storage verification;
+- evidence that blob and manifest receipt commit failures fail publish instead of exposing an entry that depends on asynchronous storage verification;
 - examples where unknown BuildKit fields stay `unknown` instead of guessed.
 
 ## Incident Tracking: OCI `blob unknown` After Export-Time Misses
@@ -411,7 +411,7 @@ The required proof is a focused OCI protocol E2E plus release-path registry E2E,
 4. assert manifest publish succeeds and the negative cache is invalidated;
 5. assert diagnostics record the miss, invalidation source, upload proof source, and final manifest status.
 
-The concurrent variant should run two same-tag writers against one proxy/backend root and prove that one writer's export-time `HEAD` miss cannot poison the other writer's later upload or manifest publish.
+The concurrent variant should run two same-tag writers against one proxy/backend instance and prove that one writer's export-time `HEAD` miss cannot poison the other writer's later upload or manifest publish.
 
 Do not classify this as runner noise in released-path reviews. Current released `one@v1`/CLI `v1.12.42` has the first receipt-strict proxy fixes, and public CLI `main` has additional same-alias proof. Benchmark failures with `blob unknown` after export-time `HEAD` misses should still be treated as OCI publish correctness failures unless the artifact records the action ref, CLI version, and session trace needed to prove which code path ran.
 

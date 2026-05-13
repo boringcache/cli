@@ -1099,7 +1099,7 @@ async fn test_start_cli_connect_email_auth_without_auth_token() {
 fn test_map_restore_result_prefers_top_level_cas_fields() {
     let mapped = ApiClient::map_restore_result(cache::RestoreResult {
         tag: "cas-tag".to_string(),
-        primary_tag: Some("cas-tag-root".to_string()),
+        primary_tag: Some("cas-tag-primary".to_string()),
         signature_tag: Some("cas-signature-tag".to_string()),
         status: "hit".to_string(),
         cache_entry_id: Some("entry-1".to_string()),
@@ -1140,7 +1140,7 @@ fn test_map_restore_result_prefers_top_level_cas_fields() {
         encrypted: false,
     });
 
-    assert_eq!(mapped.primary_tag.as_deref(), Some("cas-tag-root"));
+    assert_eq!(mapped.primary_tag.as_deref(), Some("cas-tag-primary"));
     assert_eq!(mapped.signature_tag.as_deref(), Some("cas-signature-tag"));
     assert_eq!(mapped.storage_mode.as_deref(), Some("cas"));
     assert_eq!(mapped.blob_count, Some(9));

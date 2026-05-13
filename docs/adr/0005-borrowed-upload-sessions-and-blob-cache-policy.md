@@ -71,7 +71,7 @@ Internal sessions that may become borrowed:
 
 This ADR owns CLI/proxy local body-source behavior. If Rails later accepts "already verified/present" proofs, idempotent upload intents, richer blob states, or object-store conditional-write policy, the canonical API decision lives in:
 
-- `web/docs/adr/0001-cache-control-plane-roots-aliases-and-session-insight.md`
+- `web/docs/adr/0001-cache-control-plane-tags-entries-and-session-insight.md`
 
 Do not let this CLI ADR become the source of truth for Rails upload-session schema or blob state transitions.
 
@@ -201,7 +201,7 @@ Evidence now available:
 
 Release-path proof has moved since the first `1.12.42` release-prep attempt. The 2026-04-21 `1.12.42` push at CLI commit `14c1dc2` passed CLI CI but failed required registry E2E legs with manifests/indices visible before all referenced blobs had verified download URLs. Follow-up commits promoted owned upload-session bodies into the local blob cache, removed verifier-side publish-readiness polling from the proof path, and made handoff checks use normal `boringcache check --json` cache-entry ids.
 
-The follow-up direction is not to add publish-readiness polling. Rails is meant to trust completed upload-session receipts on the hot path: blob receipt commit marks blobs storage-verified, manifest receipt commit links attested blobs and marks the CAS entry storage-verified, and tag publish stays optimistic. If Rails omits the upload session id or any receipt commit fails, the proxy should fail the publish/export instead of publishing a root that depends on the async verifier before fresh readers can fetch bodies. Zero-descriptor OCI manifests are the manifest-only edge of that same contract: the CLI sends `blob_count=0` and `blob_total_size_bytes=0` without fake padding, Rails treats the manifest receipt as complete only when no blobs are attested, and any real descriptor graph must still be receipt-complete before publish. Retries for request timeouts, transient network failures, or stale download URLs remain normal read/transport retry behavior; they are not server-side publish-readiness polling.
+The follow-up direction is not to add publish-readiness polling. Rails is meant to trust completed upload-session receipts on the hot path: blob receipt commit marks blobs storage-verified, manifest receipt commit links attested blobs and marks the CAS entry storage-verified, and tag publish stays optimistic. If Rails omits the upload session id or any receipt commit fails, the proxy should fail the publish/export instead of publishing an entry that depends on the async verifier before fresh readers can fetch bodies. Zero-descriptor OCI manifests are the manifest-only edge of that same contract: the CLI sends `blob_count=0` and `blob_total_size_bytes=0` without fake padding, Rails treats the manifest receipt as complete only when no blobs are attested, and any real descriptor graph must still be receipt-complete before publish. Retries for request timeouts, transient network failures, or stale download URLs remain normal read/transport retry behavior; they are not server-side publish-readiness polling.
 
 Remote evidence now available:
 

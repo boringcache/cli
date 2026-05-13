@@ -405,7 +405,6 @@ fn test_run_proxy_shutdown_retries_upload_in_progress_contention() {
             json!({
                 "features": {
                     "tag_publish_v2": true,
-                    "registry_path_tags": true,
                     "cas_publish_bootstrap_if_match": "0"
                 }
             })

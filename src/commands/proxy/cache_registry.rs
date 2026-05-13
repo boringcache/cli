@@ -105,7 +105,7 @@ pub(crate) fn planned_cache_ref(
     no_platform: bool,
     no_git: bool,
 ) -> Result<String> {
-    let tag_config = resolve_registry_tag_config_for_options(tag, no_platform, no_git, false)?;
+    let tag_config = resolve_cache_tag_config_for_options(tag, no_platform, no_git, false)?;
     Ok(format!(
         "{}:{}/cache:{}",
         endpoint_host, port, tag_config.configured_human_tags[0]
@@ -161,7 +161,7 @@ pub async fn execute(
         ApiClient::for_save()?
     };
     let tag_resolver = build_tag_resolver(no_platform, no_git)?;
-    let tag_config = resolve_registry_tag_config(&tag_resolver, &tag, read_only)?;
+    let tag_config = resolve_cache_tag_config(&tag_resolver, &tag, read_only)?;
     let oci_prefetch_refs = resolve_oci_prefetch_refs(&oci_prefetch_ref)?;
     let oci_hydration_policy = resolve_oci_hydration_policy(&oci_hydration)?;
     let current_dir = std::env::current_dir().context("Failed to determine current directory")?;
@@ -177,7 +177,7 @@ pub async fn execute(
     inject_cache_target_metadata_hints(
         &mut proxy_metadata_hints,
         &tag_config.configured_human_tags,
-        &tag_config.registry_root_tag,
+        &tag_config.primary_cache_tag,
     );
 
     crate::serve::run_server(
@@ -187,8 +187,8 @@ pub async fn execute(
         port,
         tag_resolver,
         tag_config.configured_human_tags,
-        tag_config.registry_root_tag,
-        tag_config.registry_restore_root_tags,
+        tag_config.primary_cache_tag,
+        tag_config.restore_cache_tags,
         oci_alias_promotion_refs,
         proxy_metadata_hints,
         startup_warm,
@@ -229,12 +229,12 @@ pub async fn start_proxy_background(
         ApiClient::for_save()?
     };
     let tag_resolver = build_tag_resolver(no_platform, no_git)?;
-    let tag_config = resolve_registry_tag_config(&tag_resolver, &tag, read_only)?;
+    let tag_config = resolve_cache_tag_config(&tag_resolver, &tag, read_only)?;
     let mut proxy_metadata_hints = proxy_metadata_hints;
     inject_cache_target_metadata_hints(
         &mut proxy_metadata_hints,
         &tag_config.configured_human_tags,
-        &tag_config.registry_root_tag,
+        &tag_config.primary_cache_tag,
     );
 
     let primary_human_tag = tag_config.configured_human_tags[0].clone();
@@ -256,8 +256,8 @@ pub async fn start_proxy_background(
         port,
         tag_resolver,
         tag_config.configured_human_tags,
-        tag_config.registry_root_tag,
-        tag_config.registry_restore_root_tags,
+        tag_config.primary_cache_tag,
+        tag_config.restore_cache_tags,
         oci_alias_promotion_refs,
         proxy_metadata_hints,
         startup_warm,
@@ -288,27 +288,27 @@ pub async fn start_proxy_background(
 }
 
 #[derive(Debug)]
-pub(crate) struct RegistryTagConfig {
-    pub(crate) registry_root_tag: String,
+pub(crate) struct CacheTagConfig {
+    pub(crate) primary_cache_tag: String,
     pub(crate) configured_human_tags: Vec<String>,
-    pub(crate) registry_restore_root_tags: Vec<String>,
+    pub(crate) restore_cache_tags: Vec<String>,
 }
 
-pub(crate) fn resolve_registry_tag_config_for_options(
+pub(crate) fn resolve_cache_tag_config_for_options(
     raw_tags: &str,
     no_platform: bool,
     no_git: bool,
     read_only: bool,
-) -> Result<RegistryTagConfig> {
+) -> Result<CacheTagConfig> {
     let tag_resolver = build_tag_resolver(no_platform, no_git)?;
-    resolve_registry_tag_config(&tag_resolver, raw_tags, read_only)
+    resolve_cache_tag_config(&tag_resolver, raw_tags, read_only)
 }
 
-fn resolve_registry_tag_config(
+fn resolve_cache_tag_config(
     tag_resolver: &TagResolver,
     raw_tags: &str,
     read_only: bool,
-) -> Result<RegistryTagConfig> {
+) -> Result<CacheTagConfig> {
     let mut resolved_tags = Vec::new();
     let mut restore_tags = Vec::new();
     for raw in raw_tags
@@ -331,22 +331,22 @@ fn resolve_registry_tag_config(
     }
     ensure!(!resolved_tags.is_empty(), "Tag must not be empty");
 
-    let registry_root_tag = resolved_tags[0].clone();
-    let mut registry_restore_root_tags = Vec::new();
+    let primary_cache_tag = resolved_tags[0].clone();
+    let mut restore_cache_tags = Vec::new();
     for restore_tag in restore_tags {
-        if !registry_restore_root_tags.contains(&restore_tag) {
-            registry_restore_root_tags.push(restore_tag);
+        if !restore_cache_tags.contains(&restore_tag) {
+            restore_cache_tags.push(restore_tag);
         }
     }
-    if registry_restore_root_tags.is_empty() {
-        registry_restore_root_tags.push(registry_root_tag.clone());
+    if restore_cache_tags.is_empty() {
+        restore_cache_tags.push(primary_cache_tag.clone());
     }
     let configured_human_tags = resolved_tags;
 
-    Ok(RegistryTagConfig {
-        registry_root_tag,
+    Ok(CacheTagConfig {
+        primary_cache_tag,
         configured_human_tags,
-        registry_restore_root_tags,
+        restore_cache_tags,
     })
 }
 
@@ -454,7 +454,7 @@ pub(crate) fn inject_default_proxy_metadata_hints(hints: &mut BTreeMap<String, S
 fn inject_cache_target_metadata_hints(
     hints: &mut BTreeMap<String, String>,
     configured_human_tags: &[String],
-    registry_root_tag: &str,
+    primary_cache_tag: &str,
 ) {
     if !hints.contains_key("cache_tag") && !hints.contains_key("cache_scope") {
         reserve_cache_target_metadata_slot(hints);
@@ -463,7 +463,7 @@ fn inject_cache_target_metadata_hints(
     let target = configured_human_tags
         .first()
         .map(String::as_str)
-        .unwrap_or(registry_root_tag);
+        .unwrap_or(primary_cache_tag);
     if insert_replayable_proxy_metadata_hint(hints, "cache_tag", target) {
         return;
     }
@@ -626,32 +626,32 @@ mod tests {
     use tokio::sync::oneshot;
 
     #[test]
-    fn root_tag_without_aliases() {
+    fn primary_tag_without_aliases() {
         let resolver = TagResolver::new(None, GitContext::default(), false);
-        let config = resolve_registry_tag_config(&resolver, "registry-root", false).unwrap();
-        assert_eq!(config.registry_root_tag, "registry-root");
+        let config = resolve_cache_tag_config(&resolver, "primary-cache", false).unwrap();
+        assert_eq!(config.primary_cache_tag, "primary-cache");
         assert_eq!(
             config.configured_human_tags,
-            vec!["registry-root".to_string()]
+            vec!["primary-cache".to_string()]
         );
-        assert_eq!(config.registry_restore_root_tags, vec!["registry-root"]);
+        assert_eq!(config.restore_cache_tags, vec!["primary-cache"]);
     }
 
     #[test]
     fn aliases_include_first_tag_and_deduplicate() {
         let resolver = TagResolver::new(None, GitContext::default(), false);
-        let config = resolve_registry_tag_config(
+        let config = resolve_cache_tag_config(
             &resolver,
-            "registry-root,oci-main,registry-root,oci-main,oci-stable",
+            "primary-cache,oci-main,primary-cache,oci-main,oci-stable",
             false,
         )
         .unwrap();
 
-        assert_eq!(config.registry_root_tag, "registry-root");
+        assert_eq!(config.primary_cache_tag, "primary-cache");
         assert_eq!(
             config.configured_human_tags,
             vec![
-                "registry-root".to_string(),
+                "primary-cache".to_string(),
                 "oci-main".to_string(),
                 "oci-stable".to_string()
             ]
@@ -659,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_roots_follow_branch_default_candidates() {
+    fn restore_cache_tags_follow_branch_default_candidates() {
         let resolver = TagResolver::new(
             None,
             GitContext {
@@ -672,17 +672,17 @@ mod tests {
             true,
         );
 
-        let config = resolve_registry_tag_config(&resolver, "registry-root", false).unwrap();
+        let config = resolve_cache_tag_config(&resolver, "primary-cache", false).unwrap();
 
-        assert_eq!(config.registry_root_tag, "registry-root-branch-feature-x");
+        assert_eq!(config.primary_cache_tag, "primary-cache-branch-feature-x");
         assert_eq!(
-            config.registry_restore_root_tags,
-            vec!["registry-root-branch-feature-x", "registry-root"]
+            config.restore_cache_tags,
+            vec!["primary-cache-branch-feature-x", "primary-cache"]
         );
     }
 
     #[test]
-    fn pr_restore_roots_include_pr_only_when_writes_are_allowed() {
+    fn pr_restore_cache_tags_include_pr_only_when_writes_are_allowed() {
         let resolver = TagResolver::new(
             None,
             GitContext {
@@ -695,19 +695,19 @@ mod tests {
             true,
         );
 
-        let read_only = resolve_registry_tag_config(&resolver, "registry-root", true).unwrap();
+        let read_only = resolve_cache_tag_config(&resolver, "primary-cache", true).unwrap();
         assert_eq!(
-            read_only.registry_restore_root_tags,
-            vec!["registry-root-branch-release-1", "registry-root"]
+            read_only.restore_cache_tags,
+            vec!["primary-cache-branch-release-1", "primary-cache"]
         );
 
-        let writable = resolve_registry_tag_config(&resolver, "registry-root", false).unwrap();
+        let writable = resolve_cache_tag_config(&resolver, "primary-cache", false).unwrap();
         assert_eq!(
-            writable.registry_restore_root_tags,
+            writable.restore_cache_tags,
             vec![
-                "registry-root-pr-42",
-                "registry-root-branch-release-1",
-                "registry-root"
+                "primary-cache-pr-42",
+                "primary-cache-branch-release-1",
+                "primary-cache"
             ]
         );
     }
@@ -715,7 +715,7 @@ mod tests {
     #[test]
     fn empty_tag_string_is_rejected() {
         let resolver = TagResolver::new(None, GitContext::default(), false);
-        let error = resolve_registry_tag_config(&resolver, " , ", false).unwrap_err();
+        let error = resolve_cache_tag_config(&resolver, " , ", false).unwrap_err();
         assert!(error.to_string().contains("Tag must not be empty"));
     }
 
@@ -812,7 +812,7 @@ mod tests {
         inject_cache_target_metadata_hints(
             &mut hints,
             &["main-cache".to_string(), "fallback-cache".to_string()],
-            "bc_registry_root_v2_abc",
+            "primary-cache",
         );
 
         assert_eq!(hints.get("cache_tag"), Some(&"main-cache".to_string()));
@@ -846,7 +846,7 @@ mod tests {
             ),
             ("ci_run_attempt".to_string(), "2".to_string()),
             ("ci_commit_sha".to_string(), "a".repeat(40)),
-            ("docker_cache_ref_tag".to_string(), "buildcache".to_string()),
+            ("docker_cache_tag".to_string(), "buildcache".to_string()),
             ("docker_cache_from_refs".to_string(), "main".to_string()),
         ]);
 
@@ -905,7 +905,7 @@ mod tests {
 
         let start_task = tokio::spawn(start_proxy_background(
             "org/repo".to_string(),
-            "registry-root".to_string(),
+            "primary-cache".to_string(),
             "127.0.0.1".to_string(),
             0,
             true,
@@ -965,7 +965,7 @@ mod tests {
 
         let start_task = tokio::spawn(start_proxy_background(
             "org/repo".to_string(),
-            "registry-root".to_string(),
+            "primary-cache".to_string(),
             "127.0.0.1".to_string(),
             0,
             true,

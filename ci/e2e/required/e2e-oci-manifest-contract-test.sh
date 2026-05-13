@@ -13,7 +13,9 @@ PROXY_PORT="${PROXY_PORT:-5050}"
 API_URL="${BORINGCACHE_API_URL:-https://api.boringcache.com}"
 RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
-REGISTRY_ROOT_TAG="${E2E_TAG_PREFIX:-gha-cache-registry}-oci-contract-${RUN_ID}-${RUN_ATTEMPT}"
+# CACHE_TAG is the human cache head for the proxy. REFERRERS_TAG is OCI
+# protocol lookup state for /referrers/<subject>, not a cache-head alias.
+CACHE_TAG="${E2E_TAG_PREFIX:-gha-cache-registry}-oci-contract-${RUN_ID}-${RUN_ATTEMPT}"
 OCI_NAME="boringcache-e2e/oci-contract-${RUN_ID}-${RUN_ATTEMPT}"
 SUBJECT_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 REFERRERS_TAG="${SUBJECT_DIGEST/:/-}"
@@ -115,7 +117,7 @@ PY
 }
 
 echo "=== Phase 1: Push subject manifest and verify referrers ==="
-start_proxy "${BINARY}" "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" "${PROXY_PORT}" "${PROXY_LOG}" "--fail-on-cache-error"
+start_proxy "${BINARY}" "${WORKSPACE}" "${CACHE_TAG}" "${PROXY_PORT}" "${PROXY_LOG}" "--fail-on-cache-error"
 wait_for_proxy "${PROXY_PORT}"
 
 curl -sS -D "${PUT_HEADERS}" -o "${PUT_BODY}" \
@@ -153,6 +155,7 @@ check_referrers_body "${FILTER_BODY}" "${MANIFEST_DIGEST}" "${ARTIFACT_TYPE}"
 
 echo "=== Phase 2: Restart proxy and verify persisted referrers ==="
 stop_proxy
+echo "Waiting for OCI referrers protocol tag ${REFERRERS_TAG} before restart"
 if ! verify_remote_tag_visible \
   "${BINARY}" \
   "${WORKSPACE}" \
@@ -164,7 +167,7 @@ if ! verify_remote_tag_visible \
   "${PROXY_LOG}"; then
   exit 1
 fi
-start_proxy "${BINARY}" "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" "${PROXY_PORT}" "${PROXY_RESTART_LOG}" "--fail-on-cache-error"
+start_proxy "${BINARY}" "${WORKSPACE}" "${CACHE_TAG}" "${PROXY_PORT}" "${PROXY_RESTART_LOG}" "--fail-on-cache-error"
 wait_for_proxy "${PROXY_PORT}"
 
 curl_get_with_status_retry \

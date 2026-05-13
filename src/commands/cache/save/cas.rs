@@ -182,7 +182,7 @@ where
         );
         progress_info(
             &reporter,
-            "  Another job is uploading this tag with a different or incomplete root; save deferred",
+            "  Another job is uploading this tag with a different or incomplete manifest; save deferred",
         );
         complete_skipped_step(
             &mut session,

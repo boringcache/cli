@@ -366,7 +366,7 @@ sccache-key-prefix = "rust/ci"
         assert!(adapter.skip_save);
         assert!(adapter.save_on_failure);
         assert_eq!(adapter.cache_mode.as_deref(), Some("min"));
-        assert_eq!(adapter.cache_ref_tag.as_deref(), None);
+        assert_eq!(adapter.legacy_cache_ref_tag.as_deref(), None);
         assert_eq!(adapter.port, Some(5001));
         assert_eq!(
             adapter.endpoint_host.as_deref(),

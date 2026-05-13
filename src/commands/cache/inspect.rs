@@ -90,9 +90,6 @@ fn render_inspection(inspection: &CacheInspectResponse) {
             if tag.primary {
                 labels.push("primary");
             }
-            if tag.system {
-                labels.push("internal");
-            }
             if labels.is_empty() {
                 println!("  {}", tag.name);
             } else {
@@ -175,22 +172,16 @@ fn remove_command(inspection: &CacheInspectResponse) -> Option<String> {
 fn preferred_human_tag(inspection: &CacheInspectResponse) -> Option<String> {
     if inspection.identifier.matched_by == "tag" {
         let query = inspection.identifier.query.trim();
-        if inspection
-            .tags
-            .iter()
-            .any(|tag| tag.name == query && !tag.system)
-        {
+        if inspection.tags.iter().any(|tag| tag.name == query) {
             return Some(query.to_string());
         }
     }
 
-    inspection.entry.primary_tag.clone().or_else(|| {
-        inspection
-            .tags
-            .iter()
-            .find(|tag| !tag.system)
-            .map(|tag| tag.name.clone())
-    })
+    inspection
+        .entry
+        .primary_tag
+        .clone()
+        .or_else(|| inspection.tags.iter().map(|tag| tag.name.clone()).next())
 }
 
 fn print_field(label: &str, value: &str) {
@@ -351,7 +342,6 @@ mod tests {
             tags: vec![CacheInspectTag {
                 name: "ruby-deps".to_string(),
                 primary: true,
-                system: false,
                 created_at: "2026-04-15T00:00:00Z".to_string(),
                 updated_at: "2026-04-15T00:00:00Z".to_string(),
             }],

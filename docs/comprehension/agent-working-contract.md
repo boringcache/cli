@@ -11,10 +11,10 @@ Stable CLI rules live here so `AGENTS.md` can stay small. Read this when impleme
 ## Encryption And Signing
 
 - The server signs `{tag}:{manifest_root_digest}` with Ed25519.
-- The CLI verifies `workspace_signing_public_key` and server signatures. New responses can carry `server_envelope_signature` plus a canonical server signature payload, signature version, workspace key fingerprint, and signing key id; `server_signature` remains the legacy `tag:root` signature during rollout.
+- The CLI verifies `workspace_signing_public_key` and server signatures. New responses can carry `server_envelope_signature` plus a canonical server signature payload, signature version, workspace key fingerprint, and signing key id; `server_signature` remains the legacy `tag:digest` signature during rollout.
 - Signature verification is warn-only unless strict mode is enabled. Missing or invalid signatures must not fail restore by default.
 - `BORINGCACHE_TRUSTED_WORKSPACE_KEY_FINGERPRINT` optionally pins strict restores/checks to an expected `ed25519-sha256` workspace signing key fingerprint.
-- Manifest bytes digest and manifest root digest mismatches warn and skip the cache.
+- Manifest bytes digest and manifest manifest digest mismatches warn and skip the cache.
 - Encryption uses age: archives are `tar.zst` then age-encrypted; manifests are CBOR, zstd-compressed, then age-encrypted when encryption is on.
 - `setup-encryption` stores workspace encryption config and default identity.
 - `save` and `mount` auto-enable encryption if workspace config exists. `--recipient` enables encryption and overrides the configured recipient.
@@ -29,8 +29,8 @@ Stable CLI rules live here so `AGENTS.md` can stay small. Read this when impleme
 - Generated git scope suffixes are sanitized. Explicit user-provided cache tags are not silently rewritten, so workflow authors who interpolate refs such as `github.ref_name` must pass a slugged tag.
 - The action may pass GitHub metadata, `BORINGCACHE_SAVE_ON_PULL_REQUEST` for PR save intent, and `BORINGCACHE_RESTORE_PR_CACHE` for PR-first archive reads. The CLI restore path must not infer read scope from the save-side env name, and the action must not become a second branch/default/PR planner for archive, proxy, or Docker behavior.
 - Git detection env precedence is explicit. Default branch detection reads `BORINGCACHE_DEFAULT_BRANCH`, then `BORINGCACHE_CI_DEFAULT_BRANCH`, then `GITHUB_DEFAULT_BRANCH`, then `GITHUB_EVENT_PATH` repository JSON. PR base and number overrides are `BORINGCACHE_CI_BASE_REF` and `BORINGCACHE_CI_PR_NUMBER`; GitHub Actions `GITHUB_BASE_REF`, `GITHUB_REF`, `GITHUB_REF_NAME`, and event JSON are fallbacks.
-- Proxy KV and Docker/BuildKit publish paths use the resolved human tag as the cache head. New CLI code must not derive `bc_registry_root_v2_*`, checkpoint, or OCI ref aliases as first-class cache tags; old system tag names belong only to backend compatibility for older clients.
-- Manifest root digest uses SHA-256. File hashes remain BLAKE3.
+- Proxy KV and Docker/BuildKit publish paths use the resolved human tag as the cache head. New CLI code must not derive internal aliases as first-class cache tags; old generated names belong only to backend compatibility for older clients.
+- Manifest manifest digest uses SHA-256. File hashes remain BLAKE3.
 - Manifest digest is SHA-256 of the uploaded manifest bytes.
 - `BORINGCACHE_TEST_MODE=1` disables git suffixing to keep test tags stable.
 - Cache miss is warn-only by default. `--fail-on-cache-miss` turns a miss into a hard error.

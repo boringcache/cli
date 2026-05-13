@@ -252,7 +252,7 @@ async fn expand_manifest_blob_descriptors_includes_child_manifest_descendants() 
     );
     let child_digest = cas_oci::prefixed_sha256_digest(child_manifest.as_bytes());
     let child_size = child_manifest.len() as u64;
-    let child_tag = digest_tag(&child_digest);
+    let child_tag = oci_digest_tag(&child_digest);
     state.oci_manifest_cache.insert(
         child_tag,
         Arc::new(OciManifestCacheEntry {
@@ -294,7 +294,7 @@ async fn stage_manifest_reference_uploads_seeds_child_manifest_sessions() {
     let child_manifest = br#"{"schemaVersion":2,"config":{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":12},"layers":[]}"#;
     let child_digest = cas_oci::prefixed_sha256_digest(child_manifest);
     let child_size = child_manifest.len() as u64;
-    let child_tag = digest_tag(&child_digest);
+    let child_tag = oci_digest_tag(&child_digest);
     state.oci_manifest_cache.insert(
         child_tag,
         Arc::new(OciManifestCacheEntry {

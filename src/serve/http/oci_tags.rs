@@ -1,19 +1,23 @@
 use std::collections::HashSet;
 
 use super::error::OciError;
-use crate::serve::state::{AppState, legacy_ref_tag_for_input, ref_tag_for_input};
+use crate::serve::state::{AppState, legacy_oci_ref_tag_for_input, readable_oci_ref_tag_for_input};
 use crate::tag_utils::{TagResolver, server_cache_tag_name};
 
+// Human OCI references are cache heads. These helpers only manufacture
+// oci_ref_* aliases for non-human OCI references that cannot be sent to the
+// backend as normal cache tags.
 pub(crate) fn scoped_restore_tags(
     tag_resolver: &TagResolver,
     configured_human_tags: &[String],
-    registry_root_tag: &str,
+    primary_cache_tag: &str,
     name: &str,
     reference: &str,
 ) -> Vec<String> {
     let mut tags = Vec::new();
     if server_cache_tag_name(reference) {
         tags.push(reference.to_string());
+        return tags;
     }
 
     let scoped_input = format!("{name}:{reference}");
@@ -21,11 +25,11 @@ pub(crate) fn scoped_restore_tags(
         .effective_restore_tags(&scoped_input)
         .unwrap_or_else(|_| vec![scoped_input]);
     for scoped in scoped_candidates {
-        let current = current_ref_tag(configured_human_tags, registry_root_tag, &scoped);
+        let current = readable_oci_ref_tag(configured_human_tags, primary_cache_tag, &scoped);
         if !tags.contains(&current) {
             tags.push(current);
         }
-        let legacy = legacy_ref_tag(registry_root_tag, &scoped);
+        let legacy = legacy_oci_ref_tag(primary_cache_tag, &scoped);
         if !tags.contains(&legacy) {
             tags.push(legacy);
         }
@@ -36,7 +40,7 @@ pub(crate) fn scoped_restore_tags(
 pub(crate) fn scoped_save_tag(
     tag_resolver: &TagResolver,
     configured_human_tags: &[String],
-    registry_root_tag: &str,
+    primary_cache_tag: &str,
     name: &str,
     reference: &str,
 ) -> Result<String, OciError> {
@@ -45,9 +49,9 @@ pub(crate) fn scoped_save_tag(
     }
 
     let scoped = fallible_effective_ref_input(tag_resolver, name, reference)?;
-    Ok(current_ref_tag(
+    Ok(readable_oci_ref_tag(
         configured_human_tags,
-        registry_root_tag,
+        primary_cache_tag,
         &scoped,
     ))
 }
@@ -67,10 +71,10 @@ pub(crate) fn scoped_write_scope_tag(
         .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))
 }
 
-pub(crate) fn scoped_legacy_alias_binding(
+pub(crate) fn scoped_legacy_oci_ref_alias_binding(
     tag_resolver: &TagResolver,
     configured_human_tags: &[String],
-    registry_root_tag: &str,
+    primary_cache_tag: &str,
     name: &str,
     reference: &str,
 ) -> Result<Option<AliasBinding>, OciError> {
@@ -79,8 +83,8 @@ pub(crate) fn scoped_legacy_alias_binding(
     }
 
     let scoped = fallible_effective_ref_input(tag_resolver, name, reference)?;
-    let current = current_ref_tag(configured_human_tags, registry_root_tag, &scoped);
-    let legacy = legacy_ref_tag(registry_root_tag, &scoped);
+    let current = readable_oci_ref_tag(configured_human_tags, primary_cache_tag, &scoped);
+    let legacy = legacy_oci_ref_tag(primary_cache_tag, &scoped);
     if current == legacy {
         return Ok(None);
     }
@@ -103,28 +107,28 @@ fn fallible_effective_ref_input(
         .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))
 }
 
-fn current_ref_tag(
+fn readable_oci_ref_tag(
     configured_human_tags: &[String],
-    registry_root_tag: &str,
+    primary_cache_tag: &str,
     scoped_ref: &str,
 ) -> String {
-    ref_tag_for_input(&current_ref_input(
+    readable_oci_ref_tag_for_input(&readable_oci_ref_input(
         configured_human_tags,
-        registry_root_tag,
+        primary_cache_tag,
         scoped_ref,
     ))
 }
 
-fn legacy_ref_tag(registry_root_tag: &str, scoped_ref: &str) -> String {
-    legacy_ref_tag_for_input(&legacy_ref_input(registry_root_tag, scoped_ref))
+fn legacy_oci_ref_tag(primary_cache_tag: &str, scoped_ref: &str) -> String {
+    legacy_oci_ref_tag_for_input(&legacy_oci_ref_input(primary_cache_tag, scoped_ref))
 }
 
-fn current_ref_input(
+fn readable_oci_ref_input(
     configured_human_tags: &[String],
-    registry_root_tag: &str,
+    primary_cache_tag: &str,
     scoped_ref: &str,
 ) -> String {
-    let namespace = current_ref_namespace(configured_human_tags, registry_root_tag);
+    let namespace = readable_oci_ref_namespace(configured_human_tags, primary_cache_tag);
     if namespace.is_empty() {
         scoped_ref.to_string()
     } else {
@@ -132,24 +136,24 @@ fn current_ref_input(
     }
 }
 
-fn legacy_ref_input(registry_root_tag: &str, scoped_ref: &str) -> String {
-    let root = registry_root_tag.trim();
-    if root.is_empty() {
+fn legacy_oci_ref_input(primary_cache_tag: &str, scoped_ref: &str) -> String {
+    let primary = primary_cache_tag.trim();
+    if primary.is_empty() {
         scoped_ref.to_string()
     } else {
-        format!("{root}:{scoped_ref}")
+        format!("{primary}:{scoped_ref}")
     }
 }
 
-fn current_ref_namespace<'a>(
+fn readable_oci_ref_namespace<'a>(
     configured_human_tags: &'a [String],
-    registry_root_tag: &'a str,
+    primary_cache_tag: &'a str,
 ) -> &'a str {
     configured_human_tags
         .first()
         .map(|tag| tag.as_str())
         .filter(|tag| !tag.trim().is_empty())
-        .unwrap_or_else(|| registry_root_tag.trim())
+        .unwrap_or_else(|| primary_cache_tag.trim())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

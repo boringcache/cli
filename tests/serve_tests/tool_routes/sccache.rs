@@ -299,10 +299,10 @@ async fn test_sccache_put_head_get_round_trip() {
 }
 
 #[tokio::test]
-async fn test_sccache_get_reads_internal_root_tag_only() {
+async fn test_sccache_get_reads_primary_cache_tag_only() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
-    state.registry_root_tag = "bc_registry_root_v2_root-only".to_string();
+    state.primary_cache_tag = "primary-cache".to_string();
     state.configured_human_tags = vec!["human-alias".to_string()];
 
     let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -313,7 +313,7 @@ async fn test_sccache_get_reads_internal_root_tag_only() {
         &key[2..3],
         key
     );
-    let payload = b"sccache-root-only";
+    let payload = b"sccache-primary-cache-only";
     let payload_digest = cas_file::prefixed_sha256_digest(payload);
     let pointer_bytes = make_kv_pointer(&[(
         format!("sccache/{key_path}"),
@@ -321,15 +321,15 @@ async fn test_sccache_get_reads_internal_root_tag_only() {
         payload.len() as u64,
     )]);
     let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
-    let root_tag = state.registry_root_tag.clone();
-    let root_entries = urlencoding::encode(&root_tag).into_owned();
+    let primary_tag = state.primary_cache_tag.clone();
+    let primary_entries = urlencoding::encode(&primary_tag).into_owned();
     let alias_entries = urlencoding::encode("human-alias").into_owned();
 
     let root_restore_mock = server
         .mock(
             "GET",
             Matcher::Regex(format!(
-                "^/v2/workspaces/org/repo/caches\\?entries={root_entries}(&.*)?$"
+                "^/v2/workspaces/org/repo/caches\\?entries={primary_entries}(&.*)?$"
             )),
         )
         .expect(1)
@@ -337,10 +337,10 @@ async fn test_sccache_get_reads_internal_root_tag_only() {
         .with_header("content-type", "application/json")
         .with_body(
             json!([{
-                "tag": root_tag,
+                "tag": primary_tag,
                 "status": "hit",
-                "cache_entry_id": "entry-sccache-root-only",
-                "manifest_url": format!("{}/pointer-download-sccache-root-only", server.url()),
+                "cache_entry_id": "entry-sccache-primary-only",
+                "manifest_url": format!("{}/pointer-download-sccache-primary-only", server.url()),
                 "manifest_root_digest": pointer_digest,
                 "storage_mode": "cas",
                 "cas_layout": "file-v1",
@@ -363,7 +363,7 @@ async fn test_sccache_get_reads_internal_root_tag_only() {
         .await;
 
     let pointer_mock = server
-        .mock("GET", "/pointer-download-sccache-root-only")
+        .mock("GET", "/pointer-download-sccache-primary-only")
         .expect(1)
         .with_status(200)
         .with_body(pointer_bytes)
@@ -382,7 +382,7 @@ async fn test_sccache_get_reads_internal_root_tag_only() {
             json!({
                 "download_urls": [{
                     "digest": payload_digest,
-                    "url": format!("{}/blob-download-sccache-root-only", server.url())
+                    "url": format!("{}/blob-download-sccache-primary-only", server.url())
                 }],
                 "missing": []
             })
@@ -392,7 +392,7 @@ async fn test_sccache_get_reads_internal_root_tag_only() {
         .await;
 
     let blob_download_mock = server
-        .mock("GET", "/blob-download-sccache-root-only")
+        .mock("GET", "/blob-download-sccache-primary-only")
         .expect(1)
         .with_status(200)
         .with_body(payload)

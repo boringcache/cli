@@ -202,7 +202,7 @@ pub(crate) async fn get_or_head_kv_object_inner(
     let scoped_key = namespace.scoped_key(key);
     kv_trace(namespace, &scoped_key, "start");
     let use_miss_cache = use_kv_miss_cache(namespace);
-    let miss_key = kv_miss_cache_key(state, &state.registry_root_tag, &scoped_key);
+    let miss_key = kv_miss_cache_key(state, &state.primary_cache_tag, &scoped_key);
 
     let local = {
         let pending = state.kv_pending.read().await;

@@ -79,7 +79,7 @@ Stays shared outside the OCI engine:
 
 - auth and token handling;
 - server runtime, listener, readiness, shutdown, and maintenance loops;
-- tag resolver and registry-root derivation where it is not protocol-specific;
+- tag resolver and human-tag derivation where it is not protocol-specific;
 - BoringCache API client DTOs and transport;
 - transfer client, upload URL calls, receipt commit helpers, and observability primitives;
 - generic HTTP routing glue that turns Axum requests and responses into typed engine calls.

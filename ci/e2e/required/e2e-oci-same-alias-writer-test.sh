@@ -528,15 +528,15 @@ assert_summary_zero \
   "request_metrics_cache_session_oci_oci_engine_alias_promotion_failed"
 
 echo
-echo "=== Phase 3: fresh proxy reads both immutable refs and winning alias ==="
+echo "=== Phase 3: fresh proxy reads both human refs and winning alias ==="
 start_proxy_instance "verify" "${PROXY_PORT_VERIFY}" "verify" "${RUN_B_STARTED_AT}" true
 VERIFY_PROXY_URL="$(proxy_url "${PROXY_PORT_VERIFY}")"
 fetch_manifest_once "${RUN_A_REF}" "${VERIFY_PROXY_URL}" "${WORK_DIR}/verify-run-a.json" "${LOG_DIR}/verify-run-a.headers"
 fetch_manifest_once "${RUN_B_REF}" "${VERIFY_PROXY_URL}" "${WORK_DIR}/verify-run-b.json" "${LOG_DIR}/verify-run-b.headers"
 fetch_manifest_once "${ALIAS_REF}" "${VERIFY_PROXY_URL}" "${WORK_DIR}/verify-alias.json" "${LOG_DIR}/verify-alias.headers"
 
-assert_same_file "${WORK_DIR}/run-a-manifest.json" "${WORK_DIR}/verify-run-a.json" "older immutable run ref"
-assert_same_file "${WORK_DIR}/run-b-manifest.json" "${WORK_DIR}/verify-run-b.json" "newer immutable run ref"
+assert_same_file "${WORK_DIR}/run-a-manifest.json" "${WORK_DIR}/verify-run-a.json" "older human cache head"
+assert_same_file "${WORK_DIR}/run-b-manifest.json" "${WORK_DIR}/verify-run-b.json" "newer human cache head"
 assert_same_file "${WORK_DIR}/run-b-manifest.json" "${WORK_DIR}/verify-alias.json" "same-alias winner"
 stop_all_proxies
 

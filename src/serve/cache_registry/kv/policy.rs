@@ -26,23 +26,23 @@ pub(crate) fn parse_positive_u64_env(name: &str) -> Option<u64> {
     }
 }
 
-fn kv_miss_generation(state: &AppState, registry_root_tag: &str) -> u64 {
+fn kv_miss_generation(state: &AppState, primary_cache_tag: &str) -> u64 {
     state
         .kv_miss_generations
-        .get(registry_root_tag.trim())
+        .get(primary_cache_tag.trim())
         .map(|entry| *entry.value())
         .unwrap_or(0)
 }
 
 pub(crate) fn kv_miss_cache_key(
     state: &AppState,
-    registry_root_tag: &str,
+    primary_cache_tag: &str,
     scoped_key: &str,
 ) -> String {
     format!(
         "{}\u{0}{}\u{0}{}",
-        registry_root_tag.trim(),
-        kv_miss_generation(state, registry_root_tag),
+        primary_cache_tag.trim(),
+        kv_miss_generation(state, primary_cache_tag),
         scoped_key
     )
 }

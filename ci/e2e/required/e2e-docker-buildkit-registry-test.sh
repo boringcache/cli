@@ -44,11 +44,12 @@ RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 BUILDER="bc-e2e-${RUN_ID}-${RUN_ATTEMPT}"
 CACHE_TAG="${E2E_TAG_PREFIX}-docker-buildkit-${RUN_ID}-${RUN_ATTEMPT}"
+# CACHE_TAG is intentionally the proxy human cache head and the BuildKit
+# registry-cache ref. This E2E should not prove generated transport aliases.
 CACHE_REF="${REGISTRY_HOST}:${REGISTRY_PORT}/boringcache-e2e/cache:${CACHE_TAG}"
 CACHE_REF_IMPLICIT="${REGISTRY_HOST}:${REGISTRY_PORT}/boringcache-e2e/cache"
 CACHE_TAG_ALIAS="${CACHE_TAG}-alias"
 CACHE_REF_ALIAS="${REGISTRY_HOST}:${REGISTRY_PORT}/boringcache-e2e/cache:${CACHE_TAG_ALIAS}"
-REGISTRY_ROOT_TAG="${E2E_TAG_PREFIX}-docker-buildkit-registry-${RUN_ID}-${RUN_ATTEMPT}"
 SERVE_PID=""
 PROXY_READY_FILE=""
 INTERRUPTED="0"
@@ -273,7 +274,7 @@ start_proxy() {
   PROXY_READY_FILE="$(mktemp "${LOG_DIR}/cache-registry-ready.XXXXXX")"
   rm -f "${PROXY_READY_FILE}"
   proxy_cmd=(
-    "${BINARY}" cache-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}"
+    "${BINARY}" cache-registry "${WORKSPACE}" "${CACHE_TAG}"
     --host "${PROXY_HOST}"
     --port "${PROXY_PORT}"
     --ready-file "${PROXY_READY_FILE}"
@@ -642,7 +643,6 @@ run_native_buildkit_with_cli() {
 
   local buildkit_addr="docker-container://buildx_buildkit_${BUILDER}0"
   local native_cache_tag="${CACHE_TAG}-native"
-  local native_proxy_tag="${REGISTRY_ROOT_TAG}-native"
   local cold_log="${LOG_DIR}/native-buildkit-cold.log"
   local warm_log="${LOG_DIR}/native-buildkit-warm.log"
   local metrics_file="${LOG_DIR}/native-buildkit-request-metrics.jsonl"
@@ -665,8 +665,7 @@ run_native_buildkit_with_cli() {
   BORINGCACHE_OBSERVABILITY_JSONL_PATH="${metrics_file}" \
     "${BINARY}" buildkit \
       --workspace "${WORKSPACE}" \
-      --tag "${native_proxy_tag}" \
-      --cache-ref-tag "${native_cache_tag}" \
+      --tag "${native_cache_tag}" \
       --port "${REGISTRY_PORT}" \
       --host "${PROXY_HOST}" \
       --endpoint-host "${REGISTRY_HOST}" \
@@ -691,8 +690,7 @@ run_native_buildkit_with_cli() {
   BORINGCACHE_OBSERVABILITY_JSONL_PATH="${metrics_file}" \
     "${BINARY}" buildkit \
       --workspace "${WORKSPACE}" \
-      --tag "${native_proxy_tag}" \
-      --cache-ref-tag "${native_cache_tag}" \
+      --tag "${native_cache_tag}" \
       --port "${REGISTRY_PORT}" \
       --host "${PROXY_HOST}" \
       --endpoint-host "${REGISTRY_HOST}" \
@@ -864,7 +862,7 @@ stop_proxy
 
 echo
 echo "=== Phase 1b: Verify published remote tag resolves ==="
-if ! verify_remote_tag_visible "$BINARY" "$WORKSPACE" "$REGISTRY_ROOT_TAG" "${LOG_DIR}/phase1b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" "${REMOTE_TAG_VERIFY_ATTEMPTS}" "${REMOTE_TAG_VERIFY_SLEEP_SECS}" "serve-initial.log"; then
+if ! verify_remote_tag_visible "$BINARY" "$WORKSPACE" "$CACHE_TAG" "${LOG_DIR}/phase1b-publish" "$BUDGET_REMOTE_TAG_HITS_MIN" "${REMOTE_TAG_VERIFY_ATTEMPTS}" "${REMOTE_TAG_VERIFY_SLEEP_SECS}" "serve-initial.log"; then
   exit 1
 fi
 

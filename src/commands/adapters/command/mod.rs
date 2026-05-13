@@ -348,20 +348,20 @@ pub async fn adapter_execute(
     )
     .unwrap_or_else(|| "max".to_string());
     docker::validate_cache_mode(&docker_cache_mode)?;
-    let proxy_tag_config = cache_registry::resolve_registry_tag_config_for_options(
+    let proxy_tag_config = cache_registry::resolve_cache_tag_config_for_options(
         &raw_tag,
         no_platform,
         no_git,
         effective_read_only,
     )?;
     let docker_plan = if matches!(kind, AdapterKind::Docker | AdapterKind::Buildkit) {
-        let cache_from_ref_tags = project_config::prefer_cli_list(
-            &adapter_config.cache_from_ref_tags,
+        let legacy_cache_from_tags = project_config::prefer_cli_list(
+            &adapter_config.legacy_cache_from_ref_tags,
             &args.cache_from_ref_tag,
             |value| value.trim().to_string(),
         );
-        let cache_promote_ref_tags = project_config::prefer_cli_list(
-            &adapter_config.cache_promote_ref_tags,
+        let legacy_cache_promote_ref_tags = project_config::prefer_cli_list(
+            &adapter_config.legacy_cache_promote_ref_tags,
             &args.cache_promote_ref_tag,
             |value| value.trim().to_string(),
         );
@@ -369,18 +369,18 @@ pub async fn adapter_execute(
             .run_context()
             .cloned();
         let plan = docker::resolve_docker_plan(docker::ResolveDockerPlanInput {
-            human_cache_tag: &proxy_tag_config.registry_root_tag,
-            human_cache_restore_tags: &proxy_tag_config.registry_restore_root_tags,
+            human_cache_tag: &proxy_tag_config.primary_cache_tag,
+            human_cache_restore_tags: &proxy_tag_config.restore_cache_tags,
             legacy_explicit_cache_ref_tag: project_config::prefer_cli_scalar(
-                adapter_config.cache_ref_tag.as_deref(),
+                adapter_config.legacy_cache_ref_tag.as_deref(),
                 args.cache_ref_tag.as_deref(),
             ),
             legacy_explicit_cache_run_ref_tag: project_config::prefer_cli_scalar(
-                adapter_config.cache_run_ref_tag.as_deref(),
+                adapter_config.legacy_cache_run_ref_tag.as_deref(),
                 args.cache_run_ref_tag.as_deref(),
             ),
-            legacy_explicit_cache_from_ref_tags: &cache_from_ref_tags,
-            legacy_explicit_cache_promote_ref_tags: &cache_promote_ref_tags,
+            legacy_explicit_cache_from_ref_tags: &legacy_cache_from_tags,
+            legacy_explicit_cache_promote_ref_tags: &legacy_cache_promote_ref_tags,
             endpoint_host: &advertised_endpoint_host,
             port,
             cache_mode: &docker_cache_mode,
@@ -392,19 +392,13 @@ pub async fn adapter_execute(
         None
     };
     if let Some(plan) = &docker_plan {
-        let diagnostic_ref_tag = plan
+        let diagnostic_cache_tag = plan
             .oci_cache
-            .cache_to_ref_tag
+            .cache_to_tag
             .as_deref()
-            .or_else(|| {
-                plan.oci_cache
-                    .cache_from_ref_tags
-                    .first()
-                    .map(String::as_str)
-            })
-            .unwrap_or(&plan.oci_cache.ref_tag);
-        generated_proxy_metadata_hints
-            .push(("docker_cache_ref_tag", diagnostic_ref_tag.to_string()));
+            .or_else(|| plan.oci_cache.cache_from_tags.first().map(String::as_str))
+            .unwrap_or(&plan.oci_cache.cache_tag);
+        generated_proxy_metadata_hints.push(("docker_cache_tag", diagnostic_cache_tag.to_string()));
         if let Some(run_metadata) = plan.oci_cache.run_metadata.as_ref() {
             generated_proxy_metadata_hints.push(("ci_provider", run_metadata.provider.clone()));
             if let Some(run_started_at) = run_metadata.run_started_at.as_deref() {
@@ -448,17 +442,17 @@ pub async fn adapter_execute(
         }
     }
     if startup_warm && let Some(plan) = &docker_plan {
-        for ref_tag in plan
+        for cache_tag in plan
             .oci_cache
-            .cache_from_ref_tags
+            .cache_from_tags
             .iter()
             .map(|tag| ("cache".to_string(), tag.clone()))
         {
             if !oci_prefetch_refs
                 .iter()
-                .any(|existing| existing == &ref_tag)
+                .any(|existing| existing == &cache_tag)
             {
-                oci_prefetch_refs.push(ref_tag);
+                oci_prefetch_refs.push(cache_tag);
             }
         }
     }
@@ -469,10 +463,10 @@ pub async fn adapter_execute(
     let tag = raw_tag.clone();
     let buildkit_cache_tag = docker_plan
         .as_ref()
-        .map(|plan| plan.oci_cache.ref_tag.clone())
+        .map(|plan| plan.oci_cache.cache_tag.clone())
         .or_else(|| {
             project_config::prefer_cli_scalar(
-                adapter_config.cache_ref_tag.clone(),
+                adapter_config.legacy_cache_ref_tag.clone(),
                 args.cache_ref_tag.clone(),
             )
         })

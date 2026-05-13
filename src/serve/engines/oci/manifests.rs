@@ -12,11 +12,11 @@ use crate::serve::engines::oci::uploads::has_non_empty_local_blob;
 use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
 use crate::serve::http::oci_tags::{
-    AliasBinding, scoped_legacy_alias_binding, scoped_restore_tags, scoped_save_tag,
+    AliasBinding, scoped_legacy_oci_ref_alias_binding, scoped_restore_tags, scoped_save_tag,
     scoped_write_scope_tag,
 };
 use crate::serve::state::{
-    AppState, BlobLocatorEntry, OciNegativeCacheReason, UploadSession, digest_tag,
+    AppState, BlobLocatorEntry, OciNegativeCacheReason, UploadSession, oci_digest_tag,
 };
 
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -44,7 +44,7 @@ pub(crate) async fn resolve_manifest(
 
     if state.oci_negative_cache.contains_manifest_ref_miss(
         &state.workspace,
-        &state.registry_root_tag,
+        &state.primary_cache_tag,
         name,
         reference,
     ) {
@@ -59,7 +59,7 @@ pub(crate) async fn resolve_manifest(
     loop {
         if state.oci_negative_cache.contains_manifest_ref_miss(
             &state.workspace,
-            &state.registry_root_tag,
+            &state.primary_cache_tag,
             name,
             reference,
         ) {
@@ -123,7 +123,7 @@ pub(crate) async fn prefetch_manifest_reference(
         ManifestBlobUrlPolicy::VerifyAndCache,
     )
     .await?;
-    let digest_tags = [digest_tag(&digest)];
+    let digest_tags = [oci_digest_tag(&digest)];
     let cached = lookup_oci_manifest_cache(state, &tags)
         .or_else(|| lookup_oci_manifest_cache(state, &digest_tags))
         .ok_or_else(|| {
@@ -301,17 +301,17 @@ pub(crate) async fn persist_referrers_manifest(
     let referrers_tag = scoped_save_tag(
         &state.tag_resolver,
         &state.configured_human_tags,
-        &state.registry_root_tag,
+        &state.primary_cache_tag,
         name,
         &referrers_reference,
     )?;
     let referrers_write_scope_tag =
         scoped_write_scope_tag(&state.tag_resolver, name, &referrers_reference)?;
     let mut additional_aliases = Vec::<AliasBinding>::new();
-    if let Some(alias) = scoped_legacy_alias_binding(
+    if let Some(alias) = scoped_legacy_oci_ref_alias_binding(
         &state.tag_resolver,
         &state.configured_human_tags,
-        &state.registry_root_tag,
+        &state.primary_cache_tag,
         name,
         &referrers_reference,
     )? {
@@ -377,12 +377,12 @@ async fn count_local_oci_blobs(state: &AppState, blobs: &[BlobDescriptor]) -> us
 
 fn manifest_restore_tags(state: &AppState, name: &str, reference: &str) -> Vec<String> {
     if reference.starts_with("sha256:") {
-        vec![digest_tag(reference)]
+        vec![oci_digest_tag(reference)]
     } else {
         scoped_restore_tags(
             &state.tag_resolver,
             &state.configured_human_tags,
-            &state.registry_root_tag,
+            &state.primary_cache_tag,
             name,
             reference,
         )
@@ -422,9 +422,9 @@ async fn resolve_manifest_remote(
     }
     if !unexpected_hits.is_empty() {
         let message = format!(
-            "OCI manifest restore ignored unexpected hits: workspace={} registry_root_tag={} name={} reference={} requested_tags=[{}] unexpected_hit_tags=[{}] backend_results=[{}]",
+            "OCI manifest restore ignored unexpected hits: workspace={} primary_cache_tag={} name={} reference={} requested_tags=[{}] unexpected_hit_tags=[{}] backend_results=[{}]",
             state.workspace,
-            state.registry_root_tag,
+            state.primary_cache_tag,
             name,
             reference,
             tags.join(", "),
@@ -441,9 +441,9 @@ async fn resolve_manifest_remote(
         .filter(|entry| entry.status == "hit")
         .ok_or_else(|| {
         let message = format!(
-            "OCI manifest restore miss: workspace={} registry_root_tag={} name={} reference={} requested_tags=[{}] backend_results=[{}]",
+            "OCI manifest restore miss: workspace={} primary_cache_tag={} name={} reference={} requested_tags=[{}] backend_results=[{}]",
             state.workspace,
-            state.registry_root_tag,
+            state.primary_cache_tag,
             name,
             reference,
             tags.join(", "),
@@ -453,7 +453,7 @@ async fn resolve_manifest_remote(
         log::warn!("{message}");
         state.oci_negative_cache.insert_manifest_ref_miss(
             &state.workspace,
-            &state.registry_root_tag,
+            &state.primary_cache_tag,
             name,
             reference,
         );
@@ -564,7 +564,7 @@ async fn resolve_manifest_remote(
         cache_keys.insert(tag.clone());
     }
     cache_keys.insert(resolved_entry_tag);
-    cache_keys.insert(digest_tag(&digest));
+    cache_keys.insert(oci_digest_tag(&digest));
     for cache_key in cache_keys {
         state
             .oci_manifest_cache
@@ -638,7 +638,7 @@ async fn verified_manifest_blob_download_urls(
     if let Some(cached_miss) = blob_descriptors.iter().find(|descriptor| {
         state.oci_negative_cache.contains_download_url_miss(
             &state.workspace,
-            &state.registry_root_tag,
+            &state.primary_cache_tag,
             name,
             &descriptor.digest,
             cache_entry_id,
@@ -671,7 +671,7 @@ async fn verified_manifest_blob_download_urls(
         for digest in &resolved.missing {
             state.oci_negative_cache.insert_download_url_miss(
                 &state.workspace,
-                &state.registry_root_tag,
+                &state.primary_cache_tag,
                 name,
                 digest,
                 cache_entry_id,
@@ -782,7 +782,7 @@ async fn load_manifest_bytes_by_digest(
     digest: &str,
     expected_size: Option<u64>,
 ) -> Result<Vec<u8>, OciError> {
-    let digest_lookup_tag = digest_tag(digest);
+    let digest_lookup_tag = oci_digest_tag(digest);
     let manifest_bytes = match lookup_oci_manifest_cache(state, &[digest_lookup_tag]) {
         Some(cached) => cached.index_json.clone(),
         None => {

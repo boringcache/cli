@@ -66,7 +66,7 @@ as the first-class place to remove repeated flag wiring for both local CLI use
 and external helpers that ask the CLI for a plan.
 
 Implementation note, 2026-05-01: cache scope is now a single CLI-owned model
-across archive restore/check, proxy roots, adapters, and Docker/BuildKit refs.
+across archive restore/check, proxy cache entries, adapters, and Docker/BuildKit refs.
 Default-branch runs read/write the default tag, trusted non-default branches
 read branch then default and write branch, PRs read base/default by default,
 PR restore-cache-enabled runs read PR then base/default, PR saves write only
@@ -112,7 +112,7 @@ Each benchmark bundle must record:
 - benchmark repo/ref, upstream project ref, workflow run URL, runner type, and cache mode;
 - cold, warm, rolling cache-bootstrap/reset, and stale-promotion classification where relevant;
 - wall-clock job time, build-tool time, restore/import time, save/export time, and storage transfer bytes when measurable;
-- `cache_session_summary`, OCI blob counts/bytes, upload-requested versus already-present blobs, cache-root publish/promotion status, and any BuildKit import/export diagnostics.
+- `cache_session_summary`, OCI blob counts/bytes, upload-requested versus already-present blobs, cache-entry publish/promotion status, and any BuildKit import/export diagnostics.
 
 Do not reuse artifacts from stale Docker experiments or invalid same-branch cache bootstraps/resets as launch proof.
 

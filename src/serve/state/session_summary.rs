@@ -499,7 +499,7 @@ fn classify_cache_session(state: &AppState) -> CacheSessionClassification {
         return classification;
     }
 
-    if state.proxy_metadata_hint("docker_cache_ref_tag").is_some()
+    if state.proxy_metadata_hint("docker_cache_tag").is_some()
         || !state.oci_alias_promotion_refs.is_empty()
     {
         return CacheSessionClassification {

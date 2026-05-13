@@ -781,7 +781,7 @@ async fn fetch_dashboard_tags(
     tag_page: u32,
 ) -> Result<WorkspaceTagsResponse> {
     let mut response = api_client
-        .workspace_tags(workspace, None, false, DASHBOARD_TAG_FETCH_LIMIT, 0)
+        .workspace_tags(workspace, None, DASHBOARD_TAG_FETCH_LIMIT, 0)
         .await?;
     let mut has_more = response.pagination.has_more;
     let mut offset = response
@@ -791,7 +791,7 @@ async fn fetch_dashboard_tags(
 
     while has_more {
         let next = api_client
-            .workspace_tags(workspace, None, false, DASHBOARD_TAG_FETCH_LIMIT, offset)
+            .workspace_tags(workspace, None, DASHBOARD_TAG_FETCH_LIMIT, offset)
             .await?;
         let returned = next.pagination.returned;
         has_more = next.pagination.has_more && returned > 0;
@@ -814,7 +814,7 @@ fn dashboard_tags_page(
         ..
     } = response;
 
-    tags.retain(|tag| tag.primary && !tag.system);
+    tags.retain(|tag| tag.primary);
     tags.sort_by(compare_dashboard_tags);
 
     let total = tags.len() as u32;
@@ -1274,13 +1274,7 @@ fn yes_no(value: bool) -> &'static str {
 }
 
 fn tag_kind(tag: &WorkspaceTagFeedItem) -> &'static str {
-    if tag.system {
-        "internal"
-    } else if tag.primary {
-        "primary"
-    } else {
-        "alias"
-    }
+    if tag.primary { "primary" } else { "alias" }
 }
 
 fn showing_range(response: &WorkspaceTagsResponse) -> String {

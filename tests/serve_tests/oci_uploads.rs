@@ -1051,7 +1051,7 @@ async fn test_head_miss_then_upload_publish_clears_blob_negative_cache() {
     .to_string();
     let manifest_digest = cas_oci::prefixed_sha256_digest(manifest_body.as_bytes());
     let primary_tag = "main".to_string();
-    let alias_tag = digest_tag(&manifest_digest);
+    let alias_tag = oci_digest_tag(&manifest_digest);
     let primary_save_mock = server
         .mock("POST", "/v2/workspaces/org/repo/caches")
         .match_header("authorization", "Bearer test-token")

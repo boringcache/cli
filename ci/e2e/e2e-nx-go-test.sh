@@ -9,12 +9,16 @@ WORKSPACE="${WORKSPACE:-${BORINGCACHE_DEFAULT_WORKSPACE:-}}"
 PORT="${PORT:-5057}"
 HOST="${HOST:-127.0.0.1}"
 TAG_PREFIX="${TAG_PREFIX:-bc-e2e-cli}"
-REGISTRY_ROOT_TAG="${REGISTRY_ROOT_TAG:-${TAG_PREFIX}-all-$(date -u +%Y%m%d%H%M%S)}"
+CACHE_TAG="${CACHE_TAG:-${TAG_PREFIX}-all-$(date -u +%Y%m%d%H%M%S)}"
+# The mixed-protocol harness keeps raw Docker traffic on a distinct human tag
+# so it cannot overwrite the shared Nx/Go/SCCACHE proxy cache head.
+DOCKER_CACHE_TAG="${CACHE_TAG}-docker-buildkit"
 LOG_DIR="${LOG_DIR:-/tmp/boringcache-all-protocols-e2e-$(date +%Y%m%d-%H%M%S)}"
 RUN_SCCACHE="${RUN_SCCACHE:-0}"
 RUN_DOCKER="${RUN_DOCKER:-0}"
 BUDGET_REMOTE_TAG_HITS_MIN="${BUDGET_REMOTE_TAG_HITS_MIN:-1}"
 BINARY="${BINARY:-${CLI_REPO_ROOT}/target/debug/boringcache}"
+DOCKER_CACHE_EXERCISED="0"
 mkdir -p "${LOG_DIR}"
 
 require_cmd() {
@@ -113,7 +117,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"${BINARY}" cache-registry "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" \
+"${BINARY}" cache-registry "${WORKSPACE}" "${CACHE_TAG}" \
   --host "${HOST}" \
   --port "${PORT}" \
   --no-platform \
@@ -352,25 +356,26 @@ WORKDIR /work
 COPY payload.txt .
 RUN sha256sum payload.txt > payload.sha
 DOCKER
-    printf 'docker-%s\n' "${REGISTRY_ROOT_TAG}" > "${DOCKER_DIR}/payload.txt"
-    DOCKER_CACHE_REF="localhost:${PORT}/boringcache-e2e/cache:${REGISTRY_ROOT_TAG}-docker-buildkit"
+    printf 'docker-%s\n' "${CACHE_TAG}" > "${DOCKER_DIR}/payload.txt"
+    DOCKER_CACHE_REF="localhost:${PORT}/boringcache-e2e/cache:${DOCKER_CACHE_TAG}"
     docker buildx build --progress=plain \
       --cache-from "type=registry,ref=${DOCKER_CACHE_REF}" \
       --cache-to "type=registry,ref=${DOCKER_CACHE_REF},mode=max" \
       --load \
-      -t "boringcache-e2e:${REGISTRY_ROOT_TAG}" \
+      -t "boringcache-e2e:${CACHE_TAG}" \
       "${DOCKER_DIR}" >"${LOG_DIR}/docker-build-1.log" 2>&1
     docker buildx build --progress=plain \
       --cache-from "type=registry,ref=${DOCKER_CACHE_REF}" \
       --cache-to "type=registry,ref=${DOCKER_CACHE_REF},mode=max" \
       --load \
-      -t "boringcache-e2e:${REGISTRY_ROOT_TAG}" \
+      -t "boringcache-e2e:${CACHE_TAG}" \
       "${DOCKER_DIR}" >"${LOG_DIR}/docker-build-2.log" 2>&1
     if ! grep -E 'CACHED|importing cache manifest' "${LOG_DIR}/docker-build-2.log" >/dev/null 2>&1; then
       echo "docker second build did not show cache reuse"
       tail -n 80 "${LOG_DIR}/docker-build-2.log"
       exit 1
     fi
+    DOCKER_CACHE_EXERCISED="1"
   else
     echo "docker daemon unavailable; skipping docker check" | tee "${LOG_DIR}/docker-skip.txt"
   fi
@@ -386,13 +391,18 @@ if [[ -n "${SERVE_PID}" ]]; then
 fi
 
 echo "==> Verifying published remote tag resolves"
-if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${REGISTRY_ROOT_TAG}" "${LOG_DIR}/publish-check" "${BUDGET_REMOTE_TAG_HITS_MIN}" "${REMOTE_TAG_VERIFY_ATTEMPTS}" "${REMOTE_TAG_VERIFY_SLEEP_SECS}" "${PROXY_LOG}"; then
+if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${CACHE_TAG}" "${LOG_DIR}/publish-check" "${BUDGET_REMOTE_TAG_HITS_MIN}" "${REMOTE_TAG_VERIFY_ATTEMPTS}" "${REMOTE_TAG_VERIFY_SLEEP_SECS}" "${PROXY_LOG}"; then
   exit 1
+fi
+if [[ "${DOCKER_CACHE_EXERCISED}" == "1" ]]; then
+  if ! verify_remote_tag_visible "${BINARY}" "${WORKSPACE}" "${DOCKER_CACHE_TAG}" "${LOG_DIR}/publish-check-docker" 1 "${REMOTE_TAG_VERIFY_ATTEMPTS}" "${REMOTE_TAG_VERIFY_SLEEP_SECS}" "${PROXY_LOG}"; then
+    exit 1
+  fi
 fi
 
 echo "==> Verifying human alias tag is visible in workspace entries"
 "${BINARY}" ls "${WORKSPACE}" --limit 500 --json > "${LOG_DIR}/workspace-ls.json"
-python3 - "${LOG_DIR}/workspace-ls.json" "${REGISTRY_ROOT_TAG}" <<'PY'
+python3 - "${LOG_DIR}/workspace-ls.json" "${CACHE_TAG}" <<'PY'
 import json
 import sys
 

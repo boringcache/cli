@@ -51,7 +51,7 @@ Optimize the existing runner-local proxy first. Do not build an on-demand edge s
 The roadmap lands in this order:
 
 1. Add a per-session cache trace, singleflight metrics, and OCI negative-cache behavior. First CLI slice done; backend/action enrichment pending.
-2. Design immutable Docker run refs and atomic alias promotion across CLI/action/Rails. Hidden CLI/Rails slice, CI-side derivation, alias/root binding, and backend same-alias E2E proof are done; released action/default rollout is still pending.
+2. Design immutable Docker run refs and atomic alias promotion across CLI/action/Rails. Hidden CLI/Rails slice, CI-side derivation, alias/entry binding, and backend same-alias E2E proof are done; released action/default rollout is still pending.
 3. Remove avoidable local copy/sync when cached blobs are reused for OCI publish. Borrowed cache-body sessions done; cache-policy proof pending.
 4. Prototype large OCI blob stream-through with tee-to-cache and end-of-stream verification. Hidden threshold prototype done; benchmark proof pending.
 5. Tune blob-cache admission and eviction using measured reuse by object size.
@@ -66,13 +66,13 @@ This roadmap is implemented through narrower ADRs:
 - ADR 0004 owns large OCI blob stream-through.
 - ADR 0005 owns borrowed upload-session bodies and blob-cache policy.
 - ADR 0006 owns the per-session cache trace, OCI negative cache, and singleflight/coalescing metrics.
-- ADR 0007 owns Docker registry-cache identity and the revision from immutable run refs to human-tag cache heads.
+- ADR 0007 owns Docker registry-cache identity and the revision from human cache heads to human-tag cache heads.
 
 ADR 0002 remains the source-backed OCI protocol contract. ADR 0003 does not replace it; it defines the next optimization sequence after the first OCI engine extraction.
 
 Web/API control-plane decisions implied by this roadmap are canonical in the web repo ADR:
 
-- `web/docs/adr/0001-cache-control-plane-roots-aliases-and-session-insight.md`
+- `web/docs/adr/0001-cache-control-plane-tags-entries-and-session-insight.md`
 
 This CLI ADR owns runner/proxy ordering. The web ADR owns Rails schema, API, state-machine, session-ingestion, and operator insight decisions.
 
@@ -89,7 +89,7 @@ Testing and proof work may be deferred, but it must stay explicit. A sub-ADR is 
 
 Current release proof status: the required registry E2E is green on public CLI `main` at `5fd0203`, including Docker BuildKit, Prefetch Smoke, Cross-Runner Verify, and the provider-neutral OCI Same-Alias Writer leg in run `24767673291`. The latest published CLI release remains `v1.12.42`; public CLI `main` is versioned for unreleased `v1.12.43`. The `boringcache/one` `v1` tag now points at signed action release `v1.12.60`, which defaults to CLI `v1.12.42` and `verify: none`.
 
-The intended product contract remains receipt-strict publish: Rails must return an upload session for new CAS writes, completed blob and manifest receipts make a root safe to expose, and missing session ids, receipt failures, or backend "blob not yet verified" confirm responses fail publish/export instead of relying on a post-publish blob download-url convergence loop. Normal API/storage retries for timeouts and transient network or URL failures are still valid retry behavior. The alias/root duplicate-entry publish fix is also in place for OCI and KV: aliases are ready-tag publishes to the confirmed root entry, so workspace entry-limit eviction cannot prune the internal root while keeping a separate human-alias entry alive.
+The intended product contract remains receipt-strict publish: Rails must return an upload session for new CAS writes, completed blob and manifest receipts make a entry safe to expose, and missing session ids, receipt failures, or backend "blob not yet verified" confirm responses fail publish/export instead of relying on a post-publish blob download-url convergence loop. Normal API/storage retries for timeouts and transient network or URL failures are still valid retry behavior. The alias/entry duplicate-entry publish fix is also in place for OCI and KV: aliases are ready-tag publishes to the confirmed entry, so workspace entry-limit eviction cannot prune the internal transport while keeping a separate human-alias entry alive.
 
 Review outcome as of 2026-04-22: the CLI ADRs are aligned with current CLI `main`, but not all claims are released/product-default evidence yet. The remaining work is now mostly control-plane and proof work: Rails receipt-strict CAS publish and structured session-summary ingestion have landed locally, action/proxy metadata transport now preserves the ordering fields Rails uses for stale-promotion decisions through first-class save request fields, and stream-through has local Docker activation proof for single-large-layer and multi-layer graphs but remains benchmark-gated with cache admission before any default threshold or policy change. Backend/operator reporting still needs to classify the structured summaries.
 
@@ -131,9 +131,9 @@ Also add OCI miss suppression for confirmed short-lived misses and expose leader
 
 ### Phase 2: Docker Cache Identity
 
-Implement the revised design in ADR 0007. Parallel same-tag writes remain a correctness and benchmark-noise issue, but normal users should see one resolved human cache tag rather than a second layer of Docker-specific run/root aliases.
+Implement the revised design in ADR 0007. Parallel same-tag writes remain a correctness and benchmark-noise issue, but normal users should see one resolved human cache tag rather than a second layer of Docker-specific run/transport aliases.
 
-This phase can begin as a design/API contract track while Phase 1 instrumentation lands. Rails owns backend compatibility for old system names; CLI/action owns valid OCI ref planning, selected human-tag imports/exports, and diagnostics.
+This phase can begin as a design/API contract track while Phase 1 instrumentation lands. Rails owns backend compatibility for old generated transport names; CLI/action owns valid OCI ref planning, selected human-tag imports/exports, and diagnostics.
 
 ### Phase 3: Borrowed Upload-Session Bodies
 

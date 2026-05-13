@@ -10,10 +10,7 @@ fn sample_tags_response(total: u32, returned: u32) -> WorkspaceTagsResponse {
             name: "testing".to_string(),
             slug: "org/testing".to_string(),
         },
-        filter: WorkspaceTagsFilter {
-            query: None,
-            include_system: false,
-        },
+        filter: WorkspaceTagsFilter { query: None },
         pagination: WorkspacePagination {
             limit: 25,
             offset: 25,
@@ -28,14 +25,12 @@ fn sample_tags_response(total: u32, returned: u32) -> WorkspaceTagsResponse {
 fn sample_tag(
     name: &str,
     primary: bool,
-    system: bool,
     uploaded_at: Option<&str>,
     last_accessed_at: Option<&str>,
 ) -> WorkspaceTagFeedItem {
     WorkspaceTagFeedItem {
         name: name.to_string(),
         primary,
-        system,
         primary_tag: name.to_string(),
         cache_entry_id: format!("entry-{name}"),
         manifest_root_digest: format!("sha256:{name}"),
@@ -61,35 +56,19 @@ fn dashboard_tags_page_keeps_primary_human_tags_sorted_by_recent_activity() {
         sample_tag(
             "old-primary",
             true,
-            false,
             Some("2026-04-27T07:00:00Z"),
             Some("2026-04-27T08:00:00Z"),
         ),
         sample_tag(
             "fresh-alias",
             false,
-            false,
             Some("2026-04-27T07:00:00Z"),
             Some("2026-04-27T12:00:00Z"),
         ),
-        sample_tag(
-            "fresh-system",
-            true,
-            true,
-            Some("2026-04-27T07:00:00Z"),
-            Some("2026-04-27T11:00:00Z"),
-        ),
-        sample_tag(
-            "uploaded-only",
-            true,
-            false,
-            Some("2026-04-27T09:00:00Z"),
-            None,
-        ),
+        sample_tag("uploaded-only", true, Some("2026-04-27T09:00:00Z"), None),
         sample_tag(
             "fresh-primary",
             true,
-            false,
             Some("2026-04-27T07:00:00Z"),
             Some("2026-04-27T10:00:00Z"),
         ),
@@ -131,16 +110,10 @@ fn dashboard_tags_page_paginates_after_filtering() {
     let mut response = sample_tags_response(4, 4);
     response.pagination.offset = 0;
     response.tags = vec![
-        sample_tag("first", true, false, Some("2026-04-27T10:00:00Z"), None),
-        sample_tag(
-            "ignored-alias",
-            false,
-            false,
-            Some("2026-04-27T09:00:00Z"),
-            None,
-        ),
-        sample_tag("second", true, false, Some("2026-04-27T08:00:00Z"), None),
-        sample_tag("third", true, false, Some("2026-04-27T07:00:00Z"), None),
+        sample_tag("first", true, Some("2026-04-27T10:00:00Z"), None),
+        sample_tag("ignored-alias", false, Some("2026-04-27T09:00:00Z"), None),
+        sample_tag("second", true, Some("2026-04-27T08:00:00Z"), None),
+        sample_tag("third", true, Some("2026-04-27T07:00:00Z"), None),
     ];
 
     let page = dashboard_tags_page(response, 2, 2);
@@ -159,10 +132,7 @@ fn resolve_selected_tag_index_falls_back_to_zero() {
             name: "testing".to_string(),
             slug: "org/testing".to_string(),
         },
-        filter: WorkspaceTagsFilter {
-            query: None,
-            include_system: false,
-        },
+        filter: WorkspaceTagsFilter { query: None },
         pagination: WorkspacePagination {
             limit: 25,
             offset: 0,
@@ -174,7 +144,6 @@ fn resolve_selected_tag_index_falls_back_to_zero() {
             WorkspaceTagFeedItem {
                 name: "alpha".to_string(),
                 primary: true,
-                system: false,
                 primary_tag: "alpha".to_string(),
                 cache_entry_id: "entry-a".to_string(),
                 manifest_root_digest: "sha256:a".to_string(),
@@ -187,7 +156,6 @@ fn resolve_selected_tag_index_falls_back_to_zero() {
             WorkspaceTagFeedItem {
                 name: "beta".to_string(),
                 primary: false,
-                system: false,
                 primary_tag: "alpha".to_string(),
                 cache_entry_id: "entry-b".to_string(),
                 manifest_root_digest: "sha256:b".to_string(),

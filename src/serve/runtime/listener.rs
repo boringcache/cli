@@ -38,8 +38,8 @@ pub(super) async fn build_server_runtime(
     port: u16,
     tag_resolver: TagResolver,
     configured_human_tags: Vec<String>,
-    registry_root_tag: String,
-    registry_restore_root_tags: Vec<String>,
+    primary_cache_tag: String,
+    restore_cache_tags: Vec<String>,
     oci_alias_promotion_refs: Vec<String>,
     proxy_metadata_hints: BTreeMap<String, String>,
     startup_warm: bool,
@@ -91,8 +91,8 @@ pub(super) async fn build_server_runtime(
         read_only,
         tag_resolver,
         configured_human_tags,
-        registry_root_tag,
-        registry_restore_root_tags,
+        primary_cache_tag,
+        restore_cache_tags,
         oci_alias_promotion_refs,
         proxy_metadata_hints: proxy_metadata_hints.clone(),
         proxy_skip_rules,
@@ -169,7 +169,7 @@ pub(super) async fn build_server_runtime(
     let listener = socket.listen(listen_backlog)?;
 
     let tag_summary = if state.configured_human_tags.is_empty() {
-        state.registry_root_tag.clone()
+        state.primary_cache_tag.clone()
     } else {
         state.configured_human_tags.join(", ")
     };
@@ -198,8 +198,8 @@ pub(super) async fn build_server_runtime(
         }
         eprintln!(
             "  {}: {}",
-            internal_root_tag_label(&state.proxy_metadata_hints),
-            state.registry_root_tag
+            primary_cache_tag_label(&state.proxy_metadata_hints),
+            state.primary_cache_tag
         );
         eprintln!(
             "  Strict Cache Errors: {}",
@@ -288,11 +288,11 @@ fn cache_tag_label(proxy_metadata_hints: &BTreeMap<String, String>) -> &'static 
     }
 }
 
-fn internal_root_tag_label(proxy_metadata_hints: &BTreeMap<String, String>) -> &'static str {
+fn primary_cache_tag_label(proxy_metadata_hints: &BTreeMap<String, String>) -> &'static str {
     if proxy_tool(proxy_metadata_hints) == Some("oci") {
-        "Internal Registry Root Tag"
+        "Primary OCI Cache Tag"
     } else {
-        "Internal Cache Root Tag"
+        "Primary Cache Tag"
     }
 }
 
@@ -675,7 +675,7 @@ mod tests {
         let hints = BTreeMap::from([("tool".to_string(), "gocache".to_string())]);
 
         assert_eq!(cache_tag_label(&hints), "Cache Tags");
-        assert_eq!(internal_root_tag_label(&hints), "Internal Cache Root Tag");
+        assert_eq!(primary_cache_tag_label(&hints), "Primary Cache Tag");
         assert_eq!(body_hydration_label(&hints), "Cache body hydration");
 
         let lines = endpoint_lines(&hints, "127.0.0.1", 4242);
@@ -694,10 +694,7 @@ mod tests {
         let hints = BTreeMap::from([("tool".to_string(), "oci".to_string())]);
 
         assert_eq!(cache_tag_label(&hints), "OCI Tags");
-        assert_eq!(
-            internal_root_tag_label(&hints),
-            "Internal Registry Root Tag"
-        );
+        assert_eq!(primary_cache_tag_label(&hints), "Primary OCI Cache Tag");
         assert_eq!(body_hydration_label(&hints), "OCI body hydration");
         assert_eq!(
             endpoint_lines(&hints, "127.0.0.1", 4242),

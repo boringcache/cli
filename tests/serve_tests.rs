@@ -11,9 +11,9 @@ use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
     AppState, BlobLocatorCache, BlobLocatorEntry, BlobReadCache, BlobReadMetrics, KvPendingStore,
     KvPublishedIndex, OciManifestCacheEntry, ProxySkipRule, UploadSession, UploadSessionBody,
-    UploadSessionStore, digest_tag, legacy_ref_tag_for_input, ref_tag,
+    UploadSessionStore, legacy_oci_ref_tag_for_input, oci_digest_tag, oci_ref_tag,
 };
-use boring_cache_cli::tag_utils::TagResolver;
+use boring_cache_cli::tag_utils::{TagResolver, server_cache_tag_name};
 use boring_cache_cli::test_env;
 use http_body_util::BodyExt;
 use mockito::{Matcher, Server};
@@ -99,8 +99,8 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         read_only: false,
         tag_resolver: TagResolver::new(None, GitContext::default(), false),
         configured_human_tags: Vec::new(),
-        registry_root_tag: "registry".to_string(),
-        registry_restore_root_tags: vec!["registry".to_string()],
+        primary_cache_tag: "registry".to_string(),
+        restore_cache_tags: vec!["registry".to_string()],
         oci_alias_promotion_refs: Vec::new(),
         proxy_metadata_hints: std::collections::BTreeMap::new(),
         proxy_skip_rules: Arc::new(Vec::new()),
@@ -168,7 +168,11 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
 }
 
 fn namespaced_scoped_ref_tag(namespace: &str, name: &str, reference: &str) -> String {
-    ref_tag(namespace, &format!("{name}:{reference}"))
+    if server_cache_tag_name(reference) {
+        return reference.to_string();
+    }
+
+    oci_ref_tag(namespace, &format!("{name}:{reference}"))
 }
 
 fn scoped_ref_tag(name: &str, reference: &str) -> String {
@@ -176,7 +180,11 @@ fn scoped_ref_tag(name: &str, reference: &str) -> String {
 }
 
 fn namespaced_legacy_scoped_ref_tag(namespace: &str, name: &str, reference: &str) -> String {
-    legacy_ref_tag_for_input(&format!("{namespace}:{name}:{reference}"))
+    if server_cache_tag_name(reference) {
+        return reference.to_string();
+    }
+
+    legacy_oci_ref_tag_for_input(&format!("{namespace}:{name}:{reference}"))
 }
 
 fn legacy_scoped_ref_tag(name: &str, reference: &str) -> String {

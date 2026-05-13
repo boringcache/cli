@@ -181,11 +181,11 @@ impl KvPublishedIndex {
     }
 }
 
-pub fn ref_tag(name: &str, reference: &str) -> String {
-    ref_tag_for_input(&format!("{}:{}", name, reference))
+pub fn oci_ref_tag(name: &str, reference: &str) -> String {
+    readable_oci_ref_tag_for_input(&format!("{}:{}", name, reference))
 }
 
-pub fn ref_tag_for_input(input: &str) -> String {
+pub fn readable_oci_ref_tag_for_input(input: &str) -> String {
     const REF_TAG_PREFIX: &str = "oci_ref_";
     const REF_TAG_HASH_BYTES: usize = 16;
     const REF_TAG_MAX_BODY_BYTES: usize = 240;
@@ -198,11 +198,11 @@ pub fn ref_tag_for_input(input: &str) -> String {
     )
 }
 
-pub fn legacy_ref_tag_for_input(input: &str) -> String {
+pub fn legacy_oci_ref_tag_for_input(input: &str) -> String {
     format!("oci_ref_{}", sha256_hex(input.as_bytes()))
 }
 
-pub fn digest_tag(digest: &str) -> String {
+pub fn oci_digest_tag(digest: &str) -> String {
     let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
     format!("oci_digest_{}", hex)
 }

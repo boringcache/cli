@@ -57,13 +57,13 @@ impl OciNegativeCache {
     pub fn contains_manifest_ref_miss(
         &self,
         workspace: &str,
-        registry_root_tag: &str,
+        primary_cache_tag: &str,
         name: &str,
         reference: &str,
     ) -> bool {
         self.contains(
             workspace,
-            registry_root_tag,
+            primary_cache_tag,
             OciNegativeCacheReason::ManifestRef,
             name,
             reference,
@@ -74,13 +74,13 @@ impl OciNegativeCache {
     pub fn insert_manifest_ref_miss(
         &self,
         workspace: &str,
-        registry_root_tag: &str,
+        primary_cache_tag: &str,
         name: &str,
         reference: &str,
     ) {
         self.insert(
             workspace,
-            registry_root_tag,
+            primary_cache_tag,
             OciNegativeCacheReason::ManifestRef,
             name,
             reference,
@@ -91,13 +91,13 @@ impl OciNegativeCache {
     pub fn contains_blob_locator_miss(
         &self,
         workspace: &str,
-        registry_root_tag: &str,
+        primary_cache_tag: &str,
         name: &str,
         digest: &str,
     ) -> bool {
         self.contains(
             workspace,
-            registry_root_tag,
+            primary_cache_tag,
             OciNegativeCacheReason::BlobLocator,
             name,
             digest,
@@ -108,13 +108,13 @@ impl OciNegativeCache {
     pub fn insert_blob_locator_miss(
         &self,
         workspace: &str,
-        registry_root_tag: &str,
+        primary_cache_tag: &str,
         name: &str,
         digest: &str,
     ) {
         self.insert(
             workspace,
-            registry_root_tag,
+            primary_cache_tag,
             OciNegativeCacheReason::BlobLocator,
             name,
             digest,
@@ -125,14 +125,14 @@ impl OciNegativeCache {
     pub fn contains_download_url_miss(
         &self,
         workspace: &str,
-        registry_root_tag: &str,
+        primary_cache_tag: &str,
         name: &str,
         digest: &str,
         cache_entry_id: &str,
     ) -> bool {
         self.contains(
             workspace,
-            registry_root_tag,
+            primary_cache_tag,
             OciNegativeCacheReason::DownloadUrl,
             name,
             digest,
@@ -143,14 +143,14 @@ impl OciNegativeCache {
     pub fn insert_download_url_miss(
         &self,
         workspace: &str,
-        registry_root_tag: &str,
+        primary_cache_tag: &str,
         name: &str,
         digest: &str,
         cache_entry_id: &str,
     ) {
         self.insert(
             workspace,
-            registry_root_tag,
+            primary_cache_tag,
             OciNegativeCacheReason::DownloadUrl,
             name,
             digest,
@@ -161,13 +161,13 @@ impl OciNegativeCache {
     pub fn contains_remote_blob_miss(
         &self,
         workspace: &str,
-        registry_root_tag: &str,
+        primary_cache_tag: &str,
         name: &str,
         digest: &str,
     ) -> bool {
         self.contains(
             workspace,
-            registry_root_tag,
+            primary_cache_tag,
             OciNegativeCacheReason::RemoteBlob,
             name,
             digest,
@@ -178,13 +178,13 @@ impl OciNegativeCache {
     pub fn insert_remote_blob_miss(
         &self,
         workspace: &str,
-        registry_root_tag: &str,
+        primary_cache_tag: &str,
         name: &str,
         digest: &str,
     ) {
         self.insert(
             workspace,
-            registry_root_tag,
+            primary_cache_tag,
             OciNegativeCacheReason::RemoteBlob,
             name,
             digest,
@@ -270,7 +270,7 @@ impl OciNegativeCache {
     fn contains(
         &self,
         workspace: &str,
-        registry_root_tag: &str,
+        primary_cache_tag: &str,
         reason: OciNegativeCacheReason,
         name: &str,
         subject: &str,
@@ -278,7 +278,7 @@ impl OciNegativeCache {
     ) -> bool {
         let key = self.key(
             workspace,
-            registry_root_tag,
+            primary_cache_tag,
             reason,
             name,
             subject,
@@ -298,7 +298,7 @@ impl OciNegativeCache {
     fn insert(
         &self,
         workspace: &str,
-        registry_root_tag: &str,
+        primary_cache_tag: &str,
         reason: OciNegativeCacheReason,
         name: &str,
         subject: &str,
@@ -306,7 +306,7 @@ impl OciNegativeCache {
     ) {
         let key = self.key(
             workspace,
-            registry_root_tag,
+            primary_cache_tag,
             reason,
             name,
             subject,
@@ -326,7 +326,7 @@ impl OciNegativeCache {
     fn key(
         &self,
         workspace: &str,
-        registry_root_tag: &str,
+        primary_cache_tag: &str,
         reason: OciNegativeCacheReason,
         name: &str,
         subject: &str,
@@ -336,7 +336,7 @@ impl OciNegativeCache {
             "{}\0{}\0{}\0{}\0{}\0{}\0{}",
             self.generation.load(Ordering::Acquire),
             workspace,
-            registry_root_tag,
+            primary_cache_tag,
             reason.as_str(),
             name,
             subject,

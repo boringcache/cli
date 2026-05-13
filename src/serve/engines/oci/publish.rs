@@ -8,7 +8,7 @@ use crate::serve::engines::oci::PresentBlob;
 use crate::serve::engines::oci::manifest_cache::OciManifestCacheEntry;
 use crate::serve::http::error::OciError;
 use crate::serve::http::oci_tags::{AliasBinding, alias_tags_for_manifest, bind_alias_tag};
-use crate::serve::state::{AppState, digest_tag};
+use crate::serve::state::{AppState, oci_digest_tag};
 
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -276,9 +276,10 @@ async fn persist_manifest_entry_inner(
     state
         .oci_manifest_cache
         .insert(primary_tag.clone(), std::sync::Arc::clone(&cached));
-    state
-        .oci_manifest_cache
-        .insert(digest_tag(&manifest_digest), std::sync::Arc::clone(&cached));
+    state.oci_manifest_cache.insert(
+        oci_digest_tag(&manifest_digest),
+        std::sync::Arc::clone(&cached),
+    );
 
     let alias_started_at = Instant::now();
     let alias_result = async {

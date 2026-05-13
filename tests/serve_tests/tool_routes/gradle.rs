@@ -195,12 +195,11 @@ async fn test_gradle_put_get_round_trip() {
 }
 
 #[tokio::test]
-async fn test_gradle_get_uses_default_restore_root_after_transient_branch_error() {
+async fn test_gradle_get_uses_default_restore_cache_tag_after_transient_branch_error() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
-    state.registry_root_tag = "head-registry".to_string();
-    state.registry_restore_root_tags =
-        vec!["head-registry".to_string(), "default-registry".to_string()];
+    state.primary_cache_tag = "feature-cache".to_string();
+    state.restore_cache_tags = vec!["feature-cache".to_string(), "default-cache".to_string()];
 
     let cache_key = "fallback-gradle-key";
     let payload = b"gradle-fallback-payload";
@@ -216,7 +215,7 @@ async fn test_gradle_get_uses_default_restore_root_after_transient_branch_error(
     let head_restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=head-registry$".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=feature-cache$".to_string()),
         )
         .expect(3)
         .with_status(500)
@@ -227,16 +226,14 @@ async fn test_gradle_get_uses_default_restore_root_after_transient_branch_error(
     let default_restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(
-                r"^/v2/workspaces/org/repo/caches\?entries=default-registry$".to_string(),
-            ),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=default-cache$".to_string()),
         )
         .expect(1)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
             json!([{
-                "tag": "default-registry",
+                "tag": "default-cache",
                 "status": "hit",
                 "cache_entry_id": "entry-gradle-fallback",
                 "manifest_url": format!("{}/pointer-download-gradle-fallback", server.url()),

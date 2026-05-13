@@ -101,7 +101,7 @@ pub(crate) async fn get_blob(
 
     if state.oci_negative_cache.contains_blob_locator_miss(
         &state.workspace,
-        &state.registry_root_tag,
+        &state.primary_cache_tag,
         &name,
         &digest,
     ) {
@@ -134,7 +134,7 @@ pub(crate) async fn get_blob(
     }) else {
         state.oci_negative_cache.insert_blob_locator_miss(
             &state.workspace,
-            &state.registry_root_tag,
+            &state.primary_cache_tag,
             &name,
             &digest,
         );
@@ -151,7 +151,7 @@ pub(crate) async fn get_blob(
             true
         } else if state.oci_negative_cache.contains_remote_blob_miss(
             &state.workspace,
-            &state.registry_root_tag,
+            &state.primary_cache_tag,
             &name,
             &digest,
         ) {
@@ -181,7 +181,7 @@ pub(crate) async fn get_blob(
             if !negative_cache_hit {
                 state.oci_negative_cache.insert_remote_blob_miss(
                     &state.workspace,
-                    &state.registry_root_tag,
+                    &state.primary_cache_tag,
                     &name,
                     &digest,
                 );
@@ -197,7 +197,7 @@ pub(crate) async fn get_blob(
 
     if state.oci_negative_cache.contains_remote_blob_miss(
         &state.workspace,
-        &state.registry_root_tag,
+        &state.primary_cache_tag,
         &name,
         &digest,
     ) {
@@ -230,7 +230,7 @@ pub(crate) async fn get_blob(
     loop {
         if state.oci_negative_cache.contains_remote_blob_miss(
             &state.workspace,
-            &state.registry_root_tag,
+            &state.primary_cache_tag,
             &name,
             &digest,
         ) {
@@ -778,7 +778,7 @@ pub(crate) async fn resolve_oci_download_url(
 ) -> Result<String, OciError> {
     if state.oci_negative_cache.contains_download_url_miss(
         &state.workspace,
-        &state.registry_root_tag,
+        &state.primary_cache_tag,
         name,
         digest,
         cache_entry_id,
@@ -803,7 +803,7 @@ pub(crate) async fn resolve_oci_download_url(
     let url = resolved.urls.remove(digest).ok_or_else(|| {
         state.oci_negative_cache.insert_download_url_miss(
             &state.workspace,
-            &state.registry_root_tag,
+            &state.primary_cache_tag,
             name,
             digest,
             cache_entry_id,
@@ -932,7 +932,7 @@ async fn stream_oci_blob_to_client(
         if !from_cached_url && response.status() == StatusCode::NOT_FOUND {
             state.oci_negative_cache.insert_remote_blob_miss(
                 &state.workspace,
-                &state.registry_root_tag,
+                &state.primary_cache_tag,
                 &name,
                 &digest,
             );
@@ -1253,7 +1253,7 @@ async fn download_oci_blob_to_cache(
         if !from_cached_url && response.status() == StatusCode::NOT_FOUND {
             state.oci_negative_cache.insert_remote_blob_miss(
                 &state.workspace,
-                &state.registry_root_tag,
+                &state.primary_cache_tag,
                 name,
                 digest,
             );

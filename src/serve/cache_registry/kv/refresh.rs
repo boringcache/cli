@@ -277,7 +277,7 @@ pub(crate) async fn poll_tag_version_loop(state: &AppState) {
             continue;
         }
 
-        let primary_tag = state.registry_root_tag.trim().to_string();
+        let primary_tag = state.primary_cache_tag.trim().to_string();
         let poll_result = tokio::time::timeout(
             KV_VERSION_POLL_TIMEOUT,
             state

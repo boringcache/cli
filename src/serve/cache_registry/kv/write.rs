@@ -100,7 +100,7 @@ pub(crate) async fn put_kv_object_with_options(
         return Err(error);
     }
 
-    let miss_key = kv_miss_cache_key(state, &state.registry_root_tag, &scoped_key);
+    let miss_key = kv_miss_cache_key(state, &state.primary_cache_tag, &scoped_key);
 
     put_probe.stage("pending_lock");
     let mut pending = state.kv_pending.write().await;
@@ -335,8 +335,8 @@ pub(crate) fn clear_kv_miss(state: &AppState, scoped_key: &str) {
     state.kv_recent_misses.remove(scoped_key);
 }
 
-pub(crate) fn clear_tag_misses(state: &AppState, registry_root_tag: &str) {
-    let tag = registry_root_tag.trim().to_string();
+pub(crate) fn clear_tag_misses(state: &AppState, primary_cache_tag: &str) {
+    let tag = primary_cache_tag.trim().to_string();
     match state.kv_miss_generations.entry(tag) {
         dashmap::mapref::entry::Entry::Occupied(mut entry) => {
             let next = entry.get().wrapping_add(1);
@@ -350,8 +350,8 @@ pub(crate) fn clear_tag_misses(state: &AppState, registry_root_tag: &str) {
 
 pub(crate) fn clear_restore_tag_misses(state: &AppState) {
     let mut seen = HashSet::new();
-    for tag in std::iter::once(state.registry_root_tag.as_str())
-        .chain(state.registry_restore_root_tags.iter().map(String::as_str))
+    for tag in std::iter::once(state.primary_cache_tag.as_str())
+        .chain(state.restore_cache_tags.iter().map(String::as_str))
     {
         let tag = tag.trim();
         if !tag.is_empty() && seen.insert(tag.to_string()) {
@@ -368,10 +368,10 @@ pub(crate) fn cleanup_expired_kv_misses(state: &AppState) {
 }
 
 pub(crate) fn kv_visibility_tags_from_values(
-    registry_root_tag: &str,
+    primary_cache_tag: &str,
     configured_human_tags: &[String],
 ) -> Vec<String> {
-    let mut tags = vec![registry_root_tag.trim().to_string()];
+    let mut tags = vec![primary_cache_tag.trim().to_string()];
     for human_tag in configured_human_tags {
         let human_tag = human_tag.trim();
         if !human_tag.is_empty() && !tags.iter().any(|tag| tag == human_tag) {
@@ -382,21 +382,21 @@ pub(crate) fn kv_visibility_tags_from_values(
 }
 
 pub(crate) fn kv_visibility_tags(state: &AppState) -> Vec<String> {
-    kv_visibility_tags_from_values(&state.registry_root_tag, &state.configured_human_tags)
+    kv_visibility_tags_from_values(&state.primary_cache_tag, &state.configured_human_tags)
 }
 
 pub(crate) fn kv_alias_tags_from_values(
-    registry_root_tag: &str,
+    primary_cache_tag: &str,
     configured_human_tags: &[String],
 ) -> Vec<String> {
-    kv_visibility_tags_from_values(registry_root_tag, configured_human_tags)
+    kv_visibility_tags_from_values(primary_cache_tag, configured_human_tags)
         .into_iter()
         .skip(1)
         .collect()
 }
 
 pub(crate) fn kv_alias_tags(state: &AppState) -> Vec<String> {
-    kv_alias_tags_from_values(&state.registry_root_tag, &state.configured_human_tags)
+    kv_alias_tags_from_values(&state.primary_cache_tag, &state.configured_human_tags)
 }
 
 pub(crate) fn kv_primary_write_scope_tag(state: &AppState) -> Option<String> {

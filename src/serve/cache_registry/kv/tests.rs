@@ -33,8 +33,8 @@ async fn put_kv_object_is_noop_in_read_only_mode() {
         read_only: true,
         tag_resolver: TagResolver::new(None, GitContext::default(), false),
         configured_human_tags: Vec::new(),
-        registry_root_tag: "registry".to_string(),
-        registry_restore_root_tags: vec!["registry".to_string()],
+        primary_cache_tag: "registry".to_string(),
+        restore_cache_tags: vec!["registry".to_string()],
         oci_alias_promotion_refs: Vec::new(),
         proxy_metadata_hints: std::collections::BTreeMap::new(),
         proxy_skip_rules: std::sync::Arc::new(Vec::new()),
@@ -165,23 +165,6 @@ fn upload_in_progress_conflict_detector_is_narrow() {
     assert!(!is_upload_in_progress_conflict(
         "confirm failed: blob not yet verified"
     ));
-}
-
-#[test]
-fn checkpoint_tag_stays_under_registry_root_system_prefix() {
-    let root = crate::proxy::internal_registry_root_tag("grpc-bazel-remote-cache-rolling-main");
-    let checkpoint = kv_checkpoint_tag_for_values(&root, "proxy-summary-test");
-
-    assert!(checkpoint.starts_with(&format!("{root}_checkpoint_")));
-    assert!(server_cache_tag_name(&checkpoint));
-    assert_eq!(
-        checkpoint,
-        kv_checkpoint_tag_for_values(&root, "proxy-summary-test")
-    );
-    assert_ne!(
-        checkpoint,
-        kv_checkpoint_tag_for_values(&root, "other-session")
-    );
 }
 
 #[test]
@@ -411,9 +394,9 @@ fn select_flush_base_entries_preserves_published_on_digest_mismatch() {
 }
 
 #[test]
-fn kv_alias_tags_exclude_internal_root_tag() {
+fn kv_alias_tags_exclude_primary_cache_tag() {
     let aliases = kv_alias_tags_from_values(
-        "bc_registry_root_v2_abc",
+        "primary-cache",
         &[String::from("alias-a"), String::from("alias-b")],
     );
     assert_eq!(aliases, vec!["alias-a".to_string(), "alias-b".to_string()]);

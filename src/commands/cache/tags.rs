@@ -18,7 +18,7 @@ pub async fn execute(
     .await?;
     let offset = (page.saturating_sub(1)).saturating_mul(limit);
     let response = api_client
-        .workspace_tags(&workspace, filter.as_deref(), false, limit, offset)
+        .workspace_tags(&workspace, filter.as_deref(), limit, offset)
         .await?;
 
     if json_output {
@@ -37,14 +37,7 @@ fn render_tags_report(response: &WorkspaceTagsResponse) {
     if let Some(filter) = response.filter.query.as_deref() {
         crate::commands::status::print_field("Filter", filter);
     }
-    crate::commands::status::print_field(
-        "Scope",
-        if response.filter.include_system {
-            "internal tags"
-        } else {
-            "named tags"
-        },
-    );
+    crate::commands::status::print_field("Scope", "named tags");
     crate::commands::status::print_field("Showing", &showing_range(&response.pagination));
     crate::ui::blank_line();
 
@@ -80,13 +73,7 @@ fn render_tags_report(response: &WorkspaceTagsResponse) {
 }
 
 fn tag_kind(tag: &crate::api::models::workspace::WorkspaceTagFeedItem) -> &'static str {
-    if tag.system {
-        "internal"
-    } else if tag.primary {
-        "primary"
-    } else {
-        "alias"
-    }
+    if tag.primary { "primary" } else { "alias" }
 }
 
 fn format_optional_relative_time(timestamp: Option<&str>) -> String {
@@ -154,7 +141,6 @@ mod tests {
             },
             filter: WorkspaceTagsFilter {
                 query: Some("ruby current".to_string()),
-                include_system: true,
             },
             pagination: WorkspacePagination {
                 limit: 20,
@@ -166,7 +152,6 @@ mod tests {
             tags: vec![WorkspaceTagFeedItem {
                 name: "ruby-current".to_string(),
                 primary: true,
-                system: false,
                 primary_tag: "ruby-current".to_string(),
                 cache_entry_id: "entry-1".to_string(),
                 manifest_root_digest: "sha256:abc".to_string(),
@@ -206,7 +191,6 @@ mod tests {
             },
             filter: WorkspaceTagsFilter {
                 query: Some("ruby".to_string()),
-                include_system: false,
             },
             pagination: WorkspacePagination {
                 limit: 20,
@@ -218,7 +202,6 @@ mod tests {
             tags: vec![WorkspaceTagFeedItem {
                 name: "ruby-current".to_string(),
                 primary: true,
-                system: false,
                 primary_tag: "ruby-current".to_string(),
                 cache_entry_id: "entry-1".to_string(),
                 manifest_root_digest: "sha256:abc".to_string(),

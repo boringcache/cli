@@ -19,7 +19,7 @@ This file tracks only product intent that is not fully settled by the current co
 - `cache-registry` is the explicit raw proxy command.
 - `run --proxy` temporarily starts that same proxy for one command.
 - `/_boringcache/status` is the operator/harness lifecycle endpoint, not the cache protocol surface.
-- Proxy cache heads use resolved human tags as canonical truth. Legacy root-hash and OCI ref aliases are backend/protocol compatibility inputs for old clients, not new CLI tag identities.
+- Proxy cache heads use resolved human tags as canonical truth. Legacy hash-based and OCI ref aliases are backend/protocol compatibility inputs for old clients, not new CLI tag identities.
 - `.boringcache.toml` is the canonical repo config filename.
 - `.boringcache.toml` is the durable repo cache plan across local and CI; the CLI is the only local planner for it.
 - `doctor` plus `audit` are the current maintenance loop after onboard. Future `lint` or `rescan` naming should wrap those planner/audit paths, not create new config truth.
@@ -38,7 +38,7 @@ This file tracks only product intent that is not fully settled by the current co
 The current ADR set is aligned on implementation direction. Public CLI `main` has moved beyond the last signed release, and the action repo has a pending release-alignment change from action `v1.12.64` / CLI `v1.12.46` to action `v1.12.65` / CLI `v1.12.47`. Treat that as unreleased until the signed release commit/tag and `one@v1` movement are complete. Docker launch artifacts now include post-proxy-shutdown `cache_session_summary` evidence for checked fresh/rolling runs, and same-ref rolling reruns produced useful steady-state samples. These gates still block broader release/default claims:
 
 - receipt commit failure, including a backend "blob not yet verified" confirm response, should continue to fail OCI/KV publish instead of waiting for asynchronous storage verification;
-- Rails v2 CAS publish is receipt-strict locally: pending CAS roots need manifest/blob receipts before visibility, with async blob verification retained only as audit/repair;
+- Rails v2 CAS publish is receipt-strict locally: pending CAS entries need manifest/blob receipts before visibility, with async blob verification retained only as audit/repair;
 - E2E publish/read checks now fail fast by default: remote tag verification has one attempt, local post-save visibility checks do not poll, prefetch seed does not wait for publish-settled before shutdown, Docker registry export retries are opt-in, and any retry must be an explicit diagnostic override rather than a hidden correctness dependency;
 - first-party action and benchmark workflows still need to artifact provider-neutral Docker run metadata, resolved human import/export tags, CLI version, action ref, and session trace; `/_boringcache/status` now carries the live `session_summary`, but the released-path benchmark proof still needs fresh artifacts after that change;
 - action/proxy/save metadata transport now preserves `ci_run_started_at` or another Rails ordering field through first-class CLI save request fields when a full provider-neutral run context is detected; capped metadata hints remain replay/debug labels and do not create ordering fields by themselves. Direct `cache-registry` same-alias proof must scope `BORINGCACHE_CI_*` fields into each proxy process instead of relying on metadata hints;
@@ -84,7 +84,7 @@ The remaining known compatibility question is whether legacy release asset alias
 
 ### 7. Proxy Delete Contract
 
-Decide whether proxy-root deletion during `delete` should remain a documented guarantee or just an implementation detail of "delete removes associated cache data."
+Decide whether cache-data deletion during `delete` should remain a documented guarantee or just an implementation detail of "delete removes associated cache data."
 
 ## Working Assumptions
 

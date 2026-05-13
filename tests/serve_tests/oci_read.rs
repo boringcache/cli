@@ -326,7 +326,7 @@ async fn test_cached_manifest_hit_returns_without_revalidation_in_best_effort() 
         .insert(tag.clone(), Arc::clone(&cached));
     state
         .oci_manifest_cache
-        .insert(digest_tag(&manifest_digest), cached);
+        .insert(oci_digest_tag(&manifest_digest), cached);
 
     let app = build_router(state.clone());
     let response = tower::ServiceExt::oneshot(
@@ -344,7 +344,7 @@ async fn test_cached_manifest_hit_returns_without_revalidation_in_best_effort() 
     assert!(
         state
             .oci_manifest_cache
-            .get(&digest_tag(&manifest_digest))
+            .get(&oci_digest_tag(&manifest_digest))
             .is_some()
     );
 }
@@ -380,7 +380,7 @@ async fn test_cached_manifest_hit_keeps_locator_urls() {
         .insert(tag.clone(), Arc::clone(&cached));
     state
         .oci_manifest_cache
-        .insert(digest_tag(&manifest_digest), cached);
+        .insert(oci_digest_tag(&manifest_digest), cached);
 
     {
         let mut locator = state.blob_locator.write().await;
@@ -1689,8 +1689,8 @@ async fn test_index_manifest_detected_as_index_type() {
 
 #[tokio::test]
 async fn test_tag_mapping_deterministic() {
-    let t1 = ref_tag("my-cache", "main");
-    let t2 = ref_tag("my-cache", "main");
+    let t1 = oci_ref_tag("my-cache", "main");
+    let t2 = oci_ref_tag("my-cache", "main");
     assert_eq!(t1, t2);
     let prefix = "oci_ref_my-cache__main__";
     assert!(t1.starts_with(prefix));
@@ -1698,9 +1698,9 @@ async fn test_tag_mapping_deterministic() {
     assert_eq!(suffix.len(), 16);
     assert!(suffix.chars().all(|ch| ch.is_ascii_hexdigit()));
 
-    let t3 = ref_tag("my-cache", "dev");
+    let t3 = oci_ref_tag("my-cache", "dev");
     assert_ne!(t1, t3);
 
-    let dt = digest_tag("sha256:abc123");
+    let dt = oci_digest_tag("sha256:abc123");
     assert_eq!(dt, "oci_digest_abc123");
 }

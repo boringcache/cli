@@ -44,7 +44,7 @@ use crate::serve::state::{
     diagnostics_enabled,
 };
 #[cfg(test)]
-use crate::serve::state::{OciManifestCacheEntry, digest_tag};
+use crate::serve::state::{OciManifestCacheEntry, oci_digest_tag};
 
 const OCI_DEGRADED_HEADER: &str = "X-BoringCache-Cache-Degraded";
 const OCI_PREFETCH_STATE_HEADER: &str = "X-BoringCache-Prefetch-State";

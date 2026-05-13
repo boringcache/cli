@@ -103,7 +103,7 @@ pub(crate) fn count_published_gaps_in_backend(
 pub(crate) async fn refresh_published_index_for_lookup(
     state: &AppState,
 ) -> Result<(), RegistryError> {
-    let (_resolved_root_tag, entries, blob_order, cache_entry_id, _) =
+    let (_resolved_cache_tag, entries, blob_order, cache_entry_id, _) =
         match load_existing_index_snapshot_with_tag(state, true).await {
             Ok(result) => {
                 state.backend_breaker.record_success();
@@ -498,16 +498,16 @@ pub(crate) async fn load_existing_index_snapshot_with_tag(
     ),
     RegistryError,
 > {
-    let root_tags = ordered_restore_root_tags(state);
+    let restore_tags = ordered_restore_cache_tags(state);
 
     let mut first_empty = None;
-    for (index, tag) in root_tags.iter().enumerate() {
-        let is_last = index + 1 == root_tags.len();
+    for (index, tag) in restore_tags.iter().enumerate() {
+        let is_last = index + 1 == restore_tags.len();
         let result = match load_existing_index(state, tag, retry_not_found).await {
             Ok(result) => result,
-            Err(error) if !is_last && should_try_next_restore_root_after_error(&error) => {
+            Err(error) if !is_last && should_try_next_restore_cache_tag_after_error(&error) => {
                 log::warn!(
-                    "KV index restore root {tag} failed with a transient backend error; trying next restore root: {error:?}"
+                    "KV index restore tag {tag} failed with a transient backend error; trying next restore tag: {error:?}"
                 );
                 continue;
             }
@@ -523,7 +523,7 @@ pub(crate) async fn load_existing_index_snapshot_with_tag(
 
     Ok(first_empty.unwrap_or_else(|| {
         (
-            state.registry_root_tag.trim().to_string(),
+            state.primary_cache_tag.trim().to_string(),
             BTreeMap::new(),
             Vec::new(),
             None,
@@ -532,12 +532,12 @@ pub(crate) async fn load_existing_index_snapshot_with_tag(
     }))
 }
 
-fn ordered_restore_root_tags(state: &AppState) -> Vec<String> {
+fn ordered_restore_cache_tags(state: &AppState) -> Vec<String> {
     let mut tags = Vec::new();
     let mut seen = HashSet::new();
 
-    for tag in std::iter::once(state.registry_root_tag.as_str())
-        .chain(state.registry_restore_root_tags.iter().map(String::as_str))
+    for tag in std::iter::once(state.primary_cache_tag.as_str())
+        .chain(state.restore_cache_tags.iter().map(String::as_str))
     {
         let tag = tag.trim();
         if !tag.is_empty() && seen.insert(tag.to_string()) {
@@ -546,13 +546,13 @@ fn ordered_restore_root_tags(state: &AppState) -> Vec<String> {
     }
 
     if tags.is_empty() {
-        tags.push(state.registry_root_tag.trim().to_string());
+        tags.push(state.primary_cache_tag.trim().to_string());
     }
 
     tags
 }
 
-fn should_try_next_restore_root_after_error(error: &RegistryError) -> bool {
+fn should_try_next_restore_cache_tag_after_error(error: &RegistryError) -> bool {
     error.status.is_server_error()
         || matches!(
             error.status,

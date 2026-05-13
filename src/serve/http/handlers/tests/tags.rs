@@ -18,7 +18,7 @@ fn scoped_save_tag_keeps_human_reference_first_class() {
     let tag = scoped_save_tag(
         &resolver,
         &["buildcache".to_string()],
-        "registry-root",
+        "primary-cache",
         "buildkit-cache",
         "posthog-run-main-ubuntu-24-x86_64",
     )
@@ -43,26 +43,11 @@ fn scoped_restore_tags_use_human_reference_directly() {
     let tags = scoped_restore_tags(
         &resolver,
         &["buildcache".to_string()],
-        "registry-root",
+        "primary-cache",
         "buildkit-cache",
         "posthog-run-main-ubuntu-24-x86_64",
     );
-    assert_eq!(
-        tags,
-        vec![
-            "posthog-run-main-ubuntu-24-x86_64".to_string(),
-            ref_tag_for_input(
-                "buildcache:buildkit-cache:posthog-run-main-ubuntu-24-x86_64-branch-feature-x"
-            ),
-            legacy_ref_tag_for_input(
-                "registry-root:buildkit-cache:posthog-run-main-ubuntu-24-x86_64-branch-feature-x"
-            ),
-            ref_tag_for_input("buildcache:buildkit-cache:posthog-run-main-ubuntu-24-x86_64"),
-            legacy_ref_tag_for_input(
-                "registry-root:buildkit-cache:posthog-run-main-ubuntu-24-x86_64"
-            ),
-        ]
-    );
+    assert_eq!(tags, vec!["posthog-run-main-ubuntu-24-x86_64".to_string()]);
 }
 
 #[test]
@@ -83,10 +68,10 @@ fn scoped_restore_tags_keep_legacy_ref_shape_only_for_non_human_references() {
     assert_eq!(
         tags,
         vec![
-            ref_tag_for_input("buildkit-cache:repo/image:main-branch-feature-x"),
-            legacy_ref_tag_for_input("buildkit-cache:repo/image:main-branch-feature-x"),
-            ref_tag_for_input("buildkit-cache:repo/image:main"),
-            legacy_ref_tag_for_input("buildkit-cache:repo/image:main"),
+            readable_oci_ref_tag_for_input("buildkit-cache:repo/image:main-branch-feature-x"),
+            legacy_oci_ref_tag_for_input("buildkit-cache:repo/image:main-branch-feature-x"),
+            readable_oci_ref_tag_for_input("buildkit-cache:repo/image:main"),
+            legacy_oci_ref_tag_for_input("buildkit-cache:repo/image:main"),
         ]
     );
 }
@@ -108,7 +93,7 @@ fn scoped_save_tag_on_default_branch_keeps_human_reference() {
     let tag = scoped_save_tag(
         &resolver,
         &["buildcache".to_string()],
-        "registry-root",
+        "primary-cache",
         "buildkit-cache",
         "docker-main",
     )

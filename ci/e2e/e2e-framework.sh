@@ -94,13 +94,13 @@ run_leg() {
       LOG_DIR="$log_dir" \
       bash "${REQUIRED_DIR}/e2e-oci-same-alias-writer-test.sh"
       ;;
-    oci-rooted-restore-isolation)
+    oci-human-tag-restore-isolation)
       BINARY="$binary" \
       WORKSPACE="$workspace" \
       PROXY_PORT_A="5000" \
       PROXY_PORT_B="5001" \
       LOG_DIR="$log_dir" \
-      bash "${REQUIRED_DIR}/e2e-oci-rooted-restore-isolation-test.sh"
+      bash "${REQUIRED_DIR}/e2e-oci-human-tag-restore-isolation-test.sh"
       ;;
     prefetch-smoke)
       BINARY="$binary" \
@@ -345,17 +345,17 @@ EOF
       cat <<'EOF'
 === Phase 1: two live writer proxies upload OCI blobs ===
 === Phase 2: newer writer commits first and older writer is stale ===
-=== Phase 3: fresh proxy reads both immutable refs and winning alias ===
+=== Phase 3: fresh proxy reads both human refs and winning alias ===
 OCI same-alias writer e2e passed
 EOF
       ;;
-    oci-rooted-restore-isolation)
+    oci-human-tag-restore-isolation)
       cat <<'EOF'
-=== Phase 1: publish root-scoped manifest for root B ===
-=== Phase 2: backfill shared legacy fallback alias to root B entry ===
-=== Phase 3: distinct root A ignores shared fallback while its primary alias is absent ===
-=== Phase 4: once root A publishes its own alias, restore prefers the root-scoped alias over fallback ===
-OCI rooted restore isolation e2e passed
+=== Phase 1: publish human-scoped manifest for tag B ===
+=== Phase 2: backfill shared legacy fallback alias to tag B entry ===
+=== Phase 3: distinct tag A ignores shared fallback while its primary alias is absent ===
+=== Phase 4: once tag A publishes its own alias, restore prefers the human-scoped alias over fallback ===
+OCI human-tag restore isolation e2e passed
 EOF
       ;;
     prefetch-smoke|prefetch-readiness)

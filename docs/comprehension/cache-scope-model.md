@@ -66,8 +66,8 @@ raw `cache-registry` therefore reuse branch/default/PR behavior without each
 adapter carrying its own GitHub cache rules.
 
 Those proxy tags are human cache-head tags. New CLI code does not derive
-`bc_registry_root_v2_*`, checkpoint, or `oci_ref_*` aliases as separate cache
-identity; those names are backend/protocol compatibility for old clients.
+internal aliases as separate cache identity; any old generated names are
+backend/protocol compatibility for older clients.
 
 ## Docker And BuildKit
 

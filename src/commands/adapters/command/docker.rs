@@ -21,13 +21,13 @@ pub(super) const BUILDKIT_RUNNER: AdapterRunner = AdapterRunner {
 pub(super) struct OciCachePlan {
     pub registry_ref: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub cache_from_ref_tags: Vec<String>,
+    pub cache_from_tags: Vec<String>,
     pub cache_from_refs: Vec<String>,
     pub cache_from: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_to: Option<String>,
-    pub ref_tag: String,
-    pub cache_to_ref_tag: Option<String>,
+    pub cache_tag: String,
+    pub cache_to_tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_metadata: Option<CiRunContext>,
 }
@@ -93,13 +93,13 @@ pub(super) fn resolve_docker_plan(input: ResolveDockerPlanInput<'_>) -> Result<R
         );
     }
 
-    let import_ref_tags = validate_ref_tag_list(human_cache_restore_tags.to_vec())?;
-    let cache_to_ref_tag = if read_only {
+    let import_cache_tags = validate_cache_tag_list(human_cache_restore_tags.to_vec())?;
+    let cache_to_tag = if read_only {
         None
     } else {
         Some(human_cache_tag.clone())
     };
-    let cache_from_refs = import_ref_tags
+    let cache_from_refs = import_cache_tags
         .iter()
         .map(|tag| docker_cache_import_spec(&format!("{endpoint_host}:{port}/cache:{tag}")))
         .collect::<Vec<_>>();
@@ -107,33 +107,33 @@ pub(super) fn resolve_docker_plan(input: ResolveDockerPlanInput<'_>) -> Result<R
         .first()
         .cloned()
         .expect("docker cache imports always include at least one ref");
-    let cache_to = cache_to_ref_tag.as_deref().map(|cache_to_ref_tag| {
+    let cache_to = cache_to_tag.as_deref().map(|cache_to_tag| {
         docker_cache_export_spec(
-            &format!("{endpoint_host}:{port}/cache:{cache_to_ref_tag}"),
+            &format!("{endpoint_host}:{port}/cache:{cache_to_tag}"),
             cache_mode,
         )
     });
-    let registry_ref = cache_to_ref_tag
+    let registry_ref = cache_to_tag
         .as_ref()
-        .or_else(|| import_ref_tags.first())
+        .or_else(|| import_cache_tags.first())
         .map(|tag| format!("{endpoint_host}:{port}/cache:{tag}"))
         .expect("docker cache plan requires an import or export ref");
 
     Ok(ResolvedDockerPlan {
         oci_cache: OciCachePlan {
             registry_ref,
-            cache_from_ref_tags: import_ref_tags,
+            cache_from_tags: import_cache_tags,
             cache_from_refs,
             cache_from,
             cache_to,
-            ref_tag: human_cache_tag,
-            cache_to_ref_tag,
+            cache_tag: human_cache_tag,
+            cache_to_tag,
             run_metadata: run_context,
         },
     })
 }
 
-fn validate_ref_tag_list(values: Vec<String>) -> Result<Vec<String>> {
+fn validate_cache_tag_list(values: Vec<String>) -> Result<Vec<String>> {
     values
         .into_iter()
         .map(|value| validate_human_oci_tag(&value))
@@ -477,9 +477,9 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(plan.oci_cache.cache_from_ref_tags, restore_tags);
+        assert_eq!(plan.oci_cache.cache_from_tags, restore_tags);
         assert_eq!(
-            plan.oci_cache.cache_to_ref_tag.as_deref(),
+            plan.oci_cache.cache_to_tag.as_deref(),
             Some("docker-main-branch-feature-x-ubuntu-24-x86_64")
         );
     }
@@ -505,9 +505,9 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(plan.oci_cache.cache_from_ref_tags, restore_tags);
+        assert_eq!(plan.oci_cache.cache_from_tags, restore_tags);
         assert!(plan.oci_cache.cache_to.is_none());
-        assert!(plan.oci_cache.cache_to_ref_tag.is_none());
+        assert!(plan.oci_cache.cache_to_tag.is_none());
     }
 
     #[test]

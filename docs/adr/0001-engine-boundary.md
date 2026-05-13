@@ -51,7 +51,7 @@ That shell must not become the storage abstraction. In particular, do not requir
 
 Generic directory engines must report diagnostics that can explain misses and latency:
 
-- input root/ref/tag and effective tag;
+- input ref/tag and effective tag;
 - local hit count and remote fetch count;
 - bytes read and written locally/remotely;
 - request count and retry count;

@@ -67,7 +67,7 @@ pub(crate) async fn flush_kv_index_with_mode(
                 let mut flushing = state.kv_flushing.write().await;
                 *flushing = None;
             }
-            clear_tag_misses(state, &state.registry_root_tag);
+            clear_tag_misses(state, &state.primary_cache_tag);
 
             let promoted =
                 promote_pending_blobs_to_read_cache(state, &pending_entries, &pending_blob_paths)
@@ -150,24 +150,16 @@ pub(crate) async fn kv_flush_publish_plan(
     let _ = flush_mode;
 
     KvFlushPublishPlan {
-        tag: kv_stable_publish_tag(state, write_scope_tag.as_deref()).await,
+        tag: kv_publish_cache_tag(state, write_scope_tag.as_deref()).await,
         write_scope_tag,
         stable: true,
     }
 }
 
-#[cfg(test)]
-pub(crate) fn kv_checkpoint_tag_for_values(registry_root_tag: &str, session_id: &str) -> String {
-    let root = registry_root_tag.trim();
-    let source = format!("{root}:{session_id}");
-    let suffix = crate::cas_oci::sha256_hex(source.as_bytes());
-    format!("{root}_checkpoint_{}", &suffix[..16])
-}
-
-async fn kv_stable_publish_tag(state: &AppState, primary_write_scope_tag: Option<&str>) -> String {
+async fn kv_publish_cache_tag(state: &AppState, primary_write_scope_tag: Option<&str>) -> String {
     primary_write_scope_tag
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| state.registry_root_tag.trim().to_string())
+        .unwrap_or_else(|| state.primary_cache_tag.trim().to_string())
 }
 
 pub(crate) async fn do_flush(
@@ -753,7 +745,7 @@ async fn publish_kv_stable_tags_for_entry(
     cache_entry_id: &str,
 ) -> Result<usize, FlushError> {
     let primary_write_scope_tag = kv_primary_write_scope_tag(state);
-    let tag = kv_stable_publish_tag(state, primary_write_scope_tag.as_deref()).await;
+    let tag = kv_publish_cache_tag(state, primary_write_scope_tag.as_deref()).await;
     state
         .api_client
         .publish_ready_tag(

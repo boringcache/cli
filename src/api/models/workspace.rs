@@ -106,14 +106,12 @@ pub struct WorkspaceSummaryContext {
 pub struct WorkspaceTagsFilter {
     #[serde(default)]
     pub query: Option<String>,
-    pub include_system: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct WorkspaceTagFeedItem {
     pub name: String,
     pub primary: bool,
-    pub system: bool,
     pub primary_tag: String,
     pub cache_entry_id: String,
     pub manifest_root_digest: String,
