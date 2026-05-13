@@ -13,28 +13,21 @@ PROXY_PORT="${PROXY_PORT:-5050}"
 API_URL="${BORINGCACHE_API_URL:-https://api.boringcache.com}"
 RUN_ID="${GITHUB_RUN_ID:-local}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
-# CACHE_TAG is the human cache head for the proxy. REFERRERS_TAG is OCI
-# protocol lookup state for /referrers/<subject>, not a cache-head alias.
 CACHE_TAG="${E2E_TAG_PREFIX:-gha-cache-registry}-oci-contract-${RUN_ID}-${RUN_ATTEMPT}"
+MANIFEST_REF="${MANIFEST_REF:-${CACHE_TAG}}"
 OCI_NAME="boringcache-e2e/oci-contract-${RUN_ID}-${RUN_ATTEMPT}"
-SUBJECT_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-REFERRERS_TAG="${SUBJECT_DIGEST/:/-}"
-ARTIFACT_TYPE="application/vnd.example.sbom.v1"
+ARTIFACT_TYPE="application/vnd.example.cache-marker.v1"
 VISIBILITY_ATTEMPTS="${OCI_CONTRACT_VISIBILITY_ATTEMPTS:-6}"
 VISIBILITY_SLEEP_SECS="${OCI_CONTRACT_VISIBILITY_SLEEP_SECS:-2}"
 PROXY_LOG="${LOG_DIR}/proxy.log"
 PROXY_RESTART_LOG="${LOG_DIR}/proxy-restart.log"
-MANIFEST_FILE="${LOG_DIR}/subject-manifest.json"
+MANIFEST_FILE="${LOG_DIR}/manifest.json"
 PUT_HEADERS="${LOG_DIR}/put.headers"
 PUT_BODY="${LOG_DIR}/put.body"
 GET_HEADERS="${LOG_DIR}/manifest-get.headers"
 GET_BODY="${LOG_DIR}/manifest-get.body"
-REFERRERS_HEADERS="${LOG_DIR}/referrers.headers"
-REFERRERS_BODY="${LOG_DIR}/referrers.json"
-FILTER_HEADERS="${LOG_DIR}/referrers-filter.headers"
-FILTER_BODY="${LOG_DIR}/referrers-filter.json"
-RESTART_REFERRERS_HEADERS="${LOG_DIR}/referrers-restart.headers"
-RESTART_REFERRERS_BODY="${LOG_DIR}/referrers-restart.json"
+RESTART_GET_HEADERS="${LOG_DIR}/manifest-restart.headers"
+RESTART_GET_BODY="${LOG_DIR}/manifest-restart.body"
 
 mkdir -p "${LOG_DIR}"
 setup_e2e_traps "${BINARY}" "${WORKSPACE}"
@@ -42,7 +35,7 @@ require_save_capable_token
 bootstrap_cli_session "${BINARY}" "${WORKSPACE}" "${API_URL}" "${LOG_DIR}/auth.log" admin
 
 cat >"${MANIFEST_FILE}" <<EOF
-{"schemaVersion":2,"mediaType":"application/vnd.oci.artifact.manifest.v1+json","artifactType":"${ARTIFACT_TYPE}","blobs":[],"subject":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"${SUBJECT_DIGEST}","size":123},"annotations":{"org.example.kind":"sbom","org.example.run":"${RUN_ID}-${RUN_ATTEMPT}"}}
+{"schemaVersion":2,"mediaType":"application/vnd.oci.artifact.manifest.v1+json","artifactType":"${ARTIFACT_TYPE}","blobs":[],"annotations":{"org.example.kind":"cache-marker","org.example.run":"${RUN_ID}-${RUN_ATTEMPT}"}}
 EOF
 
 MANIFEST_DIGEST="sha256:$(sha256_file_hex "${MANIFEST_FILE}")"
@@ -93,30 +86,7 @@ assert_header() {
   fi
 }
 
-check_referrers_body() {
-  local body_file="$1"
-  local expected_digest="$2"
-  local expected_artifact_type="$3"
-  python3 - "$body_file" "$expected_digest" "$expected_artifact_type" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    payload = json.load(handle)
-
-assert payload["schemaVersion"] == 2, payload
-assert payload["mediaType"] == "application/vnd.oci.image.index.v1+json", payload
-manifests = payload["manifests"]
-matches = [descriptor for descriptor in manifests if descriptor.get("digest") == sys.argv[2]]
-assert len(matches) == 1, manifests
-descriptor = matches[0]
-assert descriptor["digest"] == sys.argv[2], descriptor
-assert descriptor["artifactType"] == sys.argv[3], descriptor
-assert descriptor["annotations"]["org.example.kind"] == "sbom", descriptor
-PY
-}
-
-echo "=== Phase 1: Push subject manifest and verify referrers ==="
+echo "=== Phase 1: Push human-tagged manifest and verify by tag ==="
 start_proxy "${BINARY}" "${WORKSPACE}" "${CACHE_TAG}" "${PROXY_PORT}" "${PROXY_LOG}" "--fail-on-cache-error"
 wait_for_proxy "${PROXY_PORT}"
 
@@ -124,10 +94,9 @@ curl -sS -D "${PUT_HEADERS}" -o "${PUT_BODY}" \
   -X PUT \
   -H "Content-Type: application/vnd.oci.artifact.manifest.v1+json" \
   --data-binary "@${MANIFEST_FILE}" \
-  "http://${PROXY_HOST}:${PROXY_PORT}/v2/${OCI_NAME}/manifests/main"
+  "http://${PROXY_HOST}:${PROXY_PORT}/v2/${OCI_NAME}/manifests/${MANIFEST_REF}"
 assert_status "${PUT_HEADERS}" 201
 assert_header "${PUT_HEADERS}" "Docker-Distribution-API-Version" "registry/2.0"
-assert_header "${PUT_HEADERS}" "OCI-Subject" "${SUBJECT_DIGEST}"
 assert_header "${PUT_HEADERS}" "Docker-Content-Digest" "${MANIFEST_DIGEST}"
 if [[ -s "${PUT_BODY}" ]]; then
   echo "ASSERT FAILED: manifest PUT response body should be empty"
@@ -136,31 +105,20 @@ if [[ -s "${PUT_BODY}" ]]; then
 fi
 
 curl -sS -D "${GET_HEADERS}" -o "${GET_BODY}" \
-  "http://${PROXY_HOST}:${PROXY_PORT}/v2/${OCI_NAME}/manifests/${MANIFEST_DIGEST}"
+  "http://${PROXY_HOST}:${PROXY_PORT}/v2/${OCI_NAME}/manifests/${MANIFEST_REF}"
 assert_status "${GET_HEADERS}" 200
 assert_header "${GET_HEADERS}" "Content-Type" "application/vnd.oci.artifact.manifest.v1+json"
+assert_header "${GET_HEADERS}" "Docker-Content-Digest" "${MANIFEST_DIGEST}"
 cmp -s "${MANIFEST_FILE}" "${GET_BODY}"
 
-curl -sS -D "${REFERRERS_HEADERS}" -o "${REFERRERS_BODY}" \
-  "http://${PROXY_HOST}:${PROXY_PORT}/v2/${OCI_NAME}/referrers/${SUBJECT_DIGEST}"
-assert_status "${REFERRERS_HEADERS}" 200
-assert_header "${REFERRERS_HEADERS}" "Content-Type" "application/vnd.oci.image.index.v1+json"
-check_referrers_body "${REFERRERS_BODY}" "${MANIFEST_DIGEST}" "${ARTIFACT_TYPE}"
-
-curl -sS -D "${FILTER_HEADERS}" -o "${FILTER_BODY}" \
-  "http://${PROXY_HOST}:${PROXY_PORT}/v2/${OCI_NAME}/referrers/${SUBJECT_DIGEST}?artifactType=${ARTIFACT_TYPE}"
-assert_status "${FILTER_HEADERS}" 200
-assert_header "${FILTER_HEADERS}" "OCI-Filters-Applied" "artifactType"
-check_referrers_body "${FILTER_BODY}" "${MANIFEST_DIGEST}" "${ARTIFACT_TYPE}"
-
-echo "=== Phase 2: Restart proxy and verify persisted referrers ==="
+echo "=== Phase 2: Restart proxy and verify human tag restore ==="
 stop_proxy
-echo "Waiting for OCI referrers protocol tag ${REFERRERS_TAG} before restart"
+echo "Waiting for human cache tag ${CACHE_TAG} before restart"
 if ! verify_remote_tag_visible \
   "${BINARY}" \
   "${WORKSPACE}" \
-  "${REFERRERS_TAG}" \
-  "${LOG_DIR}/publish-check-referrers" \
+  "${CACHE_TAG}" \
+  "${LOG_DIR}/publish-check-human-tag" \
   1 \
   "${VISIBILITY_ATTEMPTS}" \
   "${VISIBILITY_SLEEP_SECS}" \
@@ -171,11 +129,12 @@ start_proxy "${BINARY}" "${WORKSPACE}" "${CACHE_TAG}" "${PROXY_PORT}" "${PROXY_R
 wait_for_proxy "${PROXY_PORT}"
 
 curl_get_with_status_retry \
-  "${RESTART_REFERRERS_HEADERS}" \
-  "${RESTART_REFERRERS_BODY}" \
+  "${RESTART_GET_HEADERS}" \
+  "${RESTART_GET_BODY}" \
   200 \
-  "http://${PROXY_HOST}:${PROXY_PORT}/v2/${OCI_NAME}/referrers/${SUBJECT_DIGEST}"
-assert_header "${RESTART_REFERRERS_HEADERS}" "Content-Type" "application/vnd.oci.image.index.v1+json"
-check_referrers_body "${RESTART_REFERRERS_BODY}" "${MANIFEST_DIGEST}" "${ARTIFACT_TYPE}"
+  "http://${PROXY_HOST}:${PROXY_PORT}/v2/${OCI_NAME}/manifests/${MANIFEST_REF}"
+assert_header "${RESTART_GET_HEADERS}" "Content-Type" "application/vnd.oci.artifact.manifest.v1+json"
+assert_header "${RESTART_GET_HEADERS}" "Docker-Content-Digest" "${MANIFEST_DIGEST}"
+cmp -s "${MANIFEST_FILE}" "${RESTART_GET_BODY}"
 
 echo "OCI manifest contract e2e passed"

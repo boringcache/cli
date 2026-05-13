@@ -20,16 +20,14 @@ transport aliases.
 
 ## Non-Goals
 
-New CLI code must not create first-class cache tags from:
+New CLI code must not create extra first-class cache tags from:
 
-- `bc_registry_*` compatibility names;
-- `oci_ref_*` protocol aliases;
-- `oci_digest_*` digest aliases;
+- digest-addressed manifest lookups should use `manifest_root_digest` metadata instead of a tag alias;
 - Docker run-ref/from-ref/promote-ref override flags.
 
-Those names can remain only where they describe protocol compatibility or an old
-client migration error. They should not appear in user-facing tag lists,
-workspace dashboards, public docs, or normal dry-run plans.
+Maintained clients use the resolved cache tag directly. If a caller explicitly
+supplies any other syntactically valid tag string, the backend treats it as an
+ordinary tag instead of translating it to or from a hidden identity.
 
 ## Rationale
 
@@ -49,15 +47,17 @@ protocol lookup state internal.
 - Old Docker ref override flags are rejected with migration errors.
 - `cache-registry --oci-alias-promotion-ref` remains an internal compatibility
   proof hook only; it is not part of the new CLI cache-tag model.
-- OCI protocol aliases may still exist inside the proxy/backend to answer
-  registry protocol lookups, but they are not ready cache tags.
-- Registry-reserved `bc_registry_*` names are rejected as cache tags.
+- Digest-addressed OCI manifest reads go through manifest-root metadata, not
+  generated tag aliases.
+- The backend treats generated-looking names that pass normal tag validation as
+  ordinary tags; it does not infer identity from prefixes.
 
 ## Required Evidence
 
 - Dry-run tests prove Docker/BuildKit import and export specs use resolved
   human tags.
-- API and reporting tests hide internal aliases from tag feeds and dashboards.
+- API and reporting tests treat valid tag names literally rather than hiding
+  generated-looking prefixes.
 - Local Rails-backed Docker/BuildKit E2E verifies cold and warm registry-cache
   behavior with the same human tag as the proxy cache head and BuildKit ref.
 - OCI manifest/referrers E2E waits only on the protocol referrers tag needed
@@ -75,6 +75,5 @@ protocol lookup state internal.
 
 ## Follow-Up
 
-Keep pruning old generated-name compatibility once released CLIs no longer need
-read fallback behavior. Compatibility code should be named as transport
-compatibility, not as cache-tag identity.
+Keep pruning old generated-name creation from docs, UI, and tests as new CLI
+paths become the only supported write path.

@@ -1,161 +1,56 @@
 use std::collections::HashSet;
 
 use super::error::OciError;
-use crate::serve::state::{
-    AppState, legacy_oci_ref_tag_for_input, oci_digest_tag, readable_oci_ref_tag_for_input,
-};
+use crate::serve::state::AppState;
 use crate::tag_utils::{TagResolver, server_cache_tag_name};
 
-// Human OCI references are cache heads. These helpers only manufacture
-// oci_ref_* aliases for non-human OCI references that cannot be sent to the
-// backend as normal cache tags.
+// Human OCI references are cache heads. Non-human registry references are not
+// converted into cache tags; callers should use digest restore or a valid human
+// tag reference instead.
 pub(crate) fn scoped_restore_tags(
-    tag_resolver: &TagResolver,
-    configured_human_tags: &[String],
-    primary_cache_tag: &str,
-    name: &str,
+    _tag_resolver: &TagResolver,
+    _configured_human_tags: &[String],
+    _primary_cache_tag: &str,
+    _name: &str,
     reference: &str,
 ) -> Vec<String> {
-    let mut tags = Vec::new();
     if server_cache_tag_name(reference) {
-        tags.push(reference.to_string());
-        return tags;
+        vec![reference.to_string()]
+    } else {
+        Vec::new()
     }
-
-    let scoped_input = format!("{name}:{reference}");
-    let scoped_candidates = tag_resolver
-        .effective_restore_tags(&scoped_input)
-        .unwrap_or_else(|_| vec![scoped_input]);
-    for scoped in scoped_candidates {
-        let current = readable_oci_ref_tag(configured_human_tags, primary_cache_tag, &scoped);
-        if !tags.contains(&current) {
-            tags.push(current);
-        }
-        let legacy = legacy_oci_ref_tag(primary_cache_tag, &scoped);
-        if !tags.contains(&legacy) {
-            tags.push(legacy);
-        }
-    }
-    tags
 }
 
 pub(crate) fn scoped_save_tag(
-    tag_resolver: &TagResolver,
-    configured_human_tags: &[String],
-    primary_cache_tag: &str,
+    _tag_resolver: &TagResolver,
+    _configured_human_tags: &[String],
+    _primary_cache_tag: &str,
     name: &str,
     reference: &str,
 ) -> Result<String, OciError> {
     if server_cache_tag_name(reference) {
-        return Ok(reference.to_string());
+        Ok(reference.to_string())
+    } else {
+        Err(non_human_reference_error(name, reference))
     }
-
-    let scoped = fallible_effective_ref_input(tag_resolver, name, reference)?;
-    Ok(readable_oci_ref_tag(
-        configured_human_tags,
-        primary_cache_tag,
-        &scoped,
-    ))
 }
 
 pub(crate) fn scoped_write_scope_tag(
-    tag_resolver: &TagResolver,
+    _tag_resolver: &TagResolver,
     name: &str,
     reference: &str,
 ) -> Result<String, OciError> {
     if server_cache_tag_name(reference) {
-        return Ok(reference.to_string());
+        Ok(reference.to_string())
+    } else {
+        Err(non_human_reference_error(name, reference))
     }
-
-    let scoped_input = format!("{name}:{reference}");
-    tag_resolver
-        .effective_save_tag(&scoped_input)
-        .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))
 }
 
-pub(crate) fn scoped_legacy_oci_ref_alias_binding(
-    tag_resolver: &TagResolver,
-    configured_human_tags: &[String],
-    primary_cache_tag: &str,
-    name: &str,
-    reference: &str,
-) -> Result<Option<AliasBinding>, OciError> {
-    if server_cache_tag_name(reference) {
-        return Ok(None);
-    }
-
-    let scoped = fallible_effective_ref_input(tag_resolver, name, reference)?;
-    let current = readable_oci_ref_tag(configured_human_tags, primary_cache_tag, &scoped);
-    let legacy = legacy_oci_ref_tag(primary_cache_tag, &scoped);
-    if current == legacy {
-        return Ok(None);
-    }
-
-    Ok(Some(AliasBinding {
-        tag: legacy,
-        write_scope_tag: Some(scoped_write_scope_tag(tag_resolver, name, reference)?),
-        required: false,
-    }))
-}
-
-fn fallible_effective_ref_input(
-    tag_resolver: &TagResolver,
-    name: &str,
-    reference: &str,
-) -> Result<String, OciError> {
-    let scoped_input = format!("{name}:{reference}");
-    tag_resolver
-        .effective_save_tag(&scoped_input)
-        .map_err(|e| OciError::internal(format!("Failed to resolve scoped tag: {e}")))
-}
-
-fn readable_oci_ref_tag(
-    configured_human_tags: &[String],
-    primary_cache_tag: &str,
-    scoped_ref: &str,
-) -> String {
-    readable_oci_ref_tag_for_input(&readable_oci_ref_input(
-        configured_human_tags,
-        primary_cache_tag,
-        scoped_ref,
+fn non_human_reference_error(name: &str, reference: &str) -> OciError {
+    OciError::manifest_invalid(format!(
+        "OCI registry reference {name}:{reference} is not a valid BoringCache human tag"
     ))
-}
-
-fn legacy_oci_ref_tag(primary_cache_tag: &str, scoped_ref: &str) -> String {
-    legacy_oci_ref_tag_for_input(&legacy_oci_ref_input(primary_cache_tag, scoped_ref))
-}
-
-fn readable_oci_ref_input(
-    configured_human_tags: &[String],
-    primary_cache_tag: &str,
-    scoped_ref: &str,
-) -> String {
-    let namespace = readable_oci_ref_namespace(configured_human_tags, primary_cache_tag);
-    if namespace.is_empty() {
-        scoped_ref.to_string()
-    } else {
-        format!("{namespace}:{scoped_ref}")
-    }
-}
-
-fn legacy_oci_ref_input(primary_cache_tag: &str, scoped_ref: &str) -> String {
-    let primary = primary_cache_tag.trim();
-    if primary.is_empty() {
-        scoped_ref.to_string()
-    } else {
-        format!("{primary}:{scoped_ref}")
-    }
-}
-
-fn readable_oci_ref_namespace<'a>(
-    configured_human_tags: &'a [String],
-    primary_cache_tag: &'a str,
-) -> &'a str {
-    configured_human_tags
-        .first()
-        .map(|tag| tag.as_str())
-        .filter(|tag| !tag.trim().is_empty())
-        .unwrap_or_else(|| primary_cache_tag.trim())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -167,22 +62,11 @@ pub(crate) struct AliasBinding {
 
 pub(crate) fn alias_tags_for_manifest(
     primary_tag: &str,
-    manifest_digest: &str,
-    primary_write_scope_tag: Option<&str>,
     configured_human_tags: &[String],
     additional_aliases: &[AliasBinding],
 ) -> Vec<AliasBinding> {
     let mut seen = HashSet::new();
     let mut aliases = Vec::new();
-
-    let digest_tag = oci_digest_tag(manifest_digest);
-    if digest_tag != primary_tag && seen.insert(digest_tag.clone()) {
-        aliases.push(AliasBinding {
-            tag: digest_tag,
-            write_scope_tag: primary_write_scope_tag.map(ToOwned::to_owned),
-            required: true,
-        });
-    }
 
     for human_tag in configured_human_tags {
         if human_tag != primary_tag && seen.insert(human_tag.clone()) {
@@ -221,16 +105,12 @@ pub(crate) async fn bind_alias_tag(
         .await
     {
         Ok(response) => {
-            if !alias_tag.starts_with("oci_digest_") {
-                state
-                    .oci_engine_diagnostics
-                    .record_alias_promotion(response.promotion_status.as_deref());
-            }
+            state
+                .oci_engine_diagnostics
+                .record_alias_promotion(response.promotion_status.as_deref());
         }
         Err(error) => {
-            if !alias_tag.starts_with("oci_digest_") {
-                state.oci_engine_diagnostics.record_alias_promotion(None);
-            }
+            state.oci_engine_diagnostics.record_alias_promotion(None);
             return Err(format!("confirm failed: {error}"));
         }
     }
