@@ -392,6 +392,7 @@ pub async fn adapter_execute(
         None
     };
     if let Some(plan) = &docker_plan {
+        generated_proxy_metadata_hints.push(("cache_adapter", kind.toml_key().to_string()));
         let diagnostic_cache_tag = plan
             .oci_cache
             .cache_to_tag
