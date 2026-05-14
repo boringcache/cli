@@ -51,7 +51,7 @@ pub(crate) enum PatchUploadOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PutUploadOutcome {
-    Completed { digest: String },
+    Completed { digest: String, size_bytes: u64 },
     RangeInvalid(UploadProgress),
 }
 
@@ -428,6 +428,7 @@ pub(crate) async fn put_upload(
 
     Ok(PutUploadOutcome::Completed {
         digest: digest_param,
+        size_bytes: finalized_size,
     })
 }
 

@@ -8,7 +8,7 @@ use crate::serve::engines::oci::uploads::{
     PatchUploadOutcome, PutUploadOutcome, StartUploadOutcome, UploadProgress, UploadRangeHeaders,
 };
 use crate::serve::http::error::OciError;
-use crate::serve::http::oci_route::{insert_digest_etag, insert_header};
+use crate::serve::http::oci_route::{attach_oci_cache_op_bytes, insert_digest_etag, insert_header};
 use crate::serve::state::AppState;
 
 pub(super) async fn start_upload(
@@ -80,7 +80,11 @@ pub(super) async fn put_upload(
     )
     .await?
     {
-        PutUploadOutcome::Completed { digest } => created_blob_response(&name, &digest, None),
+        PutUploadOutcome::Completed { digest, size_bytes } => {
+            let mut response = created_blob_response(&name, &digest, None)?;
+            attach_oci_cache_op_bytes(&mut response, size_bytes);
+            Ok(response)
+        }
         PutUploadOutcome::RangeInvalid(progress) => {
             upload_progress_response(StatusCode::RANGE_NOT_SATISFIABLE, &progress)
         }

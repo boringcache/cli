@@ -28,8 +28,8 @@ use self::uploads::{parse_put_upload_offset, parse_upload_offset};
 
 use super::error::OciError;
 use super::oci_route::{
-    OciRoute, oci_cache_op_for_route_method, oci_miss_key, oci_success_rollup_result,
-    parse_oci_path, record_oci_cache_op,
+    OciRoute, oci_cache_op_bytes, oci_cache_op_for_route_method, oci_miss_key,
+    oci_success_rollup_result, parse_oci_path, record_oci_cache_op,
 };
 #[cfg(test)]
 use super::oci_tags::{
@@ -263,12 +263,7 @@ pub async fn oci_dispatch(
             }
             if let Some(op) = maybe_cache_op {
                 let (result, degraded) = oci_success_rollup_result(&response, OCI_DEGRADED_HEADER);
-                let bytes = response
-                    .headers()
-                    .get(reqwest::header::CONTENT_LENGTH)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
+                let bytes = oci_cache_op_bytes(&response);
                 record_oci_cache_op(
                     &state,
                     op,

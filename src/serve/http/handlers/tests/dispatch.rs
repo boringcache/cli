@@ -104,3 +104,49 @@ async fn oci_dispatch_records_blob_miss_rollup_and_missed_key() {
         .expect("expected oci missed key");
     assert_eq!(miss_key.miss_count, 1);
 }
+
+#[tokio::test]
+async fn oci_dispatch_records_blob_finalize_size_as_write_bytes() {
+    let state = test_state();
+    let payload = b"buildkit-patch-uploaded-layer";
+    let digest = cas_oci::prefixed_sha256_digest(payload);
+    let path = write_temp_upload_file(payload).await;
+
+    {
+        let mut sessions = state.upload_sessions.write().await;
+        sessions.create(UploadSession {
+            id: "upload-finalize-bytes".to_string(),
+            name: "cache".to_string(),
+            temp_path: path.clone(),
+            body: UploadSessionBody::OwnedTempFile,
+            write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            bytes_received: payload.len() as u64,
+            finalized_digest: None,
+            finalized_size: None,
+            created_at: Instant::now(),
+        });
+    }
+
+    let response = oci_dispatch(
+        Method::PUT,
+        State(state.clone()),
+        Path("cache/blobs/uploads/upload-finalize-bytes".to_string()),
+        Query(HashMap::from([("digest".to_string(), digest.clone())])),
+        HeaderMap::new(),
+        Body::empty(),
+    )
+    .await
+    .expect("empty finalize should succeed");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let (rollups, _missed, _sessions) = state.cache_ops.drain();
+    let put_rollup = rollups
+        .iter()
+        .find(|record| record.tool == "oci" && record.operation == "put" && record.result == "hit")
+        .expect("expected oci put rollup");
+    assert_eq!(put_rollup.event_count, 1);
+    assert_eq!(put_rollup.bytes_total, payload.len() as u64);
+
+    let _ = tokio::fs::remove_file(&path).await;
+}

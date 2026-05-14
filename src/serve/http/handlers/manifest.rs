@@ -27,7 +27,7 @@ use crate::serve::engines::oci::publish::{
 };
 use crate::serve::engines::oci::{PresentBlob, ensure_manifest_blobs_present};
 use crate::serve::http::error::OciError;
-use crate::serve::http::oci_route::{insert_digest_etag, insert_header};
+use crate::serve::http::oci_route::{attach_oci_cache_op_bytes, insert_digest_etag, insert_header};
 use crate::serve::http::oci_tags::{AliasBinding, scoped_save_tag, scoped_write_scope_tag};
 use crate::serve::state::{AppState, diagnostics_enabled};
 
@@ -256,7 +256,9 @@ pub(super) async fn put_manifest(
         insert_header(&mut headers, OCI_DEGRADED_HEADER, "1")?;
     }
 
-    Ok((StatusCode::CREATED, headers, Body::empty()).into_response())
+    let mut response = (StatusCode::CREATED, headers, Body::empty()).into_response();
+    attach_oci_cache_op_bytes(&mut response, manifest_body.len() as u64);
+    Ok(response)
 }
 
 #[cfg(test)]

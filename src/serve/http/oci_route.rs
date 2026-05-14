@@ -4,6 +4,9 @@ use axum::response::Response;
 use super::error::OciError;
 use crate::serve::state::AppState;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OciCacheOpBytes(pub(crate) u64);
+
 #[derive(Clone)]
 pub(crate) enum OciRoute {
     Manifest { name: String, reference: String },
@@ -169,6 +172,25 @@ pub(crate) fn record_oci_cache_op(
             .cache_ops
             .record_miss(crate::serve::cache_registry::cache_ops::Tool::Oci, key);
     }
+}
+
+pub(crate) fn attach_oci_cache_op_bytes(response: &mut Response, bytes: u64) {
+    response.extensions_mut().insert(OciCacheOpBytes(bytes));
+}
+
+pub(crate) fn oci_cache_op_bytes(response: &Response) -> u64 {
+    response
+        .extensions()
+        .get::<OciCacheOpBytes>()
+        .map(|bytes| bytes.0)
+        .or_else(|| {
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+        .unwrap_or(0)
 }
 
 pub(crate) fn oci_success_rollup_result(
