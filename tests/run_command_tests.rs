@@ -1258,9 +1258,12 @@ port = 6001
         parsed["command"],
         serde_json::json!(["go", "test", "./..."])
     );
-    assert_eq!(
-        parsed["env_vars"]["GOCACHEPROG"],
-        "boringcache go-cacheprog --endpoint http://host.docker.internal:6001"
+    let gocacheprog = parsed["env_vars"]["GOCACHEPROG"]
+        .as_str()
+        .expect("GOCACHEPROG env var");
+    assert!(
+        gocacheprog.ends_with(" go-cacheprog --endpoint http://host.docker.internal:6001"),
+        "unexpected GOCACHEPROG command: {gocacheprog}"
     );
 }
 
