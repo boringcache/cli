@@ -338,3 +338,44 @@ fn adaptive_blob_upload_concurrency_is_bounded() {
     let larger = adaptive_blob_upload_concurrency(32);
     assert!((1..=32).contains(&larger));
 }
+
+#[test]
+fn adaptive_blob_upload_concurrency_caps_large_oci_exports() {
+    const MIB: u64 = 1024 * 1024;
+
+    let small_blobs = present_blobs_with_sizes(&[MIB, 2 * MIB, 3 * MIB]);
+    assert_eq!(
+        adaptive_blob_upload_concurrency_for_blobs(&small_blobs),
+        adaptive_blob_upload_concurrency(small_blobs.len())
+    );
+
+    let multi_gb_blobs = present_blobs_with_sizes(&[
+        831 * MIB,
+        588 * MIB,
+        440 * MIB,
+        367 * MIB,
+        296 * MIB,
+        296 * MIB,
+        296 * MIB,
+        296 * MIB,
+        296 * MIB,
+        296 * MIB,
+    ]);
+    assert_eq!(
+        adaptive_blob_upload_concurrency_for_blobs(&multi_gb_blobs),
+        4
+    );
+}
+
+fn present_blobs_with_sizes(sizes: &[u64]) -> Vec<PresentBlob> {
+    sizes
+        .iter()
+        .enumerate()
+        .map(|(index, size_bytes)| PresentBlob {
+            digest: format!("sha256:{index:064x}"),
+            size_bytes: *size_bytes,
+            source: PresentBlobSource::UploadSession,
+            upload_session_id: Some(format!("upload-{index}")),
+        })
+        .collect()
+}

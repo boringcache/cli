@@ -17,9 +17,10 @@ use std::time::Instant;
 use self::blobs::get_blob;
 #[cfg(test)]
 use self::manifest::{
-    adaptive_blob_upload_concurrency, detect_manifest_content_type_for_tests,
-    expand_manifest_blob_descriptors, extract_blob_descriptors,
-    resolve_pushed_manifest_content_type_for_tests, stage_manifest_reference_uploads,
+    adaptive_blob_upload_concurrency, adaptive_blob_upload_concurrency_for_blobs,
+    detect_manifest_content_type_for_tests, expand_manifest_blob_descriptors,
+    extract_blob_descriptors, resolve_pushed_manifest_content_type_for_tests,
+    stage_manifest_reference_uploads,
 };
 use self::manifest::{empty_referrers_response, get_manifest, get_referrers, put_manifest};
 use self::uploads::{delete_upload, get_upload_status, patch_upload, put_upload, start_upload};

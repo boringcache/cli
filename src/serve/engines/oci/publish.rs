@@ -173,7 +173,7 @@ async fn persist_manifest_entry_inner(
                     &cache_entry_id,
                     &present_blobs,
                     &state.upload_sessions,
-                    adaptive_blob_upload_concurrency(present_blobs.len()),
+                    adaptive_blob_upload_concurrency_for_blobs(&present_blobs),
                     OCI_TRANSFER_CALL_TIMEOUT,
                 )
                 .await;
@@ -367,6 +367,33 @@ pub(crate) fn adaptive_blob_upload_concurrency(operation_count: usize) -> usize 
         .clamp(16, 64)
         .min(operation_count)
         .max(1)
+}
+
+pub(crate) fn adaptive_blob_upload_concurrency_for_blobs(present_blobs: &[PresentBlob]) -> usize {
+    let operation_count = present_blobs.len();
+    if operation_count == 0 {
+        return 1;
+    }
+
+    let count_based = adaptive_blob_upload_concurrency(operation_count);
+    let total_bytes = present_blobs
+        .iter()
+        .fold(0u64, |sum, blob| sum.saturating_add(blob.size_bytes));
+    let largest_blob = present_blobs
+        .iter()
+        .map(|blob| blob.size_bytes)
+        .max()
+        .unwrap_or(0);
+
+    let byte_cap = if total_bytes >= 4 * 1024 * 1024 * 1024 || largest_blob >= 512 * 1024 * 1024 {
+        4
+    } else if total_bytes >= 1024 * 1024 * 1024 || largest_blob >= 256 * 1024 * 1024 {
+        8
+    } else {
+        count_based
+    };
+
+    count_based.min(byte_cap).min(operation_count).max(1)
 }
 
 pub(crate) async fn cleanup_present_blob_sessions(state: &AppState, present_blobs: &[PresentBlob]) {

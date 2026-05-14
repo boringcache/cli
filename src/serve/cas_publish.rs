@@ -15,6 +15,10 @@ use crate::serve::error::OciError;
 use crate::serve::state::UploadSessionStore;
 use tokio::sync::{RwLock, Semaphore};
 
+const BLOB_UPLOAD_MIN_THROUGHPUT_BYTES_PER_SEC: u64 = 768 * 1024;
+const BLOB_UPLOAD_TIMEOUT_GRACE_SECS: u64 = 120;
+const BLOB_UPLOAD_TIMEOUT_MAX_SECS: u64 = 60 * 60;
+
 #[derive(Debug)]
 struct TrackedBlobUploadJob {
     digest: String,
@@ -258,13 +262,20 @@ pub(crate) async fn upload_tracked_blobs(
             "POST",
             "/v2/cache/blobs/upload-urls".to_string(),
             format!(
-                "requested_blobs={} upload_urls={} already_present={} requested_bytes={} max_concurrent={} timeout_secs={}",
+                "requested_blobs={} upload_urls={} already_present={} requested_bytes={} max_concurrent={} min_timeout_secs={} max_timeout_secs={}",
                 requested_blob_count,
                 upload_plan.upload_urls.len(),
                 upload_plan.already_present.len(),
                 requested_blob_bytes,
                 max_concurrent.max(1),
-                transfer_timeout.as_secs()
+                transfer_timeout.as_secs(),
+                upload_plan
+                    .upload_urls
+                    .iter()
+                    .filter_map(|upload| present_blobs.iter().find(|blob| blob.digest == upload.digest))
+                    .map(|blob| blob_upload_timeout(blob.size_bytes, transfer_timeout).as_secs())
+                    .max()
+                    .unwrap_or_else(|| transfer_timeout.as_secs())
             ),
         )
         .with_workspace(Some(workspace.to_string()))
@@ -274,8 +285,9 @@ pub(crate) async fn upload_tracked_blobs(
         tracked_blob_upload_jobs(&upload_plan, present_blobs, upload_sessions).await?;
 
     upload_jobs.sort_by(|left, right| {
-        left.size_bytes
-            .cmp(&right.size_bytes)
+        right
+            .size_bytes
+            .cmp(&left.size_bytes)
             .then_with(|| left.digest.cmp(&right.digest))
     });
 
@@ -300,6 +312,7 @@ pub(crate) async fn upload_tracked_blobs(
             let url = upload_job.url;
             let headers = upload_job.headers;
             let size_bytes = upload_job.size_bytes;
+            let transfer_timeout = blob_upload_timeout(size_bytes, transfer_timeout);
             let metric_path = format!("/v2/cache/blobs/{digest}");
 
             match tokio::time::timeout(
@@ -464,6 +477,17 @@ pub(crate) async fn upload_tracked_blobs(
     );
 
     Ok(receipts)
+}
+
+pub(crate) fn blob_upload_timeout(size_bytes: u64, minimum: Duration) -> Duration {
+    let size_secs = size_bytes.saturating_add(BLOB_UPLOAD_MIN_THROUGHPUT_BYTES_PER_SEC - 1)
+        / BLOB_UPLOAD_MIN_THROUGHPUT_BYTES_PER_SEC;
+    let timeout_secs = size_secs
+        .saturating_add(BLOB_UPLOAD_TIMEOUT_GRACE_SECS)
+        .max(minimum.as_secs())
+        .min(BLOB_UPLOAD_TIMEOUT_MAX_SECS);
+
+    Duration::from_secs(timeout_secs)
 }
 
 fn present_blob_descriptors(present_blobs: &[PresentBlob]) -> Vec<BlobDescriptor> {
@@ -681,6 +705,19 @@ mod tests {
             error
                 .message()
                 .contains("remote-storage proof without local bytes")
+        );
+    }
+
+    #[test]
+    fn blob_upload_timeout_scales_for_large_layers() {
+        let floor = Duration::from_secs(300);
+
+        assert_eq!(blob_upload_timeout(16 * 1024 * 1024, floor), floor);
+        assert!(blob_upload_timeout(367 * 1024 * 1024, floor) > floor);
+        assert!(blob_upload_timeout(831 * 1024 * 1024, floor) > Duration::from_secs(900));
+        assert_eq!(
+            blob_upload_timeout(100 * 1024 * 1024 * 1024, floor),
+            Duration::from_secs(BLOB_UPLOAD_TIMEOUT_MAX_SECS)
         );
     }
 }

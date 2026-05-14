@@ -267,6 +267,11 @@ pub(super) fn adaptive_blob_upload_concurrency(operation_count: usize) -> usize 
 }
 
 #[cfg(test)]
+pub(super) fn adaptive_blob_upload_concurrency_for_blobs(present_blobs: &[PresentBlob]) -> usize {
+    crate::serve::engines::oci::publish::adaptive_blob_upload_concurrency_for_blobs(present_blobs)
+}
+
+#[cfg(test)]
 pub(super) fn extract_blob_descriptors(
     manifest: &serde_json::Value,
 ) -> Result<Vec<BlobDescriptor>, OciError> {
