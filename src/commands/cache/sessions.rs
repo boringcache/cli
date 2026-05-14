@@ -68,20 +68,11 @@ fn render_sessions_report(response: &WorkspaceSessionsResponse) {
             crate::progress::format_bytes(session.bytes_read),
             crate::progress::format_bytes(session.bytes_written)
         );
+        if let Some(stats) = crate::commands::status::session_tool_stats_line(session) {
+            println!("    tool: {stats}");
+        }
 
-        let mut context = Vec::new();
-        if let Some(project) = session.project_hint.as_deref() {
-            context.push(format!("project:{project}"));
-        }
-        if let Some(phase) = session.phase_hint.as_deref() {
-            context.push(format!("phase:{phase}"));
-        }
-        for (key, value) in &session.metadata_hints {
-            if key == "project" || key == "phase" {
-                continue;
-            }
-            context.push(format!("{key}:{value}"));
-        }
+        let context = crate::commands::status::session_context_parts(session);
         if !context.is_empty() {
             println!(
                 "    context: {}",
@@ -191,7 +182,12 @@ mod tests {
                 tool: "turbo".to_string(),
                 project_hint: Some("demo".to_string()),
                 phase_hint: Some("build".to_string()),
+                run_uid: None,
+                run_label: None,
+                run_identity: std::collections::BTreeMap::new(),
+                summary_schema: None,
                 metadata_hints: std::collections::BTreeMap::new(),
+                tool_stats: Vec::new(),
                 hit_rate: 0.8,
                 hit_count: 8,
                 miss_count: 2,

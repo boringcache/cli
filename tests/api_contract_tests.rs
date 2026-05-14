@@ -669,6 +669,34 @@ mod response_validation {
     }
 
     #[test]
+    fn test_workspace_sessions_deserializes_run_identity_and_tool_stats() {
+        let mut body = workspace_sessions_response_json(None);
+        body["sessions"][0]["run_uid"] = json!("local:proxy-summary-abc12345");
+        body["sessions"][0]["run_label"] = json!("local/abc12345");
+        body["sessions"][0]["run_identity"] = json!({
+            "provider": "local",
+            "uid": "local:proxy-summary-abc12345"
+        });
+        body["sessions"][0]["summary_schema"] = json!("cache_session_summary.v2");
+        body["sessions"][0]["tool_stats"] = json!([
+            { "label": "Cache writes", "value": "2" },
+            { "label": "Read bytes", "value": "1 KB" }
+        ]);
+
+        let response: WorkspaceSessionsResponse = serde_json::from_value(body).unwrap();
+        let session = &response.sessions[0];
+
+        assert_eq!(session.run_label.as_deref(), Some("local/abc12345"));
+        assert_eq!(session.run_identity["provider"], "local");
+        assert_eq!(
+            session.summary_schema.as_deref(),
+            Some("cache_session_summary.v2")
+        );
+        assert_eq!(session.tool_stats[0].label, "Cache writes");
+        assert_eq!(session.tool_stats[1].value, "1 KB");
+    }
+
+    #[test]
     fn test_session_info_deserializes() {
         let api_response = json!({
             "valid": true,

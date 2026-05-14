@@ -997,6 +997,16 @@ fn session_lines(sessions: &[WorkspaceStatusSession]) -> Vec<Line<'static>> {
             session.error_count,
             format_bytes(session.bytes_read)
         )));
+        if let Some(stats) = crate::commands::status::session_tool_stats_line(session) {
+            lines.push(Line::from(format!("  tool: {stats}")));
+        }
+        let context = crate::commands::status::session_context_parts(session);
+        if !context.is_empty() {
+            lines.push(Line::from(format!(
+                "  {}",
+                crate::commands::status::truncate(&context.join(" "), 92)
+            )));
+        }
         for review_line in crate::commands::status::session_review_lines(session) {
             lines.push(Line::from(format!("  {review_line}")));
         }

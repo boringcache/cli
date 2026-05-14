@@ -362,8 +362,18 @@ pub struct WorkspaceStatusSession {
     pub project_hint: Option<String>,
     #[serde(default)]
     pub phase_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_uid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_label: Option<String>,
+    #[serde(default)]
+    pub run_identity: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_schema: Option<String>,
     #[serde(default)]
     pub metadata_hints: BTreeMap<String, String>,
+    #[serde(default)]
+    pub tool_stats: Vec<WorkspaceStatusSessionToolStat>,
     pub hit_rate: f64,
     pub hit_count: u64,
     pub miss_count: u64,
@@ -377,6 +387,12 @@ pub struct WorkspaceStatusSession {
     pub missed_keys: Vec<WorkspaceStatusSessionMissedKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<WorkspaceStatusSessionReview>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WorkspaceStatusSessionToolStat {
+    pub label: String,
+    pub value: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

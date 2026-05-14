@@ -12,9 +12,15 @@ It is based on:
   - Maven build cache extension: <https://maven.apache.org/extensions/maven-build-cache-extension/remote-cache.html>
   - Turborepo remote cache: <https://turborepo.dev/docs/core-concepts/remote-caching>
   - Turborepo remote cache API: <https://turborepo.dev/docs/openapi>
+  - Turborepo run summaries: <https://turborepo.com/repo/docs/reference/run>
   - Nx self-hosted cache: <https://nx.dev/docs/guides/tasks--caching/self-hosted-caching>
+  - Nx cache-miss troubleshooting: <https://nx.dev/docs/troubleshooting/troubleshoot-cache-misses>
   - Docker BuildKit external cache: <https://docs.docker.com/build/cache/optimize/>
+  - Docker cache invalidation: <https://docs.docker.com/build/cache/invalidation/>
   - Bazel remote caching overview: <https://bazel.build/remote/caching>
+  - BuildBuddy Build/Test UI: <https://www.buildbuddy.io/ui/>
+  - Develocity Build Cache: <https://docs.gradle.com/develocity/2026.1/using-develocity/build-cache/>
+  - Develocity task-input comparison: <https://docs.gradle.com/develocity/tutorials/task-inputs-comparison/>
 
 ## Current proxy changes
 
@@ -48,6 +54,41 @@ If a benchmark needs lower-level overrides, treat those as engineering controls,
 | `nx` | Custom remote cache API: `PUT`/`GET`/`HEAD` and query | Local Nx cache folder | Tar archives per task hash plus optional terminal output objects | Same as Turborepo: hydrate the active tag before readiness and keep the live request path cheap | Adapter-name guesses or custom partial-warm policies before measuring request patterns |
 | `docker` | BuildKit registry cache via OCI registry manifests and blobs | Builder local content store and layer cache | OCI manifests plus blob layers; `mode=max` exports more cache state | Optimize manifest/index reuse, URL batching, on-demand blob read-through, and local content-store reuse | Treating OCI cache like filesystem kv objects or forcing full blob hydration before BuildKit starts |
 | `gocache` | Simple object API `GET`/`HEAD`/`PUT` | Go local build cache | One object per action/result key | Hydrate the active tag before readiness so `GOCACHEPROG` can read from local disk during the build | Partial/lazy readiness as the default for release-path runs |
+
+## Reporting UX notes
+
+2026-05-14 local Rails/Tigris adapter E2E runs covered Gradle, Maven, Turbo, Nx, Go, Bazel, sccache, Docker/BuildKit, OCI same-alias writes, and OCI human-tag restore isolation. The UX rule from those runs and the hosted tools above is: keep the first customer surface sparse, positive, and causal. Raw request streams and per-key evidence remain debug artifacts; Runs, status, sessions, and TUI panels should explain whether the build was cold, warm, partially warm, or misconfigured, and name the smallest useful cause.
+
+Hosted tools point at a common shape:
+
+- BuildBuddy emphasizes invocation timing, cache stats, cache-hit trends, action details, and invocation diffs. Its on-prem metrics also model read/write request counts and bytes by hit/miss/error status.
+- Nx Cloud's run details let users filter tasks by cache status, while Nx itself caches terminal output plus file artifacts and hashes source/config/dependency/flag inputs.
+- Turborepo exposes task hashes, global hashes, task timings, inputs, outputs, and run-summary comparison for expected-hit misses.
+- Develocity's Build Cache and Build Scan surfaces focus on hit rate, cacheability, task timings, and comparing changed task inputs when a miss should have hit.
+- Docker/BuildKit's useful mental model is first invalidated layer and downstream fanout: once one layer changes, every following layer reruns.
+- sccache's user-facing signal is compile requests, hits, misses, non-cacheable work, failures, and path-normalization caveats.
+
+Show these in product surfaces:
+
+- Per run: tool, cache target, run/ref identity, duration, hit/miss or hit-rate, read/write bytes, cache writes, and a short state such as `Cache hit`, `Partial remote-cache hit`, `Cold build`, `Tag not found`, or `BoringCache issue`.
+- Per tool details: top positive counters only. Examples: `Cache writes 14`, `Read bytes 36 KiB`, `Write bytes 12 KiB`, `Compile failures 1`, `Non-cacheable 3`. Suppress zero errors and empty watchdog windows.
+- Docker: layers cached versus rebuilt, first invalidated layer/stage when known, upload-plan reuse (`already present` versus uploaded blobs), import/export readiness, and local versus remote blob reads.
+- Bazel: AC/CAS read hit/miss split, uploaded CAS bytes, failed or unavailable remote-cache calls, and slowest target/action only when available from native data.
+- Gradle/Maven: task/module cache hits, writes, non-cacheable or portability misses, dependency/setup cache evidence when the tool provides it.
+- Turbo/Nx: task cache hits/misses, task/global hash identity, changed inputs/outputs when a summary is available, and restored terminal output/artifact counts.
+- sccache/Go: compile/action requests, hits, misses, non-cacheable/failure counts, read/write bytes, and path/toolchain caveats.
+
+Keep these out of default customer surfaces:
+
+- raw digests, cache keys, upload-session ids, HTTP/2 window and concurrency counters, exact per-request timing rows, retry internals, and provider names when `storage` explains enough.
+- duplicate flat plus structured summary rows. Reporting should prefer `cache_session_summary.v2` tool counters and use flat rows only as compatibility fallback.
+- local proxy blob-read counters as tool misses. They are locality evidence, not the native tool's cache decision.
+
+Payload pressure from the 2026-05-14 run:
+
+- Summary rows were small and useful: Bazel `cache_session_summary` lines were about 3.5-4.6 KiB, and `cache-rollups` requests were about 6.2-7.5 KiB.
+- The large pressure came from raw operation streams, not the bounded summary. Go produced about 438 KiB of JSONL for 850 request-metric events and 534 cache-op records in the local matrix run; Bazel was about 31 KiB, sccache about 23 KiB, Turbo about 22 KiB, and Nx about 21 KiB.
+- The product path should continue storing bounded summary JSON in Postgres and treating raw JSONL as compressed replay/debug evidence. If a future adapter emits Go-like high-cardinality operation streams regularly, summarize client-side before rollup ingestion rather than growing Rails/UI queries around raw events.
 
 ## Working rules
 

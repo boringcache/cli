@@ -306,19 +306,11 @@ fn print_sessions_section(status: &WorkspaceStatusResponse) {
             format_bytes(session.bytes_written)
         );
 
-        let mut context = Vec::new();
-        if let Some(project) = session.project_hint.as_deref() {
-            context.push(format!("project:{project}"));
+        if let Some(stats) = session_tool_stats_line(session) {
+            println!("    tool: {stats}");
         }
-        if let Some(phase) = session.phase_hint.as_deref() {
-            context.push(format!("phase:{phase}"));
-        }
-        for (key, value) in &session.metadata_hints {
-            if key == "project" || key == "phase" {
-                continue;
-            }
-            context.push(format!("{key}:{value}"));
-        }
+
+        let context = session_context_parts(session);
         if !context.is_empty() {
             println!("    context: {}", truncate(&context.join(" "), 80));
         }
@@ -355,6 +347,41 @@ fn print_sessions_section(status: &WorkspaceStatusResponse) {
     }
 
     ui::blank_line();
+}
+
+pub(crate) fn session_context_parts(session: &WorkspaceStatusSession) -> Vec<String> {
+    let mut context = Vec::new();
+    if let Some(run_label) = session.run_label.as_deref() {
+        context.push(format!("run:{run_label}"));
+    }
+    if let Some(project) = session.project_hint.as_deref() {
+        context.push(format!("project:{project}"));
+    }
+    if let Some(phase) = session.phase_hint.as_deref() {
+        context.push(format!("phase:{phase}"));
+    }
+    for (key, value) in &session.metadata_hints {
+        if key == "project" || key == "phase" {
+            continue;
+        }
+        context.push(format!("{key}:{value}"));
+    }
+    context
+}
+
+pub(crate) fn session_tool_stats_line(session: &WorkspaceStatusSession) -> Option<String> {
+    if session.tool_stats.is_empty() {
+        return None;
+    }
+
+    let stats = session
+        .tool_stats
+        .iter()
+        .take(4)
+        .map(|stat| format!("{} {}", stat.label, stat.value))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(truncate(&stats, 92))
 }
 
 pub(crate) fn session_review_lines(session: &WorkspaceStatusSession) -> Vec<String> {
@@ -596,10 +623,24 @@ mod tests {
                 tool: "turbo".to_string(),
                 project_hint: Some("demo".to_string()),
                 phase_hint: Some("build".to_string()),
+                run_uid: None,
+                run_label: Some("local/abc12345".to_string()),
+                run_identity: std::collections::BTreeMap::new(),
+                summary_schema: Some("cache_session_summary.v2".to_string()),
                 metadata_hints: std::collections::BTreeMap::from([(
                     "lane".to_string(),
                     "ci".to_string(),
                 )]),
+                tool_stats: vec![
+                    crate::api::models::workspace::WorkspaceStatusSessionToolStat {
+                        label: "Cache writes".to_string(),
+                        value: "2".to_string(),
+                    },
+                    crate::api::models::workspace::WorkspaceStatusSessionToolStat {
+                        label: "Read bytes".to_string(),
+                        value: "1 KB".to_string(),
+                    },
+                ],
                 hit_rate: 0.75,
                 hit_count: 9,
                 miss_count: 3,
@@ -649,6 +690,31 @@ mod tests {
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["workspace"]["slug"], "org/demo");
         assert_eq!(value["tools"][0]["tool"], "turbo");
+    }
+
+    #[test]
+    fn session_context_parts_include_run_label_and_metadata() {
+        let status = sample_status_response();
+
+        assert_eq!(
+            session_context_parts(&status.sessions[0]),
+            vec![
+                "run:local/abc12345".to_string(),
+                "project:demo".to_string(),
+                "phase:build".to_string(),
+                "lane:ci".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn session_tool_stats_line_renders_bounded_summary() {
+        let status = sample_status_response();
+
+        assert_eq!(
+            session_tool_stats_line(&status.sessions[0]),
+            Some("Cache writes 2; Read bytes 1 KB".to_string())
+        );
     }
 
     #[test]
