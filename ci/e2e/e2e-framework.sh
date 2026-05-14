@@ -329,15 +329,14 @@ EOF
 === Phase 1: Cold build and warm import ===
 === Phase 1b: Verify published remote tag resolves ===
 === Phase 2: Restart proxy and verify persisted warm import ===
-=== Phase 3: Implicit latest cache import compatibility ===
-=== Phase 4: Alias publish and alias warm import ===
+=== Phase 3: Human alias publish and alias warm import ===
 Docker buildkit registry e2e passed
 EOF
       ;;
     oci-manifest-contract)
       cat <<'EOF'
-=== Phase 1: Push subject manifest and verify referrers ===
-=== Phase 2: Restart proxy and verify persisted referrers ===
+=== Phase 1: Push human-tagged manifest and verify by tag ===
+=== Phase 2: Restart proxy and verify human tag restore ===
 OCI manifest contract e2e passed
 EOF
       ;;

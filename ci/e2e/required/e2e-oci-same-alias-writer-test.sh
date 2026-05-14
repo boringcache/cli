@@ -16,12 +16,10 @@ PROXY_STATUS_PATH="${PROXY_STATUS_PATH:-/_boringcache/status}"
 PROXY_READY_TIMEOUT_SECS="${PROXY_READY_TIMEOUT_SECS:-90}"
 PROXY_SHUTDOWN_WAIT_SECS="${PROXY_SHUTDOWN_WAIT_SECS:-210}"
 LOG_DIR="${LOG_DIR:-.}"
-ALIAS_REF="${ALIAS_REF:-branch-main}"
 RUN_ID="${GITHUB_RUN_ID:-${BORINGCACHE_E2E_RUN_ID:-local}}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-${BORINGCACHE_E2E_RUN_ATTEMPT:-1}}"
 EXPECTED_CACHE_SESSION_SCHEMA="${EXPECTED_CACHE_SESSION_SCHEMA:-auto}"
-RUN_A_REF="${RUN_A_REF:-run-a-${RUN_ID}-${RUN_ATTEMPT}}"
-RUN_B_REF="${RUN_B_REF:-run-b-${RUN_ID}-${RUN_ATTEMPT}}"
+E2E_BRANCH_REF="${E2E_BRANCH_REF:-e2e-${RUN_ID}-${RUN_ATTEMPT}}"
 RUN_A_STARTED_AT="${RUN_A_STARTED_AT:-2026-04-21T10:00:00Z}"
 RUN_B_STARTED_AT="${RUN_B_STARTED_AT:-2026-04-21T10:05:00Z}"
 
@@ -40,6 +38,9 @@ fi
 if [[ -z "${TAG}" ]]; then
   TAG="gha-oci-same-alias-${RUN_ID}-${RUN_ATTEMPT}"
 fi
+ALIAS_REF="${ALIAS_REF:-${TAG}}"
+RUN_A_REF="${RUN_A_REF:-${TAG}-older}"
+RUN_B_REF="${RUN_B_REF:-${TAG}-newer}"
 
 sha256_file_hex() {
   local file_path="$1"
@@ -176,8 +177,8 @@ start_proxy_instance() {
     --metadata-hint "ci_run_uid=${run_uid}"
     --metadata-hint "ci_run_attempt=1"
     --metadata-hint "ci_ref_type=branch"
-    --metadata-hint "ci_ref_name=main"
-    --metadata-hint "ci_default_branch=main"
+    --metadata-hint "ci_ref_name=${E2E_BRANCH_REF}"
+    --metadata-hint "ci_default_branch=${E2E_BRANCH_REF}"
     --metadata-hint "ci_run_started_at=${run_started_at}"
   )
   if [[ "${read_only}" == "true" ]]; then
@@ -193,8 +194,8 @@ start_proxy_instance() {
   BORINGCACHE_CI_RUN_ID="${run_uid}" \
   BORINGCACHE_CI_RUN_ATTEMPT="1" \
   BORINGCACHE_CI_REF_TYPE="branch" \
-  BORINGCACHE_CI_REF_NAME="main" \
-  BORINGCACHE_CI_DEFAULT_BRANCH="main" \
+  BORINGCACHE_CI_REF_NAME="${E2E_BRANCH_REF}" \
+  BORINGCACHE_CI_DEFAULT_BRANCH="${E2E_BRANCH_REF}" \
   BORINGCACHE_CI_RUN_STARTED_AT="${run_started_at}" \
   BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
   BORINGCACHE_OBSERVABILITY_JSONL_PATH="${proxy_metrics}" \
