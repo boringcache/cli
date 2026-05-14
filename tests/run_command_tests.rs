@@ -65,6 +65,12 @@ fn assert_schema_version(parsed: &Value) {
     assert_eq!(parsed["schema_version"], 1);
 }
 
+fn test_platform_tag(base: &str) -> String {
+    boring_cache_cli::platform::Platform::detect()
+        .expect("detect test platform")
+        .append_to_tag(base)
+}
+
 fn assert_proxy_metadata_hints_are_cli_replayable(parsed: &Value) {
     let hints = parsed["proxy"]["metadata_hints"]
         .as_object()
@@ -1813,7 +1819,7 @@ fn test_docker_dry_run_json_injects_cache_flags() {
     assert_eq!(parsed["adapter"], "docker");
     assert_eq!(parsed["tag"], "docker-main");
     assert_eq!(parsed["proxy"]["endpoint_host"], "host.docker.internal");
-    let resolved_tag = "docker-main-macos-26-arm64";
+    let resolved_tag = test_platform_tag("docker-main");
     assert_eq!(
         parsed["oci_cache"]["registry_ref"],
         format!("host.docker.internal:5000/cache:{resolved_tag}")
@@ -1888,7 +1894,7 @@ fn test_buildkit_dry_run_json_injects_cache_flags() {
     assert_eq!(parsed["adapter"], "buildkit");
     assert_eq!(parsed["tag"], "docker-main");
     assert_eq!(parsed["proxy"]["metadata_hints"]["tool"], "oci");
-    let resolved_tag = "docker-main-macos-26-arm64";
+    let resolved_tag = test_platform_tag("docker-main");
     assert_eq!(
         parsed["oci_cache"]["cache_from"],
         format!(
@@ -2060,7 +2066,7 @@ fn test_docker_dry_run_json_uses_github_actions_human_tag() {
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
     assert_schema_version(&parsed);
     assert_proxy_metadata_hints_are_cli_replayable(&parsed);
-    let resolved_tag = "docker-main-macos-26-arm64";
+    let resolved_tag = test_platform_tag("docker-main");
     assert_eq!(
         parsed["oci_cache"]["registry_ref"],
         format!("host.docker.internal:5000/cache:{resolved_tag}")
@@ -2073,7 +2079,7 @@ fn test_docker_dry_run_json_uses_github_actions_human_tag() {
     );
     assert_eq!(
         parsed["oci_cache"]["cache_from_tags"],
-        serde_json::json!([resolved_tag])
+        serde_json::json!([resolved_tag.as_str()])
     );
     assert_eq!(
         parsed["oci_cache"]["cache_to"],
@@ -2103,7 +2109,7 @@ fn test_docker_dry_run_json_uses_github_actions_human_tag() {
     );
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["docker_cache_tag"],
-        resolved_tag
+        resolved_tag.as_str()
     );
     assert_eq!(parsed["proxy"]["metadata_hints"]["project"], "widgets");
     assert_eq!(
@@ -2187,10 +2193,10 @@ fn test_docker_dry_run_json_uses_single_default_branch_alias() {
     let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
     assert_schema_version(&parsed);
     assert_proxy_metadata_hints_are_cli_replayable(&parsed);
-    let resolved_tag = "docker-main-macos-26-arm64";
+    let resolved_tag = test_platform_tag("docker-main");
     assert_eq!(
         parsed["oci_cache"]["cache_from_tags"],
-        serde_json::json!([resolved_tag])
+        serde_json::json!([resolved_tag.as_str()])
     );
     assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
@@ -2198,7 +2204,7 @@ fn test_docker_dry_run_json_uses_single_default_branch_alias() {
     );
     assert_eq!(
         parsed["proxy"]["metadata_hints"]["docker_cache_tag"],
-        resolved_tag
+        resolved_tag.as_str()
     );
     assert_eq!(
         parsed["oci_cache"]["cache_to"],
@@ -2254,7 +2260,7 @@ fn test_docker_read_only_dry_run_json_uses_on_demand_proxy_mode() {
         .iter()
         .map(|value| value.as_str().unwrap_or_default())
         .collect::<Vec<_>>();
-    let resolved_tag = "docker-main-macos-26-arm64";
+    let resolved_tag = test_platform_tag("docker-main");
     let expected_cache_from = format!(
         "--cache-from=type=registry,ref=host.docker.internal:5000/cache:{resolved_tag},registry.insecure=true"
     );
@@ -2298,9 +2304,10 @@ fn test_docker_dry_run_json_accepts_expert_oci_hydration_policy() {
     assert_schema_version(&parsed);
     assert_eq!(parsed["adapter"], "docker");
     assert_eq!(parsed["proxy"]["oci_hydration"], "bodies-background");
+    let resolved_tag = test_platform_tag("docker-main");
     assert_eq!(
         parsed["proxy"]["oci_prefetch_refs"],
-        serde_json::json!(["cache@docker-main-macos-26-arm64"])
+        serde_json::json!([format!("cache@{resolved_tag}")])
     );
 }
 

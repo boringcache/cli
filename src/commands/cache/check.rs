@@ -394,6 +394,9 @@ mod tests {
     #[tokio::test]
     async fn check_json_errors_when_auth_is_missing() {
         let _guard = crate::test_env::lock();
+        let temp_home = tempfile::tempdir().expect("create temp HOME");
+        let original_home = std::env::var("HOME").ok();
+        crate::test_env::set_var("HOME", temp_home.path());
         crate::test_env::remove_var("BORINGCACHE_RESTORE_TOKEN");
         crate::test_env::remove_var("BORINGCACHE_SAVE_TOKEN");
         crate::test_env::remove_var("BORINGCACHE_ADMIN_TOKEN");
@@ -413,6 +416,10 @@ mod tests {
             },
         )
         .await;
+
+        if let Some(home) = original_home {
+            crate::test_env::set_var("HOME", home);
+        }
 
         assert!(result.is_err());
     }
