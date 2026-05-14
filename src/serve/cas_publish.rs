@@ -275,7 +275,7 @@ pub(crate) async fn upload_tracked_blobs(
                     .filter_map(|upload| present_blobs.iter().find(|blob| blob.digest == upload.digest))
                     .map(|blob| blob_upload_timeout(blob.size_bytes, transfer_timeout).as_secs())
                     .max()
-                    .unwrap_or_else(|| transfer_timeout.as_secs())
+                    .unwrap_or(transfer_timeout.as_secs())
             ),
         )
         .with_workspace(Some(workspace.to_string()))

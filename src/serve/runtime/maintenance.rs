@@ -527,7 +527,7 @@ fn spawn_runtime_watchdog(
 }
 
 fn should_report_runtime_watchdog_stuck(stuck_count: u32) -> bool {
-    stuck_count == 1 || stuck_count % RUNTIME_WATCHDOG_STUCK_REPORT_INTERVAL == 0
+    stuck_count == 1 || stuck_count.is_multiple_of(RUNTIME_WATCHDOG_STUCK_REPORT_INTERVAL)
 }
 
 fn decrement_replication_queue_depth(state: &AppState) {

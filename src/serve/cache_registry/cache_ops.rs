@@ -839,7 +839,16 @@ impl Aggregator {
         bytes: u64,
         latency_ms: u64,
     ) {
-        self.record_inner(tool, None, op, result, degraded, bytes, latency_ms);
+        self.record_inner(RecordEvent {
+            event_epoch_secs: now_epoch_secs(),
+            tool,
+            scope: None,
+            op,
+            result,
+            degraded,
+            bytes,
+            latency_ms,
+        });
     }
 
     pub(crate) fn record_kv(
@@ -851,34 +860,20 @@ impl Aggregator {
         bytes: u64,
         latency_ms: u64,
     ) {
-        self.record_inner(
-            namespace.into(),
-            CacheOpScope::from_namespace(namespace),
+        self.record_inner(RecordEvent {
+            event_epoch_secs: now_epoch_secs(),
+            tool: namespace.into(),
+            scope: CacheOpScope::from_namespace(namespace),
             op,
             result,
             degraded,
             bytes,
             latency_ms,
-        );
+        });
     }
 
-    fn record_inner(
-        &self,
-        tool: Tool,
-        scope: Option<CacheOpScope>,
-        op: Op,
-        result: OpResult,
-        degraded: bool,
-        bytes: u64,
-        latency_ms: u64,
-    ) {
-        if is_successful_runtime_heartbeat(tool, op, result, degraded, bytes) {
-            return;
-        }
-
-        let event_epoch_secs = now_epoch_secs();
-        let event = CacheOpEvent::Record(RecordEvent {
-            event_epoch_secs,
+    fn record_inner(&self, record: RecordEvent) {
+        let RecordEvent {
             tool,
             scope,
             op,
@@ -886,7 +881,13 @@ impl Aggregator {
             degraded,
             bytes,
             latency_ms,
-        });
+            ..
+        } = record;
+        if is_successful_runtime_heartbeat(tool, op, result, degraded, bytes) {
+            return;
+        }
+
+        let event = CacheOpEvent::Record(record);
         if let Some(event) = self.enqueue_event(event) {
             self.apply_event_direct(event);
         }
