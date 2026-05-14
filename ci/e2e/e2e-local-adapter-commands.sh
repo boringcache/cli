@@ -17,7 +17,7 @@ LOG_DIR="${LOG_DIR:-${LOG_ROOT}/${RUN_ID}}"
 RAILS_PIDFILE="${RAILS_PIDFILE:-${LOG_DIR}/rails-server.pid}"
 TMP_DIR="${LOG_DIR}/tmp"
 SUMMARY_FILE="${LOG_DIR}/summary.txt"
-LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-config-hints,docker,oci-same-alias,gradle,maven,turbo,nx,go,bazel,sccache}"
+LOCAL_ADAPTER_TOOLS="${LOCAL_ADAPTER_TOOLS:-config-hints,docker,oci-same-alias,gradle,maven,turbo,nx,go,bazel,sccache,sccache-miss-inventory}"
 LOCAL_ADAPTER_SKIP_BUILD="${LOCAL_ADAPTER_SKIP_BUILD:-0}"
 LOCAL_ADAPTER_CLEANUP="${LOCAL_ADAPTER_CLEANUP:-}"
 EXPECTED_CACHE_SESSION_SCHEMA="${EXPECTED_CACHE_SESSION_SCHEMA:-auto}"
@@ -1459,6 +1459,122 @@ EOF
   pass_tool "sccache" "warm run reported ${warm_hits} sccache hits"
 }
 
+run_sccache_miss_inventory_e2e() {
+  local tool_dir="${TMP_DIR}/sccache-miss-inventory"
+  local metrics_file="${tool_dir}/metrics.jsonl"
+  local proxy_log="${tool_dir}/proxy.log"
+  local verify_log="${tool_dir}/verify.log"
+  local port=5316
+  local tag="local-adapter-sccache-miss-inventory-${RUN_ID}"
+  local benchmark="sccache-miss-inventory"
+  local phase="small-miss"
+  local proxy_pid=""
+  local old_pwd
+  local -a keys=(
+    "0010000000000000000000000000000000000000000000000000000000000001"
+    "1120000000000000000000000000000000000000000000000000000000000002"
+    "2230000000000000000000000000000000000000000000000000000000000003"
+    "3340000000000000000000000000000000000000000000000000000000000004"
+    "4450000000000000000000000000000000000000000000000000000000000005"
+    "5560000000000000000000000000000000000000000000000000000000000006"
+    "6670000000000000000000000000000000000000000000000000000000000007"
+  )
+  mkdir -p "${tool_dir}"
+
+  note "sccache miss inventory E2E"
+  old_pwd="${PWD}"
+  cd "${tool_dir}"
+  RUST_LOG="${RUST_LOG:-warn}" \
+  BORINGCACHE_OBSERVABILITY_INCLUDE_CACHE_OPS=1 \
+  BORINGCACHE_OBSERVABILITY_JSONL_PATH="${metrics_file}" \
+    "${BINARY}" cache-registry "${WORKSPACE}" "${tag}" \
+      --host 127.0.0.1 \
+      --port "${port}" \
+      --metadata-hint tool=sccache \
+      --metadata-hint benchmark="${benchmark}" \
+      --metadata-hint phase="${phase}" \
+      --no-platform \
+      --no-git \
+      > "${proxy_log}" 2>&1 &
+  proxy_pid=$!
+  cd "${old_pwd}"
+
+  for _ in $(seq 1 60); do
+    if curl -fsS "http://127.0.0.1:${port}/_boringcache/status" >/dev/null 2>&1; then
+      break
+    fi
+    if ! kill -0 "${proxy_pid}" >/dev/null 2>&1; then
+      tail -n 160 "${proxy_log}" || true
+      fail "sccache miss inventory proxy exited before readiness"
+    fi
+    sleep 1
+  done
+
+  local key path status
+  for key in "${keys[@]}"; do
+    path="${key:0:1}/${key:1:1}/${key:2:1}/${key}"
+    status="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${port}/${path}" || true)"
+    [[ "${status}" == "404" ]] || fail "expected synthetic sccache GET ${path} to miss with 404, got ${status}"
+  done
+
+  kill "${proxy_pid}" >/dev/null 2>&1 || true
+  wait "${proxy_pid}" >/dev/null 2>&1 || true
+  proxy_pid=""
+
+  local summary
+  summary="$(metric_summary "${metrics_file}")"
+  assert_metric_gt_zero "${summary}" "request_metrics_cache_ops_sccache_get_misses"
+
+  (
+    cd "${WEB_DIR}"
+    E2E_WORKSPACE="${WORKSPACE}" \
+    E2E_BENCHMARK="${benchmark}" \
+    E2E_PHASE="${phase}" \
+    E2E_EXPECTED_MISSES="${#keys[@]}" \
+      run_web_command bin/rails runner '
+        namespace_slug, workspace_slug = ENV.fetch("E2E_WORKSPACE").split("/", 2)
+        workspace = Workspace.joins(:namespace).find_by!(
+          namespaces: { slug: namespace_slug },
+          slug: workspace_slug
+        )
+        benchmark = ENV.fetch("E2E_BENCHMARK")
+        phase = ENV.fetch("E2E_PHASE")
+        expected = Integer(ENV.fetch("E2E_EXPECTED_MISSES"))
+
+        summary = workspace.cache_sessions
+          .where(tool: "sccache", summary_schema: "cache_session_summary.v2")
+          .where("metadata_hints ->> ? = ?", "benchmark", benchmark)
+          .where("metadata_hints ->> ? = ?", "phase", phase)
+          .order(created_at: :desc)
+          .first!
+
+        sessions = workspace.cache_sessions
+          .where(run_uid: summary.run_uid)
+          .includes(:cache_session_missed_keys)
+          .to_a
+        tool_session = sessions.find { |session| session.tool == "sccache" && session.miss_count.to_i == expected }
+        raise "missing sccache tool session with #{expected} misses" unless tool_session
+
+        keys = tool_session.cache_session_missed_keys.to_a
+        raise "expected #{expected} session missed keys, got #{keys.length}" unless keys.length == expected
+        raise "missing sampled key prefix" unless keys.all? { |key| key.sampled_key_prefix.present? }
+
+        detail = Reporting::RunDetail.build_for_run(workspace, summary.run_uid)
+        raise "run detail missed key count mismatch: #{detail.missed_keys.length}" unless detail.missed_keys.length == expected
+
+        puts "SUMMARY_SESSION=#{summary.session_id}"
+        puts "TOOL_SESSION=#{tool_session.session_id}"
+        puts "MISSED_KEYS=#{keys.length}"
+      ' > "${verify_log}" 2>&1
+  ) || {
+    cat "${verify_log}" || true
+    fail "sccache miss inventory did not persist run-scoped missed keys"
+  }
+
+  delete_tag "${tag}"
+  pass_tool "sccache-miss-inventory" "persisted ${#keys[@]} run-scoped missed keys"
+}
+
 main() {
   local total_started_at total_finished_at total_elapsed
   : > "${SUMMARY_FILE}"
@@ -1490,6 +1606,7 @@ main() {
   run_selected_tool "go" run_go_e2e
   run_selected_tool "bazel" run_bazel_e2e
   run_selected_tool "sccache" run_sccache_e2e
+  run_selected_tool "sccache-miss-inventory" run_sccache_miss_inventory_e2e
 
   total_finished_at="$(date +%s)"
   total_elapsed=$((total_finished_at - total_started_at))

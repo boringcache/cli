@@ -261,7 +261,9 @@ pub struct WorkspaceStatusInventory {
     pub tagged_storage_bytes: u64,
     pub tagged_hits: u64,
     pub version_count: u64,
+    #[serde(default)]
     pub orphaned_entries_count: u64,
+    #[serde(default)]
     pub orphaned_storage_bytes: u64,
     pub dedup_unique_bytes: u64,
     pub dedup_logical_bytes: u64,
@@ -510,4 +512,28 @@ pub struct TokenInfo {
     pub expires_in_days: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_used_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkspaceStatusInventory;
+    use serde_json::json;
+
+    #[test]
+    fn workspace_status_inventory_defaults_retired_orphan_counters() {
+        let inventory: WorkspaceStatusInventory = serde_json::from_value(json!({
+            "tagged_entries_count": 2,
+            "tagged_storage_bytes": 1024,
+            "tagged_hits": 4,
+            "version_count": 3,
+            "dedup_unique_bytes": 900,
+            "dedup_logical_bytes": 1200,
+            "dedup_savings_bytes": 300,
+            "dedup_ratio": 25.0
+        }))
+        .expect("current workspace status inventory should deserialize");
+
+        assert_eq!(inventory.orphaned_entries_count, 0);
+        assert_eq!(inventory.orphaned_storage_bytes, 0);
+    }
 }

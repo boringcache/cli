@@ -48,8 +48,8 @@ pub(crate) async fn put_kv_object_with_options(
     let put_start = std::time::Instant::now();
     let scoped_key = namespace.scoped_key(key);
     if state.read_only {
-        state.cache_ops.record(
-            namespace.into(),
+        state.cache_ops.record_kv(
+            namespace,
             super::super::cache_ops::Op::Put,
             super::super::cache_ops::OpResult::Hit,
             false,
@@ -160,8 +160,8 @@ pub(crate) async fn put_kv_object_with_options(
         put_probe.stage("replication_deferred");
     }
 
-    state.cache_ops.record(
-        namespace.into(),
+    state.cache_ops.record_kv(
+        namespace,
         super::super::cache_ops::Op::Put,
         super::super::cache_ops::OpResult::Hit,
         false,
@@ -180,8 +180,8 @@ fn record_put_error(
     put_start: std::time::Instant,
     bytes: u64,
 ) {
-    state.cache_ops.record(
-        namespace.into(),
+    state.cache_ops.record_kv(
+        namespace,
         super::super::cache_ops::Op::Put,
         super::super::cache_ops::OpResult::Error,
         false,

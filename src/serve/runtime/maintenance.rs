@@ -18,6 +18,7 @@ const KV_IDLE_FLUSH_WINDOW_SMALL_BATCH_MS: u64 = 2_000;
 const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BLOBS: usize = 64;
 const KV_SMALL_BATCH_IDLE_FLUSH_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const CACHE_SESSION_SUMMARY_SCHEMA: &str = "cache_session_summary.v2";
+const RUNTIME_WATCHDOG_STUCK_REPORT_INTERVAL: u32 = 6;
 
 pub(super) fn spawn_maintenance_tasks(
     state: &AppState,
@@ -401,28 +402,43 @@ fn insert_tool_operation_summary(
         return;
     };
 
-    for (key, value) in [
-        (
-            "cache_read_hit_count",
-            operation_summary.cache_read_hit_count,
-        ),
-        (
-            "cache_read_miss_count",
-            operation_summary.cache_read_miss_count,
-        ),
-        (
-            "cache_read_error_count",
-            operation_summary.cache_read_error_count,
-        ),
-        ("cache_read_bytes", operation_summary.cache_read_bytes),
-        ("cache_write_count", operation_summary.cache_write_count),
-        (
-            "cache_write_error_count",
-            operation_summary.cache_write_error_count,
-        ),
-        ("cache_write_bytes", operation_summary.cache_write_bytes),
-    ] {
-        tool.insert(key.to_string(), serde_json::Value::from(value));
+    insert_operation_counters(tool, None, &operation_summary.totals);
+    for (scope, counters) in &operation_summary.scoped {
+        insert_operation_counters(tool, Some(scope.as_str()), counters);
+    }
+}
+
+fn insert_operation_counters(
+    tool: &mut serde_json::Map<String, serde_json::Value>,
+    scope: Option<&str>,
+    counters: &cache_registry::cache_ops::OperationCounters,
+) {
+    let entries = [
+        ("cache_read_hit_count", counters.cache_read_hit_count),
+        ("cache_read_miss_count", counters.cache_read_miss_count),
+        ("cache_read_error_count", counters.cache_read_error_count),
+        ("cache_read_bytes", counters.cache_read_bytes),
+        ("cache_write_count", counters.cache_write_count),
+        ("cache_write_error_count", counters.cache_write_error_count),
+        ("cache_write_bytes", counters.cache_write_bytes),
+    ];
+
+    let mut scoped_object = scope.map(|_| serde_json::Map::new());
+    for (key, value) in entries {
+        if scope.is_none() {
+            tool.insert(key.to_string(), serde_json::Value::from(value));
+        }
+        if let Some(scope) = scope {
+            let flat_key = format!("{}_{}", scope, key.strip_prefix("cache_").unwrap_or(key));
+            tool.insert(flat_key, serde_json::Value::from(value));
+        }
+        if let Some(object) = scoped_object.as_mut() {
+            object.insert(key.to_string(), serde_json::Value::from(value));
+        }
+    }
+
+    if let (Some(scope), Some(object)) = (scope, scoped_object) {
+        tool.insert(scope.to_string(), serde_json::Value::Object(object));
     }
 }
 
@@ -483,36 +499,35 @@ fn spawn_runtime_watchdog(
                                 "WATCHDOG ts={ts} runtime=recovered after_stuck={stuck_count}"
                             );
                         }
-                        cache_ops.record(
-                            cache_registry::cache_ops::Tool::Runtime,
-                            cache_registry::cache_ops::Op::Query,
-                            cache_registry::cache_ops::OpResult::Hit,
-                            false,
-                            0,
-                            started_at.elapsed().as_millis() as u64,
-                        );
                         stuck_count = 0;
                     }
                     Err(_) => {
                         stuck_count += 1;
-                        if diagnostics {
+                        let should_report = should_report_runtime_watchdog_stuck(stuck_count);
+                        if diagnostics && should_report {
                             eprintln!("WATCHDOG ts={ts} runtime=STUCK consecutive={stuck_count}");
                             cache_registry::dump_stuck_puts(5, 2_000);
                         }
-                        cache_ops.record(
-                            cache_registry::cache_ops::Tool::Runtime,
-                            cache_registry::cache_ops::Op::Query,
-                            cache_registry::cache_ops::OpResult::Error,
-                            true,
-                            0,
-                            started_at.elapsed().as_millis() as u64,
-                        );
+                        if should_report {
+                            cache_ops.record(
+                                cache_registry::cache_ops::Tool::Runtime,
+                                cache_registry::cache_ops::Op::Query,
+                                cache_registry::cache_ops::OpResult::Error,
+                                true,
+                                0,
+                                started_at.elapsed().as_millis() as u64,
+                            );
+                        }
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_secs(10));
             }
         })
         .expect("Failed to spawn watchdog thread");
+}
+
+fn should_report_runtime_watchdog_stuck(stuck_count: u32) -> bool {
+    stuck_count == 1 || stuck_count % RUNTIME_WATCHDOG_STUCK_REPORT_INTERVAL == 0
 }
 
 fn decrement_replication_queue_depth(state: &AppState) {
@@ -771,13 +786,16 @@ mod tests {
             }
         });
         let operation_summary = cache_registry::cache_ops::ToolOperationSummary {
-            cache_read_hit_count: 3,
-            cache_read_miss_count: 1,
-            cache_read_error_count: 0,
-            cache_read_bytes: 128,
-            cache_write_count: 2,
-            cache_write_error_count: 1,
-            cache_write_bytes: 64,
+            totals: cache_registry::cache_ops::OperationCounters {
+                cache_read_hit_count: 3,
+                cache_read_miss_count: 1,
+                cache_read_error_count: 0,
+                cache_read_bytes: 128,
+                cache_write_count: 2,
+                cache_write_error_count: 1,
+                cache_write_bytes: 64,
+            },
+            scoped: BTreeMap::new(),
         };
 
         insert_tool_operation_summary(&mut summary, &operation_summary);
@@ -800,6 +818,87 @@ mod tests {
                 .pointer("/tool/cache_write_bytes")
                 .and_then(|value| value.as_u64()),
             Some(64)
+        );
+    }
+
+    #[test]
+    fn insert_tool_operation_summary_adds_scoped_bazel_counters() {
+        let mut summary = serde_json::json!({ "tool": { "kind": "bazel" } });
+        let operation_summary = cache_registry::cache_ops::ToolOperationSummary {
+            totals: cache_registry::cache_ops::OperationCounters {
+                cache_read_hit_count: 1_694,
+                cache_read_miss_count: 4_516,
+                cache_read_error_count: 0,
+                cache_read_bytes: 16_384,
+                cache_write_count: 312,
+                cache_write_error_count: 0,
+                cache_write_bytes: 2048,
+            },
+            scoped: BTreeMap::from([
+                (
+                    "bazel_action_cache".to_string(),
+                    cache_registry::cache_ops::OperationCounters {
+                        cache_read_hit_count: 309,
+                        cache_read_miss_count: 4_518,
+                        cache_read_error_count: 0,
+                        cache_read_bytes: 4096,
+                        cache_write_count: 300,
+                        cache_write_error_count: 0,
+                        cache_write_bytes: 1024,
+                    },
+                ),
+                (
+                    "bazel_cas".to_string(),
+                    cache_registry::cache_ops::OperationCounters {
+                        cache_read_hit_count: 1_385,
+                        cache_read_miss_count: 0,
+                        cache_read_error_count: 0,
+                        cache_read_bytes: 12_288,
+                        cache_write_count: 12,
+                        cache_write_error_count: 0,
+                        cache_write_bytes: 1024,
+                    },
+                ),
+            ]),
+        };
+
+        insert_tool_operation_summary(&mut summary, &operation_summary);
+
+        assert_eq!(
+            summary
+                .pointer("/tool/cache_read_hit_count")
+                .and_then(|value| value.as_u64()),
+            Some(1_694)
+        );
+        assert_eq!(
+            summary
+                .pointer("/tool/bazel_action_cache_read_hit_count")
+                .and_then(|value| value.as_u64()),
+            Some(309)
+        );
+        assert_eq!(
+            summary
+                .pointer("/tool/bazel_action_cache/cache_read_miss_count")
+                .and_then(|value| value.as_u64()),
+            Some(4_518)
+        );
+        assert_eq!(
+            summary
+                .pointer("/tool/bazel_cas_read_hit_count")
+                .and_then(|value| value.as_u64()),
+            Some(1_385)
+        );
+    }
+
+    #[test]
+    fn runtime_watchdog_stuck_reports_first_and_periodically() {
+        let decisions: Vec<bool> = (1..=12).map(should_report_runtime_watchdog_stuck).collect();
+
+        assert_eq!(
+            decisions,
+            vec![
+                true, false, false, false, false, true, false, false, false, false, false, true,
+            ]
         );
     }
 

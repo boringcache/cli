@@ -9,8 +9,9 @@ use crate::observability;
 
 const BUCKET_SECONDS: u64 = 10;
 const SESSION_IDLE_SECS: u64 = 10;
-const SESSION_TOP_MISSED_KEYS: usize = 5;
+const SESSION_TOP_MISSED_KEYS: usize = 16;
 const SCCACHE_MISS_SAMPLE_MASK: u64 = 0x0F;
+const SCCACHE_SESSION_MISSED_KEY_EXPLAIN_FLOOR: usize = 16;
 const SCCACHE_MISSED_KEY_CAP: usize = 2_048;
 const SCCACHE_SESSION_MISSED_KEY_CAP: usize = 256;
 const DEFAULT_CACHE_OPS_QUEUE_CAPACITY: usize = 32_768;
@@ -78,6 +79,29 @@ impl From<KvNamespace> for Tool {
             KvNamespace::Maven => Self::Maven,
             KvNamespace::Sccache => Self::Sccache,
             KvNamespace::GoCache => Self::GoCache,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CacheOpScope {
+    BazelActionCache,
+    BazelCas,
+}
+
+impl CacheOpScope {
+    pub(crate) fn from_namespace(ns: KvNamespace) -> Option<Self> {
+        match ns {
+            KvNamespace::BazelAc => Some(Self::BazelActionCache),
+            KvNamespace::BazelCas => Some(Self::BazelCas),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::BazelActionCache => "bazel_action_cache",
+            Self::BazelCas => "bazel_cas",
         }
     }
 }
@@ -155,6 +179,7 @@ struct BucketCounters {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct OperationTotalKey {
     tool: Tool,
+    scope: Option<CacheOpScope>,
     op: Op,
     result: OpResult,
     degraded: bool,
@@ -169,6 +194,16 @@ fn now_epoch_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn is_successful_runtime_heartbeat(
+    tool: Tool,
+    op: Op,
+    result: OpResult,
+    degraded: bool,
+    bytes: u64,
+) -> bool {
+    tool == Tool::Runtime && op == Op::Query && result == OpResult::Hit && !degraded && bytes == 0
 }
 
 #[derive(Debug)]
@@ -311,6 +346,7 @@ enum CacheOpEvent {
 struct RecordEvent {
     event_epoch_secs: u64,
     tool: Tool,
+    scope: Option<CacheOpScope>,
     op: Op,
     result: OpResult,
     degraded: bool,
@@ -539,10 +575,29 @@ impl Aggregator {
 
         let total_key = OperationTotalKey {
             tool: event.tool,
+            scope: None,
             op: event.op,
             result: event.result,
             degraded: event.degraded,
         };
+        Self::record_operation_total(state, total_key, &event);
+        if let Some(scope) = event.scope {
+            let total_key = OperationTotalKey {
+                tool: event.tool,
+                scope: Some(scope),
+                op: event.op,
+                result: event.result,
+                degraded: event.degraded,
+            };
+            Self::record_operation_total(state, total_key, &event);
+        }
+    }
+
+    fn record_operation_total(
+        state: &mut AggregateState,
+        total_key: OperationTotalKey,
+        event: &RecordEvent,
+    ) {
         let operation_totals = state.operation_totals.entry(total_key).or_default();
         operation_totals.event_count = operation_totals.event_count.saturating_add(1);
         operation_totals.bytes_total = operation_totals.bytes_total.saturating_add(event.bytes);
@@ -569,11 +624,34 @@ impl Aggregator {
         let _ = Self::ensure_active_session(state, tool, event_epoch_secs);
         let key_hash = crate::cas_oci::sha256_hex(raw_key.as_bytes());
         let prefix = raw_key.get(..32).unwrap_or(raw_key).to_string();
+        if !Self::should_track_miss_key(state, tool, raw_key, &key_hash) {
+            return;
+        }
+
         Self::record_global_miss_key(state, tool, &key_hash, &prefix);
         if let Some(session) = state.active_sessions.get_mut(&tool) {
             session.last_event_secs = event_epoch_secs;
             Self::record_session_miss_key(session, tool, &key_hash, &prefix);
         }
+    }
+
+    fn should_track_miss_key(
+        state: &AggregateState,
+        tool: Tool,
+        raw_key: &str,
+        key_hash: &str,
+    ) -> bool {
+        if tool != Tool::Sccache {
+            return true;
+        }
+        if should_track_sccache_miss_key(raw_key) {
+            return true;
+        }
+
+        state.active_sessions.get(&tool).is_some_and(|session| {
+            session.missed_keys.contains_key(key_hash)
+                || session.missed_keys.len() < SCCACHE_SESSION_MISSED_KEY_EXPLAIN_FLOOR
+        })
     }
 
     fn record_global_miss_key(
@@ -705,22 +783,41 @@ impl Aggregator {
             return;
         };
         let record = session.into_record(ended_at_secs);
+        if !Self::is_reportable_session(&record) {
+            return;
+        }
         if crate::serve::state::diagnostics_enabled() {
             Self::emit_session_summary(&record);
         }
         state.completed_sessions.push(record);
     }
 
+    fn is_reportable_session(record: &SessionRecord) -> bool {
+        record.hit_count > 0
+            || record.miss_count > 0
+            || record.error_count > 0
+            || record.bytes_read > 0
+            || record.bytes_written > 0
+            || !record.top_missed_keys.is_empty()
+    }
+
+    fn session_hit_rate_label(record: &SessionRecord) -> String {
+        let lookup_count = record.hit_count.saturating_add(record.miss_count);
+        if lookup_count == 0 {
+            "-".to_string()
+        } else {
+            format!(
+                "{:.1}%",
+                (record.hit_count as f64 / lookup_count as f64) * 100.0
+            )
+        }
+    }
+
     fn emit_session_summary(record: &SessionRecord) {
         let duration_secs = record.session_duration_ms / 1000;
-        let miss_denom = record.hit_count.saturating_add(record.miss_count);
-        let hit_rate = if miss_denom == 0 {
-            100.0
-        } else {
-            (record.hit_count as f64 / miss_denom as f64) * 100.0
-        };
+        let hit_rate = Self::session_hit_rate_label(record);
         eprintln!(
-            "SESSION tool={} session_id={} duration={}s hits={} misses={} errors={} hit_rate={:.1}% bytes_read={} bytes_written={}",
+            "SESSION tool={} session_id={} duration={}s hits={} misses={} errors={} hit_rate={} bytes_read={} bytes_written={}",
             record.tool,
             record.session_id,
             duration_secs,
@@ -742,10 +839,48 @@ impl Aggregator {
         bytes: u64,
         latency_ms: u64,
     ) {
+        self.record_inner(tool, None, op, result, degraded, bytes, latency_ms);
+    }
+
+    pub(crate) fn record_kv(
+        &self,
+        namespace: KvNamespace,
+        op: Op,
+        result: OpResult,
+        degraded: bool,
+        bytes: u64,
+        latency_ms: u64,
+    ) {
+        self.record_inner(
+            namespace.into(),
+            CacheOpScope::from_namespace(namespace),
+            op,
+            result,
+            degraded,
+            bytes,
+            latency_ms,
+        );
+    }
+
+    fn record_inner(
+        &self,
+        tool: Tool,
+        scope: Option<CacheOpScope>,
+        op: Op,
+        result: OpResult,
+        degraded: bool,
+        bytes: u64,
+        latency_ms: u64,
+    ) {
+        if is_successful_runtime_heartbeat(tool, op, result, degraded, bytes) {
+            return;
+        }
+
         let event_epoch_secs = now_epoch_secs();
         let event = CacheOpEvent::Record(RecordEvent {
             event_epoch_secs,
             tool,
+            scope,
             op,
             result,
             degraded,
@@ -755,7 +890,7 @@ impl Aggregator {
         if let Some(event) = self.enqueue_event(event) {
             self.apply_event_direct(event);
         }
-        emit_cache_ops_record(tool, op, result, degraded, bytes, latency_ms);
+        emit_cache_ops_record(tool, scope, op, result, degraded, bytes, latency_ms);
     }
 
     pub(crate) fn record_session_connect(&self, tool: Tool) {
@@ -835,9 +970,18 @@ impl Aggregator {
     }
 
     pub(crate) fn record_miss(&self, tool: Tool, raw_key: &str) {
-        if tool == Tool::Sccache && !should_track_sccache_miss_key(raw_key) {
-            return;
-        }
+        self.record_miss_inner(tool, None, raw_key);
+    }
+
+    pub(crate) fn record_kv_miss(&self, namespace: KvNamespace, raw_key: &str) {
+        self.record_miss_inner(
+            namespace.into(),
+            CacheOpScope::from_namespace(namespace),
+            raw_key,
+        );
+    }
+
+    fn record_miss_inner(&self, tool: Tool, scope: Option<CacheOpScope>, raw_key: &str) {
         let event = CacheOpEvent::Miss {
             event_epoch_secs: now_epoch_secs(),
             tool,
@@ -846,7 +990,9 @@ impl Aggregator {
         if let Some(event) = self.enqueue_event(event) {
             self.apply_event_direct(event);
         }
-        emit_cache_ops_miss(tool, raw_key);
+        if tool != Tool::Sccache || should_track_sccache_miss_key(raw_key) {
+            emit_cache_ops_miss(tool, scope, raw_key);
+        }
     }
 
     pub(crate) fn tool_operation_summary(&self, tool_name: &str) -> ToolOperationSummary {
@@ -862,13 +1008,27 @@ impl Aggregator {
                 continue;
             }
 
-            summary.record(
-                key.op,
-                key.result,
-                key.degraded,
-                counters.event_count,
-                counters.bytes_total,
-            );
+            if let Some(scope) = key.scope {
+                summary
+                    .scoped
+                    .entry(scope.as_str().to_string())
+                    .or_default()
+                    .record(
+                        key.op,
+                        key.result,
+                        key.degraded,
+                        counters.event_count,
+                        counters.bytes_total,
+                    );
+            } else {
+                summary.totals.record(
+                    key.op,
+                    key.result,
+                    key.degraded,
+                    counters.event_count,
+                    counters.bytes_total,
+                );
+            }
         }
         summary
     }
@@ -999,6 +1159,7 @@ fn cache_ops_observability_enabled() -> bool {
 
 fn emit_cache_ops_record(
     tool: Tool,
+    scope: Option<CacheOpScope>,
     op: Op,
     result: OpResult,
     degraded: bool,
@@ -1029,18 +1190,29 @@ fn emit_cache_ops_record(
             None,
             None,
         )
-        .with_details(Some(format!(
-            "tool={} op={} result={} degraded={} bytes={}",
-            tool.as_str(),
-            op.as_str(),
-            result.as_str(),
-            degraded,
-            bytes
-        ))),
+        .with_details(Some(match scope {
+            Some(scope) => format!(
+                "tool={} scope={} op={} result={} degraded={} bytes={}",
+                tool.as_str(),
+                scope.as_str(),
+                op.as_str(),
+                result.as_str(),
+                degraded,
+                bytes
+            ),
+            None => format!(
+                "tool={} op={} result={} degraded={} bytes={}",
+                tool.as_str(),
+                op.as_str(),
+                result.as_str(),
+                degraded,
+                bytes
+            ),
+        })),
     );
 }
 
-fn emit_cache_ops_miss(tool: Tool, raw_key: &str) {
+fn emit_cache_ops_miss(tool: Tool, scope: Option<CacheOpScope>, raw_key: &str) {
     if !cache_ops_observability_enabled() {
         return;
     }
@@ -1050,7 +1222,14 @@ fn emit_cache_ops_miss(tool: Tool, raw_key: &str) {
         CACHE_OPS_OBSERVABILITY_MISS_OP,
         "EVENT",
         CACHE_OPS_OBSERVABILITY_PATH.to_string(),
-        format!("tool={} key_hash={key_hash}", tool.as_str()),
+        match scope {
+            Some(scope) => format!(
+                "tool={} scope={} key_hash={key_hash}",
+                tool.as_str(),
+                scope.as_str()
+            ),
+            None => format!("tool={} key_hash={key_hash}", tool.as_str()),
+        },
     ));
 }
 
@@ -1126,7 +1305,7 @@ pub(crate) struct SessionRecord {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ToolOperationSummary {
+pub(crate) struct OperationCounters {
     pub cache_read_hit_count: u64,
     pub cache_read_miss_count: u64,
     pub cache_read_error_count: u64,
@@ -1136,7 +1315,7 @@ pub(crate) struct ToolOperationSummary {
     pub cache_write_bytes: u64,
 }
 
-impl ToolOperationSummary {
+impl OperationCounters {
     fn record(
         &mut self,
         op: Op,
@@ -1168,6 +1347,12 @@ impl ToolOperationSummary {
             _ => {}
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ToolOperationSummary {
+    pub totals: OperationCounters,
+    pub scoped: BTreeMap<String, OperationCounters>,
 }
 
 #[cfg(test)]
@@ -1249,7 +1434,9 @@ mod tests {
             .map(|index| format!("sccache-key-{index}"))
             .collect();
         for key in &keys {
-            if should_track_sccache_miss_key(key) {
+            if should_track_sccache_miss_key(key)
+                || expected < SCCACHE_SESSION_MISSED_KEY_EXPLAIN_FLOOR as u64
+            {
                 expected = expected.saturating_add(1);
             }
             agg.record_miss(Tool::Sccache, key);
@@ -1268,11 +1455,40 @@ mod tests {
     }
 
     #[test]
+    fn sccache_small_miss_set_preserves_explainable_keys() {
+        let agg = Aggregator::new();
+        let keys: Vec<String> = (0..512)
+            .map(|index| format!("sccache-unsampled-key-{index}"))
+            .filter(|key| !should_track_sccache_miss_key(key))
+            .take(7)
+            .collect();
+        assert_eq!(keys.len(), 7);
+
+        for key in &keys {
+            agg.record(Tool::Sccache, Op::Get, OpResult::Miss, false, 0, 1);
+            agg.record_miss(Tool::Sccache, key);
+        }
+
+        let (_, missed, sessions) = agg.drain_for_shutdown();
+
+        assert_eq!(missed.len(), 7);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].miss_count, 7);
+        assert_eq!(sessions[0].top_missed_keys.len(), keys.len());
+        assert!(
+            sessions[0]
+                .top_missed_keys
+                .iter()
+                .all(|entry| entry.sampled_key_prefix.is_some())
+        );
+    }
+
+    #[test]
     fn sccache_miss_key_tracking_caps_unique_keys() {
         let mut state = AggregateState::default();
         Aggregator::apply_session_connect_event(&mut state, 100, Tool::Sccache);
 
-        for index in 0..(SCCACHE_MISSED_KEY_CAP + 64) {
+        for index in 0..((SCCACHE_MISSED_KEY_CAP + 64) * 20) {
             let key = format!("sccache-cap-key-{index}");
             Aggregator::apply_miss_event(&mut state, 100, Tool::Sccache, &key);
         }
@@ -1404,12 +1620,13 @@ mod tests {
 
         let summary = agg.tool_operation_summary("sccache");
 
-        assert_eq!(summary.cache_read_hit_count, 1);
-        assert_eq!(summary.cache_read_miss_count, 2);
-        assert_eq!(summary.cache_read_error_count, 1);
-        assert_eq!(summary.cache_read_bytes, 100);
-        assert_eq!(summary.cache_write_count, 1);
-        assert_eq!(summary.cache_write_bytes, 50);
+        assert_eq!(summary.totals.cache_read_hit_count, 1);
+        assert_eq!(summary.totals.cache_read_miss_count, 2);
+        assert_eq!(summary.totals.cache_read_error_count, 1);
+        assert_eq!(summary.totals.cache_read_bytes, 100);
+        assert_eq!(summary.totals.cache_write_count, 1);
+        assert_eq!(summary.totals.cache_write_bytes, 50);
+        assert!(summary.scoped.is_empty());
 
         let (_, _, sessions) = agg.drain_for_shutdown();
         assert_eq!(sessions.len(), 1);
@@ -1419,6 +1636,52 @@ mod tests {
         assert_eq!(session.error_count, 1);
         assert_eq!(session.bytes_read, 100);
         assert_eq!(session.bytes_written, 50);
+    }
+
+    #[test]
+    fn tool_operation_summary_keeps_bazel_ac_and_cas_scopes() {
+        let agg = Aggregator::new();
+        agg.record_kv(KvNamespace::BazelAc, Op::Get, OpResult::Hit, false, 64, 5);
+        agg.record_kv(KvNamespace::BazelAc, Op::Get, OpResult::Miss, false, 0, 2);
+        agg.record_kv(
+            KvNamespace::BazelCas,
+            Op::Get,
+            OpResult::Hit,
+            false,
+            1024,
+            8,
+        );
+        agg.record_kv(
+            KvNamespace::BazelCas,
+            Op::Put,
+            OpResult::Hit,
+            false,
+            2048,
+            10,
+        );
+
+        let summary = agg.tool_operation_summary("bazel");
+
+        assert_eq!(summary.totals.cache_read_hit_count, 2);
+        assert_eq!(summary.totals.cache_read_miss_count, 1);
+        assert_eq!(summary.totals.cache_read_bytes, 1088);
+        assert_eq!(summary.totals.cache_write_count, 1);
+        assert_eq!(summary.totals.cache_write_bytes, 2048);
+
+        let ac = summary
+            .scoped
+            .get("bazel_action_cache")
+            .expect("bazel action-cache counters");
+        assert_eq!(ac.cache_read_hit_count, 1);
+        assert_eq!(ac.cache_read_miss_count, 1);
+        assert_eq!(ac.cache_read_bytes, 64);
+
+        let cas = summary.scoped.get("bazel_cas").expect("bazel CAS counters");
+        assert_eq!(cas.cache_read_hit_count, 1);
+        assert_eq!(cas.cache_read_miss_count, 0);
+        assert_eq!(cas.cache_read_bytes, 1024);
+        assert_eq!(cas.cache_write_count, 1);
+        assert_eq!(cas.cache_write_bytes, 2048);
     }
 
     #[test]
@@ -1436,6 +1699,7 @@ mod tests {
             RecordEvent {
                 event_epoch_secs: 100,
                 tool: Tool::Sccache,
+                scope: None,
                 op: Op::Get,
                 result: OpResult::Hit,
                 degraded: false,
@@ -1448,6 +1712,7 @@ mod tests {
             RecordEvent {
                 event_epoch_secs: 101,
                 tool: Tool::Sccache,
+                scope: None,
                 op: Op::Get,
                 result: OpResult::Miss,
                 degraded: false,
@@ -1491,6 +1756,7 @@ mod tests {
             RecordEvent {
                 event_epoch_secs: 101,
                 tool: Tool::Sccache,
+                scope: None,
                 op: Op::Get,
                 result: OpResult::Error,
                 degraded: true,
@@ -1516,6 +1782,7 @@ mod tests {
             RecordEvent {
                 event_epoch_secs: 101,
                 tool: Tool::Sccache,
+                scope: None,
                 op: Op::Put,
                 result: OpResult::Error,
                 degraded: true,
@@ -1530,5 +1797,51 @@ mod tests {
         assert_eq!(session.hit_count, 0);
         assert_eq!(session.miss_count, 0);
         assert_eq!(session.error_count, 1);
+    }
+
+    #[test]
+    fn successful_runtime_heartbeat_does_not_emit_cache_activity() {
+        let agg = Aggregator::new();
+        agg.record(Tool::Runtime, Op::Query, OpResult::Hit, false, 0, 2);
+
+        let (rollups, missed, sessions) = agg.drain_for_shutdown();
+
+        assert!(rollups.is_empty());
+        assert!(missed.is_empty());
+        assert!(sessions.is_empty());
+        assert!(agg.is_empty());
+    }
+
+    #[test]
+    fn degraded_runtime_heartbeat_still_reports_runtime_issue() {
+        let agg = Aggregator::new();
+        agg.record(Tool::Runtime, Op::Query, OpResult::Error, true, 0, 2);
+
+        let (rollups, missed, sessions) = agg.drain_for_shutdown();
+
+        assert_eq!(rollups.len(), 1);
+        assert!(missed.is_empty());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].tool, "runtime");
+        assert_eq!(sessions[0].error_count, 1);
+    }
+
+    #[test]
+    fn session_hit_rate_is_dash_when_no_read_lookups_occurred() {
+        let record = SessionRecord {
+            session_id: "sccache-1".to_string(),
+            tool: "sccache".to_string(),
+            session_duration_ms: 10_000,
+            hit_count: 0,
+            miss_count: 0,
+            error_count: 0,
+            bytes_read: 0,
+            bytes_written: 18 * 1024 * 1024,
+            metadata_hints: BTreeMap::new(),
+            top_missed_keys: Vec::new(),
+        };
+
+        assert_eq!(Aggregator::session_hit_rate_label(&record), "-");
+        assert!(Aggregator::is_reportable_session(&record));
     }
 }

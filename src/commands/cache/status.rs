@@ -144,14 +144,16 @@ fn print_inventory(status: &WorkspaceStatusResponse) {
     );
     print_field("Tag hits", &status.inventory.tagged_hits.to_string());
     print_field("Versions", &status.inventory.version_count.to_string());
-    print_field(
-        "Orphaned",
-        &format!(
-            "{} ({})",
-            status.inventory.orphaned_entries_count,
-            format_bytes(status.inventory.orphaned_storage_bytes)
-        ),
-    );
+    if status.inventory.orphaned_entries_count > 0 || status.inventory.orphaned_storage_bytes > 0 {
+        print_field(
+            "Orphaned",
+            &format!(
+                "{} ({})",
+                status.inventory.orphaned_entries_count,
+                format_bytes(status.inventory.orphaned_storage_bytes)
+            ),
+        );
+    }
     print_field(
         "Dedup saved",
         &format!(

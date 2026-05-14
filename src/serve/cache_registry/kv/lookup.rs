@@ -103,12 +103,11 @@ pub(crate) async fn get_or_head_kv_object_with_integrity(
     let get_start = std::time::Instant::now();
     let result = get_or_head_kv_object_inner(state, namespace, key, is_head, integrity).await;
     let elapsed_ms = get_start.elapsed().as_millis() as u64;
-    let tool = namespace.into();
 
     match &result {
         Ok(response) => {
-            state.cache_ops.record(
-                tool,
+            state.cache_ops.record_kv(
+                namespace,
                 super::super::cache_ops::Op::Get,
                 super::super::cache_ops::OpResult::Hit,
                 false,
@@ -117,20 +116,20 @@ pub(crate) async fn get_or_head_kv_object_with_integrity(
             );
         }
         Err(e) if e.status == StatusCode::NOT_FOUND => {
-            state.cache_ops.record(
-                tool,
+            state.cache_ops.record_kv(
+                namespace,
                 super::super::cache_ops::Op::Get,
                 super::super::cache_ops::OpResult::Miss,
                 false,
                 0,
                 elapsed_ms,
             );
-            state.cache_ops.record_miss(tool, key);
+            state.cache_ops.record_kv_miss(namespace, key);
         }
         Err(error) => {
             let degraded = !state.fail_on_cache_error && error.status.is_server_error();
-            state.cache_ops.record(
-                tool,
+            state.cache_ops.record_kv(
+                namespace,
                 super::super::cache_ops::Op::Get,
                 super::super::cache_ops::OpResult::Error,
                 degraded,
@@ -350,14 +349,13 @@ pub(crate) async fn resolve_kv_entries(
     let query_start = std::time::Instant::now();
     let result = resolve_kv_entries_inner(state, namespace, keys).await;
     let elapsed_ms = query_start.elapsed().as_millis() as u64;
-    let tool = namespace.into();
 
     if let Ok(sizes) = &result {
         for key in keys {
             let scoped = namespace.scoped_key(key);
             if let Some(&size) = sizes.get(&scoped) {
-                state.cache_ops.record(
-                    tool,
+                state.cache_ops.record_kv(
+                    namespace,
                     super::super::cache_ops::Op::Query,
                     super::super::cache_ops::OpResult::Hit,
                     false,
@@ -365,15 +363,15 @@ pub(crate) async fn resolve_kv_entries(
                     elapsed_ms,
                 );
             } else {
-                state.cache_ops.record(
-                    tool,
+                state.cache_ops.record_kv(
+                    namespace,
                     super::super::cache_ops::Op::Query,
                     super::super::cache_ops::OpResult::Miss,
                     false,
                     0,
                     elapsed_ms,
                 );
-                state.cache_ops.record_miss(tool, key);
+                state.cache_ops.record_kv_miss(namespace, key);
             }
         }
     }
