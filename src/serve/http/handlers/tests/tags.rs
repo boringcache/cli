@@ -115,18 +115,11 @@ fn alias_tags_include_human_alias_when_distinct() {
     let tags = alias_tags_for_manifest("primary-cache", &["posthog-docker-build".to_string()], &[]);
     assert_eq!(
         tags,
-        vec![
-            AliasBinding {
-                tag: "oci_digest_abc123".to_string(),
-                write_scope_tag: Some("posthog-build:pr-123".to_string()),
-                required: true
-            },
-            AliasBinding {
-                tag: "posthog-docker-build".to_string(),
-                write_scope_tag: None,
-                required: true
-            }
-        ]
+        vec![AliasBinding {
+            tag: "posthog-docker-build".to_string(),
+            write_scope_tag: None,
+            required: true
+        }]
     );
 }
 
@@ -151,11 +144,6 @@ fn alias_tags_include_multiple_human_aliases() {
         tags,
         vec![
             AliasBinding {
-                tag: "oci_digest_abc123".to_string(),
-                write_scope_tag: Some("posthog-build:pr-123".to_string()),
-                required: true
-            },
-            AliasBinding {
                 tag: "posthog-build".to_string(),
                 write_scope_tag: None,
                 required: true
@@ -175,18 +163,11 @@ fn alias_tags_keep_invalid_human_aliases_best_effort() {
 
     assert_eq!(
         tags,
-        vec![
-            AliasBinding {
-                tag: "oci_digest_abc123".to_string(),
-                write_scope_tag: Some("posthog-build:pr-123".to_string()),
-                required: true
-            },
-            AliasBinding {
-                tag: "docker/main".to_string(),
-                write_scope_tag: None,
-                required: false
-            }
-        ]
+        vec![AliasBinding {
+            tag: "docker/main".to_string(),
+            write_scope_tag: None,
+            required: false
+        }]
     );
 }
 
