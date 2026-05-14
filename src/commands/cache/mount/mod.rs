@@ -911,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn local_oci_manifest_digest_matches_pointer_digest() {
+    fn local_oci_manifest_digest_matches_oci_root_digest() {
         let temp_dir = tempfile::tempdir().unwrap();
         let blobs_dir = temp_dir.path().join("blobs").join("sha256");
         std::fs::create_dir_all(&blobs_dir).unwrap();
@@ -933,8 +933,7 @@ mod tests {
             .expect("expected digest");
 
         let scan = crate::cas_oci::scan_layout(temp_dir.path()).unwrap();
-        let pointer_bytes = crate::cas_oci::build_pointer(&scan).unwrap();
-        let expected = crate::cas_oci::prefixed_sha256_digest(&pointer_bytes);
+        let expected = crate::cas_oci::manifest_root_digest(&scan.index_json);
 
         assert_eq!(digest, expected);
     }

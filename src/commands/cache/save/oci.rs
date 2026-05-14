@@ -31,7 +31,8 @@ pub(super) async fn save_single_oci_entry(
             let scan = crate::cache::cas_oci::scan_layout(&scan_path)?;
             let pointer_bytes = crate::cache::cas_oci::build_pointer(&scan)?;
             let manifest_root_digest =
-                crate::cache::cas_oci::prefixed_sha256_digest(&pointer_bytes);
+                crate::cache::cas_oci::manifest_root_digest(&scan.index_json);
+            let pointer_digest = crate::cache::cas_oci::prefixed_sha256_digest(&pointer_bytes);
             let manifest_size = pointer_bytes.len() as u64;
             let blob_count = scan.blobs.len() as u64;
             let file_count = blob_count.min(u32::MAX as u64) as u32;
@@ -70,7 +71,7 @@ pub(super) async fn save_single_oci_entry(
                 blobs,
                 blob_sources,
                 confirm_spec: cas_publish::CasConfirmSpec {
-                    manifest_digest: manifest_root_digest.clone(),
+                    manifest_digest: pointer_digest,
                     manifest_size,
                     blob_count,
                     blob_total_size_bytes,

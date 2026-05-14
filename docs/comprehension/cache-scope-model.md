@@ -66,8 +66,8 @@ raw `cache-registry` therefore reuse branch/default/PR behavior without each
 adapter carrying its own GitHub cache rules.
 
 Those proxy tags are human cache-head tags. New CLI code does not derive
-internal aliases as separate cache identity; any old generated names are
-backend/protocol compatibility for older clients.
+generated protocol aliases as separate cache identity, and the backend treats any
+syntactically valid tag name literally.
 
 ## Docker And BuildKit
 

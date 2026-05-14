@@ -51,7 +51,7 @@ fn scoped_restore_tags_use_human_reference_directly() {
 }
 
 #[test]
-fn scoped_restore_tags_keep_legacy_ref_shape_only_for_non_human_references() {
+fn scoped_restore_tags_ignore_non_human_references() {
     let resolver = TagResolver::new(
         None,
         GitContext {
@@ -65,15 +65,7 @@ fn scoped_restore_tags_keep_legacy_ref_shape_only_for_non_human_references() {
     );
 
     let tags = scoped_restore_tags(&resolver, &[], "", "buildkit-cache", "repo/image:main");
-    assert_eq!(
-        tags,
-        vec![
-            readable_oci_ref_tag_for_input("buildkit-cache:repo/image:main-branch-feature-x"),
-            legacy_oci_ref_tag_for_input("buildkit-cache:repo/image:main-branch-feature-x"),
-            readable_oci_ref_tag_for_input("buildkit-cache:repo/image:main"),
-            legacy_oci_ref_tag_for_input("buildkit-cache:repo/image:main"),
-        ]
-    );
+    assert!(tags.is_empty());
 }
 
 #[test]
@@ -120,13 +112,7 @@ fn scoped_write_scope_tag_keeps_human_reference() {
 
 #[test]
 fn alias_tags_include_human_alias_when_distinct() {
-    let tags = alias_tags_for_manifest(
-        "oci_ref_primary",
-        "sha256:abc123",
-        Some("posthog-build:pr-123"),
-        &["posthog-docker-build".to_string()],
-        &[],
-    );
+    let tags = alias_tags_for_manifest("primary-cache", &["posthog-docker-build".to_string()], &[]);
     assert_eq!(
         tags,
         vec![
@@ -146,22 +132,14 @@ fn alias_tags_include_human_alias_when_distinct() {
 
 #[test]
 fn alias_tags_skip_primary_and_deduplicate() {
-    let tags = alias_tags_for_manifest(
-        "oci_digest_abc123",
-        "sha256:abc123",
-        Some("posthog-build:pr-123"),
-        &["oci_digest_abc123".to_string()],
-        &[],
-    );
+    let tags = alias_tags_for_manifest("posthog-build", &["posthog-build".to_string()], &[]);
     assert!(tags.is_empty());
 }
 
 #[test]
 fn alias_tags_include_multiple_human_aliases() {
     let tags = alias_tags_for_manifest(
-        "oci_ref_primary",
-        "sha256:abc123",
-        Some("posthog-build:pr-123"),
+        "primary-cache",
         &[
             "posthog-build".to_string(),
             "posthog-stable".to_string(),
@@ -193,13 +171,7 @@ fn alias_tags_include_multiple_human_aliases() {
 
 #[test]
 fn alias_tags_keep_invalid_human_aliases_best_effort() {
-    let tags = alias_tags_for_manifest(
-        "oci_ref_primary",
-        "sha256:abc123",
-        Some("posthog-build:pr-123"),
-        &["docker/main".to_string()],
-        &[],
-    );
+    let tags = alias_tags_for_manifest("primary-cache", &["docker/main".to_string()], &[]);
 
     assert_eq!(
         tags,
@@ -221,13 +193,11 @@ fn alias_tags_keep_invalid_human_aliases_best_effort() {
 #[test]
 fn alias_tags_include_additional_aliases() {
     let tags = alias_tags_for_manifest(
-        "oci_digest_abc123",
-        "sha256:abc123",
-        Some("posthog-build:pr-123"),
+        "posthog-digest-only",
         &["posthog-build".to_string()],
         &[
             AliasBinding {
-                tag: "oci_ref_latest".to_string(),
+                tag: "latest-alias".to_string(),
                 write_scope_tag: Some("posthog-build:latest".to_string()),
                 required: false,
             },
@@ -237,7 +207,7 @@ fn alias_tags_include_additional_aliases() {
                 required: true,
             },
             AliasBinding {
-                tag: "oci_ref_latest".to_string(),
+                tag: "latest-alias".to_string(),
                 write_scope_tag: Some("posthog-build:latest".to_string()),
                 required: false,
             },
@@ -252,7 +222,7 @@ fn alias_tags_include_additional_aliases() {
                 required: true
             },
             AliasBinding {
-                tag: "oci_ref_latest".to_string(),
+                tag: "latest-alias".to_string(),
                 write_scope_tag: Some("posthog-build:latest".to_string()),
                 required: false
             }

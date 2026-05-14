@@ -497,7 +497,10 @@ impl ApiClient {
         workspace: &str,
         entry: &crate::api::models::cache::SaveRequest,
     ) -> Result<crate::api::models::cache::SaveResponse> {
-        ensure!(!entry.tag.trim().is_empty(), "Tag must not be empty");
+        ensure!(
+            !entry.tag.trim().is_empty() || entry.storage_mode.as_deref() == Some("cas"),
+            "Tag must not be empty"
+        );
 
         #[derive(Serialize)]
         struct Payload<'a> {
@@ -575,6 +578,34 @@ impl ApiClient {
         Ok(results)
     }
 
+    pub async fn restore_manifest_root_digest(
+        &self,
+        workspace: &str,
+        manifest_root_digest: &str,
+        require_signed: bool,
+    ) -> Result<Vec<crate::api::models::cache::CacheResolutionEntry>> {
+        ensure!(
+            !manifest_root_digest.trim().is_empty(),
+            "manifest_root_digest must be provided"
+        );
+
+        let response = self
+            .fetch_restore_by_manifest_root_digest_response(
+                workspace,
+                manifest_root_digest,
+                require_signed,
+            )
+            .await?
+            .unwrap_or_default();
+
+        let mut results = Vec::with_capacity(response.len());
+        for item in response {
+            results.push(Self::map_restore_result(item));
+        }
+
+        Ok(results)
+    }
+
     pub async fn fetch_manifest_entry(
         &self,
         workspace: &str,
@@ -635,6 +666,26 @@ impl ApiClient {
         };
 
         self.publish_tag_pointer_with_retry(workspace, tag, &publish_payload)
+            .await
+    }
+
+    pub async fn finalize_cache_entry(
+        &self,
+        workspace: &str,
+        cache_entry_id: &str,
+        request: &crate::api::models::cache::ConfirmRequest,
+    ) -> Result<crate::api::models::cache::CacheConfirmResponse> {
+        #[derive(Serialize)]
+        struct FinalizePayload<'a> {
+            cache: &'a crate::api::models::cache::ConfirmRequest,
+        }
+
+        let endpoint = format!(
+            "{}/{}/finalize",
+            self.workspace_endpoint(workspace, "caches")?,
+            cache_entry_id
+        );
+        self.put_v2(&endpoint, &FinalizePayload { cache: request })
             .await
     }
 
@@ -787,7 +838,10 @@ impl ApiClient {
                         .as_ref()
                         .and_then(|m| m.manifest_root_digest.clone())
                 }),
-                manifest_digest: item.manifest_digest.clone(),
+                manifest_digest: item
+                    .manifest_digest
+                    .clone()
+                    .or_else(|| metadata.and_then(|m| m.manifest_digest.clone())),
                 compression_algorithm: item.compression_algorithm.clone().or_else(|| {
                     item.metadata
                         .as_ref()
@@ -845,6 +899,56 @@ impl ApiClient {
         }
         let response = self.get_response_with_base(&self.v2_base_url, &url).await?;
 
+        let status = response.status();
+
+        if status == StatusCode::MULTI_STATUS {
+            let payload: RestoreResponse = response
+                .json()
+                .await
+                .context("Failed to parse 207 restore response")?;
+            return Ok(Some(payload));
+        }
+
+        if status == StatusCode::NOT_FOUND {
+            let body = response.text().await.unwrap_or_default();
+            return parse_restore_not_found_body(&body);
+        }
+
+        if !status.is_success() {
+            return Err(self.create_error_from_response(response).await);
+        }
+
+        let payload: RestoreResponse = response
+            .json()
+            .await
+            .context("Failed to parse restore response")?;
+
+        Ok(Some(payload))
+    }
+
+    async fn fetch_restore_by_manifest_root_digest_response(
+        &self,
+        workspace: &str,
+        manifest_root_digest: &str,
+        require_signed: bool,
+    ) -> Result<Option<crate::api::models::cache::RestoreResponse>> {
+        use crate::api::models::cache::RestoreResponse;
+
+        ensure!(
+            !manifest_root_digest.trim().is_empty(),
+            "manifest_root_digest must be provided"
+        );
+
+        let base = self.workspace_endpoint(workspace, "caches")?;
+        let mut url = format!(
+            "{}?manifest_root_digest={}",
+            base,
+            urlencoding::encode(manifest_root_digest)
+        );
+        if require_signed {
+            url.push_str("&require_signed=1");
+        }
+        let response = self.get_response_with_base(&self.v2_base_url, &url).await?;
         let status = response.status();
 
         if status == StatusCode::MULTI_STATUS {

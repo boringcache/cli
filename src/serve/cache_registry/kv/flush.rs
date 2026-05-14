@@ -454,6 +454,7 @@ pub(crate) async fn do_flush(
         &state.workspace,
         &save_response,
         manifest_root_digest.clone(),
+        manifest_root_digest.clone(),
         expected_manifest_size,
         Some(all_blob_digests),
         |save_response| {

@@ -6,8 +6,7 @@ use crate::platform::Platform;
 use crate::serve::engines::oci::{PresentBlob, PresentBlobSource, ensure_manifest_blobs_present};
 use crate::serve::state::{
     BlobLocatorCache, BlobReadCache, BlobReadMetrics, KvPendingStore, KvPublishedIndex,
-    UploadSession, UploadSessionBody, UploadSessionStore, legacy_oci_ref_tag_for_input,
-    readable_oci_ref_tag_for_input,
+    UploadSession, UploadSessionBody, UploadSessionStore,
 };
 use crate::tag_utils::TagResolver;
 use axum::body::Bytes;

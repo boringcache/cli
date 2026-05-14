@@ -40,6 +40,7 @@ pub(crate) async fn publish_after_save_requiring_receipts<
     api_client: &ApiClient,
     workspace: &str,
     save_response: &SaveResponse,
+    manifest_root_digest: String,
     manifest_digest: String,
     manifest_size: u64,
     blob_digests: Option<Vec<String>>,
@@ -61,6 +62,7 @@ where
         api_client,
         workspace,
         save_response,
+        manifest_root_digest,
         manifest_digest,
         manifest_size,
         blob_digests,
@@ -87,6 +89,7 @@ async fn publish_after_save_inner<
     api_client: &ApiClient,
     workspace: &str,
     save_response: &SaveResponse,
+    manifest_root_digest: String,
     manifest_digest: String,
     manifest_size: u64,
     blob_digests: Option<Vec<String>>,
@@ -104,13 +107,13 @@ where
     ConfirmFuture: Future<Output = Result<C, E>>,
     MapReceiptError: Fn(String) -> E,
 {
-    if let Some(reason) = save_response.blocking_pending_cas_reason(&manifest_digest) {
+    if let Some(reason) = save_response.blocking_pending_cas_reason(&manifest_root_digest) {
         return Err(map_receipt_error(format!(
             "save_entry failed: another cache upload is in progress ({reason})"
         )));
     }
 
-    let manifest_etag = if save_response.should_skip_existing_uploads_for(&manifest_digest) {
+    let manifest_etag = if save_response.should_skip_existing_uploads_for(&manifest_root_digest) {
         None
     } else {
         let blob_receipts = upload_blobs(save_response).await?;

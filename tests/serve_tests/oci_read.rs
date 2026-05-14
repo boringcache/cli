@@ -137,6 +137,108 @@ async fn test_manifest_hit_returns_decoded_index_json() {
 }
 
 #[tokio::test]
+async fn test_manifest_digest_restore_uses_manifest_root_lookup() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let index_json = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":"sha256:aaaa","size":100},"layers":[]}"#;
+    let manifest_digest = cas_oci::manifest_root_digest(index_json);
+    let blob_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let pointer_bytes = make_pointer(index_json, &[(blob_digest, 5000)]);
+    let pointer_digest = cas_oci::prefixed_sha256_digest(&pointer_bytes);
+
+    let _entry_restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+        )
+        .expect(0)
+        .create_async()
+        .await;
+    let _digest_restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(
+                r"^/v2/workspaces/org/repo/caches\?manifest_root_digest=sha256%3A.*".to_string(),
+            ),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": manifest_digest,
+                "status": "hit",
+                "cache_entry_id": "entry-digest",
+                "manifest_url": format!("{}/pointers/entry-digest", server.url()),
+                "manifest_root_digest": manifest_digest,
+                "manifest_digest": pointer_digest,
+                "storage_mode": "cas",
+                "cas_layout": "oci-v1",
+            }])
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let _pointer_mock = server
+        .mock("GET", "/pointers/entry-digest")
+        .with_status(200)
+        .with_body(pointer_bytes)
+        .expect(1)
+        .create_async()
+        .await;
+    let _download_urls_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .match_body(Matcher::Json(json!({
+            "cache_entry_id": "entry-digest",
+            "verify_storage": true,
+            "live_storage": true,
+            "blobs": [
+                {"digest": blob_digest, "size_bytes": 5000}
+            ]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [{
+                    "digest": blob_digest,
+                    "url": format!("{}/blobs/{}", server.url(), blob_digest),
+                }],
+                "missing": [],
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .uri(format!("/v2/my-cache/manifests/{manifest_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("Docker-Content-Digest")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        manifest_digest
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), index_json);
+}
+
+#[tokio::test]
 async fn test_manifest_misses_when_prefetch_batch_reports_missing_blobs() {
     let mut server = Server::new_async().await;
     let (mut state, _home, _guard) = setup(&server).await;
@@ -326,7 +428,7 @@ async fn test_cached_manifest_hit_returns_without_revalidation_in_best_effort() 
         .insert(tag.clone(), Arc::clone(&cached));
     state
         .oci_manifest_cache
-        .insert(oci_digest_tag(&manifest_digest), cached);
+        .insert(manifest_digest.clone(), cached);
 
     let app = build_router(state.clone());
     let response = tower::ServiceExt::oneshot(
@@ -341,12 +443,7 @@ async fn test_cached_manifest_hit_returns_without_revalidation_in_best_effort() 
 
     assert_eq!(response.status(), StatusCode::OK);
     assert!(state.oci_manifest_cache.get(&tag).is_some());
-    assert!(
-        state
-            .oci_manifest_cache
-            .get(&oci_digest_tag(&manifest_digest))
-            .is_some()
-    );
+    assert!(state.oci_manifest_cache.get(&manifest_digest).is_some());
 }
 
 #[tokio::test]
@@ -380,7 +477,7 @@ async fn test_cached_manifest_hit_keeps_locator_urls() {
         .insert(tag.clone(), Arc::clone(&cached));
     state
         .oci_manifest_cache
-        .insert(oci_digest_tag(&manifest_digest), cached);
+        .insert(manifest_digest.clone(), cached);
 
     {
         let mut locator = state.blob_locator.write().await;
@@ -1685,22 +1782,4 @@ async fn test_index_manifest_detected_as_index_type() {
         response.headers().get("Content-Type").unwrap(),
         "application/vnd.oci.image.index.v1+json"
     );
-}
-
-#[tokio::test]
-async fn test_tag_mapping_deterministic() {
-    let t1 = oci_ref_tag("my-cache", "main");
-    let t2 = oci_ref_tag("my-cache", "main");
-    assert_eq!(t1, t2);
-    let prefix = "oci_ref_my-cache__main__";
-    assert!(t1.starts_with(prefix));
-    let suffix = t1.strip_prefix(prefix).expect("readable ref tag suffix");
-    assert_eq!(suffix.len(), 16);
-    assert!(suffix.chars().all(|ch| ch.is_ascii_hexdigit()));
-
-    let t3 = oci_ref_tag("my-cache", "dev");
-    assert_ne!(t1, t3);
-
-    let dt = oci_digest_tag("sha256:abc123");
-    assert_eq!(dt, "oci_digest_abc123");
 }

@@ -11,13 +11,8 @@ use crate::serve::engines::oci::publish::{PersistManifestEntryInput, persist_man
 use crate::serve::engines::oci::uploads::has_non_empty_local_blob;
 use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{Flight, await_flight, begin_flight, clear_flight_entry};
-use crate::serve::http::oci_tags::{
-    AliasBinding, scoped_legacy_oci_ref_alias_binding, scoped_restore_tags, scoped_save_tag,
-    scoped_write_scope_tag,
-};
-use crate::serve::state::{
-    AppState, BlobLocatorEntry, OciNegativeCacheReason, UploadSession, oci_digest_tag,
-};
+use crate::serve::http::oci_tags::{scoped_restore_tags, scoped_save_tag, scoped_write_scope_tag};
+use crate::serve::state::{AppState, BlobLocatorEntry, OciNegativeCacheReason, UploadSession};
 
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_POINTER_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -37,6 +32,10 @@ pub(crate) async fn resolve_manifest(
     blob_url_policy: ManifestBlobUrlPolicy,
 ) -> Result<(Vec<u8>, String, String), OciError> {
     let tags = manifest_restore_tags(state, name, reference);
+    if tags.is_empty() {
+        state.oci_engine_diagnostics.record_miss("manifest");
+        return Err(OciError::manifest_unknown(format!("{name}:{reference}")));
+    }
 
     if let Some(cached) = lookup_oci_manifest_cache(state, &tags) {
         return cached_manifest_response(state, cached).await;
@@ -123,7 +122,7 @@ pub(crate) async fn prefetch_manifest_reference(
         ManifestBlobUrlPolicy::VerifyAndCache,
     )
     .await?;
-    let digest_tags = [oci_digest_tag(&digest)];
+    let digest_tags = [digest.clone()];
     let cached = lookup_oci_manifest_cache(state, &tags)
         .or_else(|| lookup_oci_manifest_cache(state, &digest_tags))
         .ok_or_else(|| {
@@ -307,16 +306,6 @@ pub(crate) async fn persist_referrers_manifest(
     )?;
     let referrers_write_scope_tag =
         scoped_write_scope_tag(&state.tag_resolver, name, &referrers_reference)?;
-    let mut additional_aliases = Vec::<AliasBinding>::new();
-    if let Some(alias) = scoped_legacy_oci_ref_alias_binding(
-        &state.tag_resolver,
-        &state.configured_human_tags,
-        &state.primary_cache_tag,
-        name,
-        &referrers_reference,
-    )? {
-        additional_aliases.push(alias);
-    }
     let referrers_body = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
         "mediaType": OCI_IMAGE_INDEX_CONTENT_TYPE,
@@ -334,7 +323,7 @@ pub(crate) async fn persist_referrers_manifest(
         blob_descriptors: Vec::new(),
         present_blobs: Vec::new(),
         configured_human_tags: &[],
-        additional_aliases: &additional_aliases,
+        additional_aliases: &[],
     })
     .await?;
     if persisted.manifest_digest.is_empty() {
@@ -377,7 +366,7 @@ async fn count_local_oci_blobs(state: &AppState, blobs: &[BlobDescriptor]) -> us
 
 fn manifest_restore_tags(state: &AppState, name: &str, reference: &str) -> Vec<String> {
     if reference.starts_with("sha256:") {
-        vec![oci_digest_tag(reference)]
+        vec![reference.to_string()]
     } else {
         scoped_restore_tags(
             &state.tag_resolver,
@@ -396,18 +385,35 @@ async fn resolve_manifest_remote(
     tags: &[String],
     blob_url_policy: ManifestBlobUrlPolicy,
 ) -> Result<(Vec<u8>, String, String), OciError> {
-    let entries = tokio::time::timeout(
-        OCI_API_CALL_TIMEOUT,
-        state.api_client.restore(&state.workspace, tags, false),
-    )
-    .await
-    .map_err(|_| {
-        OciError::internal(format!(
-            "Backend restore timed out after {}s",
-            OCI_API_CALL_TIMEOUT.as_secs()
-        ))
-    })?
-    .map_err(|e| OciError::internal(format!("Backend restore failed: {e}")))?;
+    let entries = if reference.starts_with("sha256:") {
+        tokio::time::timeout(
+            OCI_API_CALL_TIMEOUT,
+            state
+                .api_client
+                .restore_manifest_root_digest(&state.workspace, reference, false),
+        )
+        .await
+        .map_err(|_| {
+            OciError::internal(format!(
+                "Backend restore timed out after {}s",
+                OCI_API_CALL_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| OciError::internal(format!("Backend restore failed: {e}")))?
+    } else {
+        tokio::time::timeout(
+            OCI_API_CALL_TIMEOUT,
+            state.api_client.restore(&state.workspace, tags, false),
+        )
+        .await
+        .map_err(|_| {
+            OciError::internal(format!(
+                "Backend restore timed out after {}s",
+                OCI_API_CALL_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| OciError::internal(format!("Backend restore failed: {e}")))?
+    };
     let restore_summary = summarize_restore_results(&entries);
 
     let mut entries_by_tag: HashMap<String, _> = entries
@@ -497,6 +503,14 @@ async fn resolve_manifest_remote(
             ))
         })?
         .map_err(|e| OciError::internal(format!("Failed to read pointer bytes: {e}")))?;
+    let pointer_digest = cas_oci::prefixed_sha256_digest(&pointer_bytes);
+    if let Some(expected_pointer_digest) = entry.manifest_digest.as_deref()
+        && expected_pointer_digest != pointer_digest
+    {
+        return Err(OciError::internal(format!(
+            "OCI pointer digest mismatch for {name}:{reference}: expected {expected_pointer_digest}, got {pointer_digest}"
+        )));
+    }
     let pointer = cas_oci::parse_pointer(&pointer_bytes)
         .map_err(|e| OciError::internal(format!("Failed to parse pointer: {e}")))?;
     let index_json = pointer
@@ -549,6 +563,11 @@ async fn resolve_manifest_remote(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| detect_manifest_content_type(&index_json));
     let digest = cas_oci::prefixed_sha256_digest(&index_json);
+    if reference.starts_with("sha256:") && digest != reference {
+        return Err(OciError::internal(format!(
+            "OCI manifest digest mismatch for {name}:{reference}: got {digest}"
+        )));
+    }
     let resolved_entry_tag = entry.tag.clone();
     let cached = Arc::new(OciManifestCacheEntry {
         index_json: index_json.clone(),
@@ -564,7 +583,7 @@ async fn resolve_manifest_remote(
         cache_keys.insert(tag.clone());
     }
     cache_keys.insert(resolved_entry_tag);
-    cache_keys.insert(oci_digest_tag(&digest));
+    cache_keys.insert(digest.clone());
     for cache_key in cache_keys {
         state
             .oci_manifest_cache
@@ -782,8 +801,7 @@ async fn load_manifest_bytes_by_digest(
     digest: &str,
     expected_size: Option<u64>,
 ) -> Result<Vec<u8>, OciError> {
-    let digest_lookup_tag = oci_digest_tag(digest);
-    let manifest_bytes = match lookup_oci_manifest_cache(state, &[digest_lookup_tag]) {
+    let manifest_bytes = match lookup_oci_manifest_cache(state, &[digest.to_string()]) {
         Some(cached) => cached.index_json.clone(),
         None => {
             let staged_path = {

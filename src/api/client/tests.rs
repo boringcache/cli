@@ -1116,6 +1116,7 @@ fn test_map_restore_result_prefers_top_level_cas_fields() {
         archive_urls: vec![],
         metadata: Some(cache::RestoreMetadata {
             manifest_root_digest: None,
+            manifest_digest: None,
             total_size_bytes: Some(99),
             storage_mode: Some("archive".to_string()),
             blob_count: Some(1),
@@ -1170,6 +1171,10 @@ fn test_map_restore_result_uses_metadata_cas_fields_as_fallback() {
                 "sha256:2222222222222222222222222222222222222222222222222222222222222222"
                     .to_string(),
             ),
+            manifest_digest: Some(
+                "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                    .to_string(),
+            ),
             total_size_bytes: Some(100),
             storage_mode: Some("cas".to_string()),
             blob_count: Some(3),
@@ -1202,4 +1207,8 @@ fn test_map_restore_result_uses_metadata_cas_fields_as_fallback() {
     assert_eq!(mapped.blob_count, Some(3));
     assert_eq!(mapped.blob_total_size_bytes, Some(2048));
     assert_eq!(mapped.cas_layout.as_deref(), Some("bazel-v2"));
+    assert_eq!(
+        mapped.manifest_digest.as_deref(),
+        Some("sha256:3333333333333333333333333333333333333333333333333333333333333333")
+    );
 }

@@ -11,7 +11,7 @@ use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
     AppState, BlobLocatorCache, BlobLocatorEntry, BlobReadCache, BlobReadMetrics, KvPendingStore,
     KvPublishedIndex, OciManifestCacheEntry, ProxySkipRule, UploadSession, UploadSessionBody,
-    UploadSessionStore, legacy_oci_ref_tag_for_input, oci_digest_tag, oci_ref_tag,
+    UploadSessionStore,
 };
 use boring_cache_cli::tag_utils::{TagResolver, server_cache_tag_name};
 use boring_cache_cli::test_env;
@@ -167,28 +167,12 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
     (state, temp_home, guard)
 }
 
-fn namespaced_scoped_ref_tag(namespace: &str, name: &str, reference: &str) -> String {
-    if server_cache_tag_name(reference) {
-        return reference.to_string();
-    }
-
-    oci_ref_tag(namespace, &format!("{name}:{reference}"))
-}
-
-fn scoped_ref_tag(name: &str, reference: &str) -> String {
-    namespaced_scoped_ref_tag("registry", name, reference)
-}
-
-fn namespaced_legacy_scoped_ref_tag(namespace: &str, name: &str, reference: &str) -> String {
-    if server_cache_tag_name(reference) {
-        return reference.to_string();
-    }
-
-    legacy_oci_ref_tag_for_input(&format!("{namespace}:{name}:{reference}"))
-}
-
-fn legacy_scoped_ref_tag(name: &str, reference: &str) -> String {
-    namespaced_legacy_scoped_ref_tag("registry", name, reference)
+fn scoped_ref_tag(_name: &str, reference: &str) -> String {
+    assert!(
+        server_cache_tag_name(reference),
+        "test reference must be a human cache tag"
+    );
+    reference.to_string()
 }
 
 fn make_pointer(index_json: &[u8], blobs: &[(&str, u64)]) -> Vec<u8> {

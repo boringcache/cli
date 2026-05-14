@@ -8,7 +8,7 @@ use crate::serve::engines::oci::PresentBlob;
 use crate::serve::engines::oci::manifest_cache::OciManifestCacheEntry;
 use crate::serve::http::error::OciError;
 use crate::serve::http::oci_tags::{AliasBinding, alias_tags_for_manifest, bind_alias_tag};
-use crate::serve::state::{AppState, oci_digest_tag};
+use crate::serve::state::AppState;
 
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const OCI_TRANSFER_CALL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -57,7 +57,7 @@ async fn persist_manifest_entry_inner(
         configured_human_tags,
         additional_aliases,
     } = input;
-    let manifest_digest = cas_oci::prefixed_sha256_digest(&manifest_body);
+    let oci_manifest_digest = cas_oci::manifest_root_digest(&manifest_body);
     let blob_count = blob_descriptors.len() as u64;
     let blob_total_size_bytes: u64 = blob_descriptors.iter().map(|blob| blob.size_bytes).sum();
 
@@ -78,15 +78,17 @@ async fn persist_manifest_entry_inner(
     };
     let pointer_bytes = serde_json::to_vec(&pointer)
         .map_err(|e| OciError::internal(format!("Failed to serialize pointer: {e}")))?;
-    let manifest_root_digest = cas_oci::prefixed_sha256_digest(&pointer_bytes);
+    let pointer_digest = cas_oci::prefixed_sha256_digest(&pointer_bytes);
+    let manifest_root_digest = oci_manifest_digest.clone();
     let (request_blob_count, request_blob_total_size_bytes) =
         request_cas_blob_summary(blob_count, blob_total_size_bytes);
     let total_size_bytes = blob_total_size_bytes + manifest_body.len() as u64;
     let manifest_size = pointer_bytes.len() as u64;
+    let request_write_scope_tag = non_empty_string(write_scope_tag.as_str());
 
     let save_request = SaveRequest {
         tag: primary_tag.clone(),
-        write_scope_tag: Some(write_scope_tag.clone()),
+        write_scope_tag: request_write_scope_tag.clone(),
         manifest_root_digest: manifest_root_digest.clone(),
         compression_algorithm: "zstd".to_string(),
         storage_mode: Some("cas".to_string()),
@@ -98,7 +100,7 @@ async fn persist_manifest_entry_inner(
         uncompressed_size: None,
         compressed_size: None,
         file_count: Some(request_blob_count.min(u32::MAX as u64) as u32),
-        expected_manifest_digest: Some(manifest_root_digest.clone()),
+        expected_manifest_digest: Some(pointer_digest.clone()),
         expected_manifest_size: Some(manifest_size),
         force: None,
         use_multipart: None,
@@ -142,9 +144,9 @@ async fn persist_manifest_entry_inner(
     let publish_present_blobs = present_blobs.clone();
     let publish_pointer_bytes = pointer_bytes.clone();
     let confirm_tag = primary_tag.clone();
-    let confirm_write_scope_tag = write_scope_tag.clone();
+    let confirm_write_scope_tag = request_write_scope_tag.clone();
     let confirm_cache_entry_id = save_response.cache_entry_id.clone();
-    let confirm_manifest_digest = manifest_root_digest.clone();
+    let confirm_manifest_digest = pointer_digest.clone();
     let confirm_manifest_size = pointer_bytes.len() as u64;
     let confirm_file_count = request_blob_count.min(u32::MAX as u64) as u32;
     let all_blob_digests: Vec<String> = present_blobs
@@ -156,6 +158,7 @@ async fn persist_manifest_entry_inner(
         &state.workspace,
         &save_response,
         manifest_root_digest.clone(),
+        pointer_digest.clone(),
         pointer_bytes.len() as u64,
         Some(all_blob_digests),
         move |save_response| {
@@ -238,17 +241,28 @@ async fn persist_manifest_entry_inner(
                     uncompressed_size: None,
                     compressed_size: None,
                     storage_mode: Some("cas".to_string()),
-                    tag: Some(tag.clone()),
-                    write_scope_tag: Some(write_scope_tag),
+                    tag: non_empty_string(tag.as_str()),
+                    write_scope_tag,
                 };
 
-                let result = match state
-                    .api_client
-                    .confirm_with_retry(&state.workspace, &cache_entry_id, &confirm_request)
-                    .await
-                {
-                    Ok(response) => Ok(response),
-                    Err(error) => Err(OciError::internal(format!("confirm failed: {error}"))),
+                let result = if tag.trim().is_empty() {
+                    match state
+                        .api_client
+                        .finalize_cache_entry(&state.workspace, &cache_entry_id, &confirm_request)
+                        .await
+                    {
+                        Ok(response) => Ok(response),
+                        Err(error) => Err(OciError::internal(format!("finalize failed: {error}"))),
+                    }
+                } else {
+                    match state
+                        .api_client
+                        .confirm_with_retry(&state.workspace, &cache_entry_id, &confirm_request)
+                        .await
+                    {
+                        Ok(response) => Ok(response),
+                        Err(error) => Err(OciError::internal(format!("confirm failed: {error}"))),
+                    }
                 };
                 state
                     .oci_engine_diagnostics
@@ -267,29 +281,28 @@ async fn persist_manifest_entry_inner(
     let cached = std::sync::Arc::new(OciManifestCacheEntry {
         index_json: manifest_body,
         content_type: content_type.clone(),
-        manifest_digest: manifest_digest.clone(),
+        manifest_digest: oci_manifest_digest.clone(),
         cache_entry_id: save_response.cache_entry_id.clone(),
         blobs: blob_descriptors.clone(),
         name: name.to_string(),
         inserted_at: Instant::now(),
     });
+    if !primary_tag.trim().is_empty() {
+        state
+            .oci_manifest_cache
+            .insert(primary_tag.clone(), std::sync::Arc::clone(&cached));
+    }
     state
         .oci_manifest_cache
-        .insert(primary_tag.clone(), std::sync::Arc::clone(&cached));
-    state.oci_manifest_cache.insert(
-        oci_digest_tag(&manifest_digest),
-        std::sync::Arc::clone(&cached),
-    );
+        .insert(oci_manifest_digest.clone(), std::sync::Arc::clone(&cached));
 
     let alias_started_at = Instant::now();
     let alias_result = async {
-        let alias_tags = alias_tags_for_manifest(
-            &primary_tag,
-            &manifest_digest,
-            Some(write_scope_tag.as_str()),
-            configured_human_tags,
-            additional_aliases,
-        );
+        let alias_tags = if primary_tag.trim().is_empty() {
+            Vec::new()
+        } else {
+            alias_tags_for_manifest(&primary_tag, configured_human_tags, additional_aliases)
+        };
         for alias in alias_tags {
             if let Err(error) = bind_alias_tag(
                 state,
@@ -326,7 +339,14 @@ async fn persist_manifest_entry_inner(
         .record_publish_phase("alias", alias_started_at.elapsed().as_millis() as u64);
     alias_result?;
 
-    Ok(PersistManifestResult { manifest_digest })
+    Ok(PersistManifestResult {
+        manifest_digest: oci_manifest_digest,
+    })
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 pub(crate) fn request_cas_blob_summary(

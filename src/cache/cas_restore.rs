@@ -75,33 +75,39 @@ where
         });
     }
 
+    let (pointer, actual_root_hex) = match cas_adapter {
+        crate::adapters::CasAdapterKind::Oci => {
+            let pointer = crate::cas_oci::parse_pointer(&pointer_bytes)?;
+            let index_json = pointer.index_json_bytes()?;
+            (
+                CasPointer::Oci(pointer),
+                crate::cas_oci::sha256_hex(&index_json),
+            )
+        }
+        crate::adapters::CasAdapterKind::File => (
+            CasPointer::File(crate::cas_file::parse_pointer(&pointer_bytes)?),
+            actual_manifest_hex.clone(),
+        ),
+    };
+
     let resolved_manifest_root_digest = hit
         .manifest_root_digest
         .clone()
-        .unwrap_or_else(|| format!("sha256:{actual_manifest_hex}"));
+        .unwrap_or_else(|| format!("sha256:{actual_root_hex}"));
     if !digest_matches(
         cas_adapter,
         &resolved_manifest_root_digest,
-        &actual_manifest_hex,
+        &actual_root_hex,
     ) {
         return Ok(FetchCasPointerOutcome::Ignored {
             reason: format!(
                 "CAS manifest root digest mismatch for {} (expected {}, got sha256:{})",
-                hit.tag, resolved_manifest_root_digest, actual_manifest_hex
+                hit.tag, resolved_manifest_root_digest, actual_root_hex
             ),
         });
     }
 
     verify_signature(hit, &resolved_manifest_root_digest)?;
-
-    let pointer = match cas_adapter {
-        crate::adapters::CasAdapterKind::Oci => {
-            CasPointer::Oci(crate::cas_oci::parse_pointer(&pointer_bytes)?)
-        }
-        crate::adapters::CasAdapterKind::File => {
-            CasPointer::File(crate::cas_file::parse_pointer(&pointer_bytes)?)
-        }
-    };
 
     Ok(FetchCasPointerOutcome::Ready(FetchedCasPointer {
         resolved_manifest_root_digest,

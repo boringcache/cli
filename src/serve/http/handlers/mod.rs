@@ -39,12 +39,12 @@ use super::oci_tags::{
 use crate::cas_oci;
 use crate::serve::cache_registry;
 use crate::serve::engines::oci::blobs as oci_blobs;
+#[cfg(test)]
+use crate::serve::state::OciManifestCacheEntry;
 use crate::serve::state::{
     AppState, CacheSessionSummarySnapshot, HttpTransportConfig, build_cache_session_summary,
     diagnostics_enabled,
 };
-#[cfg(test)]
-use crate::serve::state::{OciManifestCacheEntry, oci_digest_tag};
 
 const OCI_DEGRADED_HEADER: &str = "X-BoringCache-Cache-Degraded";
 const OCI_PREFETCH_STATE_HEADER: &str = "X-BoringCache-Prefetch-State";

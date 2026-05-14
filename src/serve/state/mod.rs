@@ -1,6 +1,5 @@
 use crate::api::client::ApiClient;
 use crate::api::models::cache::BlobDescriptor;
-use crate::cas_oci::sha256_hex;
 use crate::ci_detection::{CiRunContext, CiSourceRefType};
 use crate::tag_utils::TagResolver;
 use dashmap::DashMap;
@@ -236,45 +235,6 @@ mod tests {
 
         crate::test_env::remove_var(PROXY_DEBUG_ENV);
         set_diagnostics_enabled(false);
-    }
-
-    #[test]
-    fn oci_ref_tag_is_deterministic() {
-        let tag1 = oci_ref_tag("my-cache", "main");
-        let tag2 = oci_ref_tag("my-cache", "main");
-        assert_eq!(tag1, tag2);
-        assert_eq!(
-            tag1,
-            format!(
-                "oci_ref_my-cache__main__{}",
-                &sha256_hex(b"my-cache:main")[..16]
-            )
-        );
-    }
-
-    #[test]
-    fn oci_ref_tag_differs_for_different_inputs() {
-        let tag1 = oci_ref_tag("my-cache", "main");
-        let tag2 = oci_ref_tag("my-cache", "dev");
-        assert_ne!(tag1, tag2);
-    }
-
-    #[test]
-    fn legacy_oci_ref_tag_keeps_hash_only_shape() {
-        let tag = legacy_oci_ref_tag_for_input("my-cache:main");
-        assert_eq!(tag, format!("oci_ref_{}", sha256_hex(b"my-cache:main")));
-    }
-
-    #[test]
-    fn oci_digest_tag_strips_prefix() {
-        let tag = oci_digest_tag("sha256:abc123def456");
-        assert_eq!(tag, "oci_digest_abc123def456");
-    }
-
-    #[test]
-    fn oci_digest_tag_handles_bare_hex() {
-        let tag = oci_digest_tag("abc123def456");
-        assert_eq!(tag, "oci_digest_abc123def456");
     }
 
     #[test]

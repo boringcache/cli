@@ -294,6 +294,8 @@ pub struct RestoreMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_root_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_size_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_mode: Option<String>,

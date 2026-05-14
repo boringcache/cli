@@ -28,10 +28,8 @@ use crate::serve::engines::oci::publish::{
 use crate::serve::engines::oci::{PresentBlob, ensure_manifest_blobs_present};
 use crate::serve::http::error::OciError;
 use crate::serve::http::oci_route::{insert_digest_etag, insert_header};
-use crate::serve::http::oci_tags::{
-    AliasBinding, scoped_legacy_oci_ref_alias_binding, scoped_save_tag, scoped_write_scope_tag,
-};
-use crate::serve::state::{AppState, diagnostics_enabled, oci_digest_tag};
+use crate::serve::http::oci_tags::{AliasBinding, scoped_save_tag, scoped_write_scope_tag};
+use crate::serve::state::{AppState, diagnostics_enabled};
 
 use super::OCI_DEGRADED_HEADER;
 
@@ -150,9 +148,13 @@ pub(super) async fn put_manifest(
             .record_proof_source(blob.source.as_str(), blob.size_bytes);
     }
 
-    let write_scope_tag = scoped_write_scope_tag(&state.tag_resolver, &name, &reference)?;
+    let write_scope_tag = if reference.starts_with("sha256:") {
+        String::new()
+    } else {
+        scoped_write_scope_tag(&state.tag_resolver, &name, &reference)?
+    };
     let tag = if reference.starts_with("sha256:") {
-        oci_digest_tag(&reference)
+        String::new()
     } else {
         scoped_save_tag(
             &state.tag_resolver,
@@ -162,48 +164,10 @@ pub(super) async fn put_manifest(
             &reference,
         )?
     };
-    let mut additional_aliases = if reference.starts_with("sha256:") {
-        vec![AliasBinding {
-            tag: scoped_save_tag(
-                &state.tag_resolver,
-                &state.configured_human_tags,
-                &state.primary_cache_tag,
-                &name,
-                "latest",
-            )?,
-            write_scope_tag: Some(scoped_write_scope_tag(
-                &state.tag_resolver,
-                &name,
-                "latest",
-            )?),
-            required: false,
-        }]
-    } else {
-        Vec::new()
-    };
-    if !reference.starts_with("sha256:")
-        && let Some(alias) = scoped_legacy_oci_ref_alias_binding(
-            &state.tag_resolver,
-            &state.configured_human_tags,
-            &state.primary_cache_tag,
-            &name,
-            &reference,
-        )?
-    {
-        additional_aliases.push(alias);
+    let mut additional_aliases = Vec::new();
+    if !reference.starts_with("sha256:") {
+        additional_aliases.extend(planned_alias_promotion_bindings(&state, &name)?);
     }
-    if reference.starts_with("sha256:")
-        && let Some(alias) = scoped_legacy_oci_ref_alias_binding(
-            &state.tag_resolver,
-            &state.configured_human_tags,
-            &state.primary_cache_tag,
-            &name,
-            "latest",
-        )?
-    {
-        additional_aliases.push(alias);
-    }
-    additional_aliases.extend(planned_alias_promotion_bindings(&state, &name)?);
     let persist_result: Result<bool, OciError> = async {
         persist_manifest_entry(PersistManifestEntryInput {
             state: &state,
@@ -404,15 +368,6 @@ fn planned_alias_promotion_bindings(
             )?),
             required: false,
         });
-        if let Some(alias) = scoped_legacy_oci_ref_alias_binding(
-            &state.tag_resolver,
-            &state.configured_human_tags,
-            &state.primary_cache_tag,
-            name,
-            reference,
-        )? {
-            bindings.push(alias);
-        }
     }
 
     Ok(bindings)

@@ -17,9 +17,8 @@ pub(super) fn local_oci_manifest_digest(path: &Path) -> Result<Option<String>> {
     }
 
     let scan = crate::cache::cas_oci::scan_layout(path)?;
-    let pointer_bytes = crate::cache::cas_oci::build_pointer(&scan)?;
-    Ok(Some(crate::cache::cas_oci::prefixed_sha256_digest(
-        &pointer_bytes,
+    Ok(Some(crate::cache::cas_oci::manifest_root_digest(
+        &scan.index_json,
     )))
 }
 
@@ -182,7 +181,8 @@ pub(super) async fn sync_to_remote_oci(
         .context("OCI scan task panicked")??;
 
     let pointer_bytes = crate::cache::cas_oci::build_pointer(&scan)?;
-    let manifest_root_digest = crate::cache::cas_oci::prefixed_sha256_digest(&pointer_bytes);
+    let manifest_root_digest = crate::cache::cas_oci::manifest_root_digest(&scan.index_json);
+    let pointer_digest = crate::cache::cas_oci::prefixed_sha256_digest(&pointer_bytes);
     let manifest_size = pointer_bytes.len() as u64;
     let blob_count = scan.blobs.len() as u64;
     let file_count = blob_count.min(u32::MAX as u64) as u32;
@@ -227,7 +227,7 @@ pub(super) async fn sync_to_remote_oci(
             blobs,
             blob_sources,
             confirm_spec: crate::cache::cas_publish::CasConfirmSpec {
-                manifest_digest: manifest_root_digest,
+                manifest_digest: pointer_digest,
                 manifest_size,
                 blob_count,
                 blob_total_size_bytes,

@@ -160,6 +160,10 @@ pub fn build_pointer(scan: &OciLayoutScan) -> Result<Vec<u8>> {
     serde_json::to_vec(&pointer).context("Failed to serialize OCI CAS pointer")
 }
 
+pub fn manifest_root_digest(index_json: &[u8]) -> String {
+    prefixed_sha256_digest(index_json)
+}
+
 pub fn parse_pointer(bytes: &[u8]) -> Result<OciPointer> {
     let mut pointer: OciPointer =
         serde_json::from_slice(bytes).context("Failed to parse OCI CAS pointer")?;

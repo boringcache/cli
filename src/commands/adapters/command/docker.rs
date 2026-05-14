@@ -289,10 +289,14 @@ fn inject_buildkit_cache_flags(
 }
 
 fn docker_cache_import_spec(registry_ref: &str) -> String {
+    // The registry ref is always the local proxy endpoint started for this
+    // command, so BuildKit must use plain HTTP to reach it.
     format!("type=registry,ref={registry_ref},registry.insecure=true")
 }
 
 fn docker_cache_export_spec(registry_ref: &str, cache_mode: &str) -> String {
+    // The registry ref is always the local proxy endpoint started for this
+    // command, so BuildKit must use plain HTTP to reach it.
     format!("type=registry,ref={registry_ref},mode={cache_mode},registry.insecure=true")
 }
 

@@ -1177,12 +1177,12 @@ async fn test_restore_materializes_oci_layout() {
     let blob_bytes = b"oci-layer".to_vec();
     let blob_hex = cas_oci::sha256_hex(&blob_bytes);
     let blob_digest = format!("sha256:{blob_hex}");
+    let index_json = b"{\"schemaVersion\":2}";
     let pointer = cas_oci::OciPointer {
         format_version: 1,
         adapter: "oci-v1".to_string(),
         manifest_content_type: None,
-        index_json_base64: base64::engine::general_purpose::STANDARD
-            .encode(b"{\"schemaVersion\":2}"),
+        index_json_base64: base64::engine::general_purpose::STANDARD.encode(index_json),
         oci_layout_base64: base64::engine::general_purpose::STANDARD
             .encode(b"{\"imageLayoutVersion\":\"1.0.0\"}"),
         blobs: vec![cas_oci::OciPointerBlob {
@@ -1192,7 +1192,8 @@ async fn test_restore_materializes_oci_layout() {
         }],
     };
     let pointer_bytes = serde_json::to_vec(&pointer).expect("Failed to encode OCI pointer");
-    let root_digest = cas_oci::prefixed_sha256_digest(&pointer_bytes);
+    let root_digest = cas_oci::manifest_root_digest(index_json);
+    let pointer_digest = cas_oci::prefixed_sha256_digest(&pointer_bytes);
 
     let _restore_mock = server
         .mock(
@@ -1207,7 +1208,7 @@ async fn test_restore_materializes_oci_layout() {
                 "status": "hit",
                 "cache_entry_id": "restore-oci-entry",
                 "manifest_root_digest": root_digest,
-                "manifest_digest": root_digest,
+                "manifest_digest": pointer_digest,
                 "manifest_url": format!("{}/oci-pointer", server.url()),
                 "storage_mode": "cas",
                 "cas_layout": "oci-v1",
