@@ -10,9 +10,12 @@ concurrency:
   group: cli-ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
-  BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
+  BORINGCACHE_SAVE_TOKEN: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.BORINGCACHE_SAVE_TOKEN || '' }}
   SCCACHE_VERSION: "v0.14.0"
   CARGO_INCREMENTAL: "0"
 
@@ -237,8 +240,8 @@ jobs:
             -w /workspace
             -e CARGO_TARGET_DIR=/workspace/target
             -e CARGO_INCREMENTAL=${{ env.CARGO_INCREMENTAL }}
-            -e BORINGCACHE_RESTORE_TOKEN=${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
-            -e BORINGCACHE_SAVE_TOKEN=${{ secrets.BORINGCACHE_SAVE_TOKEN }}
+            -e BORINGCACHE_RESTORE_TOKEN="${BORINGCACHE_RESTORE_TOKEN}"
+            -e BORINGCACHE_SAVE_TOKEN="${BORINGCACHE_SAVE_TOKEN}"
           )
           if [ -n "${BORINGCACHE_BIN_PATH:-}" ] && [ -f "${BORINGCACHE_BIN_PATH}" ]; then
             docker_args+=(-v "${BORINGCACHE_BIN_PATH}:/usr/local/bin/boringcache:ro")
