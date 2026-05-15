@@ -123,6 +123,7 @@ fn push_customer_candidate(
         bottleneck,
         crate::commands::status::format_relative_time(&session.created_at)
     ));
+    push_value_evidence(lines, review);
     if let Some(action) = crate::commands::status::review_next_action(review)
         .or(candidate.suggested_action.as_deref())
     {
@@ -143,6 +144,7 @@ fn push_review_summary(
         "{label}: {}",
         crate::commands::status::truncate(crate::commands::status::review_headline(review), 92)
     ));
+    push_value_evidence(lines, review);
     if let Some(action) = crate::commands::status::review_next_action(review) {
         lines.push(format!(
             "next: {}",
@@ -154,6 +156,17 @@ fn push_review_summary(
         crate::commands::status::truncate(&session.session_id, 18),
         session.tool,
         crate::commands::status::format_relative_time(&session.created_at)
+    ));
+}
+
+fn push_value_evidence(lines: &mut Vec<String>, review: &WorkspaceStatusSessionReview) {
+    if review.value_evidence.is_empty() {
+        return;
+    }
+
+    lines.push(format!(
+        "evidence: {}",
+        crate::commands::status::truncate(&review.value_evidence.join("; "), 92)
     ));
 }
 
@@ -200,8 +213,9 @@ mod tests {
 
         assert_eq!(lines[0], "action: BoringCache did not restore this cache.");
         assert!(lines[1].contains("bottleneck=cache_miss_bound"));
+        assert_eq!(lines[2], "evidence: 1 miss".to_string());
         assert_eq!(
-            lines[2],
+            lines[3],
             "next: Check tag/ref naming and trusted save path.".to_string()
         );
     }

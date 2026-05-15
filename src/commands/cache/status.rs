@@ -411,6 +411,13 @@ pub(crate) fn session_review_lines(session: &WorkspaceStatusSession) -> Vec<Stri
         lines.push(format!("why: {}", truncate(detail, 92)));
     }
 
+    if !review.value_evidence.is_empty() {
+        lines.push(format!(
+            "evidence: {}",
+            truncate(&review.value_evidence.join("; "), 92)
+        ));
+    }
+
     if let Some(action) = review_next_action(review) {
         lines.push(format!("next: {}", truncate(action, 92)));
     }
@@ -774,6 +781,7 @@ mod tests {
             vec![
                 "value: action - BoringCache did not restore this cache.".to_string(),
                 "why: No cache entry was found for this tag.".to_string(),
+                "evidence: 1 miss".to_string(),
                 "next: Check tag/ref naming and trusted save path.".to_string()
             ]
         );
