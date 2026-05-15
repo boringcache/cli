@@ -393,14 +393,18 @@ pub(crate) fn session_review_lines(session: &WorkspaceStatusSession) -> Vec<Stri
         return Vec::new();
     };
 
-    if review.state == "clear" && review.issue_candidates.is_empty() && !review.service_side_issue {
+    if review.state == "clear"
+        && review.issue_candidates.is_empty()
+        && !review.service_side_issue
+        && !has_value_report(review)
+    {
         return Vec::new();
     }
 
     let label = match review.state.as_str() {
         "action_required" => "action",
         "service_side_issue" => "service",
-        _ => "review",
+        _ => value_label(review),
     };
     let mut lines = vec![format!(
         "value: {label} - {}",
@@ -423,6 +427,28 @@ pub(crate) fn session_review_lines(session: &WorkspaceStatusSession) -> Vec<Stri
     }
 
     lines
+}
+
+fn has_value_report(review: &WorkspaceStatusSessionReview) -> bool {
+    review.value_headline.is_some()
+        || review.value_detail.is_some()
+        || !review.value_evidence.is_empty()
+        || review
+            .value_outcome
+            .as_deref()
+            .is_some_and(|outcome| outcome != "unknown")
+}
+
+fn value_label(review: &WorkspaceStatusSessionReview) -> &'static str {
+    match review.value_outcome.as_deref() {
+        Some("saved_work") => "saved",
+        Some("populated_cache") => "stored",
+        Some("no_cache_reads") => "no-reads",
+        Some("skipped") => "skipped",
+        Some("missed_cache") => "missed",
+        Some("service_issue") => "service",
+        _ => "review",
+    }
 }
 
 pub(crate) fn review_headline(review: &WorkspaceStatusSessionReview) -> &str {
@@ -788,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn session_review_lines_stays_quiet_for_clear_reviews() {
+    fn session_review_lines_render_clear_value_reports() {
         let mut status = sample_status_response();
         status.sessions[0].review = Some(WorkspaceStatusSessionReview {
             primary_bottleneck: None,
@@ -800,6 +826,33 @@ mod tests {
             value_detail: Some("Cache served every read on this run.".to_string()),
             value_next_action: Some("Nothing to do.".to_string()),
             value_evidence: vec!["1 hit".to_string()],
+            service_side_issue: false,
+            issue_candidates: Vec::new(),
+        });
+
+        assert_eq!(
+            session_review_lines(&status.sessions[0]),
+            vec![
+                "value: saved - BoringCache saved work on this run.".to_string(),
+                "why: Cache served every read on this run.".to_string(),
+                "evidence: 1 hit".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn session_review_lines_stays_quiet_for_old_clear_reviews_without_value() {
+        let mut status = sample_status_response();
+        status.sessions[0].review = Some(WorkspaceStatusSessionReview {
+            primary_bottleneck: None,
+            state: "clear".to_string(),
+            summary: "No customer action needed from the available cache telemetry.".to_string(),
+            value_outcome: None,
+            value_owner: None,
+            value_headline: None,
+            value_detail: None,
+            value_next_action: None,
+            value_evidence: Vec::new(),
             service_side_issue: false,
             issue_candidates: Vec::new(),
         });
