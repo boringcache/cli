@@ -28,6 +28,34 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify release tag signature
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            echo "unsupported trigger for release gate: ${{ github.event_name }}"
+            exit 1
+          fi
+
+          if [[ "$(git cat-file -t "${TAG}" 2>/dev/null || true)" != "tag" ]]; then
+            echo "Release tag ${TAG} must be an annotated signed tag object."
+            exit 1
+          fi
+
+          ALLOWED_SIGNERS="${RUNNER_TEMP}/release_allowed_signers"
+          printf '%s\n' \
+            'gaurav@gauravtiwari.co.uk ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILVC6w5HTvW0TZwuN0/J3axNnAfNclejNgpCWs0b2KAM' \
+            >"${ALLOWED_SIGNERS}"
+
+          git \
+            -c gpg.format=ssh \
+            -c gpg.ssh.allowedSignersFile="${ALLOWED_SIGNERS}" \
+            tag -v "${TAG}"
+
       - name: Verify CLI CI passed for tagged commit
         id: gate
         env:

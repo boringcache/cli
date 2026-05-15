@@ -224,6 +224,24 @@ create_signed_tag() {
     git tag -s -m "Release v${version}" "v${version}" "${target_ref}"
 }
 
+verify_signed_tag() {
+    local version="$1"
+    local tag="v${version}"
+    local object_type
+
+    object_type="$(git cat-file -t "${tag}" 2>/dev/null || true)"
+    if [[ "${object_type}" != "tag" ]]; then
+        log_error "${tag} is not an annotated signed tag object."
+        exit 1
+    fi
+
+    log_info "Verifying signature for ${tag}..."
+    if ! git tag -v "${tag}"; then
+        log_error "${tag} signature verification failed. Refusing to push an unsigned release tag."
+        exit 1
+    fi
+}
+
 assert_head_matches_origin() {
     local branch="$1"
     local local_sha
@@ -377,6 +395,7 @@ main() {
 
         log_info "Tagging already-prepared release commit $(git rev-parse --short "$tag_target_sha")."
         create_signed_tag "$new_version" "$tag_target_sha"
+        verify_signed_tag "$new_version"
         log_info "Pushing tag v${new_version} to origin..."
         git push origin "v$new_version"
 
@@ -439,6 +458,7 @@ main() {
 
     # Step 8: Create signed annotated tag
     create_signed_tag "$new_version"
+    verify_signed_tag "$new_version"
 
     # Step 9: Push commit and tag
     log_info "Pushing to origin..."
