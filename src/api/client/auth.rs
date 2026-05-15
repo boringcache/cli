@@ -3,12 +3,15 @@ use super::*;
 impl ApiClient {
     pub async fn create_cli_connect_session(
         &self,
+        token_scope: crate::api::models::cli_connect::CliConnectTokenScope,
     ) -> Result<crate::api::models::cli_connect::CliConnectSessionCreateResponse> {
         let url = self.build_v2_url("cli-connect/sessions");
         debug!("POST {}", url);
 
         let response = self
-            .send_public_request(self.client.post(&url).json(&serde_json::json!({})))
+            .send_public_request(self.client.post(&url).json(
+                &crate::api::models::cli_connect::CliConnectSessionCreateRequest { token_scope },
+            ))
             .await?;
 
         self.parse_json_response(response).await

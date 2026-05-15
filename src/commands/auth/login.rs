@@ -1,3 +1,4 @@
+use crate::api::models::CliConnectTokenScope;
 use crate::commands::onboard::{
     CliEmailAuthOptions, ensure_default_workspace_after_onboarding, run_cli_connect_onboarding,
 };
@@ -19,7 +20,8 @@ pub async fn execute(
     }
 
     let cli_email_auth = CliEmailAuthOptions::from_inputs(email, name, username);
-    let token = run_cli_connect_onboarding(manual, cli_email_auth).await?;
+    let token =
+        run_cli_connect_onboarding(manual, cli_email_auth, CliConnectTokenScope::User).await?;
     crate::commands::auth::execute_with_options(token.clone(), false).await?;
     ensure_default_workspace_after_onboarding(&token).await?;
 

@@ -1,4 +1,5 @@
 use crate::api::client::ApiClient;
+use crate::api::models::CliConnectTokenScope;
 use crate::api::models::optimize::{
     OptimizeChange, OptimizeFileRequest, OptimizeFileResult, OptimizeRequest, OptimizeResponse,
 };
@@ -212,7 +213,13 @@ pub async fn execute(
             ui::info("Browser approval only grants this CLI workspace access.");
             ui::blank_line();
 
-            let token = match run_cli_connect_onboarding(manual, cli_email_auth).await {
+            let token = match run_cli_connect_onboarding(
+                manual,
+                cli_email_auth,
+                CliConnectTokenScope::Workspace,
+            )
+            .await
+            {
                 Ok(token) => token,
                 Err(err) => {
                     ui::warn(&format!("Interactive sign-in failed: {err}"));
@@ -1526,20 +1533,27 @@ async fn ensure_ai_assist_ready(json_output: bool) -> Result<()> {
 pub(crate) async fn run_cli_connect_onboarding(
     manual: bool,
     email_auth: Option<CliEmailAuthOptions>,
+    token_scope: CliConnectTokenScope,
 ) -> Result<String> {
     let client = ApiClient::new()?;
-    let connect = client.create_cli_connect_session().await?;
+    let connect = client.create_cli_connect_session(token_scope).await?;
 
     ui::blank_line();
     let email_auth_selected = email_auth.is_some();
 
     if let Some(email_auth) = email_auth {
-        ui::info("Continue onboarding by email:");
+        ui::info(match token_scope {
+            CliConnectTokenScope::User => "Continue account sign-in by email:",
+            CliConnectTokenScope::Workspace => "Continue onboarding by email:",
+        });
         ui::info(&format!("  Email: {}", email_auth.email));
         ui::info(&format!("  Browser fallback: {}", connect.authorize_url));
         start_cli_connect_email_auth(&client, &connect.session_id, email_auth).await?;
     } else {
-        ui::info("Approve CLI access:");
+        ui::info(match token_scope {
+            CliConnectTokenScope::User => "Approve account sign-in:",
+            CliConnectTokenScope::Workspace => "Approve CLI access:",
+        });
         ui::info(&format!("  1. Open {}", connect.verification_url));
         ui::info(&format!("  2. Enter code {}", connect.user_code));
         ui::info(&format!("  Direct link: {}", connect.authorize_url));

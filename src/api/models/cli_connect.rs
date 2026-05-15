@@ -10,10 +10,24 @@ pub struct CliConnectEmailAuthRequest {
     pub username: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CliConnectTokenScope {
+    User,
+    Workspace,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CliConnectSessionCreateRequest {
+    pub token_scope: CliConnectTokenScope,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CliConnectSessionCreateResponse {
     pub session_id: String,
     pub poll_token: String,
+    #[serde(default)]
+    pub token_scope: Option<CliConnectTokenScope>,
     pub user_code: String,
     pub verification_url: String,
     pub authorize_url: String,
@@ -30,6 +44,8 @@ pub struct CliConnectWorkspace {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CliConnectSessionPollResponse {
     pub session_id: String,
+    #[serde(default)]
+    pub token_scope: Option<CliConnectTokenScope>,
     pub status: String,
     pub expires_at: String,
     #[serde(default)]

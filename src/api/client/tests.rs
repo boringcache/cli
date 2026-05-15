@@ -955,10 +955,13 @@ async fn test_create_cli_connect_session_without_auth_token() {
     let mock = server
         .mock("POST", "/v2/cli-connect/sessions")
         .match_header("content-type", "application/json")
+        .match_body(Matcher::Json(json!({
+            "token_scope": "user"
+        })))
         .with_status(201)
         .with_header("content-type", "application/json")
         .with_body(
-            r#"{"session_id":"abc123","poll_token":"poll-secret","user_code":"ABCD-EF12","verification_url":"https://boringcache.com/cli/connect","authorize_url":"https://boringcache.com/cli/connect/abc123","expires_at":"2026-03-02T12:00:00Z","poll_interval_seconds":3}"#,
+            r#"{"session_id":"abc123","poll_token":"poll-secret","token_scope":"user","user_code":"ABCD-EF12","verification_url":"https://boringcache.com/cli/connect","authorize_url":"https://boringcache.com/cli/connect/abc123","expires_at":"2026-03-02T12:00:00Z","poll_interval_seconds":3}"#,
         )
         .create_async()
         .await;
@@ -967,12 +970,16 @@ async fn test_create_cli_connect_session_without_auth_token() {
 
     let client = ApiClient::new().expect("client should initialize without auth token");
     let response = client
-        .create_cli_connect_session()
+        .create_cli_connect_session(crate::api::models::CliConnectTokenScope::User)
         .await
         .expect("cli connect session should be created");
 
     assert_eq!(response.session_id, "abc123");
     assert_eq!(response.poll_token, "poll-secret");
+    assert_eq!(
+        response.token_scope,
+        Some(crate::api::models::CliConnectTokenScope::User)
+    );
     assert_eq!(response.user_code, "ABCD-EF12");
     assert_eq!(
         response.verification_url,
