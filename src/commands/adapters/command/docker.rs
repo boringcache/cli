@@ -5,6 +5,8 @@ use super::{AdapterCommandOptions, AdapterRunner, no_extra_proxy_env};
 use crate::ci_detection::CiRunContext;
 use crate::proxy;
 
+const LEGACY_DOCKER_CACHE_REF_TAG_DEFAULT: &str = "buildcache";
+
 pub(super) const RUNNER: AdapterRunner = AdapterRunner {
     name: "docker",
     inject_proxy_env: no_extra_proxy_env,
@@ -83,7 +85,9 @@ pub(super) fn resolve_docker_plan(input: ResolveDockerPlanInput<'_>) -> Result<R
             "Unsupported --tag '{human_cache_tag}'. Use a human-readable cache tag, not a digest reference."
         );
     }
-    if trim_non_empty(legacy_explicit_cache_ref_tag).is_some()
+    let unsupported_legacy_cache_ref_tag = trim_non_empty(legacy_explicit_cache_ref_tag)
+        .is_some_and(|tag| tag != LEGACY_DOCKER_CACHE_REF_TAG_DEFAULT);
+    if unsupported_legacy_cache_ref_tag
         || trim_non_empty(legacy_explicit_cache_run_ref_tag).is_some()
         || !legacy_explicit_cache_from_ref_tags.is_empty()
         || !legacy_explicit_cache_promote_ref_tags.is_empty()

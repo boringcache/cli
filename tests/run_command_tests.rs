@@ -1936,6 +1936,48 @@ fn test_buildkit_dry_run_json_injects_cache_flags() {
 }
 
 #[test]
+fn test_docker_dry_run_json_ignores_old_action_default_cache_ref_tag() {
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .args([
+            "docker",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "docker-main",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--cache-ref-tag",
+            "buildcache",
+            "--dry-run",
+            "--json",
+            "--",
+            "docker",
+            "buildx",
+            "build",
+            ".",
+        ])
+        .output()
+        .expect("Failed to execute docker dry-run command with old default ref flag");
+
+    assert!(
+        output.status.success(),
+        "Dry-run should ignore old default --cache-ref-tag, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json output");
+    assert_schema_version(&parsed);
+    let resolved_tag = test_platform_tag("docker-main");
+    assert_eq!(
+        parsed["oci_cache"]["registry_ref"],
+        format!("host.docker.internal:5000/cache:{resolved_tag}")
+    );
+    assert_eq!(parsed["oci_cache"]["cache_tag"], resolved_tag);
+}
+
+#[test]
 fn test_docker_dry_run_json_rejects_old_ref_alias_flags() {
     let mut command = Command::new(cli_binary());
     apply_test_env(&mut command);
