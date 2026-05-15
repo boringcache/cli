@@ -47,6 +47,27 @@ setting even when the repo has CI files that do not need optimization.
 `BORINGCACHE_SAVE_TOKEN` without printing token values. If both secrets already
 exist, it leaves them alone; pass `--rotate-ci-tokens` to replace them.
 
+## Automation and agents
+
+For agents, scripts, and CI bootstrap jobs, prefer the GitHub-secrets path:
+
+```bash
+boringcache onboard \
+  --workspace my-org/app \
+  --create-workspace \
+  --github-secrets \
+  --apply \
+  --json
+```
+
+That command keeps the same product path as interactive onboarding, but returns a
+bounded JSON report with `workspace`, `repo_config`, `github_secrets`,
+`optimize_results`, and `next_steps`.
+
+Use `--create-ci-tokens` only when another system must receive token values
+directly. Its JSON output includes the new restore/save token values, so do not
+write that output to public logs or commit it to the repo.
+
 If onboard writes `.boringcache.toml`, later commands can use semantic entries and profiles instead of repeating raw `tag:path` pairs:
 
 ```toml

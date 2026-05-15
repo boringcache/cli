@@ -120,6 +120,8 @@ struct OnboardAutomationReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     github_secrets: Option<GithubSecretsAutomationReport>,
     optimize_results: Vec<OptimizeFileResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    next_steps: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -323,7 +325,7 @@ pub async fn execute(
 
         if json_output {
             if automation_requested {
-                println!("{}", serde_json::to_string_pretty(&automation_report)?);
+                print_automation_report(&mut automation_report)?;
             } else {
                 println!("{{\"results\":[]}}");
             }
@@ -407,7 +409,7 @@ pub async fn execute(
             print_repo_config_tip();
         } else {
             if automation_requested {
-                println!("{}", serde_json::to_string_pretty(&automation_report)?);
+                print_automation_report(&mut automation_report)?;
             } else {
                 println!("{{\"results\":[]}}");
             }
@@ -601,14 +603,14 @@ pub async fn execute(
             });
         }
         if json_output && automation_requested {
-            println!("{}", serde_json::to_string_pretty(&automation_report)?);
+            print_automation_report(&mut automation_report)?;
         }
         return Ok(());
     }
 
     if dry_run {
         if json_output && automation_requested {
-            println!("{}", serde_json::to_string_pretty(&automation_report)?);
+            print_automation_report(&mut automation_report)?;
         }
         return Ok(());
     }
@@ -737,10 +739,63 @@ pub async fn execute(
     }
 
     if json_output && automation_requested {
-        println!("{}", serde_json::to_string_pretty(&automation_report)?);
+        print_automation_report(&mut automation_report)?;
     }
 
     Ok(())
+}
+
+fn print_automation_report(report: &mut OnboardAutomationReport) -> Result<()> {
+    report.next_steps = next_steps_for_onboard(report);
+    println!("{}", serde_json::to_string_pretty(report)?);
+    Ok(())
+}
+
+fn next_steps_for_onboard(report: &OnboardAutomationReport) -> Vec<String> {
+    let optimized_workflow = report
+        .optimize_results
+        .iter()
+        .any(|result| result.status == "optimized");
+    let repo_config_changed = report.repo_config.as_ref().is_some_and(|config| {
+        config.wrote || config.added_entries > 0 || config.added_profiles > 0
+    });
+    let printed_ci_token_values = report
+        .ci_tokens
+        .as_ref()
+        .is_some_and(|tokens| tokens.restore_value.is_some() || tokens.save_value.is_some());
+    let github_secrets_ready = report.github_secrets.is_some();
+
+    let mut steps = Vec::new();
+    if repo_config_changed {
+        steps.push("Review .boringcache.toml before committing.".to_string());
+    }
+    if optimized_workflow {
+        steps.push("Review the generated workflow diff before committing.".to_string());
+    }
+    if printed_ci_token_values {
+        steps.push(
+            "Store BORINGCACHE_RESTORE_TOKEN and BORINGCACHE_SAVE_TOKEN as CI secrets; do not commit token values."
+                .to_string(),
+        );
+    } else if optimized_workflow && !github_secrets_ready {
+        steps.push(
+            "Make sure CI has BORINGCACHE_RESTORE_TOKEN and BORINGCACHE_SAVE_TOKEN before relying on the workflow."
+                .to_string(),
+        );
+    }
+    if repo_config_changed || optimized_workflow {
+        steps.push("Commit and push to trigger the first cached CI run.".to_string());
+    } else if github_secrets_ready {
+        steps.push("Rerun CI so jobs can pick up the BoringCache secrets.".to_string());
+    }
+    if report.repo_config.is_some() || optimized_workflow {
+        steps.push(
+            "Use `boringcache doctor --json` for auth/workspace checks and `boringcache audit --json` when cache paths change."
+                .to_string(),
+        );
+    }
+
+    steps
 }
 
 #[derive(Debug, Clone)]

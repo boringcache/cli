@@ -68,6 +68,14 @@ fn onboard_workspace_apply_writes_repo_workspace_config_without_ci_files() {
         "boringcache/benchmark-hugo"
     );
     assert_eq!(body["repo_config"]["wrote"], true);
+    let steps = json_string_array(&body["next_steps"]);
+    assert!(steps.contains(&"Review .boringcache.toml before committing."));
+    assert!(
+        steps
+            .iter()
+            .any(|step| step.contains("boringcache doctor --json")),
+        "next_steps: {steps:?}"
+    );
 }
 
 #[test]
@@ -115,6 +123,58 @@ fn onboard_workspace_apply_writes_repo_workspace_config_when_ci_needs_no_changes
         "boringcache/benchmark-hugo"
     );
     assert_eq!(body["repo_config"]["wrote"], true);
+}
+
+#[test]
+fn onboard_workspace_apply_json_reports_agent_safe_next_steps() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(temp_dir.path().join(".github/workflows")).expect("workflow dir");
+    std::fs::write(
+        temp_dir.path().join(".github/workflows/ci.yml"),
+        "name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/cache@v4\n        with:\n          path: node_modules\n          key: node-${{ runner.os }}-${{ hashFiles('package-lock.json') }}\n      - run: npm ci\n",
+    )
+    .expect("write workflow");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .env("HOME", temp_dir.path())
+        .current_dir(temp_dir.path())
+        .args([
+            "onboard",
+            "--workspace",
+            "boringcache/benchmark-hugo",
+            "--apply",
+            "--json",
+        ])
+        .output()
+        .expect("run onboard --workspace --apply --json");
+
+    assert!(
+        output.status.success(),
+        "onboard should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let workflow = std::fs::read_to_string(temp_dir.path().join(".github/workflows/ci.yml"))
+        .expect("read optimized workflow");
+    assert!(
+        workflow.contains("uses: boringcache/one@v1"),
+        "workflow: {workflow}"
+    );
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse onboard json");
+    assert_eq!(body["optimize_results"][0]["status"], "optimized");
+    let steps = json_string_array(&body["next_steps"]);
+    assert!(steps.contains(&"Review .boringcache.toml before committing."));
+    assert!(steps.contains(&"Review the generated workflow diff before committing."));
+    assert!(
+        steps
+            .iter()
+            .any(|step| step.contains("Make sure CI has BORINGCACHE_RESTORE_TOKEN")),
+        "next_steps: {steps:?}"
+    );
 }
 
 #[test]
@@ -248,4 +308,13 @@ RUN yarn install --frozen-lockfile
         !temp_dir.path().join(".boringcache.toml").exists(),
         "Dockerfiles should not seed repo config"
     );
+}
+
+fn json_string_array(value: &serde_json::Value) -> Vec<&str> {
+    value
+        .as_array()
+        .expect("json value should be an array")
+        .iter()
+        .map(|step| step.as_str().expect("array value should be a string"))
+        .collect()
 }
