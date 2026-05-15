@@ -6,6 +6,7 @@ use std::process::Command;
 
 use crate::ci_detection::CiRunContext;
 use crate::ci_detection::CiSourceRefType;
+use crate::serve::cache_registry::cache_ops::OperationCounters;
 use crate::serve::engines::oci::blobs;
 
 use super::AppState;
@@ -209,7 +210,9 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
             "not_applicable"
         },
     });
+    let operation_summary = state.cache_ops.tool_operation_summary(session_kind.adapter);
     let classification = json!({
+        "cache_temperature": cache_temperature_summary(&operation_summary.totals, &lifecycle),
         "issue_candidates": []
     });
 
@@ -666,6 +669,101 @@ fn sum_json_counts(counts: &serde_json::Map<String, Value>) -> u64 {
     counts.values().filter_map(Value::as_u64).sum()
 }
 
+fn cache_temperature_summary(counters: &OperationCounters, lifecycle: &Value) -> Value {
+    let hits = counters.cache_read_hit_count;
+    let misses = counters.cache_read_miss_count;
+    let errors = counters.cache_read_error_count;
+    let writes = counters.cache_write_count;
+    let reads = hits.saturating_add(misses);
+    let hit_rate = if reads == 0 {
+        0.0
+    } else {
+        ((hits as f64 / reads as f64) * 1000.0).round() / 10.0
+    };
+    let state = if reads == 0 {
+        "no_cache_reads"
+    } else if misses == 0 {
+        "hot"
+    } else if hits > 0 && hit_rate >= 90.0 {
+        "mostly_hot_with_misses"
+    } else if hits > 0 {
+        "warm_mixed"
+    } else {
+        "cold"
+    };
+
+    json!({
+        "state": state,
+        "hit_rate": hit_rate,
+        "hits": hits,
+        "misses": misses,
+        "errors": errors,
+        "writes": writes,
+        "likely_reason": cache_temperature_reason(state, lifecycle, counters),
+    })
+}
+
+fn cache_temperature_reason(
+    state: &str,
+    lifecycle: &Value,
+    counters: &OperationCounters,
+) -> &'static str {
+    if counters.cache_read_error_count > 0 {
+        return "cache_read_errors";
+    }
+
+    if lifecycle_count(
+        lifecycle,
+        "degradation_reason_counts",
+        "storage_check_failed",
+    ) > 0
+        || lifecycle_count(
+            lifecycle,
+            "degradation_reason_counts",
+            "singleflight_timeout",
+        ) > 0
+        || lifecycle_count(
+            lifecycle,
+            "degradation_reason_counts",
+            "startup_prefetch_timeout",
+        ) > 0
+        || lifecycle_count(
+            lifecycle,
+            "degradation_reason_counts",
+            "receipt_commit_failed",
+        ) > 0
+    {
+        return "service_or_storage_degradation";
+    }
+
+    if lifecycle_count(lifecycle, "miss_reason_counts", "boringcache_skip_rule") > 0 {
+        return "boringcache_skip_rule";
+    }
+
+    if lifecycle_count(lifecycle, "miss_reason_counts", "entry_missing") > 0 {
+        return "stored_entry_or_blob_missing";
+    }
+
+    match state {
+        "hot" => "all_reads_hit",
+        "mostly_hot_with_misses" => "partial_key_churn_or_new_work",
+        "warm_mixed" => "mixed_existing_and_new_work",
+        "cold" => "no_hits_for_requested_keys",
+        "no_cache_reads" if counters.cache_write_count > 0 => "cache_save_or_warmup_only",
+        "no_cache_reads" => "no_restore_or_lookup_work",
+        _ => "unknown",
+    }
+}
+
+fn lifecycle_count(lifecycle: &Value, group: &str, key: &str) -> u64 {
+    lifecycle
+        .get(group)
+        .and_then(Value::as_object)
+        .and_then(|counts| counts.get(key))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
 fn throughput_mbps(bytes: u64, body_duration_ms: u64) -> Option<f64> {
     if bytes == 0 || body_duration_ms == 0 {
         return None;
@@ -861,5 +959,50 @@ mod tests {
             2
         );
         assert_eq!(summary["degraded_miss_count"], 22);
+    }
+
+    #[test]
+    fn cache_temperature_summary_classifies_hot_cold_and_partial_runs() {
+        let lifecycle = json!({
+            "miss_reason_counts": {
+                "entry_missing": 4,
+            },
+            "degradation_reason_counts": {},
+        });
+        let cold = cache_temperature_summary(
+            &OperationCounters {
+                cache_read_miss_count: 4,
+                ..OperationCounters::default()
+            },
+            &lifecycle,
+        );
+
+        assert_eq!(cold["state"], "cold");
+        assert_eq!(cold["hit_rate"], 0.0);
+        assert_eq!(cold["likely_reason"], "stored_entry_or_blob_missing");
+
+        let mostly_hot = cache_temperature_summary(
+            &OperationCounters {
+                cache_read_hit_count: 90,
+                cache_read_miss_count: 10,
+                ..OperationCounters::default()
+            },
+            &json!({}),
+        );
+
+        assert_eq!(mostly_hot["state"], "mostly_hot_with_misses");
+        assert_eq!(mostly_hot["hit_rate"], 90.0);
+        assert_eq!(mostly_hot["likely_reason"], "partial_key_churn_or_new_work");
+
+        let hot = cache_temperature_summary(
+            &OperationCounters {
+                cache_read_hit_count: 8,
+                ..OperationCounters::default()
+            },
+            &json!({}),
+        );
+
+        assert_eq!(hot["state"], "hot");
+        assert_eq!(hot["likely_reason"], "all_reads_hit");
     }
 }

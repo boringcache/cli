@@ -242,8 +242,31 @@ impl OperationMetrics {
                 "run_classification": "not_applicable",
             },
             "classification": {
+                "cache_temperature": self.cache_temperature_summary(),
                 "issue_candidates": [],
             },
+        })
+    }
+
+    fn cache_temperature_summary(&self) -> Value {
+        let hits = u64::from(self.operation_type == "restore");
+        let misses = 0u64;
+        let writes = u64::from(self.operation_type == "save");
+        let state = if hits > 0 { "hot" } else { "no_cache_reads" };
+        let likely_reason = if hits > 0 {
+            "all_reads_hit"
+        } else {
+            "cache_save_or_warmup_only"
+        };
+
+        json!({
+            "state": state,
+            "hit_rate": if hits > 0 { 100.0 } else { 0.0 },
+            "hits": hits,
+            "misses": misses,
+            "errors": self.error_count,
+            "writes": writes,
+            "likely_reason": likely_reason,
         })
     }
 
@@ -561,6 +584,62 @@ mod tests {
             "large archive on CI runner"
         );
         assert_eq!(summary["storage"]["retry_count"], 2);
+        assert_eq!(
+            summary["classification"]["cache_temperature"]["state"],
+            "no_cache_reads"
+        );
+        assert_eq!(
+            summary["classification"]["cache_temperature"]["likely_reason"],
+            "cache_save_or_warmup_only"
+        );
+    }
+
+    #[test]
+    fn direct_restore_summary_marks_successful_restore_hot() {
+        let metrics = OperationMetrics::from(RestoreMetrics {
+            tool: "archive".to_string(),
+            tag: "deps".to_string(),
+            manifest_root_digest: Some("sha256:abc".to_string()),
+            total_duration_ms: 1_200,
+            download_duration_ms: 900,
+            extract_duration_ms: 250,
+            compressed_size: 10_000_000,
+            part_count: Some(2),
+            part_size_mb: Some(64),
+            concurrency_level: Some(4),
+            streaming_enabled: Some(true),
+            transfer_profile: Some("download".to_string()),
+            transfer_reason: Some("restore".to_string()),
+            retry_count: 0,
+            error_count: 0,
+            storage_metrics: StorageMetrics {
+                region: None,
+                cache_status: Some("hit".to_string()),
+                block_location: None,
+                timing_header: None,
+            },
+        });
+        let identity = crate::serve::state::CacheSessionRunIdentity::default();
+
+        let batch = metrics.cache_rollups_batch(
+            "demo/workspace",
+            "session-restore".to_string(),
+            "2026-05-11T12:00:00Z".to_string(),
+            identity,
+        );
+        let session = &batch.sessions[0];
+        let summary = session.summary_json.as_ref().expect("summary json");
+
+        assert_eq!(session.hit_count, 1);
+        assert_eq!(session.miss_count, 0);
+        assert_eq!(
+            summary["classification"]["cache_temperature"]["state"],
+            "hot"
+        );
+        assert_eq!(
+            summary["classification"]["cache_temperature"]["hit_rate"],
+            100.0
+        );
     }
 
     #[test]
