@@ -393,15 +393,18 @@ pub async fn execute(
         .collect();
 
     if sendable.is_empty() {
-        if auto_apply && let Some(workspace) = target_workspace.as_deref() {
-            let config_result = ensure_repo_workspace_config(workspace)?;
-            automation_report.repo_config = Some(RepoConfigAutomationReport {
-                path: config_result.path.display().to_string(),
-                workspace: config_result.workspace,
-                wrote: config_result.wrote,
-                added_entries: 0,
-                added_profiles: 0,
-            });
+        if auto_apply {
+            let repo_config = seed_repo_config_from_files(&files)?;
+            if let Some(workspace) = target_workspace.as_deref() {
+                let config_result = ensure_repo_workspace_config(workspace)?;
+                automation_report.repo_config = Some(RepoConfigAutomationReport {
+                    path: config_result.path.display().to_string(),
+                    workspace: config_result.workspace,
+                    wrote: config_result.wrote || repo_config.as_ref().is_some_and(|r| r.wrote),
+                    added_entries: repo_config.as_ref().map(|r| r.added_entries).unwrap_or(0),
+                    added_profiles: repo_config.as_ref().map(|r| r.added_profiles).unwrap_or(0),
+                });
+            }
         }
 
         if !json_output {
@@ -592,15 +595,18 @@ pub async fn execute(
     }
 
     if files_to_apply.is_empty() {
-        if auto_apply && let Some(workspace) = target_workspace.as_deref() {
-            let config_result = ensure_repo_workspace_config(workspace)?;
-            automation_report.repo_config = Some(RepoConfigAutomationReport {
-                path: config_result.path.display().to_string(),
-                workspace: config_result.workspace,
-                wrote: config_result.wrote,
-                added_entries: 0,
-                added_profiles: 0,
-            });
+        if auto_apply {
+            let repo_config = seed_repo_config_from_files(&files)?;
+            if let Some(workspace) = target_workspace.as_deref() {
+                let config_result = ensure_repo_workspace_config(workspace)?;
+                automation_report.repo_config = Some(RepoConfigAutomationReport {
+                    path: config_result.path.display().to_string(),
+                    workspace: config_result.workspace,
+                    wrote: config_result.wrote || repo_config.as_ref().is_some_and(|r| r.wrote),
+                    added_entries: repo_config.as_ref().map(|r| r.added_entries).unwrap_or(0),
+                    added_profiles: repo_config.as_ref().map(|r| r.added_profiles).unwrap_or(0),
+                });
+            }
         }
         if json_output && automation_requested {
             print_automation_report(&mut automation_report)?;

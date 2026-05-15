@@ -81,6 +81,17 @@ struct ManualRunInvocation {
     command: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct WorkflowInput {
+    value: String,
+    line_number: usize,
+}
+
+#[derive(Debug, Clone)]
+struct BoringcacheOneInvocation {
+    entries: Vec<WorkflowInput>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SkipReason {
     Dynamic,
@@ -114,7 +125,7 @@ pub(crate) fn discover_repo_root(start_dir: &Path) -> Result<PathBuf> {
 }
 
 fn default_scan_paths(root: &Path) -> Vec<PathBuf> {
-    ["images", "scripts"]
+    [".github/workflows", "images", "scripts"]
         .iter()
         .map(|path| root.join(path))
         .filter(|path| path.exists())
@@ -355,37 +366,10 @@ fn scan_file(path: &Path, report: &mut ScanReport) -> Result<()> {
         let mut profile_entries = BTreeSet::new();
 
         for pair in invocation.tag_path_pairs {
-            let spec = match parse_save_format(&pair) {
-                Ok(spec) => spec,
-                Err(_) => continue,
-            };
-
-            match classify_skip(&spec.tag, &spec.path) {
-                Some(SkipReason::Dynamic) => {
-                    report.skipped_dynamic_pairs += 1;
-                    continue;
-                }
-                Some(SkipReason::Placeholder) => {
-                    report.skipped_placeholder_pairs += 1;
-                    continue;
-                }
-                None => {}
-            }
-
-            let suggestion = suggest_entry(&spec.tag, &spec.path);
             let source = format!("{}:{}", path.display(), line_number);
-            report
-                .entries
-                .entry(suggestion.0.clone())
-                .and_modify(|entry| {
-                    merge_entry_config(&mut entry.config, &suggestion.1);
-                    entry.sources.insert(source.clone());
-                })
-                .or_insert_with(|| SuggestedEntry {
-                    config: suggestion.1,
-                    sources: BTreeSet::from([source.clone()]),
-                });
-            profile_entries.insert(suggestion.0);
+            if let Some(entry_id) = scan_tag_path_pair(&pair, report, &source) {
+                profile_entries.insert(entry_id);
+            }
         }
 
         if let Some(name) = profile_name
@@ -406,7 +390,75 @@ fn scan_file(path: &Path, report: &mut ScanReport) -> Result<()> {
         }
     }
 
+    scan_boringcache_one_actions(path, &contents, report);
+
     Ok(())
+}
+
+fn scan_tag_path_pair(pair: &str, report: &mut ScanReport, source: &str) -> Option<String> {
+    let spec = match parse_save_format(pair) {
+        Ok(spec) => spec,
+        Err(_) => return None,
+    };
+
+    match classify_skip(&spec.tag, &spec.path) {
+        Some(SkipReason::Dynamic) => {
+            report.skipped_dynamic_pairs += 1;
+            return None;
+        }
+        Some(SkipReason::Placeholder) => {
+            report.skipped_placeholder_pairs += 1;
+            return None;
+        }
+        None => {}
+    }
+
+    let suggestion = suggest_entry(&spec.tag, &spec.path);
+    let entry_id = suggestion.0.clone();
+    add_suggested_entry(report, suggestion, source);
+    Some(entry_id)
+}
+
+fn scan_semantic_entry(entry_id: &str, report: &mut ScanReport, source: &str) -> Option<String> {
+    match classify_entry_reference(entry_id) {
+        Some(SkipReason::Dynamic) => {
+            report.skipped_dynamic_pairs += 1;
+            return None;
+        }
+        Some(SkipReason::Placeholder) => {
+            report.skipped_placeholder_pairs += 1;
+            return None;
+        }
+        None => {}
+    }
+
+    let canonical = canonical_entry_id(entry_id);
+    built_in_default_tag(&canonical)?;
+
+    add_suggested_entry(
+        report,
+        (canonical.clone(), RepoEntryConfig::default()),
+        source,
+    );
+    Some(canonical)
+}
+
+fn add_suggested_entry(
+    report: &mut ScanReport,
+    suggestion: (String, RepoEntryConfig),
+    source: &str,
+) {
+    report
+        .entries
+        .entry(suggestion.0.clone())
+        .and_modify(|entry| {
+            merge_entry_config(&mut entry.config, &suggestion.1);
+            entry.sources.insert(source.to_string());
+        })
+        .or_insert_with(|| SuggestedEntry {
+            config: suggestion.1,
+            sources: BTreeSet::from([source.to_string()]),
+        });
 }
 
 fn count_unescaped_double_quotes(value: &str) -> usize {
@@ -626,6 +678,270 @@ fn classify_skip(tag: &str, path: &str) -> Option<SkipReason> {
     }
 
     None
+}
+
+fn classify_entry_reference(entry: &str) -> Option<SkipReason> {
+    let trimmed = entry.trim();
+    if trimmed == "entry"
+        || trimmed == "<entry>"
+        || trimmed == "example-entry"
+        || trimmed == "tag"
+        || trimmed == "<tag>"
+        || trimmed == "example-tag"
+    {
+        return Some(SkipReason::Placeholder);
+    }
+
+    if trimmed.contains('$')
+        || trimmed.contains("{{")
+        || trimmed.contains("}}")
+        || trimmed.contains("%(")
+        || trimmed.contains("<%")
+    {
+        return Some(SkipReason::Dynamic);
+    }
+
+    None
+}
+
+fn scan_boringcache_one_actions(path: &Path, contents: &str, report: &mut ScanReport) {
+    let lines = contents
+        .lines()
+        .enumerate()
+        .map(|(index, line)| (index + 1, line))
+        .collect::<Vec<_>>();
+
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index].1;
+        if !line_is_boringcache_one_reference(line) {
+            index += 1;
+            continue;
+        }
+
+        let step_indent = workflow_step_indent_for_line(line);
+        let step_end = find_workflow_step_end(&lines, index + 1, step_indent);
+        let invocation = parse_boringcache_one_invocation(&lines, index + 1, step_end, step_indent);
+        for input in invocation.entries {
+            let source = format!("{}:{}", path.display(), input.line_number);
+            for entry in split_workflow_entries(&input.value) {
+                if entry.contains(':') {
+                    scan_tag_path_pair(&entry, report, &source);
+                } else {
+                    scan_semantic_entry(&entry, report, &source);
+                }
+            }
+        }
+
+        index = step_end;
+    }
+}
+
+fn parse_boringcache_one_invocation(
+    lines: &[(usize, &str)],
+    start: usize,
+    end: usize,
+    step_indent: usize,
+) -> BoringcacheOneInvocation {
+    let mut entries = Vec::new();
+    let mut index = start;
+
+    while index < end {
+        let line = lines[index].1;
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            index += 1;
+            continue;
+        }
+
+        let indent = count_leading_spaces(line);
+        if indent <= step_indent {
+            break;
+        }
+
+        if yaml_key_value(trimmed).is_some_and(|(key, value)| {
+            normalize_workflow_input_key(key) == "with" && value.is_empty()
+        }) {
+            let with_indent = indent;
+            index += 1;
+            while index < end {
+                let input_line = lines[index].1;
+                let input_trimmed = input_line.trim_start();
+                if input_trimmed.is_empty() || input_trimmed.starts_with('#') {
+                    index += 1;
+                    continue;
+                }
+
+                let input_indent = count_leading_spaces(input_line);
+                if input_indent <= with_indent {
+                    break;
+                }
+
+                let Some((key, value)) = yaml_key_value(input_trimmed) else {
+                    index += 1;
+                    continue;
+                };
+
+                if normalize_workflow_input_key(key) != "entries" {
+                    index += 1;
+                    continue;
+                }
+
+                let (input_value, next_index) =
+                    read_workflow_input_value(lines, index, input_indent, value);
+                entries.push(WorkflowInput {
+                    value: input_value,
+                    line_number: lines[index].0,
+                });
+                index = next_index;
+            }
+            continue;
+        }
+
+        index += 1;
+    }
+
+    BoringcacheOneInvocation { entries }
+}
+
+fn read_workflow_input_value(
+    lines: &[(usize, &str)],
+    index: usize,
+    key_indent: usize,
+    value: &str,
+) -> (String, usize) {
+    let trimmed = value.trim();
+    if !matches!(trimmed, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
+        return (clean_yaml_scalar(trimmed), index + 1);
+    }
+
+    let mut parts = Vec::new();
+    let mut next_index = index + 1;
+    while next_index < lines.len() {
+        let line = lines[next_index].1;
+        if line.trim().is_empty() {
+            next_index += 1;
+            continue;
+        }
+
+        if count_leading_spaces(line) <= key_indent {
+            break;
+        }
+
+        parts.push(line.trim().to_string());
+        next_index += 1;
+    }
+
+    (parts.join("\n"), next_index)
+}
+
+fn split_workflow_entries(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    let unwrapped = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(trimmed);
+
+    unwrapped
+        .split([',', '\n', '\r'])
+        .map(|entry| clean_yaml_scalar(entry.trim().trim_start_matches("- ").trim()))
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+fn yaml_key_value(line: &str) -> Option<(&str, &str)> {
+    let line = line
+        .trim_start()
+        .strip_prefix("- ")
+        .unwrap_or(line.trim_start());
+    let (key, value) = line.split_once(':')?;
+    let key = key.trim();
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return None;
+    }
+
+    Some((key, value.trim()))
+}
+
+fn normalize_workflow_input_key(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn clean_yaml_scalar(value: &str) -> String {
+    let stripped = strip_yaml_inline_comment(value).trim();
+    let quoted = (stripped.starts_with('"') && stripped.ends_with('"'))
+        || (stripped.starts_with('\'') && stripped.ends_with('\''));
+    if quoted && stripped.len() >= 2 {
+        stripped[1..stripped.len() - 1].to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
+fn strip_yaml_inline_comment(value: &str) -> &str {
+    let mut quote = None;
+    let mut previous_whitespace = true;
+    for (index, ch) in value.char_indices() {
+        match quote {
+            Some(active) if ch == active => quote = None,
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                previous_whitespace = false;
+            }
+            None if ch == '#' && previous_whitespace => return &value[..index],
+            None => previous_whitespace = ch.is_whitespace(),
+        }
+    }
+
+    value
+}
+
+fn line_is_boringcache_one_reference(line: &str) -> bool {
+    let Some((key, value)) = yaml_key_value(line.trim_start()) else {
+        return false;
+    };
+    if normalize_workflow_input_key(key) != "uses" {
+        return false;
+    }
+
+    clean_yaml_scalar(value).starts_with("boringcache/one")
+}
+
+fn workflow_step_indent_for_line(line: &str) -> usize {
+    let indent = count_leading_spaces(line);
+    if line.trim_start().starts_with("- ") {
+        indent
+    } else {
+        indent.saturating_sub(2)
+    }
+}
+
+fn find_workflow_step_end(lines: &[(usize, &str)], mut index: usize, step_indent: usize) -> usize {
+    while index < lines.len() {
+        let line = lines[index].1;
+        if line.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+
+        let indent = count_leading_spaces(line);
+        let trimmed = line.trim_start();
+        if (indent <= step_indent && trimmed.starts_with("- ")) || indent < step_indent {
+            break;
+        }
+        index += 1;
+    }
+
+    index
+}
+
+fn count_leading_spaces(line: &str) -> usize {
+    line.chars().take_while(|ch| *ch == ' ').count()
 }
 
 fn suggest_entry(tag: &str, path: &str) -> (String, RepoEntryConfig) {

@@ -119,6 +119,68 @@ jobs:
 }
 
 #[test]
+fn audit_json_scans_github_workflows_and_reads_boringcache_one_entries() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(temp_dir.path().join(".github/workflows")).expect("workflow dir");
+
+    std::fs::write(
+        temp_dir.path().join(".github/workflows/ci.yml"),
+        r#"
+name: CI
+jobs:
+  test:
+    steps:
+      - name: Setup with BoringCache
+        uses: boringcache/one@v1
+        with:
+          workspace: boringcache/web
+          cache-tag: web
+          entries: |
+            bundler:vendor/bundle
+            build-output:tmp/build
+            ${{ matrix.cache_tag }}:tmp/dynamic
+"#,
+    )
+    .expect("write workflow");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["audit", "--json"])
+        .output()
+        .expect("run audit");
+
+    assert!(
+        output.status.success(),
+        "audit should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"scanned_files\": 1"), "stdout: {stdout}");
+    assert!(stdout.contains("\"id\": \"bundler\""), "stdout: {stdout}");
+    assert!(
+        stdout.contains("\"id\": \"build-output\""),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"tag\": \"build-output\""),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"default_path\": \"tmp/build\""),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"skipped_dynamic_pairs\": 1"),
+        "stdout: {stdout}"
+    );
+    assert!(!stdout.contains("web-build-output"), "stdout: {stdout}");
+    assert!(!stdout.contains("web-bundler"), "stdout: {stdout}");
+}
+
+#[test]
 fn audit_write_generates_repo_config() {
     let temp_dir = TempDir::new().expect("temp dir");
     std::fs::create_dir_all(temp_dir.path().join("scripts")).expect("scripts dir");
@@ -175,4 +237,56 @@ boringcache run my-org/my-app node_modules:node_modules -- yarn install --frozen
         config.contains("entries = [\"node_modules\"]"),
         "config: {config}"
     );
+}
+
+#[test]
+fn audit_write_imports_boringcache_one_raw_entries_without_cache_tag_scope() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(temp_dir.path().join(".github/workflows")).expect("workflow dir");
+
+    std::fs::write(
+        temp_dir.path().join(".github/workflows/ci.yml"),
+        r#"
+name: CI
+jobs:
+  test:
+    steps:
+      - uses: "boringcache/one@v1"
+        with:
+          workspace: boringcache/web
+          cache-tag: web
+          entries: build-output:tmp/build
+"#,
+    )
+    .expect("write workflow");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args(["audit", "--write"])
+        .output()
+        .expect("run audit --write");
+
+    assert!(
+        output.status.success(),
+        "audit --write should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config = std::fs::read_to_string(temp_dir.path().join(".boringcache.toml"))
+        .expect("read generated repo config");
+    assert!(
+        config.contains("[entries.build-output]"),
+        "config: {config}"
+    );
+    assert!(
+        config.contains("tag = \"build-output\""),
+        "config: {config}"
+    );
+    assert!(
+        config.contains("default_path = \"tmp/build\""),
+        "config: {config}"
+    );
+    assert!(!config.contains("web-build-output"), "config: {config}");
 }

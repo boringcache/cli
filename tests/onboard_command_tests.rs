@@ -126,6 +126,66 @@ fn onboard_workspace_apply_writes_repo_workspace_config_when_ci_needs_no_changes
 }
 
 #[test]
+fn onboard_apply_seeds_repo_config_from_existing_boringcache_one_entries() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(temp_dir.path().join(".github/workflows")).expect("workflow dir");
+    std::fs::write(
+        temp_dir.path().join(".github/workflows/ci.yml"),
+        r#"
+name: CI
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: boringcache/one@v1
+        with:
+          workspace: boringcache/benchmark-hugo
+          cache-tag: web
+          entries: build-output:tmp/build
+"#,
+    )
+    .expect("write workflow");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .env("HOME", temp_dir.path())
+        .current_dir(temp_dir.path())
+        .args([
+            "onboard",
+            "--workspace",
+            "boringcache/benchmark-hugo",
+            "--apply",
+            "--json",
+        ])
+        .output()
+        .expect("run onboard --workspace --apply --json");
+
+    assert!(
+        output.status.success(),
+        "onboard should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config = std::fs::read_to_string(temp_dir.path().join(".boringcache.toml"))
+        .expect("read repo config");
+    assert!(
+        config.contains("workspace = \"boringcache/benchmark-hugo\""),
+        "config: {config}"
+    );
+    assert!(
+        config.contains("[entries.build-output]"),
+        "config: {config}"
+    );
+    assert!(!config.contains("web-build-output"), "config: {config}");
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse onboard json");
+    assert_eq!(body["repo_config"]["added_entries"], 1);
+}
+
+#[test]
 fn onboard_workspace_apply_json_reports_agent_safe_next_steps() {
     let temp_dir = TempDir::new().expect("temp dir");
     std::fs::create_dir_all(temp_dir.path().join(".github/workflows")).expect("workflow dir");
