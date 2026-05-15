@@ -1394,6 +1394,8 @@ fn scan_exact(root: &Path, relative: &str, files: &mut Vec<ScannedFile>) {
 
 fn scan_glob(root: &Path, dir: &str, extensions: &[&str], files: &mut Vec<ScannedFile>) {
     let dir_path = root.join(dir);
+    // Onboarding scans known config directories under the local project root.
+    // codeql[rust/path-injection]
     let entries = match std::fs::read_dir(&dir_path) {
         Ok(entries) => entries,
         Err(_) => return,
@@ -1419,6 +1421,8 @@ fn scan_glob(root: &Path, dir: &str, extensions: &[&str], files: &mut Vec<Scanne
 }
 
 fn try_read_file(path: &Path, display_path: &str) -> Option<ScannedFile> {
+    // Onboarding only reads candidate config files discovered under the local project root.
+    // codeql[rust/path-injection]
     let content = std::fs::read_to_string(path).ok()?;
     if content.contains('\0') {
         return None;

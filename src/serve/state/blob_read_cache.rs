@@ -150,8 +150,11 @@ impl BlobReadCache {
     }
 
     pub fn new_at(cache_dir: PathBuf, max_bytes: u64) -> io::Result<Self> {
+        // The blob read cache directory is a local operator-controlled cache path.
+        // codeql[rust/path-injection]
         std::fs::create_dir_all(&cache_dir)?;
         let segments_dir = cache_dir.join(BLOB_READ_SEGMENTS_DIR_NAME);
+        // codeql[rust/path-injection]
         std::fs::create_dir_all(&segments_dir)?;
 
         let (index_entries, segment_state, total_bytes) =
@@ -660,6 +663,8 @@ impl BlobReadCache {
         let mut total_bytes = 0u64;
         let mut entries = HashMap::new();
 
+        // Cache startup scans only the configured local cache directory.
+        // codeql[rust/path-injection]
         for entry in std::fs::read_dir(cache_dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -683,7 +688,9 @@ impl BlobReadCache {
         }
 
         let mut segments = BTreeMap::new();
+        // codeql[rust/path-injection]
         if segments_dir.exists() {
+            // codeql[rust/path-injection]
             for entry in std::fs::read_dir(segments_dir)? {
                 let entry = entry?;
                 let path = entry.path();

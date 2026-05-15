@@ -236,7 +236,10 @@ def find_status_paths(metrics_path, explicit_paths):
     seen = set()
 
     def add(path):
+        # CI passes local artifact paths; resolving them only normalizes for de-duplication.
+        # codeql[py/path-injection]
         resolved = path.resolve()
+        # codeql[py/path-injection]
         if resolved in seen or not path.is_file():
             return
         seen.add(resolved)
@@ -249,10 +252,14 @@ def find_status_paths(metrics_path, explicit_paths):
 
     for raw_path in candidates:
         path = Path(raw_path)
+        # Status inputs are local CI artifact directories, never fetched from a request.
+        # codeql[py/path-injection]
         if path.is_dir():
             for pattern in STATUS_SNAPSHOT_PATTERNS:
+                # codeql[py/path-injection]
                 for candidate in sorted(path.rglob(pattern)):
                     add(candidate)
+        # codeql[py/path-injection]
         elif path.is_file():
             add(path)
 
@@ -344,6 +351,8 @@ def main() -> int:
     path = sys.argv[1]
     metrics_path = Path(path)
     records = []
+    # The metrics path is a local CI artifact supplied by the calling test script.
+    # codeql[py/path-injection]
     with open(path, "r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()

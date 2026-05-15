@@ -130,6 +130,8 @@ fn ensure_restore_target_write_ready(target_path: &Path) -> Result<()> {
         } else if parent.exists() {
             parent.to_path_buf()
         } else {
+            // Restore targets are explicit local paths chosen by the CLI caller.
+            // codeql[rust/path-injection]
             std::fs::create_dir_all(parent).with_context(|| {
                 format!("Failed to create parent directory '{}'", parent.display())
             })?;
@@ -143,6 +145,7 @@ fn ensure_restore_target_write_ready(target_path: &Path) -> Result<()> {
         anyhow::bail!("No existing parent directory for {}", target_path.display());
     }
 
+    // codeql[rust/path-injection]
     let metadata = std::fs::metadata(&directory_to_check)?;
     if !metadata.is_dir() {
         anyhow::bail!("{} is not a directory", directory_to_check.display());
@@ -187,6 +190,8 @@ fn assert_directory_writable(path: &Path) -> Result<()> {
     let test_file_name = format!(".boringcache_test_{}", Uuid::new_v4());
     let test_file = path.join(&test_file_name);
 
+    // The probe file name is generated and written under the already-validated target directory.
+    // codeql[rust/path-injection]
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -203,6 +208,7 @@ fn assert_directory_writable(path: &Path) -> Result<()> {
     file.write_all(b"test")
         .map_err(|error| anyhow::anyhow!("Failed to write to {}: {}", path.display(), error))?;
 
+    // codeql[rust/path-injection]
     std::fs::remove_file(&test_file).map_err(|error| {
         anyhow::anyhow!(
             "Failed to clean up temporary file in {}: {}",

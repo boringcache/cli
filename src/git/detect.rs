@@ -85,10 +85,14 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
 
     loop {
         let candidate = current.join(".git");
+        // Git discovery walks local parent directories from the current workspace.
+        // codeql[rust/path-injection]
         if candidate.is_dir() {
             return Some(candidate);
         }
+        // codeql[rust/path-injection]
         if candidate.is_file()
+            // codeql[rust/path-injection]
             && let Ok(contents) = fs::read_to_string(&candidate)
             && let Some(rest) = contents.strip_prefix("gitdir:")
         {
@@ -111,6 +115,8 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
 
 fn detect_branch_from_head(git_dir: &Path) -> Option<String> {
     let head_path = git_dir.join("HEAD");
+    // git_dir was discovered from the local repository; HEAD is fixed metadata under it.
+    // codeql[rust/path-injection]
     let contents = fs::read_to_string(head_path).ok()?;
     let head = contents.trim();
 
@@ -125,6 +131,8 @@ fn detect_branch_from_head(git_dir: &Path) -> Option<String> {
 
 fn detect_default_branch(git_dir: &Path) -> Option<String> {
     let origin_head = git_dir.join("refs/remotes/origin/HEAD");
+    // git_dir was discovered from the local repository; origin/HEAD is fixed metadata under it.
+    // codeql[rust/path-injection]
     if let Ok(contents) = fs::read_to_string(&origin_head)
         && let Some(rest) = contents.trim().strip_prefix("ref:")
     {

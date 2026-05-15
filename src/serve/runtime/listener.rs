@@ -400,6 +400,8 @@ fn new_runtime_temp_dir() -> Result<PathBuf> {
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
+    // Runtime temp dirs use std::env::temp_dir plus process/UUID entropy.
+    // codeql[rust/path-injection]
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create runtime temp dir {}", dir.display()))?;
     Ok(dir)

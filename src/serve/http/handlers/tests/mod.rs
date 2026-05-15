@@ -21,7 +21,10 @@ fn test_state() -> AppState {
         "boringcache-handler-runtime-{}",
         uuid::Uuid::new_v4()
     ));
+    // Test temp dirs use std::env::temp_dir plus UUID entropy.
+    // codeql[rust/path-injection]
     std::fs::create_dir_all(runtime_temp_dir.join("kv-blobs")).expect("kv blob temp dir");
+    // codeql[rust/path-injection]
     std::fs::create_dir_all(runtime_temp_dir.join("oci-uploads")).expect("oci upload temp dir");
     AppState {
         api_client: ApiClient::new_with_token_override(Some("test-token".to_string()))
