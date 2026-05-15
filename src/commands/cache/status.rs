@@ -1,6 +1,8 @@
 use crate::api::{
     ApiClient,
-    models::workspace::{WorkspaceStatusResponse, WorkspaceStatusSession},
+    models::workspace::{
+        WorkspaceStatusResponse, WorkspaceStatusSession, WorkspaceStatusSessionReview,
+    },
 };
 use crate::progress::format_bytes;
 use crate::ui;
@@ -401,19 +403,39 @@ pub(crate) fn session_review_lines(session: &WorkspaceStatusSession) -> Vec<Stri
         _ => "review",
     };
     let mut lines = vec![format!(
-        "review: {label} - {}",
-        truncate(&review.summary, 92)
+        "value: {label} - {}",
+        truncate(review_headline(review), 92)
     )];
 
-    if let Some(action) = review
-        .issue_candidates
-        .first()
-        .and_then(|candidate| candidate.suggested_action.as_deref())
-    {
+    if let Some(detail) = review.value_detail.as_deref() {
+        lines.push(format!("why: {}", truncate(detail, 92)));
+    }
+
+    if let Some(action) = review_next_action(review) {
         lines.push(format!("next: {}", truncate(action, 92)));
     }
 
     lines
+}
+
+pub(crate) fn review_headline(review: &WorkspaceStatusSessionReview) -> &str {
+    review
+        .value_headline
+        .as_deref()
+        .unwrap_or(review.summary.as_str())
+}
+
+pub(crate) fn review_next_action(review: &WorkspaceStatusSessionReview) -> Option<&str> {
+    review
+        .value_next_action
+        .as_deref()
+        .filter(|action| *action != "Nothing to do.")
+        .or_else(|| {
+            review
+                .issue_candidates
+                .first()
+                .and_then(|candidate| candidate.suggested_action.as_deref())
+        })
 }
 
 fn print_missed_keys_section(status: &WorkspaceStatusResponse) {
@@ -726,6 +748,12 @@ mod tests {
             primary_bottleneck: Some("cache_miss_bound".to_string()),
             state: "action_required".to_string(),
             summary: "No cache entry was found for this tag.".to_string(),
+            value_outcome: Some("missed_cache".to_string()),
+            value_owner: Some("customer".to_string()),
+            value_headline: Some("BoringCache did not restore this cache.".to_string()),
+            value_detail: Some("No cache entry was found for this tag.".to_string()),
+            value_next_action: Some("Check tag/ref naming and trusted save path.".to_string()),
+            value_evidence: vec!["1 miss".to_string()],
             service_side_issue: false,
             issue_candidates: vec![WorkspaceStatusSessionIssueCandidate {
                 owner: "customer".to_string(),
@@ -744,7 +772,8 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "review: action - No cache entry was found for this tag.".to_string(),
+                "value: action - BoringCache did not restore this cache.".to_string(),
+                "why: No cache entry was found for this tag.".to_string(),
                 "next: Check tag/ref naming and trusted save path.".to_string()
             ]
         );
@@ -757,6 +786,12 @@ mod tests {
             primary_bottleneck: None,
             state: "clear".to_string(),
             summary: "No customer action needed from the available cache telemetry.".to_string(),
+            value_outcome: Some("saved_work".to_string()),
+            value_owner: Some("none".to_string()),
+            value_headline: Some("BoringCache saved work on this run.".to_string()),
+            value_detail: Some("Cache served every read on this run.".to_string()),
+            value_next_action: Some("Nothing to do.".to_string()),
+            value_evidence: vec!["1 hit".to_string()],
             service_side_issue: false,
             issue_candidates: Vec::new(),
         });

@@ -114,7 +114,7 @@ fn push_customer_candidate(
         .unwrap_or(candidate.kind.as_str());
     lines.push(format!(
         "action: {}",
-        crate::commands::status::truncate(&candidate.summary, 92)
+        crate::commands::status::truncate(crate::commands::status::review_headline(review), 92)
     ));
     lines.push(format!(
         "session: {}  tool={}  bottleneck={}  {}",
@@ -123,7 +123,9 @@ fn push_customer_candidate(
         bottleneck,
         crate::commands::status::format_relative_time(&session.created_at)
     ));
-    if let Some(action) = candidate.suggested_action.as_deref() {
+    if let Some(action) = crate::commands::status::review_next_action(review)
+        .or(candidate.suggested_action.as_deref())
+    {
         lines.push(format!(
             "next: {}",
             crate::commands::status::truncate(action, 92)
@@ -139,8 +141,14 @@ fn push_review_summary(
 ) {
     lines.push(format!(
         "{label}: {}",
-        crate::commands::status::truncate(&review.summary, 92)
+        crate::commands::status::truncate(crate::commands::status::review_headline(review), 92)
     ));
+    if let Some(action) = crate::commands::status::review_next_action(review) {
+        lines.push(format!(
+            "next: {}",
+            crate::commands::status::truncate(action, 92)
+        ));
+    }
     lines.push(format!(
         "session: {}  tool={}  {}",
         crate::commands::status::truncate(&session.session_id, 18),
@@ -169,6 +177,12 @@ mod tests {
             primary_bottleneck: Some("cache_miss_bound".to_string()),
             state: "action_required".to_string(),
             summary: "A repeated cache miss needs a tag check.".to_string(),
+            value_outcome: Some("missed_cache".to_string()),
+            value_owner: Some("customer".to_string()),
+            value_headline: Some("BoringCache did not restore this cache.".to_string()),
+            value_detail: Some("No cache entry was found for this tag.".to_string()),
+            value_next_action: Some("Check tag/ref naming and trusted save path.".to_string()),
+            value_evidence: vec!["1 miss".to_string()],
             service_side_issue: false,
             issue_candidates: vec![WorkspaceStatusSessionIssueCandidate {
                 owner: "customer".to_string(),
@@ -184,7 +198,7 @@ mod tests {
 
         let lines = analyze_lines(&status);
 
-        assert!(lines[0].starts_with("action: No cache entry"));
+        assert_eq!(lines[0], "action: BoringCache did not restore this cache.");
         assert!(lines[1].contains("bottleneck=cache_miss_bound"));
         assert_eq!(
             lines[2],
@@ -211,6 +225,14 @@ mod tests {
             primary_bottleneck: Some("backend_api_bound".to_string()),
             state: "service_side_issue".to_string(),
             summary: "Backend API latency is elevated.".to_string(),
+            value_outcome: Some("service_issue".to_string()),
+            value_owner: Some("boringcache".to_string()),
+            value_headline: Some("BoringCache may have slowed this run.".to_string()),
+            value_detail: Some("Backend API latency is elevated.".to_string()),
+            value_next_action: Some(
+                "Nothing to change in your repo; keep the run id if this repeats.".to_string(),
+            ),
+            value_evidence: Vec::new(),
             service_side_issue: true,
             issue_candidates: Vec::new(),
         });

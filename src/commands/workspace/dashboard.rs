@@ -1064,6 +1064,24 @@ fn tool_lines(tools: &[WorkspaceStatusTool]) -> Vec<Line<'static>> {
 fn attention_items(status: &WorkspaceStatusResponse) -> Vec<String> {
     let mut items = Vec::new();
 
+    for review in status
+        .sessions
+        .iter()
+        .filter_map(|session| session.review.as_ref())
+    {
+        if review.state == "clear"
+            && review.issue_candidates.is_empty()
+            && !review.service_side_issue
+        {
+            continue;
+        }
+
+        items.push(crate::commands::status::review_headline(review).to_string());
+        if items.len() >= 3 {
+            break;
+        }
+    }
+
     let degraded_total =
         status.operations.cache.degraded_count + status.operations.runtime.degraded_count;
     if degraded_total > 0 {

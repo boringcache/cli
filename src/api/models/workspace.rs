@@ -403,6 +403,18 @@ pub struct WorkspaceStatusSessionReview {
     pub primary_bottleneck: Option<String>,
     pub state: String,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_headline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_next_action: Option<String>,
+    #[serde(default)]
+    pub value_evidence: Vec<String>,
     pub service_side_issue: bool,
     #[serde(default)]
     pub issue_candidates: Vec<WorkspaceStatusSessionIssueCandidate>,
