@@ -264,17 +264,63 @@ prefetch_final_concurrency="$(status_metric "$PREFETCH_STATUS_FILE" "startup_pre
 prefetch_max_observed_concurrency="$(status_metric "$PREFETCH_STATUS_FILE" "startup_prefetch.startup_prefetch_max_observed_concurrency")"
 prefetch_adjustment_count="$(status_metric "$PREFETCH_STATUS_FILE" "startup_prefetch.startup_prefetch_concurrency_adjustment_count")"
 prefetch_adjustments="$(status_metric "$PREFETCH_STATUS_FILE" "startup_prefetch.startup_prefetch_concurrency_adjustments" "")"
+prefetch_reason="$(status_metric "$PREFETCH_STATUS_FILE" "startup_prefetch.startup_prefetch_concurrency_reason" "")"
 
 expected_workload_cap="$SEED_CONCURRENCY"
 expected_adaptive=1
-if (( BLOB_COUNT >= 1000 && BLOB_SIZE_BYTES <= 64 * 1024 )); then
-  expected_workload_cap=100
-elif (( BLOB_SIZE_BYTES >= 8 * 1024 * 1024 )); then
-  expected_workload_cap=4
+expected_high_initial=0
+expected_reason="machine_governor"
+
+inflight_cap="$(( (64 * 1024 * 1024) / BLOB_SIZE_BYTES ))"
+if (( inflight_cap < 1 )); then
+  inflight_cap=1
+elif (( inflight_cap > 2000 )); then
+  inflight_cap=2000
+fi
+
+if (( BLOB_SIZE_BYTES >= 8 * 1024 * 1024 )); then
+  expected_workload_cap=16
+  if (( expected_workload_cap > inflight_cap )); then
+    expected_workload_cap="$inflight_cap"
+  fi
   expected_adaptive=0
+  expected_reason="large_blobs"
+elif (( BLOB_COUNT >= 1000 && BLOB_SIZE_BYTES >= 1024 * 1024 )); then
+  many_medium_inflight_cap="$(( (192 * 1024 * 1024) / BLOB_SIZE_BYTES ))"
+  if (( many_medium_inflight_cap < 1 )); then
+    many_medium_inflight_cap=1
+  elif (( many_medium_inflight_cap > 2000 )); then
+    many_medium_inflight_cap=2000
+  fi
+  expected_workload_cap=96
+  if (( expected_workload_cap > many_medium_inflight_cap )); then
+    expected_workload_cap="$many_medium_inflight_cap"
+  fi
+  expected_high_initial=1
+  expected_reason="many_medium_blobs_io_bound"
 elif (( BLOB_SIZE_BYTES >= 1024 * 1024 )); then
-  expected_workload_cap=8
+  expected_workload_cap=64
+  if (( expected_workload_cap > inflight_cap )); then
+    expected_workload_cap="$inflight_cap"
+  fi
   expected_adaptive=0
+  expected_reason="medium_blobs"
+elif (( BLOB_COUNT >= 1000 && BLOB_SIZE_BYTES <= 64 * 1024 )); then
+  rtt_bound_cap="$(( (128 * 1024 * 1024) / BLOB_SIZE_BYTES ))"
+  if (( rtt_bound_cap < 1 )); then
+    rtt_bound_cap=1
+  elif (( rtt_bound_cap > 2000 )); then
+    rtt_bound_cap=2000
+  fi
+  expected_workload_cap="$rtt_bound_cap"
+  expected_high_initial=1
+  expected_reason="many_small_blobs_rtt_bound"
+elif (( BLOB_COUNT >= 1000 )); then
+  expected_workload_cap=256
+  if (( expected_workload_cap > inflight_cap )); then
+    expected_workload_cap="$inflight_cap"
+  fi
+  expected_reason="many_small_blobs_io_bound"
 fi
 
 expected_prefetch_ceiling="$SEED_CONCURRENCY"
@@ -285,13 +331,19 @@ if (( expected_prefetch_ceiling > BLOB_COUNT )); then
   expected_prefetch_ceiling="$BLOB_COUNT"
 fi
 expected_initial_concurrency="$expected_prefetch_ceiling"
-if (( expected_adaptive == 1 && expected_initial_concurrency > 20 )); then
+if (( expected_adaptive == 1 && expected_high_initial == 0 && expected_initial_concurrency > 20 )); then
   expected_initial_concurrency=20
 fi
 
-echo "  adaptive prefetch: initial=${prefetch_initial_concurrency} ceiling=${prefetch_concurrency} final=${prefetch_final_concurrency} max_observed=${prefetch_max_observed_concurrency} adjustments=${prefetch_adjustment_count}"
+echo "  adaptive prefetch: initial=${prefetch_initial_concurrency} ceiling=${prefetch_concurrency} final=${prefetch_final_concurrency} max_observed=${prefetch_max_observed_concurrency} adjustments=${prefetch_adjustment_count} reason=${prefetch_reason:-unknown}"
 if [[ -n "$prefetch_adjustments" ]]; then
   echo "  adaptive adjustments: ${prefetch_adjustments}"
+fi
+
+if [[ -n "$prefetch_reason" && "$prefetch_reason" != "$expected_reason" ]]; then
+  echo "ERROR: startup_prefetch_concurrency_reason=${prefetch_reason}, expected ${expected_reason}"
+  cat "$PREFETCH_STATUS_FILE"
+  exit 1
 fi
 
 if [[ "$prefetch_concurrency" != "$expected_prefetch_ceiling" ]]; then
