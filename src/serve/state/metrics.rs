@@ -281,6 +281,62 @@ impl Default for SingleflightMetrics {
     }
 }
 
+pub struct KvKeyLookupMetrics {
+    outcomes: DashMap<String, Arc<KvKeyLookupOutcomeMetrics>>,
+}
+
+struct KvKeyLookupOutcomeMetrics {
+    count: AtomicU64,
+}
+
+impl KvKeyLookupMetrics {
+    pub fn new() -> Self {
+        Self {
+            outcomes: DashMap::new(),
+        }
+    }
+
+    pub fn record(&self, namespace: &str, outcome: &str) {
+        self.outcome(namespace, outcome)
+            .count
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn metadata_hints(&self) -> BTreeMap<String, String> {
+        let mut hints = BTreeMap::new();
+        for entry in &self.outcomes {
+            let count = entry.value().count.load(Ordering::Acquire);
+            if count == 0 {
+                continue;
+            }
+            hints.insert(format!("kv_lookup_{}", entry.key()), count.to_string());
+        }
+        hints
+    }
+
+    fn outcome(&self, namespace: &str, outcome: &str) -> Arc<KvKeyLookupOutcomeMetrics> {
+        let key = format!("{}_{}", metric_slug(namespace), metric_slug(outcome));
+        self.outcomes
+            .entry(key)
+            .or_insert_with(|| Arc::new(KvKeyLookupOutcomeMetrics::new()))
+            .clone()
+    }
+}
+
+impl Default for KvKeyLookupMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KvKeyLookupOutcomeMetrics {
+    fn new() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+        }
+    }
+}
+
 impl SingleflightKindMetrics {
     fn new() -> Self {
         Self {
@@ -321,6 +377,31 @@ fn percentile(samples: &[u64], pct: u64) -> u64 {
         .saturating_sub(1)
         .min(sorted.len() - 1);
     sorted[index]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kv_key_lookup_metrics_roll_up_namespace_outcomes() {
+        let metrics = KvKeyLookupMetrics::new();
+
+        metrics.record("bazel_ac", "published_fast_miss");
+        metrics.record("bazel_ac", "published_fast_miss");
+        metrics.record("bazel_ac", "after_refresh_hit");
+
+        let hints = metrics.metadata_hints();
+
+        assert_eq!(
+            hints.get("kv_lookup_bazel_ac_published_fast_miss"),
+            Some(&"2".to_string())
+        );
+        assert_eq!(
+            hints.get("kv_lookup_bazel_ac_after_refresh_hit"),
+            Some(&"1".to_string())
+        );
+    }
 }
 
 pub struct OciEngineDiagnostics {

@@ -11,6 +11,8 @@ use crate::serve::engines::oci::blobs;
 
 use super::AppState;
 
+mod bazel;
+
 #[derive(Clone, Debug, Serialize)]
 pub struct CacheSessionSummarySnapshot {
     pub schema: &'static str,
@@ -28,6 +30,7 @@ pub struct CacheSessionSummarySnapshot {
     pub startup_prefetch: Value,
     pub kv_upload: Value,
     pub singleflight: Value,
+    pub kv_lookup: Value,
     pub local_cache: Value,
     pub buildkit: Value,
     pub classification: Value,
@@ -157,6 +160,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
     let singleflight_hints = state.singleflight_metrics.metadata_hints();
     let startup_prefetch_hints = state.prefetch_metrics.metadata_hints();
     let kv_upload_hints = state.kv_blob_upload_metrics.metadata_hints();
+    let kv_lookup_hints = state.kv_key_lookup_metrics.metadata_hints();
     let skip_rule_match_count = state.skip_rule_metrics.matched_count();
     let identity = cache_session_identity(state);
     let oci_stream_through_min_bytes = blobs::stream_through_min_bytes();
@@ -183,11 +187,14 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
     let rails = crate::observability::rails_request_summary();
     let backend_api = rails.clone();
     let storage = storage_summary(&oci_engine);
+    let operation_summary = state.cache_ops.tool_operation_summary(session_kind.adapter);
     let lifecycle = lifecycle_summary(
         &oci_engine,
         &startup_prefetch_hints,
         &kv_upload_hints,
         &singleflight_hints,
+        &kv_lookup_hints,
+        session_kind.adapter,
         skip_rule_match_count,
     );
     let mut oci = merged_maps_to_json(&[oci_body.clone(), oci_engine, oci_negative]);
@@ -210,10 +217,14 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
             "not_applicable"
         },
     });
-    let operation_summary = state.cache_ops.tool_operation_summary(session_kind.adapter);
+    let cache_key_lookup =
+        bazel::cache_key_lookup_summary(session_kind.adapter, &operation_summary, &kv_lookup_hints);
+    let issue_candidates =
+        bazel::issue_candidates_summary(session_kind.adapter, &operation_summary, &kv_lookup_hints);
     let classification = json!({
         "cache_temperature": cache_temperature_summary(&operation_summary.totals, &lifecycle),
-        "issue_candidates": []
+        "cache_key_lookup": cache_key_lookup,
+        "issue_candidates": issue_candidates
     });
 
     CacheSessionSummarySnapshot {
@@ -232,6 +243,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
         startup_prefetch: map_to_json(startup_prefetch_hints),
         kv_upload: map_to_json(kv_upload_hints),
         singleflight: map_to_json(singleflight_hints),
+        kv_lookup: map_to_json(kv_lookup_hints),
         local_cache,
         buildkit,
         classification,
@@ -392,6 +404,8 @@ fn lifecycle_summary(
     startup_prefetch: &BTreeMap<String, String>,
     kv_upload: &BTreeMap<String, String>,
     singleflight: &BTreeMap<String, String>,
+    kv_lookup: &BTreeMap<String, String>,
+    adapter: &str,
     skip_rule_match_count: u64,
 ) -> Value {
     let mut object = serde_json::Map::new();
@@ -472,6 +486,28 @@ fn lifecycle_summary(
         "receipt_commit_failed",
         metric_u64(kv_upload, "kv_upload_failed_blobs").unwrap_or(0),
     );
+
+    if adapter == "bazel" {
+        insert_positive_count(
+            &mut miss_reason_counts,
+            "action_cache_key_absent_from_warmed_cache",
+            bazel::action_cache_absent_from_warmed_cache_count(kv_lookup),
+        );
+        insert_positive_count(
+            &mut degradation_reason_counts,
+            "action_cache_key_integrity_mismatch",
+            metric_u64(
+                kv_lookup,
+                "kv_lookup_bazel_ac_published_fast_integrity_miss",
+            )
+            .unwrap_or(0),
+        );
+        insert_positive_count(
+            &mut product_behavior_reason_counts,
+            "warmed_cache_refresh_recovered_action_cache_lookup",
+            metric_u64(kv_lookup, "kv_lookup_bazel_ac_after_refresh_hit").unwrap_or(0),
+        );
+    }
 
     insert_count_map(&mut object, "miss_reason_counts", miss_reason_counts);
     insert_count_map(
@@ -929,11 +965,20 @@ mod tests {
                 "singleflight_kv_lookup_follower_timeouts".to_string(),
                 "6".to_string(),
             )]),
+            &BTreeMap::from([(
+                "kv_lookup_bazel_ac_after_refresh_miss".to_string(),
+                "3".to_string(),
+            )]),
+            "bazel",
             7,
         );
 
         assert_eq!(summary["miss_reason_counts"]["entry_missing"], 5);
         assert_eq!(summary["miss_reason_counts"]["boringcache_skip_rule"], 7);
+        assert_eq!(
+            summary["miss_reason_counts"]["action_cache_key_absent_from_warmed_cache"],
+            3
+        );
         assert_eq!(
             summary["product_behavior_reason_counts"]["boringcache_skip_rule"],
             7

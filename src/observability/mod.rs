@@ -63,6 +63,8 @@ pub(crate) struct ObservabilityEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub singleflight: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_lookup: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub local_cache: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buildkit: Option<Value>,
@@ -154,6 +156,7 @@ impl ObservabilityEvent {
             startup_prefetch: None,
             kv_upload: None,
             singleflight: None,
+            kv_lookup: None,
             local_cache: None,
             buildkit: None,
             classification: None,
@@ -206,6 +209,7 @@ impl ObservabilityEvent {
             startup_prefetch: None,
             kv_upload: None,
             singleflight: None,
+            kv_lookup: None,
             local_cache: None,
             buildkit: None,
             classification: None,
@@ -256,6 +260,7 @@ impl ObservabilityEvent {
             startup_prefetch: None,
             kv_upload: None,
             singleflight: None,
+            kv_lookup: None,
             local_cache: None,
             buildkit: None,
             classification: None,
@@ -277,6 +282,7 @@ impl ObservabilityEvent {
         startup_prefetch: Value,
         kv_upload: Value,
         singleflight: Value,
+        kv_lookup: Value,
         local_cache: Value,
         buildkit: Value,
         classification: Value,
@@ -318,6 +324,7 @@ impl ObservabilityEvent {
             startup_prefetch: Some(startup_prefetch),
             kv_upload: Some(kv_upload),
             singleflight: Some(singleflight),
+            kv_lookup: Some(kv_lookup),
             local_cache: Some(local_cache),
             buildkit: Some(buildkit),
             classification: Some(classification),

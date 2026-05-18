@@ -25,6 +25,7 @@ pub(super) fn emit_cache_session_summary(state: &AppState) {
         summary.startup_prefetch,
         summary.kv_upload,
         summary.singleflight,
+        summary.kv_lookup,
         summary.local_cache,
         summary.buildkit,
         summary.classification,

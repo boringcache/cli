@@ -54,6 +54,7 @@ async fn put_kv_object_is_noop_in_read_only_mode() {
         oci_lookup_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
         oci_negative_cache: std::sync::Arc::new(crate::serve::state::OciNegativeCache::new()),
         singleflight_metrics: std::sync::Arc::new(crate::serve::state::SingleflightMetrics::new()),
+        kv_key_lookup_metrics: std::sync::Arc::new(crate::serve::state::KvKeyLookupMetrics::new()),
         kv_last_put: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_backlog_rejects: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_replication_enqueue_deferred: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),

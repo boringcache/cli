@@ -37,6 +37,12 @@ pub(crate) fn content_length_bytes(response: &Response) -> u64 {
         .unwrap_or(0)
 }
 
+fn record_lookup_stage(state: &AppState, namespace: KvNamespace, outcome: &str) {
+    state
+        .kv_key_lookup_metrics
+        .record(namespace.metric_name(), outcome);
+}
+
 fn blob_matches_integrity(
     integrity: Option<KvBlobIntegrity>,
     phase: &str,
@@ -218,7 +224,10 @@ pub(crate) async fn get_or_head_kv_object_inner(
     {
         kv_trace(namespace, &scoped_key, "serve-local");
         match serve_local_blob(&blob, &path, is_head).await {
-            Ok(response) => return Ok(response),
+            Ok(response) => {
+                record_lookup_stage(state, namespace, "pending_hit");
+                return Ok(response);
+            }
             Err(e) => {
                 log::warn!("KV local blob read failed, falling back to backend: {e:?}");
             }
@@ -242,7 +251,10 @@ pub(crate) async fn get_or_head_kv_object_inner(
     {
         kv_trace(namespace, &scoped_key, "serve-flushing");
         match serve_local_blob(&blob, &path, is_head).await {
-            Ok(response) => return Ok(response),
+            Ok(response) => {
+                record_lookup_stage(state, namespace, "flushing_hit");
+                return Ok(response);
+            }
             Err(e) => {
                 log::warn!("KV flushing blob read failed, falling through: {e:?}");
             }
@@ -251,25 +263,32 @@ pub(crate) async fn get_or_head_kv_object_inner(
 
     await_startup_prefetch_readiness(state).await?;
 
-    if let Some((blob, cache_entry_id, cached_url)) =
-        lookup_published_blob(state, &scoped_key).await
-        && blob_matches_integrity(integrity, "published", key, &blob)
-    {
-        kv_trace(namespace, &scoped_key, "serve-published-fast");
-        if use_miss_cache {
-            clear_kv_miss(state, &miss_key);
+    match lookup_published_blob(state, &scoped_key).await {
+        Some((blob, cache_entry_id, cached_url)) => {
+            if blob_matches_integrity(integrity, "published", key, &blob) {
+                record_lookup_stage(state, namespace, "published_fast_hit");
+                kv_trace(namespace, &scoped_key, "serve-published-fast");
+                if use_miss_cache {
+                    clear_kv_miss(state, &miss_key);
+                }
+                return serve_backend_blob(
+                    state,
+                    &cache_entry_id,
+                    &blob,
+                    cached_url.as_deref(),
+                    is_head,
+                )
+                .await;
+            }
+            record_lookup_stage(state, namespace, "published_fast_integrity_miss");
         }
-        return serve_backend_blob(
-            state,
-            &cache_entry_id,
-            &blob,
-            cached_url.as_deref(),
-            is_head,
-        )
-        .await;
+        None => {
+            record_lookup_stage(state, namespace, "published_fast_miss");
+        }
     }
 
     if use_miss_cache && is_recent_kv_miss(state, &miss_key) {
+        record_lookup_stage(state, namespace, "recent_miss");
         kv_trace(namespace, &scoped_key, "recent-miss");
         return Err(RegistryError::not_found("Cache key not found"));
     }
@@ -285,10 +304,12 @@ pub(crate) async fn get_or_head_kv_object_inner(
             kv_trace(namespace, &scoped_key, "lookup-flight-follower-after-wait");
             let result = lookup_published_blob(state, &scoped_key).await;
             if result.is_some() {
+                record_lookup_stage(state, namespace, "post_flight_hit");
                 state
                     .singleflight_metrics
                     .record_post_flight_local_hit("kv-lookup");
             } else {
+                record_lookup_stage(state, namespace, "post_flight_miss");
                 state
                     .singleflight_metrics
                     .record_post_flight_retry_miss("kv-lookup");
@@ -297,11 +318,13 @@ pub(crate) async fn get_or_head_kv_object_inner(
         }
         LookupFlight::Leader(_lookup_guard) => {
             if use_miss_cache && is_recent_kv_miss(state, &miss_key) {
+                record_lookup_stage(state, namespace, "leader_recent_miss");
                 kv_trace(namespace, &scoped_key, "leader-recent-miss");
                 return Err(RegistryError::not_found("Cache key not found"));
             }
 
             if let Some(found) = lookup_published_blob(state, &scoped_key).await {
+                record_lookup_stage(state, namespace, "leader_published_hit");
                 kv_trace(namespace, &scoped_key, "leader-published-hit");
                 Some(found)
             } else {
@@ -309,6 +332,11 @@ pub(crate) async fn get_or_head_kv_object_inner(
                 maybe_refresh_published_index_for_lookup(state).await?;
                 kv_trace(namespace, &scoped_key, "leader-after-refresh");
                 let result = lookup_published_blob(state, &scoped_key).await;
+                if result.is_some() {
+                    record_lookup_stage(state, namespace, "after_refresh_hit");
+                } else {
+                    record_lookup_stage(state, namespace, "after_refresh_miss");
+                }
                 if use_miss_cache && result.is_none() {
                     mark_kv_miss(state, &miss_key);
                     kv_trace(namespace, &scoped_key, "leader-mark-miss");
@@ -337,6 +365,7 @@ pub(crate) async fn get_or_head_kv_object_inner(
         .await;
     }
 
+    record_lookup_stage(state, namespace, "not_found");
     kv_trace(namespace, &scoped_key, "not-found");
     Err(RegistryError::not_found("Cache key not found"))
 }

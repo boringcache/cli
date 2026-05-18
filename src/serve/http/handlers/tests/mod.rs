@@ -59,6 +59,7 @@ fn test_state() -> AppState {
         oci_lookup_inflight: Arc::new(dashmap::DashMap::new()),
         oci_negative_cache: Arc::new(crate::serve::state::OciNegativeCache::new()),
         singleflight_metrics: Arc::new(crate::serve::state::SingleflightMetrics::new()),
+        kv_key_lookup_metrics: Arc::new(crate::serve::state::KvKeyLookupMetrics::new()),
         kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_replication_enqueue_deferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),

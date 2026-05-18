@@ -53,6 +53,7 @@ pub(super) async fn build_server_runtime(
     let oci_engine_diagnostics = Arc::new(state::OciEngineDiagnostics::new());
     let oci_negative_cache = Arc::new(state::OciNegativeCache::new());
     let singleflight_metrics = Arc::new(state::SingleflightMetrics::new());
+    let kv_key_lookup_metrics = Arc::new(state::KvKeyLookupMetrics::new());
     let prefetch_metrics = Arc::new(state::PrefetchMetrics::new());
     let kv_blob_upload_metrics = Arc::new(state::KvBlobUploadMetrics::new());
     let proxy_skip_rules = Arc::new(load_proxy_skip_rules_from_current_dir()?);
@@ -110,6 +111,7 @@ pub(super) async fn build_server_runtime(
         oci_lookup_inflight: Arc::new(dashmap::DashMap::new()),
         oci_negative_cache,
         singleflight_metrics,
+        kv_key_lookup_metrics,
         kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_replication_enqueue_deferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),

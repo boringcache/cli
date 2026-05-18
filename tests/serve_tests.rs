@@ -120,6 +120,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         oci_lookup_inflight: Arc::new(dashmap::DashMap::new()),
         oci_negative_cache: Arc::new(boring_cache_cli::serve::state::OciNegativeCache::new()),
         singleflight_metrics: Arc::new(boring_cache_cli::serve::state::SingleflightMetrics::new()),
+        kv_key_lookup_metrics: Arc::new(boring_cache_cli::serve::state::KvKeyLookupMetrics::new()),
         kv_last_put: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_backlog_rejects: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         kv_replication_enqueue_deferred: Arc::new(std::sync::atomic::AtomicU64::new(0)),

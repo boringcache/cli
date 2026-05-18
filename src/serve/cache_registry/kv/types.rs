@@ -70,7 +70,7 @@ impl KvNamespace {
         }
     }
 
-    fn namespace_prefix(self) -> &'static str {
+    pub(crate) fn metric_name(self) -> &'static str {
         match self {
             KvNamespace::BazelAc => "bazel_ac",
             KvNamespace::BazelCas => "bazel_cas",
@@ -86,7 +86,7 @@ impl KvNamespace {
     }
 
     pub(crate) fn scoped_key(self, key: &str) -> String {
-        format!("{}/{}", self.namespace_prefix(), self.normalize_key(key))
+        format!("{}/{}", self.metric_name(), self.normalize_key(key))
     }
 }
 
