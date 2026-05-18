@@ -141,6 +141,68 @@ fn create_bundler_bundle_dir(base: &Path) -> PathBuf {
     bundle_dir
 }
 
+fn create_npm_node_modules_dir(base: &Path) -> PathBuf {
+    let project_dir = base.join("node_app");
+    let node_modules = project_dir.join("node_modules");
+    fs::create_dir_all(node_modules.join("lodash")).expect("Failed to create lodash dir");
+    fs::create_dir_all(node_modules.join(".bin")).expect("Failed to create bin dir");
+    fs::write(
+        project_dir.join("package-lock.json"),
+        json!({
+            "name": "node-app",
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "node-app" },
+                "node_modules/lodash": {
+                    "version": "4.17.21",
+                    "integrity": "sha512-lodash"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("Failed to write package-lock.json");
+    fs::write(
+        node_modules.join("lodash/package.json"),
+        json!({
+            "name": "lodash",
+            "version": "4.17.21",
+            "bin": {
+                "lodash": "bin/lodash.js"
+            }
+        })
+        .to_string(),
+    )
+    .expect("Failed to write package.json");
+    fs::create_dir_all(node_modules.join("lodash/bin")).expect("Failed to create bin package dir");
+    fs::write(
+        node_modules.join("lodash/bin/lodash.js"),
+        "#!/usr/bin/env node\n",
+    )
+    .expect("Failed to write package bin");
+    fs::write(
+        node_modules.join(".package-lock.json"),
+        json!({
+            "lockfileVersion": 3
+        })
+        .to_string(),
+    )
+    .expect("Failed to write node_modules state lockfile");
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("../lodash/bin/lodash.js", node_modules.join(".bin/lodash"))
+        .expect("Failed to create bin shim");
+
+    #[cfg(windows)]
+    fs::write(
+        node_modules.join(".bin/lodash.cmd"),
+        "@ECHO off\r\nnode ..\\lodash\\bin\\lodash.js %*\r\n",
+    )
+    .expect("Failed to write bin shim");
+
+    node_modules
+}
+
 #[tokio::test]
 async fn test_save_uses_archive_layout_for_generic_directory() {
     let _lock = acquire_test_lock().await;
@@ -393,6 +455,68 @@ async fn test_save_uses_pkg_layout_for_bundler_vendor_bundle() {
     let bundle_dir = create_bundler_bundle_dir(temp_dir.path());
 
     let tag_path = format!("bundler-pkg-tag:{}", bundle_dir.to_string_lossy());
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "save",
+            "test/workspace",
+            tag_path.as_str(),
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(0));
+    clear_env();
+}
+
+#[tokio::test]
+async fn test_save_uses_pkg_layout_for_npm_node_modules() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!("skipping test_save_uses_pkg_layout_for_npm_node_modules: networking disabled");
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+    let _save_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
+        .match_header("authorization", "Bearer test-token-123")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": "npm-pkg-tag",
+                "storage_mode": "cas",
+                "cas_layout": "pkg-v1"
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "npm-pkg-tag",
+                "cache_entry_id": "entry-npm-pkg-1",
+                "exists": true,
+                "status": "ready",
+                "storage_mode": "cas",
+                "cas_layout": "pkg-v1",
+                "blob_count": 1,
+                "blob_total_size_bytes": 1024,
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    restore_env(temp_dir.path(), &server.url());
+
+    let node_modules = create_npm_node_modules_dir(temp_dir.path());
+
+    let tag_path = format!("npm-pkg-tag:{}", node_modules.to_string_lossy());
     let output = std::process::Command::new(cli_binary())
         .args([
             "save",

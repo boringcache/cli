@@ -166,3 +166,10 @@ when encryption, excludes, or an unrecognized layout are present. The mock API
 save proof is in place. Remaining proof gates are real Bundler/Rails smoke and
 archive-vs-package benchmark evidence before claiming or broadening the
 behavior.
+
+2026-05-18 npm slice: added a conservative npm adapter for package-lock v2/v3
+`node_modules` trees. It only reads the `packages` map, packages installed
+directories, captures residual `.bin`/state files through the generic pkg-CAS
+scanner, and rejects linked/workspace, symlinked, pnpm, or unparseable layouts
+so archive mode remains the safe fallback. npm still needs real-repo smoke on a
+large but low-risk app such as n8n before treating the adapter as proven.

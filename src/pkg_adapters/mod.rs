@@ -1,4 +1,5 @@
 mod bundler;
+mod npm;
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -35,7 +36,8 @@ pub trait PkgAdapter: Send + Sync {
 }
 
 pub fn detect_pkg_layout(save_path: &Path) -> Option<DetectedPkgLayout> {
-    let adapters: Vec<Box<dyn PkgAdapter>> = vec![Box::new(bundler::BundlerAdapter)];
+    let adapters: Vec<Box<dyn PkgAdapter>> =
+        vec![Box::new(bundler::BundlerAdapter), Box::new(npm::NpmAdapter)];
 
     for adapter in adapters {
         let Some(detection) = adapter.detect(save_path) else {
