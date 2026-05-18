@@ -9,7 +9,9 @@ pub use pointer::{
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tempfile::TempDir;
+use tokio::task::JoinSet;
 
 #[derive(Debug, Clone)]
 pub struct PkgBlobSource {
@@ -112,8 +114,73 @@ pub async fn materialize_pkg_cas_entries(
     let root = root.to_path_buf();
     let pointer = pointer.clone();
     let blob_path_by_digest = blob_path_by_digest.clone();
+    if packages_can_materialize_concurrently(&pointer.packages) {
+        materialize_pkg_cas_entries_parallel(
+            &root,
+            &pointer,
+            &blob_path_by_digest,
+            allow_external_symlinks,
+        )
+        .await
+    } else {
+        tokio::task::spawn_blocking(move || {
+            materialize_pkg_cas_entries_blocking(
+                &root,
+                &pointer,
+                &blob_path_by_digest,
+                allow_external_symlinks,
+            )
+        })
+        .await
+        .context("Package CAS materialization task panicked")?
+    }
+}
+
+async fn materialize_pkg_cas_entries_parallel(
+    root: &Path,
+    pointer: &PkgPointer,
+    blob_path_by_digest: &HashMap<String, PathBuf>,
+    allow_external_symlinks: bool,
+) -> Result<()> {
+    tokio::fs::create_dir_all(root)
+        .await
+        .with_context(|| format!("Failed to create {}", root.display()))?;
+
+    let mut jobs =
+        package_extract_jobs(root, pointer, blob_path_by_digest, allow_external_symlinks)?;
+    jobs.sort_by(|left, right| {
+        right
+            .size_bytes
+            .cmp(&left.size_bytes)
+            .then_with(|| left.package_key.cmp(&right.package_key))
+    });
+
+    let max_concurrent = crate::command_support::get_optimal_concurrency(jobs.len(), "restore");
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent.max(1)));
+    let mut tasks = JoinSet::new();
+
+    for job in jobs {
+        let semaphore = semaphore.clone();
+        tasks.spawn(async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|error| anyhow!("Package materialize semaphore closed: {error}"))?;
+            tokio::task::spawn_blocking(move || extract_package_job(job))
+                .await
+                .context("Package extract task panicked")?
+        });
+    }
+
+    while let Some(task_result) = tasks.join_next().await {
+        task_result.context("Package materialize task panicked")??;
+    }
+
+    let root = root.to_path_buf();
+    let pointer = pointer.clone();
+    let blob_path_by_digest = blob_path_by_digest.clone();
     tokio::task::spawn_blocking(move || {
-        materialize_pkg_cas_entries_blocking(
+        apply_fixups_and_verify(
             &root,
             &pointer,
             &blob_path_by_digest,
@@ -235,6 +302,15 @@ fn materialize_pkg_cas_entries_blocking(
             .with_context(|| format!("Failed to extract package {}", package.package_key))?;
     }
 
+    apply_fixups_and_verify(root, pointer, blob_path_by_digest, allow_external_symlinks)
+}
+
+fn apply_fixups_and_verify(
+    root: &Path,
+    pointer: &PkgPointer,
+    blob_path_by_digest: &HashMap<String, PathBuf>,
+    allow_external_symlinks: bool,
+) -> Result<()> {
     for fixup in pointer.fixups.iter().filter(|fixup| fixup_rank(fixup) == 0) {
         apply_fixup(root, fixup, blob_path_by_digest, allow_external_symlinks)?;
     }
@@ -246,6 +322,94 @@ fn materialize_pkg_cas_entries_blocking(
     }
 
     verify_install_paths(root, pointer)
+}
+
+#[derive(Debug)]
+struct PackageExtractJob {
+    root: PathBuf,
+    package_key: String,
+    blob_path: PathBuf,
+    size_bytes: u64,
+    allow_external_symlinks: bool,
+}
+
+fn package_extract_jobs(
+    root: &Path,
+    pointer: &PkgPointer,
+    blob_path_by_digest: &HashMap<String, PathBuf>,
+    allow_external_symlinks: bool,
+) -> Result<Vec<PackageExtractJob>> {
+    let blob_sizes = pointer
+        .blobs
+        .iter()
+        .map(|blob| (blob.digest.as_str(), blob.size_bytes))
+        .collect::<HashMap<_, _>>();
+    let mut jobs = Vec::with_capacity(pointer.packages.len());
+
+    for package in &pointer.packages {
+        let blob_path = blob_path_by_digest
+            .get(&package.blob_digest)
+            .ok_or_else(|| anyhow!("Missing package blob {}", package.blob_digest))?;
+        jobs.push(PackageExtractJob {
+            root: root.to_path_buf(),
+            package_key: package.package_key.clone(),
+            blob_path: blob_path.clone(),
+            size_bytes: *blob_sizes.get(package.blob_digest.as_str()).unwrap_or(&0),
+            allow_external_symlinks,
+        });
+    }
+
+    Ok(jobs)
+}
+
+fn extract_package_job(job: PackageExtractJob) -> Result<()> {
+    extract_package_tar(&job.root, &job.blob_path, job.allow_external_symlinks)
+        .with_context(|| format!("Failed to extract package {}", job.package_key))
+}
+
+fn packages_can_materialize_concurrently(packages: &[PkgPointerPackage]) -> bool {
+    #[derive(Debug)]
+    struct InstallPath<'a> {
+        package_index: usize,
+        path: &'a str,
+    }
+
+    let mut install_paths = Vec::new();
+    for (package_index, package) in packages.iter().enumerate() {
+        for install_path in &package.install_paths {
+            install_paths.push(InstallPath {
+                package_index,
+                path: install_path.trim_end_matches('/'),
+            });
+        }
+    }
+    install_paths.sort_by(|left, right| left.path.cmp(right.path));
+
+    let mut ancestors: Vec<InstallPath<'_>> = Vec::new();
+    for install_path in install_paths {
+        while ancestors
+            .last()
+            .is_some_and(|ancestor| !path_contains(ancestor.path, install_path.path))
+        {
+            ancestors.pop();
+        }
+        if ancestors.iter().any(|ancestor| {
+            ancestor.package_index != install_path.package_index
+                && path_contains(ancestor.path, install_path.path)
+        }) {
+            return false;
+        }
+        ancestors.push(install_path);
+    }
+
+    true
+}
+
+fn path_contains(parent: &str, child: &str) -> bool {
+    parent == child
+        || child
+            .strip_prefix(parent)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn extract_package_tar(root: &Path, blob_path: &Path, allow_external_symlinks: bool) -> Result<()> {
@@ -516,6 +680,60 @@ mod tests {
             first.packages[0].blob_digest,
             second.packages[0].blob_digest
         );
+    }
+
+    #[test]
+    fn parallel_materialization_is_allowed_for_disjoint_package_paths() {
+        let packages = vec![
+            PkgPointerPackage {
+                package_key: "bundler:3.4.0:json-2.7.2".to_string(),
+                blob_digest:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                install_paths: vec![
+                    "ruby/3.4.0/gems/json-2.7.2".to_string(),
+                    "ruby/3.4.0/specifications/json-2.7.2.gemspec".to_string(),
+                ],
+                lock_integrity: None,
+            },
+            PkgPointerPackage {
+                package_key: "bundler:3.4.0:rake-13.2.1".to_string(),
+                blob_digest:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                install_paths: vec![
+                    "ruby/3.4.0/gems/rake-13.2.1".to_string(),
+                    "ruby/3.4.0/specifications/rake-13.2.1.gemspec".to_string(),
+                ],
+                lock_integrity: None,
+            },
+        ];
+
+        assert!(packages_can_materialize_concurrently(&packages));
+    }
+
+    #[test]
+    fn parallel_materialization_is_disabled_for_nested_package_paths() {
+        let packages = vec![
+            PkgPointerPackage {
+                package_key: "npm:parent@1.0.0:node_modules/parent".to_string(),
+                blob_digest:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                install_paths: vec!["parent".to_string()],
+                lock_integrity: None,
+            },
+            PkgPointerPackage {
+                package_key: "npm:child@1.0.0:node_modules/parent/node_modules/child".to_string(),
+                blob_digest:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                install_paths: vec!["parent/node_modules/child".to_string()],
+                lock_integrity: None,
+            },
+        ];
+
+        assert!(!packages_can_materialize_concurrently(&packages));
     }
 
     #[test]

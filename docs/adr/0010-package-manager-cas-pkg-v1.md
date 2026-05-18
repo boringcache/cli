@@ -173,3 +173,18 @@ directories, captures residual `.bin`/state files through the generic pkg-CAS
 scanner, and rejects linked/workspace, symlinked, pnpm, or unparseable layouts
 so archive mode remains the safe fallback. npm still needs real-repo smoke on a
 large but low-risk app such as n8n before treating the adapter as proven.
+
+2026-05-18 restore-speed slice: direct CAS restore now front-loads larger blobs
+and uses adaptive download concurrency by default. The restore path starts from
+a blob-shape estimate, raises concurrency when observed goodput improves, backs
+off when goodput drops, and still treats `BORINGCACHE_RESTORE_MAX_CONCURRENCY`
+as a ceiling/escape hatch rather than an opt-in. Package materialization
+extracts disjoint package paths concurrently, but falls back to serial
+extraction when install paths overlap, which keeps conservative npm nested
+package trees safe. Local Rails + MinIO + real benchmark repo proof after this
+change: Mastodon `vendor/bundle` restored 459 blobs / 232 MB in 2.3s
+(879ms download, 1.4s materialize) and `bundle check` passed; Discourse
+`vendor/bundle` restored 358 blobs / 1.01 GB in 6.3s (3.8s download,
+2.5s materialize) and `bundle check` passed. Sub-second cold restores are not a
+credible target for the 1 GB Discourse shape without pipelining download and
+materialization or avoiding filesystem materialization entirely.

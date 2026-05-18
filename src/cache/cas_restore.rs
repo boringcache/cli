@@ -6,8 +6,19 @@ use crate::transfer::send_manifest_request_with_retry;
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
+
+const RESTORE_MAX_CONCURRENCY_ENV: &str = "BORINGCACHE_RESTORE_MAX_CONCURRENCY";
+const MANY_CAS_RESTORE_BLOB_COUNT: usize = 256;
+const SMALL_CAS_RESTORE_BLOB_BYTES: u64 = 1024 * 1024;
+const MEDIUM_CAS_RESTORE_BLOB_BYTES: u64 = 4 * 1024 * 1024;
+const TARGET_CAS_RESTORE_INFLIGHT_BYTES: u64 = 192 * 1024 * 1024;
+const CAS_RESTORE_HARD_CONCURRENCY_CAP: usize = 64;
+const CAS_RESTORE_ADAPTIVE_WINDOW: Duration = Duration::from_millis(250);
+const CAS_RESTORE_ADAPTIVE_MIN_COMPLETIONS: usize = 4;
+const CAS_RESTORE_GOODPUT_GAIN_THRESHOLD: f64 = 1.05;
+const CAS_RESTORE_GOODPUT_DROP_THRESHOLD: f64 = 0.70;
 
 #[derive(Debug)]
 pub(crate) enum CasPointer {
@@ -39,6 +50,15 @@ pub(crate) struct BlobDownloadTarget {
 pub(crate) struct BlobDownloadOutcome {
     pub bytes_downloaded: u64,
     pub storage_metrics: StorageMetrics,
+}
+
+impl BlobDownloadOutcome {
+    fn record_download(&mut self, bytes_downloaded: u64, storage_metrics: StorageMetrics) {
+        self.bytes_downloaded += bytes_downloaded;
+        if self.storage_metrics.region.is_none() {
+            self.storage_metrics = storage_metrics;
+        }
+    }
 }
 
 pub(crate) async fn fetch_cas_pointer<F>(
@@ -136,15 +156,22 @@ pub(crate) async fn download_blob_targets(
         .cache_entry_id
         .as_deref()
         .ok_or_else(|| anyhow!("Missing cache_entry_id for CAS restore"))?;
-    let max_concurrent =
-        crate::command_support::get_optimal_concurrency(download_targets.len(), "restore");
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+    let mut concurrency =
+        CasBlobDownloadConcurrency::new(cas_blob_download_concurrency_plan(download_targets));
     let transfer_client = api_client.transfer_client().clone();
     let mut outcome = BlobDownloadOutcome::default();
     let mut tasks = JoinSet::new();
     let batch_max = crate::api::client::blob_url_batch_max();
 
-    for batch in download_targets.chunks(batch_max) {
+    let mut ordered_targets = download_targets.to_vec();
+    ordered_targets.sort_by(|left, right| {
+        right
+            .size_bytes
+            .cmp(&left.size_bytes)
+            .then_with(|| left.digest.cmp(&right.digest))
+    });
+
+    for batch in ordered_targets.chunks(batch_max) {
         let blobs = batch_blob_descriptors(batch);
         let download_plan = api_client
             .blob_download_urls_verified(workspace, cache_entry_id, &blobs)
@@ -163,19 +190,26 @@ pub(crate) async fn download_blob_targets(
             spawn_download_task(
                 &mut tasks,
                 download_item,
-                semaphore.clone(),
                 progress.clone(),
                 transfer_client.clone(),
                 writer_capacity,
             );
-            if tasks.len() >= max_concurrent {
-                drain_download_task(&mut tasks, &mut outcome).await?;
+            while tasks.len() >= concurrency.current() {
+                let task_outcome = drain_download_task(&mut tasks).await?;
+                let bytes_downloaded = task_outcome.bytes_downloaded;
+                let elapsed = task_outcome.elapsed;
+                outcome.record_download(bytes_downloaded, task_outcome.storage_metrics);
+                concurrency.record_success(bytes_downloaded, elapsed);
             }
         }
     }
 
     while !tasks.is_empty() {
-        drain_download_task(&mut tasks, &mut outcome).await?;
+        let task_outcome = drain_download_task(&mut tasks).await?;
+        let bytes_downloaded = task_outcome.bytes_downloaded;
+        let elapsed = task_outcome.elapsed;
+        outcome.record_download(bytes_downloaded, task_outcome.storage_metrics);
+        concurrency.record_success(bytes_downloaded, elapsed);
     }
 
     Ok(outcome)
@@ -200,18 +234,14 @@ fn batch_blob_descriptors(download_targets: &[BlobDownloadTarget]) -> Vec<BlobDe
 }
 
 fn spawn_download_task(
-    tasks: &mut JoinSet<Result<(u64, StorageMetrics)>>,
+    tasks: &mut JoinSet<Result<BlobDownloadTaskOutcome>>,
     download_target: BlobDownloadItem,
-    semaphore: Arc<tokio::sync::Semaphore>,
     progress: TransferProgress,
     transfer_client: reqwest::Client,
     writer_capacity: usize,
 ) {
     tasks.spawn(async move {
-        let _permit = semaphore
-            .acquire_owned()
-            .await
-            .map_err(|error| anyhow!("Restore blob download semaphore closed: {error}"))?;
+        let started_at = Instant::now();
         let result = crate::cas_transport::download_blob_file(
             &transfer_client,
             &download_target.url,
@@ -222,25 +252,30 @@ fn spawn_download_task(
             Some(&download_target.digest),
         )
         .await;
-        drop(_permit);
-        result
+        let elapsed = started_at.elapsed();
+        let (bytes_downloaded, storage_metrics) = result?;
+        Ok(BlobDownloadTaskOutcome {
+            bytes_downloaded,
+            storage_metrics,
+            elapsed,
+        })
     });
 }
 
 async fn drain_download_task(
-    tasks: &mut JoinSet<Result<(u64, StorageMetrics)>>,
-    outcome: &mut BlobDownloadOutcome,
-) -> Result<()> {
+    tasks: &mut JoinSet<Result<BlobDownloadTaskOutcome>>,
+) -> Result<BlobDownloadTaskOutcome> {
     let Some(task_result) = tasks.join_next().await else {
-        return Ok(());
+        return Err(anyhow!("No CAS blob download task to drain"));
     };
-    let (bytes_downloaded, storage_metrics) =
-        task_result.context("Blob download task panicked")??;
-    outcome.bytes_downloaded += bytes_downloaded;
-    if outcome.storage_metrics.region.is_none() {
-        outcome.storage_metrics = storage_metrics;
-    }
-    Ok(())
+    task_result.context("Blob download task panicked")?
+}
+
+#[derive(Debug)]
+struct BlobDownloadTaskOutcome {
+    bytes_downloaded: u64,
+    storage_metrics: StorageMetrics,
+    elapsed: Duration,
 }
 
 fn build_download_items(
@@ -275,6 +310,146 @@ fn build_download_items(
     Ok(items)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CasBlobDownloadConcurrencyPlan {
+    initial: usize,
+    ceiling: usize,
+    adaptive: bool,
+}
+
+#[derive(Debug)]
+struct CasBlobDownloadConcurrency {
+    current: usize,
+    ceiling: usize,
+    adaptive: bool,
+    window_started_at: Instant,
+    window_completed: usize,
+    window_bytes: u64,
+    smoothed_goodput_bps: Option<f64>,
+}
+
+impl CasBlobDownloadConcurrency {
+    fn new(plan: CasBlobDownloadConcurrencyPlan) -> Self {
+        Self {
+            current: plan.initial.max(1),
+            ceiling: plan.ceiling.max(1),
+            adaptive: plan.adaptive,
+            window_started_at: Instant::now(),
+            window_completed: 0,
+            window_bytes: 0,
+            smoothed_goodput_bps: None,
+        }
+    }
+
+    fn current(&self) -> usize {
+        self.current.max(1)
+    }
+
+    fn record_success(&mut self, bytes_downloaded: u64, elapsed: Duration) {
+        if !self.adaptive {
+            return;
+        }
+
+        self.window_completed += 1;
+        self.window_bytes = self.window_bytes.saturating_add(bytes_downloaded);
+
+        let window_elapsed = self.window_started_at.elapsed();
+        if window_elapsed < CAS_RESTORE_ADAPTIVE_WINDOW
+            && self.window_completed < CAS_RESTORE_ADAPTIVE_MIN_COMPLETIONS
+        {
+            return;
+        }
+
+        let observed_elapsed = window_elapsed.max(elapsed).as_secs_f64().max(0.001);
+        let goodput_bps = self.window_bytes as f64 / observed_elapsed;
+        let previous_goodput = self.smoothed_goodput_bps;
+        let next_goodput = previous_goodput
+            .map(|previous| previous * 0.70 + goodput_bps * 0.30)
+            .unwrap_or(goodput_bps);
+        self.smoothed_goodput_bps = Some(next_goodput);
+
+        if previous_goodput
+            .map(|previous| goodput_bps < previous * CAS_RESTORE_GOODPUT_DROP_THRESHOLD)
+            .unwrap_or(false)
+        {
+            self.current = ((self.current as f64) * 0.85).floor().max(1.0) as usize;
+        } else if self.current < self.ceiling
+            && previous_goodput
+                .map(|previous| goodput_bps > previous * CAS_RESTORE_GOODPUT_GAIN_THRESHOLD)
+                .unwrap_or(true)
+        {
+            let step = ((self.current as f64) * 0.25).ceil() as usize;
+            self.current = self.current.saturating_add(step.max(4)).min(self.ceiling);
+        }
+
+        self.window_started_at = Instant::now();
+        self.window_completed = 0;
+        self.window_bytes = 0;
+    }
+}
+
+fn cas_blob_download_concurrency_plan(
+    download_targets: &[BlobDownloadTarget],
+) -> CasBlobDownloadConcurrencyPlan {
+    let operation_count = download_targets.len();
+    if operation_count == 0 {
+        return CasBlobDownloadConcurrencyPlan {
+            initial: 1,
+            ceiling: 1,
+            adaptive: false,
+        };
+    }
+
+    let base = crate::command_support::get_optimal_concurrency(operation_count, "restore").max(1);
+    let total_bytes = download_targets
+        .iter()
+        .map(|target| target.size_bytes)
+        .sum::<u64>();
+    let average_blob_bytes = total_bytes / operation_count as u64;
+    let profile_floor = if operation_count >= MANY_CAS_RESTORE_BLOB_COUNT
+        && average_blob_bytes <= MEDIUM_CAS_RESTORE_BLOB_BYTES
+    {
+        32
+    } else if operation_count >= 64 && average_blob_bytes <= SMALL_CAS_RESTORE_BLOB_BYTES {
+        24
+    } else {
+        base
+    };
+    let inflight_cap = if average_blob_bytes == 0 {
+        CAS_RESTORE_HARD_CONCURRENCY_CAP
+    } else {
+        TARGET_CAS_RESTORE_INFLIGHT_BYTES
+            .saturating_div(average_blob_bytes)
+            .clamp(1, CAS_RESTORE_HARD_CONCURRENCY_CAP as u64) as usize
+    };
+    let explicit_cap = parse_restore_concurrency_cap()
+        .unwrap_or(CAS_RESTORE_HARD_CONCURRENCY_CAP)
+        .clamp(1, 128);
+
+    let ceiling = inflight_cap.min(explicit_cap).min(operation_count).max(1);
+    let initial = base
+        .max(profile_floor)
+        .min(ceiling)
+        .min(operation_count)
+        .max(1);
+    let adaptive = ceiling > initial && operation_count >= 2;
+
+    CasBlobDownloadConcurrencyPlan {
+        initial,
+        ceiling,
+        adaptive,
+    }
+}
+
+fn parse_restore_concurrency_cap() -> Option<usize> {
+    let raw = std::env::var(RESTORE_MAX_CONCURRENCY_ENV).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<usize>().ok().filter(|value| *value > 0)
+}
+
 fn sha256_hex(cas_adapter: crate::adapters::CasAdapterKind, bytes: &[u8]) -> String {
     match cas_adapter {
         crate::adapters::CasAdapterKind::Oci => crate::cas_oci::sha256_hex(bytes),
@@ -304,6 +479,7 @@ fn digest_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env;
 
     #[test]
     fn build_download_items_rejects_missing_url() {
@@ -357,5 +533,71 @@ mod tests {
             "sha256:abc",
             "abc"
         ));
+    }
+
+    #[test]
+    fn cas_blob_download_concurrency_boosts_many_medium_blobs() {
+        let _guard = test_env::lock();
+        test_env::remove_var(RESTORE_MAX_CONCURRENCY_ENV);
+        let targets = blob_targets(300, 2 * 1024 * 1024);
+
+        let plan = cas_blob_download_concurrency_plan(&targets);
+
+        assert_eq!(plan.initial, 32);
+        assert!(plan.ceiling > plan.initial);
+        assert!(plan.adaptive);
+    }
+
+    #[test]
+    fn cas_blob_download_concurrency_respects_restore_cap() {
+        let _guard = test_env::lock();
+        test_env::set_var(RESTORE_MAX_CONCURRENCY_ENV, "12");
+        let targets = blob_targets(300, 2 * 1024 * 1024);
+
+        let plan = cas_blob_download_concurrency_plan(&targets);
+
+        assert_eq!(plan.initial, 12);
+        assert_eq!(plan.ceiling, 12);
+        assert!(!plan.adaptive);
+        test_env::remove_var(RESTORE_MAX_CONCURRENCY_ENV);
+    }
+
+    #[test]
+    fn cas_blob_download_concurrency_ramps_up_on_healthy_windows() {
+        let mut controller = CasBlobDownloadConcurrency::new(CasBlobDownloadConcurrencyPlan {
+            initial: 16,
+            ceiling: 64,
+            adaptive: true,
+        });
+
+        controller.window_started_at = Instant::now() - CAS_RESTORE_ADAPTIVE_WINDOW;
+        controller.record_success(16 * 1024 * 1024, CAS_RESTORE_ADAPTIVE_WINDOW);
+
+        assert!(controller.current() > 16);
+    }
+
+    #[test]
+    fn cas_blob_download_concurrency_drops_when_goodput_falls() {
+        let mut controller = CasBlobDownloadConcurrency::new(CasBlobDownloadConcurrencyPlan {
+            initial: 32,
+            ceiling: 64,
+            adaptive: true,
+        });
+        controller.smoothed_goodput_bps = Some(100.0);
+        controller.window_started_at = Instant::now() - CAS_RESTORE_ADAPTIVE_WINDOW;
+
+        controller.record_success(1, CAS_RESTORE_ADAPTIVE_WINDOW);
+
+        assert!(controller.current() < 32);
+    }
+
+    fn blob_targets(count: usize, size_bytes: u64) -> Vec<BlobDownloadTarget> {
+        (0..count)
+            .map(|index| BlobDownloadTarget {
+                digest: format!("sha256:{index:064x}"),
+                path: PathBuf::from(format!("/tmp/blob-{index}")),
+                size_bytes,
+            })
+            .collect()
     }
 }
