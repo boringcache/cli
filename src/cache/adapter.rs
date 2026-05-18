@@ -6,6 +6,7 @@ pub enum CacheAdapterKind {
     Cas,
     CasOci,
     CasBazel,
+    CasPkg,
 }
 
 impl CacheAdapterKind {
@@ -15,6 +16,7 @@ impl CacheAdapterKind {
             CacheAdapterKind::Cas => "cas",
             CacheAdapterKind::CasOci => "cas-oci",
             CacheAdapterKind::CasBazel => "cas-bazel",
+            CacheAdapterKind::CasPkg => "cas-pkg",
         }
     }
 }
@@ -69,6 +71,7 @@ fn detect_cas_layout(cas_layout: Option<&str>) -> Option<CacheAdapterKind> {
         Some("oci-v1") => Some(CacheAdapterKind::CasOci),
         Some("bazel-v2") => Some(CacheAdapterKind::CasBazel),
         Some("file-v1") => Some(CacheAdapterKind::Cas),
+        Some("pkg-v1") => Some(CacheAdapterKind::CasPkg),
         _ => None,
     }
 }
@@ -145,6 +148,10 @@ mod tests {
         assert_eq!(
             detect_restore_transport(Some("cas"), Some("file-v1")),
             CacheAdapterKind::Cas
+        );
+        assert_eq!(
+            detect_restore_transport(Some("cas"), Some("pkg-v1")),
+            CacheAdapterKind::CasPkg
         );
     }
 

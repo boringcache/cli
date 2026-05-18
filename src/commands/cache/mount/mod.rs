@@ -537,6 +537,11 @@ async fn initial_restore(
                     require_server_signature,
                 )
             },
+            || async {
+                Err(anyhow::anyhow!(
+                    "pkg-v1 caches cannot be mounted yet; use `boringcache restore`"
+                ))
+            },
         )
         .await?;
     Ok(restore_action)
@@ -731,6 +736,11 @@ async fn sync_to_remote(
                     adapter_detection.kind,
                     require_server_signature,
                 )
+            },
+            || async {
+                Err(anyhow::anyhow!(
+                    "pkg-v1 caches cannot be mounted yet; use `boringcache save`"
+                ))
             },
         )
         .await

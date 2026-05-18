@@ -54,9 +54,9 @@ pub(super) async fn process_restore_oci(
     };
     fetch_step.complete()?;
     let resolved_manifest_root_digest = fetched_pointer.resolved_manifest_root_digest;
-    let pointer = match fetched_pointer.pointer {
+    let pointer = match *fetched_pointer.pointer {
         cas_restore::CasPointer::Oci(pointer) => pointer,
-        cas_restore::CasPointer::File(_) => unreachable!(),
+        cas_restore::CasPointer::File(_) | cas_restore::CasPointer::Pkg(_) => unreachable!(),
     };
 
     let blobs_dir = Path::new(&target_path).join("blobs").join("sha256");

@@ -7,6 +7,7 @@ pub const CONTENT_ADDRESSED_ENCRYPTION_FALLBACK_WARNING: &str =
 pub enum CasAdapterKind {
     Oci,
     File,
+    Pkg,
 }
 
 impl CasAdapterKind {
@@ -22,6 +23,11 @@ impl CasAdapterKind {
                 crate::cache_adapter::CacheAdapterKind::Cas
                     | crate::cache_adapter::CacheAdapterKind::CasBazel
             ),
+            CasAdapterKind::Pkg => matches!(
+                server_kind,
+                crate::cache_adapter::CacheAdapterKind::Cas
+                    | crate::cache_adapter::CacheAdapterKind::CasPkg
+            ),
         }
     }
 
@@ -32,6 +38,7 @@ impl CasAdapterKind {
                 crate::cache_adapter::CacheAdapterKind::CasBazel => "bazel-v2",
                 _ => "file-v1",
             },
+            CasAdapterKind::Pkg => "pkg-v1",
         }
     }
 }
@@ -41,6 +48,7 @@ pub enum AdapterDispatchKind {
     Archive,
     Oci,
     File,
+    Pkg,
 }
 
 impl AdapterDispatchKind {
@@ -49,6 +57,7 @@ impl AdapterDispatchKind {
             AdapterDispatchKind::Archive => crate::cache_adapter::CacheAdapterKind::Archive,
             AdapterDispatchKind::Oci => crate::cache_adapter::CacheAdapterKind::CasOci,
             AdapterDispatchKind::File => crate::cache_adapter::CacheAdapterKind::Cas,
+            AdapterDispatchKind::Pkg => crate::cache_adapter::CacheAdapterKind::CasPkg,
         }
     }
 
@@ -57,6 +66,7 @@ impl AdapterDispatchKind {
             AdapterDispatchKind::Archive => None,
             AdapterDispatchKind::Oci => Some(CasAdapterKind::Oci),
             AdapterDispatchKind::File => Some(CasAdapterKind::File),
+            AdapterDispatchKind::Pkg => Some(CasAdapterKind::Pkg),
         }
     }
 
@@ -75,24 +85,38 @@ impl AdapterDispatchKind {
             .map(|cas_adapter| cas_adapter.cas_layout(detected_kind))
     }
 
-    pub async fn dispatch<T, ArchiveFn, OciFn, FileFn, ArchiveFuture, OciFuture, FileFuture>(
+    pub async fn dispatch<
+        T,
+        ArchiveFn,
+        OciFn,
+        FileFn,
+        PkgFn,
+        ArchiveFuture,
+        OciFuture,
+        FileFuture,
+        PkgFuture,
+    >(
         self,
         archive: ArchiveFn,
         oci: OciFn,
         file: FileFn,
+        pkg: PkgFn,
     ) -> T
     where
         ArchiveFn: FnOnce() -> ArchiveFuture,
         OciFn: FnOnce() -> OciFuture,
         FileFn: FnOnce() -> FileFuture,
+        PkgFn: FnOnce() -> PkgFuture,
         ArchiveFuture: Future<Output = T>,
         OciFuture: Future<Output = T>,
         FileFuture: Future<Output = T>,
+        PkgFuture: Future<Output = T>,
     {
         match self {
             AdapterDispatchKind::Archive => archive().await,
             AdapterDispatchKind::Oci => oci().await,
             AdapterDispatchKind::File => file().await,
+            AdapterDispatchKind::Pkg => pkg().await,
         }
     }
 }
@@ -105,6 +129,7 @@ pub fn select_transport_adapter(
         crate::cache_adapter::CacheAdapterKind::CasOci => AdapterDispatchKind::Oci,
         crate::cache_adapter::CacheAdapterKind::Cas
         | crate::cache_adapter::CacheAdapterKind::CasBazel => AdapterDispatchKind::File,
+        crate::cache_adapter::CacheAdapterKind::CasPkg => AdapterDispatchKind::Pkg,
     }
 }
 
@@ -140,6 +165,19 @@ pub fn select_layout_adapter(
             } else {
                 LayoutAdapterSelection {
                     adapter: AdapterDispatchKind::File,
+                    used_encryption_fallback: false,
+                }
+            }
+        }
+        crate::cache_adapter::CacheAdapterKind::CasPkg => {
+            if encrypt {
+                LayoutAdapterSelection {
+                    adapter: AdapterDispatchKind::Archive,
+                    used_encryption_fallback: true,
+                }
+            } else {
+                LayoutAdapterSelection {
+                    adapter: AdapterDispatchKind::Pkg,
                     used_encryption_fallback: false,
                 }
             }
@@ -182,6 +220,18 @@ mod tests {
         assert!(
             !AdapterDispatchKind::Oci
                 .accepts_server_kind(crate::cache_adapter::CacheAdapterKind::CasBazel)
+        );
+    }
+
+    #[test]
+    fn pkg_adapter_uses_pkg_layout() {
+        assert_eq!(
+            AdapterDispatchKind::Pkg.cas_layout(crate::cache_adapter::CacheAdapterKind::CasPkg),
+            Some("pkg-v1")
+        );
+        assert!(
+            AdapterDispatchKind::Pkg
+                .accepts_server_kind(crate::cache_adapter::CacheAdapterKind::CasPkg)
         );
     }
 

@@ -13,12 +13,13 @@ use tokio::task::JoinSet;
 pub(crate) enum CasPointer {
     Oci(crate::cas_oci::OciPointer),
     File(crate::cas_file::FilePointer),
+    Pkg(crate::cache::cas_pkg::PkgPointer),
 }
 
 #[derive(Debug)]
 pub(crate) struct FetchedCasPointer {
     pub resolved_manifest_root_digest: String,
-    pub pointer: CasPointer,
+    pub pointer: Box<CasPointer>,
 }
 
 #[derive(Debug)]
@@ -88,6 +89,10 @@ where
             CasPointer::File(crate::cas_file::parse_pointer(&pointer_bytes)?),
             actual_manifest_hex.clone(),
         ),
+        crate::adapters::CasAdapterKind::Pkg => (
+            CasPointer::Pkg(crate::cache::cas_pkg::parse_pointer(&pointer_bytes)?),
+            actual_manifest_hex.clone(),
+        ),
     };
 
     let resolved_manifest_root_digest = hit
@@ -111,7 +116,7 @@ where
 
     Ok(FetchCasPointerOutcome::Ready(FetchedCasPointer {
         resolved_manifest_root_digest,
-        pointer,
+        pointer: Box::new(pointer),
     }))
 }
 
@@ -274,6 +279,7 @@ fn sha256_hex(cas_adapter: crate::adapters::CasAdapterKind, bytes: &[u8]) -> Str
     match cas_adapter {
         crate::adapters::CasAdapterKind::Oci => crate::cas_oci::sha256_hex(bytes),
         crate::adapters::CasAdapterKind::File => crate::cas_file::sha256_hex(bytes),
+        crate::adapters::CasAdapterKind::Pkg => crate::cas_file::sha256_hex(bytes),
     }
 }
 
@@ -287,6 +293,9 @@ fn digest_matches(
             crate::cas_oci::digest_matches(expected_digest, actual_manifest_hex)
         }
         crate::adapters::CasAdapterKind::File => {
+            crate::cas_file::digest_matches(expected_digest, actual_manifest_hex)
+        }
+        crate::adapters::CasAdapterKind::Pkg => {
             crate::cas_file::digest_matches(expected_digest, actual_manifest_hex)
         }
     }

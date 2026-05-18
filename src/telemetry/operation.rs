@@ -436,6 +436,7 @@ pub(crate) fn canonical_tool_for_cas_layout(cas_layout: Option<&str>) -> &'stati
     match cas_layout.unwrap_or_default() {
         layout if layout.starts_with("oci") => "oci",
         layout if layout.starts_with("bazel") => "bazel",
+        layout if layout.starts_with("pkg") => "package",
         _ => "archive",
     }
 }

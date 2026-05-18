@@ -29,6 +29,7 @@ pub(super) struct CasSaveBundle {
     pub(super) blob_sources: HashMap<String, BlobUploadSource>,
     pub(super) confirm_spec: cas_publish::CasConfirmSpec,
     pub(super) empty_payload_error: Option<String>,
+    pub(super) _temp_dir: Option<tempfile::TempDir>,
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -172,6 +172,7 @@ pub(crate) fn ensure_server_adapter(
     let expected_name = match expected_adapter {
         crate::adapters::CasAdapterKind::Oci => "OCI",
         crate::adapters::CasAdapterKind::File => "file",
+        crate::adapters::CasAdapterKind::Pkg => "package",
     };
     anyhow::bail!(
         "Server did not negotiate {} CAS mode for {} (adapter '{}')",

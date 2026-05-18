@@ -64,12 +64,14 @@ Owner: cache lifecycle (`public-primary` unless noted otherwise)
 - `src/commands/cache/restore/archive.rs`
 - `src/commands/cache/restore/file.rs`
 - `src/commands/cache/restore/oci.rs`
+- `src/commands/cache/restore/pkg.rs`
 - `src/commands/cache/restore/tests.rs`
 - `src/commands/cache/save/mod.rs`
 - `src/commands/cache/save/archive.rs`
 - `src/commands/cache/save/cas.rs`
 - `src/commands/cache/save/file.rs`
 - `src/commands/cache/save/oci.rs`
+- `src/commands/cache/save/pkg.rs`
 
 Notes:
 
@@ -131,6 +133,7 @@ Owner: cache lifecycle support (`support-primary`)
 - `src/cache/archive_transfer.rs`
 - `src/cache/cas_file.rs`
 - `src/cache/cas_oci.rs`
+- `src/cache/cas_pkg/**`
 - `src/cache/cas_publish.rs`
 - `src/cache/cas_restore.rs`
 - `src/cache/file_materialize.rs`
@@ -138,6 +141,7 @@ Owner: cache lifecycle support (`support-primary`)
 - `src/cache/receipts.rs`
 - `src/cache/transfer.rs`
 - `src/cache/transport.rs`
+- `src/pkg_adapters/**`
 - `src/manifest/mod.rs`
 - `src/manifest/apply.rs`
 - `src/manifest/builder.rs`

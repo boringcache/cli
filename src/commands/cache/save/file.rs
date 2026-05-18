@@ -94,6 +94,7 @@ pub(super) async fn save_single_file_entry(
                         bundle_tag, bundle_path
                     )
                 }),
+                _temp_dir: None,
             })
         },
     )

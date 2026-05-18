@@ -5,6 +5,7 @@ mod archive;
 mod cas;
 mod file;
 mod oci;
+mod pkg;
 
 use anyhow::{Context, Error, Result, anyhow};
 use std::sync::Arc;
@@ -269,7 +270,17 @@ async fn save_single_entry(
         path
     ));
 
-    let adapter_detection = crate::cache_adapter::detect_layout(std::path::Path::new(&path));
+    let mut adapter_detection = crate::cache_adapter::detect_layout(std::path::Path::new(&path));
+    if adapter_detection.kind == crate::cache_adapter::CacheAdapterKind::Archive
+        && !encrypt
+        && exclude.is_empty()
+        && crate::pkg_adapters::has_pkg_layout(std::path::Path::new(&path))
+    {
+        adapter_detection = crate::cache_adapter::AdapterDetection {
+            kind: crate::cache_adapter::CacheAdapterKind::CasPkg,
+            reason: "detected package-manager install tree",
+        };
+    }
     log::debug!(
         "Starting save {} of {} for tag={} path={} workspace={}",
         entry_index + 1,
@@ -307,7 +318,11 @@ async fn save_single_entry(
     let oci_tag = tag.clone();
     let oci_path = path.clone();
     let oci_api_client = shared_api_client.clone();
-    let file_api_client = shared_api_client;
+    let file_workspace = workspace.clone();
+    let file_tag = tag.clone();
+    let file_path = path.clone();
+    let file_api_client = shared_api_client.clone();
+    let pkg_api_client = shared_api_client;
 
     adapter
         .dispatch(
@@ -342,6 +357,21 @@ async fn save_single_entry(
             || async move {
                 file::save_single_file_entry(
                     file_api_client,
+                    file_workspace,
+                    file_tag,
+                    file_path,
+                    verbose,
+                    force,
+                    entry_index,
+                    total_entries,
+                    exclude,
+                    adapter_detection.kind,
+                )
+                .await
+            },
+            || async move {
+                pkg::save_single_pkg_entry(
+                    pkg_api_client,
                     workspace,
                     tag,
                     path,
@@ -349,8 +379,6 @@ async fn save_single_entry(
                     force,
                     entry_index,
                     total_entries,
-                    exclude,
-                    adapter_detection.kind,
                 )
                 .await
             },

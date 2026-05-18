@@ -116,6 +116,31 @@ fn create_oci_cache_dir(base: &Path, dir_name: &str) -> PathBuf {
     cache_dir
 }
 
+fn create_bundler_bundle_dir(base: &Path) -> PathBuf {
+    let project_dir = base.join("rails_app");
+    let bundle_dir = project_dir.join("vendor").join("bundle");
+    fs::create_dir_all(bundle_dir.join("ruby/3.4.0/gems/json-2.7.2/lib"))
+        .expect("Failed to create gem dir");
+    fs::create_dir_all(bundle_dir.join("ruby/3.4.0/specifications"))
+        .expect("Failed to create specifications dir");
+    fs::write(
+        project_dir.join("Gemfile.lock"),
+        "GEM\n  specs:\n    json (2.7.2)\n",
+    )
+    .expect("Failed to write Gemfile.lock");
+    fs::write(
+        bundle_dir.join("ruby/3.4.0/gems/json-2.7.2/lib/json.rb"),
+        "module JSON; end\n",
+    )
+    .expect("Failed to write gem file");
+    fs::write(
+        bundle_dir.join("ruby/3.4.0/specifications/json-2.7.2.gemspec"),
+        "Gem::Specification.new\n",
+    )
+    .expect("Failed to write gemspec");
+    bundle_dir
+}
+
 #[tokio::test]
 async fn test_save_uses_archive_layout_for_generic_directory() {
     let _lock = acquire_test_lock().await;
@@ -304,6 +329,70 @@ async fn test_save_uses_oci_layout_for_oci_cache() {
     .expect("Failed to write OCI blob");
 
     let tag_path = format!("oci-cache-tag:{}", cache_dir.to_string_lossy());
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "save",
+            "test/workspace",
+            tag_path.as_str(),
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(0));
+    clear_env();
+}
+
+#[tokio::test]
+async fn test_save_uses_pkg_layout_for_bundler_vendor_bundle() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!(
+            "skipping test_save_uses_pkg_layout_for_bundler_vendor_bundle: networking disabled"
+        );
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+    let _save_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/caches")
+        .match_header("authorization", "Bearer test-token-123")
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": "bundler-pkg-tag",
+                "storage_mode": "cas",
+                "cas_layout": "pkg-v1"
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "bundler-pkg-tag",
+                "cache_entry_id": "entry-pkg-1",
+                "exists": true,
+                "status": "ready",
+                "storage_mode": "cas",
+                "cas_layout": "pkg-v1",
+                "blob_count": 1,
+                "blob_total_size_bytes": 1024,
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    restore_env(temp_dir.path(), &server.url());
+
+    let bundle_dir = create_bundler_bundle_dir(temp_dir.path());
+
+    let tag_path = format!("bundler-pkg-tag:{}", bundle_dir.to_string_lossy());
     let output = std::process::Command::new(cli_binary())
         .args([
             "save",

@@ -35,6 +35,7 @@ Docs-ready is not the same as rollout-ready. If testing or benchmark proof is de
 | [0007](0007-docker-human-tag-registry-identity.md) | accepted for new CLI paths | Docker/BuildKit registry-cache identity follows resolved human cache tags | Old generated ref controls are migration errors; protocol aliases remain internal compatibility state only |
 | [0008](0008-unified-repo-config-plan-lifecycle.md) | accepted launch-readiness decision | `.boringcache.toml` as durable repo cache plan, with CLI-owned planning, cache scope, and doctor/audit maintenance | Version dry-run schemas, add drift checks where needed, and keep action/web/copy aligned on the same setup path |
 | [0009](0009-launch-maintenance-contract-and-performance-review.md) | accepted launch-readiness review | Current CLI launch audit for maintenance UX, cross-platform behavior, cache scope, action/web boundaries, legacy surface review, and performance guardrails | Version JSON schemas, add drift/lint surface if needed, reduce action per-entry planning, and keep local Rails-backed adapter E2E current |
+| [0010](0010-package-manager-cas-pkg-v1.md) | accepted for Bundler-first implementation | Package-manager CAS layout for materialized dependency trees, starting with Bundler native-install pain | Local Rails smoke and archive-vs-pkg benchmark before claiming or broadening rollout beyond conservative Bundler autodetect |
 
 ## Launch ADR Review
 

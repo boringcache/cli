@@ -87,9 +87,9 @@ pub(super) async fn initial_restore_oci(
             return Ok(RestoreAction::NoRemoteCache);
         }
     };
-    let pointer = match fetched_pointer.pointer {
+    let pointer = match *fetched_pointer.pointer {
         cas_restore::CasPointer::Oci(pointer) => pointer,
-        cas_restore::CasPointer::File(_) => unreachable!(),
+        cas_restore::CasPointer::File(_) | cas_restore::CasPointer::Pkg(_) => unreachable!(),
     };
 
     if local_path.exists() && force {

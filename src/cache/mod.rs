@@ -3,6 +3,7 @@ pub mod archive;
 pub(crate) mod archive_transfer;
 pub mod cas_file;
 pub mod cas_oci;
+pub mod cas_pkg;
 pub mod cas_publish;
 pub mod cas_restore;
 pub mod file_materialize;

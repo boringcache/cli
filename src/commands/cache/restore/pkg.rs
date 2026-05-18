@@ -1,18 +1,17 @@
 use super::{EnsureTargetStatus, RestoreOutcome, download_buffer_size, ensure_empty_target};
 use crate::api::{ApiClient, CacheResolutionEntry};
 use crate::cache::cas_restore::{self, BlobDownloadTarget, FetchCasPointerOutcome};
-use crate::cache::file_materialize::materialize_file_cas_entries;
 use crate::progress::{ProgressSession, Summary, TransferProgress};
 use crate::signing::policy::verify_restore_signature;
 use crate::ui;
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tempfile::tempdir;
 use tokio::fs;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn process_restore_file(
+pub(super) async fn process_restore_pkg(
     api_client: &ApiClient,
     reporter: crate::progress::Reporter,
     session_id: String,
@@ -44,11 +43,11 @@ pub(super) async fn process_restore_file(
 
     let mut session = ProgressSession::new(reporter.clone(), session_id.clone(), title, 3)?;
 
-    let fetch_step = session.start_step("Fetch CAS index".to_string(), None)?;
+    let fetch_step = session.start_step("Fetch package CAS index".to_string(), None)?;
     let fetched_pointer = match cas_restore::fetch_cas_pointer(
         api_client,
         &hit,
-        crate::adapters::CasAdapterKind::File,
+        crate::adapters::CasAdapterKind::Pkg,
         |hit, root_digest| {
             verify_restore_signature(
                 hit,
@@ -76,11 +75,21 @@ pub(super) async fn process_restore_file(
     fetch_step.complete()?;
     let resolved_manifest_root_digest = fetched_pointer.resolved_manifest_root_digest;
     let pointer = match *fetched_pointer.pointer {
-        cas_restore::CasPointer::File(pointer) => pointer,
-        cas_restore::CasPointer::Oci(_) | cas_restore::CasPointer::Pkg(_) => unreachable!(),
+        cas_restore::CasPointer::Pkg(pointer) => pointer,
+        cas_restore::CasPointer::Oci(_) | cas_restore::CasPointer::File(_) => unreachable!(),
     };
 
-    let tmp_dir = tempdir().context("Failed to create CAS download temp directory")?;
+    if let Some(reason) = platform_mismatch_reason(&pointer) {
+        let _ = reporter.warning(reason.clone());
+        ui::warn(&reason);
+        session.error(reason.clone())?;
+        return Ok(RestoreOutcome::Ignored {
+            tag: hit.tag.clone(),
+            reason,
+        });
+    }
+
+    let tmp_dir = tempdir().context("Failed to create package CAS download temp directory")?;
     let blobs_dir = tmp_dir.path().join("blobs").join("sha256");
     fs::create_dir_all(&blobs_dir)
         .await
@@ -94,7 +103,7 @@ pub(super) async fn process_restore_file(
     }
 
     let download_step = session.start_step(
-        "Download blobs".to_string(),
+        "Download package blobs".to_string(),
         Some(format!("{} blobs", pointer.blobs.len())),
     )?;
     let download_started = std::time::Instant::now();
@@ -137,37 +146,30 @@ pub(super) async fn process_restore_file(
     let bytes_downloaded = download_outcome.bytes_downloaded;
     let download_storage_metrics = download_outcome.storage_metrics;
 
-    let materialize_step = session.start_step("Materialize files".to_string(), None)?;
+    let materialize_step = session.start_step("Materialize packages".to_string(), None)?;
     let materialize_started = std::time::Instant::now();
-    let target_root = Path::new(&target_path);
-    materialize_file_cas_entries(
-        target_root,
-        &pointer.entries,
+    crate::cache::cas_pkg::materialize_pkg_cas_entries(
+        std::path::Path::new(&target_path),
+        &pointer,
         &blob_path_by_digest,
         allow_external_symlinks,
     )
     .await?;
-
     materialize_step.complete()?;
     let materialize_elapsed = materialize_started.elapsed();
 
     if verbose {
         let _ = reporter.info(format!(
-            "  Restored file CAS layout ({} blobs, {} downloaded)",
+            "  Restored package CAS layout ({} packages, {} blobs, {} downloaded)",
+            pointer.packages.len(),
             pointer.blobs.len(),
             crate::progress::format_bytes(bytes_downloaded)
         ));
     }
 
-    let file_count = pointer
-        .entries
-        .iter()
-        .filter(|entry| entry.entry_type == crate::manifest::EntryType::File)
-        .count()
-        .min(u32::MAX as usize) as u32;
     let summary = Summary {
         size_bytes: hit.blob_total_size_bytes.unwrap_or(bytes_downloaded),
-        file_count,
+        file_count: pointer.packages.len().min(u32::MAX as usize) as u32,
         digest: Some(resolved_manifest_root_digest.clone()),
         path: Some(target_path.clone()),
     };
@@ -190,4 +192,17 @@ pub(super) async fn process_restore_file(
         retry_count: 0,
         archive_transfer_plan: None,
     })
+}
+
+fn platform_mismatch_reason(pointer: &crate::cache::cas_pkg::PkgPointer) -> Option<String> {
+    let expected = pointer.compatibility.as_ref()?.platform.as_ref()?;
+    let current = crate::platform::Platform::detect().ok()?.to_tag_suffix();
+    if expected == &current {
+        return None;
+    }
+
+    Some(format!(
+        "Package CAS platform mismatch for {} (cache {}, current {}); skipping restore",
+        pointer.ecosystem, expected, current
+    ))
 }

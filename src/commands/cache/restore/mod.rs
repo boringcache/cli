@@ -4,6 +4,7 @@
 mod archive;
 mod file;
 mod oci;
+mod pkg;
 
 #[cfg(test)]
 mod tests;
@@ -942,6 +943,12 @@ async fn process_restore(
     let oci_workspace = workspace.clone();
     let oci_hit = hit.clone();
     let oci_target_path = target_path.clone();
+    let file_reporter = reporter.clone();
+    let file_session_id = session_id.clone();
+    let file_title = title.clone();
+    let file_workspace = workspace.clone();
+    let file_hit = hit.clone();
+    let file_target_path = target_path.clone();
 
     adapter
         .dispatch(
@@ -976,6 +983,20 @@ async fn process_restore(
             },
             || {
                 file::process_restore_file(
+                    &api_client,
+                    file_reporter,
+                    file_session_id,
+                    file_title,
+                    file_workspace,
+                    file_hit,
+                    file_target_path,
+                    verbose,
+                    allow_external_symlinks,
+                    require_server_signature,
+                )
+            },
+            || {
+                pkg::process_restore_pkg(
                     &api_client,
                     reporter,
                     session_id,
