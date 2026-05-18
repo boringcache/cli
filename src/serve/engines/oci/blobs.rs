@@ -9,6 +9,10 @@ use tokio_util::io::ReaderStream;
 
 use crate::api::models::cache::BlobDescriptor;
 use crate::cas_oci;
+use crate::serve::cache_registry::{
+    AdaptiveStartupPrefetch, StartupPrefetchAdjustment, StartupPrefetchConcurrencyPlan,
+    StartupPrefetchTaskReport, adaptive_startup_prefetch_concurrency,
+};
 use crate::serve::engines::oci::uploads::{find_local_uploaded_blob, has_remote_blob};
 use crate::serve::http::error::OciError;
 use crate::serve::http::flight::{
@@ -62,6 +66,8 @@ pub(crate) struct BlobPrefetchStats {
     pub(crate) already_local: usize,
     pub(crate) scheduled_bytes: u64,
     pub(crate) duration_ms: u64,
+    pub(crate) final_concurrency: usize,
+    pub(crate) max_observed_concurrency: usize,
 }
 
 struct BlobPrefetchTarget {
@@ -421,13 +427,25 @@ pub(crate) async fn prefetch_blob_bodies(
         .iter()
         .map(|target| target.blob.size_bytes)
         .sum();
+    let concurrency_plan = oci_blob_prefetch_concurrency_plan(
+        state.blob_prefetch_max_concurrency,
+        state.blob_prefetch_concurrency_from_env,
+        stats.scheduled,
+        stats.scheduled_bytes,
+    );
     let diagnostics = crate::serve::state::diagnostics_enabled();
     if diagnostics {
         eprintln!(
-            "{log_label}: hydrating {}/{} OCI blobs ({:.1} MB, cached_urls={}, unresolved_urls={}, already_local={})",
+            "{log_label}: hydrating {}/{} OCI blobs ({:.1} MB, concurrency_initial={}, concurrency_ceiling={}, resource_max={}, source={}, reason={}, adaptive={}, cached_urls={}, unresolved_urls={}, already_local={})",
             stats.scheduled,
             stats.total_unique_blobs,
             stats.scheduled_bytes as f64 / (1024.0 * 1024.0),
+            concurrency_plan.initial_concurrency,
+            concurrency_plan.effective_concurrency,
+            concurrency_plan.max_concurrency,
+            concurrency_plan.source,
+            concurrency_plan.reason,
+            concurrency_plan.adaptive,
             cached_url_count,
             blobs.len().saturating_sub(cached_url_count),
             stats.already_local,
@@ -435,38 +453,33 @@ pub(crate) async fn prefetch_blob_bodies(
     }
 
     let prefetch_started_at = std::time::Instant::now();
+    let mut pending_iter = pending_targets.into_iter();
     let mut tasks = tokio::task::JoinSet::new();
-    for target in pending_targets {
-        let state = state.clone();
-        let name = name.to_string();
-        let cache_entry_id = cache_entry_id.to_string();
-        let prefetch_semaphore = state.blob_prefetch_semaphore.clone();
-        tasks.spawn(async move {
-            let prefetch_permit = prefetch_semaphore.acquire_owned().await.map_err(|error| {
-                OciError::internal(format!("prefetch semaphore closed: {error}"))
-            })?;
-            let result = prefetch_one_blob(
-                &state,
-                &name,
-                &cache_entry_id,
-                target.blob,
-                target.cached_url,
-            )
-            .await;
-            drop(prefetch_permit);
-            result
-        });
-    }
+    let mut controller = AdaptiveStartupPrefetch::new(concurrency_plan);
+    let mut max_observed_concurrency = 0usize;
+    spawn_oci_prefetch_until_target(
+        &mut tasks,
+        &mut pending_iter,
+        state,
+        name,
+        cache_entry_id,
+        controller.current().min(stats.scheduled).max(1),
+        &mut max_observed_concurrency,
+    );
 
     let log_interval = (stats.scheduled / 10).max(1);
     let mut completed = 0usize;
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok(Ok(true)) => stats.inserted = stats.inserted.saturating_add(1),
-            Ok(Ok(false)) => {}
-            Ok(Err(error)) => {
-                stats.failures = stats.failures.saturating_add(1);
-                log::warn!("{log_label} blob failed: {}", error.message());
+            Ok(report) => {
+                controller.record(&report);
+                if report.inserted {
+                    stats.inserted = stats.inserted.saturating_add(1);
+                }
+                if let Some(error) = report.error {
+                    stats.failures = stats.failures.saturating_add(1);
+                    log::warn!("{log_label} blob failed: {error}");
+                }
             }
             Err(error) => {
                 stats.failures = stats.failures.saturating_add(1);
@@ -474,6 +487,13 @@ pub(crate) async fn prefetch_blob_bodies(
             }
         }
         completed = completed.saturating_add(1);
+        if let Some((adjustment, previous, next)) = controller.maybe_adjust()
+            && adjustment != StartupPrefetchAdjustment::Disabled
+            && previous != next
+            && diagnostics
+        {
+            eprintln!("{log_label}: adaptive concurrency {adjustment:?} {previous}->{next}");
+        }
         if diagnostics && completed.is_multiple_of(log_interval) {
             eprintln!(
                 "{log_label}: {completed}/{} OCI blobs ({} inserted, {} failed, {:.1}s)",
@@ -483,20 +503,138 @@ pub(crate) async fn prefetch_blob_bodies(
                 prefetch_started_at.elapsed().as_secs_f64(),
             );
         }
+        let target_in_flight = controller.target_in_flight();
+        if target_in_flight > 0 {
+            spawn_oci_prefetch_until_target(
+                &mut tasks,
+                &mut pending_iter,
+                state,
+                name,
+                cache_entry_id,
+                target_in_flight,
+                &mut max_observed_concurrency,
+            );
+        } else if tasks.is_empty()
+            && pending_iter.len() > 0
+            && let Some(pause_remaining) = controller.pause_remaining()
+        {
+            tokio::time::sleep(pause_remaining).await;
+            spawn_oci_prefetch_until_target(
+                &mut tasks,
+                &mut pending_iter,
+                state,
+                name,
+                cache_entry_id,
+                controller.target_in_flight(),
+                &mut max_observed_concurrency,
+            );
+        }
     }
 
     stats.duration_ms = prefetch_started_at.elapsed().as_millis() as u64;
+    stats.final_concurrency = controller.current();
+    stats.max_observed_concurrency = max_observed_concurrency;
     if diagnostics {
         eprintln!(
-            "{log_label}: done inserted={} scheduled={} failures={} cache_size={} bytes in {:.1}s",
+            "{log_label}: done inserted={} scheduled={} failures={} cache_size={} bytes concurrency_final={} concurrency_max_observed={} in {:.1}s",
             stats.inserted,
             stats.scheduled,
             stats.failures,
             state.blob_read_cache.total_bytes(),
+            controller.current(),
+            max_observed_concurrency,
             prefetch_started_at.elapsed().as_secs_f64(),
         );
     }
     stats
+}
+
+fn oci_blob_prefetch_concurrency_plan(
+    max_concurrency: usize,
+    explicit_override: bool,
+    scheduled_blobs: usize,
+    scheduled_bytes: u64,
+) -> StartupPrefetchConcurrencyPlan {
+    adaptive_startup_prefetch_concurrency(
+        max_concurrency,
+        explicit_override,
+        scheduled_blobs,
+        scheduled_bytes,
+    )
+}
+
+fn spawn_oci_prefetch_until_target(
+    tasks: &mut tokio::task::JoinSet<StartupPrefetchTaskReport>,
+    pending_iter: &mut std::vec::IntoIter<BlobPrefetchTarget>,
+    state: &AppState,
+    name: &str,
+    cache_entry_id: &str,
+    target_in_flight: usize,
+    max_observed_concurrency: &mut usize,
+) {
+    while tasks.len() < target_in_flight {
+        let Some(target) = pending_iter.next() else {
+            break;
+        };
+        let state = state.clone();
+        let name = name.to_string();
+        let cache_entry_id = cache_entry_id.to_string();
+        let in_flight = tasks.len().saturating_add(1);
+        *max_observed_concurrency = (*max_observed_concurrency).max(in_flight);
+        let prefetch_semaphore = state.blob_prefetch_semaphore.clone();
+        tasks.spawn(async move {
+            let size_bytes = target.blob.size_bytes;
+            let prefetch_permit = prefetch_semaphore
+                .acquire_owned()
+                .await
+                .map_err(|error| OciError::internal(format!("prefetch semaphore closed: {error}")));
+            let permit = match prefetch_permit {
+                Ok(permit) => permit,
+                Err(error) => {
+                    return StartupPrefetchTaskReport {
+                        inserted: false,
+                        size_bytes,
+                        retry_count: 0,
+                        duration_ms: 0,
+                        status: Some(error.status()),
+                        retry_after: None,
+                        error: Some(error.message().to_string()),
+                    };
+                }
+            };
+            let started_at = std::time::Instant::now();
+            let result = prefetch_one_blob(
+                &state,
+                &name,
+                &cache_entry_id,
+                target.blob,
+                target.cached_url,
+            )
+            .await;
+            drop(permit);
+            let duration_ms = started_at.elapsed().as_millis() as u64;
+            match result {
+                Ok(inserted) => StartupPrefetchTaskReport {
+                    inserted,
+                    size_bytes,
+                    retry_count: 0,
+                    duration_ms,
+                    status: None,
+                    retry_after: None,
+                    error: None,
+                },
+                Err(error) => StartupPrefetchTaskReport {
+                    inserted: false,
+                    size_bytes,
+                    retry_count: 0,
+                    duration_ms,
+                    status: Some(error.status()),
+                    retry_after: None,
+                    error: Some(error.message().to_string()),
+                },
+            }
+        });
+    }
 }
 
 async fn prefetch_one_blob(
@@ -1539,6 +1677,35 @@ mod tests {
         assert!(!is_retryable_oci_blob_storage_status(
             StatusCode::UNPROCESSABLE_ENTITY
         ));
+    }
+
+    #[test]
+    fn oci_blob_prefetch_uses_adaptive_plan_for_many_small_bodies() {
+        let plan = super::oci_blob_prefetch_concurrency_plan(100, false, 5_000, 5_000 * 128 * 1024);
+
+        assert_eq!(plan.initial_concurrency, 20);
+        assert_eq!(plan.effective_concurrency, 100);
+        assert!(plan.adaptive);
+        assert_eq!(plan.source, "auto");
+    }
+
+    #[test]
+    fn oci_blob_prefetch_env_override_stays_fixed_ceiling() {
+        let plan = super::oci_blob_prefetch_concurrency_plan(12, true, 5_000, 5_000 * 128 * 1024);
+
+        assert_eq!(plan.initial_concurrency, 12);
+        assert_eq!(plan.effective_concurrency, 12);
+        assert!(!plan.adaptive);
+        assert_eq!(plan.source, "env");
+    }
+
+    #[test]
+    fn oci_blob_prefetch_empty_plan_is_not_adaptive() {
+        let plan = super::oci_blob_prefetch_concurrency_plan(100, false, 0, 0);
+
+        assert_eq!(plan.initial_concurrency, 1);
+        assert_eq!(plan.effective_concurrency, 1);
+        assert!(!plan.adaptive);
     }
 
     #[test]

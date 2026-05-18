@@ -186,11 +186,16 @@ mod route;
 mod tool_routes;
 
 pub use error::RegistryError;
+pub(crate) use kv::AdaptiveStartupPrefetch;
 pub(crate) use kv::FlushResult;
 pub(crate) use kv::KV_PREFETCH_READINESS_TIMEOUT;
 pub(crate) use kv::KvBlobIntegrity;
 pub(crate) use kv::KvNamespace;
 pub(crate) use kv::KvPutOptions;
+pub(crate) use kv::StartupPrefetchAdjustment;
+pub(crate) use kv::StartupPrefetchConcurrencyPlan;
+pub(crate) use kv::StartupPrefetchTaskReport;
+pub(crate) use kv::adaptive_startup_prefetch_concurrency;
 pub(crate) use kv::await_startup_prefetch_readiness;
 pub(crate) use kv::cleanup_expired_kv_misses;
 pub(crate) use kv::count_missing_local_blobs;
