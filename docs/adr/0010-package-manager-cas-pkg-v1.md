@@ -38,9 +38,10 @@ Add a `pkg-v1` CAS layout in the CLI, with no web/API schema change.
 `pkg-v1` stores the materialized package closure:
 
 1. the installed package files after the package manager has extracted,
-   compiled, linked, and generated metadata;
+   compiled, linked, and generated metadata, as deterministic `tar.zst`
+   package blobs;
 2. any small residual state needed for the package manager to recognize the
-   restored tree;
+   restored tree, as raw state-file blobs;
 3. a pointer manifest that maps packages to workspace-scoped CAS blobs.
 
 The backend continues to see:
@@ -102,6 +103,8 @@ prove large-tree and partial-reuse behavior for `node_modules`.
 - pointer and blob digests must verify through the existing CAS restore path;
 - materialized paths must pass the same safe-join and symlink escape checks as
   file CAS;
+- package extraction refuses to create files through symlink parent
+  directories, including when external symlink replay is explicitly enabled;
 - runtime fingerprints reject obvious wrong restores;
 - detection or materialization failure falls back to archive behavior on save
   and skip/ignore behavior on restore;
@@ -188,3 +191,11 @@ change: Mastodon `vendor/bundle` restored 459 blobs / 232 MB in 2.3s
 2.5s materialize) and `bundle check` passed. Sub-second cold restores are not a
 credible target for the 1 GB Discourse shape without pipelining download and
 materialization or avoiding filesystem materialization entirely.
+
+2026-05-18 compressed-blob slice: package pointer `format_version` is now `2`.
+Package blobs are deterministic single-thread zstd-compressed tar streams, while
+residual state-file blobs remain raw file bytes. This intentionally drops the
+one-release raw package-tar format instead of carrying compatibility plumbing.
+Focused tests cover zstd package blobs, pointer version rejection for the raw
+format, tar path traversal rejection, and refusal to write through symlink
+parent directories during materialization.

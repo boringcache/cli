@@ -2,8 +2,11 @@ use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use zstd::stream::write::Encoder as ZstdEncoder;
+
+const PACKAGE_ZSTD_LEVEL: i32 = 3;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PackageTar {
@@ -20,30 +23,77 @@ pub(crate) fn write_package_tar(
     let entries = package_entries(root, install_paths)?;
     let writer = File::create(destination)
         .with_context(|| format!("Failed to create package blob {}", destination.display()))?;
-    let mut builder = tar::Builder::new(writer);
+    let writer = BufWriter::new(writer);
+    let hashing_writer = HashingWriter::new(writer);
+    let mut encoder = ZstdEncoder::new(hashing_writer, PACKAGE_ZSTD_LEVEL)
+        .context("Failed to initialize package zstd encoder")?;
+    encoder
+        .include_checksum(true)
+        .context("Failed to enable package zstd checksum")?;
+
+    let mut builder = tar::Builder::new(encoder);
     builder.mode(tar::HeaderMode::Deterministic);
 
     for (relative, absolute) in &entries {
         append_path(&mut builder, root, relative, absolute)?;
     }
 
-    let mut writer = builder
+    let encoder = builder
         .into_inner()
         .context("Failed to finalize package tar")?;
-    use std::io::Write;
-    writer.flush().context("Failed to flush package tar")?;
-    drop(writer);
+    let mut hashing_writer = encoder
+        .finish()
+        .context("Failed to finish package zstd stream")?;
+    hashing_writer
+        .flush()
+        .context("Failed to flush package blob")?;
+    let digest = hashing_writer.finish_hash();
 
     let size_bytes = fs::metadata(destination)
         .with_context(|| format!("Failed to stat package blob {}", destination.display()))?
         .len();
-    let digest = hash_file(destination)?;
 
     Ok(PackageTar {
         digest,
         size_bytes,
         entry_count: entries.len(),
     })
+}
+
+struct HashingWriter<W> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W> HashingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    fn finish_hash(self) -> String {
+        let digest = self.hasher.finalize();
+        let mut output = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(output, "{byte:02x}");
+        }
+        format!("sha256:{output}")
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        self.hasher.update(&buffer[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 pub(crate) fn hash_file(path: &Path) -> Result<String> {

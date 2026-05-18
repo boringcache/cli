@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 pub const ADAPTER: &str = "pkg-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

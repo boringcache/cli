@@ -8,10 +8,13 @@ pub use pointer::{
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::io::BufReader;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::task::JoinSet;
+use zstd::stream::read::Decoder as ZstdDecoder;
 
 #[derive(Debug, Clone)]
 pub struct PkgBlobSource {
@@ -52,7 +55,7 @@ pub fn scan_packages(
     packages.sort_by(|left, right| left.package_key.cmp(&right.package_key));
 
     for (index, package) in packages.iter().enumerate() {
-        let tar_path = temp_dir.path().join(format!("package-{index}.tar"));
+        let tar_path = temp_dir.path().join(format!("package-{index}.tar.zst"));
         let package_tar = tar::write_package_tar(root, &package.install_paths, &tar_path)
             .with_context(|| format!("Failed to package {}", package.package_key))?;
         if package_tar.entry_count == 0 {
@@ -298,7 +301,7 @@ fn materialize_pkg_cas_entries_blocking(
         let blob_path = blob_path_by_digest
             .get(&package.blob_digest)
             .ok_or_else(|| anyhow!("Missing package blob {}", package.blob_digest))?;
-        extract_package_tar(root, blob_path, allow_external_symlinks)
+        extract_package_tar_zstd(root, blob_path, allow_external_symlinks)
             .with_context(|| format!("Failed to extract package {}", package.package_key))?;
     }
 
@@ -363,7 +366,7 @@ fn package_extract_jobs(
 }
 
 fn extract_package_job(job: PackageExtractJob) -> Result<()> {
-    extract_package_tar(&job.root, &job.blob_path, job.allow_external_symlinks)
+    extract_package_tar_zstd(&job.root, &job.blob_path, job.allow_external_symlinks)
         .with_context(|| format!("Failed to extract package {}", job.package_key))
 }
 
@@ -412,10 +415,17 @@ fn path_contains(parent: &str, child: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-fn extract_package_tar(root: &Path, blob_path: &Path, allow_external_symlinks: bool) -> Result<()> {
+fn extract_package_tar_zstd(
+    root: &Path,
+    blob_path: &Path,
+    allow_external_symlinks: bool,
+) -> Result<()> {
     let file = fs::File::open(blob_path)
         .with_context(|| format!("Failed to open {}", blob_path.display()))?;
-    let mut archive = ::tar::Archive::new(file);
+    let reader = BufReader::new(file);
+    let decoder = ZstdDecoder::new(reader)
+        .with_context(|| format!("Failed to decode package blob {}", blob_path.display()))?;
+    let mut archive = ::tar::Archive::new(decoder);
 
     for entry in archive.entries().context("Failed to read package tar")? {
         let mut entry = entry.context("Failed to read package tar entry")?;
@@ -427,15 +437,11 @@ fn extract_package_tar(root: &Path, blob_path: &Path, allow_external_symlinks: b
         let entry_type = entry.header().entry_type();
 
         if entry_type.is_dir() {
-            fs::create_dir_all(&destination)
-                .with_context(|| format!("Failed to create {}", destination.display()))?;
+            create_dir_all_without_symlink(root, &destination)?;
             continue;
         }
 
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
-        }
+        ensure_parent_directory(root, &destination)?;
 
         if entry_type.is_symlink() {
             let target = entry
@@ -480,15 +486,11 @@ fn apply_fixup(
     match fixup {
         PkgFixup::Dir { rel } => {
             let destination = crate::cas_file::safe_join(root, rel)?;
-            fs::create_dir_all(&destination)
-                .with_context(|| format!("Failed to create {}", destination.display()))?;
+            create_dir_all_without_symlink(root, &destination)?;
         }
         PkgFixup::StateFile { rel, blob_digest } => {
             let destination = crate::cas_file::safe_join(root, rel)?;
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create {}", parent.display()))?;
-            }
+            ensure_parent_directory(root, &destination)?;
             let blob_path = blob_path_by_digest
                 .get(blob_digest)
                 .ok_or_else(|| anyhow!("Missing state-file blob {}", blob_digest))?;
@@ -503,10 +505,7 @@ fn apply_fixup(
         }
         PkgFixup::Symlink { link_rel, target } => {
             let destination = crate::cas_file::safe_join(root, link_rel)?;
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create {}", parent.display()))?;
-            }
+            ensure_parent_directory(root, &destination)?;
             let target_path = PathBuf::from(target);
             crate::cas_file::validate_symlink_target(
                 root,
@@ -519,6 +518,91 @@ fn apply_fixup(
         }
     }
     Ok(())
+}
+
+fn ensure_parent_directory(root: &Path, destination: &Path) -> Result<()> {
+    let parent = destination.parent().ok_or_else(|| {
+        anyhow!(
+            "Package CAS destination has no parent directory: {}",
+            destination.display()
+        )
+    })?;
+    create_dir_all_without_symlink(root, parent)
+}
+
+fn create_dir_all_without_symlink(root: &Path, directory: &Path) -> Result<()> {
+    let relative = directory.strip_prefix(root).with_context(|| {
+        format!(
+            "Package CAS destination {} is not under {}",
+            directory.display(),
+            root.display()
+        )
+    })?;
+    let mut current = root.to_path_buf();
+
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => current.push(part),
+            Component::CurDir => continue,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(anyhow!(
+                    "Package CAS destination contains unsupported path component: {}",
+                    directory.display()
+                ));
+            }
+        }
+
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(anyhow!(
+                    "Package CAS refuses to write through symlink directory {}",
+                    current.display()
+                ));
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(anyhow!(
+                    "Package CAS destination parent is not a directory: {}",
+                    current.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                create_one_directory_without_symlink(&current)?;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to inspect {}", current.display()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn create_one_directory_without_symlink(directory: &Path) -> Result<()> {
+    match fs::create_dir(directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(directory)
+                .with_context(|| format!("Failed to inspect {}", directory.display()))?;
+            if metadata.file_type().is_symlink() {
+                return Err(anyhow!(
+                    "Package CAS refuses to write through symlink directory {}",
+                    directory.display()
+                ));
+            }
+            if !metadata.is_dir() {
+                return Err(anyhow!(
+                    "Package CAS destination parent is not a directory: {}",
+                    directory.display()
+                ));
+            }
+            Ok(())
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("Failed to create {}", directory.display()))
+        }
+    }
 }
 
 fn verify_install_paths(root: &Path, pointer: &PkgPointer) -> Result<()> {
@@ -656,6 +740,54 @@ mod tests {
     }
 
     #[test]
+    fn package_blobs_are_zstd_tars() {
+        let source = tempfile::tempdir().unwrap();
+        let root = source.path();
+        fs::create_dir_all(root.join("ruby/3.4.0/gems/big-1.0.0/lib")).unwrap();
+        fs::write(
+            root.join("ruby/3.4.0/gems/big-1.0.0/lib/big.rb"),
+            "module Big\n".repeat(128),
+        )
+        .unwrap();
+
+        let packages = vec![crate::pkg_adapters::ResolvedPackage {
+            package_key: "bundler:3.4.0:big-1.0.0".to_string(),
+            lock_integrity: None,
+            install_paths: vec![PathBuf::from("ruby/3.4.0/gems/big-1.0.0")],
+            no_integrity: true,
+        }];
+
+        let scan = scan_packages(root, "bundler", None, &packages).unwrap();
+        let blob = &scan.blobs[0];
+        let bytes = fs::read(&blob.path).unwrap();
+
+        assert_eq!(&bytes[..4], &[0x28, 0xb5, 0x2f, 0xfd]);
+
+        let decoded = zstd::stream::decode_all(bytes.as_slice()).unwrap();
+        let mut archive = ::tar::Archive::new(decoded.as_slice());
+        let paths = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            paths
+                .iter()
+                .any(|path| path == "ruby/3.4.0/gems/big-1.0.0/lib/big.rb")
+        );
+
+        let pointer = parse_pointer(&build_pointer(&scan).unwrap()).unwrap();
+        assert_eq!(pointer.format_version, FORMAT_VERSION);
+    }
+
+    #[test]
     fn package_tar_digest_is_stable_for_same_content() {
         let source = tempfile::tempdir().unwrap();
         let root = source.path();
@@ -756,5 +888,199 @@ mod tests {
 
         let error = parse_pointer(&serde_json::to_vec(&pointer).unwrap()).unwrap_err();
         assert!(error.to_string().contains("Invalid package install path"));
+    }
+
+    #[test]
+    fn pointer_rejects_old_uncompressed_package_format() {
+        let pointer = serde_json::json!({
+            "format_version": 1,
+            "adapter": ADAPTER,
+            "ecosystem": "bundler",
+            "packages": [{
+                "package_key": "bundler:3.4.0:old-1.0.0",
+                "blob_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "install_paths": ["ruby/3.4.0/gems/old-1.0.0"]
+            }],
+            "fixups": [],
+            "blobs": [{
+                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "size_bytes": 1
+            }]
+        });
+
+        let error = parse_pointer(&serde_json::to_vec(&pointer).unwrap()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported package CAS pointer version 1")
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_rejects_package_tar_path_traversal() {
+        let source = tempfile::tempdir().unwrap();
+        let blob_path = source.path().join("bad.tar.zst");
+        let digest = write_test_package_blob_from_tar_bytes(
+            &blob_path,
+            raw_tar_with_file("../escaped.txt", b"oops"),
+        );
+        let size_bytes = fs::metadata(&blob_path).unwrap().len();
+        let pointer = test_pointer(digest.clone(), size_bytes, vec!["safe".to_string()]);
+        let mut blobs = HashMap::new();
+        blobs.insert(digest, blob_path);
+        let restore_parent = tempfile::tempdir().unwrap();
+        let target_path = restore_parent.path().join("restore");
+        fs::create_dir(&target_path).unwrap();
+
+        let error = materialize_pkg_cas_entries(&target_path, &pointer, &blobs, false)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to extract package test-package")
+        );
+        assert!(!target_path.join("escaped.txt").exists());
+        assert!(!restore_parent.path().join("escaped.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn materialize_refuses_to_write_through_symlink_parent() {
+        let source = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let blob_path = source.path().join("symlink-parent.tar.zst");
+        let outside_target = outside.path().join("outside");
+        fs::create_dir_all(&outside_target).unwrap();
+        let digest = write_test_package_blob(&blob_path, |builder| {
+            append_test_dir(builder, "pkg");
+            append_test_symlink(builder, "pkg/link", &outside_target);
+            append_test_file(builder, "pkg/link/pwned.txt", b"nope");
+        });
+        let size_bytes = fs::metadata(&blob_path).unwrap().len();
+        let pointer = test_pointer(digest.clone(), size_bytes, vec!["pkg".to_string()]);
+        let mut blobs = HashMap::new();
+        blobs.insert(digest, blob_path);
+        let target = tempfile::tempdir().unwrap();
+
+        let error = materialize_pkg_cas_entries(target.path(), &pointer, &blobs, true)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to extract package test-package")
+        );
+        assert!(!outside_target.join("pwned.txt").exists());
+    }
+
+    fn test_pointer(digest: String, size_bytes: u64, install_paths: Vec<String>) -> PkgPointer {
+        PkgPointer {
+            format_version: FORMAT_VERSION,
+            adapter: ADAPTER.to_string(),
+            ecosystem: "test".to_string(),
+            install_root_rel: None,
+            compatibility: None,
+            packages: vec![PkgPointerPackage {
+                package_key: "test-package".to_string(),
+                blob_digest: digest.clone(),
+                install_paths,
+                lock_integrity: None,
+            }],
+            fixups: Vec::new(),
+            blobs: vec![PkgPointerBlob {
+                digest,
+                size_bytes,
+                sequence: Some(0),
+            }],
+        }
+    }
+
+    fn write_test_package_blob(
+        blob_path: &Path,
+        write_entries: impl FnOnce(&mut ::tar::Builder<Vec<u8>>),
+    ) -> String {
+        let mut builder = ::tar::Builder::new(Vec::new());
+        builder.mode(::tar::HeaderMode::Deterministic);
+        write_entries(&mut builder);
+        let tar_bytes = builder.into_inner().unwrap();
+        let compressed = zstd::stream::encode_all(tar_bytes.as_slice(), 3).unwrap();
+        fs::write(blob_path, compressed).unwrap();
+        tar::hash_file(blob_path).unwrap()
+    }
+
+    fn write_test_package_blob_from_tar_bytes(blob_path: &Path, tar_bytes: Vec<u8>) -> String {
+        let compressed = zstd::stream::encode_all(tar_bytes.as_slice(), 3).unwrap();
+        fs::write(blob_path, compressed).unwrap();
+        tar::hash_file(blob_path).unwrap()
+    }
+
+    fn append_test_dir(builder: &mut ::tar::Builder<Vec<u8>>, path: &str) {
+        let mut header = test_header(::tar::EntryType::Directory, 0, 0o755);
+        builder
+            .append_data(&mut header, path, std::io::empty())
+            .unwrap();
+    }
+
+    fn append_test_file(builder: &mut ::tar::Builder<Vec<u8>>, path: &str, bytes: &[u8]) {
+        let mut header = test_header(::tar::EntryType::Regular, bytes.len() as u64, 0o644);
+        builder.append_data(&mut header, path, bytes).unwrap();
+    }
+
+    fn append_test_symlink(builder: &mut ::tar::Builder<Vec<u8>>, path: &str, target: &Path) {
+        let mut header = test_header(::tar::EntryType::Symlink, 0, 0o755);
+        builder.append_link(&mut header, path, target).unwrap();
+    }
+
+    fn test_header(entry_type: ::tar::EntryType, size: u64, mode: u32) -> ::tar::Header {
+        let mut header = ::tar::Header::new_gnu();
+        header.set_entry_type(entry_type);
+        header.set_size(size);
+        header.set_mode(mode);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_username("").unwrap();
+        header.set_groupname("").unwrap();
+        header.set_cksum();
+        header
+    }
+
+    fn raw_tar_with_file(path: &str, bytes: &[u8]) -> Vec<u8> {
+        let mut output = Vec::new();
+        let mut header = [0u8; 512];
+        write_tar_string(&mut header[0..100], path);
+        write_tar_octal(&mut header[100..108], 0o644);
+        write_tar_octal(&mut header[108..116], 0);
+        write_tar_octal(&mut header[116..124], 0);
+        write_tar_octal(&mut header[124..136], bytes.len() as u64);
+        write_tar_octal(&mut header[136..148], 0);
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        write_tar_string(&mut header[257..263], "ustar");
+        write_tar_string(&mut header[263..265], "00");
+
+        let checksum = header.iter().map(|byte| *byte as u32).sum::<u32>();
+        let checksum_text = format!("{checksum:06o}\0 ");
+        header[148..156].copy_from_slice(checksum_text.as_bytes());
+
+        output.extend_from_slice(&header);
+        output.extend_from_slice(bytes);
+        let padding = (512 - (bytes.len() % 512)) % 512;
+        output.extend(std::iter::repeat_n(0, padding));
+        output.extend_from_slice(&[0u8; 1024]);
+        output
+    }
+
+    fn write_tar_string(field: &mut [u8], value: &str) {
+        let bytes = value.as_bytes();
+        let len = bytes.len().min(field.len());
+        field[..len].copy_from_slice(&bytes[..len]);
+    }
+
+    fn write_tar_octal(field: &mut [u8], value: u64) {
+        let text = format!("{value:0width$o}\0", width = field.len() - 1);
+        field.copy_from_slice(text.as_bytes());
     }
 }
