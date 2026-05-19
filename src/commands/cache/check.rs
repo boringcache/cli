@@ -5,6 +5,11 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy)]
+struct KvTagStats {
+    total_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct CheckOptions {
     pub no_platform: bool,
     pub no_git: bool,
@@ -173,10 +178,10 @@ async fn execute_inner(
         results_by_tag.insert(entry.tag.clone(), entry);
     }
 
-    let kv_row_hits = if options.require_server_signature {
-        HashSet::new()
+    let kv_row_stats = if options.require_server_signature {
+        HashMap::new()
     } else {
-        resolve_kv_row_hits(&api_client, &workspace, &tag_to_resolved, &results_by_tag).await?
+        resolve_kv_row_stats(&api_client, &workspace, &tag_to_resolved, &results_by_tag).await?
     };
 
     let mut check_results: Vec<CheckResult> = Vec::new();
@@ -199,8 +204,7 @@ async fn execute_inner(
             .unwrap_or_else(|| requested_tag.clone());
         let kv_row_hit = candidate_tags
             .iter()
-            .find(|tag| kv_row_hits.contains(*tag))
-            .cloned();
+            .find_map(|tag| kv_row_stats.get(tag).map(|stats| (tag.clone(), *stats)));
 
         match hit.or(pending_entry) {
             Some(entry) if entry.status == "hit" => {
@@ -230,7 +234,7 @@ async fn execute_inner(
                 });
             }
             _ => {
-                if let Some(tag) = kv_row_hit {
+                if let Some((tag, stats)) = kv_row_hit {
                     hits += 1;
                     check_results.push(CheckResult {
                         tag,
@@ -239,8 +243,8 @@ async fn execute_inner(
                         cache_type: Some("kv".to_string()),
                         cache_entry_id: None,
                         manifest_root_digest: None,
-                        size: None,
-                        compressed_size: None,
+                        size: Some(stats.total_size_bytes),
+                        compressed_size: Some(stats.total_size_bytes),
                     });
                 } else {
                     misses += 1;
@@ -355,14 +359,14 @@ async fn execute_inner(
     Ok(())
 }
 
-async fn resolve_kv_row_hits(
+async fn resolve_kv_row_stats(
     api_client: &ApiClient,
     workspace: &str,
     tag_to_resolved: &[(String, Vec<String>)],
     manifest_results: &HashMap<String, crate::api::CacheResolutionEntry>,
-) -> Result<HashSet<String>> {
+) -> Result<HashMap<String, KvTagStats>> {
+    let mut stats_by_tag = HashMap::new();
     let mut checked = HashSet::new();
-    let mut hits = HashSet::new();
 
     for (_, candidate_tags) in tag_to_resolved {
         if candidate_tags
@@ -378,13 +382,48 @@ async fn resolve_kv_row_hits(
                 continue;
             }
 
-            if api_client.cache_kv_tag_has_entries(workspace, tag).await? {
-                hits.insert(tag.clone());
+            if let Some(stats) = cache_kv_tag_stats(api_client, workspace, tag).await? {
+                stats_by_tag.insert(tag.clone(), stats);
             }
         }
     }
 
-    Ok(hits)
+    Ok(stats_by_tag)
+}
+
+async fn cache_kv_tag_stats(
+    api_client: &ApiClient,
+    workspace: &str,
+    tag: &str,
+) -> Result<Option<KvTagStats>> {
+    let mut cursor = None;
+    let mut entry_count = 0u64;
+    let mut total_size_bytes = 0u64;
+    let mut seen_blobs = HashSet::new();
+
+    loop {
+        let response = api_client
+            .stream_cache_kv_entries(workspace, tag, cursor.as_deref(), 5_000)
+            .await?;
+
+        if response.entries.is_empty() && entry_count == 0 {
+            return Ok(None);
+        }
+
+        for entry in response.entries {
+            entry_count += 1;
+            if seen_blobs.insert(entry.blob.digest) {
+                total_size_bytes = total_size_bytes.saturating_add(entry.blob.size_bytes);
+            }
+        }
+
+        cursor = response.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    Ok(Some(KvTagStats { total_size_bytes }))
 }
 
 fn is_pending_resolution(entry: &crate::api::CacheResolutionEntry) -> bool {

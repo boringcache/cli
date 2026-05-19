@@ -406,7 +406,7 @@ async fn test_check_reports_direct_kv_tag_as_hit() {
     let _kv_mock = server
         .mock(
             "GET",
-            "/v2/workspaces/test/workspace/cache-kv-entries?tag=kv-tag&limit=1",
+            "/v2/workspaces/test/workspace/cache-kv-entries?tag=kv-tag&limit=5000",
         )
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -460,6 +460,8 @@ async fn test_check_reports_direct_kv_tag_as_hit() {
     assert_eq!(value["misses"], 0);
     assert_eq!(value["results"][0]["status"], "hit");
     assert_eq!(value["results"][0]["cache_type"], "kv");
+    assert_eq!(value["results"][0]["size"], 123);
+    assert_eq!(value["results"][0]["compressed_size"], 123);
     assert_eq!(
         value["results"][0]["cache_entry_id"],
         serde_json::Value::Null
