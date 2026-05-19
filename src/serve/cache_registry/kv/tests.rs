@@ -10,6 +10,7 @@ use crate::test_env;
 use mockito::{Matcher, Server};
 use serde_json::json;
 use std::ffi::{OsStr, OsString};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::{Mutex as TokioMutex, RwLock};
@@ -43,6 +44,113 @@ impl Drop for EnvVarGuard {
             test_env::remove_var(self.key);
         }
     }
+}
+
+fn kv_flush_test_state(api_client: ApiClient, temp_home: &Path, read_only: bool) -> AppState {
+    let (kv_replication_work_tx, _kv_replication_work_rx) =
+        tokio::sync::mpsc::channel(crate::serve::state::KV_REPLICATION_WORK_QUEUE_CAPACITY);
+    let runtime_temp_dir = temp_home.join("serve-runtime");
+    std::fs::create_dir_all(runtime_temp_dir.join("kv-blobs")).expect("kv blob temp dir");
+    std::fs::create_dir_all(runtime_temp_dir.join("oci-uploads")).expect("oci upload temp dir");
+
+    AppState {
+        api_client,
+        workspace: "org/repo".to_string(),
+        started_at: Instant::now(),
+        cache_session_summary_id: "proxy-summary-test".to_string(),
+        runtime_temp_dir: runtime_temp_dir.clone(),
+        kv_blob_temp_dir: runtime_temp_dir.join("kv-blobs"),
+        oci_upload_temp_dir: runtime_temp_dir.join("oci-uploads"),
+        read_only,
+        tag_resolver: TagResolver::new(None, GitContext::default(), false),
+        configured_human_tags: Vec::new(),
+        primary_cache_tag: "registry".to_string(),
+        restore_cache_tags: vec!["registry".to_string()],
+        oci_alias_promotion_refs: Vec::new(),
+        proxy_metadata_hints: std::collections::BTreeMap::new(),
+        proxy_skip_rules: std::sync::Arc::new(Vec::new()),
+        proxy_ci_run_context: None,
+        fail_on_cache_error: true,
+        oci_hydration_policy: crate::serve::OciHydrationPolicy::MetadataOnly,
+        http_transport: crate::serve::state::HttpTransportConfig::h1_h2c_auto(
+            2 * 1024 * 1024,
+            32 * 1024 * 1024,
+            1024,
+        ),
+        blob_locator: std::sync::Arc::new(RwLock::new(BlobLocatorCache::default())),
+        upload_sessions: std::sync::Arc::new(RwLock::new(UploadSessionStore::default())),
+        kv_pending: std::sync::Arc::new(RwLock::new(KvPendingStore::default())),
+        kv_flush_lock: std::sync::Arc::new(TokioMutex::new(())),
+        kv_lookup_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
+        oci_lookup_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
+        oci_negative_cache: std::sync::Arc::new(crate::serve::state::OciNegativeCache::new()),
+        singleflight_metrics: std::sync::Arc::new(crate::serve::state::SingleflightMetrics::new()),
+        kv_key_lookup_metrics: std::sync::Arc::new(crate::serve::state::KvKeyLookupMetrics::new()),
+        kv_last_put: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_backlog_rejects: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_enqueue_deferred: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_flush_ok: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_flush_conflict: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_flush_error: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_flush_permanent: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_queue_depth: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        kv_replication_work_tx,
+        kv_next_flush_at: std::sync::Arc::new(RwLock::new(None)),
+        kv_flush_scheduled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        kv_published_index: std::sync::Arc::new(RwLock::new(KvPublishedIndex::default())),
+        kv_flushing: std::sync::Arc::new(RwLock::new(None)),
+        shutdown_requested: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        kv_recent_misses: std::sync::Arc::new(dashmap::DashMap::new()),
+        kv_miss_generations: std::sync::Arc::new(dashmap::DashMap::new()),
+        blob_read_cache: std::sync::Arc::new(
+            BlobReadCache::new_at(temp_home.join("blob-read-cache"), 2 * 1024 * 1024 * 1024)
+                .expect("blob read cache"),
+        ),
+        blob_read_metrics: std::sync::Arc::new(BlobReadMetrics::new()),
+        oci_body_metrics: std::sync::Arc::new(crate::serve::state::OciBodyMetrics::new()),
+        oci_engine_diagnostics: std::sync::Arc::new(
+            crate::serve::state::OciEngineDiagnostics::new(),
+        ),
+        prefetch_metrics: std::sync::Arc::new(crate::serve::state::PrefetchMetrics::new()),
+        kv_blob_upload_metrics: std::sync::Arc::new(crate::serve::state::KvBlobUploadMetrics::new()),
+        skip_rule_metrics: std::sync::Arc::new(crate::serve::state::ProxySkipRuleMetrics::new()),
+        blob_download_max_concurrency: 16,
+        blob_prefetch_max_concurrency: 2,
+        blob_prefetch_concurrency_from_env: false,
+        blob_download_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(16)),
+        blob_prefetch_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+        cache_ops: std::sync::Arc::new(crate::serve::cache_registry::cache_ops::Aggregator::new()),
+        oci_manifest_cache: std::sync::Arc::new(dashmap::DashMap::new()),
+        backend_breaker: std::sync::Arc::new(BackendCircuitBreaker::new()),
+        prefetch_complete: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        prefetch_complete_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        prefetch_error: std::sync::Arc::new(RwLock::new(None)),
+    }
+}
+
+async fn insert_pending_test_blob(
+    state: &AppState,
+    key: &str,
+    file_name: &str,
+    payload: &[u8],
+) -> String {
+    let blob_digest = crate::cas_file::prefixed_sha256_digest(payload);
+    let blob_path = state.kv_blob_temp_dir.join(file_name);
+    tokio::fs::write(&blob_path, payload)
+        .await
+        .expect("write pending blob");
+    {
+        let mut pending = state.kv_pending.write().await;
+        pending.insert(
+            key.to_string(),
+            BlobDescriptor {
+                digest: blob_digest.clone(),
+                size_bytes: payload.len() as u64,
+            },
+            blob_path,
+        );
+    }
+    blob_digest
 }
 
 #[tokio::test]
@@ -151,8 +259,8 @@ async fn put_kv_object_is_noop_in_read_only_mode() {
 #[tokio::test]
 async fn normal_flush_checkpoints_blobs_without_manifest_publish() {
     let mut server = Server::new_async().await;
-    let temp_home = tempfile::tempdir().expect("temp dir");
     let _guard = test_env::lock();
+    let temp_home = tempfile::tempdir().expect("temp dir");
     let home_env = EnvVarGuard::new("HOME");
     let tmpdir_env = EnvVarGuard::new("TMPDIR");
     let api_url_env = EnvVarGuard::new("BORINGCACHE_API_URL");
@@ -421,6 +529,567 @@ async fn normal_flush_checkpoints_blobs_without_manifest_publish() {
     blob_receipt_mock.assert_async().await;
     manifest_upload_mock.assert_async().await;
     manifest_receipt_mock.assert_async().await;
+    publish_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn normal_flushes_checkpoint_then_shutdown_promotes_cumulative_manifest_once() {
+    let mut server = Server::new_async().await;
+    let _guard = test_env::lock();
+    let temp_home = tempfile::tempdir().expect("temp dir");
+    let home_env = EnvVarGuard::new("HOME");
+    let tmpdir_env = EnvVarGuard::new("TMPDIR");
+    let api_url_env = EnvVarGuard::new("BORINGCACHE_API_URL");
+    let auth_token_env = EnvVarGuard::new("BORINGCACHE_AUTH_TOKEN");
+    let test_mode_env = EnvVarGuard::new("BORINGCACHE_TEST_MODE");
+    home_env.set(temp_home.path());
+    tmpdir_env.set(temp_home.path());
+    api_url_env.set(server.url());
+    auth_token_env.set("test-token");
+    test_mode_env.set("1");
+
+    let api_client =
+        ApiClient::new_with_token_override(Some("test-token".to_string())).expect("client");
+    let state = kv_flush_test_state(api_client, temp_home.path(), false);
+
+    let first_payload = b"first checkpoint payload";
+    let first_digest =
+        insert_pending_test_blob(&state, "bazel_cas/key-one", "blob-one", first_payload).await;
+
+    let capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "features": {
+                    "upload_receipts_v2": true,
+                    "cas_publish_bootstrap_if_match": "0"
+                }
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let restore_mock = server
+        .mock("GET", "/v2/workspaces/org/repo/caches?entries=registry")
+        .expect(2)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create_async()
+        .await;
+    let first_save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .expect(1)
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": "",
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": first_payload.len()
+            }
+        })))
+        .with_status(201)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "",
+                "cache_entry_id": "entry-checkpoint-one",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": first_payload.len(),
+                "cas_layout": "file-v1",
+                "upload_session_id": "session-checkpoint-one",
+                "manifest_upload_url": format!("{}/checkpoint-one-manifest", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let first_stage_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/stage")
+        .expect(1)
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-checkpoint-one",
+            "blobs": [{ "digest": first_digest, "size_bytes": first_payload.len() }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_urls": [{
+                    "digest": first_digest,
+                    "url": format!("{}/blob-upload-one", server.url()),
+                    "headers": {}
+                }],
+                "already_present": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let first_upload_mock = server
+        .mock("PUT", "/blob-upload-one")
+        .expect(1)
+        .match_body(Matcher::Exact(
+            String::from_utf8(first_payload.to_vec()).expect("payload is utf8"),
+        ))
+        .with_status(200)
+        .create_async()
+        .await;
+    let first_receipt_mock = server
+        .mock(
+            "POST",
+            "/v2/workspaces/org/repo/upload-sessions/session-checkpoint-one/blobs/commit",
+        )
+        .expect(1)
+        .match_body(Matcher::PartialJson(json!({
+            "receipts": [{ "digest": first_digest }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_session_id": "session-checkpoint-one",
+                "cache_entry_id": "entry-checkpoint-one",
+                "state": "uploading",
+                "expected_blob_count": 1,
+                "receipt_blob_count": 1
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let first_result = flush_kv_index(&state).await;
+    assert!(matches!(first_result, FlushResult::Ok));
+
+    let second_payload = b"second checkpoint payload";
+    let second_digest =
+        insert_pending_test_blob(&state, "bazel_cas/key-two", "blob-two", second_payload).await;
+    let second_save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .expect(1)
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": "",
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": second_payload.len()
+            }
+        })))
+        .with_status(201)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "",
+                "cache_entry_id": "entry-checkpoint-two",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": second_payload.len(),
+                "cas_layout": "file-v1",
+                "upload_session_id": "session-checkpoint-two",
+                "manifest_upload_url": format!("{}/checkpoint-two-manifest", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let second_stage_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/stage")
+        .expect(1)
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-checkpoint-two",
+            "blobs": [{ "digest": second_digest, "size_bytes": second_payload.len() }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_urls": [{
+                    "digest": second_digest,
+                    "url": format!("{}/blob-upload-two", server.url()),
+                    "headers": {}
+                }],
+                "already_present": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let second_upload_mock = server
+        .mock("PUT", "/blob-upload-two")
+        .expect(1)
+        .match_body(Matcher::Exact(
+            String::from_utf8(second_payload.to_vec()).expect("payload is utf8"),
+        ))
+        .with_status(200)
+        .create_async()
+        .await;
+    let second_receipt_mock = server
+        .mock(
+            "POST",
+            "/v2/workspaces/org/repo/upload-sessions/session-checkpoint-two/blobs/commit",
+        )
+        .expect(1)
+        .match_body(Matcher::PartialJson(json!({
+            "receipts": [{ "digest": second_digest }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_session_id": "session-checkpoint-two",
+                "cache_entry_id": "entry-checkpoint-two",
+                "state": "uploading",
+                "expected_blob_count": 1,
+                "receipt_blob_count": 1
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let second_result = flush_kv_index(&state).await;
+    assert!(matches!(second_result, FlushResult::Ok));
+    {
+        let pending = state.kv_pending.read().await;
+        assert!(pending.is_empty());
+    }
+    {
+        let published = state.kv_published_index.read().await;
+        assert_eq!(published.entry_count(), 2);
+        assert!(!published.is_stable());
+    }
+
+    let stable_save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .expect(1)
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": "registry",
+                "storage_mode": "cas",
+                "blob_count": 2,
+                "blob_total_size_bytes": first_payload.len() + second_payload.len(),
+                "file_count": 2
+            }
+        })))
+        .with_status(201)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "registry",
+                "cache_entry_id": "entry-stable",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 2,
+                "blob_total_size_bytes": first_payload.len() + second_payload.len(),
+                "cas_layout": "file-v1",
+                "upload_session_id": "session-stable",
+                "manifest_upload_url": format!("{}/stable-manifest", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let stable_stage_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/stage")
+        .expect(1)
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-stable"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_urls": [],
+                "already_present": [first_digest, second_digest]
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let stable_manifest_mock = server
+        .mock("PUT", "/stable-manifest")
+        .expect(1)
+        .match_body(Matcher::Regex(
+            r#""path":"bazel_cas/key-one".*"path":"bazel_cas/key-two""#.to_string(),
+        ))
+        .with_status(200)
+        .create_async()
+        .await;
+    let stable_manifest_receipt_mock = server
+        .mock(
+            "POST",
+            "/v2/workspaces/org/repo/upload-sessions/session-stable/manifest/commit",
+        )
+        .expect(1)
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_session_id": "session-stable",
+                "cache_entry_id": "entry-stable",
+                "state": "uploading",
+                "expected_blob_count": 2,
+                "receipt_blob_count": 2
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let pointer_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/org/repo/caches/tags/registry/pointer",
+        )
+        .expect(1)
+        .with_status(404)
+        .create_async()
+        .await;
+    let publish_mock = server
+        .mock(
+            "PUT",
+            "/v2/workspaces/org/repo/caches/tags/registry/publish",
+        )
+        .expect(1)
+        .match_header("if-match", "0")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-stable",
+            "publish_mode": "cas"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "1",
+                "cache_entry_id": "entry-stable",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let shutdown_result = flush_kv_index_on_shutdown(&state).await;
+    assert!(matches!(shutdown_result, FlushResult::Ok));
+    {
+        let published = state.kv_published_index.read().await;
+        assert_eq!(published.entry_count(), 2);
+        assert_eq!(published.cache_entry_id(), Some("entry-stable"));
+        assert!(published.is_stable());
+    }
+
+    capabilities_mock.assert_async().await;
+    restore_mock.assert_async().await;
+    first_save_mock.assert_async().await;
+    first_stage_mock.assert_async().await;
+    first_upload_mock.assert_async().await;
+    first_receipt_mock.assert_async().await;
+    second_save_mock.assert_async().await;
+    second_stage_mock.assert_async().await;
+    second_upload_mock.assert_async().await;
+    second_receipt_mock.assert_async().await;
+    stable_save_mock.assert_async().await;
+    stable_stage_mock.assert_async().await;
+    stable_manifest_mock.assert_async().await;
+    stable_manifest_receipt_mock.assert_async().await;
+    pointer_mock.assert_async().await;
+    publish_mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn shutdown_flush_promotes_unstable_published_index_when_pending_is_empty() {
+    let mut server = Server::new_async().await;
+    let _guard = test_env::lock();
+    let temp_home = tempfile::tempdir().expect("temp dir");
+    let home_env = EnvVarGuard::new("HOME");
+    let tmpdir_env = EnvVarGuard::new("TMPDIR");
+    let api_url_env = EnvVarGuard::new("BORINGCACHE_API_URL");
+    let auth_token_env = EnvVarGuard::new("BORINGCACHE_AUTH_TOKEN");
+    let test_mode_env = EnvVarGuard::new("BORINGCACHE_TEST_MODE");
+    home_env.set(temp_home.path());
+    tmpdir_env.set(temp_home.path());
+    api_url_env.set(server.url());
+    auth_token_env.set("test-token");
+    test_mode_env.set("1");
+
+    let api_client =
+        ApiClient::new_with_token_override(Some("test-token".to_string())).expect("client");
+    let state = kv_flush_test_state(api_client, temp_home.path(), false);
+    let blob_digest = crate::cas_file::prefixed_sha256_digest(b"already durable blob");
+    let blob = BlobDescriptor {
+        digest: blob_digest.clone(),
+        size_bytes: 20,
+    };
+    {
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("bazel_cas/recovered-key".to_string(), blob.clone());
+        let mut published = state.kv_published_index.write().await;
+        published.update(
+            entries,
+            vec![blob],
+            "entry-unstable-memory".to_string(),
+            false,
+        );
+    }
+
+    let capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "features": {
+                    "upload_receipts_v2": true,
+                    "cas_publish_bootstrap_if_match": "0"
+                }
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let stable_save_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches")
+        .expect(1)
+        .match_body(Matcher::PartialJson(json!({
+            "cache": {
+                "tag": "registry",
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": 20,
+                "file_count": 1
+            }
+        })))
+        .with_status(201)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "tag": "registry",
+                "cache_entry_id": "entry-stable-empty-pending",
+                "exists": false,
+                "storage_mode": "cas",
+                "blob_count": 1,
+                "blob_total_size_bytes": 20,
+                "cas_layout": "file-v1",
+                "upload_session_id": "session-stable-empty-pending",
+                "manifest_upload_url": format!("{}/stable-empty-pending-manifest", server.url()),
+                "archive_urls": [],
+                "upload_headers": {}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let stable_stage_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/stage")
+        .expect(1)
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-stable-empty-pending"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_urls": [],
+                "already_present": [blob_digest]
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let stable_manifest_mock = server
+        .mock("PUT", "/stable-empty-pending-manifest")
+        .expect(1)
+        .match_body(Matcher::Regex(
+            r#""path":"bazel_cas/recovered-key""#.to_string(),
+        ))
+        .with_status(200)
+        .create_async()
+        .await;
+    let stable_manifest_receipt_mock = server
+        .mock(
+            "POST",
+            "/v2/workspaces/org/repo/upload-sessions/session-stable-empty-pending/manifest/commit",
+        )
+        .expect(1)
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "upload_session_id": "session-stable-empty-pending",
+                "cache_entry_id": "entry-stable-empty-pending",
+                "state": "uploading",
+                "expected_blob_count": 1,
+                "receipt_blob_count": 1
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let pointer_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/org/repo/caches/tags/registry/pointer",
+        )
+        .expect(1)
+        .with_status(404)
+        .create_async()
+        .await;
+    let publish_mock = server
+        .mock(
+            "PUT",
+            "/v2/workspaces/org/repo/caches/tags/registry/publish",
+        )
+        .expect(1)
+        .match_header("if-match", "0")
+        .match_body(Matcher::PartialJson(json!({
+            "cache_entry_id": "entry-stable-empty-pending",
+            "publish_mode": "cas"
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "version": "1",
+                "cache_entry_id": "entry-stable-empty-pending",
+                "status": "ready"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let result = flush_kv_index_on_shutdown(&state).await;
+    assert!(matches!(result, FlushResult::Ok));
+    {
+        let published = state.kv_published_index.read().await;
+        assert_eq!(
+            published.cache_entry_id(),
+            Some("entry-stable-empty-pending")
+        );
+        assert!(published.is_stable());
+    }
+
+    capabilities_mock.assert_async().await;
+    stable_save_mock.assert_async().await;
+    stable_stage_mock.assert_async().await;
+    stable_manifest_mock.assert_async().await;
+    stable_manifest_receipt_mock.assert_async().await;
+    pointer_mock.assert_async().await;
     publish_mock.assert_async().await;
 }
 

@@ -33,16 +33,19 @@ pub(crate) async fn flush_kv_index_with_mode(
 ) -> FlushResult {
     let guard = state.kv_flush_lock.lock().await;
 
-    let (pending_entries, pending_blob_paths) = {
+    let Some((pending_entries, pending_blob_paths)) = ({
         let mut pending = state.kv_pending.write().await;
         if pending.is_empty() {
-            return FlushResult::Ok;
+            None
+        } else {
+            Some(pending.take_all())
         }
-        pending.take_all()
+    }) else {
+        return flush_empty_pending_with_mode(state, flush_mode).await;
     };
 
     if pending_entries.is_empty() {
-        return FlushResult::Ok;
+        return flush_empty_pending_with_mode(state, flush_mode).await;
     }
 
     {
@@ -137,6 +140,14 @@ pub(crate) async fn flush_kv_index_with_mode(
     }
 
     result
+}
+
+async fn flush_empty_pending_with_mode(state: &AppState, flush_mode: FlushMode) -> FlushResult {
+    if flush_mode.publishes_stable_manifest() {
+        promote_kv_published_checkpoint_on_shutdown(state).await
+    } else {
+        FlushResult::Ok
+    }
 }
 
 pub(crate) fn should_clear_flushing_after_flush(result: &FlushResult) -> bool {
