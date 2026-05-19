@@ -1020,15 +1020,28 @@ mod tests {
     }
 
     async fn start_delayed_cache_api(delay: Duration) -> (String, oneshot::Sender<()>) {
-        let app = Router::new().route(
-            "/v2/workspaces/{org}/{repo}/caches",
-            get({
-                move || async move {
-                    tokio::time::sleep(delay).await;
-                    Json(Vec::<serde_json::Value>::new())
-                }
-            }),
-        );
+        let app = Router::new()
+            .route(
+                "/v2/workspaces/{org}/{repo}/caches",
+                get({
+                    move || async move {
+                        tokio::time::sleep(delay).await;
+                        Json(Vec::<serde_json::Value>::new())
+                    }
+                }),
+            )
+            .route(
+                "/v2/workspaces/{org}/{repo}/cache-kv-entries",
+                get({
+                    move || async move {
+                        tokio::time::sleep(delay).await;
+                        Json(serde_json::json!({
+                            "entries": [],
+                            "next_cursor": null
+                        }))
+                    }
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind delayed api");

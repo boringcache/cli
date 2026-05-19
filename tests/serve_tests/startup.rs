@@ -8,12 +8,12 @@ async fn test_startup_manifest_warm_runs_by_default() {
     let restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/cache-kv-entries\?tag=.*".to_string()),
         )
         .expect_at_least(1)
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body("[]")
+        .with_body(json!({ "entries": [], "next_cursor": null }).to_string())
         .create_async()
         .await;
 
@@ -55,7 +55,7 @@ async fn test_command_proxy_start_continues_when_warmup_fails() {
     let restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/cache-kv-entries\?tag=.*".to_string()),
         )
         .expect_at_least(1)
         .with_status(500)
@@ -190,58 +190,56 @@ async fn test_startup_prefetch_hydrates_full_tag_before_ready() {
     let key_a = digest_a.strip_prefix("sha256:").unwrap();
     let key_b = digest_b.strip_prefix("sha256:").unwrap();
     let key_c = digest_c.strip_prefix("sha256:").unwrap();
-    let pointer_entries = vec![
-        (
-            format!("bazel_cas/{key_a}"),
-            digest_a.clone(),
-            warm_blob_a.len() as u64,
-        ),
-        (
-            format!("bazel_cas/{key_b}"),
-            digest_b.clone(),
-            warm_blob_b.len() as u64,
-        ),
-        (
-            format!("bazel_cas/{key_c}"),
-            digest_c.clone(),
-            cold_blob.len() as u64,
-        ),
-    ];
-    let pointer_bytes = make_kv_pointer(&pointer_entries);
-
     let restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(
+                r"^/v2/workspaces/org/repo/cache-kv-entries\?tag=registry(&.*)?$".to_string(),
+            ),
         )
         .expect_at_least(1)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
-            json!([{
-                "tag": "registry",
-                "status": "hit",
-                "cache_entry_id": "entry-full-hydration",
-                "manifest_url": format!("{}/pointers/entry-full-hydration", server.url()),
-                "manifest_root_digest": cas_file::prefixed_sha256_digest(&pointer_bytes),
-                "storage_mode": "cas",
-                "cas_layout": "file-v1",
-            }])
+            json!({
+                "entries": [
+                    {
+                        "namespace": "bazel_cas",
+                        "scoped_key": format!("bazel_cas/{key_a}"),
+                        "blob": {
+                            "digest": digest_a.clone(),
+                            "size_bytes": warm_blob_a.len()
+                        }
+                    },
+                    {
+                        "namespace": "bazel_cas",
+                        "scoped_key": format!("bazel_cas/{key_b}"),
+                        "blob": {
+                            "digest": digest_b.clone(),
+                            "size_bytes": warm_blob_b.len()
+                        }
+                    },
+                    {
+                        "namespace": "bazel_cas",
+                        "scoped_key": format!("bazel_cas/{key_c}"),
+                        "blob": {
+                            "digest": digest_c.clone(),
+                            "size_bytes": cold_blob.len()
+                        }
+                    }
+                ],
+                "next_cursor": null
+            })
             .to_string(),
         )
         .create_async()
         .await;
 
-    let pointer_mock = server
-        .mock("GET", "/pointers/entry-full-hydration")
-        .expect_at_least(1)
-        .with_status(200)
-        .with_body(pointer_bytes)
-        .create_async()
-        .await;
-
     let download_urls_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .mock(
+            "POST",
+            "/v2/workspaces/org/repo/cache-kv-entries/download-urls",
+        )
         .expect_at_least(1)
         .match_body(Matcher::Any)
         .with_status(200)
@@ -339,7 +337,6 @@ async fn test_startup_prefetch_hydrates_full_tag_before_ready() {
     handle.shutdown_and_flush().await.expect("shutdown proxy");
 
     restore_mock.assert_async().await;
-    pointer_mock.assert_async().await;
     download_urls_mock.assert_async().await;
     pointer_visibility_mock.assert_async().await;
 }
@@ -355,54 +352,49 @@ async fn test_startup_prefetch_partial_blob_failure_does_not_block_readiness() {
     let cold_digest = cas_oci::prefixed_sha256_digest(cold_blob);
     let warm_key = warm_digest.strip_prefix("sha256:").unwrap();
     let cold_key = cold_digest.strip_prefix("sha256:").unwrap();
-    let pointer_entries = vec![
-        (
-            format!("bazel_cas/{warm_key}"),
-            warm_digest.clone(),
-            warm_blob.len() as u64,
-        ),
-        (
-            format!("bazel_cas/{cold_key}"),
-            cold_digest.clone(),
-            cold_blob.len() as u64,
-        ),
-    ];
-    let pointer_bytes = make_kv_pointer(&pointer_entries);
-    let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
 
     let restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(
+                r"^/v2/workspaces/org/repo/cache-kv-entries\?tag=registry(&.*)?$".to_string(),
+            ),
         )
         .expect_at_least(1)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
-            json!([{
-                "tag": "registry",
-                "status": "hit",
-                "cache_entry_id": "entry-partial-hydration",
-                "manifest_url": format!("{}/pointers/entry-partial-hydration", server.url()),
-                "manifest_root_digest": cas_file::prefixed_sha256_digest(&pointer_bytes),
-                "storage_mode": "cas",
-                "cas_layout": "file-v1",
-            }])
+            json!({
+                "entries": [
+                    {
+                        "namespace": "bazel_cas",
+                        "scoped_key": format!("bazel_cas/{warm_key}"),
+                        "blob": {
+                            "digest": warm_digest.clone(),
+                            "size_bytes": warm_blob.len()
+                        }
+                    },
+                    {
+                        "namespace": "bazel_cas",
+                        "scoped_key": format!("bazel_cas/{cold_key}"),
+                        "blob": {
+                            "digest": cold_digest.clone(),
+                            "size_bytes": cold_blob.len()
+                        }
+                    }
+                ],
+                "next_cursor": null
+            })
             .to_string(),
         )
         .create_async()
         .await;
 
-    let pointer_mock = server
-        .mock("GET", "/pointers/entry-partial-hydration")
-        .expect_at_least(1)
-        .with_status(200)
-        .with_body(pointer_bytes)
-        .create_async()
-        .await;
-
     let download_urls_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .mock(
+            "POST",
+            "/v2/workspaces/org/repo/cache-kv-entries/download-urls",
+        )
         .expect_at_least(1)
         .match_body(Matcher::Any)
         .with_status(200)
@@ -445,18 +437,9 @@ async fn test_startup_prefetch_partial_blob_failure_does_not_block_readiness() {
             "GET",
             Matcher::Regex(r"^/v2/workspaces/org/repo/caches/tags/registry/pointer".to_string()),
         )
-        .expect_at_least(1)
+        .expect(0)
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(
-            serde_json::to_string(&json!({
-                "tag": "registry",
-                "cache_entry_id": "entry-partial-hydration",
-                "manifest_root_digest": pointer_digest,
-                "version": "1"
-            }))
-            .unwrap(),
-        )
         .create_async()
         .await;
 
@@ -508,7 +491,6 @@ async fn test_startup_prefetch_partial_blob_failure_does_not_block_readiness() {
     handle.shutdown_and_flush().await.expect("shutdown proxy");
 
     restore_mock.assert_async().await;
-    pointer_mock.assert_async().await;
     download_urls_mock.assert_async().await;
     warm_blob_mock.assert_async().await;
     cold_blob_mock.assert_async().await;
@@ -554,11 +536,14 @@ async fn test_oci_prefetch_ref_indexes_manifest_before_ready() {
         .await;
 
     let kv_restore_mock = server
-        .mock("GET", "/v2/workspaces/org/repo/caches?entries=registry")
+        .mock(
+            "GET",
+            "/v2/workspaces/org/repo/cache-kv-entries?tag=registry&limit=5000",
+        )
         .expect_at_least(1)
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body("[]")
+        .with_body(json!({ "entries": [], "next_cursor": null }).to_string())
         .create_async()
         .await;
 
@@ -715,11 +700,14 @@ async fn test_oci_prefetch_ref_can_hydrate_bodies_before_ready() {
         .await;
 
     let kv_restore_mock = server
-        .mock("GET", "/v2/workspaces/org/repo/caches?entries=registry")
+        .mock(
+            "GET",
+            "/v2/workspaces/org/repo/cache-kv-entries?tag=registry&limit=5000",
+        )
         .expect_at_least(1)
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body("[]")
+        .with_body(json!({ "entries": [], "next_cursor": null }).to_string())
         .create_async()
         .await;
 

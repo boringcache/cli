@@ -82,12 +82,3 @@ pub(crate) fn transient_backoff_window(message: &str) -> (u64, u64) {
         (KV_TRANSIENT_BACKOFF_MS, KV_TRANSIENT_JITTER_MS)
     }
 }
-
-pub(crate) fn kv_confirm_retry_delay(attempt: u32) -> std::time::Duration {
-    let exponent = attempt.saturating_sub(1).min(6);
-    let multiplier = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
-    let delay_ms = KV_CONFIRM_RETRY_BASE_MS
-        .saturating_mul(multiplier)
-        .min(KV_CONFIRM_RETRY_MAX_MS);
-    std::time::Duration::from_millis(delay_ms)
-}

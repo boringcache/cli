@@ -426,44 +426,37 @@ async fn test_bazel_cas_get_ignores_backend_index_digest_mismatch() {
         .to_string();
     let mismatched_payload = b"mismatched-backend-bazel-cas-payload";
     let mismatched_digest = cas_file::prefixed_sha256_digest(mismatched_payload);
-    let pointer_bytes = make_kv_pointer(&[(
-        format!("bazel_cas/{key}"),
-        mismatched_digest.clone(),
-        mismatched_payload.len() as u64,
-    )]);
-    let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
-
     let restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(
+                r"^/v2/workspaces/org/repo/cache-kv-entries\?tag=registry(&.*)?$".to_string(),
+            ),
         )
         .expect(1)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
-            json!([{
-                "tag": "registry",
-                "status": "hit",
-                "cache_entry_id": "entry-bazel-mismatched-backend",
-                "manifest_url": format!("{}/pointer-bazel-mismatched-backend", server.url()),
-                "manifest_root_digest": pointer_digest,
-                "storage_mode": "cas",
-                "cas_layout": "file-v1",
-            }])
+            json!({
+                "entries": [{
+                    "namespace": "bazel_cas",
+                    "scoped_key": format!("bazel_cas/{key}"),
+                    "blob": {
+                        "digest": mismatched_digest,
+                        "size_bytes": mismatched_payload.len()
+                    }
+                }],
+                "next_cursor": null
+            })
             .to_string(),
         )
         .create_async()
         .await;
-    let pointer_mock = server
-        .mock("GET", "/pointer-bazel-mismatched-backend")
-        .expect(1)
-        .with_status(200)
-        .with_body(pointer_bytes)
-        .create_async()
-        .await;
     let download_urls_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .mock(
+            "POST",
+            "/v2/workspaces/org/repo/cache-kv-entries/download-urls",
+        )
         .expect(0)
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -493,7 +486,6 @@ async fn test_bazel_cas_get_ignores_backend_index_digest_mismatch() {
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     restore_mock.assert_async().await;
-    pointer_mock.assert_async().await;
     download_urls_mock.assert_async().await;
 }
 
@@ -522,7 +514,7 @@ async fn test_bazel_rejects_unsupported_method() {
 async fn test_bazel_ac_and_cas_misses_return_not_found() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
-    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 1).await;
     let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     for path in [format!("/ac/{digest}"), format!("/cas/{digest}")] {

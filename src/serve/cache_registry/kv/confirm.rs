@@ -7,10 +7,6 @@ pub(crate) enum FlushError {
     Permanent(String),
 }
 
-pub(crate) struct KvConfirmOutcome {
-    pub(crate) cache_entry_id: String,
-}
-
 pub(crate) fn classify_flush_error(error: &anyhow::Error, context: &str) -> FlushError {
     let message = format!("{context}: {error}");
     let lower = message.to_ascii_lowercase();
@@ -121,56 +117,6 @@ fn edge_blob_url_planning_bad_request(lower: &str) -> bool {
         && (lower.contains("<html")
             || lower.contains("<title>400 bad request</title>")
             || lower.contains("nginx"))
-}
-
-pub(crate) async fn confirm_kv_flush(
-    state: &AppState,
-    cache_entry_id: &str,
-    confirm_request: &ConfirmRequest,
-) -> Result<KvConfirmOutcome, FlushError> {
-    let started_at = std::time::Instant::now();
-    let mut attempt = 0u32;
-
-    loop {
-        let result: Result<KvConfirmOutcome, anyhow::Error> = state
-            .api_client
-            .confirm_with_retry(&state.workspace, cache_entry_id, confirm_request)
-            .await
-            .map(|response| KvConfirmOutcome {
-                cache_entry_id: response
-                    .cache_entry_id
-                    .unwrap_or_else(|| cache_entry_id.to_string()),
-            });
-
-        match result {
-            Ok(outcome) => return Ok(outcome),
-            Err(error) => {
-                let classified = classify_flush_error(&error, "confirm failed");
-                if started_at.elapsed() < KV_CONFIRM_RETRY_TIMEOUT
-                    && let Some(reason) = confirm_retry_reason(&classified)
-                {
-                    attempt = attempt.saturating_add(1);
-                    let delay = kv_confirm_retry_delay(attempt);
-                    eprintln!(
-                        "KV confirm: {reason} for cache entry {cache_entry_id}; retrying in {:.1}s (attempt {attempt})",
-                        delay.as_secs_f32()
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-
-                return Err(classified);
-            }
-        }
-    }
-}
-
-pub(crate) fn confirm_retry_reason(classified: &FlushError) -> Option<&'static str> {
-    if matches!(classified, FlushError::Transient(_)) {
-        return Some("transient backend error");
-    }
-
-    None
 }
 
 pub(crate) fn has_status_code(lower: &str, code: u16) -> bool {

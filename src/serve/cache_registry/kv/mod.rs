@@ -13,13 +13,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::io::ReaderStream;
 
-use crate::api::models::cache::{
-    BlobDescriptor, CacheResolutionEntry, ConfirmRequest, SaveRequest,
-};
-use crate::cache::receipts::try_commit_blob_receipts;
-use crate::cas_transport::upload_payload;
+use crate::api::models::cache::{BlobDescriptor, CacheResolutionEntry};
 use crate::error::BoringCacheError;
-use crate::manifest::EntryType;
 use crate::serve::state::{
     AppState, BlobReadHandle, KV_BACKLOG_POLICY, KvFlushingSnapshot, KvReplicationWork,
 };
@@ -36,9 +31,6 @@ const KV_TRANSIENT_BACKOFF_MS: u64 = 2_000;
 const KV_TRANSIENT_JITTER_MS: u64 = 2_000;
 const KV_TRANSIENT_WRITE_PATH_BACKOFF_MS: u64 = 20_000;
 const KV_TRANSIENT_WRITE_PATH_JITTER_MS: u64 = 5_000;
-const KV_CONFIRM_RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-const KV_CONFIRM_RETRY_BASE_MS: u64 = 1_000;
-const KV_CONFIRM_RETRY_MAX_MS: u64 = 5_000;
 const KV_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const KV_EMPTY_INDEX_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(12);
 const KV_PENDING_REFRESH_SUPPRESSION_WINDOW: std::time::Duration =
@@ -50,7 +42,6 @@ const KV_LOOKUP_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from
 const KV_PUT_BODY_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const KV_PUT_BODY_SLOW_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
 const KV_RESOLVE_HIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const KV_FETCH_POINTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
 const KV_STARTUP_PREFETCH_MAX_BLOBS_ENV: &str = "BORINGCACHE_STARTUP_PREFETCH_MAX_BLOBS";
 #[cfg(test)]

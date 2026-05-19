@@ -6,7 +6,6 @@ use boring_cache_cli::api::models::cache::BlobDescriptor;
 use boring_cache_cli::cas_file;
 use boring_cache_cli::cas_oci;
 use boring_cache_cli::git::GitContext;
-use boring_cache_cli::manifest::EntryType;
 use boring_cache_cli::serve::routes::build_router;
 use boring_cache_cli::serve::state::{
     AppState, BlobLocatorCache, BlobLocatorEntry, BlobReadCache, BlobReadMetrics, KvPendingStore,
@@ -222,46 +221,16 @@ fn make_file_pointer(blob_digest: &str, size_bytes: u64) -> Vec<u8> {
     serde_json::to_vec(&pointer).unwrap()
 }
 
-fn make_kv_pointer(entries: &[(String, String, u64)]) -> Vec<u8> {
-    let pointer = cas_file::FilePointer {
-        format_version: 1,
-        adapter: "file-v1".to_string(),
-        entries: entries
-            .iter()
-            .map(|(path, digest, size_bytes)| cas_file::FilePointerEntry {
-                path: path.clone(),
-                entry_type: EntryType::File,
-                size_bytes: *size_bytes,
-                executable: None,
-                target: None,
-                digest: Some(digest.clone()),
-            })
-            .collect(),
-        blobs: entries
-            .iter()
-            .enumerate()
-            .map(
-                |(sequence, (_, digest, size_bytes))| cas_file::FilePointerBlob {
-                    digest: digest.clone(),
-                    size_bytes: *size_bytes,
-                    sequence: Some(sequence as u64),
-                },
-            )
-            .collect(),
-    };
-    serde_json::to_vec(&pointer).unwrap()
-}
-
 async fn mock_empty_cache_restore(server: &mut Server, expected_calls: usize) -> mockito::Mock {
     server
         .mock(
             "GET",
-            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(r"^/v2/workspaces/org/repo/cache-kv-entries\?tag=.*".to_string()),
         )
         .expect(expected_calls)
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body("[]")
+        .with_body(json!({ "entries": [], "next_cursor": null }).to_string())
         .create_async()
         .await
 }

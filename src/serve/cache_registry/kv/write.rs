@@ -240,6 +240,38 @@ pub(crate) async fn resolve_download_url(
     cache_entry_id: &str,
     blob: &BlobDescriptor,
 ) -> Result<String, RegistryError> {
+    if let Some(tag) = kv_direct_tag_from_cache_entry_id(cache_entry_id) {
+        let response = match state
+            .api_client
+            .cache_kv_blob_download_urls(&state.workspace, tag, std::slice::from_ref(blob))
+            .await
+        {
+            Ok(response) => {
+                state.backend_breaker.record_success();
+                response
+            }
+            Err(e) => {
+                state.backend_breaker.record_failure();
+                return Err(RegistryError::internal(format!(
+                    "Failed to resolve KV blob download URL: {e}"
+                )));
+            }
+        };
+
+        if let Some(url) = response
+            .download_urls
+            .into_iter()
+            .find(|item| item.digest.eq_ignore_ascii_case(&blob.digest))
+            .map(|item| item.url)
+        {
+            return Ok(url);
+        }
+
+        return Err(RegistryError::not_found(
+            "Cache object is missing blob data",
+        ));
+    }
+
     let download_url = match crate::serve::blob_download_urls::resolve_verified_blob_download_url(
         state,
         cache_entry_id,
@@ -385,32 +417,14 @@ pub(crate) fn kv_visibility_tags(state: &AppState) -> Vec<String> {
     kv_visibility_tags_from_values(&state.primary_cache_tag, &state.configured_human_tags)
 }
 
-pub(crate) fn kv_alias_tags_from_values(
-    primary_cache_tag: &str,
-    configured_human_tags: &[String],
-) -> Vec<String> {
-    kv_visibility_tags_from_values(primary_cache_tag, configured_human_tags)
-        .into_iter()
-        .skip(1)
-        .collect()
-}
-
-pub(crate) fn kv_alias_tags(state: &AppState) -> Vec<String> {
-    kv_alias_tags_from_values(&state.primary_cache_tag, &state.configured_human_tags)
-}
-
-pub(crate) fn kv_primary_write_scope_tag(state: &AppState) -> Option<String> {
-    state
-        .configured_human_tags
-        .first()
-        .map(|tag| tag.trim().to_string())
-        .filter(|tag| !tag.is_empty())
-}
-
 pub(crate) async fn kv_publish_tags_visible(
     state: &AppState,
     expected_cache_entry_id: &str,
 ) -> bool {
+    if kv_direct_tag_from_cache_entry_id(expected_cache_entry_id).is_some() {
+        return true;
+    }
+
     for tag in kv_visibility_tags(state) {
         let visible = match state
             .api_client

@@ -8,6 +8,18 @@ use crate::observability::{self, ObservabilityEvent};
 use crate::serve::cache_registry;
 use crate::serve::state::{AppState, build_cache_session_summary};
 
+const KV_SHUTDOWN_FLUSH_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_KV_SHUTDOWN_FLUSH_TIMEOUT_SECS";
+const DEFAULT_KV_SHUTDOWN_FLUSH_TIMEOUT_SECS: u64 = 180;
+
+fn kv_shutdown_flush_timeout() -> std::time::Duration {
+    std::env::var(KV_SHUTDOWN_FLUSH_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or_else(|| std::time::Duration::from_secs(DEFAULT_KV_SHUTDOWN_FLUSH_TIMEOUT_SECS))
+}
+
 pub(super) fn emit_cache_session_summary(state: &AppState) {
     let summary = build_cache_session_summary(state);
 
@@ -52,7 +64,8 @@ pub(super) async fn cleanup_runtime_temp_dir(state: &AppState) {
 }
 
 pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let timeout = kv_shutdown_flush_timeout();
+    let deadline = std::time::Instant::now() + timeout;
 
     loop {
         let pending_entries = {
@@ -69,9 +82,7 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
                 pending.entry_count()
             };
             if pending_after_flush == 0 {
-                if promote_checkpoint_if_needed(state).await? {
-                    break;
-                }
+                break;
             } else {
                 continue;
             }
@@ -104,7 +115,7 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
             }
         }
 
-        if promote_checkpoint_if_no_pending_entries(state).await? {
+        if pending_entries_empty(state).await {
             break;
         }
 
@@ -113,21 +124,13 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
                 let pending = state.kv_pending.read().await;
                 pending.entry_count()
             };
-            let checkpoint_unpromoted = {
-                let published = state.kv_published_index.read().await;
-                !published.is_stable() && published.cache_entry_id().is_some()
-            };
-            if pending_entries == 0 && !checkpoint_unpromoted {
+            if pending_entries == 0 {
                 break;
             }
-            let message = if checkpoint_unpromoted {
-                "Shutdown: checkpoint promotion timeout reached; latest cache was not made stable"
-                    .to_string()
-            } else {
-                format!(
-                    "Shutdown: flush timeout reached with {pending_entries} pending entries remaining"
-                )
-            };
+            let message = format!(
+                "Shutdown: flush timeout reached after {}s with {pending_entries} pending entries remaining",
+                timeout.as_secs()
+            );
             eprintln!("{message}");
             if state.fail_on_cache_error {
                 return Err(anyhow!(message));
@@ -142,28 +145,12 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-async fn promote_checkpoint_if_no_pending_entries(state: &AppState) -> Result<bool> {
+async fn pending_entries_empty(state: &AppState) -> bool {
     let pending_entries = {
         let pending = state.kv_pending.read().await;
         pending.entry_count()
     };
-
-    if pending_entries == 0 {
-        promote_checkpoint_if_needed(state).await
-    } else {
-        Ok(false)
-    }
-}
-
-async fn promote_checkpoint_if_needed(state: &AppState) -> Result<bool> {
-    match cache_registry::promote_kv_published_checkpoint_on_shutdown(state).await {
-        cache_registry::FlushResult::Ok => Ok(true),
-        cache_registry::FlushResult::Permanent if state.fail_on_cache_error => Err(anyhow!(
-            "Shutdown: cache checkpoint could not be promoted; see proxy log for the backend error"
-        )),
-        cache_registry::FlushResult::Permanent => Ok(true),
-        cache_registry::FlushResult::Conflict | cache_registry::FlushResult::Error => Ok(false),
-    }
+    pending_entries == 0
 }
 
 pub(super) async fn shutdown_signal(shutdown_requested: Arc<AtomicBool>) {
@@ -234,4 +221,28 @@ pub(super) async fn shutdown_signal_with_channel(
 
     shutdown_requested.store(true, Ordering::Release);
     eprintln!("\nShutting down...");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_env;
+
+    #[test]
+    fn kv_shutdown_flush_timeout_uses_default_and_env_override() {
+        let _guard = test_env::lock();
+        test_env::remove_var(KV_SHUTDOWN_FLUSH_TIMEOUT_SECS_ENV);
+        assert_eq!(
+            kv_shutdown_flush_timeout(),
+            std::time::Duration::from_secs(DEFAULT_KV_SHUTDOWN_FLUSH_TIMEOUT_SECS)
+        );
+
+        test_env::set_var(KV_SHUTDOWN_FLUSH_TIMEOUT_SECS_ENV, "42");
+        assert_eq!(
+            kv_shutdown_flush_timeout(),
+            std::time::Duration::from_secs(42)
+        );
+
+        test_env::remove_var(KV_SHUTDOWN_FLUSH_TIMEOUT_SECS_ENV);
+    }
 }

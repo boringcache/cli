@@ -27,6 +27,9 @@ const BLOB_UPLOAD_URL_BATCH_MAX: usize = 500;
 const BLOB_METRIC_ENDPOINT_OPERATION_CHECK: &str = "cache_blobs_check";
 const BLOB_METRIC_ENDPOINT_OPERATION_UPLOAD_URLS: &str = "cache_blobs_upload_urls";
 const BLOB_METRIC_ENDPOINT_OPERATION_DOWNLOAD_URLS: &str = "cache_blobs_download_urls";
+const CACHE_METRIC_ENDPOINT_OPERATION_KV_ENTRIES_UPSERT: &str = "cache_kv_entries_upsert";
+const CACHE_METRIC_ENDPOINT_OPERATION_KV_ENTRIES_DOWNLOAD_URLS: &str =
+    "cache_kv_entries_download_urls";
 const CACHE_METRIC_ENDPOINT_OPERATION_SAVE_ENTRY: &str = "cache_flush_upload";
 const CACHE_METRIC_ENDPOINT_OPERATION_CONFIRM_PUBLISH: &str = "cache_finalize_publish";
 const CACHE_METRIC_ENDPOINT_OPERATION_UPLOAD_SESSION_BLOB_RECEIPTS: &str =
@@ -39,6 +42,9 @@ const API_VERSION_V2: &str = "v2";
 const FALLBACK_API_BASE_URL: &str = "https://api.boringcache.com";
 const CONFIRM_PUBLISH_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_CONFIRM_PUBLISH_TIMEOUT_SECS";
 const DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS: u64 = 10;
+const UPLOAD_SESSION_MANIFEST_COMMIT_TIMEOUT_SECS_ENV: &str =
+    "BORINGCACHE_UPLOAD_SESSION_MANIFEST_COMMIT_TIMEOUT_SECS";
+const DEFAULT_UPLOAD_SESSION_MANIFEST_COMMIT_TIMEOUT_SECS: u64 = 300;
 const TRANSFER_CONNECT_TIMEOUT_SECS_ENV: &str = "BORINGCACHE_TRANSFER_CONNECT_TIMEOUT_SECS";
 const DEFAULT_TRANSFER_CONNECT_TIMEOUT_SECS: u64 = 10;
 const BLOB_RECEIPT_COMMIT_BATCH_MAX: usize = 500;
@@ -64,6 +70,8 @@ struct CapabilityFlags {
     upload_sessions_v2: bool,
     #[serde(default)]
     upload_receipts_v2: bool,
+    #[serde(default)]
+    cache_kv_entries_v1: bool,
     #[serde(default)]
     cas_publish_bootstrap_if_match: Option<String>,
 }
@@ -353,6 +361,15 @@ fn confirm_publish_request_timeout() -> Duration {
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_CONFIRM_PUBLISH_TIMEOUT_SECS);
+    Duration::from_secs(seconds)
+}
+
+fn upload_session_manifest_commit_timeout() -> Duration {
+    let seconds = std::env::var(UPLOAD_SESSION_MANIFEST_COMMIT_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_UPLOAD_SESSION_MANIFEST_COMMIT_TIMEOUT_SECS);
     Duration::from_secs(seconds)
 }
 

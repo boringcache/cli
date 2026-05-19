@@ -62,7 +62,7 @@ async fn test_go_cache_put_head_get_round_trip() {
 async fn test_go_cache_get_miss_returns_not_found() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
-    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 1).await;
     let action = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     let response = tower::ServiceExt::oneshot(

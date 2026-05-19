@@ -1,5 +1,17 @@
 use super::*;
 
+pub(crate) const KV_DIRECT_CACHE_ENTRY_PREFIX: &str = "kv-direct:";
+
+pub(crate) fn kv_direct_cache_entry_id(tag: &str) -> String {
+    format!("{KV_DIRECT_CACHE_ENTRY_PREFIX}{}", tag.trim())
+}
+
+pub(crate) fn kv_direct_tag_from_cache_entry_id(cache_entry_id: &str) -> Option<&str> {
+    cache_entry_id
+        .strip_prefix(KV_DIRECT_CACHE_ENTRY_PREFIX)
+        .filter(|tag| !tag.trim().is_empty())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlobReadSource {
     LocalCache,

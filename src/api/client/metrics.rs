@@ -45,8 +45,12 @@ impl ApiClient {
         let workspace = Self::metric_workspace_from_endpoint(endpoint);
         let request_bytes = serde_json::to_vec(body).ok().map(|buf| buf.len() as u64);
         let started_at = Instant::now();
+        let mut request = self.client.post(&url).json(body);
+        if operation == CACHE_METRIC_ENDPOINT_OPERATION_UPLOAD_SESSION_MANIFEST_RECEIPT {
+            request = request.timeout(upload_session_manifest_commit_timeout());
+        }
         let (response_result, retry_count) = self
-            .send_authenticated_request_with_retry_count(self.client.post(&url).json(body))
+            .send_authenticated_request_with_retry_count(request)
             .await;
 
         match response_result {

@@ -492,6 +492,103 @@ impl ApiClient {
             .await
     }
 
+    pub async fn stream_cache_kv_entries(
+        &self,
+        workspace: &str,
+        tag: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::api::models::cache::CacheKvEntriesResponse> {
+        ensure!(!tag.trim().is_empty(), "tag must not be empty");
+        let encoded_tag = urlencoding::encode(tag);
+        let mut endpoint = self.workspace_endpoint(
+            workspace,
+            &format!("cache-kv-entries?tag={encoded_tag}&limit={limit}"),
+        )?;
+        if let Some(cursor) = cursor.filter(|value| !value.trim().is_empty()) {
+            endpoint.push_str("&cursor=");
+            endpoint.push_str(&urlencoding::encode(cursor));
+        }
+
+        self.get_v2(&endpoint).await
+    }
+
+    pub async fn upsert_cache_kv_entries(
+        &self,
+        workspace: &str,
+        tag: &str,
+        entries: &[crate::api::models::cache::CacheKvEntryUpsertItem],
+    ) -> Result<crate::api::models::cache::CacheKvEntriesResponse> {
+        ensure!(!tag.trim().is_empty(), "tag must not be empty");
+        ensure!(!entries.is_empty(), "entries cannot be empty");
+
+        let endpoint = self.workspace_endpoint(workspace, "cache-kv-entries")?;
+        let batch_max = 2_000usize;
+        let batch_count = entries.len().div_ceil(batch_max) as u64;
+        let mut response_entries = Vec::new();
+        for (batch_idx, chunk) in entries.chunks(batch_max).enumerate() {
+            let body = crate::api::models::cache::CacheKvEntryUpsertRequest {
+                tag: tag.to_string(),
+                entries: chunk.to_vec(),
+            };
+            let response: crate::api::models::cache::CacheKvEntriesResponse = self
+                .post_v2_with_request_metrics(
+                    &endpoint,
+                    &body,
+                    CACHE_METRIC_ENDPOINT_OPERATION_KV_ENTRIES_UPSERT,
+                    Some((batch_idx + 1) as u64),
+                    Some(batch_count),
+                    Some(chunk.len() as u64),
+                )
+                .await?;
+            response_entries.extend(response.entries);
+        }
+
+        Ok(crate::api::models::cache::CacheKvEntriesResponse {
+            entries: response_entries,
+            next_cursor: None,
+        })
+    }
+
+    pub async fn cache_kv_blob_download_urls(
+        &self,
+        workspace: &str,
+        tag: &str,
+        blobs: &[crate::api::models::cache::BlobDescriptor],
+    ) -> Result<crate::api::models::cache::BlobDownloadUrlsResponse> {
+        ensure!(!tag.trim().is_empty(), "tag must not be empty");
+        ensure!(!blobs.is_empty(), "blobs cannot be empty");
+
+        let endpoint = self.workspace_endpoint(workspace, "cache-kv-entries/download-urls")?;
+        let batch_max = blob_url_batch_max();
+        let batch_count = blobs.len().div_ceil(batch_max) as u64;
+        let mut download_urls = Vec::new();
+        let mut missing = Vec::new();
+        for (batch_idx, chunk) in blobs.chunks(batch_max).enumerate() {
+            let body = crate::api::models::cache::CacheKvBlobDownloadUrlsRequest {
+                tag: tag.to_string(),
+                blobs: chunk.to_vec(),
+            };
+            let response: crate::api::models::cache::BlobDownloadUrlsResponse = self
+                .post_v2_with_request_metrics(
+                    &endpoint,
+                    &body,
+                    CACHE_METRIC_ENDPOINT_OPERATION_KV_ENTRIES_DOWNLOAD_URLS,
+                    Some((batch_idx + 1) as u64),
+                    Some(batch_count),
+                    Some(chunk.len() as u64),
+                )
+                .await?;
+            download_urls.extend(response.download_urls);
+            missing.extend(response.missing);
+        }
+
+        Ok(crate::api::models::cache::BlobDownloadUrlsResponse {
+            download_urls,
+            missing: dedupe_strings(missing),
+        })
+    }
+
     pub async fn save_entry(
         &self,
         workspace: &str,

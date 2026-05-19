@@ -315,12 +315,6 @@ async fn test_sccache_get_reads_primary_cache_tag_only() {
     );
     let payload = b"sccache-primary-cache-only";
     let payload_digest = cas_file::prefixed_sha256_digest(payload);
-    let pointer_bytes = make_kv_pointer(&[(
-        format!("sccache/{key_path}"),
-        payload_digest.clone(),
-        payload.len() as u64,
-    )]);
-    let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
     let primary_tag = state.primary_cache_tag.clone();
     let primary_entries = urlencoding::encode(&primary_tag).into_owned();
     let alias_entries = urlencoding::encode("human-alias").into_owned();
@@ -329,22 +323,24 @@ async fn test_sccache_get_reads_primary_cache_tag_only() {
         .mock(
             "GET",
             Matcher::Regex(format!(
-                "^/v2/workspaces/org/repo/caches\\?entries={primary_entries}(&.*)?$"
+                "^/v2/workspaces/org/repo/cache-kv-entries\\?tag={primary_entries}(&.*)?$"
             )),
         )
         .expect(1)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
-            json!([{
-                "tag": primary_tag,
-                "status": "hit",
-                "cache_entry_id": "entry-sccache-primary-only",
-                "manifest_url": format!("{}/pointer-download-sccache-primary-only", server.url()),
-                "manifest_root_digest": pointer_digest,
-                "storage_mode": "cas",
-                "cas_layout": "file-v1",
-            }])
+            json!({
+                "entries": [{
+                    "namespace": "sccache",
+                    "scoped_key": format!("sccache/{key_path}"),
+                    "blob": {
+                        "digest": payload_digest,
+                        "size_bytes": payload.len()
+                    }
+                }],
+                "next_cursor": null
+            })
             .to_string(),
         )
         .create_async()
@@ -354,7 +350,7 @@ async fn test_sccache_get_reads_primary_cache_tag_only() {
         .mock(
             "GET",
             Matcher::Regex(format!(
-                "^/v2/workspaces/org/repo/caches\\?entries={alias_entries}(&.*)?$"
+                "^/v2/workspaces/org/repo/cache-kv-entries\\?tag={alias_entries}(&.*)?$"
             )),
         )
         .expect(0)
@@ -362,20 +358,13 @@ async fn test_sccache_get_reads_primary_cache_tag_only() {
         .create_async()
         .await;
 
-    let pointer_mock = server
-        .mock("GET", "/pointer-download-sccache-primary-only")
-        .expect(1)
-        .with_status(200)
-        .with_body(pointer_bytes)
-        .create_async()
-        .await;
-
     let download_urls_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .mock(
+            "POST",
+            "/v2/workspaces/org/repo/cache-kv-entries/download-urls",
+        )
         .expect(1)
-        .match_body(Matcher::PartialJson(json!({
-            "verify_storage": true
-        })))
+        .match_body(Matcher::PartialJson(json!({ "tag": primary_tag })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -417,7 +406,6 @@ async fn test_sccache_get_reads_primary_cache_tag_only() {
 
     root_restore_mock.assert_async().await;
     alias_restore_mock.assert_async().await;
-    pointer_mock.assert_async().await;
     download_urls_mock.assert_async().await;
     blob_download_mock.assert_async().await;
 }
@@ -437,50 +425,41 @@ async fn test_sccache_concurrent_get_coalesces_blob_download() {
     );
     let payload = vec![b'x'; 2 * 1024 * 1024];
     let payload_digest = cas_file::prefixed_sha256_digest(&payload);
-    let pointer_bytes = make_kv_pointer(&[(
-        format!("sccache/{key_path}"),
-        payload_digest.clone(),
-        payload.len() as u64,
-    )]);
-    let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
 
     let restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(
+                r"^/v2/workspaces/org/repo/cache-kv-entries\?tag=registry(&.*)?$".to_string(),
+            ),
         )
         .expect_at_least(1)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
-            json!([{
-                "tag": "registry",
-                "status": "hit",
-                "cache_entry_id": "entry-sccache-coalesced",
-                "manifest_url": format!("{}/pointer-download-sccache-coalesced", server.url()),
-                "manifest_root_digest": pointer_digest,
-                "storage_mode": "cas",
-                "cas_layout": "file-v1",
-            }])
+            json!({
+                "entries": [{
+                    "namespace": "sccache",
+                    "scoped_key": format!("sccache/{key_path}"),
+                    "blob": {
+                        "digest": payload_digest,
+                        "size_bytes": payload.len()
+                    }
+                }],
+                "next_cursor": null
+            })
             .to_string(),
         )
         .create_async()
         .await;
 
-    let pointer_mock = server
-        .mock("GET", "/pointer-download-sccache-coalesced")
-        .expect_at_least(1)
-        .with_status(200)
-        .with_body(pointer_bytes)
-        .create_async()
-        .await;
-
     let download_urls_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .mock(
+            "POST",
+            "/v2/workspaces/org/repo/cache-kv-entries/download-urls",
+        )
         .expect(1)
-        .match_body(Matcher::PartialJson(json!({
-            "verify_storage": true
-        })))
+        .match_body(Matcher::PartialJson(json!({ "tag": "registry" })))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -528,7 +507,6 @@ async fn test_sccache_concurrent_get_coalesces_blob_download() {
     assert_eq!(second_body.as_ref(), payload.as_slice());
 
     restore_mock.assert_async().await;
-    pointer_mock.assert_async().await;
     download_urls_mock.assert_async().await;
     blob_download_mock.assert_async().await;
 }
@@ -559,7 +537,7 @@ async fn test_sccache_rejects_unsupported_method() {
 async fn test_sccache_head_miss_returns_not_found_without_body() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
-    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 1).await;
     let key_path =
         "cache-prefix/0/1/2/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -594,53 +572,31 @@ async fn test_sccache_miss_is_temporarily_cached_to_reduce_backend_lookups() {
         key
     );
     let payload_digest = cas_file::prefixed_sha256_digest(b"unrelated");
-    let pointer = cas_file::FilePointer {
-        format_version: 1,
-        adapter: "file-v1".to_string(),
-        entries: vec![cas_file::FilePointerEntry {
-            path: "sccache/other-key".to_string(),
-            entry_type: EntryType::File,
-            size_bytes: 9,
-            executable: None,
-            target: None,
-            digest: Some(payload_digest.clone()),
-        }],
-        blobs: vec![cas_file::FilePointerBlob {
-            digest: payload_digest,
-            size_bytes: 9,
-            sequence: None,
-        }],
-    };
-    let pointer_bytes = serde_json::to_vec(&pointer).expect("pointer");
 
     let restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=.*".to_string()),
+            Matcher::Regex(
+                r"^/v2/workspaces/org/repo/cache-kv-entries\?tag=registry(&.*)?$".to_string(),
+            ),
         )
         .expect(1)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
-            json!([{
-                "tag": "unused",
-                "status": "hit",
-                "cache_entry_id": "entry-sccache-kv",
-                "manifest_url": format!("{}/pointer-miss-sccache", server.url()),
-                "manifest_root_digest": cas_file::prefixed_sha256_digest(&pointer_bytes),
-                "storage_mode": "cas",
-                "cas_layout": "file-v1",
-            }])
+            json!({
+                "entries": [{
+                    "namespace": "sccache",
+                    "scoped_key": "sccache/other-key",
+                    "blob": {
+                        "digest": payload_digest,
+                        "size_bytes": 9
+                    }
+                }],
+                "next_cursor": null
+            })
             .to_string(),
         )
-        .create_async()
-        .await;
-
-    let pointer_mock = server
-        .mock("GET", "/pointer-miss-sccache")
-        .expect(1)
-        .with_status(200)
-        .with_body(pointer_bytes)
         .create_async()
         .await;
 
@@ -671,5 +627,4 @@ async fn test_sccache_miss_is_temporarily_cached_to_reduce_backend_lookups() {
     assert_eq!(second_response.status(), StatusCode::NOT_FOUND);
 
     restore_mock.assert_async().await;
-    pointer_mock.assert_async().await;
 }

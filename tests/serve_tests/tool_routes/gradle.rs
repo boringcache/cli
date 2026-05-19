@@ -204,18 +204,13 @@ async fn test_gradle_get_uses_default_restore_cache_tag_after_transient_branch_e
     let cache_key = "fallback-gradle-key";
     let payload = b"gradle-fallback-payload";
     let payload_digest = cas_file::prefixed_sha256_digest(payload);
-    let pointer_entries = vec![(
-        format!("gradle/{cache_key}"),
-        payload_digest.clone(),
-        payload.len() as u64,
-    )];
-    let pointer_bytes = make_kv_pointer(&pointer_entries);
-    let pointer_digest = cas_file::prefixed_sha256_digest(&pointer_bytes);
 
     let head_restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=feature-cache$".to_string()),
+            Matcher::Regex(
+                r"^/v2/workspaces/org/repo/cache-kv-entries\?tag=feature-cache(&.*)?$".to_string(),
+            ),
         )
         .expect(3)
         .with_status(500)
@@ -226,39 +221,38 @@ async fn test_gradle_get_uses_default_restore_cache_tag_after_transient_branch_e
     let default_restore_mock = server
         .mock(
             "GET",
-            Matcher::Regex(r"^/v2/workspaces/org/repo/caches\?entries=default-cache$".to_string()),
+            Matcher::Regex(
+                r"^/v2/workspaces/org/repo/cache-kv-entries\?tag=default-cache(&.*)?$".to_string(),
+            ),
         )
         .expect(1)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
-            json!([{
-                "tag": "default-cache",
-                "status": "hit",
-                "cache_entry_id": "entry-gradle-fallback",
-                "manifest_url": format!("{}/pointer-download-gradle-fallback", server.url()),
-                "manifest_root_digest": pointer_digest,
-                "storage_mode": "cas",
-                "cas_layout": "file-v1",
-            }])
+            json!({
+                "entries": [{
+                    "namespace": "gradle",
+                    "scoped_key": format!("gradle/{cache_key}"),
+                    "blob": {
+                        "digest": payload_digest,
+                        "size_bytes": payload.len()
+                    }
+                }],
+                "next_cursor": null
+            })
             .to_string(),
         )
         .create_async()
         .await;
 
-    let pointer_get_mock = server
-        .mock("GET", "/pointer-download-gradle-fallback")
-        .expect(1)
-        .with_status(200)
-        .with_body(pointer_bytes)
-        .create_async()
-        .await;
-
     let download_urls_mock = server
-        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/download-urls")
+        .mock(
+            "POST",
+            "/v2/workspaces/org/repo/cache-kv-entries/download-urls",
+        )
         .expect(1)
         .match_body(Matcher::PartialJson(json!({
-            "verify_storage": true
+            "tag": "default-cache"
         })))
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -299,7 +293,6 @@ async fn test_gradle_get_uses_default_restore_cache_tag_after_transient_branch_e
     assert_eq!(body.as_ref(), payload);
     head_restore_mock.assert_async().await;
     default_restore_mock.assert_async().await;
-    pointer_get_mock.assert_async().await;
     download_urls_mock.assert_async().await;
     blob_download_mock.assert_async().await;
 }
@@ -328,7 +321,7 @@ async fn test_gradle_rejects_unsupported_method() {
 async fn test_gradle_get_miss_returns_not_found() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
-    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 1).await;
 
     let response = tower::ServiceExt::oneshot(
         build_router(state),

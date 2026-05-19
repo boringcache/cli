@@ -439,7 +439,7 @@ async fn test_turborepo_artifact_rejects_unsupported_method() {
 async fn test_turborepo_artifact_get_miss_returns_not_found() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
-    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 1).await;
 
     let response = tower::ServiceExt::oneshot(
         build_router(state),

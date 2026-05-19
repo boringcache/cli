@@ -610,6 +610,47 @@ pub struct BlobDownloadUrlsResponse {
     pub missing: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct CacheKvEntryUpsertItem {
+    pub namespace: String,
+    pub scoped_key: String,
+    pub blob_digest: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CacheKvEntryUpsertRequest {
+    pub tag: String,
+    pub entries: Vec<CacheKvEntryUpsertItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CacheKvBlobDownloadUrlsRequest {
+    pub tag: String,
+    pub blobs: Vec<BlobDescriptor>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CacheKvEntryRecord {
+    pub namespace: String,
+    pub scoped_key: String,
+    pub blob: BlobDescriptor,
+    #[serde(default)]
+    pub last_read_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub last_written_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CacheKvEntriesResponse {
+    #[serde(default)]
+    pub entries: Vec<CacheKvEntryRecord>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TagPointerResponse {
     pub tag: String,

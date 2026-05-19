@@ -64,14 +64,33 @@ pub(crate) async fn preload_download_urls_for_blobs(
     );
     let started_at = std::time::Instant::now();
 
-    match crate::serve::blob_download_urls::resolve_verified_blob_download_urls(
-        state,
-        cache_entry_id,
-        blobs,
-        KV_BLOB_URL_RESOLVE_TIMEOUT,
-    )
-    .await
-    {
+    let resolved_urls = if let Some(tag) = kv_direct_tag_from_cache_entry_id(cache_entry_id) {
+        match state
+            .api_client
+            .cache_kv_blob_download_urls(&state.workspace, tag, blobs)
+            .await
+        {
+            Ok(response) => Ok(crate::serve::blob_download_urls::ResolvedBlobDownloadUrls {
+                urls: response
+                    .download_urls
+                    .into_iter()
+                    .map(|item| (item.digest, item.url))
+                    .collect(),
+                missing: response.missing,
+            }),
+            Err(error) => Err(error.to_string()),
+        }
+    } else {
+        crate::serve::blob_download_urls::resolve_verified_blob_download_urls(
+            state,
+            cache_entry_id,
+            blobs,
+            KV_BLOB_URL_RESOLVE_TIMEOUT,
+        )
+        .await
+    };
+
+    match resolved_urls {
         Ok(response) => {
             let urls = response.urls;
             let url_count = urls.len();

@@ -232,161 +232,6 @@ pub(crate) async fn resolve_hit(
         .ok_or_else(|| RegistryError::not_found("Cache key not found"))
 }
 
-pub(crate) async fn fetch_pointer(
-    state: &AppState,
-    hit: &CacheResolutionEntry,
-) -> Result<crate::cas_file::FilePointer, RegistryError> {
-    let manifest_url = hit
-        .manifest_url
-        .as_ref()
-        .ok_or_else(|| RegistryError::internal("Cache hit is missing manifest_url"))?;
-
-    let pointer_response = tokio::time::timeout(
-        KV_FETCH_POINTER_TIMEOUT,
-        state.api_client.transfer_client().get(manifest_url).send(),
-    )
-    .await
-    .map_err(|_| {
-        RegistryError::internal(format!(
-            "Timed out fetching manifest pointer after {}s",
-            KV_FETCH_POINTER_TIMEOUT.as_secs()
-        ))
-    })?
-    .map_err(|e| RegistryError::internal(format!("Failed to fetch manifest pointer: {e}")))?
-    .error_for_status()
-    .map_err(|e| RegistryError::internal(format!("Manifest pointer request failed: {e}")))?;
-    let pointer_bytes = tokio::time::timeout(KV_FETCH_POINTER_TIMEOUT, pointer_response.bytes())
-        .await
-        .map_err(|_| {
-            RegistryError::internal(format!(
-                "Timed out reading manifest pointer after {}s",
-                KV_FETCH_POINTER_TIMEOUT.as_secs()
-            ))
-        })?
-        .map_err(|e| {
-            RegistryError::internal(format!("Failed to read manifest pointer bytes: {e}"))
-        })?;
-
-    crate::cas_file::parse_pointer(pointer_bytes.as_ref())
-        .map_err(|e| RegistryError::internal(format!("Invalid file CAS pointer: {e}")))
-}
-
-pub(crate) fn build_index_pointer(
-    entries: &BTreeMap<String, BlobDescriptor>,
-    blob_order: &[BlobDescriptor],
-) -> Result<(Vec<u8>, Vec<BlobDescriptor>), RegistryError> {
-    let mut blob_sizes: BTreeMap<String, u64> = BTreeMap::new();
-    let mut pointer_entries = Vec::with_capacity(entries.len());
-
-    for (key, blob) in entries {
-        if let Some(existing_size) = blob_sizes.get(&blob.digest) {
-            if *existing_size != blob.size_bytes {
-                return Err(RegistryError::internal(format!(
-                    "Digest {} has inconsistent sizes ({} vs {})",
-                    blob.digest, existing_size, blob.size_bytes
-                )));
-            }
-        } else {
-            blob_sizes.insert(blob.digest.clone(), blob.size_bytes);
-        }
-
-        pointer_entries.push(crate::cas_file::FilePointerEntry {
-            path: key.clone(),
-            entry_type: EntryType::File,
-            size_bytes: blob.size_bytes,
-            executable: None,
-            target: None,
-            digest: Some(blob.digest.clone()),
-        });
-    }
-
-    let mut blobs = Vec::with_capacity(blob_sizes.len());
-    let mut seen = HashSet::new();
-    for blob in blob_order {
-        let digest = blob.digest.clone();
-        let Some(size_bytes) = blob_sizes.get(&digest) else {
-            continue;
-        };
-        if seen.insert(digest.clone()) {
-            blobs.push(BlobDescriptor {
-                digest,
-                size_bytes: *size_bytes,
-            });
-        }
-    }
-    for (digest, size_bytes) in &blob_sizes {
-        if seen.insert(digest.clone()) {
-            blobs.push(BlobDescriptor {
-                digest: digest.clone(),
-                size_bytes: *size_bytes,
-            });
-        }
-    }
-
-    let pointer = crate::cas_file::FilePointer {
-        format_version: 1,
-        adapter: "file-v1".to_string(),
-        entries: pointer_entries,
-        blobs: blobs
-            .iter()
-            .map(|blob| crate::cas_file::FilePointerBlob {
-                digest: blob.digest.clone(),
-                size_bytes: blob.size_bytes,
-                sequence: None,
-            })
-            .collect(),
-    };
-    let pointer_bytes = serde_json::to_vec(&pointer)
-        .map_err(|e| RegistryError::internal(format!("Failed to serialize file pointer: {e}")))?;
-
-    Ok((pointer_bytes, blobs))
-}
-
-pub(crate) fn pointer_blob_order(
-    pointer: &crate::cas_file::FilePointer,
-    entries: &BTreeMap<String, BlobDescriptor>,
-) -> Vec<BlobDescriptor> {
-    let mut size_by_digest = BTreeMap::new();
-    for blob in entries.values() {
-        size_by_digest
-            .entry(blob.digest.clone())
-            .or_insert(blob.size_bytes);
-    }
-
-    let mut pointer_blobs = pointer.blobs.clone();
-    if pointer_blobs.iter().any(|blob| blob.sequence.is_some()) {
-        pointer_blobs.sort_by(|left, right| {
-            left.sequence
-                .unwrap_or(u64::MAX)
-                .cmp(&right.sequence.unwrap_or(u64::MAX))
-                .then_with(|| left.digest.cmp(&right.digest))
-        });
-    }
-
-    let mut ordered = Vec::with_capacity(size_by_digest.len());
-    let mut seen = HashSet::new();
-    for blob in pointer_blobs {
-        let digest = blob.digest;
-        let Some(size_bytes) = size_by_digest.get(&digest) else {
-            continue;
-        };
-        if seen.insert(digest.clone()) {
-            ordered.push(BlobDescriptor {
-                digest,
-                size_bytes: *size_bytes,
-            });
-        }
-    }
-
-    for (digest, size_bytes) in size_by_digest {
-        if seen.insert(digest.clone()) {
-            ordered.push(BlobDescriptor { digest, size_bytes });
-        }
-    }
-
-    ordered
-}
-
 pub(crate) fn merge_blob_order(
     merged_entries: &BTreeMap<String, BlobDescriptor>,
     base_blob_order: &[BlobDescriptor],
@@ -425,7 +270,7 @@ pub(crate) fn merge_blob_order(
 pub(crate) async fn load_existing_index(
     state: &AppState,
     tag: &str,
-    retry_not_found: bool,
+    _retry_not_found: bool,
 ) -> Result<
     (
         BTreeMap<String, BlobDescriptor>,
@@ -435,37 +280,110 @@ pub(crate) async fn load_existing_index(
     ),
     RegistryError,
 > {
-    let hit = match resolve_hit_for_index_load(state, tag, retry_not_found).await {
-        Ok(hit) => hit,
-        Err(error) if error.status == StatusCode::NOT_FOUND => {
-            return Ok((BTreeMap::new(), Vec::new(), None, None));
+    let mut map = BTreeMap::new();
+    let mut blobs_by_digest = HashMap::new();
+    let mut stream_position = 0usize;
+    let mut cursor = None;
+
+    loop {
+        let page = state
+            .api_client
+            .stream_cache_kv_entries(&state.workspace, tag, cursor.as_deref(), 5_000)
+            .await
+            .map_err(|error| {
+                RegistryError::internal(format!(
+                    "Failed to stream KV entries for tag {tag}: {error}"
+                ))
+            })?;
+
+        for entry in page.entries {
+            record_streamed_blob_for_startup(&mut blobs_by_digest, stream_position, &entry);
+            stream_position = stream_position.saturating_add(1);
+            map.insert(entry.scoped_key, entry.blob);
         }
-        Err(error) => return Err(error),
+
+        let Some(next_cursor) = page.next_cursor.filter(|value| !value.trim().is_empty()) else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    let blob_order = startup_blob_order(blobs_by_digest);
+    if map.is_empty() {
+        return Ok((map, blob_order, None, None));
+    }
+
+    Ok((map, blob_order, Some(kv_direct_cache_entry_id(tag)), None))
+}
+
+#[derive(Debug)]
+struct StartupBlobRank {
+    blob: BlobDescriptor,
+    namespace_priority: u8,
+    last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    first_seen: usize,
+}
+
+fn record_streamed_blob_for_startup(
+    blobs_by_digest: &mut HashMap<String, StartupBlobRank>,
+    stream_position: usize,
+    entry: &crate::api::models::cache::CacheKvEntryRecord,
+) {
+    let digest = entry.blob.digest.clone();
+    let incoming = StartupBlobRank {
+        blob: entry.blob.clone(),
+        namespace_priority: startup_namespace_priority(&entry.namespace),
+        last_used_at: entry_last_used_at(entry),
+        first_seen: stream_position,
     };
 
-    let cache_entry_id = hit.cache_entry_id.clone();
-    let manifest_root_digest = hit
-        .manifest_root_digest
-        .clone()
-        .or(hit.manifest_digest.clone());
-    let pointer = fetch_pointer(state, &hit).await?;
-    let mut map = BTreeMap::new();
-    for entry in &pointer.entries {
-        if !matches!(entry.entry_type, EntryType::File) {
-            continue;
+    match blobs_by_digest.entry(digest) {
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(incoming);
         }
-        if let Some(digest) = &entry.digest {
-            map.insert(
-                entry.path.clone(),
-                BlobDescriptor {
-                    digest: digest.clone(),
-                    size_bytes: entry.size_bytes,
-                },
-            );
+        std::collections::hash_map::Entry::Occupied(mut slot) => {
+            if startup_blob_rank_precedes(&incoming, slot.get()) {
+                slot.insert(incoming);
+            }
         }
     }
-    let blob_order = pointer_blob_order(&pointer, &map);
-    Ok((map, blob_order, cache_entry_id, manifest_root_digest))
+}
+
+fn startup_blob_order(blobs_by_digest: HashMap<String, StartupBlobRank>) -> Vec<BlobDescriptor> {
+    let mut ranked = blobs_by_digest.into_values().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        left.namespace_priority
+            .cmp(&right.namespace_priority)
+            .then_with(|| right.last_used_at.cmp(&left.last_used_at))
+            .then_with(|| left.first_seen.cmp(&right.first_seen))
+            .then_with(|| left.blob.digest.cmp(&right.blob.digest))
+    });
+    ranked.into_iter().map(|rank| rank.blob).collect()
+}
+
+fn startup_blob_rank_precedes(left: &StartupBlobRank, right: &StartupBlobRank) -> bool {
+    left.namespace_priority < right.namespace_priority
+        || (left.namespace_priority == right.namespace_priority
+            && left.last_used_at > right.last_used_at)
+        || (left.namespace_priority == right.namespace_priority
+            && left.last_used_at == right.last_used_at
+            && left.first_seen < right.first_seen)
+}
+
+fn startup_namespace_priority(namespace: &str) -> u8 {
+    match namespace {
+        "bazel_ac" | "turborepo_meta" => 0,
+        _ => 1,
+    }
+}
+
+fn entry_last_used_at(
+    entry: &crate::api::models::cache::CacheKvEntryRecord,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    [entry.last_read_at, entry.last_written_at, entry.updated_at]
+        .into_iter()
+        .flatten()
+        .max()
 }
 
 pub(crate) async fn load_existing_index_snapshot(
@@ -558,23 +476,4 @@ fn should_try_next_restore_cache_tag_after_error(error: &RegistryError) -> bool 
             error.status,
             StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
         )
-}
-
-pub(crate) async fn resolve_hit_for_index_load(
-    state: &AppState,
-    tag: &str,
-    retry_not_found: bool,
-) -> Result<CacheResolutionEntry, RegistryError> {
-    let first = resolve_hit(state, tag).await;
-    if !retry_not_found {
-        return first;
-    }
-
-    match first {
-        Err(error) if error.status == StatusCode::NOT_FOUND => {
-            tokio::time::sleep(KV_RESOLVE_NOT_FOUND_RETRY_DELAY).await;
-            resolve_hit(state, tag).await
-        }
-        other => other,
-    }
 }

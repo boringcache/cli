@@ -2,6 +2,7 @@
 
 use mockito::{Matcher, Server};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
@@ -17,6 +18,12 @@ fn cli_binary() -> PathBuf {
                 .unwrap()
                 .join("target/debug/boringcache")
         })
+}
+
+fn canonical_digest(body: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(body);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 #[test]
@@ -218,66 +225,13 @@ fn test_run_proxy_warm_start_continues_when_backend_cannot_hydrate() {
 }
 
 #[test]
-fn test_run_proxy_sends_provider_neutral_ci_context_to_save_request() {
+fn test_run_proxy_upserts_direct_kv_rows() {
     let temp_dir = TempDir::new().expect("temp dir");
     let mut server = Server::new();
-    let tag = "main";
     let workspace_path = "/v2/workspaces/test-org/test-workspace";
-    let pointer_path = format!("{workspace_path}/caches/tags/{tag}/pointer");
-    let publish_path = format!("{workspace_path}/caches/tags/{tag}/publish");
-
-    let capabilities_mock = server
-        .mock("GET", "/v2/capabilities")
-        .match_header("authorization", "Bearer test-save-token")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "features": {
-                    "tag_publish_v2": true,
-                    "cas_publish_bootstrap_if_match": "0"
-                }
-            })
-            .to_string(),
-        )
-        .expect(1)
-        .create();
-
-    let save_mock = server
-        .mock("POST", format!("{workspace_path}/caches").as_str())
-        .match_header("authorization", "Bearer test-save-token")
-        .match_body(Matcher::PartialJson(json!({
-            "cache": {
-                "tag": tag,
-                "write_scope_tag": "main",
-                "storage_mode": "cas",
-                "cas_layout": "file-v1",
-                "ci_provider": "gitlab",
-                "ci_run_uid": "pipeline-987",
-                "ci_run_attempt": "2",
-                "ci_ref_type": "branch",
-                "ci_ref_name": "main",
-                "ci_default_branch": "main",
-                "ci_commit_sha": "0123456789abcdef0123456789abcdef01234567",
-                "ci_run_started_at": "2026-04-22T09:00:00Z"
-            }
-        })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "tag": tag,
-                "cache_entry_id": "entry-provider-neutral",
-                "exists": true,
-                "storage_mode": "cas",
-                "blob_count": 2,
-                "blob_total_size_bytes": 24,
-                "cas_layout": "file-v1"
-            })
-            .to_string(),
-        )
-        .expect(1)
-        .create();
+    let payload = b"provider-neutral-artifact";
+    let digest = canonical_digest(payload);
+    let metadata_digest = canonical_digest(b"{}");
 
     let stage_mock = server
         .mock(
@@ -288,35 +242,73 @@ fn test_run_proxy_sends_provider_neutral_ci_context_to_save_request() {
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(json!({"upload_urls": [], "already_present": []}).to_string())
-        .expect(1)
-        .create();
-
-    let pointer_mock = server
-        .mock("GET", pointer_path.as_str())
-        .match_header("authorization", "Bearer test-save-token")
-        .with_status(404)
-        .expect(1)
-        .create();
-    let publish_mock = server
-        .mock("PUT", publish_path.as_str())
-        .match_header("authorization", "Bearer test-save-token")
-        .match_header("if-match", "0")
-        .match_body(Matcher::PartialJson(json!({
-            "cache_entry_id": "entry-provider-neutral",
-            "publish_mode": "cas",
-            "write_scope_tag": "main"
-        })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
         .with_body(
             json!({
-                "version": "1",
-                "cache_entry_id": "entry-provider-neutral",
-                "status": "ready"
+                "upload_urls": [{
+                    "digest": digest,
+                    "url": format!("{}/provider-neutral-upload", server.url()),
+                    "headers": {}
+                }, {
+                    "digest": metadata_digest,
+                    "url": format!("{}/provider-neutral-metadata-upload", server.url()),
+                    "headers": {}
+                }],
+                "already_present": []
             })
             .to_string(),
         )
+        .expect(1)
+        .create();
+
+    let blob_upload_mock = server
+        .mock("PUT", "/provider-neutral-upload")
+        .match_body(Matcher::Exact("provider-neutral-artifact".to_string()))
+        .with_status(200)
+        .expect(1)
+        .create();
+    let metadata_upload_mock = server
+        .mock("PUT", "/provider-neutral-metadata-upload")
+        .match_body(Matcher::Exact("{}".to_string()))
+        .with_status(200)
+        .expect(1)
+        .create();
+
+    let kv_upsert_mock = server
+        .mock("POST", format!("{workspace_path}/cache-kv-entries").as_str())
+        .match_header("authorization", "Bearer test-save-token")
+        .match_body(Matcher::Any)
+        .with_status(201)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "entries": [{
+                    "namespace": "turbo",
+                    "scoped_key": "turbo/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "blob": { "digest": digest, "size_bytes": payload.len() }
+                }, {
+                    "namespace": "turbo_meta",
+                    "scoped_key": "turbo_meta/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "blob": { "digest": metadata_digest, "size_bytes": 2 }
+                }]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create();
+
+    let save_mock = server
+        .mock("POST", format!("{workspace_path}/caches").as_str())
+        .expect(0)
+        .create();
+    let rollup_mock = server
+        .mock("POST", format!("{workspace_path}/cache-rollups").as_str())
+        .match_header("authorization", "Bearer test-save-token")
+        .match_body(Matcher::Regex(
+            r#""run_provider":"gitlab".*"cache_kv_entries_upsert""#.to_string(),
+        ))
+        .with_status(202)
+        .with_header("content-type", "application/json")
+        .with_body(json!({"accepted": true}).to_string())
         .expect(1)
         .create();
 
@@ -376,84 +368,27 @@ curl -fsS \
 
     assert!(
         output.status.success(),
-        "Expected provider-neutral CI proxy save e2e to succeed, stdout: {}, stderr: {}",
+        "Expected direct KV proxy save e2e to succeed, stdout: {}, stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 
-    capabilities_mock.assert();
-    save_mock.assert();
     stage_mock.assert();
-    pointer_mock.assert();
-    publish_mock.assert();
+    blob_upload_mock.assert();
+    metadata_upload_mock.assert();
+    kv_upsert_mock.assert();
+    save_mock.assert();
+    rollup_mock.assert();
 }
 
 #[test]
-fn test_run_proxy_shutdown_retries_upload_in_progress_contention() {
+fn test_run_proxy_direct_kv_flush_skips_manifest_publish() {
     let temp_dir = TempDir::new().expect("temp dir");
     let mut server = Server::new();
     let workspace_path = "/v2/workspaces/test-org/test-workspace";
-    let alias_pointer_path = format!("{workspace_path}/caches/tags/main/pointer");
-    let alias_publish_path = format!("{workspace_path}/caches/tags/main/publish");
-
-    let _capabilities_mock = server
-        .mock("GET", "/v2/capabilities")
-        .match_header("authorization", "Bearer test-save-token")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "features": {
-                    "tag_publish_v2": true,
-                    "cas_publish_bootstrap_if_match": "0"
-                }
-            })
-            .to_string(),
-        )
-        .expect_at_least(1)
-        .create();
-
-    let contended_save_mock = server
-        .mock("POST", format!("{workspace_path}/caches").as_str())
-        .match_header("authorization", "Bearer test-save-token")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "tag": "main",
-                "cache_entry_id": "entry-pending-owner",
-                "exists": true,
-                "status": "pending",
-                "storage_mode": "cas",
-                "cas_layout": "file-v1",
-                "manifest_root_digest": "sha256:foreign-owner",
-                "upload_session_id": "session-owner",
-                "manifest_upload_url": "https://uploads.example.invalid/manifest"
-            })
-            .to_string(),
-        )
-        .expect_at_least(1)
-        .create();
-
-    let retry_save_mock = server
-        .mock("POST", format!("{workspace_path}/caches").as_str())
-        .match_header("authorization", "Bearer test-save-token")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            json!({
-                "tag": "main",
-                "cache_entry_id": "entry-final",
-                "exists": true,
-                "storage_mode": "cas",
-                "blob_count": 1,
-                "blob_total_size_bytes": 18,
-                "cas_layout": "file-v1"
-            })
-            .to_string(),
-        )
-        .expect(1)
-        .create();
+    let payload = b"contended-artifact";
+    let digest = canonical_digest(payload);
+    let metadata_digest = canonical_digest(b"{}");
 
     let stage_mock = server
         .mock(
@@ -464,35 +399,80 @@ fn test_run_proxy_shutdown_retries_upload_in_progress_contention() {
         .match_body(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(json!({"upload_urls": [], "already_present": []}).to_string())
-        .expect(1)
-        .create();
-
-    let alias_pointer_mock = server
-        .mock("GET", alias_pointer_path.as_str())
-        .match_header("authorization", "Bearer test-save-token")
-        .with_status(404)
-        .expect(1)
-        .create();
-    let alias_publish_mock = server
-        .mock("PUT", alias_publish_path.as_str())
-        .match_header("authorization", "Bearer test-save-token")
-        .match_header("if-match", "0")
-        .match_body(Matcher::PartialJson(json!({
-            "cache_entry_id": "entry-final",
-            "publish_mode": "cas",
-            "write_scope_tag": "main"
-        })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
         .with_body(
             json!({
-                "version": "1",
-                "cache_entry_id": "entry-final",
-                "status": "ready"
+                "upload_urls": [{
+                    "digest": digest,
+                    "url": format!("{}/direct-kv-upload", server.url()),
+                    "headers": {}
+                }, {
+                    "digest": metadata_digest,
+                    "url": format!("{}/direct-kv-metadata-upload", server.url()),
+                    "headers": {}
+                }],
+                "already_present": []
             })
             .to_string(),
         )
+        .expect(1)
+        .create();
+
+    let blob_upload_mock = server
+        .mock("PUT", "/direct-kv-upload")
+        .match_body(Matcher::Exact("contended-artifact".to_string()))
+        .with_status(200)
+        .expect(1)
+        .create();
+    let metadata_upload_mock = server
+        .mock("PUT", "/direct-kv-metadata-upload")
+        .match_body(Matcher::Exact("{}".to_string()))
+        .with_status(200)
+        .expect(1)
+        .create();
+
+    let kv_upsert_mock = server
+        .mock("POST", format!("{workspace_path}/cache-kv-entries").as_str())
+        .match_header("authorization", "Bearer test-save-token")
+        .match_body(Matcher::Any)
+        .with_status(201)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "entries": [{
+                    "namespace": "turbo",
+                    "scoped_key": "turbo/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "blob": { "digest": digest, "size_bytes": payload.len() }
+                }, {
+                    "namespace": "turbo_meta",
+                    "scoped_key": "turbo_meta/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "blob": { "digest": metadata_digest, "size_bytes": 2 }
+                }]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create();
+
+    let save_mock = server
+        .mock("POST", format!("{workspace_path}/caches").as_str())
+        .expect(0)
+        .create();
+    let publish_mock = server
+        .mock(
+            "PUT",
+            format!("{workspace_path}/caches/tags/main/publish").as_str(),
+        )
+        .expect(0)
+        .create();
+    let rollup_mock = server
+        .mock("POST", format!("{workspace_path}/cache-rollups").as_str())
+        .match_header("authorization", "Bearer test-save-token")
+        .match_body(Matcher::Regex(
+            r#""cache_kv_entries_upsert".*"kv_upload_uploaded_blobs":2"#.to_string(),
+        ))
+        .with_status(202)
+        .with_header("content-type", "application/json")
+        .with_body(json!({"accepted": true}).to_string())
         .expect(1)
         .create();
 
@@ -539,20 +519,17 @@ curl -fsS \
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{stdout}{stderr}");
 
     assert!(
         output.status.success(),
-        "Expected proxy run to retry upload-in-progress contention and publish, stdout: {stdout}, stderr: {stderr}"
-    );
-    assert!(
-        combined.contains("KV batch flush: skipped"),
-        "Expected contention retry log, got: {combined}"
+        "Expected proxy run to upsert direct KV rows without manifest publish, stdout: {stdout}, stderr: {stderr}"
     );
 
-    contended_save_mock.assert();
-    retry_save_mock.assert();
     stage_mock.assert();
-    alias_pointer_mock.assert();
-    alias_publish_mock.assert();
+    blob_upload_mock.assert();
+    metadata_upload_mock.assert();
+    kv_upsert_mock.assert();
+    save_mock.assert();
+    publish_mock.assert();
+    rollup_mock.assert();
 }

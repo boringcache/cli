@@ -371,6 +371,24 @@ fn test_confirm_publish_request_timeout_uses_default_and_env_override() {
 }
 
 #[test]
+fn test_upload_session_manifest_commit_timeout_uses_default_and_env_override() {
+    let _guard = test_env::lock();
+    test_env::remove_var(UPLOAD_SESSION_MANIFEST_COMMIT_TIMEOUT_SECS_ENV);
+    assert_eq!(
+        upload_session_manifest_commit_timeout(),
+        Duration::from_secs(DEFAULT_UPLOAD_SESSION_MANIFEST_COMMIT_TIMEOUT_SECS)
+    );
+
+    test_env::set_var(UPLOAD_SESSION_MANIFEST_COMMIT_TIMEOUT_SECS_ENV, "45");
+    assert_eq!(
+        upload_session_manifest_commit_timeout(),
+        Duration::from_secs(45)
+    );
+
+    test_env::remove_var(UPLOAD_SESSION_MANIFEST_COMMIT_TIMEOUT_SECS_ENV);
+}
+
+#[test]
 fn test_transfer_connect_timeout_uses_default_and_env_override() {
     let _guard = test_env::lock();
     test_env::remove_var(TRANSFER_CONNECT_TIMEOUT_SECS_ENV);

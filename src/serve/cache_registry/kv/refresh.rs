@@ -382,6 +382,10 @@ pub(crate) async fn refresh_fence_allows_update(
     expected_cache_entry_id: &str,
     expected_manifest_root_digest: Option<&str>,
 ) -> bool {
+    if kv_direct_tag_from_cache_entry_id(expected_cache_entry_id).is_some() {
+        return true;
+    }
+
     let live_hit = match resolve_hit(state, tag).await {
         Ok(hit) => hit,
         Err(error) if error.status == StatusCode::NOT_FOUND => {

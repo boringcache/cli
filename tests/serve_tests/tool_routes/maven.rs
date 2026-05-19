@@ -295,7 +295,7 @@ async fn test_maven_put_keeps_generic_spool_rejection_status() {
 async fn test_maven_get_and_head_misses_return_not_found() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;
-    let restore_mock = mock_empty_cache_restore(&mut server, 2).await;
+    let restore_mock = mock_empty_cache_restore(&mut server, 1).await;
     let uri = "/v1.1/com.example/app/abcdef1234567890/buildinfo.xml";
 
     let get_response = tower::ServiceExt::oneshot(
