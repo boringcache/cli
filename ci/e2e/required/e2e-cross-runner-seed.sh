@@ -118,24 +118,7 @@ kill "${PROXY_PID}"
 wait "${PROXY_PID}" 2>/dev/null || true
 PROXY_PID=""
 
-echo "Waiting for published remote tag before handing off to fresh runner..."
-PUBLISHED_TAG="$(latest_proxy_log_published_tag "${PROXY_LOG}" || true)"
-if [[ -z "${PUBLISHED_TAG}" ]]; then
-  echo "ERROR: proxy log did not include a KV publish"
-  cat "${PROXY_LOG}"
-  exit 1
-fi
-
-verify_remote_tag_visible \
-  "${BINARY}" \
-  "${WORKSPACE}" \
-  "${PUBLISHED_TAG}" \
-  "${WORK_DIR}/published-tag-check" \
-  1 \
-  "${REMOTE_TAG_VERIFY_ATTEMPTS}" \
-  "${REMOTE_TAG_VERIFY_SLEEP_SECS}" \
-  "${PROXY_LOG}"
-
+echo "Waiting for remote cache tag before handing off to fresh runner..."
 verify_remote_tag_visible \
   "${BINARY}" \
   "${WORKSPACE}" \

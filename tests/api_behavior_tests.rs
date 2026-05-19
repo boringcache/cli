@@ -376,6 +376,100 @@ async fn test_check_reports_pending_distinctly_and_fail_on_miss_still_fails() {
 }
 
 #[tokio::test]
+async fn test_check_reports_direct_kv_tag_as_hit() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!("skipping test: networking disabled");
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+        )
+        .with_status(207)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "kv-tag",
+                "status": "miss",
+                "cache_entry_id": null
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _kv_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/test/workspace/cache-kv-entries?tag=kv-tag&limit=1",
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "entries": [{
+                    "namespace": "bazel_cas",
+                    "scoped_key": "sha256:abc",
+                    "blob": {
+                        "digest": "sha256:abc",
+                        "size_bytes": 123
+                    }
+                }],
+                "next_cursor": null
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    test_env::set_var("HOME", temp_dir.path());
+
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "check",
+            "test/workspace",
+            "kv-tag",
+            "--json",
+            "--no-platform",
+            "--no-git",
+            "--fail-on-miss",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        output.status.success(),
+        "Expected KV-backed check to succeed, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("check JSON output");
+    assert_eq!(value["hits"], 1);
+    assert_eq!(value["pending"], 0);
+    assert_eq!(value["misses"], 0);
+    assert_eq!(value["results"][0]["status"], "hit");
+    assert_eq!(value["results"][0]["cache_type"], "kv");
+    assert_eq!(
+        value["results"][0]["cache_entry_id"],
+        serde_json::Value::Null
+    );
+
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
+}
+
+#[tokio::test]
 async fn test_restore_retries_on_storage_backend_unavailable() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {

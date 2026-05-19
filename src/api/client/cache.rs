@@ -513,6 +513,30 @@ impl ApiClient {
         self.get_v2(&endpoint).await
     }
 
+    pub async fn cache_kv_tag_has_entries(&self, workspace: &str, tag: &str) -> Result<bool> {
+        ensure!(!tag.trim().is_empty(), "tag must not be empty");
+        let encoded_tag = urlencoding::encode(tag);
+        let endpoint = self.workspace_endpoint(
+            workspace,
+            &format!("cache-kv-entries?tag={encoded_tag}&limit=1"),
+        )?;
+        let response = self
+            .get_response_with_base(&self.v2_base_url, &endpoint)
+            .await?;
+
+        match response.status() {
+            status if status.is_success() => {
+                let payload: crate::api::models::cache::CacheKvEntriesResponse = response
+                    .json()
+                    .await
+                    .context("Failed to parse cache KV entries response")?;
+                Ok(!payload.entries.is_empty())
+            }
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => Ok(false),
+            _ => Err(self.create_error_from_response(response).await),
+        }
+    }
+
     pub async fn upsert_cache_kv_entries(
         &self,
         workspace: &str,

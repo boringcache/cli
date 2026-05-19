@@ -2,6 +2,7 @@ use crate::api::ApiClient;
 use crate::ui;
 use anyhow::{Result, anyhow};
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy)]
 pub struct CheckOptions {
@@ -18,6 +19,8 @@ pub struct CheckResult {
     pub tag: String,
     pub requested_tag: String,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_entry_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,14 +165,19 @@ async fn execute_inner(
         Err(err) => return Err(err),
     };
 
-    let mut results_by_tag: std::collections::HashMap<String, crate::api::CacheResolutionEntry> =
-        std::collections::HashMap::new();
+    let mut results_by_tag: HashMap<String, crate::api::CacheResolutionEntry> = HashMap::new();
     for entry in resolution_result {
         if options.require_server_signature && entry.status == "hit" {
             verify_check_signature(&entry)?;
         }
         results_by_tag.insert(entry.tag.clone(), entry);
     }
+
+    let kv_row_hits = if options.require_server_signature {
+        HashSet::new()
+    } else {
+        resolve_kv_row_hits(&api_client, &workspace, &tag_to_resolved, &results_by_tag).await?
+    };
 
     let mut check_results: Vec<CheckResult> = Vec::new();
     let mut hits = 0usize;
@@ -189,6 +197,10 @@ async fn execute_inner(
             .first()
             .cloned()
             .unwrap_or_else(|| requested_tag.clone());
+        let kv_row_hit = candidate_tags
+            .iter()
+            .find(|tag| kv_row_hits.contains(*tag))
+            .cloned();
 
         match hit.or(pending_entry) {
             Some(entry) if entry.status == "hit" => {
@@ -197,6 +209,7 @@ async fn execute_inner(
                     tag: entry.tag.clone(),
                     requested_tag: requested_tag.clone(),
                     status: "hit".to_string(),
+                    cache_type: Some("cache_entry".to_string()),
                     cache_entry_id: entry.cache_entry_id.clone(),
                     manifest_root_digest: entry.manifest_root_digest.clone(),
                     size: entry.size,
@@ -209,6 +222,7 @@ async fn execute_inner(
                     tag: entry.tag.clone(),
                     requested_tag: requested_tag.clone(),
                     status: "pending".to_string(),
+                    cache_type: Some("cache_entry".to_string()),
                     cache_entry_id: entry.cache_entry_id.clone(),
                     manifest_root_digest: entry.manifest_root_digest.clone(),
                     size: entry.size,
@@ -216,17 +230,32 @@ async fn execute_inner(
                 });
             }
             _ => {
-                misses += 1;
+                if let Some(tag) = kv_row_hit {
+                    hits += 1;
+                    check_results.push(CheckResult {
+                        tag,
+                        requested_tag: requested_tag.clone(),
+                        status: "hit".to_string(),
+                        cache_type: Some("kv".to_string()),
+                        cache_entry_id: None,
+                        manifest_root_digest: None,
+                        size: None,
+                        compressed_size: None,
+                    });
+                } else {
+                    misses += 1;
 
-                check_results.push(CheckResult {
-                    tag: fallback_tag,
-                    requested_tag: requested_tag.clone(),
-                    status: "miss".to_string(),
-                    cache_entry_id: None,
-                    manifest_root_digest: None,
-                    size: None,
-                    compressed_size: None,
-                });
+                    check_results.push(CheckResult {
+                        tag: fallback_tag,
+                        requested_tag: requested_tag.clone(),
+                        status: "miss".to_string(),
+                        cache_type: None,
+                        cache_entry_id: None,
+                        manifest_root_digest: None,
+                        size: None,
+                        compressed_size: None,
+                    });
+                }
             }
         }
     }
@@ -271,6 +300,7 @@ async fn execute_inner(
                 (Some(size), _) | (_, Some(size)) => {
                     format!(" ({})", crate::progress::format_bytes(size))
                 }
+                _ if result.cache_type.as_deref() == Some("kv") => " (tool cache)".to_string(),
                 _ => String::new(),
             };
 
@@ -286,7 +316,7 @@ async fn execute_inner(
 
         ui::blank_line();
         ui::info(&format!(
-            "Result: {}/{} cache entries found{}",
+            "Result: {}/{} cache tags usable{}",
             hits,
             check_results.len(),
             if pending > 0 {
@@ -323,6 +353,38 @@ async fn execute_inner(
     }
 
     Ok(())
+}
+
+async fn resolve_kv_row_hits(
+    api_client: &ApiClient,
+    workspace: &str,
+    tag_to_resolved: &[(String, Vec<String>)],
+    manifest_results: &HashMap<String, crate::api::CacheResolutionEntry>,
+) -> Result<HashSet<String>> {
+    let mut checked = HashSet::new();
+    let mut hits = HashSet::new();
+
+    for (_, candidate_tags) in tag_to_resolved {
+        if candidate_tags
+            .iter()
+            .filter_map(|tag| manifest_results.get(tag))
+            .any(|entry| entry.status == "hit" || is_pending_resolution(entry))
+        {
+            continue;
+        }
+
+        for tag in candidate_tags {
+            if !checked.insert(tag.clone()) {
+                continue;
+            }
+
+            if api_client.cache_kv_tag_has_entries(workspace, tag).await? {
+                hits.insert(tag.clone());
+            }
+        }
+    }
+
+    Ok(hits)
 }
 
 fn is_pending_resolution(entry: &crate::api::CacheResolutionEntry) -> bool {
@@ -437,6 +499,7 @@ mod tests {
                     tag: "deps-main".to_string(),
                     requested_tag: "deps".to_string(),
                     status: "hit".to_string(),
+                    cache_type: Some("cache_entry".to_string()),
                     cache_entry_id: Some("entry-123".to_string()),
                     manifest_root_digest: Some("sha256:root".to_string()),
                     size: Some(1024),
@@ -446,6 +509,7 @@ mod tests {
                     tag: "deps-fallback".to_string(),
                     requested_tag: "deps-fallback".to_string(),
                     status: "miss".to_string(),
+                    cache_type: None,
                     cache_entry_id: None,
                     manifest_root_digest: None,
                     size: None,

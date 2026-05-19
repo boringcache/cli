@@ -97,10 +97,12 @@ remote_tag_check_once() {
   REMOTE_TAG_CHECK_MISSES="${misses:-0}"
   REMOTE_TAG_CHECK_PENDING="${pending:-0}"
   REMOTE_TAG_CHECK_CACHE_ENTRY_ID="$(json_first_hit_string_value "cache_entry_id" "$check_file")"
+  REMOTE_TAG_CHECK_CACHE_TYPE="$(json_first_hit_string_value "cache_type" "$check_file")"
   REMOTE_TAG_CHECK_FILE="$check_file"
   REMOTE_TAG_CHECK_STDERR_FILE="$stderr_file"
   export \
     REMOTE_TAG_CHECK_CACHE_ENTRY_ID \
+    REMOTE_TAG_CHECK_CACHE_TYPE \
     REMOTE_TAG_CHECK_FILE \
     REMOTE_TAG_CHECK_HITS \
     REMOTE_TAG_CHECK_MISSES \
@@ -131,7 +133,7 @@ verify_remote_tag_visible() {
 
   for attempt in $(seq 1 "$attempts"); do
     if remote_tag_check_once "$binary" "$workspace" "$tag" "$output_dir"; then
-      echo "Remote tag check (${tag}): hits=${REMOTE_TAG_CHECK_HITS:-0}, pending=${REMOTE_TAG_CHECK_PENDING:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0}, file=${REMOTE_TAG_CHECK_FILE}"
+      echo "Remote tag check (${tag}): hits=${REMOTE_TAG_CHECK_HITS:-0}, pending=${REMOTE_TAG_CHECK_PENDING:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0}, type=${REMOTE_TAG_CHECK_CACHE_TYPE:-unknown}, file=${REMOTE_TAG_CHECK_FILE}"
       if awk -v a="${REMOTE_TAG_CHECK_HITS:-0}" -v b="$minimum_hits" 'BEGIN { exit (a + 0 >= b + 0) ? 0 : 1 }'; then
         if [[ -z "$expected_cache_entry_id" ]]; then
           return 0
@@ -160,7 +162,7 @@ verify_remote_tag_visible() {
   if [[ -n "$expected_cache_entry_id" ]]; then
     echo "ERROR: remote tag ${tag} did not converge to cache_entry_id=${expected_cache_entry_id} (hits=${REMOTE_TAG_CHECK_HITS:-0}, pending=${REMOTE_TAG_CHECK_PENDING:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0}, observed_cache_entry_id=${REMOTE_TAG_CHECK_CACHE_ENTRY_ID:-})"
   else
-    echo "ERROR: remote tag ${tag} is not published (hits=${REMOTE_TAG_CHECK_HITS:-0}, pending=${REMOTE_TAG_CHECK_PENDING:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0})"
+    echo "ERROR: remote tag ${tag} is not usable (hits=${REMOTE_TAG_CHECK_HITS:-0}, pending=${REMOTE_TAG_CHECK_PENDING:-0}, misses=${REMOTE_TAG_CHECK_MISSES:-0})"
   fi
   if (( ${REMOTE_TAG_CHECK_PENDING:-0} > 0 )); then
     echo "ERROR: remote tag ${tag} is still pending; publish receipts did not settle before the visibility gate"
