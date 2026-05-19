@@ -70,13 +70,15 @@ pub(super) fn default_remote_cache_args(
     context: &proxy::ProxyContext,
     options: &AdapterCommandOptions,
 ) -> Vec<String> {
-    vec![
+    let mut args = vec![
         format!("--remote_cache={}", context.endpoint()),
         format!("--remote_upload_local_results={}", !options.read_only),
         "--remote_cache_async=false".to_string(),
         "--remote_download_minimal".to_string(),
         format!("--remote_max_connections={}", remote_max_connections()),
-    ]
+    ];
+    args.extend(stable_host_env_args());
+    args
 }
 
 fn should_inject_default_arg(command: &[String], arg: &str) -> bool {
@@ -99,9 +101,124 @@ pub(super) fn remote_max_connections() -> u16 {
         .unwrap_or(64)
 }
 
+fn stable_host_env_args() -> Vec<String> {
+    if stable_host_env_disabled() {
+        return Vec::new();
+    }
+
+    let Some(stable_path) = stable_host_path() else {
+        return Vec::new();
+    };
+
+    let mut args = vec![
+        "--incompatible_strict_action_env".to_string(),
+        format!("--action_env=PATH={stable_path}"),
+        format!("--host_action_env=PATH={stable_path}"),
+        format!("--repo_env=PATH={stable_path}"),
+    ];
+
+    args.extend(stable_toolchain_env_args(&stable_path));
+    args
+}
+
+fn stable_host_env_disabled() -> bool {
+    std::env::var("BORINGCACHE_BAZEL_STABLE_HOST_ENV")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn stable_host_path() -> Option<String> {
+    let configured = std::env::var("BORINGCACHE_BAZEL_STABLE_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    configured.or_else(default_stable_host_path)
+}
+
+#[cfg(target_os = "linux")]
+fn default_stable_host_path() -> Option<String> {
+    Some("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn default_stable_host_path() -> Option<String> {
+    Some("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn default_stable_host_path() -> Option<String> {
+    None
+}
+
+fn stable_toolchain_env_args(stable_path: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    for (name, env_name, candidates) in stable_toolchain_candidates() {
+        let resolved = std::env::var(env_name)
+            .ok()
+            .and_then(|value| stable_command_path(&value, stable_path))
+            .or_else(|| first_stable_command_path(candidates, stable_path));
+        if let Some(path) = resolved {
+            args.push(format!("--repo_env={name}={path}"));
+        }
+    }
+    args
+}
+
+#[cfg(target_os = "linux")]
+fn stable_toolchain_candidates() -> Vec<(&'static str, &'static str, &'static [&'static str])> {
+    vec![
+        ("CC", "CC", &["gcc", "cc", "clang"]),
+        ("CXX", "CXX", &["g++", "c++", "clang++"]),
+        ("LD", "LD", &["ld"]),
+    ]
+}
+
+#[cfg(target_os = "macos")]
+fn stable_toolchain_candidates() -> Vec<(&'static str, &'static str, &'static [&'static str])> {
+    vec![
+        ("CC", "CC", &["cc", "clang"]),
+        ("CXX", "CXX", &["c++", "clang++"]),
+    ]
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn stable_toolchain_candidates() -> Vec<(&'static str, &'static str, &'static [&'static str])> {
+    Vec::new()
+}
+
+fn first_stable_command_path(candidates: &[&str], stable_path: &str) -> Option<String> {
+    candidates
+        .iter()
+        .find_map(|candidate| stable_command_path(candidate, stable_path))
+}
+
+fn stable_command_path(command: &str, stable_path: &str) -> Option<String> {
+    let command = command.trim();
+    if command.is_empty()
+        || command.contains(char::is_whitespace)
+        || command.contains('/')
+        || command.contains('\\')
+    {
+        let path = std::path::Path::new(command);
+        return path.is_absolute().then(|| command.to_string());
+    }
+
+    std::env::split_paths(stable_path)
+        .map(|directory| directory.join(command))
+        .find(|path| path.is_file())
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env;
 
     fn context() -> proxy::ProxyContext {
         proxy::ProxyContext {
@@ -126,6 +243,7 @@ mod tests {
 
     #[test]
     fn bazel_prepare_command_injects_remote_cache_flags() {
+        let _guard = stable_host_env_disabled_guard();
         let command = prepare_command(
             &[
                 "bazel".to_string(),
@@ -150,6 +268,7 @@ mod tests {
 
     #[test]
     fn bazel_prepare_command_preserves_explicit_cache_flags() {
+        let _guard = stable_host_env_disabled_guard();
         let command = prepare_command(
             &[
                 "bazel".to_string(),
@@ -172,6 +291,7 @@ mod tests {
 
     #[test]
     fn bazel_prepare_command_uses_read_only_upload_setting() {
+        let _guard = stable_host_env_disabled_guard();
         let command = prepare_command(
             &["bazel".to_string(), "test".to_string(), "//...".to_string()],
             Some(&context()),
@@ -184,5 +304,39 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "--remote_upload_local_results=false")
         );
+    }
+
+    #[test]
+    fn bazel_default_args_pin_stable_host_path_for_cache_keys() {
+        let _guard = test_env::lock();
+        test_env::set_var(
+            "BORINGCACHE_BAZEL_STABLE_PATH",
+            "/usr/local/bin:/usr/bin:/bin",
+        );
+        test_env::remove_var("BORINGCACHE_BAZEL_STABLE_HOST_ENV");
+
+        let args = default_remote_cache_args(&context(), &options(false));
+
+        assert!(args.contains(&"--incompatible_strict_action_env".to_string()));
+        assert!(args.contains(&"--action_env=PATH=/usr/local/bin:/usr/bin:/bin".to_string()));
+        assert!(args.contains(&"--host_action_env=PATH=/usr/local/bin:/usr/bin:/bin".to_string()));
+        assert!(args.contains(&"--repo_env=PATH=/usr/local/bin:/usr/bin:/bin".to_string()));
+    }
+
+    #[test]
+    fn bazel_stable_host_env_can_be_disabled() {
+        let _guard = stable_host_env_disabled_guard();
+
+        let args = default_remote_cache_args(&context(), &options(false));
+
+        assert!(!args.iter().any(|arg| arg.contains("action_env=PATH")));
+        assert!(!args.iter().any(|arg| arg.contains("repo_env=PATH")));
+    }
+
+    fn stable_host_env_disabled_guard() -> test_env::Guard {
+        let guard = test_env::lock();
+        test_env::set_var("BORINGCACHE_BAZEL_STABLE_HOST_ENV", "0");
+        test_env::remove_var("BORINGCACHE_BAZEL_STABLE_PATH");
+        guard
     }
 }

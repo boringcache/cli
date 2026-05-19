@@ -1605,7 +1605,27 @@ port = 6001
     assert_eq!(command[4], "--remote_cache_async=false");
     assert_eq!(command[5], "--remote_download_minimal");
     assert_eq!(command[6], "--remote_max_connections=64");
-    assert_eq!(command[7], "//...");
+    assert!(
+        command.contains(&Value::String(
+            "--incompatible_strict_action_env".to_string()
+        )),
+        "Bazel dry-run should pin strict action env: {command:?}"
+    );
+    assert!(
+        command.iter().any(|arg| {
+            arg.as_str()
+                .is_some_and(|value| value.starts_with("--action_env=PATH="))
+        }),
+        "Bazel dry-run should pin action PATH: {command:?}"
+    );
+    assert!(
+        command.iter().any(|arg| {
+            arg.as_str()
+                .is_some_and(|value| value.starts_with("--repo_env=PATH="))
+        }),
+        "Bazel dry-run should pin repository-rule PATH: {command:?}"
+    );
+    assert_eq!(command.last().expect("target arg"), "//...");
     assert_eq!(parsed["setup"]["schema_version"], 1);
 }
 

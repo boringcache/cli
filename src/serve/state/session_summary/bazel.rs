@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 use crate::serve::cache_registry::cache_ops::{OperationCounters, ToolOperationSummary};
 
-const BAZEL_ACTION_KEY_NEXT_STEP: &str = "Pin Bazel action inputs before rerunning: enable --incompatible_strict_action_env, set a stable --action_env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin, and pin local toolchain discovery with --repo_env=CC=/usr/bin/gcc plus matching CXX and LD values. Then compare any remaining source, generated-file, or flag changes.";
+const BAZEL_ACTION_KEY_NEXT_STEP: &str = "BoringCache pins Bazel's action and repository-rule PATH for its adapter path. If these misses persist, compare source changes first, then pin project-specific host toolchain inputs with repository-owned --repo_env values or an explicit Bazel toolchain.";
 
 pub(super) fn cache_key_lookup_summary(
     adapter: &str,
@@ -197,7 +197,7 @@ fn action_cache_lookup_next_step(state: &str) -> &'static str {
         "action_cache_hot" => "No action needed.",
         "requested_keys_absent_from_warmed_cache" => BAZEL_ACTION_KEY_NEXT_STEP,
         "some_requested_keys_absent_from_warmed_cache" => {
-            "Compare the missed Bazel actions against changed inputs; this usually means partial new work or action-key churn. Start by pinning PATH, action_env, and local toolchain repo_env values."
+            "Compare the missed Bazel actions against changed inputs; this usually means partial new work or action-key churn. If source did not change, pin project-specific host toolchain inputs with repository-owned --repo_env values or an explicit Bazel toolchain."
         }
         "mixed_action_cache_after_warmed_cache_refresh" => {
             "Compare Bazel action inputs first, then inspect BoringCache warmed-entry refresh evidence if the same keys later hit."
