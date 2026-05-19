@@ -214,10 +214,18 @@ async fn execute_inner(
             .first()
             .cloned()
             .unwrap_or_else(|| requested_tag.clone());
-        let kv_row_hit = candidate_tags
-            .iter()
-            .find_map(|tag| kv_row_stats.get(tag).map(|stats| (tag.clone(), *stats)));
-        let (kv_entry_count, kv_total_size) = kv_row_hit
+        let kv_row_hit = candidate_tags.iter().find_map(|tag| {
+            kv_row_stats
+                .get(tag)
+                .filter(|stats| stats.entry_count > 0)
+                .map(|stats| (tag.clone(), *stats))
+        });
+        let kv_row_observation = kv_row_hit.clone().or_else(|| {
+            candidate_tags
+                .iter()
+                .find_map(|tag| kv_row_stats.get(tag).map(|stats| (tag.clone(), *stats)))
+        });
+        let (kv_entry_count, kv_total_size) = kv_row_observation
             .as_ref()
             .map(|(_, stats)| (Some(stats.entry_count), Some(stats.total_size_bytes)))
             .unwrap_or((None, None));
@@ -437,7 +445,10 @@ async fn cache_kv_tag_stats(
         };
 
         if response.entries.is_empty() && entry_count == 0 {
-            return Ok(None);
+            return Ok(Some(KvTagStats {
+                entry_count: 0,
+                total_size_bytes: 0,
+            }));
         }
 
         for entry in response.entries {

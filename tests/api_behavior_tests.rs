@@ -565,6 +565,84 @@ async fn test_check_strict_json_reports_kv_rows_without_promoting_them_to_signed
 }
 
 #[tokio::test]
+async fn test_check_strict_json_reports_empty_kv_probe_without_promoting_it() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!("skipping test: networking disabled");
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+        )
+        .with_status(207)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "kv-empty-tag",
+                "status": "miss",
+                "cache_entry_id": null
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _kv_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/test/workspace/cache-kv-entries?tag=kv-empty-tag&limit=5000",
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json!({"entries": [], "next_cursor": null}).to_string())
+        .create_async()
+        .await;
+
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    test_env::set_var("HOME", temp_dir.path());
+
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "--require-server-signature",
+            "check",
+            "test/workspace",
+            "kv-empty-tag",
+            "--json",
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        output.status.success(),
+        "Expected strict KV-aware check to succeed, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("check JSON output");
+    assert_eq!(value["hits"], 0);
+    assert_eq!(value["misses"], 1);
+    assert_eq!(value["results"][0]["status"], "miss");
+    assert_eq!(value["results"][0]["cache_type"], serde_json::Value::Null);
+    assert_eq!(value["results"][0]["kv_entry_count"], 0);
+    assert_eq!(value["results"][0]["kv_total_size"], 0);
+
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
+}
+
+#[tokio::test]
 async fn test_check_strict_json_reports_kv_rows_next_to_signed_cache_entry_hits() {
     let _lock = acquire_test_lock().await;
     if !networking_available() {
