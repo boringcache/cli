@@ -390,6 +390,7 @@ mod tests {
         metrics.record("bazel_ac", "published_fast_miss");
         metrics.record("bazel_ac", "published_fast_miss");
         metrics.record("bazel_ac", "after_refresh_hit");
+        metrics.record("Action Cache", "After Refresh Miss!");
 
         let hints = metrics.metadata_hints();
 
@@ -399,6 +400,10 @@ mod tests {
         );
         assert_eq!(
             hints.get("kv_lookup_bazel_ac_after_refresh_hit"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            hints.get("kv_lookup_action_cache_after_refresh_miss"),
             Some(&"1".to_string())
         );
     }

@@ -294,58 +294,61 @@ pub(crate) async fn get_or_head_kv_object_inner(
     }
 
     kv_trace(namespace, &scoped_key, "lookup-flight-begin");
-    let lookup_result = match begin_lookup_flight(state, miss_key.clone(), "kv-lookup") {
-        LookupFlight::Follower(notified) => {
-            kv_trace(namespace, &scoped_key, "lookup-flight-follower-wait");
-            if !await_flight(state, "kv-lookup", &miss_key, notified).await {
-                state.singleflight_metrics.record_takeover("kv-lookup");
-                clear_lookup_flight_entry(state, &miss_key);
-            }
-            kv_trace(namespace, &scoped_key, "lookup-flight-follower-after-wait");
-            let result = lookup_published_blob(state, &scoped_key).await;
-            if result.is_some() {
-                record_lookup_stage(state, namespace, "post_flight_hit");
-                state
-                    .singleflight_metrics
-                    .record_post_flight_local_hit("kv-lookup");
-            } else {
-                record_lookup_stage(state, namespace, "post_flight_miss");
-                state
-                    .singleflight_metrics
-                    .record_post_flight_retry_miss("kv-lookup");
-            }
-            result
-        }
-        LookupFlight::Leader(_lookup_guard) => {
-            if use_miss_cache && is_recent_kv_miss(state, &miss_key) {
-                record_lookup_stage(state, namespace, "leader_recent_miss");
-                kv_trace(namespace, &scoped_key, "leader-recent-miss");
-                return Err(RegistryError::not_found("Cache key not found"));
-            }
-
-            if let Some(found) = lookup_published_blob(state, &scoped_key).await {
-                record_lookup_stage(state, namespace, "leader_published_hit");
-                kv_trace(namespace, &scoped_key, "leader-published-hit");
-                Some(found)
-            } else {
-                kv_trace(namespace, &scoped_key, "leader-before-refresh");
-                maybe_refresh_published_index_for_lookup(state).await?;
-                kv_trace(namespace, &scoped_key, "leader-after-refresh");
+    let (lookup_result, miss_stage_recorded) =
+        match begin_lookup_flight(state, miss_key.clone(), "kv-lookup") {
+            LookupFlight::Follower(notified) => {
+                kv_trace(namespace, &scoped_key, "lookup-flight-follower-wait");
+                if !await_flight(state, "kv-lookup", &miss_key, notified).await {
+                    state.singleflight_metrics.record_takeover("kv-lookup");
+                    clear_lookup_flight_entry(state, &miss_key);
+                }
+                kv_trace(namespace, &scoped_key, "lookup-flight-follower-after-wait");
                 let result = lookup_published_blob(state, &scoped_key).await;
                 if result.is_some() {
-                    record_lookup_stage(state, namespace, "after_refresh_hit");
+                    record_lookup_stage(state, namespace, "post_flight_hit");
+                    state
+                        .singleflight_metrics
+                        .record_post_flight_local_hit("kv-lookup");
+                    (result, false)
                 } else {
-                    record_lookup_stage(state, namespace, "after_refresh_miss");
+                    record_lookup_stage(state, namespace, "post_flight_miss");
+                    state
+                        .singleflight_metrics
+                        .record_post_flight_retry_miss("kv-lookup");
+                    (result, true)
                 }
-                if use_miss_cache && result.is_none() {
-                    mark_kv_miss(state, &miss_key);
-                    kv_trace(namespace, &scoped_key, "leader-mark-miss");
-                }
-                result
             }
-            // _lookup_guard drops here — BEFORE the download
-        }
-    };
+            LookupFlight::Leader(_lookup_guard) => {
+                if use_miss_cache && is_recent_kv_miss(state, &miss_key) {
+                    record_lookup_stage(state, namespace, "leader_recent_miss");
+                    kv_trace(namespace, &scoped_key, "leader-recent-miss");
+                    return Err(RegistryError::not_found("Cache key not found"));
+                }
+
+                if let Some(found) = lookup_published_blob(state, &scoped_key).await {
+                    record_lookup_stage(state, namespace, "leader_published_hit");
+                    kv_trace(namespace, &scoped_key, "leader-published-hit");
+                    (Some(found), false)
+                } else {
+                    kv_trace(namespace, &scoped_key, "leader-before-refresh");
+                    maybe_refresh_published_index_for_lookup(state).await?;
+                    kv_trace(namespace, &scoped_key, "leader-after-refresh");
+                    let result = lookup_published_blob(state, &scoped_key).await;
+                    if result.is_some() {
+                        record_lookup_stage(state, namespace, "after_refresh_hit");
+                        (result, false)
+                    } else {
+                        record_lookup_stage(state, namespace, "after_refresh_miss");
+                        if use_miss_cache {
+                            mark_kv_miss(state, &miss_key);
+                            kv_trace(namespace, &scoped_key, "leader-mark-miss");
+                        }
+                        (result, true)
+                    }
+                }
+                // _lookup_guard drops here — BEFORE the download
+            }
+        };
     kv_trace(namespace, &scoped_key, "lookup-flight-end");
 
     if let Some((blob, cache_entry_id, cached_url)) = lookup_result
@@ -365,7 +368,9 @@ pub(crate) async fn get_or_head_kv_object_inner(
         .await;
     }
 
-    record_lookup_stage(state, namespace, "not_found");
+    if !miss_stage_recorded {
+        record_lookup_stage(state, namespace, "not_found");
+    }
     kv_trace(namespace, &scoped_key, "not-found");
     Err(RegistryError::not_found("Cache key not found"))
 }

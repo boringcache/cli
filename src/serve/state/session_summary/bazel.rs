@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 
 use crate::serve::cache_registry::cache_ops::{OperationCounters, ToolOperationSummary};
 
+const BAZEL_ACTION_KEY_NEXT_STEP: &str = "Pin Bazel action inputs before rerunning: enable --incompatible_strict_action_env, set a stable --action_env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin, and pin local toolchain discovery with --repo_env=CC=/usr/bin/gcc plus matching CXX and LD values. Then compare any remaining source, generated-file, or flag changes.";
+
 pub(super) fn cache_key_lookup_summary(
     adapter: &str,
     operation_summary: &ToolOperationSummary,
@@ -19,7 +21,19 @@ pub(super) fn cache_key_lookup_summary(
         .get("bazel_action_cache")
         .cloned()
         .unwrap_or_default();
-    action_cache_lookup_summary(&action_cache, kv_lookup)
+    let cas = operation_summary
+        .scoped
+        .get("bazel_cas")
+        .cloned()
+        .unwrap_or_default();
+    let mut summary = action_cache_lookup_summary(&action_cache, kv_lookup);
+    if let Value::Object(ref mut object) = summary {
+        object.insert(
+            "cas".to_string(),
+            cas_lookup_summary(&cas, kv_lookup, action_cache.cache_read_hit_count),
+        );
+    }
+    summary
 }
 
 fn action_cache_lookup_summary(
@@ -181,11 +195,9 @@ fn action_cache_lookup_next_step(state: &str) -> &'static str {
             "No workflow change is needed; inspect why the warmed cache entry view was stale if this repeats."
         }
         "action_cache_hot" => "No action needed.",
-        "requested_keys_absent_from_warmed_cache" => {
-            "Compare seed and warm Bazel action inputs: source commit, command line, action env, toolchain, generated files, and Bazel flags."
-        }
+        "requested_keys_absent_from_warmed_cache" => BAZEL_ACTION_KEY_NEXT_STEP,
         "some_requested_keys_absent_from_warmed_cache" => {
-            "Compare the missed Bazel actions against changed inputs; this usually means partial new work or action-key churn."
+            "Compare the missed Bazel actions against changed inputs; this usually means partial new work or action-key churn. Start by pinning PATH, action_env, and local toolchain repo_env values."
         }
         "mixed_action_cache_after_warmed_cache_refresh" => {
             "Compare Bazel action inputs first, then inspect BoringCache warmed-entry refresh evidence if the same keys later hit."
@@ -240,7 +252,7 @@ pub(super) fn issue_candidates_summary(
                 "severity": "actionable",
                 "confidence": 0.85,
                 "customer_action_required": true,
-                "next_step": "Compare seed and warm Bazel action inputs: source commit, command line, action env, toolchain, generated files, and Bazel flags.",
+                "next_step": BAZEL_ACTION_KEY_NEXT_STEP,
                 "evidence_refs": [
                     "classification.cache_key_lookup",
                     "kv_lookup"
@@ -300,6 +312,124 @@ pub(super) fn issue_candidates_summary(
     Value::Array(issues)
 }
 
+fn cas_lookup_summary(
+    cas: &OperationCounters,
+    kv_lookup: &BTreeMap<String, String>,
+    action_cache_hits: u64,
+) -> Value {
+    let requests = cas
+        .cache_read_hit_count
+        .saturating_add(cas.cache_read_miss_count)
+        .saturating_add(cas.cache_read_error_count);
+    let published_fast_hits =
+        metric_u64(kv_lookup, "kv_lookup_bazel_cas_published_fast_hit").unwrap_or(0);
+    let published_fast_misses =
+        metric_u64(kv_lookup, "kv_lookup_bazel_cas_published_fast_miss").unwrap_or(0);
+    let after_refresh_hits =
+        metric_u64(kv_lookup, "kv_lookup_bazel_cas_after_refresh_hit").unwrap_or(0);
+    let after_refresh_misses =
+        metric_u64(kv_lookup, "kv_lookup_bazel_cas_after_refresh_miss").unwrap_or(0);
+    let post_flight_misses =
+        metric_u64(kv_lookup, "kv_lookup_bazel_cas_post_flight_miss").unwrap_or(0);
+    let recent_misses = metric_u64(kv_lookup, "kv_lookup_bazel_cas_recent_miss").unwrap_or(0);
+    let leader_recent_misses =
+        metric_u64(kv_lookup, "kv_lookup_bazel_cas_leader_recent_miss").unwrap_or(0);
+    let integrity_misses = metric_u64(
+        kv_lookup,
+        "kv_lookup_bazel_cas_published_fast_integrity_miss",
+    )
+    .unwrap_or(0);
+    let absent_from_warmed_cache =
+        cas_absent_from_warmed_cache_count(kv_lookup).min(cas.cache_read_miss_count);
+    let state = cas_lookup_state(
+        cas,
+        requests,
+        absent_from_warmed_cache,
+        after_refresh_hits,
+        integrity_misses,
+        action_cache_hits,
+    );
+
+    json!({
+        "scope": "cas",
+        "state": state,
+        "owner": cas_lookup_owner(state),
+        "customer_action_required": cas_lookup_customer_action_required(state),
+        "requests": requests,
+        "hits": cas.cache_read_hit_count,
+        "misses": cas.cache_read_miss_count,
+        "errors": cas.cache_read_error_count,
+        "evidence": {
+            "warmed_cache_hits": published_fast_hits,
+            "warmed_cache_misses_before_refresh": published_fast_misses,
+            "warmed_cache_refresh_hits": after_refresh_hits,
+            "warmed_cache_refresh_misses": after_refresh_misses,
+            "shared_lookup_wait_misses": post_flight_misses,
+            "recent_negative_cache_misses": recent_misses.saturating_add(leader_recent_misses),
+            "integrity_misses": integrity_misses,
+            "absent_from_warmed_cache": absent_from_warmed_cache,
+            "action_cache_hits": action_cache_hits,
+        }
+    })
+}
+
+fn cas_lookup_state(
+    cas: &OperationCounters,
+    requests: u64,
+    absent_from_warmed_cache: u64,
+    after_refresh_hits: u64,
+    integrity_misses: u64,
+    action_cache_hits: u64,
+) -> &'static str {
+    if requests == 0 {
+        return "no_cas_requests";
+    }
+    if cas.cache_read_error_count > 0 {
+        return "cas_request_errors";
+    }
+    if integrity_misses > 0 {
+        return "cas_integrity_mismatch";
+    }
+    if cas.cache_read_miss_count == 0 && after_refresh_hits > 0 {
+        return "cas_refresh_recovered_lookup";
+    }
+    if cas.cache_read_miss_count == 0 {
+        return "cas_hot";
+    }
+    if action_cache_hits > 0 && absent_from_warmed_cache > 0 {
+        return "cas_missing_for_action_cache_hits";
+    }
+    if absent_from_warmed_cache > 0 {
+        return "cas_keys_absent_from_warmed_cache";
+    }
+    if after_refresh_hits > 0 {
+        return "mixed_cas_after_warmed_cache_refresh";
+    }
+
+    "cas_miss_unclassified"
+}
+
+fn cas_lookup_owner(state: &str) -> &'static str {
+    match state {
+        "cas_request_errors"
+        | "cas_integrity_mismatch"
+        | "cas_refresh_recovered_lookup"
+        | "cas_missing_for_action_cache_hits" => "boringcache",
+        "cas_keys_absent_from_warmed_cache" | "mixed_cas_after_warmed_cache_refresh" => "shared",
+        "cas_hot" | "no_cas_requests" => "none",
+        _ => "unknown",
+    }
+}
+
+fn cas_lookup_customer_action_required(state: &str) -> bool {
+    matches!(
+        state,
+        "cas_keys_absent_from_warmed_cache"
+            | "mixed_cas_after_warmed_cache_refresh"
+            | "cas_miss_unclassified"
+    )
+}
+
 pub(super) fn action_cache_absent_from_warmed_cache_count(
     kv_lookup: &BTreeMap<String, String>,
 ) -> u64 {
@@ -310,6 +440,18 @@ pub(super) fn action_cache_absent_from_warmed_cache_count(
             "kv_lookup_bazel_ac_post_flight_miss",
             "kv_lookup_bazel_ac_recent_miss",
             "kv_lookup_bazel_ac_leader_recent_miss",
+        ],
+    )
+}
+
+fn cas_absent_from_warmed_cache_count(kv_lookup: &BTreeMap<String, String>) -> u64 {
+    sum_metric_keys(
+        kv_lookup,
+        &[
+            "kv_lookup_bazel_cas_after_refresh_miss",
+            "kv_lookup_bazel_cas_post_flight_miss",
+            "kv_lookup_bazel_cas_recent_miss",
+            "kv_lookup_bazel_cas_leader_recent_miss",
         ],
     )
 }
@@ -378,5 +520,42 @@ mod tests {
         assert_eq!(issues[0]["severity"], "actionable");
         assert_eq!(issues[0]["customer_action_required"], true);
         assert_eq!(issues[0]["evidence"]["absent_from_warmed_cache"], 2);
+        assert_eq!(issues[0]["next_step"], BAZEL_ACTION_KEY_NEXT_STEP);
+    }
+
+    #[test]
+    fn cache_key_lookup_summary_includes_cas_signal() {
+        let operation_summary = ToolOperationSummary {
+            scoped: BTreeMap::from([
+                (
+                    "bazel_action_cache".to_string(),
+                    OperationCounters {
+                        cache_read_hit_count: 2,
+                        ..OperationCounters::default()
+                    },
+                ),
+                (
+                    "bazel_cas".to_string(),
+                    OperationCounters {
+                        cache_read_miss_count: 1,
+                        ..OperationCounters::default()
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+        let lookup = BTreeMap::from([(
+            "kv_lookup_bazel_cas_after_refresh_miss".to_string(),
+            "1".to_string(),
+        )]);
+
+        let summary = cache_key_lookup_summary("bazel", &operation_summary, &lookup);
+
+        assert_eq!(summary["cas"]["scope"], "cas");
+        assert_eq!(summary["cas"]["state"], "cas_missing_for_action_cache_hits");
+        assert_eq!(summary["cas"]["owner"], "boringcache");
+        assert_eq!(summary["cas"]["customer_action_required"], false);
+        assert_eq!(summary["cas"]["evidence"]["action_cache_hits"], 2);
+        assert_eq!(summary["cas"]["evidence"]["absent_from_warmed_cache"], 1);
     }
 }
