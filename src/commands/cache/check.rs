@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy)]
 struct KvTagStats {
+    entry_count: u64,
     total_size_bytes: u64,
 }
 
@@ -34,6 +35,10 @@ pub struct CheckResult {
     pub size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compressed_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_entry_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_total_size: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,10 +183,17 @@ async fn execute_inner(
         results_by_tag.insert(entry.tag.clone(), entry);
     }
 
-    let kv_row_stats = if options.require_server_signature {
-        HashMap::new()
+    let kv_row_stats = if options.json_output || !options.require_server_signature {
+        resolve_kv_row_stats(
+            &api_client,
+            &workspace,
+            &tag_to_resolved,
+            &results_by_tag,
+            options.require_server_signature,
+        )
+        .await?
     } else {
-        resolve_kv_row_stats(&api_client, &workspace, &tag_to_resolved, &results_by_tag).await?
+        HashMap::new()
     };
 
     let mut check_results: Vec<CheckResult> = Vec::new();
@@ -205,6 +217,10 @@ async fn execute_inner(
         let kv_row_hit = candidate_tags
             .iter()
             .find_map(|tag| kv_row_stats.get(tag).map(|stats| (tag.clone(), *stats)));
+        let (kv_entry_count, kv_total_size) = kv_row_hit
+            .as_ref()
+            .map(|(_, stats)| (Some(stats.entry_count), Some(stats.total_size_bytes)))
+            .unwrap_or((None, None));
 
         match hit.or(pending_entry) {
             Some(entry) if entry.status == "hit" => {
@@ -218,6 +234,8 @@ async fn execute_inner(
                     manifest_root_digest: entry.manifest_root_digest.clone(),
                     size: entry.size,
                     compressed_size: entry.compressed_size,
+                    kv_entry_count,
+                    kv_total_size,
                 });
             }
             Some(entry) if is_pending_resolution(entry) => {
@@ -231,10 +249,13 @@ async fn execute_inner(
                     manifest_root_digest: entry.manifest_root_digest.clone(),
                     size: entry.size,
                     compressed_size: entry.compressed_size,
+                    kv_entry_count,
+                    kv_total_size,
                 });
             }
             _ => {
-                if let Some((tag, stats)) = kv_row_hit {
+                if let (false, Some((tag, stats))) = (options.require_server_signature, kv_row_hit)
+                {
                     hits += 1;
                     check_results.push(CheckResult {
                         tag,
@@ -245,6 +266,8 @@ async fn execute_inner(
                         manifest_root_digest: None,
                         size: Some(stats.total_size_bytes),
                         compressed_size: Some(stats.total_size_bytes),
+                        kv_entry_count: Some(stats.entry_count),
+                        kv_total_size: Some(stats.total_size_bytes),
                     });
                 } else {
                     misses += 1;
@@ -258,6 +281,8 @@ async fn execute_inner(
                         manifest_root_digest: None,
                         size: None,
                         compressed_size: None,
+                        kv_entry_count,
+                        kv_total_size,
                     });
                 }
             }
@@ -364,15 +389,17 @@ async fn resolve_kv_row_stats(
     workspace: &str,
     tag_to_resolved: &[(String, Vec<String>)],
     manifest_results: &HashMap<String, crate::api::CacheResolutionEntry>,
+    include_manifest_hits: bool,
 ) -> Result<HashMap<String, KvTagStats>> {
     let mut stats_by_tag = HashMap::new();
     let mut checked = HashSet::new();
 
     for (_, candidate_tags) in tag_to_resolved {
-        if candidate_tags
-            .iter()
-            .filter_map(|tag| manifest_results.get(tag))
-            .any(|entry| entry.status == "hit" || is_pending_resolution(entry))
+        if !include_manifest_hits
+            && candidate_tags
+                .iter()
+                .filter_map(|tag| manifest_results.get(tag))
+                .any(|entry| entry.status == "hit" || is_pending_resolution(entry))
         {
             continue;
         }
@@ -403,8 +430,11 @@ async fn cache_kv_tag_stats(
 
     loop {
         let response = api_client
-            .stream_cache_kv_entries(workspace, tag, cursor.as_deref(), 5_000)
+            .try_stream_cache_kv_entries(workspace, tag, cursor.as_deref(), 5_000)
             .await?;
+        let Some(response) = response else {
+            return Ok(None);
+        };
 
         if response.entries.is_empty() && entry_count == 0 {
             return Ok(None);
@@ -423,7 +453,10 @@ async fn cache_kv_tag_stats(
         }
     }
 
-    Ok(Some(KvTagStats { total_size_bytes }))
+    Ok(Some(KvTagStats {
+        entry_count,
+        total_size_bytes,
+    }))
 }
 
 fn is_pending_resolution(entry: &crate::api::CacheResolutionEntry) -> bool {
@@ -543,6 +576,8 @@ mod tests {
                     manifest_root_digest: Some("sha256:root".to_string()),
                     size: Some(1024),
                     compressed_size: Some(512),
+                    kv_entry_count: None,
+                    kv_total_size: None,
                 },
                 CheckResult {
                     tag: "deps-fallback".to_string(),
@@ -553,6 +588,8 @@ mod tests {
                     manifest_root_digest: None,
                     size: None,
                     compressed_size: None,
+                    kv_entry_count: None,
+                    kv_total_size: None,
                 },
             ],
         };

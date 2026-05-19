@@ -492,13 +492,13 @@ impl ApiClient {
             .await
     }
 
-    pub async fn stream_cache_kv_entries(
+    fn cache_kv_entries_endpoint(
         &self,
         workspace: &str,
         tag: &str,
         cursor: Option<&str>,
         limit: usize,
-    ) -> Result<crate::api::models::cache::CacheKvEntriesResponse> {
+    ) -> Result<String> {
         ensure!(!tag.trim().is_empty(), "tag must not be empty");
         let encoded_tag = urlencoding::encode(tag);
         let mut endpoint = self.workspace_endpoint(
@@ -510,16 +510,28 @@ impl ApiClient {
             endpoint.push_str(&urlencoding::encode(cursor));
         }
 
+        Ok(endpoint)
+    }
+
+    pub async fn stream_cache_kv_entries(
+        &self,
+        workspace: &str,
+        tag: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::api::models::cache::CacheKvEntriesResponse> {
+        let endpoint = self.cache_kv_entries_endpoint(workspace, tag, cursor, limit)?;
         self.get_v2(&endpoint).await
     }
 
-    pub async fn cache_kv_tag_has_entries(&self, workspace: &str, tag: &str) -> Result<bool> {
-        ensure!(!tag.trim().is_empty(), "tag must not be empty");
-        let encoded_tag = urlencoding::encode(tag);
-        let endpoint = self.workspace_endpoint(
-            workspace,
-            &format!("cache-kv-entries?tag={encoded_tag}&limit=1"),
-        )?;
+    pub async fn try_stream_cache_kv_entries(
+        &self,
+        workspace: &str,
+        tag: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Option<crate::api::models::cache::CacheKvEntriesResponse>> {
+        let endpoint = self.cache_kv_entries_endpoint(workspace, tag, cursor, limit)?;
         let response = self
             .get_response_with_base(&self.v2_base_url, &endpoint)
             .await?;
@@ -530,11 +542,18 @@ impl ApiClient {
                     .json()
                     .await
                     .context("Failed to parse cache KV entries response")?;
-                Ok(!payload.entries.is_empty())
+                Ok(Some(payload))
             }
-            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => Ok(false),
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => Ok(None),
             _ => Err(self.create_error_from_response(response).await),
         }
+    }
+
+    pub async fn cache_kv_tag_has_entries(&self, workspace: &str, tag: &str) -> Result<bool> {
+        Ok(self
+            .try_stream_cache_kv_entries(workspace, tag, None, 1)
+            .await?
+            .is_some_and(|payload| !payload.entries.is_empty()))
     }
 
     pub async fn upsert_cache_kv_entries(

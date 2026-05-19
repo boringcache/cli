@@ -1,4 +1,4 @@
-use boring_cache_cli::test_env;
+use boring_cache_cli::{signing, test_env};
 use mockito::{Matcher, Server};
 use serde_json::json;
 use std::env;
@@ -462,10 +462,307 @@ async fn test_check_reports_direct_kv_tag_as_hit() {
     assert_eq!(value["results"][0]["cache_type"], "kv");
     assert_eq!(value["results"][0]["size"], 123);
     assert_eq!(value["results"][0]["compressed_size"], 123);
+    assert_eq!(value["results"][0]["kv_entry_count"], 1);
+    assert_eq!(value["results"][0]["kv_total_size"], 123);
     assert_eq!(
         value["results"][0]["cache_entry_id"],
         serde_json::Value::Null
     );
+
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
+}
+
+#[tokio::test]
+async fn test_check_strict_json_reports_kv_rows_without_promoting_them_to_signed_hits() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!("skipping test: networking disabled");
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+        )
+        .with_status(207)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "kv-only-tag",
+                "status": "miss",
+                "cache_entry_id": null
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _kv_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/test/workspace/cache-kv-entries?tag=kv-only-tag&limit=5000",
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "entries": [{
+                    "namespace": "sccache",
+                    "scoped_key": "sccache/a/b/c",
+                    "blob": {
+                        "digest": "sha256:abc",
+                        "size_bytes": 123
+                    }
+                }],
+                "next_cursor": null
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    test_env::set_var("HOME", temp_dir.path());
+
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "--require-server-signature",
+            "check",
+            "test/workspace",
+            "kv-only-tag",
+            "--json",
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        output.status.success(),
+        "Expected strict KV-aware check to succeed, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("check JSON output");
+    assert_eq!(value["hits"], 0);
+    assert_eq!(value["misses"], 1);
+    assert_eq!(value["results"][0]["status"], "miss");
+    assert_eq!(value["results"][0]["cache_type"], serde_json::Value::Null);
+    assert_eq!(value["results"][0]["kv_entry_count"], 1);
+    assert_eq!(value["results"][0]["kv_total_size"], 123);
+
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
+}
+
+#[tokio::test]
+async fn test_check_strict_json_reports_kv_rows_next_to_signed_cache_entry_hits() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!("skipping test: networking disabled");
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+    let root_digest = "sha256:root";
+    let (signing_key, verifying_key) = signing::generate_keypair();
+    let public_key = signing::format_public_key(&verifying_key);
+    let signature = signing::signature_to_base64(&signing::sign_data(
+        format!("signed-tag:{root_digest}").as_bytes(),
+        &signing_key,
+    ));
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+        )
+        .with_status(207)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "signed-tag",
+                "status": "hit",
+                "cache_entry_id": "entry-123",
+                "manifest_root_digest": root_digest,
+                "workspace_signing_public_key": public_key,
+                "server_signature": signature,
+                "size": 456,
+                "compressed_size": 456
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _kv_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/test/workspace/cache-kv-entries?tag=signed-tag&limit=5000",
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "entries": [
+                    {
+                        "namespace": "sccache",
+                        "scoped_key": "sccache/a",
+                        "blob": {"digest": "sha256:a", "size_bytes": 10}
+                    },
+                    {
+                        "namespace": "sccache",
+                        "scoped_key": "sccache/b",
+                        "blob": {"digest": "sha256:a", "size_bytes": 10}
+                    },
+                    {
+                        "namespace": "sccache",
+                        "scoped_key": "sccache/c",
+                        "blob": {"digest": "sha256:c", "size_bytes": 20}
+                    }
+                ],
+                "next_cursor": null
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    test_env::set_var("HOME", temp_dir.path());
+
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "--require-server-signature",
+            "check",
+            "test/workspace",
+            "signed-tag",
+            "--json",
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        output.status.success(),
+        "Expected strict signed check to succeed, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("check JSON output");
+    assert_eq!(value["hits"], 1);
+    assert_eq!(value["misses"], 0);
+    assert_eq!(value["results"][0]["status"], "hit");
+    assert_eq!(value["results"][0]["cache_type"], "cache_entry");
+    assert_eq!(value["results"][0]["cache_entry_id"], "entry-123");
+    assert_eq!(value["results"][0]["kv_entry_count"], 3);
+    assert_eq!(value["results"][0]["kv_total_size"], 30);
+
+    test_env::remove_var("BORINGCACHE_API_URL");
+    test_env::remove_var("HOME");
+}
+
+#[tokio::test]
+async fn test_check_strict_json_keeps_signed_hit_when_kv_stats_are_unavailable() {
+    let _lock = acquire_test_lock().await;
+    if !networking_available() {
+        eprintln!("skipping test: networking disabled");
+        return;
+    }
+
+    let mut server = Server::new_async().await;
+    let root_digest = "sha256:root";
+    let (signing_key, verifying_key) = signing::generate_keypair();
+    let public_key = signing::format_public_key(&verifying_key);
+    let signature = signing::signature_to_base64(&signing::sign_data(
+        format!("signed-tag:{root_digest}").as_bytes(),
+        &signing_key,
+    ));
+
+    let _restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=.*$".to_string()),
+        )
+        .with_status(207)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "signed-tag",
+                "status": "hit",
+                "cache_entry_id": "entry-123",
+                "manifest_root_digest": root_digest,
+                "workspace_signing_public_key": public_key,
+                "server_signature": signature,
+                "size": 456,
+                "compressed_size": 456
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let _kv_mock = server
+        .mock(
+            "GET",
+            "/v2/workspaces/test/workspace/cache-kv-entries?tag=signed-tag&limit=5000",
+        )
+        .with_status(404)
+        .create_async()
+        .await;
+
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    setup_test_config(&temp_dir, &server.url());
+    test_env::set_var("HOME", temp_dir.path());
+
+    let output = std::process::Command::new(cli_binary())
+        .args([
+            "--require-server-signature",
+            "check",
+            "test/workspace",
+            "signed-tag",
+            "--json",
+            "--no-platform",
+            "--no-git",
+        ])
+        .current_dir(temp_dir.path())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        output.status.success(),
+        "Expected strict signed check to succeed without KV stats, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("check JSON output");
+    assert_eq!(value["hits"], 1);
+    assert_eq!(value["misses"], 0);
+    assert_eq!(value["results"][0]["status"], "hit");
+    assert_eq!(value["results"][0]["cache_type"], "cache_entry");
+    let result = value["results"][0]
+        .as_object()
+        .expect("check result object");
+    assert!(!result.contains_key("kv_entry_count"));
+    assert!(!result.contains_key("kv_total_size"));
 
     test_env::remove_var("BORINGCACHE_API_URL");
     test_env::remove_var("HOME");
