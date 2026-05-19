@@ -13,6 +13,12 @@ pub(crate) enum FlushMode {
     Shutdown,
 }
 
+impl FlushMode {
+    pub(crate) fn publishes_stable_manifest(self) -> bool {
+        matches!(self, FlushMode::Shutdown)
+    }
+}
+
 pub(crate) async fn flush_kv_index(state: &AppState) -> FlushResult {
     flush_kv_index_with_mode(state, FlushMode::Normal).await
 }
@@ -54,6 +60,9 @@ pub(crate) async fn flush_kv_index_with_mode(
 
     let result = match do_flush(state, &pending_entries, &pending_blob_paths, flush_mode).await {
         Ok((merged_entries, merged_blob_order, cache_entry_id, stable_publish)) => {
+            let promoted =
+                promote_pending_blobs_to_read_cache(state, &pending_entries, &pending_blob_paths)
+                    .await;
             {
                 let mut published = state.kv_published_index.write().await;
                 published.update(
@@ -69,9 +78,6 @@ pub(crate) async fn flush_kv_index_with_mode(
             }
             clear_tag_misses(state, &state.primary_cache_tag);
 
-            let promoted =
-                promote_pending_blobs_to_read_cache(state, &pending_entries, &pending_blob_paths)
-                    .await;
             cleanup_blob_files(&pending_blob_paths).await;
             state.kv_last_put.store(0, Ordering::Release);
 
@@ -82,7 +88,9 @@ pub(crate) async fn flush_kv_index_with_mode(
                 );
             }
             drop(guard);
-            preload_download_urls(state, &cache_entry_id).await;
+            if stable_publish {
+                preload_download_urls(state, &cache_entry_id).await;
+            }
             FlushResult::Ok
         }
         Err(FlushError::Conflict(msg)) => {
@@ -147,12 +155,11 @@ pub(crate) async fn kv_flush_publish_plan(
     flush_mode: FlushMode,
 ) -> KvFlushPublishPlan {
     let write_scope_tag = kv_primary_write_scope_tag(state);
-    let _ = flush_mode;
 
     KvFlushPublishPlan {
         tag: kv_publish_cache_tag(state, write_scope_tag.as_deref()).await,
         write_scope_tag,
-        stable: true,
+        stable: flush_mode.publishes_stable_manifest(),
     }
 }
 
@@ -179,12 +186,14 @@ pub(crate) async fn do_flush(
     let flush_started_at = std::time::Instant::now();
     let diagnostics = crate::serve::state::diagnostics_enabled();
     let publish_plan = kv_flush_publish_plan(state, flush_mode).await;
-    let primary_write_scope_tag = publish_plan.write_scope_tag.clone();
-    let tag = publish_plan.tag.clone();
 
-    let (published_snapshot, published_blob_order) = {
+    let (published_snapshot, published_blob_order, published_cache_entry_id) = {
         let published = state.kv_published_index.read().await;
-        (published.entries_snapshot(), published.unique_blobs())
+        (
+            published.entries_snapshot(),
+            published.unique_blobs(),
+            published.cache_entry_id().map(str::to_string),
+        )
     };
 
     let (backend_entries, backend_blob_order) =
@@ -246,7 +255,51 @@ pub(crate) async fn do_flush(
         );
     }
 
-    let (pointer_bytes, blobs) = build_index_pointer(&entries, &merged_blob_order)
+    if !publish_plan.stable {
+        let checkpoint_cache_entry_id = checkpoint_kv_blobs(
+            state,
+            &filtered_pending_entries,
+            &filtered_pending_blob_paths,
+            diagnostics,
+            flush_started_at,
+        )
+        .await?;
+        return Ok((
+            entries,
+            merged_blob_order,
+            published_cache_entry_id.unwrap_or(checkpoint_cache_entry_id),
+            false,
+        ));
+    }
+
+    let cache_entry_id = publish_kv_manifest(
+        state,
+        &entries,
+        &merged_blob_order,
+        &filtered_pending_blob_paths,
+        &publish_plan,
+        diagnostics,
+        flush_started_at,
+    )
+    .await?;
+
+    Ok((entries, merged_blob_order, cache_entry_id, true))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_kv_manifest(
+    state: &AppState,
+    entries: &BTreeMap<String, BlobDescriptor>,
+    merged_blob_order: &[BlobDescriptor],
+    local_blob_paths: &HashMap<String, PathBuf>,
+    publish_plan: &KvFlushPublishPlan,
+    diagnostics: bool,
+    flush_started_at: std::time::Instant,
+) -> Result<String, FlushError> {
+    let tag = publish_plan.tag.clone();
+    let primary_write_scope_tag = publish_plan.write_scope_tag.clone();
+    let total_count = entries.len();
+    let (pointer_bytes, blobs) = build_index_pointer(entries, merged_blob_order)
         .map_err(|e| FlushError::Transient(format!("build pointer failed: {e:?}")))?;
 
     let manifest_root_digest = crate::cas_file::prefixed_sha256_digest(&pointer_bytes);
@@ -255,52 +308,18 @@ pub(crate) async fn do_flush(
     let blob_total_size_bytes: u64 = blobs.iter().map(|b| b.size_bytes).sum();
     let file_count = entries.len().min(u32::MAX as usize) as u32;
 
-    let request = SaveRequest {
-        tag: tag.clone(),
-        write_scope_tag: primary_write_scope_tag.clone(),
-        manifest_root_digest: manifest_root_digest.clone(),
-        compression_algorithm: "zstd".to_string(),
-        storage_mode: Some("cas".to_string()),
-        blob_count: Some(blob_count),
-        blob_total_size_bytes: Some(blob_total_size_bytes),
-        cas_layout: Some("file-v1".to_string()),
-        manifest_format_version: Some(1),
-        total_size_bytes: blob_total_size_bytes,
-        uncompressed_size: None,
-        compressed_size: None,
-        file_count: Some(file_count),
-        expected_manifest_digest: Some(manifest_root_digest.clone()),
-        expected_manifest_size: Some(expected_manifest_size),
-        force: None,
-        use_multipart: None,
-        ci_provider: state.ci_provider(),
-        ci_run_uid: state.ci_run_uid(),
-        ci_run_attempt: state.ci_run_attempt(),
-        ci_ref_type: state.ci_ref_type(),
-        ci_ref_name: state.ci_ref_name(),
-        ci_default_branch: state.ci_default_branch(),
-        ci_pr_number: state.ci_pr_number(),
-        ci_commit_sha: state.ci_commit_sha(),
-        ci_run_started_at: state.ci_run_started_at(),
-        encrypted: None,
-        encryption_algorithm: None,
-        encryption_recipient_hint: None,
-    };
+    let request = kv_save_request(
+        state,
+        tag.clone(),
+        primary_write_scope_tag.clone(),
+        manifest_root_digest.clone(),
+        expected_manifest_size,
+        blob_count,
+        blob_total_size_bytes,
+        file_count,
+    );
 
-    let save_response = match state
-        .api_client
-        .save_entry(&state.workspace, &request)
-        .await
-    {
-        Ok(resp) => {
-            state.backend_breaker.record_success();
-            resp
-        }
-        Err(e) => {
-            state.backend_breaker.record_failure();
-            return Err(classify_flush_error(&e, "save_entry failed"));
-        }
-    };
+    let save_response = save_kv_entry(state, &request).await?;
     let confirm_cache_entry_id = save_response.cache_entry_id.clone();
     let confirm_manifest_digest = manifest_root_digest.clone();
     let confirm_tag = tag.clone();
@@ -313,23 +332,13 @@ pub(crate) async fn do_flush(
     }
 
     if save_response.should_skip_existing_uploads_for(&manifest_root_digest) {
-        let mut pending_blob_by_digest: HashMap<String, u64> = HashMap::new();
-        for blob in filtered_pending_entries.values() {
-            pending_blob_by_digest
-                .entry(blob.digest.clone())
-                .or_insert(blob.size_bytes);
-        }
-        let pending_blobs: Vec<BlobDescriptor> = pending_blob_by_digest
-            .into_iter()
-            .map(|(digest, size_bytes)| BlobDescriptor { digest, size_bytes })
-            .collect();
-
-        if !pending_blobs.is_empty() {
+        let reconcile_blobs = local_reconcile_blobs(entries, local_blob_paths);
+        if !reconcile_blobs.is_empty() {
             match upload_blobs(
                 state,
                 &save_response.cache_entry_id,
-                &pending_blobs,
-                &filtered_pending_blob_paths,
+                &reconcile_blobs,
+                local_blob_paths,
             )
             .await
             {
@@ -410,15 +419,8 @@ pub(crate) async fn do_flush(
         };
         if diagnostics {
             eprintln!(
-                "KV flush publish: tag={} cache_entry_id={} state={} alias_tags={}",
-                tag,
-                confirm_outcome.cache_entry_id,
-                if publish_plan.stable {
-                    "stable"
-                } else {
-                    "checkpoint"
-                },
-                alias_count
+                "KV flush publish: tag={} cache_entry_id={} state=stable alias_tags={}",
+                tag, confirm_outcome.cache_entry_id, alias_count
             );
         }
         if diagnostics && alias_count > 0 {
@@ -433,12 +435,7 @@ pub(crate) async fn do_flush(
                 "KV flush: save_entry returned exists=true ({total_count} entries, {blob_count} blobs, digest={manifest_root_digest})"
             );
         }
-        return Ok((
-            entries,
-            merged_blob_order,
-            save_response.cache_entry_id,
-            publish_plan.stable,
-        ));
+        return Ok(confirm_outcome.cache_entry_id);
     }
     if diagnostics {
         eprintln!(
@@ -462,7 +459,7 @@ pub(crate) async fn do_flush(
             let upload_session_id = save_response.upload_session_id.clone();
             async move {
                 let upload_stats = if !blobs.is_empty() {
-                    match upload_blobs(state, &cache_entry_id, &blobs, &filtered_pending_blob_paths)
+                    match upload_blobs(state, &cache_entry_id, &blobs, local_blob_paths)
                         .await
                     {
                         Ok(upload_stats) => upload_stats,
@@ -585,12 +582,216 @@ pub(crate) async fn do_flush(
         );
     }
 
-    Ok((
-        entries,
-        merged_blob_order,
-        save_response.cache_entry_id,
-        publish_plan.stable,
-    ))
+    Ok(confirm_outcome.cache_entry_id)
+}
+
+async fn checkpoint_kv_blobs(
+    state: &AppState,
+    pending_entries: &BTreeMap<String, BlobDescriptor>,
+    pending_blob_paths: &HashMap<String, PathBuf>,
+    diagnostics: bool,
+    flush_started_at: std::time::Instant,
+) -> Result<String, FlushError> {
+    let pending_blob_order = merge_blob_order(pending_entries, &[]);
+    let (checkpoint_pointer_bytes, pending_blobs) =
+        build_index_pointer(pending_entries, &pending_blob_order).map_err(|e| {
+            FlushError::Transient(format!("build checkpoint pointer failed: {e:?}"))
+        })?;
+
+    let checkpoint_digest = crate::cas_file::prefixed_sha256_digest(&checkpoint_pointer_bytes);
+    let expected_manifest_size = checkpoint_pointer_bytes.len() as u64;
+    let blob_count = pending_blobs.len() as u64;
+    let blob_total_size_bytes: u64 = pending_blobs.iter().map(|b| b.size_bytes).sum();
+    let file_count = pending_entries.len().min(u32::MAX as usize) as u32;
+    let request = kv_save_request(
+        state,
+        String::new(),
+        None,
+        checkpoint_digest.clone(),
+        expected_manifest_size,
+        blob_count,
+        blob_total_size_bytes,
+        file_count,
+    );
+
+    let save_response = save_kv_entry(state, &request).await?;
+    if let Some(reason) = save_response.blocking_pending_cas_reason(&checkpoint_digest) {
+        return Err(FlushError::Conflict(format!(
+            "checkpoint save_entry failed: another cache upload is in progress ({reason})"
+        )));
+    }
+
+    let upload_stats = if pending_blobs.is_empty() {
+        BlobUploadStats::default()
+    } else {
+        match upload_blobs(
+            state,
+            &save_response.cache_entry_id,
+            &pending_blobs,
+            pending_blob_paths,
+        )
+        .await
+        {
+            Ok(upload_stats) => upload_stats,
+            Err(error) => {
+                if let Some(partial_stats) = partial_blob_upload_stats(&error) {
+                    if let Err(commit_error) = try_commit_blob_receipts(
+                        &state.api_client,
+                        &state.workspace,
+                        save_response.upload_session_id.as_deref(),
+                        partial_stats.uploaded_receipts.clone(),
+                    )
+                    .await
+                    {
+                        log::warn!(
+                            "KV checkpoint: partial blob receipt commit failed: {commit_error:#}"
+                        );
+                    }
+                    if partial_stats.uploaded_count > 0 || partial_stats.missing_local_count > 0 {
+                        eprintln!(
+                            "KV checkpoint: preserved partial blob uploads uploaded={} already_present={} missing_local={}",
+                            partial_stats.uploaded_count,
+                            partial_stats.already_present_count,
+                            partial_stats.missing_local_count
+                        );
+                    }
+                }
+                return Err(classify_flush_error(
+                    &error,
+                    "checkpoint blob upload failed",
+                ));
+            }
+        }
+    };
+
+    commit_required_blob_receipts(
+        state,
+        save_response.upload_session_id.as_deref(),
+        upload_stats.uploaded_receipts.clone(),
+        "checkpoint blob receipt commit failed",
+    )
+    .await?;
+
+    if diagnostics {
+        eprintln!(
+            "KV checkpoint: cache_entry_id={} entries={} unique_blobs={} uploaded={} already_present={} skipped_local={} bytes={} duration_ms={}",
+            save_response.cache_entry_id,
+            pending_entries.len(),
+            blob_count,
+            upload_stats.uploaded_count,
+            upload_stats.already_present_count,
+            upload_stats.missing_local_count,
+            blob_total_size_bytes,
+            flush_started_at.elapsed().as_millis()
+        );
+    }
+
+    Ok(save_response.cache_entry_id)
+}
+
+async fn commit_required_blob_receipts(
+    state: &AppState,
+    upload_session_id: Option<&str>,
+    receipts: Vec<crate::api::models::cache::BlobReceipt>,
+    context: &str,
+) -> Result<(), FlushError> {
+    if receipts.is_empty() {
+        return Ok(());
+    }
+
+    let Some(upload_session_id) = upload_session_id.filter(|value| !value.trim().is_empty()) else {
+        return Err(FlushError::Transient(format!(
+            "{context}: missing upload_session_id"
+        )));
+    };
+
+    try_commit_blob_receipts(
+        &state.api_client,
+        &state.workspace,
+        Some(upload_session_id),
+        receipts,
+    )
+    .await
+    .map_err(|error| classify_flush_error(&error, context))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn kv_save_request(
+    state: &AppState,
+    tag: String,
+    write_scope_tag: Option<String>,
+    manifest_root_digest: String,
+    expected_manifest_size: u64,
+    blob_count: u64,
+    blob_total_size_bytes: u64,
+    file_count: u32,
+) -> SaveRequest {
+    SaveRequest {
+        tag,
+        write_scope_tag,
+        manifest_root_digest: manifest_root_digest.clone(),
+        compression_algorithm: "zstd".to_string(),
+        storage_mode: Some("cas".to_string()),
+        blob_count: Some(blob_count),
+        blob_total_size_bytes: Some(blob_total_size_bytes),
+        cas_layout: Some("file-v1".to_string()),
+        manifest_format_version: Some(1),
+        total_size_bytes: blob_total_size_bytes,
+        uncompressed_size: None,
+        compressed_size: None,
+        file_count: Some(file_count),
+        expected_manifest_digest: Some(manifest_root_digest),
+        expected_manifest_size: Some(expected_manifest_size),
+        force: None,
+        use_multipart: None,
+        ci_provider: state.ci_provider(),
+        ci_run_uid: state.ci_run_uid(),
+        ci_run_attempt: state.ci_run_attempt(),
+        ci_ref_type: state.ci_ref_type(),
+        ci_ref_name: state.ci_ref_name(),
+        ci_default_branch: state.ci_default_branch(),
+        ci_pr_number: state.ci_pr_number(),
+        ci_commit_sha: state.ci_commit_sha(),
+        ci_run_started_at: state.ci_run_started_at(),
+        encrypted: None,
+        encryption_algorithm: None,
+        encryption_recipient_hint: None,
+    }
+}
+
+async fn save_kv_entry(
+    state: &AppState,
+    request: &SaveRequest,
+) -> Result<crate::api::models::cache::SaveResponse, FlushError> {
+    match state.api_client.save_entry(&state.workspace, request).await {
+        Ok(resp) => {
+            state.backend_breaker.record_success();
+            Ok(resp)
+        }
+        Err(e) => {
+            state.backend_breaker.record_failure();
+            Err(classify_flush_error(&e, "save_entry failed"))
+        }
+    }
+}
+
+fn local_reconcile_blobs(
+    entries: &BTreeMap<String, BlobDescriptor>,
+    local_blob_paths: &HashMap<String, PathBuf>,
+) -> Vec<BlobDescriptor> {
+    let mut blobs_by_digest: BTreeMap<String, u64> = BTreeMap::new();
+    for blob in entries.values() {
+        if local_blob_paths.contains_key(&blob.digest) {
+            blobs_by_digest
+                .entry(blob.digest.clone())
+                .or_insert(blob.size_bytes);
+        }
+    }
+
+    blobs_by_digest
+        .into_iter()
+        .map(|(digest, size_bytes)| BlobDescriptor { digest, size_bytes })
+        .collect()
 }
 
 type FilteredPendingEntries = (
@@ -697,35 +898,52 @@ pub(crate) async fn bind_kv_alias_tags(
 }
 
 pub(crate) async fn promote_kv_published_checkpoint_on_shutdown(state: &AppState) -> FlushResult {
-    let cache_entry_id = {
+    let (entries, blob_order) = {
         let published = state.kv_published_index.read().await;
         if published.is_stable() {
             return FlushResult::Ok;
         }
 
-        match published.cache_entry_id() {
-            Some(id) => id.to_string(),
-            None => return FlushResult::Ok,
+        let entries: BTreeMap<String, BlobDescriptor> = published
+            .entries_snapshot()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if entries.is_empty() {
+            return FlushResult::Ok;
         }
+        (entries, published.unique_blobs())
     };
 
-    match publish_kv_stable_tags_for_entry(state, &cache_entry_id).await {
-        Ok(alias_count) => {
+    let diagnostics = crate::serve::state::diagnostics_enabled();
+    let publish_plan = kv_flush_publish_plan(state, FlushMode::Shutdown).await;
+    let local_blob_paths = HashMap::new();
+
+    match publish_kv_manifest(
+        state,
+        &entries,
+        &blob_order,
+        &local_blob_paths,
+        &publish_plan,
+        diagnostics,
+        std::time::Instant::now(),
+    )
+    .await
+    {
+        Ok(cache_entry_id) => {
             {
                 let mut published = state.kv_published_index.write().await;
-                let entries = published.entries_snapshot();
-                let blob_order = published.unique_blobs();
                 published.update(
-                    entries.as_ref().clone(),
+                    entries.into_iter().collect(),
                     blob_order,
                     cache_entry_id.clone(),
                     true,
                 );
             }
-            if crate::serve::state::diagnostics_enabled() {
+            if diagnostics {
                 eprintln!(
-                    "KV shutdown publish: promoted checkpoint cache_entry_id={} alias_tags={}",
-                    cache_entry_id, alias_count
+                    "KV shutdown publish: published checkpoint cache_entry_id={}",
+                    cache_entry_id
                 );
             }
             FlushResult::Ok
@@ -739,28 +957,6 @@ pub(crate) async fn promote_kv_published_checkpoint_on_shutdown(state: &AppState
             }
         }
     }
-}
-
-async fn publish_kv_stable_tags_for_entry(
-    state: &AppState,
-    cache_entry_id: &str,
-) -> Result<usize, FlushError> {
-    let primary_write_scope_tag = kv_primary_write_scope_tag(state);
-    let tag = kv_publish_cache_tag(state, primary_write_scope_tag.as_deref()).await;
-    state
-        .api_client
-        .publish_ready_tag(
-            &state.workspace,
-            &tag,
-            cache_entry_id,
-            primary_write_scope_tag.clone(),
-            "cas",
-        )
-        .await
-        .map_err(|error| classify_flush_error(&error, "stable publish failed"))?;
-
-    let alias_count = bind_kv_alias_tags(state, cache_entry_id, Some(&tag)).await?;
-    Ok(alias_count)
 }
 
 pub(crate) fn server_cache_tag_name(tag: &str) -> bool {
@@ -837,4 +1033,50 @@ pub(crate) fn select_flush_base_entries(
             mismatched_published_keys,
         },
     )
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+
+    #[test]
+    fn normal_flush_does_not_publish_stable_manifest() {
+        assert!(!FlushMode::Normal.publishes_stable_manifest());
+        assert!(FlushMode::Shutdown.publishes_stable_manifest());
+    }
+
+    #[test]
+    fn local_reconcile_blobs_only_includes_blobs_with_local_paths() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "k1".to_string(),
+            BlobDescriptor {
+                digest: "sha256:111".to_string(),
+                size_bytes: 10,
+            },
+        );
+        entries.insert(
+            "k2".to_string(),
+            BlobDescriptor {
+                digest: "sha256:111".to_string(),
+                size_bytes: 10,
+            },
+        );
+        entries.insert(
+            "k3".to_string(),
+            BlobDescriptor {
+                digest: "sha256:222".to_string(),
+                size_bytes: 20,
+            },
+        );
+
+        let mut local_blob_paths = HashMap::new();
+        local_blob_paths.insert("sha256:111".to_string(), PathBuf::from("/tmp/blob-111"));
+
+        let blobs = local_reconcile_blobs(&entries, &local_blob_paths);
+
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0].digest, "sha256:111");
+        assert_eq!(blobs[0].size_bytes, 10);
+    }
 }
