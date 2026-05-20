@@ -32,6 +32,8 @@ Current fixtures:
 - `gradle_setup_plan_v1.json`
 - `maven_setup_plan_v1.json`
 - `check_hit_v1.json`
+- `check_miss_v1.json`
+- `check_pending_v1.json`
 - `status_workspace_v1.json`
 - `token_list_v1.json`
 - `token_ci_pair_v1.json`
@@ -54,8 +56,8 @@ Add fixtures in this order:
 2. Docker/BuildKit dry-run plan.
 3. Adapter dry-run setup plans with `setup.schema_version`. First coverage:
    Bazel, Gradle, and Maven.
-4. `check --json` and `status --json`. First coverage: check hit and
-   workspace status.
+4. `check --json` and `status --json`. First coverage: check hit, miss,
+   pending, and workspace status.
 5. Token and auth JSON outputs. First coverage: token list and CI token pair.
    Remaining secret-bearing token create/rotate outputs need explicit
    token-sensitive fixtures.

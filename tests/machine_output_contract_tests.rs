@@ -415,6 +415,129 @@ async fn check_json_matches_v1_contract() {
 }
 
 #[tokio::test]
+async fn check_miss_json_matches_v1_contract() {
+    let mut server = mockito::Server::new_async().await;
+    let capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .match_header("authorization", "Bearer restore-token-fixture")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "api_version": "v2",
+                "features": {
+                    "cache_kv_entries_summary_v1": true
+                }
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=deps$".to_string()),
+        )
+        .match_header("authorization", "Bearer restore-token-fixture")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create_async()
+        .await;
+    let kv_summary_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(
+                r"^/v2/workspaces/test/workspace/cache-kv-entries\?tag=deps&summary=true$"
+                    .to_string(),
+            ),
+        )
+        .match_header("authorization", "Bearer restore-token-fixture")
+        .with_status(404)
+        .with_header("content-type", "application/json")
+        .with_body("{}")
+        .create_async()
+        .await;
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let output = mocked_api_command(&temp_dir, &server.url())
+        .env("BORINGCACHE_RESTORE_TOKEN", "restore-token-fixture")
+        .args([
+            "check",
+            "test/workspace",
+            "deps",
+            "--json",
+            "--no-platform",
+            "--no-git",
+        ])
+        .output()
+        .expect("check miss json");
+
+    assert!(
+        output.status.success(),
+        "check miss should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    restore_mock.assert_async().await;
+    capabilities_mock.assert_async().await;
+    kv_summary_mock.assert_async().await;
+    assert_machine_output_matches_fixture(
+        &output.stdout,
+        include_str!("fixtures/machine-output/check_miss_v1.json"),
+    );
+}
+
+#[tokio::test]
+async fn check_pending_json_matches_v1_contract() {
+    let mut server = mockito::Server::new_async().await;
+    let restore_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"^/v2/workspaces/test/workspace/caches\?entries=deps$".to_string()),
+        )
+        .match_header("authorization", "Bearer restore-token-fixture")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "tag": "deps",
+                "status": "pending",
+                "pending": true,
+                "cache_entry_id": "entry-pending",
+                "manifest_root_digest": "sha256:pending-root"
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let output = mocked_api_command(&temp_dir, &server.url())
+        .env("BORINGCACHE_RESTORE_TOKEN", "restore-token-fixture")
+        .args([
+            "check",
+            "test/workspace",
+            "deps",
+            "--json",
+            "--no-platform",
+            "--no-git",
+        ])
+        .output()
+        .expect("check pending json");
+
+    assert!(
+        output.status.success(),
+        "check pending should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    restore_mock.assert_async().await;
+    assert_machine_output_matches_fixture(
+        &output.stdout,
+        include_str!("fixtures/machine-output/check_pending_v1.json"),
+    );
+}
+
+#[tokio::test]
 async fn status_json_matches_v1_contract() {
     let mut server = mockito::Server::new_async().await;
     let status_mock = server

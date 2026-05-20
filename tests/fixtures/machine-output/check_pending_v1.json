@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "workspace": "test/workspace",
+  "total": 1,
+  "hits": 0,
+  "pending": 1,
+  "misses": 0,
+  "results": [
+    {
+      "tag": "deps",
+      "requested_tag": "deps",
+      "status": "pending",
+      "cache_type": "cache_entry",
+      "cache_entry_id": "entry-pending",
+      "manifest_root_digest": "sha256:pending-root"
+    }
+  ]
+}
