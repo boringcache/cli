@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "workspace": "test-org/test-workspace",
+  "workspace_source": "explicit",
+  "tag_path_pairs": [
+    "custom-tag:/tmp/custom-path"
+  ],
+  "archive_entries": [
+    {
+      "requested": "custom-tag",
+      "request_source": "manual",
+      "resolution_source": "manual",
+      "resolved_tag": "custom-tag",
+      "tag": "custom-tag",
+      "path": "/tmp/custom-path",
+      "tag_path_pair": "custom-tag:/tmp/custom-path"
+    }
+  ],
+  "env_vars": {},
+  "command": [
+    "echo",
+    "hello"
+  ]
+}

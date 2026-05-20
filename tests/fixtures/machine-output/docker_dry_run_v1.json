@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "adapter": "docker",
+  "workspace": "test-org/test-workspace",
+  "workspace_source": "explicit",
+  "tag": "docker-cache",
+  "command": [
+    "docker",
+    "buildx",
+    "build",
+    "--cache-from=type=registry,ref=127.0.0.1:5000/cache:docker-cache,registry.insecure=true",
+    "--cache-to=type=registry,ref=127.0.0.1:5000/cache:docker-cache,mode=max,registry.insecure=true",
+    "."
+  ],
+  "env_vars": {
+    "BORINGCACHE_CACHE_REF": "127.0.0.1:5000/cache:docker-cache",
+    "BORINGCACHE_PROXY_PORT": "5000"
+  },
+  "proxy": {
+    "host": "127.0.0.1",
+    "endpoint_host": "127.0.0.1",
+    "port": 5000,
+    "no_platform": true,
+    "no_git": true,
+    "read_only": false,
+    "startup_mode": "warm",
+    "oci_hydration": "metadata-only",
+    "oci_prefetch_refs": [
+      "cache@docker-cache"
+    ],
+    "metadata_hints": {
+      "cache_adapter": "docker",
+      "docker_cache_tag": "docker-cache"
+    }
+  },
+  "oci_cache": {
+    "registry_ref": "127.0.0.1:5000/cache:docker-cache",
+    "cache_from_tags": [
+      "docker-cache"
+    ],
+    "cache_from_refs": [
+      "type=registry,ref=127.0.0.1:5000/cache:docker-cache,registry.insecure=true"
+    ],
+    "cache_from": "type=registry,ref=127.0.0.1:5000/cache:docker-cache,registry.insecure=true",
+    "cache_to": "type=registry,ref=127.0.0.1:5000/cache:docker-cache,mode=max,registry.insecure=true",
+    "cache_tag": "docker-cache",
+    "cache_to_tag": "docker-cache"
+  }
+}
