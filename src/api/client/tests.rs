@@ -904,6 +904,178 @@ async fn test_blob_download_urls_can_request_live_storage_verification() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn test_cache_kv_summary_falls_back_to_streaming_for_old_web() {
+    let _guard = test_env::lock();
+
+    if !networking_available() {
+        eprintln!(
+            "skipping test_cache_kv_summary_falls_back_to_streaming_for_old_web: networking disabled in sandbox"
+        );
+        return;
+    }
+
+    let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+    let original_home = std::env::var("HOME").ok();
+    test_env::set_var("HOME", temp_home.path());
+
+    let mut server = mockito::Server::new_async().await;
+    let capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"api_version":"v2","features":{"cache_kv_entries_v1":true}}"#)
+        .create_async()
+        .await;
+    let first_page_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(
+                r"^/v2/workspaces/ns/ws/cache-kv-entries\?tag=kv-tag&limit=5000$"
+                    .to_string(),
+            ),
+        )
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"entries":[{"namespace":"sccache","scoped_key":"a","blob":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":5}},{"namespace":"sccache","scoped_key":"a-copy","blob":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":5}}],"next_cursor":"cursor-1"}"#,
+        )
+        .create_async()
+        .await;
+    let second_page_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(
+                r"^/v2/workspaces/ns/ws/cache-kv-entries\?tag=kv-tag&limit=5000&cursor=cursor-1$"
+                    .to_string(),
+            ),
+        )
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"entries":[{"namespace":"sccache","scoped_key":"b","blob":{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size_bytes":7}}],"next_cursor":null}"#,
+        )
+        .create_async()
+        .await;
+
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+        .expect("client should initialize");
+    let summary = client
+        .try_cache_kv_tag_summary("ns/ws", "kv-tag")
+        .await
+        .expect("summary should succeed")
+        .expect("old web stream should count as supported KV");
+
+    assert_eq!(summary.entry_count, 3);
+    assert_eq!(summary.total_size_bytes, 12);
+
+    capabilities_mock.assert_async().await;
+    first_page_mock.assert_async().await;
+    second_page_mock.assert_async().await;
+
+    if let Some(home) = original_home {
+        test_env::set_var("HOME", home);
+    }
+    test_env::remove_var("BORINGCACHE_API_URL");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_cache_kv_multi_tag_upsert_falls_back_for_old_web() {
+    let _guard = test_env::lock();
+
+    if !networking_available() {
+        eprintln!(
+            "skipping test_cache_kv_multi_tag_upsert_falls_back_for_old_web: networking disabled in sandbox"
+        );
+        return;
+    }
+
+    let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+    let original_home = std::env::var("HOME").ok();
+    test_env::set_var("HOME", temp_home.path());
+
+    let digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let mut server = mockito::Server::new_async().await;
+    let capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"api_version":"v2","features":{"cache_kv_entries_v1":true}}"#)
+        .create_async()
+        .await;
+    let primary_mock = server
+        .mock("POST", "/v2/workspaces/ns/ws/cache-kv-entries")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "tag": "primary",
+            "tags": ["primary"],
+            "blob_receipts": [{ "digest": digest, "etag": "etag-1" }]
+        })))
+        .with_status(201)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{"entries":[{{"namespace":"sccache","scoped_key":"key","blob":{{"digest":"{digest}","size_bytes":9}}}}]}}"#
+        ))
+        .create_async()
+        .await;
+    let secondary_mock = server
+        .mock("POST", "/v2/workspaces/ns/ws/cache-kv-entries")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "tag": "secondary",
+            "tags": ["secondary"],
+            "blob_receipts": [{ "digest": digest, "etag": "etag-1" }]
+        })))
+        .with_status(201)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{"entries":[{{"namespace":"sccache","scoped_key":"key","blob":{{"digest":"{digest}","size_bytes":9}}}}]}}"#
+        ))
+        .create_async()
+        .await;
+
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+        .expect("client should initialize");
+    let response = client
+        .upsert_cache_kv_entries_for_tags(
+            "ns/ws",
+            &["primary".to_string(), "secondary".to_string()],
+            &[cache::CacheKvEntryUpsertItem {
+                namespace: "sccache".to_string(),
+                scoped_key: "key".to_string(),
+                blob_digest: digest.to_string(),
+                size_bytes: 9,
+            }],
+            &[cache::BlobReceipt {
+                digest: digest.to_string(),
+                etag: Some("etag-1".to_string()),
+            }],
+        )
+        .await
+        .expect("old web fallback should upsert each tag");
+
+    assert_eq!(response.entries.len(), 2);
+
+    capabilities_mock.assert_async().await;
+    primary_mock.assert_async().await;
+    secondary_mock.assert_async().await;
+
+    if let Some(home) = original_home {
+        test_env::set_var("HOME", home);
+    }
+    test_env::remove_var("BORINGCACHE_API_URL");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_cache_inspect_request() {
     let _guard = test_env::lock();
 

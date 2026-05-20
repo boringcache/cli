@@ -73,6 +73,10 @@ struct CapabilityFlags {
     #[serde(default)]
     cache_kv_entries_v1: bool,
     #[serde(default)]
+    cache_kv_entries_summary_v1: bool,
+    #[serde(default)]
+    cache_kv_entries_multi_tag_upsert_v1: bool,
+    #[serde(default)]
     cas_publish_bootstrap_if_match: Option<String>,
 }
 

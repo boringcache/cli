@@ -208,6 +208,23 @@ async fn normal_flush_uploads_blobs_and_upserts_kv_rows_without_manifest_publish
         .with_header("etag", "kv-etag")
         .create_async()
         .await;
+    let capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "api_version": "v2",
+                "features": {
+                    "cache_kv_entries_v1": true,
+                    "cache_kv_entries_multi_tag_upsert_v1": true
+                }
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
     let kv_upsert_mock = server
         .mock("POST", "/v2/workspaces/org/repo/cache-kv-entries")
         .expect(1)
@@ -260,6 +277,7 @@ async fn normal_flush_uploads_blobs_and_upserts_kv_rows_without_manifest_publish
 
     blob_stage_mock.assert_async().await;
     blob_upload_mock.assert_async().await;
+    capabilities_mock.assert_async().await;
     kv_upsert_mock.assert_async().await;
     save_mock.assert_async().await;
     publish_mock.assert_async().await;

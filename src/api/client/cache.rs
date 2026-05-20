@@ -562,6 +562,10 @@ impl ApiClient {
         tag: &str,
     ) -> Result<Option<crate::api::models::cache::CacheKvEntriesSummaryResponse>> {
         ensure!(!tag.trim().is_empty(), "tag must not be empty");
+        if !self.get_capabilities().await.cache_kv_entries_summary_v1 {
+            return self.cache_kv_tag_summary_by_streaming(workspace, tag).await;
+        }
+
         let encoded_tag = urlencoding::encode(tag);
         let endpoint = self.workspace_endpoint(
             workspace,
@@ -582,6 +586,45 @@ impl ApiClient {
             StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => Ok(None),
             _ => Err(self.create_error_from_response(response).await),
         }
+    }
+
+    async fn cache_kv_tag_summary_by_streaming(
+        &self,
+        workspace: &str,
+        tag: &str,
+    ) -> Result<Option<crate::api::models::cache::CacheKvEntriesSummaryResponse>> {
+        let mut cursor = None;
+        let mut entry_count = 0u64;
+        let mut blob_sizes_by_digest = std::collections::HashMap::new();
+
+        loop {
+            let Some(page) = self
+                .try_stream_cache_kv_entries(workspace, tag, cursor.as_deref(), 5_000)
+                .await?
+            else {
+                return Ok(None);
+            };
+
+            entry_count = entry_count.saturating_add(page.entries.len() as u64);
+            for entry in &page.entries {
+                blob_sizes_by_digest
+                    .entry(entry.blob.digest.clone())
+                    .or_insert(entry.blob.size_bytes);
+            }
+
+            let Some(next_cursor) = page.next_cursor.filter(|value| !value.trim().is_empty())
+            else {
+                break;
+            };
+            cursor = Some(next_cursor);
+        }
+
+        Ok(Some(
+            crate::api::models::cache::CacheKvEntriesSummaryResponse {
+                entry_count,
+                total_size_bytes: blob_sizes_by_digest.values().copied().sum(),
+            },
+        ))
     }
 
     pub async fn upsert_cache_kv_entries(
@@ -609,6 +652,42 @@ impl ApiClient {
         );
         ensure!(!entries.is_empty(), "entries cannot be empty");
 
+        if tags.len() > 1
+            && !self
+                .get_capabilities()
+                .await
+                .cache_kv_entries_multi_tag_upsert_v1
+        {
+            let mut response_entries = Vec::new();
+            for tag in tags {
+                let response = self
+                    .post_cache_kv_entries_batches(
+                        workspace,
+                        std::slice::from_ref(tag),
+                        entries,
+                        blob_receipts,
+                    )
+                    .await?;
+                response_entries.extend(response.entries);
+            }
+
+            return Ok(crate::api::models::cache::CacheKvEntriesResponse {
+                entries: response_entries,
+                next_cursor: None,
+            });
+        }
+
+        self.post_cache_kv_entries_batches(workspace, tags, entries, blob_receipts)
+            .await
+    }
+
+    async fn post_cache_kv_entries_batches(
+        &self,
+        workspace: &str,
+        tags: &[String],
+        entries: &[crate::api::models::cache::CacheKvEntryUpsertItem],
+        blob_receipts: &[crate::api::models::cache::BlobReceipt],
+    ) -> Result<crate::api::models::cache::CacheKvEntriesResponse> {
         let endpoint = self.workspace_endpoint(workspace, "cache-kv-entries")?;
         let batch_max = 2_000usize;
         let batch_count = entries.len().div_ceil(batch_max) as u64;
