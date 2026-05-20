@@ -11,6 +11,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+const SAVE_MAX_CONCURRENCY_ENV: &str = "BORINGCACHE_SAVE_MAX_CONCURRENCY";
+const CAS_UPLOAD_HARD_CONCURRENCY_CAP: usize = 32;
+const TARGET_CAS_UPLOAD_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
+const MANY_CAS_UPLOAD_BLOB_COUNT: usize = 256;
+const SOME_CAS_UPLOAD_BLOB_COUNT: usize = 64;
+const SMALL_CAS_UPLOAD_BLOB_BYTES: u64 = 1024 * 1024;
+const MEDIUM_CAS_UPLOAD_BLOB_BYTES: u64 = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub(crate) struct BlobUploadSource {
     pub path: PathBuf,
@@ -95,8 +103,7 @@ pub(crate) async fn upload_missing_blobs(
         return Ok(BlobUploadOutcome::default());
     }
 
-    let max_concurrent =
-        crate::command_support::get_optimal_concurrency(upload_items.len(), "save");
+    let max_concurrent = cas_blob_upload_concurrency(&upload_items);
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
     let transfer_client = api_client.transfer_client().clone();
     let mut tasks = Vec::with_capacity(upload_items.len());
@@ -386,9 +393,57 @@ fn build_upload_items(
     Ok(items)
 }
 
+fn cas_blob_upload_concurrency(upload_items: &[BlobUploadItem]) -> usize {
+    let operation_count = upload_items.len();
+    if operation_count == 0 {
+        return 1;
+    }
+
+    let base = crate::command_support::get_optimal_concurrency(operation_count, "save").max(1);
+    let total_bytes = upload_items.iter().map(|item| item.size_bytes).sum::<u64>();
+    let average_blob_bytes = total_bytes / operation_count as u64;
+    let profile_floor = if operation_count >= MANY_CAS_UPLOAD_BLOB_COUNT
+        && average_blob_bytes <= MEDIUM_CAS_UPLOAD_BLOB_BYTES
+    {
+        32
+    } else if operation_count >= SOME_CAS_UPLOAD_BLOB_COUNT
+        && average_blob_bytes <= SMALL_CAS_UPLOAD_BLOB_BYTES
+    {
+        24
+    } else {
+        base
+    };
+    let inflight_cap = if average_blob_bytes == 0 {
+        CAS_UPLOAD_HARD_CONCURRENCY_CAP
+    } else {
+        TARGET_CAS_UPLOAD_INFLIGHT_BYTES
+            .saturating_div(average_blob_bytes)
+            .clamp(1, CAS_UPLOAD_HARD_CONCURRENCY_CAP as u64) as usize
+    };
+    let explicit_cap = parse_save_concurrency_cap()
+        .unwrap_or(CAS_UPLOAD_HARD_CONCURRENCY_CAP)
+        .clamp(1, 128);
+
+    base.max(profile_floor)
+        .min(inflight_cap)
+        .min(explicit_cap)
+        .min(operation_count)
+        .max(1)
+}
+
+fn parse_save_concurrency_cap() -> Option<usize> {
+    let raw = std::env::var(SAVE_MAX_CONCURRENCY_ENV).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<usize>().ok().filter(|value| *value > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env;
 
     #[test]
     fn build_upload_items_uses_local_sources_for_missing_blobs() {
@@ -448,5 +503,45 @@ mod tests {
                 .to_string()
                 .contains("Server did not provide upload URL")
         );
+    }
+
+    fn blob_upload_items(count: usize, size_bytes: u64) -> Vec<BlobUploadItem> {
+        (0..count)
+            .map(|index| BlobUploadItem {
+                digest: format!("sha256:{index:064x}"),
+                path: PathBuf::from(format!("/tmp/blob-{index}")),
+                url: "https://example.test/blob".to_string(),
+                headers: HashMap::new(),
+                size_bytes,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cas_blob_upload_concurrency_boosts_many_medium_blobs() {
+        let _guard = test_env::lock();
+        test_env::remove_var(SAVE_MAX_CONCURRENCY_ENV);
+        let items = blob_upload_items(MANY_CAS_UPLOAD_BLOB_COUNT, SMALL_CAS_UPLOAD_BLOB_BYTES);
+
+        assert_eq!(cas_blob_upload_concurrency(&items), 32);
+    }
+
+    #[test]
+    fn cas_blob_upload_concurrency_respects_save_cap() {
+        let _guard = test_env::lock();
+        test_env::set_var(SAVE_MAX_CONCURRENCY_ENV, "3");
+        let items = blob_upload_items(MANY_CAS_UPLOAD_BLOB_COUNT, SMALL_CAS_UPLOAD_BLOB_BYTES);
+
+        assert_eq!(cas_blob_upload_concurrency(&items), 3);
+        test_env::remove_var(SAVE_MAX_CONCURRENCY_ENV);
+    }
+
+    #[test]
+    fn cas_blob_upload_concurrency_limits_large_blob_inflight() {
+        let _guard = test_env::lock();
+        test_env::remove_var(SAVE_MAX_CONCURRENCY_ENV);
+        let items = blob_upload_items(8, 512 * 1024 * 1024);
+
+        assert_eq!(cas_blob_upload_concurrency(&items), 1);
     }
 }
