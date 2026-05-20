@@ -14,3 +14,6 @@ Fixtures may use placeholders for machine-local paths:
 
 - `$HOME` for user-level setup paths.
 - `$WORKSPACE_ROOT` for the temporary project root used by the fixture test.
+
+Token fixtures use deterministic dummy values only. Do not paste real tokens or
+credential-shaped production examples into this directory.
