@@ -195,7 +195,12 @@ pub(crate) async fn do_flush(
         }
     };
 
-    upsert_kv_rows_for_visibility_tags(state, &filtered_pending_entries).await?;
+    upsert_kv_rows_for_visibility_tags(
+        state,
+        &filtered_pending_entries,
+        &upload_stats.uploaded_receipts,
+    )
+    .await?;
 
     entries.extend(
         filtered_pending_entries
@@ -228,19 +233,19 @@ pub(crate) async fn do_flush(
 async fn upsert_kv_rows_for_visibility_tags(
     state: &AppState,
     entries: &BTreeMap<String, BlobDescriptor>,
+    blob_receipts: &[crate::api::models::cache::BlobReceipt],
 ) -> Result<(), FlushError> {
     if entries.is_empty() {
         return Ok(());
     }
 
     let rows = kv_upsert_items(entries)?;
-    for tag in kv_visibility_tags(state) {
-        state
-            .api_client
-            .upsert_cache_kv_entries(&state.workspace, &tag, &rows)
-            .await
-            .map_err(|error| classify_flush_error(&error, "kv row upsert failed"))?;
-    }
+    let tags = kv_visibility_tags(state);
+    state
+        .api_client
+        .upsert_cache_kv_entries_for_tags(&state.workspace, &tags, &rows, blob_receipts)
+        .await
+        .map_err(|error| classify_flush_error(&error, "kv row upsert failed"))?;
     Ok(())
 }
 

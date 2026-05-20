@@ -1165,7 +1165,7 @@ pub(crate) async fn run_startup_warmup(
         "sync:start".to_string(),
     );
 
-    match load_existing_index_snapshot(state, true).await {
+    match load_existing_index_snapshot(state).await {
         Ok((entries, blob_order, Some(cache_entry_id), _manifest_root_digest))
             if !entries.is_empty() =>
         {

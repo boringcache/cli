@@ -171,7 +171,8 @@ async fn normal_flush_uploads_blobs_and_upserts_kv_rows_without_manifest_publish
 
     let api_client =
         ApiClient::new_with_token_override(Some("test-token".to_string())).expect("client");
-    let state = kv_flush_test_state(api_client, temp_home.path(), false);
+    let mut state = kv_flush_test_state(api_client, temp_home.path(), false);
+    state.configured_human_tags = vec!["human-tag".to_string()];
 
     let payload = b"direct-kv-payload";
     let digest = insert_pending_test_blob(&state, "bazel_cas/key", "direct-kv", payload).await;
@@ -204,19 +205,21 @@ async fn normal_flush_uploads_blobs_and_upserts_kv_rows_without_manifest_publish
             String::from_utf8(payload.to_vec()).expect("payload is utf8"),
         ))
         .with_status(200)
+        .with_header("etag", "kv-etag")
         .create_async()
         .await;
     let kv_upsert_mock = server
         .mock("POST", "/v2/workspaces/org/repo/cache-kv-entries")
         .expect(1)
         .match_body(Matcher::PartialJson(json!({
-            "tag": "registry",
+            "tags": ["registry", "human-tag"],
             "entries": [{
                 "namespace": "bazel_cas",
                 "scoped_key": "bazel_cas/key",
                 "blob_digest": digest,
                 "size_bytes": payload.len()
-            }]
+            }],
+            "blob_receipts": [{ "digest": digest, "etag": "kv-etag" }]
         })))
         .with_status(201)
         .with_header("content-type", "application/json")
@@ -313,19 +316,21 @@ async fn shutdown_flush_upserts_only_new_kv_rows_without_manifest_publish() {
             String::from_utf8(first_payload.to_vec()).expect("payload is utf8"),
         ))
         .with_status(200)
+        .with_header("etag", "kv-etag-one")
         .create_async()
         .await;
     let first_upsert_mock = server
         .mock("POST", "/v2/workspaces/org/repo/cache-kv-entries")
         .expect(1)
         .match_body(Matcher::PartialJson(json!({
-            "tag": "registry",
+            "tags": ["registry"],
             "entries": [{
                 "namespace": "bazel_cas",
                 "scoped_key": "bazel_cas/key-one",
                 "blob_digest": first_digest,
                 "size_bytes": first_payload.len()
-            }]
+            }],
+            "blob_receipts": [{ "digest": first_digest, "etag": "kv-etag-one" }]
         })))
         .with_status(201)
         .with_header("content-type", "application/json")
@@ -389,19 +394,21 @@ async fn shutdown_flush_upserts_only_new_kv_rows_without_manifest_publish() {
             String::from_utf8(second_payload.to_vec()).expect("payload is utf8"),
         ))
         .with_status(200)
+        .with_header("etag", "kv-etag-two")
         .create_async()
         .await;
     let second_upsert_mock = server
         .mock("POST", "/v2/workspaces/org/repo/cache-kv-entries")
         .expect(1)
         .match_body(Matcher::PartialJson(json!({
-            "tag": "registry",
+            "tags": ["registry"],
             "entries": [{
                 "namespace": "bazel_cas",
                 "scoped_key": "bazel_cas/key-two",
                 "blob_digest": second_digest,
                 "size_bytes": second_payload.len()
-            }]
+            }],
+            "blob_receipts": [{ "digest": second_digest, "etag": "kv-etag-two" }]
         })))
         .with_status(201)
         .with_header("content-type", "application/json")
@@ -506,7 +513,7 @@ async fn load_existing_index_prioritizes_metadata_and_recent_blobs_for_startup_w
         .await;
 
     let (entries, blob_order, cache_entry_id, manifest_root_digest) =
-        load_existing_index(&state, "registry", false)
+        load_existing_index(&state, "registry")
             .await
             .expect("load index");
 

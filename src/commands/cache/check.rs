@@ -431,42 +431,13 @@ async fn cache_kv_tag_stats(
     workspace: &str,
     tag: &str,
 ) -> Result<Option<KvTagStats>> {
-    let mut cursor = None;
-    let mut entry_count = 0u64;
-    let mut total_size_bytes = 0u64;
-    let mut seen_blobs = HashSet::new();
-
-    loop {
-        let response = api_client
-            .try_stream_cache_kv_entries(workspace, tag, cursor.as_deref(), 5_000)
-            .await?;
-        let Some(response) = response else {
-            return Ok(None);
-        };
-
-        if response.entries.is_empty() && entry_count == 0 {
-            return Ok(Some(KvTagStats {
-                entry_count: 0,
-                total_size_bytes: 0,
-            }));
-        }
-
-        for entry in response.entries {
-            entry_count += 1;
-            if seen_blobs.insert(entry.blob.digest) {
-                total_size_bytes = total_size_bytes.saturating_add(entry.blob.size_bytes);
-            }
-        }
-
-        cursor = response.next_cursor;
-        if cursor.is_none() {
-            break;
-        }
-    }
+    let Some(summary) = api_client.try_cache_kv_tag_summary(workspace, tag).await? else {
+        return Ok(None);
+    };
 
     Ok(Some(KvTagStats {
-        entry_count,
-        total_size_bytes,
+        entry_count: summary.entry_count,
+        total_size_bytes: summary.total_size_bytes,
     }))
 }
 

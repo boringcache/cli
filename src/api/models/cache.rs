@@ -620,8 +620,21 @@ pub struct CacheKvEntryUpsertItem {
 
 #[derive(Debug, Serialize)]
 pub struct CacheKvEntryUpsertRequest {
-    pub tag: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     pub entries: Vec<CacheKvEntryUpsertItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blob_receipts: Vec<BlobReceipt>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct CacheKvEntriesSummaryResponse {
+    #[serde(default)]
+    pub entry_count: u64,
+    #[serde(default)]
+    pub total_size_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]

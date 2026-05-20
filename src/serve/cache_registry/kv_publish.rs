@@ -59,10 +59,8 @@ pub(super) fn partial_blob_upload_stats(error: &anyhow::Error) -> Option<BlobUpl
         .map(|partial| partial.stats.clone())
 }
 
-#[derive(Clone, Copy)]
 enum BlobUploadOutcome {
-    Uploaded,
-    UploadedAfterRetry,
+    Uploaded { etag: Option<String>, retried: bool },
     AlreadyPresent,
 }
 
@@ -292,11 +290,10 @@ async fn upload_single_blob_with_retry(
             )
             .await;
         match upload_result {
-            Ok(_) => {
-                let outcome = if attempt > 1 {
-                    BlobUploadOutcome::UploadedAfterRetry
-                } else {
-                    BlobUploadOutcome::Uploaded
+            Ok((etag, _metrics)) => {
+                let outcome = BlobUploadOutcome::Uploaded {
+                    etag,
+                    retried: attempt > 1,
                 };
                 return Ok((request.upload_digest.clone(), outcome));
             }
@@ -483,15 +480,13 @@ pub(super) async fn upload_blobs(
             }
         };
 
-        let had_retry = matches!(outcome, BlobUploadOutcome::UploadedAfterRetry);
+        let had_retry = matches!(outcome, BlobUploadOutcome::Uploaded { retried: true, .. });
         limiter.on_upload_complete(had_retry);
 
         match outcome {
-            BlobUploadOutcome::Uploaded | BlobUploadOutcome::UploadedAfterRetry => {
+            BlobUploadOutcome::Uploaded { etag, .. } => {
                 stats.uploaded_count = stats.uploaded_count.saturating_add(1);
-                stats
-                    .uploaded_receipts
-                    .push(BlobReceipt { digest, etag: None });
+                stats.uploaded_receipts.push(BlobReceipt { digest, etag });
             }
             BlobUploadOutcome::AlreadyPresent => {
                 stats.already_present_count = stats.already_present_count.saturating_add(1);

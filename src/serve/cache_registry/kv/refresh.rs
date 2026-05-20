@@ -22,7 +22,7 @@ pub(crate) async fn refresh_kv_index(state: &AppState) {
 
     let diagnostics = crate::serve::state::diagnostics_enabled();
     let (loaded_tag, entries_by_path, blob_order, cache_entry_id, manifest_root_digest) =
-        match load_existing_index_snapshot_with_tag(state, true).await {
+        match load_existing_index_snapshot_with_tag(state).await {
             Ok(result) => result,
             Err(error) => {
                 log::warn!("KV index refresh failed during resolve: {error:?}");
@@ -153,7 +153,7 @@ pub(crate) async fn refresh_kv_index_keys_only(state: &AppState) {
 
     let diagnostics = crate::serve::state::diagnostics_enabled();
     let (loaded_tag, entries_by_path, blob_order, cache_entry_id, manifest_root_digest) =
-        match load_existing_index_snapshot_with_tag(state, true).await {
+        match load_existing_index_snapshot_with_tag(state).await {
             Ok(result) => result,
             Err(error) => {
                 log::warn!("KV version-triggered refresh failed during resolve: {error:?}");
@@ -383,6 +383,9 @@ pub(crate) async fn refresh_fence_allows_update(
     expected_manifest_root_digest: Option<&str>,
 ) -> bool {
     if kv_direct_tag_from_cache_entry_id(expected_cache_entry_id).is_some() {
+        // Direct KV reads/writes are served from the primary API path today.
+        // A successful upsert is the fence until Rails introduces a separate
+        // KV row-version signal.
         return true;
     }
 

@@ -556,13 +556,57 @@ impl ApiClient {
             .is_some_and(|payload| !payload.entries.is_empty()))
     }
 
+    pub async fn try_cache_kv_tag_summary(
+        &self,
+        workspace: &str,
+        tag: &str,
+    ) -> Result<Option<crate::api::models::cache::CacheKvEntriesSummaryResponse>> {
+        ensure!(!tag.trim().is_empty(), "tag must not be empty");
+        let encoded_tag = urlencoding::encode(tag);
+        let endpoint = self.workspace_endpoint(
+            workspace,
+            &format!("cache-kv-entries?tag={encoded_tag}&summary=true"),
+        )?;
+        let response = self
+            .get_response_with_base(&self.v2_base_url, &endpoint)
+            .await?;
+
+        match response.status() {
+            status if status.is_success() => {
+                let payload: crate::api::models::cache::CacheKvEntriesSummaryResponse = response
+                    .json()
+                    .await
+                    .context("Failed to parse cache KV summary response")?;
+                Ok(Some(payload))
+            }
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => Ok(None),
+            _ => Err(self.create_error_from_response(response).await),
+        }
+    }
+
     pub async fn upsert_cache_kv_entries(
         &self,
         workspace: &str,
         tag: &str,
         entries: &[crate::api::models::cache::CacheKvEntryUpsertItem],
+        blob_receipts: &[crate::api::models::cache::BlobReceipt],
     ) -> Result<crate::api::models::cache::CacheKvEntriesResponse> {
-        ensure!(!tag.trim().is_empty(), "tag must not be empty");
+        self.upsert_cache_kv_entries_for_tags(workspace, &[tag.to_string()], entries, blob_receipts)
+            .await
+    }
+
+    pub async fn upsert_cache_kv_entries_for_tags(
+        &self,
+        workspace: &str,
+        tags: &[String],
+        entries: &[crate::api::models::cache::CacheKvEntryUpsertItem],
+        blob_receipts: &[crate::api::models::cache::BlobReceipt],
+    ) -> Result<crate::api::models::cache::CacheKvEntriesResponse> {
+        ensure!(!tags.is_empty(), "tags cannot be empty");
+        ensure!(
+            tags.iter().all(|tag| !tag.trim().is_empty()),
+            "tags cannot contain empty values"
+        );
         ensure!(!entries.is_empty(), "entries cannot be empty");
 
         let endpoint = self.workspace_endpoint(workspace, "cache-kv-entries")?;
@@ -570,9 +614,20 @@ impl ApiClient {
         let batch_count = entries.len().div_ceil(batch_max) as u64;
         let mut response_entries = Vec::new();
         for (batch_idx, chunk) in entries.chunks(batch_max).enumerate() {
+            let chunk_digests: std::collections::HashSet<&str> = chunk
+                .iter()
+                .map(|entry| entry.blob_digest.as_str())
+                .collect();
+            let chunk_receipts: Vec<_> = blob_receipts
+                .iter()
+                .filter(|receipt| chunk_digests.contains(receipt.digest.as_str()))
+                .cloned()
+                .collect();
             let body = crate::api::models::cache::CacheKvEntryUpsertRequest {
-                tag: tag.to_string(),
+                tag: tags.first().cloned(),
+                tags: tags.to_vec(),
                 entries: chunk.to_vec(),
+                blob_receipts: chunk_receipts,
             };
             let response: crate::api::models::cache::CacheKvEntriesResponse = self
                 .post_v2_with_request_metrics(

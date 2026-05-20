@@ -422,6 +422,9 @@ pub(crate) async fn kv_publish_tags_visible(
     expected_cache_entry_id: &str,
 ) -> bool {
     if kv_direct_tag_from_cache_entry_id(expected_cache_entry_id).is_some() {
+        // Direct KV upserts are primary-routed and transactional, so a successful
+        // upsert is the visibility fence. If the API route ever moves off primary
+        // reads, this needs an explicit row-version check instead of a blind pass.
         return true;
     }
 

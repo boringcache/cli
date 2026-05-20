@@ -104,7 +104,7 @@ pub(crate) async fn refresh_published_index_for_lookup(
     state: &AppState,
 ) -> Result<(), RegistryError> {
     let (_resolved_cache_tag, entries, blob_order, cache_entry_id, _) =
-        match load_existing_index_snapshot_with_tag(state, true).await {
+        match load_existing_index_snapshot_with_tag(state).await {
             Ok(result) => {
                 state.backend_breaker.record_success();
                 result
@@ -270,7 +270,6 @@ pub(crate) fn merge_blob_order(
 pub(crate) async fn load_existing_index(
     state: &AppState,
     tag: &str,
-    _retry_not_found: bool,
 ) -> Result<
     (
         BTreeMap<String, BlobDescriptor>,
@@ -388,7 +387,6 @@ fn entry_last_used_at(
 
 pub(crate) async fn load_existing_index_snapshot(
     state: &AppState,
-    retry_not_found: bool,
 ) -> Result<
     (
         BTreeMap<String, BlobDescriptor>,
@@ -399,13 +397,12 @@ pub(crate) async fn load_existing_index_snapshot(
     RegistryError,
 > {
     let (_, entries, blob_order, cache_entry_id, manifest_root_digest) =
-        load_existing_index_snapshot_with_tag(state, retry_not_found).await?;
+        load_existing_index_snapshot_with_tag(state).await?;
     Ok((entries, blob_order, cache_entry_id, manifest_root_digest))
 }
 
 pub(crate) async fn load_existing_index_snapshot_with_tag(
     state: &AppState,
-    retry_not_found: bool,
 ) -> Result<
     (
         String,
@@ -421,7 +418,7 @@ pub(crate) async fn load_existing_index_snapshot_with_tag(
     let mut first_empty = None;
     for (index, tag) in restore_tags.iter().enumerate() {
         let is_last = index + 1 == restore_tags.len();
-        let result = match load_existing_index(state, tag, retry_not_found).await {
+        let result = match load_existing_index(state, tag).await {
             Ok(result) => result,
             Err(error) if !is_last && should_try_next_restore_cache_tag_after_error(&error) => {
                 log::warn!(
