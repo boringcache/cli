@@ -12,6 +12,7 @@ use crate::serve::engines::oci::blobs;
 use super::AppState;
 
 mod bazel;
+mod classification;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct CacheSessionSummarySnapshot {
@@ -221,8 +222,23 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
         bazel::cache_key_lookup_summary(session_kind.adapter, &operation_summary, &kv_lookup_hints);
     let issue_candidates =
         bazel::issue_candidates_summary(session_kind.adapter, &operation_summary, &kv_lookup_hints);
+    let cache_temperature = cache_temperature_summary(&operation_summary.totals, &lifecycle);
+    let bottleneck = classification::bottleneck_summary(
+        session_kind.adapter,
+        &operation_summary,
+        &lifecycle,
+        &storage,
+        &startup_prefetch_hints,
+        duration_ms,
+    );
+    let primary_bottleneck = bottleneck
+        .get("primary_bottleneck")
+        .cloned()
+        .unwrap_or(Value::Null);
     let classification = json!({
-        "cache_temperature": cache_temperature_summary(&operation_summary.totals, &lifecycle),
+        "cache_temperature": cache_temperature,
+        "primary_bottleneck": primary_bottleneck,
+        "bottleneck": bottleneck,
         "cache_key_lookup": cache_key_lookup,
         "issue_candidates": issue_candidates
     });
