@@ -5,7 +5,6 @@ use crate::progress::{ProgressSession, Summary, TransferProgress};
 use crate::signing::policy::verify_restore_signature;
 use crate::ui;
 use anyhow::{Context, Result, anyhow};
-use std::io::ErrorKind;
 use std::path::Path;
 use tokio::fs;
 
@@ -69,13 +68,9 @@ pub(super) async fn process_restore_oci(
         let digest_hex = crate::cache::cas_oci::digest_hex_component(&blob.digest)
             .ok_or_else(|| anyhow!("Invalid blob digest {}", blob.digest))?;
         let blob_path = blobs_dir.join(digest_hex);
-        let is_present = match fs::metadata(&blob_path).await {
-            Ok(metadata) => metadata.is_file() && metadata.len() == blob.size_bytes,
-            Err(err) if err.kind() == ErrorKind::NotFound => false,
-            Err(err) => {
-                return Err(err).with_context(|| format!("Failed to stat {}", blob_path.display()));
-            }
-        };
+        let is_present =
+            cas_restore::local_blob_matches_descriptor(&blob_path, &blob.digest, blob.size_bytes)
+                .await?;
         if !is_present {
             download_targets.push(BlobDownloadTarget {
                 digest: blob.digest.clone(),

@@ -5,8 +5,9 @@ use crate::telemetry::StorageMetrics;
 use crate::transfer::send_manifest_request_with_retry;
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 use tokio::task::JoinSet;
 
 const RESTORE_MAX_CONCURRENCY_ENV: &str = "BORINGCACHE_RESTORE_MAX_CONCURRENCY";
@@ -50,6 +51,51 @@ pub(crate) struct BlobDownloadTarget {
 pub(crate) struct BlobDownloadOutcome {
     pub bytes_downloaded: u64,
     pub storage_metrics: StorageMetrics,
+}
+
+pub(crate) async fn local_blob_matches_descriptor(
+    path: &Path,
+    expected_digest: &str,
+    expected_size: u64,
+) -> Result<bool> {
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("Failed to stat {}", path.display())),
+    };
+    if !metadata.is_file() || metadata.len() != expected_size {
+        return Ok(false);
+    }
+
+    let actual_hex = sha256_file_hex(path).await?;
+    let expected_hex = expected_digest
+        .strip_prefix("sha256:")
+        .unwrap_or(expected_digest);
+    Ok(actual_hex == expected_hex)
+}
+
+async fn sha256_file_hex(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    let file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("Failed to open {} for integrity check", path.display()))?;
+    let mut reader = tokio::io::BufReader::with_capacity(256 * 1024, file);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 256 * 1024];
+
+    loop {
+        let bytes_read = reader
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("Failed to read {} for integrity check", path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    Ok(hex::encode(hasher.finalize()))
 }
 
 impl BlobDownloadOutcome {
@@ -533,6 +579,47 @@ mod tests {
             "sha256:abc",
             "abc"
         ));
+    }
+
+    #[tokio::test]
+    async fn local_blob_matches_descriptor_accepts_matching_blob() {
+        let temp = tempfile::tempdir().unwrap();
+        let blob_path = temp.path().join("blob");
+        let payload = b"known payload";
+        tokio::fs::write(&blob_path, payload).await.unwrap();
+        let digest = crate::cas_file::prefixed_sha256_digest(payload);
+
+        assert!(
+            local_blob_matches_descriptor(&blob_path, &digest, payload.len() as u64)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_blob_matches_descriptor_rejects_same_size_digest_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let blob_path = temp.path().join("blob");
+        tokio::fs::write(&blob_path, b"bad!").await.unwrap();
+        let expected_digest = crate::cas_file::prefixed_sha256_digest(b"good");
+
+        assert!(
+            !local_blob_matches_descriptor(&blob_path, &expected_digest, 4)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_blob_matches_descriptor_treats_missing_blob_as_not_ready() {
+        let temp = tempfile::tempdir().unwrap();
+        let blob_path = temp.path().join("missing");
+
+        assert!(
+            !local_blob_matches_descriptor(&blob_path, "sha256:abc", 123)
+                .await
+                .unwrap()
+        );
     }
 
     #[test]

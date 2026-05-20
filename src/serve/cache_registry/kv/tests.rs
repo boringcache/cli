@@ -159,12 +159,10 @@ async fn normal_flush_uploads_blobs_and_upserts_kv_rows_without_manifest_publish
     let _guard = test_env::lock();
     let temp_home = tempfile::tempdir().expect("temp dir");
     let home_env = EnvVarGuard::new("HOME");
-    let tmpdir_env = EnvVarGuard::new("TMPDIR");
     let api_url_env = EnvVarGuard::new("BORINGCACHE_API_URL");
     let auth_token_env = EnvVarGuard::new("BORINGCACHE_AUTH_TOKEN");
     let test_mode_env = EnvVarGuard::new("BORINGCACHE_TEST_MODE");
     home_env.set(temp_home.path());
-    tmpdir_env.set(temp_home.path());
     api_url_env.set(server.url());
     auth_token_env.set("test-token");
     test_mode_env.set("1");
@@ -289,12 +287,10 @@ async fn shutdown_flush_upserts_only_new_kv_rows_without_manifest_publish() {
     let _guard = test_env::lock();
     let temp_home = tempfile::tempdir().expect("temp dir");
     let home_env = EnvVarGuard::new("HOME");
-    let tmpdir_env = EnvVarGuard::new("TMPDIR");
     let api_url_env = EnvVarGuard::new("BORINGCACHE_API_URL");
     let auth_token_env = EnvVarGuard::new("BORINGCACHE_AUTH_TOKEN");
     let test_mode_env = EnvVarGuard::new("BORINGCACHE_TEST_MODE");
     home_env.set(temp_home.path());
-    tmpdir_env.set(temp_home.path());
     api_url_env.set(server.url());
     auth_token_env.set("test-token");
     test_mode_env.set("1");
@@ -470,12 +466,10 @@ async fn load_existing_index_prioritizes_metadata_and_recent_blobs_for_startup_w
     let _guard = test_env::lock();
     let temp_home = tempfile::tempdir().expect("temp dir");
     let home_env = EnvVarGuard::new("HOME");
-    let tmpdir_env = EnvVarGuard::new("TMPDIR");
     let api_url_env = EnvVarGuard::new("BORINGCACHE_API_URL");
     let auth_token_env = EnvVarGuard::new("BORINGCACHE_AUTH_TOKEN");
     let test_mode_env = EnvVarGuard::new("BORINGCACHE_TEST_MODE");
     home_env.set(temp_home.path());
-    tmpdir_env.set(temp_home.path());
     api_url_env.set(server.url());
     auth_token_env.set("test-token");
     test_mode_env.set("1");

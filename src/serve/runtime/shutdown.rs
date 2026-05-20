@@ -236,17 +236,52 @@ mod tests {
     use mockito::{Matcher, Server};
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::ffi::{OsStr, OsString};
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn new(key: &'static str) -> Self {
+            Self {
+                key,
+                original: std::env::var_os(key),
+            }
+        }
+
+        fn set<V>(&self, value: V)
+        where
+            V: AsRef<OsStr>,
+        {
+            test_env::set_var(self.key, value);
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(ref value) = self.original {
+                test_env::set_var(self.key, value);
+            } else {
+                test_env::remove_var(self.key);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn strict_shutdown_returns_error_on_permanent_kv_flush_failure() {
         let mut server = Server::new_async().await;
         let _guard = test_env::lock();
         let temp_home = tempfile::tempdir().expect("temp home");
-        test_env::set_var("HOME", temp_home.path());
-        test_env::set_var("TMPDIR", temp_home.path());
-        test_env::set_var("BORINGCACHE_API_URL", server.url());
-        test_env::set_var("BORINGCACHE_AUTH_TOKEN", "test-token");
-        test_env::set_var("BORINGCACHE_TEST_MODE", "1");
+        let home_env = EnvVarGuard::new("HOME");
+        let api_url_env = EnvVarGuard::new("BORINGCACHE_API_URL");
+        let auth_token_env = EnvVarGuard::new("BORINGCACHE_AUTH_TOKEN");
+        let test_mode_env = EnvVarGuard::new("BORINGCACHE_TEST_MODE");
+        home_env.set(temp_home.path());
+        api_url_env.set(server.url());
+        auth_token_env.set("test-token");
+        test_mode_env.set("1");
 
         let api_client =
             ApiClient::new_with_token_override(Some("test-token".to_string())).expect("client");

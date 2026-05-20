@@ -117,13 +117,9 @@ pub(super) async fn initial_restore_oci(
             anyhow::bail!("Invalid OCI digest {}", blob.digest);
         };
         let blob_path = blobs_dir.join(hex);
-        let is_ready = match tokio::fs::metadata(&blob_path).await {
-            Ok(metadata) => metadata.is_file() && metadata.len() == blob.size_bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-            Err(err) => {
-                return Err(err).with_context(|| format!("Failed to stat {}", blob_path.display()));
-            }
-        };
+        let is_ready =
+            cas_restore::local_blob_matches_descriptor(&blob_path, &blob.digest, blob.size_bytes)
+                .await?;
         if !is_ready {
             download_targets.push(BlobDownloadTarget {
                 digest: blob.digest.clone(),
