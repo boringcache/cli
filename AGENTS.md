@@ -6,7 +6,7 @@ Keep this file short. It is loaded often; durable detail belongs in skills and t
 
 - For CLI work, prefer the `cli-expert` skill entrypoint.
 - For broad code changes, read `/Users/gaurav/boringcache/skills/categories/coding-principles/boringcache-engineering-guide/SKILL.md`.
-- For broad CLI behavior or ownership questions, start at `/Users/gaurav/boringcache/web/.planning/product-hardening-feature-inventory.md` and the relevant `/Users/gaurav/boringcache/web/.planning/features/cli-*.md` file.
+- For broad CLI behavior or ownership questions, start at `/Users/gaurav/boringcache/web/.planning/product-hardening-feature-inventory.md`, resolve the feature in `/Users/gaurav/boringcache/web/.planning/feature-index.yml`, and read the relevant `/Users/gaurav/boringcache/web/.planning/features/cli-*.md` file.
 - For implementation rules, use the CLI feature inventory plus the BoringCache engineering guide.
 
 ## Non-Negotiables
@@ -40,6 +40,7 @@ Use `crate::test_env` for process environment mutation in tests.
 ## Updates
 
 - Update the relevant `/Users/gaurav/boringcache/web/.planning/features/cli-*.md` file before handoff when command surface, flags, env/config behavior, cache lifecycle, proxy/adapters, release workflows, module ownership, support reachability, or file coverage changes.
+- If the feature is marked `token_sensitive` in `/Users/gaurav/boringcache/web/.planning/feature-index.yml`, scrub examples/logs/tests and keep token roles explicit.
 - If CLI changes alter Rails API expectations, update the matching `/Users/gaurav/boringcache/web/.planning/features/web-api-*.md` or `/Users/gaurav/boringcache/web/.planning/features/web-cache-*.md` file too.
 - If CLI work implements, validates, supersedes, or rejects an ADR-tracked decision, update the relevant ADR before handoff with progress, evidence, and remaining gates.
 - For release, action tag, base-image, or benchmark dispatch work, load `/Users/gaurav/boringcache/skills/categories/release-operations/release-paths/SKILL.md` first.
