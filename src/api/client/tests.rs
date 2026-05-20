@@ -147,8 +147,9 @@ fn test_default_base_url_matches_config() {
         .expect("client should initialize without BORINGCACHE_API_URL or config file");
 
     // Restore original HOME
-    if let Some(home) = original_home {
-        test_env::set_var("HOME", home);
+    match original_home {
+        Some(home) => test_env::set_var("HOME", home),
+        None => test_env::remove_var("HOME"),
     }
 
     let expected_v2 = derive_api_base_url(crate::config::Config::default_api_url_value());
@@ -768,6 +769,69 @@ async fn test_blob_download_urls_batches_large_requests() {
         .await
         .expect("blob download urls should succeed");
     assert_eq!(response.download_urls.len(), 2);
+
+    mock.assert_async().await;
+
+    if let Some(home) = original_home {
+        test_env::set_var("HOME", home);
+    }
+    test_env::remove_var("BORINGCACHE_API_URL");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_cache_kv_blob_download_urls_batches_large_requests() {
+    let _guard = test_env::lock();
+
+    if !networking_available() {
+        eprintln!(
+            "skipping test_cache_kv_blob_download_urls_batches_large_requests: networking disabled in sandbox"
+        );
+        return;
+    }
+
+    let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+    let original_home = std::env::var("HOME").ok();
+    test_env::set_var("HOME", temp_home.path());
+
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock(
+            "POST",
+            "/v2/workspaces/ns/ws/cache-kv-entries/download-urls",
+        )
+        .match_header("authorization", "Bearer test-token")
+        .match_header("content-type", "application/json")
+        .match_body(Matcher::PartialJson(json!({
+            "tag": "kv-tag"
+        })))
+        .expect(2)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"download_urls":[{"digest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","url":"https://example.com/kv-download"}],"missing":["sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"]}"#,
+        )
+        .create_async()
+        .await;
+
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+        .expect("client should initialize");
+
+    let blobs = (0..(BLOB_DOWNLOAD_URL_BATCH_MAX + 1))
+        .map(|index| cache::BlobDescriptor {
+            digest: digest_for(index),
+            size_bytes: 1,
+        })
+        .collect::<Vec<_>>();
+
+    let response = client
+        .cache_kv_blob_download_urls("ns/ws", "kv-tag", &blobs)
+        .await
+        .expect("KV blob download urls should succeed");
+    assert_eq!(response.download_urls.len(), 2);
+    assert_eq!(response.missing.len(), 1);
 
     mock.assert_async().await;
 

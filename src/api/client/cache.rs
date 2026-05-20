@@ -738,24 +738,66 @@ impl ApiClient {
 
         let endpoint = self.workspace_endpoint(workspace, "cache-kv-entries/download-urls")?;
         let batch_max = blob_url_batch_max();
-        let batch_count = blobs.len().div_ceil(batch_max) as u64;
-        let mut download_urls = Vec::new();
-        let mut missing = Vec::new();
-        for (batch_idx, chunk) in blobs.chunks(batch_max).enumerate() {
+        let chunk_count = blobs.len().div_ceil(batch_max);
+        let batch_count = chunk_count as u64;
+        if chunk_count == 1 {
             let body = crate::api::models::cache::CacheKvBlobDownloadUrlsRequest {
                 tag: tag.to_string(),
-                blobs: chunk.to_vec(),
+                blobs: blobs.to_vec(),
             };
-            let response: crate::api::models::cache::BlobDownloadUrlsResponse = self
+            return self
                 .post_v2_with_request_metrics(
                     &endpoint,
                     &body,
                     CACHE_METRIC_ENDPOINT_OPERATION_KV_ENTRIES_DOWNLOAD_URLS,
-                    Some((batch_idx + 1) as u64),
+                    Some(1),
                     Some(batch_count),
-                    Some(chunk.len() as u64),
+                    Some(blobs.len() as u64),
                 )
-                .await?;
+                .await;
+        }
+
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            blob_url_batch_concurrency(chunk_count),
+        ));
+        let mut tasks = Vec::new();
+        for (batch_idx, chunk) in blobs.chunks(batch_max).enumerate() {
+            let client = self.clone();
+            let endpoint = endpoint.clone();
+            let tag = tag.to_string();
+            let chunk = chunk.to_vec();
+            let semaphore = semaphore.clone();
+            let batch_size = chunk.len() as u64;
+            let batch_index = (batch_idx + 1) as u64;
+            tasks.push(tokio::spawn(async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("KV blob download URL semaphore closed: {e}"))?;
+                let body =
+                    crate::api::models::cache::CacheKvBlobDownloadUrlsRequest { tag, blobs: chunk };
+                let response = client
+                    .post_v2_with_request_metrics::<
+                        _,
+                        crate::api::models::cache::BlobDownloadUrlsResponse,
+                    >(
+                        &endpoint,
+                        &body,
+                        CACHE_METRIC_ENDPOINT_OPERATION_KV_ENTRIES_DOWNLOAD_URLS,
+                        Some(batch_index),
+                        Some(batch_count),
+                        Some(batch_size),
+                    )
+                    .await;
+                drop(_permit);
+                response
+            }));
+        }
+
+        let mut download_urls = Vec::new();
+        let mut missing = Vec::new();
+        for task in tasks {
+            let response = task.await.map_err(|e| anyhow::anyhow!(e))??;
             download_urls.extend(response.download_urls);
             missing.extend(response.missing);
         }
