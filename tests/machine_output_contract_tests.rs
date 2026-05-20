@@ -525,6 +525,51 @@ async fn token_list_json_matches_v1_contract() {
     );
 }
 
+#[tokio::test]
+async fn token_ci_pair_json_matches_v1_contract() {
+    let mut server = mockito::Server::new_async().await;
+    let token_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/tokens/ci-pair")
+        .match_header("authorization", "Bearer admin-token-fixture")
+        .match_body(Matcher::Regex(
+            r#""name_prefix":"Release CI".*"save_tag_prefixes":\["deps","docker"\]"#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(token_ci_pair_response_body().to_string())
+        .create_async()
+        .await;
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let output = mocked_api_command(&temp_dir, &server.url())
+        .env("BORINGCACHE_ADMIN_TOKEN", "admin-token-fixture")
+        .args([
+            "token",
+            "create-ci",
+            "test/workspace",
+            "--name",
+            "Release CI",
+            "--save-tag-prefix",
+            "deps",
+            "--save-tag-prefix",
+            "docker",
+            "--json",
+        ])
+        .output()
+        .expect("token create-ci json");
+
+    assert!(
+        output.status.success(),
+        "token create-ci should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    token_mock.assert_async().await;
+    assert_machine_output_matches_fixture(
+        &output.stdout,
+        include_str!("fixtures/machine-output/token_ci_pair_v1.json"),
+    );
+}
+
 fn status_response_body() -> Value {
     json!({
         "workspace": {
@@ -670,5 +715,46 @@ fn status_response_body() -> Value {
             "sampled_key_prefix": "deps-",
             "miss_state": "recurring"
         }]
+    })
+}
+
+fn token_ci_pair_response_body() -> Value {
+    json!({
+        "workspace": {
+            "name": "testing",
+            "slug": "test/workspace"
+        },
+        "restore": {
+            "token": {
+                "id": "tok_restore_ci",
+                "name": "Release CI restore",
+                "access_level": "restore",
+                "scope_type": "workspace",
+                "state": "active",
+                "active": true,
+                "created_at": "2026-04-15T00:00:00Z",
+                "expires_at": "2026-07-14T00:00:00Z",
+                "expires_in_days": 55,
+                "last_used_at": null,
+                "write_tag_prefixes": []
+            },
+            "value": "fixture_restore_token_not_real"
+        },
+        "save": {
+            "token": {
+                "id": "tok_save_ci",
+                "name": "Release CI save",
+                "access_level": "save",
+                "scope_type": "workspace",
+                "state": "active",
+                "active": true,
+                "created_at": "2026-04-15T00:00:00Z",
+                "expires_at": "2026-07-14T00:00:00Z",
+                "expires_in_days": 55,
+                "last_used_at": null,
+                "write_tag_prefixes": ["deps", "docker"]
+            },
+            "value": "fixture_save_token_not_real"
+        }
     })
 }

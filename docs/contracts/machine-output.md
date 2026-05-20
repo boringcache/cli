@@ -34,6 +34,7 @@ Current fixtures:
 - `check_hit_v1.json`
 - `status_workspace_v1.json`
 - `token_list_v1.json`
+- `token_ci_pair_v1.json`
 
 The guardrail test is:
 
@@ -55,8 +56,9 @@ Add fixtures in this order:
    Bazel, Gradle, and Maven.
 4. `check --json` and `status --json`. First coverage: check hit and
    workspace status.
-5. Token and auth JSON outputs. First coverage: token list. Secret-bearing
-   token create/rotate/CI-pair outputs need explicit token-sensitive fixtures.
+5. Token and auth JSON outputs. First coverage: token list and CI token pair.
+   Remaining secret-bearing token create/rotate outputs need explicit
+   token-sensitive fixtures.
 
 Keep fixtures stable by using explicit workspaces, explicit tags, disabled
 platform/git suffixing when the suffix is not the point, and temporary
