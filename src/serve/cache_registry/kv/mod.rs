@@ -62,9 +62,9 @@ const LOOKUP_REFRESH_FLIGHT_KEY: &str = "lookup_refresh";
 static KV_BLOB_DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 mod blob_read;
-mod confirm;
 mod flight;
 mod flush;
+mod flush_error;
 mod handoff;
 mod index;
 mod instrumentation;
@@ -77,9 +77,9 @@ mod types;
 mod write;
 
 pub(crate) use blob_read::*;
-pub(crate) use confirm::*;
 pub(crate) use flight::*;
 pub(crate) use flush::*;
+pub(crate) use flush_error::*;
 pub(crate) use handoff::*;
 pub(crate) use index::*;
 pub(crate) use instrumentation::*;

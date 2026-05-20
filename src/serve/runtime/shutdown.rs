@@ -226,7 +226,99 @@ pub(super) async fn shutdown_signal_with_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::api::client::ApiClient;
+    use crate::api::models::cache::BlobDescriptor;
+    use crate::cas_file;
+    use crate::git::GitContext;
+    use crate::tag_utils::TagResolver;
     use crate::test_env;
+    use mockito::{Matcher, Server};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn strict_shutdown_returns_error_on_permanent_kv_flush_failure() {
+        let mut server = Server::new_async().await;
+        let _guard = test_env::lock();
+        let temp_home = tempfile::tempdir().expect("temp home");
+        test_env::set_var("HOME", temp_home.path());
+        test_env::set_var("TMPDIR", temp_home.path());
+        test_env::set_var("BORINGCACHE_API_URL", server.url());
+        test_env::set_var("BORINGCACHE_AUTH_TOKEN", "test-token");
+        test_env::set_var("BORINGCACHE_TEST_MODE", "1");
+
+        let api_client =
+            ApiClient::new_with_token_override(Some("test-token".to_string())).expect("client");
+        let (state, _listener, _replication_rx) = super::super::listener::build_server_runtime(
+            api_client,
+            "org/repo".to_string(),
+            "127.0.0.1".to_string(),
+            0,
+            TagResolver::new(None, GitContext::default(), false),
+            Vec::new(),
+            "registry".to_string(),
+            vec!["registry".to_string()],
+            Vec::new(),
+            BTreeMap::new(),
+            false,
+            crate::serve::OciHydrationPolicy::MetadataOnly,
+            true,
+            false,
+        )
+        .await
+        .expect("server runtime");
+
+        let payload = b"strict-shutdown-permanent-failure";
+        let digest = cas_file::prefixed_sha256_digest(payload);
+        let blob_path = state.kv_blob_temp_dir.join("strict-shutdown-blob");
+        tokio::fs::write(&blob_path, payload)
+            .await
+            .expect("pending blob");
+        {
+            let mut pending = state.kv_pending.write().await;
+            pending.insert(
+                "bazel_cas/strict-shutdown".to_string(),
+                BlobDescriptor {
+                    digest: digest.clone(),
+                    size_bytes: payload.len() as u64,
+                },
+                blob_path,
+            );
+        }
+
+        let blob_stage_mock = server
+            .mock("POST", "/v2/workspaces/org/repo/caches/blobs/stage")
+            .expect(1)
+            .match_body(Matcher::PartialJson(json!({
+                "blobs": [{ "digest": digest, "size_bytes": payload.len() }]
+            })))
+            .with_status(422)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "success": false,
+                    "error": "blob upload receipt required"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let error = flush_pending_on_shutdown(&state)
+            .await
+            .expect_err("strict shutdown should fail on permanent flush failure");
+
+        assert!(
+            error
+                .to_string()
+                .contains("cache publish failed permanently"),
+            "{error:#}"
+        );
+        assert_eq!(state.kv_pending.read().await.entry_count(), 1);
+        blob_stage_mock.assert_async().await;
+        cleanup_runtime_temp_dir(&state).await;
+    }
 
     #[test]
     fn kv_shutdown_flush_timeout_uses_default_and_env_override() {
