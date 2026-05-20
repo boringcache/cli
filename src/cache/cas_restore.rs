@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::task::JoinSet;
 
-const RESTORE_MAX_CONCURRENCY_ENV: &str = "BORINGCACHE_RESTORE_MAX_CONCURRENCY";
 const MANY_CAS_RESTORE_BLOB_COUNT: usize = 256;
 const SMALL_CAS_RESTORE_BLOB_BYTES: u64 = 1024 * 1024;
 const MEDIUM_CAS_RESTORE_BLOB_BYTES: u64 = 4 * 1024 * 1024;
@@ -468,7 +467,7 @@ fn cas_blob_download_concurrency_plan(
             .saturating_div(average_blob_bytes)
             .clamp(1, CAS_RESTORE_HARD_CONCURRENCY_CAP as u64) as usize
     };
-    let explicit_cap = parse_restore_concurrency_cap()
+    let explicit_cap = crate::command_support::explicit_restore_concurrency_cap()
         .unwrap_or(CAS_RESTORE_HARD_CONCURRENCY_CAP)
         .clamp(1, 128);
 
@@ -485,15 +484,6 @@ fn cas_blob_download_concurrency_plan(
         ceiling,
         adaptive,
     }
-}
-
-fn parse_restore_concurrency_cap() -> Option<usize> {
-    let raw = std::env::var(RESTORE_MAX_CONCURRENCY_ENV).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    trimmed.parse::<usize>().ok().filter(|value| *value > 0)
 }
 
 fn sha256_hex(cas_adapter: crate::adapters::CasAdapterKind, bytes: &[u8]) -> String {
@@ -525,6 +515,7 @@ fn digest_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command_support::concurrency::RESTORE_MAX_CONCURRENCY_ENV;
     use crate::test_env;
 
     #[test]

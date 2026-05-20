@@ -4,6 +4,7 @@ pub mod specs;
 pub mod workspace;
 
 pub use concurrency::{display_concurrency_info, get_optimal_concurrency};
+pub(crate) use concurrency::{explicit_restore_concurrency_cap, explicit_save_concurrency_cap};
 pub use specs::{
     IdentifierParseError, RestoreSpec, SaveSpec, expand_tilde_path, parse_restore_format,
     parse_save_format,

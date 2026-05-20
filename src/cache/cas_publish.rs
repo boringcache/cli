@@ -7,11 +7,10 @@ use crate::command_support::save_support::apply_detected_ci_context;
 use crate::progress::TransferProgress;
 use crate::telemetry::StorageMetrics;
 use anyhow::{Context, Result, anyhow};
+use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 
-const SAVE_MAX_CONCURRENCY_ENV: &str = "BORINGCACHE_SAVE_MAX_CONCURRENCY";
 const CAS_UPLOAD_HARD_CONCURRENCY_CAP: usize = 32;
 const TARGET_CAS_UPLOAD_INFLIGHT_BYTES: u64 = 256 * 1024 * 1024;
 const MANY_CAS_UPLOAD_BLOB_COUNT: usize = 256;
@@ -104,40 +103,34 @@ pub(crate) async fn upload_missing_blobs(
     }
 
     let max_concurrent = cas_blob_upload_concurrency(&upload_items);
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
     let transfer_client = api_client.transfer_client().clone();
-    let mut tasks = Vec::with_capacity(upload_items.len());
-
-    for upload_item in upload_items {
-        let semaphore = semaphore.clone();
-        let progress = progress.clone();
-        let transfer_client = transfer_client.clone();
-        let task = tokio::spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
+    // Keep only the active upload window alive; large CAS saves can have many blobs.
+    let mut uploads = futures_util::stream::iter(upload_items)
+        .map(move |upload_item| {
+            let progress = progress.clone();
+            let transfer_client = transfer_client.clone();
+            async move {
+                let (etag, metrics) = crate::multipart_upload::upload_via_single_url(
+                    &upload_item.path,
+                    &upload_item.url,
+                    &progress,
+                    &transfer_client,
+                    &upload_item.headers,
+                )
                 .await
-                .map_err(|error| anyhow!("CAS upload semaphore closed: {error}"))?;
-            let (etag, metrics) = crate::multipart_upload::upload_via_single_url(
-                &upload_item.path,
-                &upload_item.url,
-                &progress,
-                &transfer_client,
-                &upload_item.headers,
-            )
-            .await
-            .with_context(|| format!("Failed to upload blob {}", upload_item.path.display()))?;
-            Ok::<(String, Option<String>, StorageMetrics), anyhow::Error>((
-                upload_item.digest,
-                etag,
-                metrics,
-            ))
-        });
-        tasks.push(task);
-    }
+                .with_context(|| format!("Failed to upload blob {}", upload_item.path.display()))?;
+                Ok::<(String, Option<String>, StorageMetrics), anyhow::Error>((
+                    upload_item.digest,
+                    etag,
+                    metrics,
+                ))
+            }
+        })
+        .buffered(max_concurrent);
 
     let mut outcome = BlobUploadOutcome::default();
-    for task in tasks {
-        let (digest, etag, metrics) = task.await.context("Blob upload task panicked")??;
+    while let Some(upload_result) = uploads.next().await {
+        let (digest, etag, metrics) = upload_result?;
         outcome.receipts.push(BlobReceipt { digest, etag });
         if outcome.storage_metrics.region.is_none() {
             outcome.storage_metrics = metrics;
@@ -420,7 +413,7 @@ fn cas_blob_upload_concurrency(upload_items: &[BlobUploadItem]) -> usize {
             .saturating_div(average_blob_bytes)
             .clamp(1, CAS_UPLOAD_HARD_CONCURRENCY_CAP as u64) as usize
     };
-    let explicit_cap = parse_save_concurrency_cap()
+    let explicit_cap = crate::command_support::explicit_save_concurrency_cap()
         .unwrap_or(CAS_UPLOAD_HARD_CONCURRENCY_CAP)
         .clamp(1, 128);
 
@@ -431,18 +424,10 @@ fn cas_blob_upload_concurrency(upload_items: &[BlobUploadItem]) -> usize {
         .max(1)
 }
 
-fn parse_save_concurrency_cap() -> Option<usize> {
-    let raw = std::env::var(SAVE_MAX_CONCURRENCY_ENV).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    trimmed.parse::<usize>().ok().filter(|value| *value > 0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command_support::concurrency::SAVE_MAX_CONCURRENCY_ENV;
     use crate::test_env;
 
     #[test]

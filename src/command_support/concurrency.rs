@@ -1,7 +1,7 @@
 use crate::ui;
 
-const SAVE_MAX_CONCURRENCY_ENV: &str = "BORINGCACHE_SAVE_MAX_CONCURRENCY";
-const RESTORE_MAX_CONCURRENCY_ENV: &str = "BORINGCACHE_RESTORE_MAX_CONCURRENCY";
+pub(crate) const SAVE_MAX_CONCURRENCY_ENV: &str = "BORINGCACHE_SAVE_MAX_CONCURRENCY";
+pub(crate) const RESTORE_MAX_CONCURRENCY_ENV: &str = "BORINGCACHE_RESTORE_MAX_CONCURRENCY";
 
 pub fn get_optimal_concurrency(operation_count: usize, operation_type: &str) -> usize {
     let resources = crate::platform::resources::SystemResources::detect();
@@ -32,8 +32,8 @@ pub fn get_optimal_concurrency(operation_count: usize, operation_type: &str) -> 
     };
 
     let env_cap = match operation_type {
-        "save" => parse_concurrency_env(SAVE_MAX_CONCURRENCY_ENV),
-        "restore" => parse_concurrency_env(RESTORE_MAX_CONCURRENCY_ENV),
+        "save" => explicit_save_concurrency_cap(),
+        "restore" => explicit_restore_concurrency_cap(),
         _ => None,
     };
     let effective_cap = env_cap.unwrap_or(hard_cap).clamp(1, 128);
@@ -48,6 +48,14 @@ pub fn display_concurrency_info(max_concurrent: usize, operation_type: &str) {
     ui::info(&format!(
         "Using {max_concurrent} concurrent {operation_type} operations"
     ));
+}
+
+pub(crate) fn explicit_save_concurrency_cap() -> Option<usize> {
+    parse_concurrency_env(SAVE_MAX_CONCURRENCY_ENV)
+}
+
+pub(crate) fn explicit_restore_concurrency_cap() -> Option<usize> {
+    parse_concurrency_env(RESTORE_MAX_CONCURRENCY_ENV)
 }
 
 fn parse_concurrency_env(name: &str) -> Option<usize> {
