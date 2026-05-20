@@ -86,7 +86,7 @@ No snapshot-v2 default switch until:
 No crate/workspace split for snapshot-v2 until:
 
 - the engine boundary is merged;
-- module ownership is documented in `docs/comprehension`;
+- module ownership is documented in the maintained feature inventory under `/Users/gaurav/boringcache/web/.planning/features/cli-*.md`;
 - tests cover each engine at the behavior boundary.
 
 ## Rejected Options

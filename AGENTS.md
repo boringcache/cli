@@ -1,13 +1,13 @@
 # Agent Guide (BoringCache CLI)
 
-Keep this file short. It is loaded often; durable detail belongs in skills and `docs/comprehension`.
+Keep this file short. It is loaded often; durable detail belongs in skills and the maintained feature inventory under `/Users/gaurav/boringcache/web/.planning/`.
 
 ## First Reads
 
 - For CLI work, prefer the `cli-expert` skill entrypoint.
 - For broad code changes, read `/Users/gaurav/boringcache/skills/categories/coding-principles/boringcache-engineering-guide/SKILL.md`.
-- For broad CLI behavior or ownership questions, start at `docs/comprehension/README.md`.
-- For implementation rules, read `docs/comprehension/agent-working-contract.md`.
+- For broad CLI behavior or ownership questions, start at `/Users/gaurav/boringcache/web/.planning/product-hardening-feature-inventory.md` and the relevant `/Users/gaurav/boringcache/web/.planning/features/cli-*.md` file.
+- For implementation rules, use the CLI feature inventory plus the BoringCache engineering guide.
 
 ## Non-Negotiables
 
@@ -22,7 +22,7 @@ Keep this file short. It is loaded often; durable detail belongs in skills and `
 - Adapter capability and layout decisions belong in `src/adapters/mod.rs`.
 - Keep archive-specific behavior separate from CAS-specific behavior.
 - Split workflow intent cleanly: PR validation belongs in validation workflows; publish/deploy behavior belongs in main, tag, or release workflows.
-- When touching a long or hard-to-grok file, treat simplification as part of the task: split by ownership, move tests into focused sibling modules, delete dead paths, or leave a clear note in `docs/comprehension` when deferring the cleanup.
+- When touching a long or hard-to-grok file, treat simplification as part of the task: split by ownership, move tests into focused sibling modules, delete dead paths, or leave a clear note in the relevant CLI feature inventory file when deferring the cleanup.
 
 ## Required Gates
 
@@ -39,7 +39,7 @@ Use `crate::test_env` for process environment mutation in tests.
 
 ## Updates
 
-- Update the relevant `docs/comprehension` file before handoff when command surface, flags, env/config behavior, cache lifecycle, proxy/adapters, release workflows, module ownership, support reachability, or file coverage changes.
-- If CLI changes alter Rails API expectations, update `/Users/gaurav/boringcache/web/docs/comprehension` too.
+- Update the relevant `/Users/gaurav/boringcache/web/.planning/features/cli-*.md` file before handoff when command surface, flags, env/config behavior, cache lifecycle, proxy/adapters, release workflows, module ownership, support reachability, or file coverage changes.
+- If CLI changes alter Rails API expectations, update the matching `/Users/gaurav/boringcache/web/.planning/features/web-api-*.md` or `/Users/gaurav/boringcache/web/.planning/features/web-cache-*.md` file too.
 - If CLI work implements, validates, supersedes, or rejects an ADR-tracked decision, update the relevant ADR before handoff with progress, evidence, and remaining gates.
 - For release, action tag, base-image, or benchmark dispatch work, load `/Users/gaurav/boringcache/skills/categories/release-operations/release-paths/SKILL.md` first.

@@ -218,7 +218,7 @@ The web API must remain able to answer these states for OCI publish:
 - alias bound;
 - publish abandoned.
 
-This ADR does not require a web API change for the first CLI increment. If a later OCI increment needs finer remote-visible state than `check_blobs_verified`, update the web contract and web comprehension map in the same change.
+This ADR does not require a web API change for the first CLI increment. If a later OCI increment needs finer remote-visible state than `check_blobs_verified`, update the web contract and the maintained feature inventory in the same change.
 
 ## Acceptance Gates
 
