@@ -327,9 +327,9 @@ pub async fn adapter_execute(
     )?;
     let archive_enabled = !resolved_plan.tag_path_pairs.is_empty();
     let effective_read_only = cache_registry::effective_proxy_read_only(configured_read_only);
-    let docker_read_only_on_demand =
-        matches!(kind, AdapterKind::Docker | AdapterKind::Buildkit) && effective_read_only;
-    let startup_warm = !(args.on_demand || docker_read_only_on_demand);
+    // Read-only disables writes, not selected-ref metadata warmup. Docker and
+    // BuildKit still fetch blob bodies lazily under the default OCI policy.
+    let startup_warm = !args.on_demand;
     let mut proxy_metadata_hints =
         cache_registry::resolve_proxy_metadata_hints(&metadata_hint_args)?;
     cache_registry::inject_default_proxy_metadata_hints(&mut proxy_metadata_hints);
