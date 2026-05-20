@@ -649,6 +649,56 @@ async fn token_list_json_matches_v1_contract() {
 }
 
 #[tokio::test]
+async fn token_create_json_matches_v1_contract() {
+    let mut server = mockito::Server::new_async().await;
+    let token_mock = server
+        .mock("POST", "/v2/workspaces/test/workspace/tokens")
+        .match_header("authorization", "Bearer admin-token-fixture")
+        .match_body(Matcher::Regex(
+            r#""name":"Release Save".*"access_level":"save".*"write_tag_prefixes":\["deps","docker"\].*"expiration_preset":"90_days""#
+                .to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(token_create_response_body().to_string())
+        .create_async()
+        .await;
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let output = mocked_api_command(&temp_dir, &server.url())
+        .env("BORINGCACHE_ADMIN_TOKEN", "admin-token-fixture")
+        .args([
+            "token",
+            "create",
+            "test/workspace",
+            "--name",
+            "Release Save",
+            "--access",
+            "save",
+            "--write-tag-prefix",
+            "deps",
+            "--write-tag-prefix",
+            "docker",
+            "--expires-in",
+            "90d",
+            "--json",
+        ])
+        .output()
+        .expect("token create json");
+
+    assert!(
+        output.status.success(),
+        "token create should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    token_mock.assert_async().await;
+    assert_machine_output_matches_fixture(
+        &output.stdout,
+        include_str!("fixtures/machine-output/token_create_v1.json"),
+    );
+}
+
+#[tokio::test]
 async fn token_ci_pair_json_matches_v1_contract() {
     let mut server = mockito::Server::new_async().await;
     let token_mock = server
@@ -690,6 +740,53 @@ async fn token_ci_pair_json_matches_v1_contract() {
     assert_machine_output_matches_fixture(
         &output.stdout,
         include_str!("fixtures/machine-output/token_ci_pair_v1.json"),
+    );
+}
+
+#[tokio::test]
+async fn token_rotate_json_matches_v1_contract() {
+    let mut server = mockito::Server::new_async().await;
+    let token_mock = server
+        .mock(
+            "POST",
+            "/v2/workspaces/test/workspace/tokens/tok_save_1/rotate",
+        )
+        .match_header("authorization", "Bearer admin-token-fixture")
+        .match_body(Matcher::Regex(
+            r#""name":"Release Save rotated".*"expiration_preset":"30_days""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(token_rotate_response_body().to_string())
+        .create_async()
+        .await;
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let output = mocked_api_command(&temp_dir, &server.url())
+        .env("BORINGCACHE_ADMIN_TOKEN", "admin-token-fixture")
+        .args([
+            "token",
+            "rotate",
+            "test/workspace",
+            "tok_save_1",
+            "--name",
+            "Release Save rotated",
+            "--expires-in",
+            "30d",
+            "--json",
+        ])
+        .output()
+        .expect("token rotate json");
+
+    assert!(
+        output.status.success(),
+        "token rotate should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    token_mock.assert_async().await;
+    assert_machine_output_matches_fixture(
+        &output.stdout,
+        include_str!("fixtures/machine-output/token_rotate_v1.json"),
     );
 }
 
@@ -841,6 +938,29 @@ fn status_response_body() -> Value {
     })
 }
 
+fn token_create_response_body() -> Value {
+    json!({
+        "workspace": {
+            "name": "testing",
+            "slug": "test/workspace"
+        },
+        "token": {
+            "id": "tok_save_1",
+            "name": "Release Save",
+            "access_level": "save",
+            "scope_type": "workspace",
+            "state": "active",
+            "active": true,
+            "created_at": "2026-04-15T00:00:00Z",
+            "expires_at": "2026-07-14T00:00:00Z",
+            "expires_in_days": 55,
+            "last_used_at": null,
+            "write_tag_prefixes": ["deps", "docker"]
+        },
+        "value": "fixture_save_token_not_real"
+    })
+}
+
 fn token_ci_pair_response_body() -> Value {
     json!({
         "workspace": {
@@ -878,6 +998,42 @@ fn token_ci_pair_response_body() -> Value {
                 "write_tag_prefixes": ["deps", "docker"]
             },
             "value": "fixture_save_token_not_real"
+        }
+    })
+}
+
+fn token_rotate_response_body() -> Value {
+    json!({
+        "workspace": {
+            "name": "testing",
+            "slug": "test/workspace"
+        },
+        "token": {
+            "id": "tok_save_2",
+            "name": "Release Save rotated",
+            "access_level": "save",
+            "scope_type": "workspace",
+            "state": "active",
+            "active": true,
+            "created_at": "2026-04-16T00:00:00Z",
+            "expires_at": "2026-05-16T00:00:00Z",
+            "expires_in_days": 30,
+            "last_used_at": null,
+            "write_tag_prefixes": ["deps", "docker"]
+        },
+        "value": "fixture_rotated_save_token_not_real",
+        "rotated_from": {
+            "id": "tok_save_1",
+            "name": "Release Save",
+            "access_level": "save",
+            "scope_type": "workspace",
+            "state": "revoked",
+            "active": false,
+            "created_at": "2026-04-15T00:00:00Z",
+            "expires_at": "2026-07-14T00:00:00Z",
+            "expires_in_days": 55,
+            "last_used_at": null,
+            "write_tag_prefixes": ["deps", "docker"]
         }
     })
 }
