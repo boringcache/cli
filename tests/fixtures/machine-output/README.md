@@ -9,3 +9,8 @@ blessing the new output.
 Update these only when the corresponding feature inventory entry under
 `web/.planning/features/cli-machine-output-contracts.md` explains the contract
 change and the consuming surfaces have been checked.
+
+Fixtures may use placeholders for machine-local paths:
+
+- `$HOME` for user-level setup paths.
+- `$WORKSPACE_ROOT` for the temporary project root used by the fixture test.

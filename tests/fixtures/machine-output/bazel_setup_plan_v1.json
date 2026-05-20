@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "adapter": "bazel",
+  "workspace": "test-org/test-workspace",
+  "workspace_source": "explicit",
+  "tag": "bazel-cache",
+  "command": [
+    "bazel",
+    "build",
+    "--remote_cache=http://host.docker.internal:6001",
+    "--remote_upload_local_results=true",
+    "--remote_cache_async=false",
+    "--remote_download_minimal",
+    "--remote_max_connections=64",
+    "//..."
+  ],
+  "env_vars": {
+    "BORINGCACHE_CACHE_REF": "host.docker.internal:6001/cache:bazel-cache",
+    "BORINGCACHE_PROXY_PORT": "6001"
+  },
+  "setup": {
+    "schema_version": 1,
+    "files": [
+      {
+        "path": "$HOME/.bazelrc",
+        "mode": "append",
+        "content": "\n# BoringCache remote cache\nbuild --remote_cache=http://host.docker.internal:6001\nbuild --remote_upload_local_results=true\nbuild --remote_cache_async=false\nbuild --remote_download_minimal\nbuild --remote_max_connections=64\n"
+      }
+    ]
+  },
+  "proxy": {
+    "host": "127.0.0.1",
+    "endpoint_host": "host.docker.internal",
+    "port": 6001,
+    "no_platform": true,
+    "no_git": true,
+    "read_only": false,
+    "startup_mode": "warm",
+    "oci_hydration": "metadata-only",
+    "metadata_hints": {
+      "tool": "bazel"
+    }
+  }
+}

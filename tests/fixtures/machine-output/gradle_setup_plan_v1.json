@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "adapter": "gradle",
+  "workspace": "test-org/test-workspace",
+  "workspace_source": "explicit",
+  "tag": "gradle-cache",
+  "command": [
+    "./gradlew",
+    "--build-cache",
+    "build",
+    "--no-daemon"
+  ],
+  "env_vars": {
+    "BORINGCACHE_CACHE_REF": "host.docker.internal:6001/cache:gradle-cache",
+    "BORINGCACHE_GRADLE_CACHE_PUSH": "false",
+    "BORINGCACHE_GRADLE_CACHE_URL": "http://host.docker.internal:6001/cache/",
+    "BORINGCACHE_PROXY_PORT": "6001"
+  },
+  "setup": {
+    "schema_version": 1,
+    "env_vars": {
+      "BORINGCACHE_CACHE_REF": "host.docker.internal:6001/cache:gradle-cache",
+      "BORINGCACHE_GRADLE_CACHE_PUSH": "false",
+      "BORINGCACHE_GRADLE_CACHE_URL": "http://host.docker.internal:6001/cache/",
+      "BORINGCACHE_PROXY_PORT": "6001"
+    },
+    "files": [
+      {
+        "path": "$HOME/.gradle/init.d/boringcache-gradle-build-cache.init.gradle",
+        "mode": "write",
+        "content": "import org.gradle.caching.http.HttpBuildCache\nimport groovy.json.JsonSlurper\n\ndef boringcacheSkipActions() {\n    def raw = System.getenv(\"BORINGCACHE_GRADLE_SKIP_ACTIONS\")\n    if (!raw) {\n        return [] as Set\n    }\n\n    try {\n        def parsed = new JsonSlurper().parseText(raw)\n        if (parsed instanceof Collection) {\n            return parsed\n                .collect { value -> value == null ? null : value.toString().trim() }\n                .findAll { value -> value }\n                .toSet()\n        }\n    } catch (Exception ignored) {\n        logger.warn(\"[boringcache] ignoring invalid BORINGCACHE_GRADLE_SKIP_ACTIONS\")\n    }\n\n    return [] as Set\n}\n\ngradle.settingsEvaluated { settings ->\n    def cacheUrl = System.getenv(\"BORINGCACHE_GRADLE_CACHE_URL\")\n    if (cacheUrl) {\n        settings.buildCache {\n            remote(HttpBuildCache) {\n                enabled = true\n                url = uri(cacheUrl)\n                push = System.getenv(\"BORINGCACHE_GRADLE_CACHE_PUSH\") == \"true\"\n                allowInsecureProtocol = true\n            }\n        }\n    }\n}\n\ngradle.projectsEvaluated {\n    def boringcacheSkip = boringcacheSkipActions()\n    if (!boringcacheSkip.empty) {\n        gradle.rootProject.allprojects { project ->\n            project.tasks.configureEach { task ->\n                if (boringcacheSkip.contains(task.path)) {\n                    task.outputs.cacheIf(\"BoringCache skip rule\") { false }\n                }\n            }\n        }\n    }\n}\n"
+      },
+      {
+        "path": "$HOME/.gradle/gradle.properties",
+        "mode": "append",
+        "content": "\norg.gradle.caching=true\n"
+      }
+    ]
+  },
+  "proxy": {
+    "host": "127.0.0.1",
+    "endpoint_host": "host.docker.internal",
+    "port": 6001,
+    "no_platform": true,
+    "no_git": true,
+    "read_only": true,
+    "startup_mode": "warm",
+    "oci_hydration": "metadata-only",
+    "metadata_hints": {
+      "tool": "gradle"
+    }
+  }
+}

@@ -28,6 +28,9 @@ Current fixtures:
 
 - `run_dry_run_manual_archive_v1.json`
 - `docker_dry_run_v1.json`
+- `bazel_setup_plan_v1.json`
+- `gradle_setup_plan_v1.json`
+- `maven_setup_plan_v1.json`
 
 The guardrail test is:
 
@@ -45,7 +48,8 @@ Add fixtures in this order:
 
 1. `run --dry-run --json` archive modes.
 2. Docker/BuildKit dry-run plan.
-3. Adapter dry-run setup plans with `setup.schema_version`.
+3. Adapter dry-run setup plans with `setup.schema_version`. First coverage:
+   Bazel, Gradle, and Maven.
 4. `check --json` and `status --json`.
 5. Token and auth JSON outputs.
 

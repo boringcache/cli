@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "adapter": "maven",
+  "workspace": "test-org/test-workspace",
+  "workspace_source": "explicit",
+  "tag": "maven-cache",
+  "command": [
+    "mvn",
+    "-Dmaven.build.cache.enabled=true",
+    "-Dmaven.build.cache.remote.enabled=true",
+    "-Dmaven.build.cache.remote.url=http://host.docker.internal:6001",
+    "-Dmaven.build.cache.remote.save.enabled=false",
+    "install",
+    "-DskipTests"
+  ],
+  "env_vars": {
+    "BORINGCACHE_CACHE_REF": "host.docker.internal:6001/cache:maven-cache",
+    "BORINGCACHE_PROXY_PORT": "6001"
+  },
+  "setup": {
+    "schema_version": 1,
+    "files": [
+      {
+        "path": "$WORKSPACE_ROOT/.mvn/extensions.xml",
+        "mode": "write",
+        "content": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<extensions xmlns=\"http://maven.apache.org/EXTENSIONS/1.0.0\"\n            xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n            xsi:schemaLocation=\"http://maven.apache.org/EXTENSIONS/1.0.0 https://maven.apache.org/xsd/core-extensions-1.0.0.xsd\">\n  <extension>\n    <groupId>org.apache.maven.extensions</groupId>\n    <artifactId>maven-build-cache-extension</artifactId>\n    <version>1.2.2</version>\n  </extension>\n</extensions>\n"
+      },
+      {
+        "path": "$WORKSPACE_ROOT/.mvn/maven-build-cache-config.xml",
+        "mode": "write",
+        "content": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<cache xmlns=\"http://maven.apache.org/BUILD-CACHE-CONFIG/1.2.0\"\n       xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n       xsi:schemaLocation=\"http://maven.apache.org/BUILD-CACHE-CONFIG/1.2.0 https://maven.apache.org/xsd/build-cache-config-1.2.0.xsd\">\n  <configuration>\n    <remote enabled=\"true\" saveToRemote=\"false\" transport=\"resolver\" id=\"boringcache\">\n      <url>http://host.docker.internal:6001</url>\n    </remote>\n  </configuration>\n</cache>\n"
+      }
+    ],
+    "directories": [
+      "$HOME/.m2/repository"
+    ]
+  },
+  "proxy": {
+    "host": "127.0.0.1",
+    "endpoint_host": "host.docker.internal",
+    "port": 6001,
+    "no_platform": true,
+    "no_git": true,
+    "read_only": true,
+    "startup_mode": "warm",
+    "oci_hydration": "metadata-only",
+    "metadata_hints": {
+      "tool": "maven"
+    }
+  }
+}
