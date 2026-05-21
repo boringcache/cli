@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "adapter": "nx",
+  "workspace": "test-org/test-workspace",
+  "workspace_source": "explicit",
+  "tag": "nx-cache",
+  "command": [
+    "nx",
+    "affected",
+    "--target=build"
+  ],
+  "env_vars": {
+    "BORINGCACHE_CACHE_REF": "host.docker.internal:6001/cache:nx-cache",
+    "BORINGCACHE_PROXY_PORT": "6001",
+    "NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN": "boringcache",
+    "NX_SELF_HOSTED_REMOTE_CACHE_SERVER": "http://host.docker.internal:6001"
+  },
+  "proxy": {
+    "host": "127.0.0.1",
+    "endpoint_host": "host.docker.internal",
+    "port": 6001,
+    "no_platform": true,
+    "no_git": true,
+    "read_only": false,
+    "startup_mode": "warm",
+    "oci_hydration": "metadata-only",
+    "metadata_hints": {
+      "tool": "nx"
+    }
+  }
+}

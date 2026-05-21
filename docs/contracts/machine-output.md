@@ -28,13 +28,19 @@ Current fixtures:
 
 - `run_dry_run_manual_archive_v1.json`
 - `docker_dry_run_v1.json`
+- `buildkit_dry_run_v1.json`
 - `bazel_setup_plan_v1.json`
 - `gradle_setup_plan_v1.json`
 - `maven_setup_plan_v1.json`
+- `turbo_setup_plan_v1.json`
+- `nx_setup_plan_v1.json`
+- `sccache_setup_plan_v1.json`
+- `go_setup_plan_v1.json`
 - `check_hit_v1.json`
 - `check_miss_v1.json`
 - `check_pending_v1.json`
 - `status_workspace_v1.json`
+- `doctor_no_auth_v1.json`
 - `token_list_v1.json`
 - `token_create_v1.json`
 - `token_ci_pair_v1.json`
@@ -55,11 +61,12 @@ scripts, and any docs that teach the JSON shape.
 Add fixtures in this order:
 
 1. `run --dry-run --json` archive modes.
-2. Docker/BuildKit dry-run plan.
+2. Docker/BuildKit dry-run plans.
 3. Adapter dry-run setup plans with `setup.schema_version`. First coverage:
-   Bazel, Gradle, and Maven.
+   Bazel, Gradle, Maven, Turbo, Nx, sccache, and Go.
 4. `check --json` and `status --json`. First coverage: check hit, miss,
-   pending, and workspace status.
+   pending, workspace status, and auth/workspace doctor without configured
+   credentials.
 5. Token and auth JSON outputs. First coverage: token list, token create, CI
    token pair, and token rotate. Remaining auth/connect outputs need explicit
    fixtures.
@@ -67,3 +74,8 @@ Add fixtures in this order:
 Keep fixtures stable by using explicit workspaces, explicit tags, disabled
 platform/git suffixing when the suffix is not the point, and temporary
 directories without repo config.
+
+CLI connect/login is interactive text today, not a stable `--json` machine
+output command. Treat CLI-connect API response shapes as API contracts, and add
+a machine-output fixture here only if a public JSON command starts emitting
+them.

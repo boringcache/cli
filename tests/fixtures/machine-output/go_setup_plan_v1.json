@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "adapter": "go",
+  "workspace": "test-org/test-workspace",
+  "workspace_source": "explicit",
+  "tag": "go-cache",
+  "command": [
+    "go",
+    "test",
+    "./..."
+  ],
+  "env_vars": {
+    "BORINGCACHE_CACHE_REF": "host.docker.internal:6001/cache:go-cache",
+    "BORINGCACHE_PROXY_PORT": "6001",
+    "GOCACHEPROG": "$BORINGCACHE_BIN go-cacheprog --endpoint http://host.docker.internal:6001"
+  },
+  "proxy": {
+    "host": "127.0.0.1",
+    "endpoint_host": "host.docker.internal",
+    "port": 6001,
+    "no_platform": true,
+    "no_git": true,
+    "read_only": false,
+    "startup_mode": "warm",
+    "oci_hydration": "metadata-only",
+    "metadata_hints": {
+      "tool": "gocache"
+    }
+  }
+}

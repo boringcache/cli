@@ -92,6 +92,10 @@ fn home_placeholder() -> Placeholder {
     path_placeholder(&home, "$HOME")
 }
 
+fn cli_binary_placeholder() -> Placeholder {
+    path_placeholder(&cli_binary(), "$BORINGCACHE_BIN")
+}
+
 fn workspace_root_placeholders(path: &Path) -> Vec<Placeholder> {
     let mut placeholders = Vec::new();
     if let Ok(canonical) = std::fs::canonicalize(path) {
@@ -236,6 +240,51 @@ fn docker_dry_run_json_matches_v1_contract() {
 }
 
 #[test]
+fn buildkit_dry_run_json_matches_v1_contract() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args([
+            "buildkit",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "buildkit-cache",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--port",
+            "6001",
+            "--no-platform",
+            "--no-git",
+            "--dry-run",
+            "--json",
+            "--",
+            "buildctl",
+            "build",
+            "--frontend",
+            "dockerfile.v0",
+            "--local",
+            "context=.",
+            "--local",
+            "dockerfile=.",
+        ])
+        .output()
+        .expect("buildkit dry-run json");
+
+    assert!(
+        output.status.success(),
+        "buildkit dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_machine_output_matches_fixture(
+        &output.stdout,
+        include_str!("fixtures/machine-output/buildkit_dry_run_v1.json"),
+    );
+}
+
+#[test]
 fn bazel_setup_plan_json_matches_v1_contract() {
     let temp_dir = TempDir::new().expect("temp dir");
     let mut command = Command::new(cli_binary());
@@ -360,6 +409,166 @@ fn maven_setup_plan_json_matches_v1_contract() {
         &output.stdout,
         include_str!("fixtures/machine-output/maven_setup_plan_v1.json"),
         &placeholders,
+    );
+}
+
+#[test]
+fn turbo_dry_run_json_matches_v1_contract() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args([
+            "turbo",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "turbo-cache",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--port",
+            "6001",
+            "--no-platform",
+            "--no-git",
+            "--dry-run",
+            "--json",
+            "--",
+            "turbo",
+            "run",
+            "build",
+        ])
+        .output()
+        .expect("turbo dry-run json");
+
+    assert!(
+        output.status.success(),
+        "turbo dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_machine_output_matches_fixture(
+        &output.stdout,
+        include_str!("fixtures/machine-output/turbo_setup_plan_v1.json"),
+    );
+}
+
+#[test]
+fn nx_dry_run_json_matches_v1_contract() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args([
+            "nx",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "nx-cache",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--port",
+            "6001",
+            "--no-platform",
+            "--no-git",
+            "--dry-run",
+            "--json",
+            "--",
+            "nx",
+            "affected",
+            "--target=build",
+        ])
+        .output()
+        .expect("nx dry-run json");
+
+    assert!(
+        output.status.success(),
+        "nx dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_machine_output_matches_fixture(
+        &output.stdout,
+        include_str!("fixtures/machine-output/nx_setup_plan_v1.json"),
+    );
+}
+
+#[test]
+fn sccache_dry_run_json_matches_v1_contract() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args([
+            "sccache",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "rust-cache",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--port",
+            "6001",
+            "--no-platform",
+            "--no-git",
+            "--dry-run",
+            "--json",
+            "--",
+            "cargo",
+            "build",
+        ])
+        .output()
+        .expect("sccache dry-run json");
+
+    assert!(
+        output.status.success(),
+        "sccache dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_machine_output_matches_fixture(
+        &output.stdout,
+        include_str!("fixtures/machine-output/sccache_setup_plan_v1.json"),
+    );
+}
+
+#[test]
+fn go_dry_run_json_matches_v1_contract() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .args([
+            "go",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "go-cache",
+            "--endpoint-host",
+            "host.docker.internal",
+            "--port",
+            "6001",
+            "--no-platform",
+            "--no-git",
+            "--dry-run",
+            "--json",
+            "--",
+            "go",
+            "test",
+            "./...",
+        ])
+        .output()
+        .expect("go dry-run json");
+
+    assert!(
+        output.status.success(),
+        "go dry-run should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_machine_output_matches_fixture_with_placeholders(
+        &output.stdout,
+        include_str!("fixtures/machine-output/go_setup_plan_v1.json"),
+        &[cli_binary_placeholder()],
     );
 }
 
@@ -578,6 +787,29 @@ async fn status_json_matches_v1_contract() {
     assert_machine_output_matches_fixture(
         &output.stdout,
         include_str!("fixtures/machine-output/status_workspace_v1.json"),
+    );
+}
+
+#[test]
+fn doctor_no_auth_json_matches_v1_contract() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .current_dir(temp_dir.path())
+        .env("HOME", temp_dir.path())
+        .args(["doctor", "--json"])
+        .output()
+        .expect("doctor json");
+
+    assert!(
+        output.status.success(),
+        "doctor should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_machine_output_matches_fixture(
+        &output.stdout,
+        include_str!("fixtures/machine-output/doctor_no_auth_v1.json"),
     );
 }
 

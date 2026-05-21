@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "failure_count": 0,
+  "warning_count": 10,
+  "api": {
+    "configured_url": "http://127.0.0.1:65535",
+    "source": {
+      "kind": "env",
+      "detail": "BORINGCACHE_API_URL"
+    },
+    "v2_url": "http://127.0.0.1:65535/v2"
+  },
+  "workspace": {
+    "status": "warn",
+    "source": {
+      "kind": "missing"
+    },
+    "summary": "No default workspace is set yet."
+  },
+  "auth": {
+    "restore": {
+      "status": "warn",
+      "usable": false,
+      "source": {
+        "kind": "missing"
+      },
+      "configured": false,
+      "summary": "No restore token configured."
+    },
+    "save": {
+      "status": "warn",
+      "usable": false,
+      "source": {
+        "kind": "missing"
+      },
+      "configured": false,
+      "summary": "No save token configured."
+    },
+    "admin": {
+      "status": "warn",
+      "usable": false,
+      "source": {
+        "kind": "missing"
+      },
+      "configured": false,
+      "summary": "No admin token configured."
+    }
+  },
+  "commands": {
+    "status": {
+      "status": "warn",
+      "ready": false,
+      "summary": "Need a readable workspace to run `status`."
+    },
+    "inspect": {
+      "status": "warn",
+      "ready": false,
+      "summary": "Need a readable workspace to run `inspect`."
+    },
+    "save": {
+      "status": "warn",
+      "ready": false,
+      "summary": "Need a save-capable token and workspace to run `save`."
+    },
+    "rm": {
+      "status": "warn",
+      "ready": false,
+      "summary": "Need an admin-capable token and workspace to run `rm`."
+    },
+    "use_command": {
+      "status": "warn",
+      "ready": false,
+      "summary": "Need a readable token and working workspace discovery to run `use`."
+    },
+    "workspaces": {
+      "status": "warn",
+      "ready": false,
+      "summary": "Need a readable token and working workspace discovery to run `workspaces`."
+    }
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "adapter": "buildkit",
+  "workspace": "test-org/test-workspace",
+  "workspace_source": "explicit",
+  "tag": "buildkit-cache",
+  "command": [
+    "buildctl",
+    "build",
+    "--frontend",
+    "dockerfile.v0",
+    "--local",
+    "context=.",
+    "--local",
+    "dockerfile=.",
+    "--import-cache",
+    "type=registry,ref=host.docker.internal:6001/cache:buildkit-cache,registry.insecure=true",
+    "--export-cache",
+    "type=registry,ref=host.docker.internal:6001/cache:buildkit-cache,mode=max,registry.insecure=true"
+  ],
+  "env_vars": {
+    "BORINGCACHE_CACHE_REF": "host.docker.internal:6001/cache:buildkit-cache",
+    "BORINGCACHE_PROXY_PORT": "6001"
+  },
+  "proxy": {
+    "host": "127.0.0.1",
+    "endpoint_host": "host.docker.internal",
+    "port": 6001,
+    "no_platform": true,
+    "no_git": true,
+    "read_only": false,
+    "startup_mode": "warm",
+    "oci_hydration": "metadata-only",
+    "oci_prefetch_refs": [
+      "cache@buildkit-cache"
+    ],
+    "metadata_hints": {
+      "cache_adapter": "buildkit",
+      "docker_cache_tag": "buildkit-cache",
+      "tool": "oci"
+    }
+  },
+  "oci_cache": {
+    "registry_ref": "host.docker.internal:6001/cache:buildkit-cache",
+    "cache_from_tags": [
+      "buildkit-cache"
+    ],
+    "cache_from_refs": [
+      "type=registry,ref=host.docker.internal:6001/cache:buildkit-cache,registry.insecure=true"
+    ],
+    "cache_from": "type=registry,ref=host.docker.internal:6001/cache:buildkit-cache,registry.insecure=true",
+    "cache_to": "type=registry,ref=host.docker.internal:6001/cache:buildkit-cache,mode=max,registry.insecure=true",
+    "cache_tag": "buildkit-cache",
+    "cache_to_tag": "buildkit-cache"
+  }
+}
