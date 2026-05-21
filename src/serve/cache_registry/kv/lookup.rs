@@ -59,6 +59,12 @@ fn blob_matches_integrity(
     false
 }
 
+fn record_active_read(state: &AppState, namespace: KvNamespace, scoped_key: &str, is_head: bool) {
+    if !is_head {
+        state.record_kv_active_key(namespace.metric_name(), scoped_key);
+    }
+}
+
 pub(crate) async fn get_or_head_kv_object(
     state: &AppState,
     namespace: KvNamespace,
@@ -226,6 +232,7 @@ pub(crate) async fn get_or_head_kv_object_inner(
         match serve_local_blob(&blob, &path, is_head).await {
             Ok(response) => {
                 record_lookup_stage(state, namespace, "pending_hit");
+                record_active_read(state, namespace, &scoped_key, is_head);
                 return Ok(response);
             }
             Err(e) => {
@@ -253,6 +260,7 @@ pub(crate) async fn get_or_head_kv_object_inner(
         match serve_local_blob(&blob, &path, is_head).await {
             Ok(response) => {
                 record_lookup_stage(state, namespace, "flushing_hit");
+                record_active_read(state, namespace, &scoped_key, is_head);
                 return Ok(response);
             }
             Err(e) => {
@@ -271,14 +279,16 @@ pub(crate) async fn get_or_head_kv_object_inner(
                 if use_miss_cache {
                     clear_kv_miss(state, &miss_key);
                 }
-                return serve_backend_blob(
+                let response = serve_backend_blob(
                     state,
                     &cache_entry_id,
                     &blob,
                     cached_url.as_deref(),
                     is_head,
                 )
-                .await;
+                .await?;
+                record_active_read(state, namespace, &scoped_key, is_head);
+                return Ok(response);
             }
             record_lookup_stage(state, namespace, "published_fast_integrity_miss");
         }
@@ -358,14 +368,16 @@ pub(crate) async fn get_or_head_kv_object_inner(
         if use_miss_cache {
             clear_kv_miss(state, &miss_key);
         }
-        return serve_backend_blob(
+        let response = serve_backend_blob(
             state,
             &cache_entry_id,
             &blob,
             cached_url.as_deref(),
             is_head,
         )
-        .await;
+        .await?;
+        record_active_read(state, namespace, &scoped_key, is_head);
+        return Ok(response);
     }
 
     if !miss_stage_recorded {

@@ -279,21 +279,73 @@ pub(crate) async fn load_existing_index(
     ),
     RegistryError,
 > {
+    load_existing_index_with_stream(state, tag, KvIndexStream::Full).await
+}
+
+pub(crate) async fn load_existing_current_version_index(
+    state: &AppState,
+    tag: &str,
+) -> Result<
+    (
+        BTreeMap<String, BlobDescriptor>,
+        Vec<BlobDescriptor>,
+        Option<String>,
+        Option<String>,
+    ),
+    RegistryError,
+> {
+    load_existing_index_with_stream(state, tag, KvIndexStream::CurrentVersion).await
+}
+
+#[derive(Clone, Copy)]
+enum KvIndexStream {
+    Full,
+    CurrentVersion,
+}
+
+async fn load_existing_index_with_stream(
+    state: &AppState,
+    tag: &str,
+    stream: KvIndexStream,
+) -> Result<
+    (
+        BTreeMap<String, BlobDescriptor>,
+        Vec<BlobDescriptor>,
+        Option<String>,
+        Option<String>,
+    ),
+    RegistryError,
+> {
     let mut map = BTreeMap::new();
     let mut blobs_by_digest = HashMap::new();
     let mut stream_position = 0usize;
     let mut cursor = None;
 
     loop {
-        let page = state
-            .api_client
-            .stream_cache_kv_entries(&state.workspace, tag, cursor.as_deref(), 5_000)
-            .await
-            .map_err(|error| {
-                RegistryError::internal(format!(
-                    "Failed to stream KV entries for tag {tag}: {error}"
-                ))
-            })?;
+        let page = match stream {
+            KvIndexStream::Full => {
+                state
+                    .api_client
+                    .stream_cache_kv_entries(&state.workspace, tag, cursor.as_deref(), 5_000)
+                    .await
+            }
+            KvIndexStream::CurrentVersion => {
+                state
+                    .api_client
+                    .stream_current_cache_kv_entries(
+                        &state.workspace,
+                        tag,
+                        cursor.as_deref(),
+                        5_000,
+                    )
+                    .await
+            }
+        }
+        .map_err(|error| {
+            RegistryError::internal(format!(
+                "Failed to stream KV entries for tag {tag}: {error}"
+            ))
+        })?;
 
         for entry in page.entries {
             record_streamed_blob_for_startup(&mut blobs_by_digest, stream_position, &entry);
@@ -383,22 +435,6 @@ fn entry_last_used_at(
         .into_iter()
         .flatten()
         .max()
-}
-
-pub(crate) async fn load_existing_index_snapshot(
-    state: &AppState,
-) -> Result<
-    (
-        BTreeMap<String, BlobDescriptor>,
-        Vec<BlobDescriptor>,
-        Option<String>,
-        Option<String>,
-    ),
-    RegistryError,
-> {
-    let (_, entries, blob_order, cache_entry_id, manifest_root_digest) =
-        load_existing_index_snapshot_with_tag(state).await?;
-    Ok((entries, blob_order, cache_entry_id, manifest_root_digest))
 }
 
 pub(crate) async fn load_existing_index_snapshot_with_tag(

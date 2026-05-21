@@ -342,6 +342,216 @@ async fn test_startup_prefetch_hydrates_full_tag_before_ready() {
 }
 
 #[tokio::test]
+async fn test_startup_prefetch_hydrates_current_kv_version_when_supported() {
+    let mut server = Server::new_async().await;
+    let (_state, _home, _guard) = setup(&server).await;
+
+    let warm_blob_a = b"aaaaa";
+    let warm_blob_b = b"bbbbb";
+    let cold_blob = b"cccccccccccc";
+    let digest_a = cas_oci::prefixed_sha256_digest(warm_blob_a);
+    let digest_b = cas_oci::prefixed_sha256_digest(warm_blob_b);
+    let digest_c = cas_oci::prefixed_sha256_digest(cold_blob);
+
+    let key_a = digest_a.strip_prefix("sha256:").unwrap();
+    let key_b = digest_b.strip_prefix("sha256:").unwrap();
+    let key_c = digest_c.strip_prefix("sha256:").unwrap();
+
+    let capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "api_version": "v2",
+                "features": {
+                    "cache_kv_entries_v1": true,
+                    "cache_kv_entries_current_version_v1": true
+                }
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let full_stream_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(
+                r"^/v2/workspaces/org/repo/cache-kv-entries\?tag=registry&limit=5000$".to_string(),
+            ),
+        )
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "entries": [
+                    {
+                        "namespace": "bazel_cas",
+                        "scoped_key": format!("bazel_cas/{key_a}"),
+                        "blob": { "digest": digest_a.clone(), "size_bytes": warm_blob_a.len() }
+                    },
+                    {
+                        "namespace": "bazel_cas",
+                        "scoped_key": format!("bazel_cas/{key_b}"),
+                        "blob": { "digest": digest_b.clone(), "size_bytes": warm_blob_b.len() }
+                    },
+                    {
+                        "namespace": "bazel_cas",
+                        "scoped_key": format!("bazel_cas/{key_c}"),
+                        "blob": { "digest": digest_c.clone(), "size_bytes": cold_blob.len() }
+                    }
+                ],
+                "next_cursor": null
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let current_stream_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(
+                r"^/v2/workspaces/org/repo/cache-kv-entries\?tag=registry&limit=5000&version=current$"
+                    .to_string(),
+            ),
+        )
+        .expect(1)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "entries": [
+                    {
+                        "namespace": "bazel_cas",
+                        "scoped_key": format!("bazel_cas/{key_a}"),
+                        "kv_version": 7,
+                        "blob": { "digest": digest_a.clone(), "size_bytes": warm_blob_a.len() }
+                    },
+                    {
+                        "namespace": "bazel_cas",
+                        "scoped_key": format!("bazel_cas/{key_b}"),
+                        "kv_version": 7,
+                        "blob": { "digest": digest_b.clone(), "size_bytes": warm_blob_b.len() }
+                    }
+                ],
+                "next_cursor": null
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let download_urls_mock = server
+        .mock(
+            "POST",
+            "/v2/workspaces/org/repo/cache-kv-entries/download-urls",
+        )
+        .expect(1)
+        .match_body(Matcher::PartialJson(json!({
+            "tag": "registry",
+            "blobs": [
+                { "digest": digest_a, "size_bytes": warm_blob_a.len() },
+                { "digest": digest_b, "size_bytes": warm_blob_b.len() }
+            ]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "download_urls": [
+                    { "digest": digest_a, "url": format!("{}/blobs/{}", server.url(), digest_a) },
+                    { "digest": digest_b, "url": format!("{}/blobs/{}", server.url(), digest_b) }
+                ],
+                "missing": []
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let warm_blob_a_mock = server
+        .mock("GET", format!("/blobs/{}", digest_a).as_str())
+        .expect(1)
+        .with_status(200)
+        .with_body(warm_blob_a)
+        .create_async()
+        .await;
+    let warm_blob_b_mock = server
+        .mock("GET", format!("/blobs/{}", digest_b).as_str())
+        .expect(1)
+        .with_status(200)
+        .with_body(warm_blob_b)
+        .create_async()
+        .await;
+    let cold_blob_mock = server
+        .mock("GET", format!("/blobs/{}", digest_c).as_str())
+        .expect(0)
+        .with_status(200)
+        .with_body(cold_blob)
+        .create_async()
+        .await;
+
+    let handle = boring_cache_cli::serve::start_server_background(
+        ApiClient::new_with_token_override(Some("test-token".to_string())).expect("api client"),
+        "org/repo".to_string(),
+        "127.0.0.1".to_string(),
+        0,
+        TagResolver::new(None, GitContext::default(), false),
+        Vec::new(),
+        "registry".to_string(),
+        vec!["registry".to_string()],
+        Vec::new(),
+        BTreeMap::new(),
+        true,
+        Vec::new(),
+        boring_cache_cli::serve::OciHydrationPolicy::MetadataOnly,
+        true,
+        false,
+    )
+    .await
+    .expect("start proxy");
+
+    let base_url = format!("http://127.0.0.1:{}", handle.port);
+    let client = reqwest::Client::new();
+
+    wait_for_prefetch_state(&client, &base_url, "ready").await;
+
+    let response = client
+        .get(format!("{base_url}/_boringcache/status"))
+        .send()
+        .await
+        .expect("status request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let status: serde_json::Value = response.json().await.expect("status json");
+    assert_eq!(
+        status["startup_prefetch"]["startup_prefetch_mode"],
+        "current_version"
+    );
+    assert_eq!(
+        status["startup_prefetch"]["startup_prefetch_total_unique_blobs"],
+        "3"
+    );
+    assert_eq!(
+        status["startup_prefetch"]["startup_prefetch_target_blobs"],
+        "2"
+    );
+
+    handle.shutdown_and_flush().await.expect("shutdown proxy");
+
+    capabilities_mock.assert_async().await;
+    full_stream_mock.assert_async().await;
+    current_stream_mock.assert_async().await;
+    download_urls_mock.assert_async().await;
+    warm_blob_a_mock.assert_async().await;
+    warm_blob_b_mock.assert_async().await;
+    cold_blob_mock.assert_async().await;
+}
+
+#[tokio::test]
 async fn test_startup_prefetch_partial_blob_failure_does_not_block_readiness() {
     let mut server = Server::new_async().await;
     let (_state, _home, _guard) = setup(&server).await;

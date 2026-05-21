@@ -125,6 +125,7 @@ pub(super) async fn build_server_runtime(
         kv_next_flush_at: Arc::new(RwLock::new(None)),
         kv_flush_scheduled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_published_index: Arc::new(RwLock::new(KvPublishedIndex::default())),
+        kv_active_set: Arc::new(dashmap::DashMap::new()),
         kv_flushing: Arc::new(RwLock::new(None)),
         shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         kv_recent_misses: Arc::new(dashmap::DashMap::new()),

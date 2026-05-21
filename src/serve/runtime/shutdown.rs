@@ -142,6 +142,7 @@ pub(super) async fn flush_pending_on_shutdown(state: &AppState) -> Result<()> {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
+    publish_current_kv_version_on_shutdown(state).await;
     super::maintenance::flush_cache_ops_on_shutdown(state).await;
     Ok(())
 }
@@ -152,6 +153,52 @@ async fn pending_entries_empty(state: &AppState) -> bool {
         pending.entry_count()
     };
     pending_entries == 0
+}
+
+async fn publish_current_kv_version_on_shutdown(state: &AppState) {
+    if state.read_only {
+        return;
+    }
+
+    let entries = state.kv_active_set_snapshot();
+    if entries.is_empty() {
+        return;
+    }
+
+    for tag in cache_registry::kv_visibility_tags(state) {
+        match state
+            .api_client
+            .publish_cache_kv_current_version(&state.workspace, &tag, &entries)
+            .await
+        {
+            Ok(Some(response)) => {
+                if crate::serve::state::diagnostics_enabled() {
+                    eprintln!(
+                        "KV current version: tag={} published version={} marked={} requested={} missing={}",
+                        tag,
+                        response
+                            .current_kv_version
+                            .map(|version| version.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        response.marked_count,
+                        response.requested_count,
+                        response.missing_count,
+                    );
+                }
+                if response.missing_count > 0 {
+                    log::warn!(
+                        "KV current version publish for tag {} missed {} active keys",
+                        tag,
+                        response.missing_count
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!("KV current version publish for tag {tag} failed: {error}");
+            }
+        }
+    }
 }
 
 pub(super) async fn shutdown_signal(shutdown_requested: Arc<AtomicBool>) {
@@ -353,6 +400,95 @@ mod tests {
         );
         assert_eq!(state.kv_pending.read().await.entry_count(), 1);
         blob_stage_mock.assert_async().await;
+        cleanup_runtime_temp_dir(&state).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_current_version_publish_uses_active_kv_set() {
+        let mut server = Server::new_async().await;
+        let _guard = test_env::lock();
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let home_env = EnvVarGuard::new("HOME");
+        let api_url_env = EnvVarGuard::new("BORINGCACHE_API_URL");
+        let auth_token_env = EnvVarGuard::new("BORINGCACHE_AUTH_TOKEN");
+        let test_mode_env = EnvVarGuard::new("BORINGCACHE_TEST_MODE");
+        home_env.set(temp_home.path());
+        api_url_env.set(server.url());
+        auth_token_env.set("test-token");
+        test_mode_env.set("1");
+
+        let api_client =
+            ApiClient::new_with_token_override(Some("test-token".to_string())).expect("client");
+        let (state, _listener, _replication_rx) = super::super::listener::build_server_runtime(
+            api_client,
+            "org/repo".to_string(),
+            "127.0.0.1".to_string(),
+            0,
+            TagResolver::new(None, GitContext::default(), false),
+            Vec::new(),
+            "registry".to_string(),
+            vec!["registry".to_string()],
+            Vec::new(),
+            BTreeMap::new(),
+            false,
+            crate::serve::OciHydrationPolicy::MetadataOnly,
+            true,
+            false,
+        )
+        .await
+        .expect("server runtime");
+
+        state.record_kv_active_key("sccache", "sccache/hot");
+
+        let capabilities_mock = server
+            .mock("GET", "/v2/capabilities")
+            .expect(1)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "api_version": "v2",
+                    "features": {
+                        "cache_kv_entries_v1": true,
+                        "cache_kv_entries_current_version_v1": true
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let publish_mock = server
+            .mock(
+                "POST",
+                "/v2/workspaces/org/repo/cache-kv-entries/current-version",
+            )
+            .expect(1)
+            .match_body(Matcher::PartialJson(json!({
+                "tag": "registry",
+                "entries": [
+                    { "namespace": "sccache", "scoped_key": "sccache/hot" }
+                ]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "response_type": "current_version",
+                    "current_kv_version": 1,
+                    "requested_count": 1,
+                    "marked_count": 1,
+                    "missing_count": 0,
+                    "missing": []
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        publish_current_kv_version_on_shutdown(&state).await;
+
+        capabilities_mock.assert_async().await;
+        publish_mock.assert_async().await;
         cleanup_runtime_temp_dir(&state).await;
     }
 

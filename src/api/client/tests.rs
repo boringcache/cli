@@ -1049,6 +1049,145 @@ async fn test_cache_kv_summary_falls_back_to_streaming_for_old_web() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn test_cache_kv_current_version_streams_current_rows_when_supported() {
+    let _guard = test_env::lock();
+
+    if !networking_available() {
+        eprintln!(
+            "skipping test_cache_kv_current_version_streams_current_rows_when_supported: networking disabled in sandbox"
+        );
+        return;
+    }
+
+    let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+    let original_home = std::env::var("HOME").ok();
+    test_env::set_var("HOME", temp_home.path());
+
+    let mut server = mockito::Server::new_async().await;
+    let capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"api_version":"v2","features":{"cache_kv_entries_v1":true,"cache_kv_entries_current_version_v1":true}}"#,
+        )
+        .create_async()
+        .await;
+    let current_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(
+                r"^/v2/workspaces/ns/ws/cache-kv-entries\?tag=kv-tag&limit=5000&version=current$"
+                    .to_string(),
+            ),
+        )
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"entries":[{"namespace":"sccache","scoped_key":"sccache/hot","kv_version":3,"blob":{"digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","size_bytes":5}}],"next_cursor":null}"#,
+        )
+        .create_async()
+        .await;
+
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+        .expect("client should initialize");
+    let response = client
+        .stream_current_cache_kv_entries("ns/ws", "kv-tag", None, 5_000)
+        .await
+        .expect("current stream should succeed");
+
+    assert_eq!(response.entries.len(), 1);
+    assert_eq!(response.entries[0].scoped_key, "sccache/hot");
+    assert_eq!(response.entries[0].kv_version, Some(3));
+
+    capabilities_mock.assert_async().await;
+    current_mock.assert_async().await;
+
+    if let Some(home) = original_home {
+        test_env::set_var("HOME", home);
+    }
+    test_env::remove_var("BORINGCACHE_API_URL");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_cache_kv_current_version_publish_posts_active_set_when_supported() {
+    let _guard = test_env::lock();
+
+    if !networking_available() {
+        eprintln!(
+            "skipping test_cache_kv_current_version_publish_posts_active_set_when_supported: networking disabled in sandbox"
+        );
+        return;
+    }
+
+    let temp_home = tempfile::tempdir().expect("failed to create temp dir");
+    let original_home = std::env::var("HOME").ok();
+    test_env::set_var("HOME", temp_home.path());
+
+    let mut server = mockito::Server::new_async().await;
+    let capabilities_mock = server
+        .mock("GET", "/v2/capabilities")
+        .match_header("authorization", "Bearer test-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"api_version":"v2","features":{"cache_kv_entries_v1":true,"cache_kv_entries_current_version_v1":true}}"#,
+        )
+        .create_async()
+        .await;
+    let publish_mock = server
+        .mock("POST", "/v2/workspaces/ns/ws/cache-kv-entries/current-version")
+        .match_header("authorization", "Bearer test-token")
+        .match_body(Matcher::PartialJson(json!({
+            "tag": "kv-tag",
+            "entries": [
+                { "namespace": "sccache", "scoped_key": "sccache/hot" }
+            ]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"response_type":"current_version","current_kv_version":4,"requested_count":1,"marked_count":1,"missing_count":0,"missing":[]}"#,
+        )
+        .create_async()
+        .await;
+
+    test_env::set_var("BORINGCACHE_API_URL", server.url());
+
+    let client = ApiClient::new_with_token_override(Some("test-token".to_string()))
+        .expect("client should initialize");
+    let response = client
+        .publish_cache_kv_current_version(
+            "ns/ws",
+            "kv-tag",
+            &[cache::CacheKvActiveSetItem {
+                namespace: "sccache".to_string(),
+                scoped_key: "sccache/hot".to_string(),
+            }],
+        )
+        .await
+        .expect("publish should succeed")
+        .expect("supported web should publish");
+
+    assert_eq!(response.current_kv_version, Some(4));
+    assert_eq!(response.marked_count, 1);
+
+    capabilities_mock.assert_async().await;
+    publish_mock.assert_async().await;
+
+    if let Some(home) = original_home {
+        test_env::set_var("HOME", home);
+    }
+    test_env::remove_var("BORINGCACHE_API_URL");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn test_cache_kv_multi_tag_upsert_falls_back_for_old_web() {
     let _guard = test_env::lock();
 

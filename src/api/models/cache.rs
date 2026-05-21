@@ -629,6 +629,32 @@ pub struct CacheKvEntryUpsertRequest {
     pub blob_receipts: Vec<BlobReceipt>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct CacheKvActiveSetItem {
+    pub namespace: String,
+    pub scoped_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CacheKvCurrentVersionRequest {
+    pub tag: String,
+    pub entries: Vec<CacheKvActiveSetItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CacheKvCurrentVersionResponse {
+    #[serde(default)]
+    pub current_kv_version: Option<u64>,
+    #[serde(default)]
+    pub requested_count: u64,
+    #[serde(default)]
+    pub marked_count: u64,
+    #[serde(default)]
+    pub missing_count: u64,
+    #[serde(default)]
+    pub missing: Vec<String>,
+}
+
 #[derive(Debug, Deserialize, Clone, Copy)]
 pub struct CacheKvEntriesSummaryResponse {
     #[serde(default)]
@@ -648,6 +674,8 @@ pub struct CacheKvEntryRecord {
     pub namespace: String,
     pub scoped_key: String,
     pub blob: BlobDescriptor,
+    #[serde(default)]
+    pub kv_version: Option<u64>,
     #[serde(default)]
     pub last_read_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]

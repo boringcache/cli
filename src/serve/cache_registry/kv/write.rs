@@ -168,6 +168,7 @@ pub(crate) async fn put_kv_object_with_options(
         blob_size,
         put_start.elapsed().as_millis() as u64,
     );
+    state.record_kv_active_key(namespace.metric_name(), &scoped_key);
 
     put_probe.stage("respond");
     log::debug!("KV PUT {scoped_key}: queued ({blob_size} bytes, digest={blob_digest})");

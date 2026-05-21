@@ -1,5 +1,5 @@
 use crate::api::client::ApiClient;
-use crate::api::models::cache::BlobDescriptor;
+use crate::api::models::cache::{BlobDescriptor, CacheKvActiveSetItem};
 use crate::ci_detection::{CiRunContext, CiSourceRefType};
 use crate::tag_utils::TagResolver;
 use dashmap::DashMap;
@@ -125,6 +125,7 @@ pub struct AppState {
     pub kv_next_flush_at: Arc<RwLock<Option<Instant>>>,
     pub kv_flush_scheduled: Arc<AtomicBool>,
     pub kv_published_index: Arc<RwLock<KvPublishedIndex>>,
+    pub kv_active_set: Arc<DashMap<String, CacheKvActiveSetItem>>,
     pub kv_flushing: Arc<RwLock<Option<KvFlushingSnapshot>>>,
     pub shutdown_requested: Arc<AtomicBool>,
     pub kv_recent_misses: Arc<DashMap<String, Instant>>,
@@ -168,6 +169,36 @@ impl AppState {
             .lock()
             .ok()
             .and_then(|guard| guard.clone())
+    }
+
+    pub fn record_kv_active_key(&self, namespace: &str, scoped_key: &str) {
+        let namespace = namespace.trim();
+        let scoped_key = scoped_key.trim();
+        if namespace.is_empty() || scoped_key.is_empty() {
+            return;
+        }
+
+        self.kv_active_set.insert(
+            scoped_key.to_string(),
+            CacheKvActiveSetItem {
+                namespace: namespace.to_string(),
+                scoped_key: scoped_key.to_string(),
+            },
+        );
+    }
+
+    pub fn kv_active_set_snapshot(&self) -> Vec<CacheKvActiveSetItem> {
+        let mut entries = self
+            .kv_active_set
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.namespace
+                .cmp(&right.namespace)
+                .then_with(|| left.scoped_key.cmp(&right.scoped_key))
+        });
+        entries
     }
 
     pub fn ci_provider(&self) -> Option<String> {

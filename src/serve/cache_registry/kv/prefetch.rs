@@ -1163,7 +1163,7 @@ pub(crate) async fn run_startup_warmup(
 
     let diagnostics = crate::serve::state::diagnostics_enabled();
     if diagnostics {
-        eprintln!("Prefetch: loading index and hydrating full tag before serving...");
+        eprintln!("Prefetch: loading index and hydrating current KV version before serving...");
     }
     let started_at = std::time::Instant::now();
 
@@ -1174,8 +1174,8 @@ pub(crate) async fn run_startup_warmup(
         "sync:start".to_string(),
     );
 
-    match load_existing_index_snapshot(state).await {
-        Ok((entries, blob_order, Some(cache_entry_id), _manifest_root_digest))
+    match load_existing_index_snapshot_with_tag(state).await {
+        Ok((resolved_tag, entries, blob_order, Some(cache_entry_id), _manifest_root_digest))
             if !entries.is_empty() =>
         {
             let count = entries.len();
@@ -1196,19 +1196,23 @@ pub(crate) async fn run_startup_warmup(
             let total_unique_blobs = unique_blobs.len();
             let total_unique_bytes: u64 =
                 unique_blobs.iter().map(|blob| blob.size_bytes).sum::<u64>();
+            let (warm_mode, warm_blobs) =
+                startup_warm_blobs(state, &resolved_tag, &unique_blobs).await;
+            let target_blob_count = warm_blobs.len();
+            let target_bytes: u64 = warm_blobs.iter().map(|blob| blob.size_bytes).sum::<u64>();
             let concurrency_plan = adaptive_startup_prefetch_concurrency(
                 state.blob_prefetch_max_concurrency,
                 state.blob_prefetch_concurrency_from_env,
-                total_unique_blobs,
-                total_unique_bytes,
+                target_blob_count,
+                target_bytes,
             );
             state
                 .prefetch_metrics
                 .record_startup_plan(crate::serve::state::StartupPrefetchPlan {
-                    mode: "full_tag",
+                    mode: warm_mode,
                     total_unique_blobs,
-                    target_blobs: total_unique_blobs,
-                    target_bytes: total_unique_bytes,
+                    target_blobs: target_blob_count,
+                    target_bytes,
                     max_concurrency: concurrency_plan.max_concurrency,
                     effective_concurrency: concurrency_plan.effective_concurrency,
                     initial_concurrency: concurrency_plan.initial_concurrency,
@@ -1218,8 +1222,10 @@ pub(crate) async fn run_startup_warmup(
 
             if diagnostics {
                 eprintln!(
-                    "Prefetch: {count} entries loaded, hydrating full tag locally ({} blobs, {:.1} MB, concurrency_initial={}, concurrency_ceiling={}, resource_max={}, source={}, reason={}, adaptive={})",
+                    "Prefetch: {count} entries loaded, hydrating {warm_mode} locally ({} of {} blobs, {:.1} of {:.1} MB, concurrency_initial={}, concurrency_ceiling={}, resource_max={}, source={}, reason={}, adaptive={})",
+                    target_blob_count,
                     total_unique_blobs,
+                    target_bytes as f64 / (1024.0 * 1024.0),
                     total_unique_bytes as f64 / (1024.0 * 1024.0),
                     concurrency_plan.initial_concurrency,
                     concurrency_plan.effective_concurrency,
@@ -1231,10 +1237,10 @@ pub(crate) async fn run_startup_warmup(
             }
 
             let startup_url_stats =
-                preload_download_urls_for_blobs(state, &cache_entry_id, &unique_blobs).await;
+                preload_download_urls_for_blobs(state, &cache_entry_id, &warm_blobs).await;
             if diagnostics {
                 eprintln!(
-                    "Prefetch: full-tag URL coverage resolved={}/{} missing={}",
+                    "Prefetch: {warm_mode} URL coverage resolved={}/{} missing={}",
                     startup_url_stats.resolved,
                     startup_url_stats.requested,
                     startup_url_stats.missing,
@@ -1245,11 +1251,11 @@ pub(crate) async fn run_startup_warmup(
                 .record_startup_url_coverage(startup_url_stats.resolved, startup_url_stats.missing);
 
             if diagnostics {
-                eprintln!("Prefetch: warming full tag...");
+                eprintln!("Prefetch: warming {warm_mode}...");
             }
             match tokio::time::timeout(
                 KV_PREFETCH_READINESS_TIMEOUT,
-                prefetch_all_blobs(state, &cache_entry_id, &unique_blobs, concurrency_plan),
+                prefetch_all_blobs(state, &cache_entry_id, &warm_blobs, concurrency_plan),
             )
             .await
             {
@@ -1271,14 +1277,14 @@ pub(crate) async fn run_startup_warmup(
                 }
             }
 
-            let missing_local_blobs = count_missing_local_blobs(state, &unique_blobs).await;
+            let missing_local_blobs = count_missing_local_blobs(state, &warm_blobs).await;
             state
                 .prefetch_metrics
                 .record_startup_cold_blobs(missing_local_blobs);
             if missing_local_blobs > 0 {
                 let message = format!(
                     "Startup warmup incomplete: {missing_local_blobs}/{} blobs are still cold",
-                    unique_blobs.len()
+                    warm_blobs.len()
                 );
                 log::warn!("{message}");
                 eprintln!("Prefetch: {message}; serving remaining blobs on demand");
@@ -1298,6 +1304,28 @@ pub(crate) async fn run_startup_warmup(
             published.set_empty_incomplete();
             log::warn!("Prefetch: index load failed: {e:?}");
             eprintln!("Prefetch: index load failed; serving cache reads on demand");
+        }
+    }
+}
+
+async fn startup_warm_blobs(
+    state: &AppState,
+    tag: &str,
+    full_blobs: &[BlobDescriptor],
+) -> (&'static str, Vec<BlobDescriptor>) {
+    if !state.api_client.supports_cache_kv_current_version().await {
+        return ("full_tag", full_blobs.to_vec());
+    }
+
+    match load_existing_current_version_index(state, tag).await {
+        Ok((_entries, current_blobs, _cache_entry_id, _manifest_root_digest)) => {
+            ("current_version", current_blobs)
+        }
+        Err(error) => {
+            log::warn!(
+                "Prefetch: current KV version load failed for tag {tag}; falling back to full tag: {error:?}"
+            );
+            ("full_tag", full_blobs.to_vec())
         }
     }
 }
@@ -1322,7 +1350,7 @@ pub(crate) async fn prefetch_all_blobs(
         startup_targets,
         startup_summary,
         concurrency_plan,
-        "Prefetch: full tag",
+        "Prefetch: startup warm",
     )
     .await;
 

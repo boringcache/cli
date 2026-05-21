@@ -498,6 +498,7 @@ impl ApiClient {
         tag: &str,
         cursor: Option<&str>,
         limit: usize,
+        version: Option<&str>,
     ) -> Result<String> {
         ensure!(!tag.trim().is_empty(), "tag must not be empty");
         let encoded_tag = urlencoding::encode(tag);
@@ -505,6 +506,10 @@ impl ApiClient {
             workspace,
             &format!("cache-kv-entries?tag={encoded_tag}&limit={limit}"),
         )?;
+        if let Some(version) = version.filter(|value| !value.trim().is_empty()) {
+            endpoint.push_str("&version=");
+            endpoint.push_str(&urlencoding::encode(version));
+        }
         if let Some(cursor) = cursor.filter(|value| !value.trim().is_empty()) {
             endpoint.push_str("&cursor=");
             endpoint.push_str(&urlencoding::encode(cursor));
@@ -520,8 +525,36 @@ impl ApiClient {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<crate::api::models::cache::CacheKvEntriesResponse> {
-        let endpoint = self.cache_kv_entries_endpoint(workspace, tag, cursor, limit)?;
+        let endpoint = self.cache_kv_entries_endpoint(workspace, tag, cursor, limit, None)?;
         self.get_v2(&endpoint).await
+    }
+
+    pub async fn stream_current_cache_kv_entries(
+        &self,
+        workspace: &str,
+        tag: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::api::models::cache::CacheKvEntriesResponse> {
+        if !self
+            .get_capabilities()
+            .await
+            .cache_kv_entries_current_version_v1
+        {
+            return self
+                .stream_cache_kv_entries(workspace, tag, cursor, limit)
+                .await;
+        }
+
+        let endpoint =
+            self.cache_kv_entries_endpoint(workspace, tag, cursor, limit, Some("current"))?;
+        self.get_v2(&endpoint).await
+    }
+
+    pub async fn supports_cache_kv_current_version(&self) -> bool {
+        self.get_capabilities()
+            .await
+            .cache_kv_entries_current_version_v1
     }
 
     pub async fn try_stream_cache_kv_entries(
@@ -531,7 +564,7 @@ impl ApiClient {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Option<crate::api::models::cache::CacheKvEntriesResponse>> {
-        let endpoint = self.cache_kv_entries_endpoint(workspace, tag, cursor, limit)?;
+        let endpoint = self.cache_kv_entries_endpoint(workspace, tag, cursor, limit, None)?;
         let response = self
             .get_response_with_base(&self.v2_base_url, &endpoint)
             .await?;
@@ -725,6 +758,40 @@ impl ApiClient {
             entries: response_entries,
             next_cursor: None,
         })
+    }
+
+    pub async fn publish_cache_kv_current_version(
+        &self,
+        workspace: &str,
+        tag: &str,
+        entries: &[crate::api::models::cache::CacheKvActiveSetItem],
+    ) -> Result<Option<crate::api::models::cache::CacheKvCurrentVersionResponse>> {
+        ensure!(!tag.trim().is_empty(), "tag must not be empty");
+        if entries.is_empty()
+            || !self
+                .get_capabilities()
+                .await
+                .cache_kv_entries_current_version_v1
+        {
+            return Ok(None);
+        }
+
+        let endpoint = self.workspace_endpoint(workspace, "cache-kv-entries/current-version")?;
+        let body = crate::api::models::cache::CacheKvCurrentVersionRequest {
+            tag: tag.to_string(),
+            entries: entries.to_vec(),
+        };
+        let response = self
+            .post_v2_with_request_metrics(
+                &endpoint,
+                &body,
+                CACHE_METRIC_ENDPOINT_OPERATION_KV_ENTRIES_CURRENT_VERSION,
+                Some(1),
+                Some(1),
+                Some(entries.len() as u64),
+            )
+            .await?;
+        Ok(Some(response))
     }
 
     pub async fn cache_kv_blob_download_urls(

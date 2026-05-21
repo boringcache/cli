@@ -206,6 +206,7 @@ pub(crate) use kv::flush_kv_index_on_shutdown;
 pub(crate) use kv::get_or_head_kv_object;
 pub(crate) use kv::get_or_head_kv_object_with_integrity;
 pub(crate) use kv::kv_publish_tags_visible;
+pub(crate) use kv::kv_visibility_tags;
 pub(crate) use kv::lookup_published_blob;
 pub(crate) use kv::maybe_refresh_published_index_for_lookup;
 pub(crate) use kv::poll_tag_version_loop;

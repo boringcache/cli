@@ -30,6 +30,8 @@ const BLOB_METRIC_ENDPOINT_OPERATION_DOWNLOAD_URLS: &str = "cache_blobs_download
 const CACHE_METRIC_ENDPOINT_OPERATION_KV_ENTRIES_UPSERT: &str = "cache_kv_entries_upsert";
 const CACHE_METRIC_ENDPOINT_OPERATION_KV_ENTRIES_DOWNLOAD_URLS: &str =
     "cache_kv_entries_download_urls";
+const CACHE_METRIC_ENDPOINT_OPERATION_KV_ENTRIES_CURRENT_VERSION: &str =
+    "cache_kv_entries_current_version";
 const CACHE_METRIC_ENDPOINT_OPERATION_SAVE_ENTRY: &str = "cache_flush_upload";
 const CACHE_METRIC_ENDPOINT_OPERATION_CONFIRM_PUBLISH: &str = "cache_finalize_publish";
 const CACHE_METRIC_ENDPOINT_OPERATION_UPLOAD_SESSION_BLOB_RECEIPTS: &str =
@@ -76,6 +78,8 @@ struct CapabilityFlags {
     cache_kv_entries_summary_v1: bool,
     #[serde(default)]
     cache_kv_entries_multi_tag_upsert_v1: bool,
+    #[serde(default)]
+    cache_kv_entries_current_version_v1: bool,
     #[serde(default)]
     cas_publish_bootstrap_if_match: Option<String>,
 }

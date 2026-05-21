@@ -157,9 +157,7 @@ pub(super) async fn collect_post_command_evidence(
         ui::warn("sccache native tool evidence was unavailable after the wrapped command");
     }
 
-    let Some(evidence) = evidence else {
-        return None;
-    };
+    let evidence = evidence?;
     let evidence_json = match serde_json::to_value(&evidence) {
         Ok(value) => value,
         Err(error) => {
