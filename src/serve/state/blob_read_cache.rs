@@ -1,6 +1,7 @@
 use super::*;
 
 const BLOB_READ_CACHE_DIR_ENV: &str = "BORINGCACHE_BLOB_READ_CACHE_DIR";
+const BLOB_READ_MEMORY_CACHE_BYTES_ENV: &str = "BORINGCACHE_BLOB_READ_MEMORY_CACHE_BYTES";
 const BLOB_READ_CACHE_DIR_NAME: &str = "boringcache-blob-cache";
 const BLOB_READ_SEGMENTS_DIR_NAME: &str = "segments";
 const BLOB_READ_SEGMENT_PREFIX: &str = "segment-";
@@ -37,6 +38,7 @@ pub struct BlobReadHandle {
     path: PathBuf,
     offset: u64,
     size_bytes: u64,
+    memory: Option<Arc<[u8]>>,
 }
 
 impl BlobReadHandle {
@@ -45,6 +47,7 @@ impl BlobReadHandle {
             path,
             offset: 0,
             size_bytes,
+            memory: None,
         }
     }
 
@@ -53,6 +56,7 @@ impl BlobReadHandle {
             path,
             offset,
             size_bytes,
+            memory: None,
         }
     }
 
@@ -66,6 +70,17 @@ impl BlobReadHandle {
 
     pub fn size_bytes(&self) -> u64 {
         self.size_bytes
+    }
+
+    pub fn memory_slice(&self, offset: u64, size_bytes: u64) -> Option<bytes::Bytes> {
+        let memory = self.memory.as_ref()?.clone();
+        let end = offset.checked_add(size_bytes)?;
+        let start = usize::try_from(offset).ok()?;
+        let end = usize::try_from(end).ok()?;
+        if end > memory.len() {
+            return None;
+        }
+        Some(bytes::Bytes::from_owner(memory).slice(start..end))
     }
 }
 
@@ -131,8 +146,11 @@ pub struct BlobReadCache {
     cache_dir: PathBuf,
     total_bytes: AtomicU64,
     max_bytes: u64,
+    memory_total_bytes: AtomicU64,
+    memory_max_bytes: u64,
     pub(super) inflight: Arc<DashMap<String, Arc<Notify>>>,
     storage_index: Arc<DashMap<String, BlobReadStorageEntry>>,
+    memory_index: Arc<DashMap<String, Arc<[u8]>>>,
     pins: Arc<DashMap<String, AtomicU64>>,
     segment_entry_keys: Arc<DashMap<u64, Vec<String>>>,
     segment_state: Arc<Mutex<BlobReadSegmentState>>,
@@ -176,8 +194,11 @@ impl BlobReadCache {
             cache_dir,
             total_bytes: AtomicU64::new(total_bytes),
             max_bytes: max_bytes.max(1),
+            memory_total_bytes: AtomicU64::new(0),
+            memory_max_bytes: memory_cache_max_bytes_from_env(),
             inflight: Arc::new(DashMap::new()),
             storage_index,
+            memory_index: Arc::new(DashMap::new()),
             pins: Arc::new(DashMap::new()),
             segment_entry_keys: Arc::new(segment_entry_keys),
             segment_state: Arc::new(Mutex::new(segment_state)),
@@ -196,6 +217,14 @@ impl BlobReadCache {
 
     pub fn total_bytes(&self) -> u64 {
         self.total_bytes.load(Ordering::Acquire)
+    }
+
+    pub fn memory_bytes(&self) -> u64 {
+        self.memory_total_bytes.load(Ordering::Acquire)
+    }
+
+    pub fn memory_max_bytes(&self) -> u64 {
+        self.memory_max_bytes
     }
 
     async fn await_blob_read_flight(
@@ -247,6 +276,10 @@ impl BlobReadCache {
             .storage_index
             .get(&key)
             .map(|item| item.value().clone())?;
+        let memory = self
+            .memory_index
+            .get(&key)
+            .map(|item| Arc::clone(item.value()));
         match entry {
             BlobReadStorageEntry::LegacyFile { path, size_bytes } => {
                 let metadata = tokio::fs::metadata(&path).await.ok()?;
@@ -267,6 +300,7 @@ impl BlobReadCache {
                     path,
                     offset: 0,
                     size_bytes: size,
+                    memory,
                 })
             }
             BlobReadStorageEntry::Segment {
@@ -278,6 +312,7 @@ impl BlobReadCache {
                 path,
                 offset,
                 size_bytes,
+                memory,
             }),
         }
     }
@@ -312,6 +347,25 @@ impl BlobReadCache {
         })
     }
 
+    pub async fn hydrate_memory(&self, digest: &str) -> io::Result<bool> {
+        let Some(key) = Self::normalize_digest_hex(digest) else {
+            return Ok(false);
+        };
+        if self.memory_max_bytes == 0 || self.memory_index.contains_key(&key) {
+            return Ok(false);
+        }
+
+        let Some(entry) = self
+            .storage_index
+            .get(&key)
+            .map(|item| item.value().clone())
+        else {
+            return Ok(false);
+        };
+
+        self.store_memory_from_entry(&key, &entry).await
+    }
+
     pub async fn remove(&self, digest: &str) {
         let Some(key) = Self::normalize_digest_hex(digest) else {
             return;
@@ -319,6 +373,7 @@ impl BlobReadCache {
         if self.is_pinned(&key) {
             return;
         }
+        self.remove_memory_entry(&key);
         let Some((_, entry)) = self.storage_index.remove(&key) else {
             return;
         };
@@ -352,7 +407,8 @@ impl BlobReadCache {
                 let Some(entry) = self.append_blob_bytes(&key, data).await? else {
                     return Ok(false);
                 };
-                self.track_storage_entry(key, entry);
+                self.track_storage_entry(key.clone(), entry);
+                self.store_memory_entry(&key, Arc::<[u8]>::from(data.to_vec().into_boxed_slice()));
                 if let Err(error) = self.evict_over_budget().await {
                     log::warn!("Blob read cache eviction failed after insert: {error}");
                 }
@@ -415,7 +471,11 @@ impl BlobReadCache {
                 let Some(entry) = entry else {
                     return Ok(false);
                 };
-                self.track_storage_entry(key, entry);
+                let entry_for_memory = entry.clone();
+                self.track_storage_entry(key.clone(), entry);
+                if let Err(error) = self.store_memory_from_entry(&key, &entry_for_memory).await {
+                    log::warn!("Blob read memory cache fill failed after promote: {error}");
+                }
                 if let Err(error) = self.evict_over_budget().await {
                     log::warn!("Blob read cache eviction failed after promote: {error}");
                 }
@@ -596,6 +656,7 @@ impl BlobReadCache {
             }
             if tokio::fs::remove_file(&path).await.is_ok() {
                 self.storage_index.remove(&digest);
+                self.remove_memory_entry(&digest);
                 total = total.saturating_sub(size_bytes);
             }
         }
@@ -623,6 +684,7 @@ impl BlobReadCache {
                     if let Some((_, keys)) = self.segment_entry_keys.remove(&segment_id) {
                         for key in keys {
                             self.storage_index.remove(&key);
+                            self.remove_memory_entry(&key);
                         }
                     }
                     total = total.saturating_sub(meta.size_bytes);
@@ -632,6 +694,94 @@ impl BlobReadCache {
 
         self.total_bytes.store(total, Ordering::Release);
         Ok(())
+    }
+
+    fn store_memory_entry(&self, key: &str, data: Arc<[u8]>) -> bool {
+        if self.memory_max_bytes == 0 || self.memory_index.contains_key(key) {
+            return false;
+        }
+
+        let size_bytes = data.len() as u64;
+        if size_bytes > self.memory_max_bytes {
+            return false;
+        }
+
+        let mut current = self.memory_total_bytes.load(Ordering::Acquire);
+        loop {
+            let Some(next) = current.checked_add(size_bytes) else {
+                return false;
+            };
+            if next > self.memory_max_bytes {
+                return false;
+            }
+            match self.memory_total_bytes.compare_exchange(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => match self.memory_index.entry(key.to_string()) {
+                    dashmap::mapref::entry::Entry::Occupied(_) => {
+                        self.sub_memory_total(size_bytes);
+                        return false;
+                    }
+                    dashmap::mapref::entry::Entry::Vacant(entry) => {
+                        entry.insert(data);
+                        return true;
+                    }
+                },
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    async fn store_memory_from_entry(
+        &self,
+        key: &str,
+        entry: &BlobReadStorageEntry,
+    ) -> io::Result<bool> {
+        if self.memory_max_bytes == 0 || self.memory_index.contains_key(key) {
+            return Ok(false);
+        }
+
+        let (path, offset, size_bytes) = match entry {
+            BlobReadStorageEntry::LegacyFile { path, size_bytes } => (path, 0, *size_bytes),
+            BlobReadStorageEntry::Segment {
+                path,
+                offset,
+                size_bytes,
+                ..
+            } => (path, *offset, *size_bytes),
+        };
+        if size_bytes > self.memory_max_bytes {
+            return Ok(false);
+        }
+        if self
+            .memory_total_bytes
+            .load(Ordering::Acquire)
+            .saturating_add(size_bytes)
+            > self.memory_max_bytes
+        {
+            return Ok(false);
+        }
+        let Ok(size) = usize::try_from(size_bytes) else {
+            return Ok(false);
+        };
+
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let mut file = tokio::fs::File::open(path).await?;
+        if offset > 0 {
+            file.seek(std::io::SeekFrom::Start(offset)).await?;
+        }
+        let mut data = vec![0u8; size];
+        file.read_exact(&mut data).await?;
+        Ok(self.store_memory_entry(key, Arc::<[u8]>::from(data.into_boxed_slice())))
+    }
+
+    fn remove_memory_entry(&self, key: &str) {
+        if let Some((_, data)) = self.memory_index.remove(key) {
+            self.sub_memory_total(data.len() as u64);
+        }
     }
 
     fn is_pinned(&self, key: &str) -> bool {
@@ -880,6 +1030,60 @@ impl BlobReadCache {
             }
         }
     }
+
+    fn sub_memory_total(&self, amount: u64) {
+        let mut current = self.memory_total_bytes.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_sub(amount);
+            match self.memory_total_bytes.compare_exchange(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+fn memory_cache_max_bytes_from_env() -> u64 {
+    std::env::var(BLOB_READ_MEMORY_CACHE_BYTES_ENV)
+        .ok()
+        .and_then(|value| parse_memory_cache_bytes(&value))
+        .unwrap_or(0)
+}
+
+fn parse_memory_cache_bytes(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some(0);
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if matches!(lower.as_str(), "0" | "false" | "off" | "no") {
+        return Some(0);
+    }
+
+    let suffixes = [
+        ("gib", 1024_u64 * 1024 * 1024),
+        ("gb", 1024_u64 * 1024 * 1024),
+        ("g", 1024_u64 * 1024 * 1024),
+        ("mib", 1024_u64 * 1024),
+        ("mb", 1024_u64 * 1024),
+        ("m", 1024_u64 * 1024),
+        ("kib", 1024_u64),
+        ("kb", 1024_u64),
+        ("k", 1024_u64),
+    ];
+
+    for (suffix, multiplier) in suffixes {
+        if let Some(number) = lower.strip_suffix(suffix) {
+            return number.trim().parse::<u64>().ok()?.checked_mul(multiplier);
+        }
+    }
+
+    lower.parse::<u64>().ok()
 }
 
 fn is_cross_device_rename_error(error: &io::Error) -> bool {

@@ -180,6 +180,13 @@ pub struct AdapterArgs {
     )]
     pub maven_build_cache_id: Option<String>,
 
+    #[arg(
+        long = "native-tool-evidence-json",
+        value_name = "PATH",
+        help = "Write normalized native-tool evidence JSON after supported adapters finish"
+    )]
+    pub native_tool_evidence_json: Option<String>,
+
     #[arg(long, help = "Print the resolved execution plan without running")]
     pub dry_run: bool,
 

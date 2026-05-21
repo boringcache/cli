@@ -603,6 +603,106 @@ async fn put_upload_returns_internal_error_on_body_stream_error() {
     let _ = tokio::fs::remove_file(&path).await;
 }
 
+#[tokio::test]
+async fn patch_upload_records_transfer_metrics() {
+    let state = test_state();
+    let path = write_temp_upload_file(&[]).await;
+    let payload = b"patch-metric-body";
+
+    {
+        let mut sessions = state.upload_sessions.write().await;
+        sessions.create(UploadSession::owned_temp_file(
+            "patch-metrics-session".to_string(),
+            "cache".to_string(),
+            path.clone(),
+            0,
+            None,
+            None,
+        ));
+    }
+
+    let response = patch_upload(
+        state.clone(),
+        "cache".to_string(),
+        "patch-metrics-session".to_string(),
+        HeaderMap::new(),
+        Body::from(payload.to_vec()),
+    )
+    .await
+    .expect("patch upload should succeed");
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let diagnostics = state
+        .oci_engine_diagnostics
+        .metadata_hints(state.oci_hydration_policy.as_str());
+    assert_eq!(
+        diagnostics.get("oci_engine_upload_patch_requests"),
+        Some(&"1".to_string())
+    );
+    assert_eq!(
+        diagnostics.get("oci_engine_upload_patch_bytes"),
+        Some(&payload.len().to_string())
+    );
+    assert_eq!(
+        diagnostics.get("oci_engine_upload_patch_first_byte_observations"),
+        Some(&"1".to_string())
+    );
+
+    let _ = tokio::fs::remove_file(&path).await;
+}
+
+#[tokio::test]
+async fn put_upload_records_transfer_metrics() {
+    let state = test_state();
+    let path = write_temp_upload_file(&[]).await;
+    let payload = b"put-metric-body";
+    let digest = cas_oci::prefixed_sha256_digest(payload);
+
+    {
+        let mut sessions = state.upload_sessions.write().await;
+        sessions.create(UploadSession::owned_temp_file(
+            "put-metrics-session".to_string(),
+            "cache".to_string(),
+            path.clone(),
+            0,
+            None,
+            None,
+        ));
+    }
+
+    let mut params = HashMap::new();
+    params.insert("digest".to_string(), digest);
+    let response = put_upload(
+        state.clone(),
+        "cache".to_string(),
+        "put-metrics-session".to_string(),
+        params,
+        HeaderMap::new(),
+        Body::from(payload.to_vec()),
+    )
+    .await
+    .expect("put upload should succeed");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let diagnostics = state
+        .oci_engine_diagnostics
+        .metadata_hints(state.oci_hydration_policy.as_str());
+    assert_eq!(
+        diagnostics.get("oci_engine_upload_put_requests"),
+        Some(&"1".to_string())
+    );
+    assert_eq!(
+        diagnostics.get("oci_engine_upload_put_bytes"),
+        Some(&payload.len().to_string())
+    );
+    assert_eq!(
+        diagnostics.get("oci_engine_upload_put_first_byte_observations"),
+        Some(&"1".to_string())
+    );
+
+    let _ = tokio::fs::remove_file(&path).await;
+}
+
 #[test]
 fn parse_upload_offset_prefers_range_start() {
     let mut headers = HeaderMap::new();

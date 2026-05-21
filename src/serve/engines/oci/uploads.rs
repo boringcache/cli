@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use crate::api::models::cache::BlobDescriptor;
 use crate::serve::http::error::OciError;
-use crate::serve::state::{AppState, BlobReadHandle, BlobReadLease, UploadSession};
+use crate::serve::state::{
+    AppState, BlobLocatorEntry, BlobReadHandle, BlobReadLease, UploadSession,
+};
 
 const OCI_API_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const EMPTY_FINALIZE_LOCAL_RETRY_ATTEMPTS: usize = 20;
@@ -38,7 +40,7 @@ pub(crate) struct UploadProgress {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum StartUploadOutcome {
-    Mounted { digest: String },
+    Mounted { digest: String, source: MountSource },
     Completed { uuid: String, digest: String },
     Accepted { uuid: String },
 }
@@ -66,6 +68,8 @@ enum EmptyFinalizeReuse {
 struct WrittenBody {
     bytes_written: u64,
     digest: String,
+    duration_ms: u64,
+    first_byte_latency_ms: Option<u64>,
 }
 
 enum ExistingMountedBlob {
@@ -78,6 +82,25 @@ impl ExistingMountedBlob {
         match self {
             Self::UploadSession(handle) => handle.size_bytes(),
             Self::BlobReadCache(lease) => lease.size_bytes(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MountSource {
+    ExistingTarget,
+    LocalSession,
+    LocalBodyCache,
+    RemoteLocator,
+}
+
+impl MountSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ExistingTarget => "existing-target",
+            Self::LocalSession => "local-session",
+            Self::LocalBodyCache => "local-body-cache",
+            Self::RemoteLocator => "remote-locator",
         }
     }
 }
@@ -141,6 +164,7 @@ pub(crate) async fn start_upload(
     state: &AppState,
     name: &str,
     mount_digest: Option<&str>,
+    mount_from: Option<&str>,
     digest_param: Option<&str>,
     body: Body,
 ) -> Result<StartUploadOutcome, OciError> {
@@ -151,9 +175,12 @@ pub(crate) async fn start_upload(
             )));
         }
 
-        if stage_mounted_blob_session(state, name, mount_digest).await? {
+        if let Some(source) =
+            stage_mounted_blob_session(state, name, mount_digest, mount_from).await?
+        {
             return Ok(StartUploadOutcome::Mounted {
                 digest: mount_digest.to_string(),
+                source,
             });
         }
     }
@@ -255,7 +282,14 @@ pub(crate) async fn patch_upload(
         .await
         .map_err(|e| OciError::internal(format!("Failed to seek temp file: {e}")))?;
 
-    let bytes_written = write_body_to_file(body, &mut file).await?.bytes_written;
+    let written = write_body_to_file(body, &mut file).await?;
+    state.oci_engine_diagnostics.record_upload_transfer(
+        "patch",
+        written.bytes_written,
+        written.duration_ms,
+        written.first_byte_latency_ms,
+    );
+    let bytes_written = written.bytes_written;
     drop(file);
 
     let mut sessions = state.upload_sessions.write().await;
@@ -320,6 +354,12 @@ pub(crate) async fn put_upload(
                 write_offset
             ))
         })?;
+    state.oci_engine_diagnostics.record_upload_transfer(
+        "put",
+        written.bytes_written,
+        written.duration_ms,
+        written.first_byte_latency_ms,
+    );
     let bytes_written = written.bytes_written;
     if write_offset == 0 && progress_before.bytes_received > 0 && bytes_written > 0 {
         file.set_len(bytes_written)
@@ -539,21 +579,23 @@ async fn stage_mounted_blob_session(
     state: &AppState,
     name: &str,
     digest: &str,
-) -> Result<bool, OciError> {
+    mount_from: Option<&str>,
+) -> Result<Option<MountSource>, OciError> {
     {
         let sessions = state.upload_sessions.read().await;
         if sessions.find_by_name_and_digest(name, digest).is_some() {
-            return Ok(true);
+            return Ok(Some(MountSource::ExistingTarget));
         }
     }
 
     if let Some(existing) = existing_mounted_blob_handle(state, name, digest).await {
         let session_id = format!("oci-mount-{}", uuid::Uuid::new_v4());
         let size_bytes = existing.size_bytes();
+        let source = existing.source();
 
         let mut sessions = state.upload_sessions.write().await;
         if sessions.find_by_name_and_digest(name, digest).is_some() {
-            return Ok(true);
+            return Ok(Some(MountSource::ExistingTarget));
         }
 
         match existing {
@@ -564,7 +606,7 @@ async fn stage_mounted_blob_session(
                 if sessions.find_by_name_and_digest(name, digest).is_some() {
                     drop(sessions);
                     let _ = tokio::fs::remove_file(&temp_path).await;
-                    return Ok(true);
+                    return Ok(Some(MountSource::ExistingTarget));
                 }
                 sessions.create(UploadSession::owned_temp_file(
                     session_id,
@@ -589,10 +631,14 @@ async fn stage_mounted_blob_session(
             }
         }
         state.oci_negative_cache.invalidate_blob(name, digest);
-        return Ok(true);
+        return Ok(Some(source));
     }
 
-    Ok(false)
+    if stage_remote_locator_mount(state, name, digest, mount_from).await? {
+        return Ok(Some(MountSource::RemoteLocator));
+    }
+
+    Ok(None)
 }
 
 async fn existing_mounted_blob_handle(
@@ -629,6 +675,84 @@ async fn existing_mounted_blob_handle(
         .lease_handle(digest)
         .await
         .map(ExistingMountedBlob::BlobReadCache)
+}
+
+impl ExistingMountedBlob {
+    fn source(&self) -> MountSource {
+        match self {
+            Self::UploadSession(_) => MountSource::LocalSession,
+            Self::BlobReadCache(_) => MountSource::LocalBodyCache,
+        }
+    }
+}
+
+async fn stage_remote_locator_mount(
+    state: &AppState,
+    name: &str,
+    digest: &str,
+    mount_from: Option<&str>,
+) -> Result<bool, OciError> {
+    let Some(locator_entry) = remote_mount_locator_entry(state, name, digest, mount_from).await
+    else {
+        return Ok(false);
+    };
+
+    match has_remote_blob(state, digest).await {
+        Ok(true) => {
+            let mut locator = state.blob_locator.write().await;
+            locator.insert(name, digest, locator_entry);
+            state.oci_negative_cache.invalidate_blob(name, digest);
+            Ok(true)
+        }
+        Ok(false) => {
+            state
+                .oci_engine_diagnostics
+                .record_upload_mount_remote_miss();
+            Ok(false)
+        }
+        Err(error) => {
+            state
+                .oci_engine_diagnostics
+                .record_upload_mount_remote_error();
+            log::warn!(
+                "OCI mount remote blob existence check failed for {}@{} ({})",
+                name,
+                digest,
+                error.message()
+            );
+            Ok(false)
+        }
+    }
+}
+
+async fn remote_mount_locator_entry(
+    state: &AppState,
+    name: &str,
+    digest: &str,
+    mount_from: Option<&str>,
+) -> Option<BlobLocatorEntry> {
+    let source_names = remote_mount_source_names(name, mount_from);
+    let locator = state.blob_locator.read().await;
+    for source_name in source_names {
+        if let Some(entry) = locator.get(&source_name, digest) {
+            return Some(entry.clone());
+        }
+    }
+    None
+}
+
+fn remote_mount_source_names(name: &str, mount_from: Option<&str>) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(source) = mount_from
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+    {
+        names.push(source.to_string());
+    }
+    if names.iter().all(|source| source != name) {
+        names.push(name.to_string());
+    }
+    names
 }
 
 async fn materialize_mounted_blob(
@@ -704,9 +828,11 @@ async fn write_body_to_file(
 ) -> Result<WrittenBody, OciError> {
     use tokio::io::AsyncWriteExt;
 
+    let started_at = Instant::now();
     let mut stream = body.into_data_stream();
     let mut bytes_written: u64 = 0;
     let mut hasher = Sha256::new();
+    let mut first_byte_latency_ms = None;
 
     loop {
         let next_chunk = stream.next().await;
@@ -718,6 +844,9 @@ async fn write_body_to_file(
         if chunk.is_empty() {
             continue;
         }
+        if first_byte_latency_ms.is_none() {
+            first_byte_latency_ms = Some(started_at.elapsed().as_millis() as u64);
+        }
         file.write_all(&chunk)
             .await
             .map_err(|e| OciError::internal(format!("Failed to write request body chunk: {e}")))?;
@@ -728,6 +857,8 @@ async fn write_body_to_file(
     Ok(WrittenBody {
         bytes_written,
         digest: format!("sha256:{}", hex::encode(hasher.finalize())),
+        duration_ms: started_at.elapsed().as_millis() as u64,
+        first_byte_latency_ms,
     })
 }
 

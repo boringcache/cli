@@ -489,6 +489,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blob_read_cache_memory_layer_keeps_inserted_blob_when_enabled() {
+        let _guard = crate::test_env::lock();
+        crate::test_env::set_var("BORINGCACHE_BLOB_READ_MEMORY_CACHE_BYTES", "1m");
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache = BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 1024 * 1024)
+            .expect("blob cache");
+        let digest = format!("sha256:{}", "c".repeat(64));
+
+        let inserted = cache
+            .insert(&digest, b"memory-insert")
+            .await
+            .expect("insert");
+        assert!(inserted);
+        assert_eq!(cache.memory_max_bytes(), 1024 * 1024);
+        assert_eq!(cache.memory_bytes(), b"memory-insert".len() as u64);
+
+        let handle = cache.get_handle(&digest).await.expect("cache hit");
+        let memory = handle
+            .memory_slice(0, handle.size_bytes())
+            .expect("memory-backed handle");
+        assert_eq!(memory.as_ref(), b"memory-insert");
+    }
+
+    #[tokio::test]
+    async fn blob_read_cache_memory_layer_keeps_promoted_blob_when_enabled() {
+        let _guard = crate::test_env::lock();
+        crate::test_env::set_var("BORINGCACHE_BLOB_READ_MEMORY_CACHE_BYTES", "1m");
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache = BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 1024 * 1024)
+            .expect("blob cache");
+        let digest = format!("sha256:{}", "f".repeat(64));
+        let source_path = temp_dir.path().join("source-blob");
+        tokio::fs::write(&source_path, b"memory-promote")
+            .await
+            .expect("source");
+
+        let promoted = cache
+            .promote(&digest, &source_path, b"memory-promote".len() as u64)
+            .await
+            .expect("promote");
+        assert!(promoted);
+
+        let handle = cache.get_handle(&digest).await.expect("cache hit");
+        let memory = handle
+            .memory_slice(0, handle.size_bytes())
+            .expect("memory-backed handle");
+        assert_eq!(memory.as_ref(), b"memory-promote");
+    }
+
+    #[tokio::test]
+    async fn blob_read_cache_memory_layer_respects_budget() {
+        let _guard = crate::test_env::lock();
+        crate::test_env::set_var("BORINGCACHE_BLOB_READ_MEMORY_CACHE_BYTES", "4");
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache = BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 1024 * 1024)
+            .expect("blob cache");
+        let digest = format!("sha256:{}", "9".repeat(64));
+
+        let inserted = cache.insert(&digest, b"too-large").await.expect("insert");
+        assert!(inserted);
+        assert_eq!(cache.memory_bytes(), 0);
+
+        let handle = cache.get_handle(&digest).await.expect("cache hit");
+        assert!(handle.memory_slice(0, handle.size_bytes()).is_none());
+    }
+
+    #[tokio::test]
+    async fn blob_read_cache_memory_layer_hydrates_existing_local_blob_when_enabled() {
+        let _guard = crate::test_env::lock();
+        crate::test_env::set_var("BORINGCACHE_BLOB_READ_MEMORY_CACHE_BYTES", "1m");
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache_dir = temp_dir.path().join("blob-cache");
+        let digest = format!("sha256:{}", "7".repeat(64));
+
+        let cache = BlobReadCache::new_at(cache_dir.clone(), 1024 * 1024).expect("blob cache");
+        assert!(
+            cache
+                .insert(&digest, b"existing-local")
+                .await
+                .expect("insert")
+        );
+
+        let reloaded = BlobReadCache::new_at(cache_dir, 1024 * 1024).expect("reloaded cache");
+        assert_eq!(reloaded.memory_bytes(), 0);
+
+        let hydrated = reloaded
+            .hydrate_memory(&digest)
+            .await
+            .expect("hydrate memory");
+        assert!(hydrated);
+        assert_eq!(reloaded.memory_bytes(), b"existing-local".len() as u64);
+
+        let handle = reloaded.get_handle(&digest).await.expect("cache hit");
+        let memory = handle
+            .memory_slice(0, handle.size_bytes())
+            .expect("memory-backed handle");
+        assert_eq!(memory.as_ref(), b"existing-local");
+    }
+
+    #[tokio::test]
     async fn blob_read_cache_rejects_invalid_digest() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let cache = BlobReadCache::new_at(temp_dir.path().join("blob-cache"), 1024 * 1024)

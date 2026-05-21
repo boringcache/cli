@@ -21,17 +21,30 @@ pub(super) async fn start_upload(
         &state,
         &name,
         params.get("mount").map(String::as_str),
+        params.get("from").map(String::as_str),
         params.get("digest").map(String::as_str),
         body,
     )
     .await?;
 
     match outcome {
-        StartUploadOutcome::Mounted { digest } => created_blob_response(&name, &digest, None),
+        StartUploadOutcome::Mounted { digest, source } => {
+            state
+                .oci_engine_diagnostics
+                .record_upload_mount("created", Some(source.as_str()));
+            created_blob_response(&name, &digest, None)
+        }
         StartUploadOutcome::Completed { uuid, digest } => {
             created_blob_response(&name, &digest, Some(&uuid))
         }
-        StartUploadOutcome::Accepted { uuid } => started_upload_response(&name, &uuid),
+        StartUploadOutcome::Accepted { uuid } => {
+            if params.contains_key("mount") {
+                state
+                    .oci_engine_diagnostics
+                    .record_upload_mount("accepted", None);
+            }
+            started_upload_response(&name, &uuid)
+        }
     }
 }
 

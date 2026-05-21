@@ -410,6 +410,30 @@ mod tests {
 }
 
 pub struct OciEngineDiagnostics {
+    blob_head_requests: AtomicU64,
+    blob_head_hits: AtomicU64,
+    blob_head_misses: AtomicU64,
+    blob_head_errors: AtomicU64,
+    blob_head_duration_ms: AtomicU64,
+    upload_mount_attempts: AtomicU64,
+    upload_mount_created: AtomicU64,
+    upload_mount_accepted: AtomicU64,
+    upload_mount_existing_target: AtomicU64,
+    upload_mount_local_session: AtomicU64,
+    upload_mount_local_body_cache: AtomicU64,
+    upload_mount_remote_locator: AtomicU64,
+    upload_mount_remote_miss: AtomicU64,
+    upload_mount_remote_error: AtomicU64,
+    upload_patch_requests: AtomicU64,
+    upload_patch_bytes: AtomicU64,
+    upload_patch_duration_ms: AtomicU64,
+    upload_patch_first_byte_observations: AtomicU64,
+    upload_patch_first_byte_latency_ms: AtomicU64,
+    upload_put_requests: AtomicU64,
+    upload_put_bytes: AtomicU64,
+    upload_put_duration_ms: AtomicU64,
+    upload_put_first_byte_observations: AtomicU64,
+    upload_put_first_byte_latency_ms: AtomicU64,
     proof_total: AtomicU64,
     proof_bytes: AtomicU64,
     proof_upload_session: AtomicU64,
@@ -492,6 +516,30 @@ pub struct OciEngineDiagnostics {
 impl OciEngineDiagnostics {
     pub fn new() -> Self {
         Self {
+            blob_head_requests: AtomicU64::new(0),
+            blob_head_hits: AtomicU64::new(0),
+            blob_head_misses: AtomicU64::new(0),
+            blob_head_errors: AtomicU64::new(0),
+            blob_head_duration_ms: AtomicU64::new(0),
+            upload_mount_attempts: AtomicU64::new(0),
+            upload_mount_created: AtomicU64::new(0),
+            upload_mount_accepted: AtomicU64::new(0),
+            upload_mount_existing_target: AtomicU64::new(0),
+            upload_mount_local_session: AtomicU64::new(0),
+            upload_mount_local_body_cache: AtomicU64::new(0),
+            upload_mount_remote_locator: AtomicU64::new(0),
+            upload_mount_remote_miss: AtomicU64::new(0),
+            upload_mount_remote_error: AtomicU64::new(0),
+            upload_patch_requests: AtomicU64::new(0),
+            upload_patch_bytes: AtomicU64::new(0),
+            upload_patch_duration_ms: AtomicU64::new(0),
+            upload_patch_first_byte_observations: AtomicU64::new(0),
+            upload_patch_first_byte_latency_ms: AtomicU64::new(0),
+            upload_put_requests: AtomicU64::new(0),
+            upload_put_bytes: AtomicU64::new(0),
+            upload_put_duration_ms: AtomicU64::new(0),
+            upload_put_first_byte_observations: AtomicU64::new(0),
+            upload_put_first_byte_latency_ms: AtomicU64::new(0),
             proof_total: AtomicU64::new(0),
             proof_bytes: AtomicU64::new(0),
             proof_upload_session: AtomicU64::new(0),
@@ -584,6 +632,88 @@ impl OciEngineDiagnostics {
             _ => return,
         }
         .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_blob_head_response(&self, status: axum::http::StatusCode, duration_ms: u64) {
+        self.blob_head_requests.fetch_add(1, Ordering::AcqRel);
+        self.blob_head_duration_ms
+            .fetch_add(duration_ms, Ordering::AcqRel);
+        if status.is_success() {
+            self.blob_head_hits.fetch_add(1, Ordering::AcqRel);
+        } else if status == axum::http::StatusCode::NOT_FOUND {
+            self.blob_head_misses.fetch_add(1, Ordering::AcqRel);
+        } else {
+            self.blob_head_errors.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn record_upload_mount(&self, status: &str, source: Option<&str>) {
+        self.upload_mount_attempts.fetch_add(1, Ordering::AcqRel);
+        match status {
+            "created" => {
+                self.upload_mount_created.fetch_add(1, Ordering::AcqRel);
+                match source {
+                    Some("existing-target") => &self.upload_mount_existing_target,
+                    Some("local-session") => &self.upload_mount_local_session,
+                    Some("local-body-cache") => &self.upload_mount_local_body_cache,
+                    Some("remote-locator") => &self.upload_mount_remote_locator,
+                    _ => return,
+                }
+                .fetch_add(1, Ordering::AcqRel);
+            }
+            "accepted" => {
+                self.upload_mount_accepted.fetch_add(1, Ordering::AcqRel);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn record_upload_mount_remote_miss(&self) {
+        self.upload_mount_remote_miss.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_upload_mount_remote_error(&self) {
+        self.upload_mount_remote_error
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn record_upload_transfer(
+        &self,
+        method: &str,
+        bytes: u64,
+        duration_ms: u64,
+        first_byte_latency_ms: Option<u64>,
+    ) {
+        let (
+            requests,
+            byte_counter,
+            duration_counter,
+            first_byte_observations,
+            first_byte_latency_counter,
+        ) = match method {
+            "patch" => (
+                &self.upload_patch_requests,
+                &self.upload_patch_bytes,
+                &self.upload_patch_duration_ms,
+                &self.upload_patch_first_byte_observations,
+                &self.upload_patch_first_byte_latency_ms,
+            ),
+            "put" => (
+                &self.upload_put_requests,
+                &self.upload_put_bytes,
+                &self.upload_put_duration_ms,
+                &self.upload_put_first_byte_observations,
+                &self.upload_put_first_byte_latency_ms,
+            ),
+            _ => return,
+        };
+        requests.fetch_add(1, Ordering::AcqRel);
+        byte_counter.fetch_add(bytes, Ordering::AcqRel);
+        duration_counter.fetch_add(duration_ms, Ordering::AcqRel);
+        if let Some(latency_ms) = first_byte_latency_ms {
+            first_byte_observations.fetch_add(1, Ordering::AcqRel);
+            first_byte_latency_counter.fetch_add(latency_ms, Ordering::AcqRel);
+        }
     }
 
     pub fn record_local_blob_read(&self, served_bytes: u64, ranged: bool) {
@@ -802,6 +932,126 @@ impl OciEngineDiagnostics {
         )]);
 
         self.insert_counter(&mut hints, "oci_engine_proof_total", &self.proof_total);
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_blob_head_requests",
+            &self.blob_head_requests,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_blob_head_hits",
+            &self.blob_head_hits,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_blob_head_misses",
+            &self.blob_head_misses,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_blob_head_errors",
+            &self.blob_head_errors,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_blob_head_duration_ms",
+            &self.blob_head_duration_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_mount_attempts",
+            &self.upload_mount_attempts,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_mount_created",
+            &self.upload_mount_created,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_mount_accepted",
+            &self.upload_mount_accepted,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_mount_existing_target",
+            &self.upload_mount_existing_target,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_mount_local_session",
+            &self.upload_mount_local_session,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_mount_local_body_cache",
+            &self.upload_mount_local_body_cache,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_mount_remote_locator",
+            &self.upload_mount_remote_locator,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_mount_remote_miss",
+            &self.upload_mount_remote_miss,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_mount_remote_error",
+            &self.upload_mount_remote_error,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_patch_requests",
+            &self.upload_patch_requests,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_patch_bytes",
+            &self.upload_patch_bytes,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_patch_duration_ms",
+            &self.upload_patch_duration_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_patch_first_byte_observations",
+            &self.upload_patch_first_byte_observations,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_patch_first_byte_latency_ms",
+            &self.upload_patch_first_byte_latency_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_put_requests",
+            &self.upload_put_requests,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_put_bytes",
+            &self.upload_put_bytes,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_put_duration_ms",
+            &self.upload_put_duration_ms,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_put_first_byte_observations",
+            &self.upload_put_first_byte_observations,
+        );
+        self.insert_counter(
+            &mut hints,
+            "oci_engine_upload_put_first_byte_latency_ms",
+            &self.upload_put_first_byte_latency_ms,
+        );
         self.insert_counter(&mut hints, "oci_engine_proof_bytes", &self.proof_bytes);
         self.insert_counter(
             &mut hints,

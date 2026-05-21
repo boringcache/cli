@@ -189,6 +189,13 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
     let backend_api = rails.clone();
     let storage = storage_summary(&oci_engine);
     let operation_summary = state.cache_ops.tool_operation_summary(session_kind.adapter);
+    let buildkit = buildkit_summary(
+        session_kind.adapter,
+        &oci_body,
+        &oci_engine,
+        &storage,
+        &operation_summary,
+    );
     let lifecycle = lifecycle_summary(
         &oci_engine,
         &startup_prefetch_hints,
@@ -202,21 +209,21 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
     if let Some(object) = oci.as_object_mut() {
         object.insert(
             "buildkit_enrichment".to_string(),
-            Value::String("unknown".to_string()),
+            Value::String(
+                buildkit["run_classification"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string(),
+            ),
         );
     }
     let local_cache = json!({
         "blob_read_cache_bytes": state.blob_read_cache.total_bytes(),
         "blob_read_cache_max_bytes": state.blob_read_cache.max_bytes(),
+        "blob_read_memory_cache_bytes": state.blob_read_cache.memory_bytes(),
+        "blob_read_memory_cache_max_bytes": state.blob_read_cache.memory_max_bytes(),
         "oci_body": map_to_json(oci_body),
         "blob_read": map_to_json(state.blob_read_metrics.metadata_hints()),
-    });
-    let buildkit = json!({
-        "run_classification": if session_kind.adapter == "oci" {
-            "unknown"
-        } else {
-            "not_applicable"
-        },
     });
     let cache_key_lookup =
         bazel::cache_key_lookup_summary(session_kind.adapter, &operation_summary, &kv_lookup_hints);
@@ -340,6 +347,164 @@ fn storage_summary(oci_engine: &BTreeMap<String, String>) -> Value {
     }
 
     Value::Object(object)
+}
+
+fn buildkit_summary(
+    adapter: &str,
+    oci_body: &BTreeMap<String, String>,
+    oci_engine: &BTreeMap<String, String>,
+    storage: &Value,
+    operation_summary: &crate::serve::cache_registry::cache_ops::ToolOperationSummary,
+) -> Value {
+    if adapter != "oci" {
+        return json!({ "run_classification": "not_applicable" });
+    }
+
+    let head_requests = metric_u64(oci_engine, "oci_engine_blob_head_requests").unwrap_or(0);
+    let head_hits = metric_u64(oci_engine, "oci_engine_blob_head_hits").unwrap_or(0);
+    let head_misses = metric_u64(oci_engine, "oci_engine_blob_head_misses").unwrap_or(0);
+    let head_errors = metric_u64(oci_engine, "oci_engine_blob_head_errors").unwrap_or(0);
+    let head_duration_ms = metric_u64(oci_engine, "oci_engine_blob_head_duration_ms").unwrap_or(0);
+
+    let mount_attempts = metric_u64(oci_engine, "oci_engine_upload_mount_attempts").unwrap_or(0);
+    let mount_created = metric_u64(oci_engine, "oci_engine_upload_mount_created").unwrap_or(0);
+    let mount_accepted = metric_u64(oci_engine, "oci_engine_upload_mount_accepted").unwrap_or(0);
+    let mount_remote_locator =
+        metric_u64(oci_engine, "oci_engine_upload_mount_remote_locator").unwrap_or(0);
+    let mount_remote_miss =
+        metric_u64(oci_engine, "oci_engine_upload_mount_remote_miss").unwrap_or(0);
+    let mount_remote_error =
+        metric_u64(oci_engine, "oci_engine_upload_mount_remote_error").unwrap_or(0);
+
+    let upload_patch_bytes = metric_u64(oci_engine, "oci_engine_upload_patch_bytes").unwrap_or(0);
+    let upload_put_bytes = metric_u64(oci_engine, "oci_engine_upload_put_bytes").unwrap_or(0);
+    let upload_body_bytes = upload_patch_bytes.saturating_add(upload_put_bytes);
+    let upload_patch_requests =
+        metric_u64(oci_engine, "oci_engine_upload_patch_requests").unwrap_or(0);
+    let upload_put_requests = metric_u64(oci_engine, "oci_engine_upload_put_requests").unwrap_or(0);
+    let upload_requests = upload_patch_requests.saturating_add(upload_put_requests);
+    let upload_duration_ms = metric_u64(oci_engine, "oci_engine_upload_patch_duration_ms")
+        .unwrap_or(0)
+        .saturating_add(metric_u64(oci_engine, "oci_engine_upload_put_duration_ms").unwrap_or(0));
+    let upload_first_byte_latency_ms =
+        metric_u64(oci_engine, "oci_engine_upload_patch_first_byte_latency_ms")
+            .unwrap_or(0)
+            .saturating_add(
+                metric_u64(oci_engine, "oci_engine_upload_put_first_byte_latency_ms").unwrap_or(0),
+            );
+    let upload_first_byte_observations = metric_u64(
+        oci_engine,
+        "oci_engine_upload_patch_first_byte_observations",
+    )
+    .unwrap_or(0)
+    .saturating_add(
+        metric_u64(oci_engine, "oci_engine_upload_put_first_byte_observations").unwrap_or(0),
+    );
+
+    let remote_body_fetches = metric_u64(oci_body, "oci_body_remote_fetches").unwrap_or(0);
+    let remote_body_bytes = metric_u64(oci_body, "oci_body_remote_bytes").unwrap_or(0);
+    let local_body_hits = metric_u64(oci_body, "oci_body_local_hits").unwrap_or(0);
+    let local_body_bytes = metric_u64(oci_body, "oci_body_local_bytes").unwrap_or(0);
+    let storage_bytes = storage.get("bytes").and_then(Value::as_u64).unwrap_or(0);
+
+    let write_count = operation_summary.totals.cache_write_count;
+    let write_bytes = operation_summary.totals.cache_write_bytes;
+    let read_hits = operation_summary.totals.cache_read_hit_count;
+    let read_misses = operation_summary.totals.cache_read_miss_count;
+
+    let evidence = BuildkitEvidence {
+        head_requests,
+        head_hits,
+        head_misses,
+        head_errors,
+        mount_attempts,
+        mount_created,
+        mount_accepted,
+        upload_body_bytes,
+        remote_body_fetches,
+        local_body_hits,
+        write_count,
+        read_hits,
+        read_misses,
+    };
+    let run_classification = classify_buildkit_run(&evidence);
+
+    json!({
+        "schema_version": "buildkit_proxy_evidence.v1",
+        "run_classification": run_classification,
+        "blob_head_requests": head_requests,
+        "blob_head_hits": head_hits,
+        "blob_head_misses": head_misses,
+        "blob_head_errors": head_errors,
+        "blob_head_duration_ms": head_duration_ms,
+        "mount_attempts": mount_attempts,
+        "mount_created": mount_created,
+        "mount_accepted": mount_accepted,
+        "mount_remote_locator": mount_remote_locator,
+        "mount_remote_miss": mount_remote_miss,
+        "mount_remote_error": mount_remote_error,
+        "upload_requests": upload_requests,
+        "upload_body_bytes": upload_body_bytes,
+        "upload_patch_bytes": upload_patch_bytes,
+        "upload_put_bytes": upload_put_bytes,
+        "upload_duration_ms": upload_duration_ms,
+        "upload_first_byte_latency_ms": upload_first_byte_latency_ms,
+        "upload_first_byte_observations": upload_first_byte_observations,
+        "cache_write_count": write_count,
+        "cache_write_bytes": write_bytes,
+        "cache_read_hits": read_hits,
+        "cache_read_misses": read_misses,
+        "remote_body_fetches": remote_body_fetches,
+        "remote_body_bytes": remote_body_bytes,
+        "local_body_hits": local_body_hits,
+        "local_body_bytes": local_body_bytes,
+        "storage_download_bytes": storage_bytes,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct BuildkitEvidence {
+    head_requests: u64,
+    head_hits: u64,
+    head_misses: u64,
+    head_errors: u64,
+    mount_attempts: u64,
+    mount_created: u64,
+    mount_accepted: u64,
+    upload_body_bytes: u64,
+    remote_body_fetches: u64,
+    local_body_hits: u64,
+    write_count: u64,
+    read_hits: u64,
+    read_misses: u64,
+}
+
+fn classify_buildkit_run(evidence: &BuildkitEvidence) -> &'static str {
+    if evidence.head_errors > 0 {
+        "registry_head_errors"
+    } else if evidence.mount_attempts > 0 && evidence.mount_accepted > evidence.mount_created {
+        "mount_fell_back_to_upload"
+    } else if evidence.upload_body_bytes > 0 {
+        "export_uploaded_blobs"
+    } else if evidence.write_count > 0
+        && evidence.head_requests > 0
+        && evidence.head_misses == 0
+        && evidence.head_hits > 0
+    {
+        "warm_export_verified_existing_blobs"
+    } else if evidence.remote_body_fetches > 0 {
+        "import_read_remote_blobs"
+    } else if evidence.local_body_hits > 0 {
+        "import_read_local_blobs"
+    } else if evidence.read_hits > 0 && evidence.read_misses == 0 {
+        "cache_read_hot"
+    } else if evidence.read_misses > 0 && evidence.read_hits == 0 {
+        "cache_read_cold"
+    } else if evidence.head_requests > 0 {
+        "registry_checks_only"
+    } else {
+        "unknown"
+    }
 }
 
 pub fn cache_session_run_identity(state: &AppState) -> CacheSessionRunIdentity {
@@ -946,6 +1111,94 @@ mod tests {
         assert_eq!(summary["cache_status"], "hit");
         assert_eq!(summary["block_location"], "remote");
         assert_eq!(summary["oci_engine_storage_get_ttfb_ms"], 400);
+    }
+
+    #[test]
+    fn buildkit_summary_projects_oci_proxy_evidence() {
+        let operation_summary = crate::serve::cache_registry::cache_ops::ToolOperationSummary {
+            totals: OperationCounters {
+                cache_read_hit_count: 4,
+                cache_read_miss_count: 1,
+                cache_read_error_count: 0,
+                cache_read_bytes: 1024,
+                cache_write_count: 3,
+                cache_write_error_count: 0,
+                cache_write_bytes: 2048,
+            },
+            scoped: BTreeMap::new(),
+        };
+        let summary = buildkit_summary(
+            "oci",
+            &BTreeMap::from([
+                ("oci_body_remote_fetches".to_string(), "2".to_string()),
+                ("oci_body_remote_bytes".to_string(), "4096".to_string()),
+                ("oci_body_local_hits".to_string(), "5".to_string()),
+                ("oci_body_local_bytes".to_string(), "8192".to_string()),
+            ]),
+            &BTreeMap::from([
+                ("oci_engine_blob_head_requests".to_string(), "6".to_string()),
+                ("oci_engine_blob_head_hits".to_string(), "5".to_string()),
+                ("oci_engine_blob_head_misses".to_string(), "1".to_string()),
+                (
+                    "oci_engine_upload_mount_attempts".to_string(),
+                    "2".to_string(),
+                ),
+                (
+                    "oci_engine_upload_mount_created".to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    "oci_engine_upload_mount_accepted".to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    "oci_engine_upload_mount_remote_locator".to_string(),
+                    "1".to_string(),
+                ),
+                (
+                    "oci_engine_upload_patch_requests".to_string(),
+                    "3".to_string(),
+                ),
+                (
+                    "oci_engine_upload_patch_bytes".to_string(),
+                    "1000".to_string(),
+                ),
+                (
+                    "oci_engine_upload_put_requests".to_string(),
+                    "2".to_string(),
+                ),
+                ("oci_engine_upload_put_bytes".to_string(), "500".to_string()),
+            ]),
+            &json!({ "bytes": 4096 }),
+            &operation_summary,
+        );
+
+        assert_eq!(summary["schema_version"], "buildkit_proxy_evidence.v1");
+        assert_eq!(summary["run_classification"], "export_uploaded_blobs");
+        assert_eq!(summary["blob_head_requests"], 6);
+        assert_eq!(summary["blob_head_hits"], 5);
+        assert_eq!(summary["blob_head_misses"], 1);
+        assert_eq!(summary["mount_attempts"], 2);
+        assert_eq!(summary["mount_created"], 1);
+        assert_eq!(summary["mount_remote_locator"], 1);
+        assert_eq!(summary["upload_requests"], 5);
+        assert_eq!(summary["upload_body_bytes"], 1500);
+        assert_eq!(summary["cache_write_count"], 3);
+        assert_eq!(summary["cache_read_hits"], 4);
+        assert_eq!(summary["remote_body_fetches"], 2);
+        assert_eq!(summary["storage_download_bytes"], 4096);
+    }
+
+    #[test]
+    fn classify_buildkit_run_identifies_warm_export_checks() {
+        let classification = classify_buildkit_run(&BuildkitEvidence {
+            head_requests: 4,
+            head_hits: 4,
+            write_count: 1,
+            ..BuildkitEvidence::default()
+        });
+
+        assert_eq!(classification, "warm_export_verified_existing_blobs");
     }
 
     #[test]

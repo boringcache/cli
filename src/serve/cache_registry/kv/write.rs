@@ -328,20 +328,9 @@ pub(crate) async fn serve_backend_blob(
     }
 
     let cache_handle = download_blob_to_cache(state, cache_entry_id, blob, cached_url).await?;
-    let mut file = tokio::fs::File::open(cache_handle.path())
-        .await
-        .map_err(|e| RegistryError::internal(format!("Failed to open cached blob: {e}")))?;
-    if cache_handle.offset() > 0 {
-        file.seek(std::io::SeekFrom::Start(cache_handle.offset()))
-            .await
-            .map_err(|e| RegistryError::internal(format!("Failed to seek cached blob: {e}")))?;
-    }
-    let stream = ReaderStream::with_capacity(
-        file.take(cache_handle.size_bytes()),
-        crate::serve::local_blob_stream::buffer_bytes_for(cache_handle.size_bytes()),
-    );
+    let body = serve_blob_read_handle(&cache_handle).await?;
 
-    Ok((StatusCode::OK, response_headers, Body::from_stream(stream)).into_response())
+    Ok((StatusCode::OK, response_headers, body).into_response())
 }
 
 pub(crate) fn is_recent_kv_miss(state: &AppState, scoped_key: &str) -> bool {

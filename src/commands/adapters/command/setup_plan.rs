@@ -387,6 +387,7 @@ mod tests {
             maven_build_cache_config_path: None,
             maven_build_cache_extension_version: None,
             maven_build_cache_id: None,
+            native_tool_evidence_json: None,
             dry_run: true,
             json: true,
             command: Vec::new(),

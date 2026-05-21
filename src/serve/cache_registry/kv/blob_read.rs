@@ -35,6 +35,26 @@ pub(crate) async fn serve_local_blob(
     Ok((StatusCode::OK, headers, Body::from_stream(stream)).into_response())
 }
 
+pub(crate) async fn serve_blob_read_handle(handle: &BlobReadHandle) -> Result<Body, RegistryError> {
+    if let Some(bytes) = handle.memory_slice(0, handle.size_bytes()) {
+        return Ok(Body::from(bytes));
+    }
+
+    let mut file = tokio::fs::File::open(handle.path())
+        .await
+        .map_err(|e| RegistryError::internal(format!("Failed to open cached blob: {e}")))?;
+    if handle.offset() > 0 {
+        file.seek(std::io::SeekFrom::Start(handle.offset()))
+            .await
+            .map_err(|e| RegistryError::internal(format!("Failed to seek cached blob: {e}")))?;
+    }
+    let stream = ReaderStream::with_capacity(
+        file.take(handle.size_bytes()),
+        crate::serve::local_blob_stream::buffer_bytes_for(handle.size_bytes()),
+    );
+    Ok(Body::from_stream(stream))
+}
+
 fn emit_blob_read_elapsed_metric(
     state: &AppState,
     cache_entry_id: &str,

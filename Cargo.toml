@@ -60,6 +60,7 @@ zstd = { version = "0.13", default-features = false, features = ["zstdmt"] }
 
 # Concurrent collections
 dashmap = "6"
+bytes = "1"
 
 # System utilities
 dirs = "6.0"

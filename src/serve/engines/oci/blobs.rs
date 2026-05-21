@@ -401,6 +401,11 @@ pub(crate) async fn prefetch_blob_bodies(
             .await
             .is_some()
         {
+            if let Err(error) = state.blob_read_cache.hydrate_memory(&blob.digest).await {
+                log::warn!(
+                    "OCI blob read memory cache hydrate failed during startup prefetch: {error}"
+                );
+            }
             stats.already_local = stats.already_local.saturating_add(1);
         } else {
             pending_targets.push(BlobPrefetchTarget {
@@ -968,13 +973,18 @@ async fn cached_blob_body(
 ) -> Result<Body, OciError> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+    let (relative_offset, size_bytes) = match range {
+        Some(range) => (range.start, range.len()),
+        None => (0, handle.size_bytes()),
+    };
+    if let Some(bytes) = handle.memory_slice(relative_offset, size_bytes) {
+        return Ok(Body::from(bytes));
+    }
+
     let mut file = tokio::fs::File::open(handle.path())
         .await
         .map_err(|e| OciError::internal(format!("Failed to open cached blob: {e}")))?;
-    let (offset, size_bytes) = match range {
-        Some(range) => (handle.offset().saturating_add(range.start), range.len()),
-        None => (handle.offset(), handle.size_bytes()),
-    };
+    let offset = handle.offset().saturating_add(relative_offset);
     if offset > 0 {
         file.seek(std::io::SeekFrom::Start(offset))
             .await

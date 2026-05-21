@@ -368,6 +368,9 @@ fn build_cache_session_summary_param(
     });
     let operation_summary = state.cache_ops.tool_operation_summary(&tool);
     insert_tool_operation_summary(&mut summary_json, &operation_summary);
+    if tool == "oci" {
+        insert_buildkit_tool_stats(&mut summary_json);
+    }
     if let Some(object) = summary_json.as_object_mut() {
         object.insert(
             "identity".to_string(),
@@ -405,6 +408,85 @@ fn insert_tool_operation_summary(
     insert_operation_counters(tool, None, &operation_summary.totals);
     for (scope, counters) in &operation_summary.scoped {
         insert_operation_counters(tool, Some(scope.as_str()), counters);
+    }
+}
+
+fn insert_buildkit_tool_stats(summary_json: &mut serde_json::Value) {
+    let Some(root) = summary_json.as_object_mut() else {
+        return;
+    };
+    let buildkit_stats = root
+        .get("buildkit")
+        .and_then(serde_json::Value::as_object)
+        .cloned();
+    let Some(buildkit_stats) = buildkit_stats else {
+        return;
+    };
+
+    let tool_value = root
+        .entry("tool".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !tool_value.is_object() {
+        *tool_value = serde_json::json!({});
+    }
+    let Some(tool) = tool_value.as_object_mut() else {
+        return;
+    };
+
+    insert_tool_string_from(
+        tool,
+        &buildkit_stats,
+        "buildkit_run_classification",
+        "run_classification",
+    );
+    for key in [
+        "blob_head_requests",
+        "blob_head_hits",
+        "blob_head_misses",
+        "blob_head_errors",
+        "mount_attempts",
+        "mount_created",
+        "mount_accepted",
+        "mount_remote_locator",
+        "mount_remote_miss",
+        "mount_remote_error",
+        "upload_requests",
+        "upload_body_bytes",
+        "upload_duration_ms",
+        "remote_body_fetches",
+        "remote_body_bytes",
+        "local_body_hits",
+        "local_body_bytes",
+        "storage_download_bytes",
+    ] {
+        insert_tool_number_from(tool, &buildkit_stats, &format!("buildkit_{key}"), key);
+    }
+}
+
+fn insert_tool_string_from(
+    tool: &mut serde_json::Map<String, serde_json::Value>,
+    source: &serde_json::Map<String, serde_json::Value>,
+    target_key: &str,
+    source_key: &str,
+) {
+    if let Some(value) = source.get(source_key).and_then(serde_json::Value::as_str)
+        && !value.trim().is_empty()
+    {
+        tool.insert(
+            target_key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+    }
+}
+
+fn insert_tool_number_from(
+    tool: &mut serde_json::Map<String, serde_json::Value>,
+    source: &serde_json::Map<String, serde_json::Value>,
+    target_key: &str,
+    source_key: &str,
+) {
+    if let Some(value) = source.get(source_key).and_then(serde_json::Value::as_u64) {
+        tool.insert(target_key.to_string(), serde_json::Value::from(value));
     }
 }
 
@@ -818,6 +900,61 @@ mod tests {
                 .pointer("/tool/cache_write_bytes")
                 .and_then(|value| value.as_u64()),
             Some(64)
+        );
+    }
+
+    #[test]
+    fn insert_buildkit_tool_stats_projects_docker_evidence() {
+        let mut summary = serde_json::json!({
+            "buildkit": {
+                "run_classification": "export_uploaded_blobs",
+                "blob_head_requests": 9,
+                "blob_head_hits": 8,
+                "blob_head_misses": 1,
+                "mount_attempts": 2,
+                "mount_created": 1,
+                "mount_accepted": 1,
+                "upload_requests": 4,
+                "upload_body_bytes": 67_108_864,
+                "upload_duration_ms": 4300,
+                "remote_body_fetches": 3,
+                "remote_body_bytes": 8192,
+                "local_body_hits": 6,
+                "storage_download_bytes": 8192
+            },
+            "tool": {
+                "actions": [
+                    { "label": "docker build", "outcome": "hit" }
+                ]
+            }
+        });
+
+        insert_buildkit_tool_stats(&mut summary);
+
+        assert!(summary.pointer("/tool/actions/0/label").is_some());
+        assert_eq!(
+            summary.pointer("/tool/buildkit_run_classification"),
+            Some(&serde_json::Value::String(
+                "export_uploaded_blobs".to_string()
+            ))
+        );
+        assert_eq!(
+            summary
+                .pointer("/tool/buildkit_blob_head_hits")
+                .and_then(serde_json::Value::as_u64),
+            Some(8)
+        );
+        assert_eq!(
+            summary
+                .pointer("/tool/buildkit_upload_body_bytes")
+                .and_then(serde_json::Value::as_u64),
+            Some(67_108_864)
+        );
+        assert_eq!(
+            summary
+                .pointer("/tool/buildkit_remote_body_fetches")
+                .and_then(serde_json::Value::as_u64),
+            Some(3)
         );
     }
 

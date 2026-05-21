@@ -154,6 +154,28 @@ async fn insert_pending_test_blob(
 }
 
 #[tokio::test]
+async fn serve_blob_read_handle_can_return_memory_body() {
+    let _guard = test_env::lock();
+    let memory_env = EnvVarGuard::new("BORINGCACHE_BLOB_READ_MEMORY_CACHE_BYTES");
+    memory_env.set("1m");
+    let temp_home = tempfile::tempdir().expect("temp dir");
+    let cache = BlobReadCache::new_at(temp_home.path().join("blob-read-cache"), 1024 * 1024)
+        .expect("blob read cache");
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let payload = b"memory-body-response";
+
+    assert!(cache.insert(&digest, payload).await.expect("insert blob"));
+    let handle = cache.get_handle(&digest).await.expect("cache hit");
+
+    let body = serve_blob_read_handle(&handle).await.expect("memory body");
+    let bytes = http_body_util::BodyExt::collect(body)
+        .await
+        .expect("collect body")
+        .to_bytes();
+    assert_eq!(bytes.as_ref(), payload);
+}
+
+#[tokio::test]
 async fn normal_flush_uploads_blobs_and_upserts_kv_rows_without_manifest_publish() {
     let mut server = Server::new_async().await;
     let _guard = test_env::lock();

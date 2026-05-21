@@ -1142,8 +1142,8 @@ run_docker_e2e() {
   REGISTRY_PORT="${docker_port}" \
   REGISTRY_HOST="${registry_host}" \
   PROXY_HOST="${proxy_host}" \
-  E2E_TAG_PREFIX="local-adapter-${RUN_ID}" \
-  GITHUB_RUN_ID="${RUN_ID}" \
+  E2E_TAG_PREFIX="local-adapter-${E2E_RUN_SUFFIX}" \
+  GITHUB_RUN_ID="${E2E_RUN_SUFFIX}" \
   GITHUB_RUN_ATTEMPT="1" \
   BINARY="${BINARY}" \
   WORKSPACE="${WORKSPACE}" \

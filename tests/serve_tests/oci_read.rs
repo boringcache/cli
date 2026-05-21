@@ -1381,6 +1381,199 @@ async fn test_blob_head_after_manifest_resolution_uses_remote_existence_check() 
 }
 
 #[tokio::test]
+async fn test_mount_with_verified_source_locator_clones_locator_to_target() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let blob_digest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let blob_size = 23u64;
+    {
+        let mut locator = state.blob_locator.write().await;
+        locator.insert(
+            "source",
+            blob_digest,
+            BlobLocatorEntry {
+                cache_entry_id: "entry-mounted-source".to_string(),
+                size_bytes: blob_size,
+                download_url: Some(format!("{}/blobs/{}", server.url(), blob_digest)),
+                download_url_cached_at: Some(Instant::now()),
+            },
+        );
+    }
+
+    let _check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": blob_digest,
+                    "exists": true
+                }]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let mount_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/v2/target/blobs/uploads/?mount={blob_digest}&from=source"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(mount_response.status(), StatusCode::CREATED);
+    assert_eq!(
+        mount_response
+            .headers()
+            .get("Location")
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("/v2/target/blobs/{blob_digest}").as_str())
+    );
+
+    {
+        let locator = state.blob_locator.read().await;
+        let target = locator
+            .get("target", blob_digest)
+            .expect("remote mount should stage target locator");
+        assert_eq!(target.cache_entry_id, "entry-mounted-source");
+        assert_eq!(target.size_bytes, blob_size);
+    }
+
+    let app = build_router(state.clone());
+    let head_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("/v2/target/blobs/{blob_digest}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(head_response.status(), StatusCode::OK);
+    assert_eq!(
+        head_response
+            .headers()
+            .get("Content-Length")
+            .and_then(|value| value.to_str().ok()),
+        Some(blob_size.to_string().as_str())
+    );
+
+    let diagnostics = state
+        .oci_engine_diagnostics
+        .metadata_hints(state.oci_hydration_policy.as_str());
+    assert_eq!(
+        diagnostics.get("oci_engine_upload_mount_attempts"),
+        Some(&"1".to_string())
+    );
+    assert_eq!(
+        diagnostics.get("oci_engine_upload_mount_created"),
+        Some(&"1".to_string())
+    );
+    assert_eq!(
+        diagnostics.get("oci_engine_upload_mount_remote_locator"),
+        Some(&"1".to_string())
+    );
+    assert_eq!(
+        diagnostics.get("oci_engine_blob_head_requests"),
+        Some(&"1".to_string())
+    );
+    assert_eq!(
+        diagnostics.get("oci_engine_blob_head_hits"),
+        Some(&"1".to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_mount_with_unverified_source_locator_falls_back_to_upload_session() {
+    let mut server = Server::new_async().await;
+    let (state, _home, _guard) = setup(&server).await;
+
+    let blob_digest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    {
+        let mut locator = state.blob_locator.write().await;
+        locator.insert(
+            "source",
+            blob_digest,
+            BlobLocatorEntry {
+                cache_entry_id: "entry-unverified-source".to_string(),
+                size_bytes: 42,
+                download_url: None,
+                download_url_cached_at: None,
+            },
+        );
+    }
+
+    let _check_blobs_mock = server
+        .mock("POST", "/v2/workspaces/org/repo/caches/blobs/check")
+        .match_body(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "results": [{
+                    "digest": blob_digest,
+                    "exists": false
+                }]
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let app = build_router(state.clone());
+    let mount_response = tower::ServiceExt::oneshot(
+        app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/v2/target/blobs/uploads/?mount={blob_digest}&from=source"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(mount_response.status(), StatusCode::ACCEPTED);
+    assert!(mount_response.headers().get("Docker-Upload-UUID").is_some());
+    {
+        let locator = state.blob_locator.read().await;
+        assert!(locator.get("target", blob_digest).is_none());
+    }
+
+    let diagnostics = state
+        .oci_engine_diagnostics
+        .metadata_hints(state.oci_hydration_policy.as_str());
+    assert_eq!(
+        diagnostics.get("oci_engine_upload_mount_attempts"),
+        Some(&"1".to_string())
+    );
+    assert_eq!(
+        diagnostics.get("oci_engine_upload_mount_accepted"),
+        Some(&"1".to_string())
+    );
+    assert_eq!(
+        diagnostics.get("oci_engine_upload_mount_remote_miss"),
+        Some(&"1".to_string())
+    );
+}
+
+#[tokio::test]
 async fn test_blob_head_degrades_remote_check_failures_to_404() {
     let mut server = Server::new_async().await;
     let (state, _home, _guard) = setup(&server).await;

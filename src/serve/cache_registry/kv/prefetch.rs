@@ -921,6 +921,15 @@ async fn prefetch_blob_targets(
         {
             pending_targets.push(target);
         } else {
+            if let Err(error) = state
+                .blob_read_cache
+                .hydrate_memory(&target.blob.digest)
+                .await
+            {
+                log::warn!(
+                    "Blob read memory cache hydrate failed during startup prefetch: {error}"
+                );
+            }
             stats.already_local = stats.already_local.saturating_add(1);
         }
     }

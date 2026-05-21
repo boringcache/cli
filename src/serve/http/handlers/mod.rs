@@ -253,6 +253,13 @@ pub async fn oci_dispatch(
     match response {
         Ok(response) => {
             let response_status = response.status();
+            record_oci_blob_head_if_needed(
+                &state,
+                &route,
+                &request_method,
+                response_status,
+                request_start.elapsed().as_millis() as u64,
+            );
             if request_method != Method::GET
                 && request_method != Method::HEAD
                 && !response_status.is_success()
@@ -279,6 +286,13 @@ pub async fn oci_dispatch(
         }
         Err(error) => {
             let error_status = error.status();
+            record_oci_blob_head_if_needed(
+                &state,
+                &route,
+                &request_method,
+                error_status,
+                request_start.elapsed().as_millis() as u64,
+            );
             if fail_on_cache_error || !error_status.is_server_error() {
                 eprintln!(
                     "OCI {} {} -> {} ({})",
@@ -347,6 +361,20 @@ pub async fn oci_dispatch(
             }
             best_effort_oci_read_response(&route)
         }
+    }
+}
+
+fn record_oci_blob_head_if_needed(
+    state: &AppState,
+    route: &OciRoute,
+    method: &Method,
+    status: StatusCode,
+    duration_ms: u64,
+) {
+    if matches!(route, OciRoute::Blob { .. }) && *method == Method::HEAD {
+        state
+            .oci_engine_diagnostics
+            .record_blob_head_response(status, duration_ms);
     }
 }
 

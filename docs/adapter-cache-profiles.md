@@ -37,6 +37,7 @@ Keep the normal operator surface small:
   - `BORINGCACHE_BLOB_DOWNLOAD_CONCURRENCY`
 - Internal benchmark/proof knobs:
   - `BORINGCACHE_BLOB_PREFETCH_CONCURRENCY`
+  - `BORINGCACHE_BLOB_READ_MEMORY_CACHE_BYTES` keeps the disk blob cache as source of truth while optionally retaining prefetched, promoted, and already-local startup-prefetch blob bodies in a bounded in-memory layer.
 - Internal batching stays fixed in code.
 
 The intent is that the machine governor, workload shape, and one generic startup path pick the right defaults for almost every workload. Archive restore can stay CPU/disk conservative; proxy-native warmup is allowed more concurrent object reads because the wrapped build is not running yet.
@@ -96,6 +97,7 @@ Payload pressure from the 2026-05-14 run:
 - BoringCache owns storage, transfer, verification, and machine-safe scheduling.
 - Generic KV startup warming should hydrate the full active tag by default on disk-backed cache-registry paths. Capacity control belongs in the blob read cache size and eviction policy, not a separate startup selection budget.
 - Query-aware or protocol-aware optimizations should come from real request patterns, not adapter-name guesses.
+- The in-memory blob read layer is an opt-in benchmark experiment. Keep it disabled by default, compare it against disk-backed warm reads with fresh proxy cache directories, and use status/session summary `blob_read_memory_cache_*` fields to confirm the configured budget and resident bytes.
 - Telemetry fields named `tool` or `adapter` must use the Rails canonical rollup names: `turborepo`, `nx`, `bazel`, `gradle`, `maven`, `sccache`, `gocache`, `oci`, `archive`, or `runtime`. Keep command spellings such as `turbo`, `go`, and `docker` in user-facing plan fields only, or put them in a separate `adapter_command` field.
 - `docker` should stay OCI-native. BuildKit already understands manifests, layers, and local content reuse. The product default resolves selected refs and serves blob bodies on demand (`metadata-only`); `bodies-background` and `bodies-before-ready` stay internal benchmark/diagnostic modes.
 
