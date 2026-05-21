@@ -2,6 +2,90 @@
 
 This log captures regressions, root causes, and guardrails for cache-registry performance/correctness.
 
+## 2026-05-21 - Memory read cache is not the broad benchmark lever
+
+- Local actual-benchmark checks covered n8n/Turbo, OpenTelemetry Java/Gradle,
+  Hugo Go/gocache, and a Spring AI/Maven seed attempt.
+- The in-memory blob read layer behaved correctly where it was enabled:
+  - n8n/Turbo subset hydrated `5.68 MB` of already-local KV blobs into memory,
+    served `24/24` warm task hits locally, and produced `0` remote body reads.
+  - OpenTelemetry Java/Gradle warmed the real workflow command, with
+    `521` Gradle tasks `FROM-CACHE`; the active remote-build-cache body set was
+    only `47.24 MB`, so a `1 GiB` memory cap was mostly unused.
+  - Hugo Go/gocache warmed the real `go build -trimpath -buildvcs=false ./...`
+    lane and hydrated `890.70 MB` under a `1 GiB` cap, with `2,032` local body
+    reads and `0` remote body reads on warm restart.
+- Wall-time impact was modest. Gradle stayed dominated by dependency/tooling
+  restore plus Gradle/JVM work. Hugo Go moved from about `26s` disk-warm to
+  about `23s` memory-warm locally, but local disk and the OS page cache can
+  already make disk-backed proxy reads look memory-backed in repeat runs.
+- Spring AI/Maven is not evidence for or against the memory layer in this slice:
+  the actual benchmark command failed in upstream compilation with NullAway
+  errors before a valid seed/warm pair existed.
+- Decision:
+  - Do not pursue the memory read cache as a broad umbrella optimization across
+    tools.
+  - Keep `BORINGCACHE_BLOB_READ_MEMORY_CACHE_BYTES` as an internal opt-in
+    diagnostic/benchmark control only.
+  - Do not default it on or build tool-specific defaults from this evidence.
+- Guardrail:
+  - Memory-resident blob reads are worth testing only when prior evidence shows
+    large repeated KV body reads that are not already hidden by local disk or the
+    OS page cache. For Gradle-like runs with small proxy body sets and large
+    dependency archives, focus elsewhere.
+- Next performance direction:
+  - Reduce dependency archive restore cost.
+  - Reduce command/setup orchestration overhead around archive restore, proxy
+    startup, and native tool execution.
+
+## 2026-05-21 - Archive restore and orchestration are the next bottleneck
+
+- Evidence from the same local actual-benchmark runs:
+  - OpenTelemetry Java/Gradle restored a dependency/tooling archive of
+    `1.79 GB` from an `842.62 MB` compressed archive before the warm Gradle
+    command. Download took about `50-51s`, extraction about `5.8s`, and the
+    Gradle command itself then completed in `21-22s`.
+  - Hugo Go/gocache restored a module-cache archive of `358.45 MB` from a
+    `152.22 MB` compressed archive before the warm Go command. Warm total moved
+    from about `26s` disk-backed proxy reads to about `23s` with `1 GiB`
+    memory-backed reads, but the module archive restore remained a material
+    part of the phase.
+- Current shape in the CLI:
+  - `boringcache <adapter>` restores archive profile entries before starting
+    the proxy.
+  - Archive restore downloads the archive to a temp file, verifies the archive
+    digest when present, then extracts it into the target.
+  - Proxy startup warming is independent from dependency archive restore for
+    most adapter runs, but today those two waits are serialized.
+- Highest-value investigation candidates:
+  - Split or replace monolithic dependency archives where they are mostly
+    stable but expensive to fully restore. For large tool homes, compare the
+    current tar.zstd archive against a file/CAS-style package layout that can
+    skip already-present content and avoid rewriting every file.
+  - Add benchmark artifact fields for `archive_restore_ms`,
+    `archive_download_ms`, `archive_extract_ms`, `proxy_startup_ms`,
+    `wrapped_command_ms`, and `archive_save_ms`, so benchmark summaries explain
+    where warm time went without reading logs.
+  - Start proxy warmup concurrently with archive restore when both are required,
+    then wait for both before launching the wrapped command. This should be
+    resource-governed because large archive downloads and proxy blob prefetch
+    can compete for the same network/disk budget, but the current strict
+    sequencing leaves avoidable idle time in small-proxy/large-archive runs.
+  - Test whether some dependency profiles should be optional or narrower for
+    benchmark lanes where the native tool can fetch dependencies faster than
+    restoring a large compressed tool-home archive.
+  - Keep archive integrity strict. Any streaming or digest-skipping shortcut
+    must preserve server-signed manifest/root verification and archive byte
+    verification, or prove an equivalent storage checksum boundary.
+- Measurement plan:
+  - For each cheap benchmark lane, run four warm variants: current profile
+    restore, no dependency archive restore, narrower dependency entry, and
+    overlapped proxy-start/archive-restore prototype.
+  - Compare phase wall time, archive download/extract time, proxy startup time,
+    native hit rate, local/remote proxy body bytes, and failure modes.
+  - Treat improvements as adapter/profile decisions only after the timings show
+    the dependency archive, not the native build cache, is the dominant wait.
+
 ## 2026-04-29 - Nx self-hosted archive metadata collision
 
 - Storybook Nx rolling warm failed after the tag-plan fix with an Nx 22.x panic in `http_remote_cache.rs` while reading a remote cache hit. Datadog showed the BoringCache proxy had restored and prefetched the selected Nx tag successfully with zero startup prefetch failures, so the failure moved from tag visibility to the artifact read path.
