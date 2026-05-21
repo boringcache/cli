@@ -96,6 +96,7 @@ pub(super) async fn build_server_runtime(
         restore_cache_tags,
         oci_alias_promotion_refs,
         proxy_metadata_hints: proxy_metadata_hints.clone(),
+        native_tool_evidence: Arc::new(std::sync::Mutex::new(None)),
         proxy_skip_rules,
         proxy_ci_run_context: crate::ci_detection::detect_ci_context()
             .run_context()

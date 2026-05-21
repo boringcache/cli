@@ -47,6 +47,10 @@ impl ProxyServerHandle {
         )
     }
 
+    pub(crate) fn set_native_tool_evidence(&self, evidence: serde_json::Value) {
+        self.handle.set_native_tool_evidence(evidence);
+    }
+
     pub async fn shutdown_and_flush(self) -> Result<()> {
         self.handle.shutdown_and_flush().await
     }

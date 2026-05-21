@@ -40,6 +40,7 @@ pub(super) fn emit_cache_session_summary(state: &AppState) {
         summary.kv_lookup,
         summary.local_cache,
         summary.buildkit,
+        summary.native_tool,
         summary.classification,
     ));
     observability::flush_for(std::time::Duration::from_secs(2));

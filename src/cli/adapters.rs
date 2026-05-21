@@ -183,7 +183,8 @@ pub struct AdapterArgs {
     #[arg(
         long = "native-tool-evidence-json",
         value_name = "PATH",
-        help = "Write normalized native-tool evidence JSON after supported adapters finish"
+        hide = true,
+        help = "Expert: write an additional copy of normalized native-tool evidence JSON"
     )]
     pub native_tool_evidence_json: Option<String>,
 

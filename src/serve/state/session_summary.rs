@@ -34,6 +34,8 @@ pub struct CacheSessionSummarySnapshot {
     pub kv_lookup: Value,
     pub local_cache: Value,
     pub buildkit: Value,
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub native_tool: Value,
     pub classification: Value,
 }
 
@@ -225,6 +227,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
         "oci_body": map_to_json(oci_body),
         "blob_read": map_to_json(state.blob_read_metrics.metadata_hints()),
     });
+    let native_tool = state.native_tool_evidence().unwrap_or(Value::Null);
     let cache_key_lookup =
         bazel::cache_key_lookup_summary(session_kind.adapter, &operation_summary, &kv_lookup_hints);
     let issue_candidates =
@@ -269,6 +272,7 @@ pub fn build_cache_session_summary(state: &AppState) -> CacheSessionSummarySnaps
         kv_lookup: map_to_json(kv_lookup_hints),
         local_cache,
         buildkit,
+        native_tool,
         classification,
     }
 }

@@ -102,6 +102,7 @@ async fn setup(server: &Server) -> (AppState, tempfile::TempDir, test_env::Guard
         restore_cache_tags: vec!["registry".to_string()],
         oci_alias_promotion_refs: Vec::new(),
         proxy_metadata_hints: std::collections::BTreeMap::new(),
+        native_tool_evidence: Arc::new(std::sync::Mutex::new(None)),
         proxy_skip_rules: Arc::new(Vec::new()),
         proxy_ci_run_context: None,
         fail_on_cache_error: true,

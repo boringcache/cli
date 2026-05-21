@@ -596,7 +596,13 @@ pub async fn adapter_execute(
             proxy::spawn_command(&command, &resolved_plan.env_vars, None, |_, _| {}).await?;
         return match child_outcome {
             proxy::ChildOutcome::Exited(status) => {
-                run_post_command_diagnostics(kind, args.native_tool_evidence_json.as_deref()).await;
+                let _native_tool_evidence = run_post_command_diagnostics(
+                    kind,
+                    &workspace,
+                    &raw_tag,
+                    args.native_tool_evidence_json.as_deref(),
+                )
+                .await;
                 let code = proxy::status_exit_code(&status);
                 if code == 0 {
                     Ok(())
@@ -715,9 +721,20 @@ pub async fn adapter_execute(
             let command_succeeded = status.success();
             let command_exit_code = proxy::status_exit_code(&status);
 
+            if let Some(evidence) = run_post_command_diagnostics(
+                kind,
+                &workspace,
+                &raw_tag,
+                args.native_tool_evidence_json.as_deref(),
+            )
+            .await
+            {
+                proxy_handle.set_native_tool_evidence(evidence);
+            }
+
             if archive_enabled && !effective_skip_save && (command_succeeded || save_on_failure) {
                 let save_result = save::execute_batch_save(
-                    Some(workspace),
+                    Some(workspace.clone()),
                     resolved_plan.tag_path_pairs,
                     verbose,
                     no_platform,
@@ -740,7 +757,6 @@ pub async fn adapter_execute(
                 }
             }
 
-            run_post_command_diagnostics(kind, args.native_tool_evidence_json.as_deref()).await;
             shutdown_proxy_handle(proxy_handle, fail_on_cache_error, command_succeeded).await?;
 
             if command_exit_code == 0 {
@@ -752,10 +768,25 @@ pub async fn adapter_execute(
     }
 }
 
-async fn run_post_command_diagnostics(kind: AdapterKind, native_tool_evidence_json: Option<&str>) {
+async fn run_post_command_diagnostics(
+    kind: AdapterKind,
+    workspace: &str,
+    tag: &str,
+    native_tool_evidence_json: Option<&str>,
+) -> Option<serde_json::Value> {
     if kind == AdapterKind::Sccache {
-        sccache::print_stats_summary(native_tool_evidence_json).await;
+        return sccache::collect_post_command_evidence(workspace, tag, native_tool_evidence_json)
+            .await;
     }
+
+    if native_tool_evidence_json.is_some() {
+        ui::warn(&format!(
+            "native tool evidence JSON is not supported for {} yet",
+            kind.display_name()
+        ));
+    }
+
+    None
 }
 
 fn trim_non_empty(value: Option<&str>) -> Option<&str> {

@@ -262,7 +262,7 @@ boringcache sccache
 ```
 
 The adapter sets `RUSTC_WRAPPER=sccache`, `SCCACHE_WEBDAV_ENDPOINT`, `SCCACHE_WEBDAV_KEY_PREFIX`, and `CARGO_INCREMENTAL=0` when the caller has not set it.
-After the wrapped command exits, it reads `sccache --show-stats` and prints a concise hit/miss summary when sccache reports one.
+After the wrapped command exits, it reads `sccache --show-stats`, prints a concise hit/miss summary, and records normalized native tool evidence with the run/session diagnostics when sccache reports stats.
 
 For a long-lived endpoint:
 

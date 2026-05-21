@@ -69,6 +69,8 @@ pub(crate) struct ObservabilityEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buildkit: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_tool: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub classification: Option<Value>,
 }
 
@@ -159,6 +161,7 @@ impl ObservabilityEvent {
             kv_lookup: None,
             local_cache: None,
             buildkit: None,
+            native_tool: None,
             classification: None,
         }
     }
@@ -212,6 +215,7 @@ impl ObservabilityEvent {
             kv_lookup: None,
             local_cache: None,
             buildkit: None,
+            native_tool: None,
             classification: None,
         }
     }
@@ -263,6 +267,7 @@ impl ObservabilityEvent {
             kv_lookup: None,
             local_cache: None,
             buildkit: None,
+            native_tool: None,
             classification: None,
         }
     }
@@ -285,6 +290,7 @@ impl ObservabilityEvent {
         kv_lookup: Value,
         local_cache: Value,
         buildkit: Value,
+        native_tool: Value,
         classification: Value,
     ) -> Self {
         let ctx = default_context();
@@ -327,7 +333,59 @@ impl ObservabilityEvent {
             kv_lookup: Some(kv_lookup),
             local_cache: Some(local_cache),
             buildkit: Some(buildkit),
+            native_tool: (!native_tool.is_null()).then_some(native_tool),
             classification: Some(classification),
+        }
+    }
+
+    pub(crate) fn native_tool_evidence(
+        workspace: String,
+        tag: String,
+        adapter: &'static str,
+        native_tool: Value,
+    ) -> Self {
+        let ctx = default_context();
+        Self {
+            ts_ms: now_ms(),
+            run_id: ctx.run_id.clone(),
+            session_id: ctx.session_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            request_id: None,
+            source: "cli",
+            operation: "native_tool_evidence",
+            method: "SUMMARY",
+            path: format!("/_boringcache/native-tool/{adapter}"),
+            status: None,
+            status_class: None,
+            duration_ms: 0,
+            request_bytes: None,
+            response_bytes: None,
+            batch_index: None,
+            batch_count: None,
+            batch_size: None,
+            retry_count: None,
+            workspace: Some(workspace),
+            tag: Some(tag),
+            cache_entry_id: None,
+            error: None,
+            details: None,
+            schema: Some("native_tool_evidence.v1"),
+            mode: None,
+            adapter: Some(adapter),
+            proxy: None,
+            backend_api: None,
+            rails: None,
+            storage: None,
+            lifecycle: None,
+            oci: None,
+            startup_prefetch: None,
+            kv_upload: None,
+            singleflight: None,
+            kv_lookup: None,
+            local_cache: None,
+            buildkit: None,
+            native_tool: Some(native_tool),
+            classification: None,
         }
     }
 

@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use super::{AdapterRunner, passthrough_command};
+use crate::observability::{self, ObservabilityEvent};
 use crate::proxy;
 use crate::ui;
 
@@ -102,7 +103,11 @@ impl SccacheNativeToolEvidence {
     }
 }
 
-pub(super) async fn print_stats_summary(native_tool_evidence_json: Option<&str>) {
+pub(super) async fn collect_post_command_evidence(
+    workspace: &str,
+    tag: &str,
+    native_tool_evidence_json: Option<&str>,
+) -> Option<serde_json::Value> {
     let output = match tokio::process::Command::new("sccache")
         .arg("--show-stats")
         .stdout(Stdio::piped())
@@ -111,10 +116,10 @@ pub(super) async fn print_stats_summary(native_tool_evidence_json: Option<&str>)
         .await
     {
         Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
             ui::warn(&format!("Failed to read sccache stats: {error}"));
-            return;
+            return None;
         }
     };
 
@@ -151,6 +156,29 @@ pub(super) async fn print_stats_summary(native_tool_evidence_json: Option<&str>)
     } else if native_tool_evidence_json.is_some() && evidence.is_none() {
         ui::warn("sccache native tool evidence was unavailable after the wrapped command");
     }
+
+    let Some(evidence) = evidence else {
+        return None;
+    };
+    let evidence_json = match serde_json::to_value(&evidence) {
+        Ok(value) => value,
+        Err(error) => {
+            ui::warn(&format!(
+                "Failed to serialize sccache native tool evidence: {error}"
+            ));
+            return None;
+        }
+    };
+
+    observability::emit(ObservabilityEvent::native_tool_evidence(
+        workspace.to_string(),
+        tag.to_string(),
+        "sccache",
+        evidence_json.clone(),
+    ));
+    observability::flush_for(std::time::Duration::from_secs(2));
+
+    Some(evidence_json)
 }
 
 #[cfg(test)]

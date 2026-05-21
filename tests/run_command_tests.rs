@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -100,6 +100,18 @@ fn assert_proxy_metadata_hints_are_cli_replayable(parsed: &Value) {
             "metadata hint value is not command-line-safe: {key}={value}"
         );
     }
+}
+
+#[cfg(unix)]
+fn write_executable(path: &Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::write(path, contents).expect("write executable");
+    let mut permissions = std::fs::metadata(path)
+        .expect("executable metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("mark executable");
 }
 
 #[test]
@@ -1217,6 +1229,82 @@ sccache-key-prefix = "rust/ci"
         "http://host.docker.internal:6001/"
     );
     assert_eq!(parsed["env_vars"]["SCCACHE_WEBDAV_KEY_PREFIX"], "rust/ci");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_sccache_collects_native_tool_evidence_without_export_flag() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let bin_dir = temp_dir.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_executable(
+        &bin_dir.join("sccache"),
+        r#"#!/bin/sh
+if [ "$1" = "--show-stats" ]; then
+  cat <<'STATS'
+Compile requests                     7
+Compile requests executed            7
+Cache hits                           3
+Cache hits (Rust)                    3
+Cache misses                         4
+Cache misses (Rust)                  4
+Average compiler                 1.250 s
+STATS
+  exit 0
+fi
+exit 0
+"#,
+    );
+
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin_dir];
+    paths.extend(std::env::split_paths(&original_path));
+    let path = std::env::join_paths(paths).expect("join PATH");
+    let metrics_path = temp_dir.path().join("native-tool-events.jsonl");
+
+    let mut command = Command::new(cli_binary());
+    apply_test_env(&mut command);
+    let output = command
+        .env("HOME", temp_dir.path())
+        .env("PATH", path)
+        .env("BORINGCACHE_OBSERVABILITY_JSONL_PATH", &metrics_path)
+        .args([
+            "sccache",
+            "--workspace",
+            "test-org/test-workspace",
+            "--tag",
+            "rust-cache",
+            "--",
+            "true",
+        ])
+        .output()
+        .expect("Failed to execute sccache command");
+
+    assert!(
+        output.status.success(),
+        "sccache command should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let metrics = std::fs::read_to_string(&metrics_path).expect("native tool metrics");
+    let event = metrics
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl event"))
+        .find(|event| event["operation"] == "native_tool_evidence")
+        .expect("native tool evidence event");
+
+    assert_eq!(event["workspace"], "test-org/test-workspace");
+    assert_eq!(event["tag"], "rust-cache");
+    assert_eq!(event["adapter"], "sccache");
+    assert_eq!(
+        event["native_tool"]["schema_version"],
+        "native_tool_evidence.v1"
+    );
+    assert_eq!(event["native_tool"]["tool"], "sccache");
+    assert_eq!(event["native_tool"]["compile_requests"], 7);
+    assert_eq!(event["native_tool"]["cache_hits"], 3);
+    assert_eq!(event["native_tool"]["cache_misses"], 4);
+    assert_eq!(event["native_tool"]["hit_rate"], 42.9);
 }
 
 #[test]

@@ -3,6 +3,7 @@ use crate::api::models::cache::BlobDescriptor;
 use crate::ci_detection::{CiRunContext, CiSourceRefType};
 use crate::tag_utils::TagResolver;
 use dashmap::DashMap;
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -97,6 +98,7 @@ pub struct AppState {
     pub restore_cache_tags: Vec<String>,
     pub oci_alias_promotion_refs: Vec<String>,
     pub proxy_metadata_hints: BTreeMap<String, String>,
+    pub native_tool_evidence: Arc<StdMutex<Option<Value>>>,
     pub proxy_skip_rules: Arc<Vec<ProxySkipRule>>,
     pub proxy_ci_run_context: Option<CiRunContext>,
     pub fail_on_cache_error: bool,
@@ -153,6 +155,19 @@ impl AppState {
             .get(key)
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
+    }
+
+    pub fn set_native_tool_evidence(&self, evidence: Value) {
+        if let Ok(mut guard) = self.native_tool_evidence.lock() {
+            *guard = Some(evidence);
+        }
+    }
+
+    pub fn native_tool_evidence(&self) -> Option<Value> {
+        self.native_tool_evidence
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     pub fn ci_provider(&self) -> Option<String> {

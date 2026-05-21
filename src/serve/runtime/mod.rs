@@ -3,9 +3,11 @@ mod maintenance;
 mod shutdown;
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Notify, RwLock, oneshot};
 
@@ -21,6 +23,7 @@ pub struct ServeHandle {
     ready: Arc<AtomicBool>,
     ready_notify: Arc<Notify>,
     prefetch_error: Arc<RwLock<Option<String>>>,
+    native_tool_evidence: Arc<StdMutex<Option<Value>>>,
     pub port: u16,
 }
 
@@ -39,6 +42,12 @@ impl ServeHandle {
 
     pub(crate) async fn prefetch_error_message(&self) -> Option<String> {
         self.prefetch_error.read().await.clone()
+    }
+
+    pub(crate) fn set_native_tool_evidence(&self, evidence: Value) {
+        if let Ok(mut guard) = self.native_tool_evidence.lock() {
+            *guard = Some(evidence);
+        }
     }
 
     pub async fn shutdown_and_flush(mut self) -> Result<()> {
@@ -202,6 +211,7 @@ pub async fn start_server_background(
         ready: state.prefetch_complete.clone(),
         ready_notify: state.prefetch_complete_notify.clone(),
         prefetch_error: state.prefetch_error.clone(),
+        native_tool_evidence: state.native_tool_evidence.clone(),
         port: bound_port,
     })
 }
