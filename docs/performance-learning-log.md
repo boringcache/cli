@@ -50,6 +50,34 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
     from about `26s` disk-backed proxy reads to about `23s` with `1 GiB`
     memory-backed reads, but the module archive restore remained a material
     part of the phase.
+- Follow-up archive transfer probe against production benchmark workspaces:
+  - Ranged archive download is active; the slow local restores were not silently
+    falling back to streaming.
+  - On this local machine, the Hugo Go `266.09 MB` production archive restored
+    in about `20-24s`. Default local planning used `2` connections, `9` parts,
+    and a `32 MB` part size. Forcing `16` or `32` connections only moved body
+    download from about `16.5-18.3s` to `15.4-15.8s`.
+  - On this local machine, the OpenTelemetry Gradle `883.12 MB` production
+    archive restored in `66.9s` with one connection and `57.7s` with `32`
+    connections. Body download improved from `61.1s` to `52.1s`, while
+    extraction stayed about `5.6-5.9s`.
+  - The matching GitHub Actions OpenTelemetry Gradle restore downloaded the
+    same `883.12 MB` archive body in `1.7s` with `16` connections and restored
+    in `7.2s` total. The matching Hugo Go Actions restore downloaded a
+    `266.09 MB` archive body in `2.1s` with `6` connections and restored in
+    `5.4s` total.
+  - Do not assume the OpenTelemetry Gradle archive can be narrowed safely. The
+    restored Gradle user home is mostly real dependency/tooling state:
+    `caches/9.5.1` was about `1.0 GB` uncompressed, including about `798 MB`
+    under `transforms`; `caches/modules-2` was about `593 MB`; wrapper dists
+    were about `151 MB`. The benchmark already strips local Gradle build-cache
+    directories before archive save, so this archive is not obviously
+    duplicating the measured remote build-cache surface.
+  - Conclusion: increasing archive chunks is not a broad answer. It helps a
+    little on the local LHR path but GHA already gets high body throughput from
+    the ranged path. For Actions-scale benchmark readiness, focus more on
+    reducing archive size/materialization work and overlapping independent
+    waits than on raising download concurrency alone.
 - Current shape in the CLI:
   - `boringcache <adapter>` restores archive profile entries before starting
     the proxy.
@@ -62,10 +90,12 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
     stable but expensive to fully restore. For large tool homes, compare the
     current tar.zstd archive against a file/CAS-style package layout that can
     skip already-present content and avoid rewriting every file.
-  - Add benchmark artifact fields for `archive_restore_ms`,
-    `archive_download_ms`, `archive_extract_ms`, `proxy_startup_ms`,
-    `wrapped_command_ms`, and `archive_save_ms`, so benchmark summaries explain
-    where warm time went without reading logs.
+  - Surface the existing archive restore/save timing telemetry in benchmark
+    artifacts, and add only the missing spans around proxy startup and wrapped
+    command execution. Restore already records total/download/extract timing,
+    and save already records archive/upload timing; benchmark summaries should
+    expose those alongside `proxy_startup_ms` and `wrapped_command_ms` so warm
+    time is explainable without reading logs.
   - Start proxy warmup concurrently with archive restore when both are required,
     then wait for both before launching the wrapped command. This should be
     resource-governed because large archive downloads and proxy blob prefetch
