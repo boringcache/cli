@@ -52,9 +52,19 @@ The guardrail test is:
 cargo test --test machine_output_contract_tests
 ```
 
+CLI CI runs this as the explicit `Machine Output Contracts` job, and the CLI
+release workflow refuses to publish a tag unless that job passed for the tagged
+commit.
+
 If this test fails because output changed, do not update the fixture by reflex.
 First check the consumer impact for the action, benchmark workflows, release
 scripts, and any docs that teach the JSON shape.
+
+`boringcache/one` keeps mirrored parser fixtures under
+`tests/fixtures/cli-machine-output/` in the action repo. Those fixtures include
+supported adapter plans and unsupported-schema failure artifacts so action
+parser drift fails in action tests before a release or benchmark path consumes
+the new CLI shape.
 
 ## Expansion Order
 

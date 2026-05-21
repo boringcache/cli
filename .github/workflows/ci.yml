@@ -106,6 +106,26 @@ jobs:
           name: boringcache-results
           path: benchmark-results/
 
+  machine-output-contracts:
+    name: Machine Output Contracts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Resolve Rust version
+        id: rust-version
+        run: echo "version=$(./scripts/rust-version.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust-version.outputs.version }}
+
+      - name: Check machine-output fixtures
+        run: cargo test --test machine_output_contract_tests
+
   warm-macos-debug-cache:
     name: Warm CLI debug cache (macOS)
     runs-on: macos-15

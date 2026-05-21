@@ -161,7 +161,7 @@ jobs:
           echo "e2e_run_id=${E2E_RUN_ID}" >> "$GITHUB_OUTPUT"
 
           JOBS_JSON="$(fetch_jobs_json "${CI_RUN_ID}")"
-          for prefix in "Test CLI (BoringCache)"; do
+          for prefix in "Test CLI (BoringCache)" "Machine Output Contracts"; do
             TOTAL="$(printf '%s' "${JOBS_JSON}" | jq --arg p "${prefix}" '[.jobs[] | select((.name // "") | startswith($p))] | length')"
             OK="$(printf '%s' "${JOBS_JSON}" | jq --arg p "${prefix}" '[.jobs[] | select(((.name // "") | startswith($p)) and ((.conclusion // "")=="success"))] | length')"
             if [[ "${TOTAL}" -eq 0 ]]; then
