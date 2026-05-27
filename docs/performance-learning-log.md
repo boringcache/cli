@@ -279,7 +279,6 @@ This log captures regressions, root causes, and guardrails for cache-registry pe
   - Strict local-edge replay must isolate the proxy blob cache (`E2E_BLOB_CACHE_SCOPE=per-proxy`). Otherwise a same-machine proxy restart can reuse the previous read-through blob cache and hide the cold body-plane cost.
   - 84-layer, 32 MiB random-body replay through local Rails/Tigris passed all three policies. With per-proxy body-cache isolation, metadata-only had 86 cold selected bodies and fetched about 33.6 MB remotely during warm reads; `bodies-before-ready` inserted all 86 selected bodies before readiness in about 2.7s and avoided restart-warm remote body fetches; `bodies-background` inserted all 86 selected bodies in about 2.2s and also avoided restart-warm remote body fetches when it won the race.
 - Harness/product-DX lessons:
-  - The debug path must keep the benchmark graph stable when testing a new `cli_ref`. A real binary copied into a Docker build context is a BuildKit input and can legitimately require a cache reset after a binary change.
   - Local Docker-on-macOS validation needs separate proxy and registry hosts because a `docker-container` builder resolves `localhost` inside the Linux VM/Colima context.
   - macOS Bash 3 with `set -u` needs empty-array guards in E2E harnesses.
 - Review of the core-engine rewrite recommendation:
