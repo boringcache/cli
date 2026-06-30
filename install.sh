@@ -111,6 +111,27 @@ verify_checksum() {
     fi
 }
 
+verify_checksum_signature() {
+    local temp_dir="$1"
+
+    if [ "${BORINGCACHE_VERIFY_SIGNATURE:-0}" != "1" ]; then
+        return 0
+    fi
+
+    if ! command -v cosign >/dev/null 2>&1; then
+        print_error "BORINGCACHE_VERIFY_SIGNATURE=1 requires cosign in PATH."
+        print_error "Install cosign or unset BORINGCACHE_VERIFY_SIGNATURE to use checksum-only verification."
+        exit 1
+    fi
+
+    cosign verify-blob \
+        --certificate "${temp_dir}/SHA256SUMS.pem" \
+        --signature "${temp_dir}/SHA256SUMS.sig" \
+        --certificate-identity-regexp '^https://github.com/boringcache/.+/.github/workflows/.+@refs/(heads/main|tags/v.+)$' \
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        "${temp_dir}/SHA256SUMS" >/dev/null
+}
+
 # Function to download and install binary
 install_binary() {
     local os="$1"
@@ -162,6 +183,10 @@ install_binary() {
     
     download_file "${download_url}" "${temp_file}"
     download_file "${release_url}/SHA256SUMS" "${temp_dir}/SHA256SUMS"
+    if [ "${BORINGCACHE_VERIFY_SIGNATURE:-0}" = "1" ]; then
+        download_file "${release_url}/SHA256SUMS.sig" "${temp_dir}/SHA256SUMS.sig"
+        download_file "${release_url}/SHA256SUMS.pem" "${temp_dir}/SHA256SUMS.pem"
+    fi
     
     # Check if download was successful
     if [ ! -f "${temp_file}" ] || [ ! -s "${temp_file}" ]; then
@@ -172,6 +197,11 @@ install_binary() {
 
     if ! verify_checksum "${temp_dir}" "${binary_name}"; then
         print_error "Checksum verification failed for ${binary_name}"
+        exit 1
+    fi
+
+    if ! verify_checksum_signature "${temp_dir}"; then
+        print_error "Checksum signature verification failed"
         exit 1
     fi
     
