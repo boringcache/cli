@@ -59,7 +59,7 @@ get_latest_release() {
     local repo="$1"
     
     # Try to get latest release from GitHub API
-    local response=$(curl -s "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null)
+    local response=$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null || true)
     
     # Check if API call was successful
     if echo "$response" | grep -q '"tag_name":'; then
@@ -75,6 +75,39 @@ get_latest_release() {
     print_warning "This may not be the latest version. Check https://github.com/${repo}/releases manually." >&2
 
     echo "$fallback_version"
+}
+
+download_file() {
+    local url="$1"
+    local output="$2"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "${url}" -o "${output}"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "${url}" -O "${output}"
+    else
+        print_error "Neither curl nor wget found. Please install one of them."
+        exit 1
+    fi
+}
+
+verify_checksum() {
+    local temp_dir="$1"
+    local binary_name="$2"
+    local checksum_file="${temp_dir}/SHA256SUMS"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd "${temp_dir}" && grep "  ${binary_name}$" SHA256SUMS | sha256sum -c -) >/dev/null
+    elif command -v shasum >/dev/null 2>&1; then
+        local expected
+        local actual
+        expected=$(grep "  ${binary_name}$" "${checksum_file}" | awk '{print $1}')
+        actual=$(shasum -a 256 "${temp_dir}/${binary_name}" | awk '{print $1}')
+        [ -n "${expected}" ] && [ "${expected}" = "${actual}" ]
+    else
+        print_error "Neither sha256sum nor shasum found. Cannot verify release checksum."
+        exit 1
+    fi
 }
 
 # Function to download and install binary
@@ -117,7 +150,8 @@ install_binary() {
             ;;
     esac
     
-    local download_url="https://github.com/${REPO}/releases/download/${version}/${binary_name}"
+    local release_url="https://github.com/${REPO}/releases/download/${version}"
+    local download_url="${release_url}/${binary_name}"
     
     print_status "Downloading ${binary_name} from ${download_url}..."
     
@@ -125,20 +159,18 @@ install_binary() {
     local temp_dir=$(mktemp -d)
     local temp_file="${temp_dir}/${binary_name}"
     
-    # Download the binary
-    if command -v curl >/dev/null 2>&1; then
-        curl -sL "${download_url}" -o "${temp_file}"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q "${download_url}" -O "${temp_file}"
-    else
-        print_error "Neither curl nor wget found. Please install one of them."
-        exit 1
-    fi
+    download_file "${download_url}" "${temp_file}"
+    download_file "${release_url}/SHA256SUMS" "${temp_dir}/SHA256SUMS"
     
     # Check if download was successful
     if [ ! -f "${temp_file}" ] || [ ! -s "${temp_file}" ]; then
         print_error "Failed to download ${binary_name}"
         print_error "Please check if the release exists at: ${download_url}"
+        exit 1
+    fi
+
+    if ! verify_checksum "${temp_dir}" "${binary_name}"; then
+        print_error "Checksum verification failed for ${binary_name}"
         exit 1
     fi
     
@@ -190,8 +222,8 @@ install_binary() {
     esac
     
     # Test the installation
-    if command -v "${BINARY_NAME}" >/dev/null 2>&1; then
-        print_success "✓ Installation verified - 'boringcache' command is available"
+    if command -v "${BINARY_NAME}" >/dev/null 2>&1 && "${BINARY_NAME}" --version >/dev/null 2>&1; then
+        print_success "✓ Installation verified - 'boringcache --version' succeeded"
         print_status "Run 'boringcache --help' to get started"
     else
         print_warning "⚠ 'boringcache' command not found in PATH"
