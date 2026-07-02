@@ -124,12 +124,20 @@ verify_checksum_signature() {
         exit 1
     fi
 
-    cosign verify-blob \
-        --certificate "${temp_dir}/SHA256SUMS.pem" \
-        --signature "${temp_dir}/SHA256SUMS.sig" \
-        --certificate-identity-regexp '^https://github.com/boringcache/.+/.github/workflows/.+@refs/(heads/main|tags/v.+)$' \
-        --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-        "${temp_dir}/SHA256SUMS" >/dev/null
+    if [ -f "${temp_dir}/SHA256SUMS.bundle" ]; then
+        cosign verify-blob \
+            --bundle "${temp_dir}/SHA256SUMS.bundle" \
+            --certificate-identity-regexp '^https://github.com/boringcache/.+/.github/workflows/.+@refs/(heads/main|tags/v.+)$' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${temp_dir}/SHA256SUMS" >/dev/null
+    else
+        cosign verify-blob \
+            --certificate "${temp_dir}/SHA256SUMS.pem" \
+            --signature "${temp_dir}/SHA256SUMS.sig" \
+            --certificate-identity-regexp '^https://github.com/boringcache/.+/.github/workflows/.+@refs/(heads/main|tags/v.+)$' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${temp_dir}/SHA256SUMS" >/dev/null
+    fi
 }
 
 # Function to download and install binary
@@ -184,8 +192,11 @@ install_binary() {
     download_file "${download_url}" "${temp_file}"
     download_file "${release_url}/SHA256SUMS" "${temp_dir}/SHA256SUMS"
     if [ "${BORINGCACHE_VERIFY_SIGNATURE:-0}" = "1" ]; then
-        download_file "${release_url}/SHA256SUMS.sig" "${temp_dir}/SHA256SUMS.sig"
-        download_file "${release_url}/SHA256SUMS.pem" "${temp_dir}/SHA256SUMS.pem"
+        if ! download_file "${release_url}/SHA256SUMS.bundle" "${temp_dir}/SHA256SUMS.bundle"; then
+            rm -f "${temp_dir}/SHA256SUMS.bundle"
+            download_file "${release_url}/SHA256SUMS.sig" "${temp_dir}/SHA256SUMS.sig"
+            download_file "${release_url}/SHA256SUMS.pem" "${temp_dir}/SHA256SUMS.pem"
+        fi
     fi
     
     # Check if download was successful
