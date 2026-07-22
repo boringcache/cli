@@ -1,6 +1,7 @@
 #!/bin/sh
 # BoringCache CLI Installation Script
 # Usage: curl -sSL -H "Cache-Control: no-cache" -H "Pragma: no-cache" https://install.boringcache.com/install.sh | sh
+# Strict: curl -sSL https://install.boringcache.com/install.sh | BORINGCACHE_VERIFY_SIGNATURE=1 sh
 
 set -e
 
@@ -14,6 +15,9 @@ NC='\033[0m' # No Color
 # GitHub repository
 REPO="boringcache/cli"
 BINARY_NAME="boringcache"
+CHECKSUM_CERTIFICATE_IDENTITY_REGEXP='^https://github\.com/boringcache/monorepo/\.github/workflows/(cli-release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+|cli-release-checksums\.yml@refs/heads/main)$'
+CHECKSUM_CERTIFICATE_OIDC_ISSUER='https://token.actions.githubusercontent.com'
+VERIFY_CHECKSUM_SIGNATURE=0
 
 # Function to print colored output
 print_status() {
@@ -111,33 +115,52 @@ verify_checksum() {
     fi
 }
 
+prepare_checksum_signature_verification() {
+    VERIFY_CHECKSUM_SIGNATURE=0
+
+    case "${BORINGCACHE_VERIFY_SIGNATURE:-auto}" in
+        auto)
+            if command -v cosign >/dev/null 2>&1; then
+                VERIFY_CHECKSUM_SIGNATURE=1
+                print_status "cosign found; release signature verification is enabled."
+            else
+                print_warning "cosign not found; continuing with SHA-256 checksum verification."
+                print_warning "Install cosign and set BORINGCACHE_VERIFY_SIGNATURE=1 for fail-closed signature verification."
+            fi
+            ;;
+        1|true|required)
+            if ! command -v cosign >/dev/null 2>&1; then
+                print_error "BORINGCACHE_VERIFY_SIGNATURE=1 requires cosign in PATH."
+                return 1
+            fi
+            VERIFY_CHECKSUM_SIGNATURE=1
+            ;;
+        0|false|off)
+            ;;
+        *)
+            print_error "BORINGCACHE_VERIFY_SIGNATURE must be auto, 1, or 0."
+            return 1
+            ;;
+    esac
+}
+
 verify_checksum_signature() {
     local temp_dir="$1"
 
-    if [ "${BORINGCACHE_VERIFY_SIGNATURE:-0}" != "1" ]; then
+    if [ "${VERIFY_CHECKSUM_SIGNATURE}" != "1" ]; then
         return 0
     fi
 
-    if ! command -v cosign >/dev/null 2>&1; then
-        print_error "BORINGCACHE_VERIFY_SIGNATURE=1 requires cosign in PATH."
-        print_error "Install cosign or unset BORINGCACHE_VERIFY_SIGNATURE to use checksum-only verification."
-        exit 1
+    if [ ! -s "${temp_dir}/SHA256SUMS.bundle" ]; then
+        print_error "Signed checksum bundle is missing or empty."
+        return 1
     fi
 
-    if [ -f "${temp_dir}/SHA256SUMS.bundle" ]; then
-        cosign verify-blob \
-            --bundle "${temp_dir}/SHA256SUMS.bundle" \
-            --certificate-identity-regexp '^https://github.com/boringcache/.+/.github/workflows/.+@refs/(heads/main|tags/v.+)$' \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "${temp_dir}/SHA256SUMS" >/dev/null
-    else
-        cosign verify-blob \
-            --certificate "${temp_dir}/SHA256SUMS.pem" \
-            --signature "${temp_dir}/SHA256SUMS.sig" \
-            --certificate-identity-regexp '^https://github.com/boringcache/.+/.github/workflows/.+@refs/(heads/main|tags/v.+)$' \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "${temp_dir}/SHA256SUMS" >/dev/null
-    fi
+    cosign verify-blob \
+        --bundle "${temp_dir}/SHA256SUMS.bundle" \
+        --certificate-identity-regexp "${CHECKSUM_CERTIFICATE_IDENTITY_REGEXP}" \
+        --certificate-oidc-issuer "${CHECKSUM_CERTIFICATE_OIDC_ISSUER}" \
+        "${temp_dir}/SHA256SUMS" >/dev/null
 }
 
 # Function to download and install binary
@@ -188,14 +211,20 @@ install_binary() {
     # Create temporary directory
     local temp_dir=$(mktemp -d)
     local temp_file="${temp_dir}/${binary_name}"
+
+    if ! prepare_checksum_signature_verification; then
+        rm -rf "${temp_dir}"
+        exit 1
+    fi
     
     download_file "${download_url}" "${temp_file}"
     download_file "${release_url}/SHA256SUMS" "${temp_dir}/SHA256SUMS"
-    if [ "${BORINGCACHE_VERIFY_SIGNATURE:-0}" = "1" ]; then
+    if [ "${VERIFY_CHECKSUM_SIGNATURE}" = "1" ]; then
         if ! download_file "${release_url}/SHA256SUMS.bundle" "${temp_dir}/SHA256SUMS.bundle"; then
             rm -f "${temp_dir}/SHA256SUMS.bundle"
-            download_file "${release_url}/SHA256SUMS.sig" "${temp_dir}/SHA256SUMS.sig"
-            download_file "${release_url}/SHA256SUMS.pem" "${temp_dir}/SHA256SUMS.pem"
+            print_error "Signed checksum bundle is unavailable for ${version}."
+            rm -rf "${temp_dir}"
+            exit 1
         fi
     fi
     
@@ -206,13 +235,13 @@ install_binary() {
         exit 1
     fi
 
-    if ! verify_checksum "${temp_dir}" "${binary_name}"; then
-        print_error "Checksum verification failed for ${binary_name}"
+    if ! verify_checksum_signature "${temp_dir}"; then
+        print_error "Checksum signature verification failed"
         exit 1
     fi
 
-    if ! verify_checksum_signature "${temp_dir}"; then
-        print_error "Checksum signature verification failed"
+    if ! verify_checksum "${temp_dir}" "${binary_name}"; then
+        print_error "Checksum verification failed for ${binary_name}"
         exit 1
     fi
     
@@ -323,5 +352,6 @@ main() {
     print_status "  ${BINARY_NAME} onboard"
 }
 
-# Run main function
-main "$@"
+if [ "${BORINGCACHE_INSTALLER_SOURCE_ONLY:-0}" != "1" ]; then
+    main "$@"
+fi
