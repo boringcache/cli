@@ -7,6 +7,14 @@ BoringCache CLI. The normal install command is:
 curl -sSL https://install.boringcache.com/install.sh | sh
 ```
 
+The installer always verifies `SHA256SUMS`. When `cosign` is available it also
+verifies `SHA256SUMS.bundle` automatically. To make Sigstore verification
+mandatory, install `cosign` first and run:
+
+```bash
+curl -sSL https://install.boringcache.com/install.sh | BORINGCACHE_VERIFY_SIGNATURE=1 sh
+```
+
 When testing the installer itself, use:
 
 ```bash
@@ -59,6 +67,7 @@ The release workflow publishes:
 - `boringcache-windows-amd64.exe`
 - `boringcache-windows-arm64.exe`
 - `SHA256SUMS`
+- `SHA256SUMS.bundle`
 
 ## Installation Locations
 
@@ -71,7 +80,13 @@ The script installs to the first writable location:
 ## Security Notes
 
 - Downloads use HTTPS.
-- Release assets include `SHA256SUMS`.
+- The installer always verifies the binary against `SHA256SUMS`.
+- When `cosign` is available, the installer verifies `SHA256SUMS.bundle`
+  automatically; `BORINGCACHE_VERIFY_SIGNATURE=1` makes this fail closed.
+- Sigstore verification accepts only the monorepo CLI release workflow on a
+  semantic-version tag or the checksum-repair workflow on `main`.
 - The installer verifies the downloaded binary can run before finishing.
 - Product source is maintained in the BoringCache monorepo; this public repo is
   the distribution channel.
+- Potential vulnerabilities should be reported through the private process in
+  [the security policy](.github/SECURITY.md), not a public issue.
