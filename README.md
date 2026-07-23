@@ -10,6 +10,14 @@ cd your-project
 boringcache onboard
 ```
 
+The installer always verifies the release checksum. If `cosign` is installed,
+it also verifies the signed checksum bundle automatically. To require the
+signature and fail closed, run:
+
+```bash
+curl -sSL https://install.boringcache.com/install.sh | BORINGCACHE_VERIFY_SIGNATURE=1 sh
+```
+
 `boringcache onboard` authenticates the CLI, chooses a workspace, writes `.boringcache.toml` when it can, and lines up the same cache names across local runs, Docker builds, and GitHub Actions.
 
 If you want to start sign-in from the terminal by email, use `boringcache onboard --email you@example.com`. For a brand-new account, pass `--name` and `--username` too.
@@ -38,7 +46,13 @@ Use adapter commands when the build tool already speaks a remote-cache protocol 
 Use `cache-registry` when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive. `cache-registry` is the proxy. `run --proxy` and adapter commands temporarily start that same proxy for one command.
 When `.boringcache.toml` stores the Docker command, `boringcache docker` is the short form. Use the longer version when you want to pass the Docker command inline.
 
-If you are wiring GitHub Actions, use [`boringcache/one`](https://github.com/boringcache/one) pinned to the immutable v1.13.99 commit (`b55458ec8a4165e3fd70b1a1645f518a2095ed02`) after onboard so CI can reuse the same repo config and trust model.
+If you are wiring GitHub Actions, pin the verified `boringcache/one` v1.13.99
+distribution commit after onboard so CI can reuse the same repo config and
+trust model:
+
+```yaml
+- uses: boringcache/one@b55458ec8a4165e3fd70b1a1645f518a2095ed02 # v1.13.99
+```
 
 ## Docs
 

@@ -14,7 +14,7 @@ The pattern is simple:
 `cache-registry` itself is warm by default. Use `--on-demand` only for advanced shared-proxy setups that prefer immediate startup over warmed first reads.
 
 The snippets below are intended to be copy-pasteable `.boringcache.toml`
-starting points. They work for local CLI runs and for the pinned `boringcache/one` action
+starting points. They work for local CLI runs and for `boringcache/one`
 because the action asks the CLI for the same repo plan.
 
 Shared defaults for the examples:

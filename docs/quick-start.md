@@ -52,5 +52,7 @@ boringcache docker
 
 The next docs to read are usually [Adapter commands](adapter-commands.md) and [Tool guides](tool-guides.md).
 
-If the repo uses GitHub Actions, the next step is usually [`boringcache/one`](https://github.com/boringcache/one) pinned to the immutable v1.13.99 commit (`b55458ec8a4165e3fd70b1a1645f518a2095ed02`).
+If the repo uses GitHub Actions, the next step is usually the immutable
+[`boringcache/one`](https://github.com/boringcache/one) v1.13.99 distribution
+commit `b55458ec8a4165e3fd70b1a1645f518a2095ed02`.
 See [GitHub Actions](github-actions.md).

@@ -5,7 +5,7 @@ The preferred path is:
 1. install the CLI locally
 2. run `boringcache onboard`
 3. commit `.boringcache.toml` when it helps
-4. use [`boringcache/one`](https://github.com/boringcache/one) pinned to the immutable v1.13.99 commit in GitHub Actions
+4. use the verified, immutable [`boringcache/one`](https://github.com/boringcache/one) release commit in GitHub Actions
 
 That keeps CI and local runs on the same workspace, entries, and cache profiles.
 
@@ -21,7 +21,7 @@ Example:
     BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
 ```
 
-For proxy-backed modes, the pinned `boringcache/one` action also accepts first-class `metadata-hints` so sessions and misses stay grouped by stable labels instead of per-run noise:
+For proxy-backed modes, `boringcache/one` also accepts first-class `metadata-hints` so sessions and misses stay grouped by stable labels instead of per-run noise:
 
 ```yaml
 - uses: boringcache/one@b55458ec8a4165e3fd70b1a1645f518a2095ed02 # v1.13.99
@@ -39,7 +39,7 @@ For proxy-backed modes, the pinned `boringcache/one` action also accepts first-c
 
 Keep those hints low-cardinality. Good values are `project=web`, `benchmark=grpc-bazel`, `tool=gradle`, `lane=ci`, or `workflow=build`. Avoid commit SHAs, run ids, timestamps, and cold/warm labels for normal sessions; BoringCache classifies new and recurring misses from cache target and lifecycle data.
 
-If the repo already defines `[proxy]` or adapter `metadata-hints` in `.boringcache.toml`, the pinned `boringcache/one` action inherits them through the CLI dry-run plan. Prefer repo config for durable defaults and use the action input only when the workflow needs an explicit override.
+If the repo already defines `[proxy]` or adapter `metadata-hints` in `.boringcache.toml`, `boringcache/one` inherits them through the CLI dry-run plan. Prefer repo config for durable defaults and use the action input only when the workflow needs an explicit override.
 The canonical repo-config starting points in [Tool guides](tool-guides.md) are
 meant to be shared between local CLI runs and GitHub Actions for exactly this
 reason.
@@ -81,7 +81,7 @@ You can still override a configured adapter from the workflow when needed:
     BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
 ```
 
-Use the pinned `boringcache/one` action when you want it to keep owning tool setup such as Bazel rc files, Maven or Gradle cache config, buildx setup, or container networking.
+Use `boringcache/one` when you want the action to keep owning tool setup such as Bazel rc files, Maven or Gradle cache config, buildx setup, or container networking. Keep the full commit pin and update it deliberately after verifying a newer public release.
 When you run `boringcache docker` directly in GitHub Actions, the CLI derives the same branch/default/PR human tags from GitHub metadata that archive and proxy flows use. The action path passes provider-neutral metadata so Docker cache artifacts report the resolved human import/export tags and CI context.
 
 For Docker and BuildKit registry caches on pull requests, restore-only is the default.
