@@ -38,7 +38,7 @@ Use adapter commands when the build tool already speaks a remote-cache protocol 
 Use `cache-registry` when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive. `cache-registry` is the proxy. `run --proxy` and adapter commands temporarily start that same proxy for one command.
 When `.boringcache.toml` stores the Docker command, `boringcache docker` is the short form. Use the longer version when you want to pass the Docker command inline.
 
-If you are wiring GitHub Actions, use [`boringcache/one@v1`](https://github.com/boringcache/one) after onboard so CI can reuse the same repo config and trust model.
+If you are wiring GitHub Actions, use [`boringcache/one`](https://github.com/boringcache/one) pinned to the immutable v1.13.99 commit (`b55458ec8a4165e3fd70b1a1645f518a2095ed02`) after onboard so CI can reuse the same repo config and trust model.
 
 ## Docs
 
