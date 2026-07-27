@@ -10,21 +10,15 @@ cd your-project
 boringcache onboard
 ```
 
-The installer always verifies the release checksum. If `cosign` is installed,
-it also verifies the signed checksum bundle automatically. To require the
-signature and fail closed, run:
-
-```bash
-curl -sSL https://install.boringcache.com/install.sh | BORINGCACHE_VERIFY_SIGNATURE=1 sh
-```
-
 `boringcache onboard` authenticates the CLI, chooses a workspace, writes `.boringcache.toml` when it can, and lines up the same cache names across local runs, Docker builds, and GitHub Actions.
+
+For restore-first laptop use, set `boringcache config set read_only true` once
+and add `--write` only when a local command should publish.
 
 If you want to start sign-in from the terminal by email, use `boringcache onboard --email you@example.com`. For a brand-new account, pass `--name` and `--username` too.
 
 Repo config can also keep the repeated command itself under `[adapters.<tool>]`.
 `command` accepts either an argv array or a shell-style string.
-This is not general TOML templating: proxy-backed commands only substitute `{PORT}`, `{ENDPOINT}`, and `{CACHE_REF}`.
 After that, start with the shortest command that fits the tool:
 
 ```bash
@@ -33,26 +27,31 @@ boringcache run -- bundle install
 
 # Docker adapter from repo config
 boringcache docker
-
-# Same adapter without repo config
-boringcache docker --tag docker-cache -- docker buildx build .
-
-# Long-lived local proxy
-boringcache cache-registry my-org/app registry-cache --port 5000
+# Native Xcode compilation cache (macOS)
+boringcache xcode -- xcodebuild -workspace App.xcworkspace -scheme App build
 ```
 
 Use archive mode commands (`run`, `save`, and `restore`) when you are caching explicit directories.
 Use adapter commands when the build tool already speaks a remote-cache protocol and BoringCache has a dedicated wrapper for it.
-Use `cache-registry` when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive. `cache-registry` is the proxy. `run --proxy` and adapter commands temporarily start that same proxy for one command.
-When `.boringcache.toml` stores the Docker command, `boringcache docker` is the short form. Use the longer version when you want to pass the Docker command inline.
+`.boringcache.toml` keeps repeated adapter commands and cache identity out of
+shell scripts.
 
-If you are wiring GitHub Actions, pin the verified `boringcache/one` v1.13.99
-distribution commit after onboard so CI can reuse the same repo config and
-trust model:
+Image publication is opt-in and uses the same workspace CAS as the BuildKit
+cache. Configure a stable default with `publish-image = "web:latest"` under
+`[adapters.docker]`, or pass a dynamic tag with `--publish-image`. To pull from
+another machine, use a workspace restore token as the password. The hosted
+registry is pull-only in this release; publish through the BoringCache wrapper,
+not a direct `docker push`:
 
-```yaml
-- uses: boringcache/one@b55458ec8a4165e3fd70b1a1645f518a2095ed02 # v1.13.99
+```bash
+boringcache docker --publish-image web:$GITHUB_SHA
+
+echo "$BORINGCACHE_RESTORE_TOKEN" | docker login registry.boringcache.com \
+  --username boringcache --password-stdin
+docker pull registry.boringcache.com/my-org/my-workspace/web:latest
 ```
+
+If you are wiring GitHub Actions, use [`boringcache/one@9721d419d2c78c0780963d297eb3f81f24641a27`](https://github.com/boringcache/one) after onboard so CI can reuse the same repo config and trust model.
 
 ## Docs
 
@@ -61,7 +60,7 @@ trust model:
 - [Archive mode](docs/archive-mode.md)
 - [Adapter commands](docs/adapter-commands.md)
 - [Tool guides](docs/tool-guides.md)
-- [Proxy mode](docs/proxy-mode.md)
 - [GitHub Actions](docs/github-actions.md)
+- [Development](docs/development.md)
 - [Installation setup](INSTALLATION.md)
 - [Website docs](https://boringcache.com/docs)

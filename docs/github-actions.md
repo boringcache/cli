@@ -5,46 +5,51 @@ The preferred path is:
 1. install the CLI locally
 2. run `boringcache onboard`
 3. commit `.boringcache.toml` when it helps
-4. use the verified, immutable [`boringcache/one`](https://github.com/boringcache/one) release commit in GitHub Actions
+4. use [`boringcache/one@9721d419d2c78c0780963d297eb3f81f24641a27`](https://github.com/boringcache/one) in GitHub Actions
 
 That keeps CI and local runs on the same workspace, entries, and cache profiles.
 
 Example:
 
 ```yaml
-- uses: boringcache/one@b55458ec8a4165e3fd70b1a1645f518a2095ed02 # v1.13.99
+- uses: boringcache/one@9721d419d2c78c0780963d297eb3f81f24641a27 # v1.13.106
   with:
-    workspace: my-org/my-project
+    setup: none
+    mode: archive
     cache-profiles: bundle-install
   env:
     BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
-    BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
+    BORINGCACHE_SAVE_TOKEN: ${{ github.event_name != 'pull_request' && secrets.BORINGCACHE_SAVE_TOKEN || '' }}
 ```
 
-For proxy-backed modes, `boringcache/one` also accepts first-class `metadata-hints` so sessions and misses stay grouped by stable labels instead of per-run noise:
+For proxy-backed modes, `boringcache/one@9721d419d2c78c0780963d297eb3f81f24641a27` also accepts first-class `metadata-hints` so sessions and misses stay grouped by stable labels instead of per-run noise:
 
 ```yaml
-- uses: boringcache/one@b55458ec8a4165e3fd70b1a1645f518a2095ed02 # v1.13.99
+- uses: boringcache/one@9721d419d2c78c0780963d297eb3f81f24641a27 # v1.13.106
   with:
+    setup: none
     mode: bazel
-    workspace: my-org/my-project
     metadata-hints: |
       project=web
       tool=bazel
       lane=ci
   env:
     BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
-    BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
+    BORINGCACHE_SAVE_TOKEN: ${{ github.event_name != 'pull_request' && secrets.BORINGCACHE_SAVE_TOKEN || '' }}
 ```
 
 Keep those hints low-cardinality. Good values are `project=web`, `benchmark=grpc-bazel`, `tool=gradle`, `lane=ci`, or `workflow=build`. Avoid commit SHAs, run ids, timestamps, and cold/warm labels for normal sessions; BoringCache classifies new and recurring misses from cache target and lifecycle data.
 
-If the repo already defines `[proxy]` or adapter `metadata-hints` in `.boringcache.toml`, `boringcache/one` inherits them through the CLI dry-run plan. Prefer repo config for durable defaults and use the action input only when the workflow needs an explicit override.
+If the repo already defines `[proxy]` or adapter `metadata-hints` in `.boringcache.toml`, `boringcache/one@9721d419d2c78c0780963d297eb3f81f24641a27` inherits them through the CLI dry-run plan. Prefer repo config for durable defaults and use the action input only when the workflow needs an explicit override.
 The canonical repo-config starting points in [Tool guides](tool-guides.md) are
 meant to be shared between local CLI runs and GitHub Actions for exactly this
 reason.
 
-If you are migrating an existing workflow and do not have repo config yet, raw `entries` and `actions/cache`-compatible `path` / `key` / `restore-keys` inputs still work.
+Adapter modes use the same names as their CLI commands: `mode: docker`,
+`mode: bazel`, `mode: turbo`, `mode: nx`, and `mode: sccache`.
+
+When migrating `actions/cache`, run `boringcache onboard` first and commit the
+profile. Do not copy GitHub cache paths or keys into the Action.
 
 If you already manage the tool-specific setup yourself and only want proxy lifecycle plus adapter env injection, the CLI now also supports direct adapter commands:
 
@@ -65,7 +70,7 @@ If you already manage the tool-specific setup yourself and only want proxy lifec
 - run: boringcache turbo
   env:
     BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
-    BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
+    BORINGCACHE_SAVE_TOKEN: ${{ github.event_name != 'pull_request' && secrets.BORINGCACHE_SAVE_TOKEN || '' }}
 ```
 
 You can still override a configured adapter from the workflow when needed:
@@ -78,30 +83,46 @@ You can still override a configured adapter from the workflow when needed:
       -- pnpm turbo run build
   env:
     BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
-    BORINGCACHE_SAVE_TOKEN: ${{ secrets.BORINGCACHE_SAVE_TOKEN }}
+    BORINGCACHE_SAVE_TOKEN: ${{ github.event_name != 'pull_request' && secrets.BORINGCACHE_SAVE_TOKEN || '' }}
 ```
 
-Use `boringcache/one` when you want the action to keep owning tool setup such as Bazel rc files, Maven or Gradle cache config, buildx setup, or container networking. Keep the full commit pin and update it deliberately after verifying a newer public release.
+Use `boringcache/one@9721d419d2c78c0780963d297eb3f81f24641a27` when you want the action to keep owning tool setup such as Bazel rc files, Maven or Gradle cache config, buildx setup, or container networking.
 When you run `boringcache docker` directly in GitHub Actions, the CLI derives the same branch/default/PR human tags from GitHub metadata that archive and proxy flows use. The action path passes provider-neutral metadata so Docker cache artifacts report the resolved human import/export tags and CI context.
+For Dockerfile `RUN` steps that invoke native remote-cache tools, use the
+Docker-specific action input with inline tags such as
+`docker-tool-cache: turbo:turbo-cache,gradle:gradle-cache,go:go-cache`, or pass plain tool
+names when `.boringcache.toml` defines `[adapters.<tool>].tag`. The action
+delegates those builds to `boringcache docker --tool-cache ...`, so the CLI
+owns the session-only BuildKit env/config injection and Docker-visible proxy
+endpoints. The supported Docker tool set is Turbo, Nx, Bazel, Gradle, Maven,
+sccache, and Go.
 
-For Docker and BuildKit registry caches on pull requests, restore-only is the default.
-A PR-scoped human tag may be absent and return 404, so restore-only PRs import the CLI-planned base/default tags without gaining write access.
-If a workflow intentionally wants PR-scoped Docker writes, give the job a save-capable token and set `save-on-pull-request: true`; do that only when the PR write scope is isolated, not merely to make the PR tag exist. In PR context, the derived write target is the PR human tag.
+For managed Docker and BuildKit caches on pull requests, `trust-policy: auto`
+is restore-only. A separately trusted job can use `trust-policy: stage` to
+create an immutable candidate. A later trusted solve supplies its exact ID or
+digest through `cache-candidates`, imports it beside the current published
+manifest, and exports only the fresh published manifest.
+`boringcache/one` exposes the authenticated stage receipts as its
+`cache-candidates` and `cache-candidate-digests` outputs for direct job-to-job
+handoff.
 
-Keep the proxy story simple in CI too:
-
-- `cache-registry` is the long-lived proxy when a workflow or service needs to keep one around
-- adapter commands and `run --proxy` temporarily start that same proxy for one command and wait internally
-- if a detached helper needs to spawn `cache-registry` and continue only after startup readiness, it should consume the CLI-owned readiness handoff instead of reimplementing local HTTP polling
-- use `/_boringcache/status` for diagnostics, explicit lifecycle assertions, and publish-settlement checks
+Adapter modes start, wait for, diagnose, and stop their local cache process.
+Workflows select the adapter name and should not recreate that lifecycle.
 
 Keep the trust model simple:
 
 - every job gets `BORINGCACHE_RESTORE_TOKEN`
+- candidate-producing jobs get `BORINGCACHE_STAGE_TOKEN`
 - only trusted jobs get `BORINGCACHE_SAVE_TOKEN`
-- `pull_request` jobs stay restore-only by default inside `boringcache/one`; set `save-on-pull-request: true` only when the write scope is intentionally isolated
-- restore-only PR Docker refs may 404 and should fall through to CLI-planned base/default imports
-- avoid broad legacy `BORINGCACHE_API_TOKEN` use in CI
+- `pull_request` jobs stay restore-only under `trust-policy: auto`
+- exact candidates are explicit inputs, never ambient PR or Git fallbacks
+- use only the purpose-specific restore/stage/save variables
+
+The Action does not use `CI=true` or a self-hosted runner's machine config as a
+trust signal. After it evaluates event intent and token capability, every CLI
+plan call receives exactly one explicit policy: `--read-only`, `--stage`, or
+`--write`. The service still enforces token capability; the CLI flag is
+orchestration, not authority.
 
 Read from pull requests.
 Write from trusted branches, tags, or manual jobs.

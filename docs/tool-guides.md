@@ -7,14 +7,9 @@ The pattern is simple:
 1. run `boringcache onboard`
 2. put repeated setup in `.boringcache.toml`
 3. use `boringcache <tool>`
-4. drop to `cache-registry` only when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive
-
-`cache-registry` is the proxy.
-`boringcache <tool>` and `boringcache run --proxy` temporarily start that same proxy for one command, wait until it is ready, then hand traffic to the wrapped tool.
-`cache-registry` itself is warm by default. Use `--on-demand` only for advanced shared-proxy setups that prefer immediate startup over warmed first reads.
 
 The snippets below are intended to be copy-pasteable `.boringcache.toml`
-starting points. They work for local CLI runs and for `boringcache/one`
+starting points. They work for local CLI runs and for `boringcache/one@9721d419d2c78c0780963d297eb3f81f24641a27`
 because the action asks the CLI for the same repo plan.
 
 Shared defaults for the examples:
@@ -48,7 +43,7 @@ boringcache docker --tag docker-cache -- docker buildx build .
 Do not pass those flags yourself.
 Use `--cache-mode` only when you need to change the BuildKit export mode.
 
-Direct BuildKit runs use the same OCI cache plan:
+Direct BuildKit runs use the same managed cache plan:
 
 ```toml
 [adapters.buildkit]
@@ -63,11 +58,11 @@ boringcache buildkit --tag docker-cache -- buildctl build --frontend dockerfile.
 ```
 
 `boringcache buildkit` injects `--import-cache` and `--export-cache` for `buildctl build`.
-Keep builder installation, daemon lifecycle, QEMU/binfmt, and Docker container networking in the caller's runtime setup.
+The Docker and BuildKit adapters own the managed BoringCache builder lifecycle and its Docker networking, including selecting a cache endpoint reachable from the builder.
 
 Docker has one BoringCache tag concept:
 
-- `--tag docker-cache` selects the resolved human cache tag, and the CLI uses that same tag for the BuildKit registry ref and backend cache entry.
+- `--tag docker-cache` selects the resolved human cache tag, and the CLI uses that same tag for the managed BuildKit cache ref and backend entry.
 
 In GitHub Actions or another CI environment that provides BoringCache CI metadata, the adapter applies the shared branch/default/PR restore ordering as human tags.
 It injects the planned human-tag imports and exports the resolved write tag:
@@ -78,22 +73,9 @@ It injects the planned human-tag imports and exports the resolved write tag:
 --cache-to   .../cache:docker-cache-pr-3208-ubuntu-24-x86_64
 ```
 
-BoringCache backs the BuildKit registry cache through the Docker and direct BuildKit adapters.
-By default the Docker path warms the selected OCI manifest, blob URLs, and blob bodies before BuildKit starts.
-That keeps the normal path simple: a warm BuildKit run should read cache bodies through the local proxy instead of discovering remote body reads after the manifest hit.
-
-If the builder runs in another container, set `endpoint-host = "host.docker.internal"` in `.boringcache.toml` or pass `--endpoint-host host.docker.internal`.
-
-For a long-lived endpoint:
-
-```bash
-boringcache cache-registry my-org/app registry-cache --port 5000
-
-docker buildx build \
-  --cache-from type=registry,ref=127.0.0.1:5000/my-cache:main \
-  --cache-to type=registry,ref=127.0.0.1:5000/my-cache:main,mode=max \
-  .
-```
+BoringCache provides the managed BuildKit backend through the Docker and direct BuildKit adapters.
+By default the Docker path warms the selected cache metadata before BuildKit starts, then lets BuildKit fetch blob bodies on demand through the local proxy.
+Use explicit OCI hydration settings only for evidence-backed read-path experiments; do not assume blob bodies are warmed before every BuildKit run.
 
 ## Nx
 
@@ -107,23 +89,14 @@ command = ["nx", "run-many", "--target=build"]
 boringcache nx
 ```
 
-Nx gets the local endpoint and access token automatically.
+Nx gets the local endpoint and a random per-proxy access token automatically;
+the proxy rejects a token copied from another wrapped run.
 If `nx.json` is still connected to Nx Cloud with `nxCloudId`, `nxCloudAccessToken`,
 or an `nx-cloud` task runner, Nx may select its private cloud runner before the
 self-hosted cache endpoint. Remove that Nx Cloud binding from the workspace
 config before using the BoringCache Nx proxy, or use a prepared disposable
 checkout for benchmarks. Do not use `NX_NO_CLOUD` as the BoringCache setup path;
 Nx treats it as remote-cache disablement in current releases.
-
-For a long-lived endpoint:
-
-```bash
-boringcache cache-registry my-org/app registry-cache --port 5000
-
-NX_SELF_HOSTED_REMOTE_CACHE_SERVER=http://127.0.0.1:5000 \
-NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN=boringcache \
-nx run-many --target=build
-```
 
 ## Turborepo
 
@@ -143,18 +116,8 @@ metadata-hints = ["tool=turborepo", "lane=ci"]
 boringcache turbo
 ```
 
-Turborepo gets `TURBO_API`, `TURBO_TOKEN`, and `TURBO_TEAM` automatically.
-
-For a long-lived endpoint:
-
-```bash
-boringcache cache-registry my-org/app registry-cache --port 5000
-
-TURBO_API=http://127.0.0.1:5000 \
-TURBO_TOKEN=boringcache \
-TURBO_TEAM=boringcache \
-turbo run build
-```
+Turborepo gets `TURBO_API`, `TURBO_TOKEN`, and `TURBO_TEAM` automatically. The
+wrapped token is random per proxy and is not a multi-tenant authorization model.
 
 ## Bazel
 
@@ -174,18 +137,10 @@ metadata-hints = ["tool=bazel", "lane=ci"]
 boringcache bazel
 ```
 
-`boringcache bazel` starts the proxy and runs Bazel.
-It injects `--remote_cache=http://127.0.0.1:5000` automatically and keeps upload enabled unless you run the adapter in read-only mode.
+`boringcache bazel` starts the local cache process and runs Bazel.
+It injects the remote-cache endpoint automatically and keeps upload enabled unless you run the adapter in read-only mode.
 
 If the repo already has Bazel cache flags in `.bazelrc`, those stay in effect and explicit user flags still win.
-
-For a long-lived endpoint:
-
-```bash
-boringcache cache-registry my-org/app registry-cache --port 5000
-
-bazel build --remote_cache=http://127.0.0.1:5000 //...
-```
 
 ## Gradle
 
@@ -205,18 +160,11 @@ metadata-hints = ["tool=gradle", "lane=ci"]
 boringcache gradle
 ```
 
-`boringcache gradle` starts the proxy and runs Gradle.
-It injects `--build-cache` and a generated init script that points Gradle remote cache traffic at `http://127.0.0.1:5000/cache/`.
+`boringcache gradle` starts the local cache process and runs Gradle.
+It injects `--build-cache` and a generated init script that points Gradle remote cache traffic at the managed local endpoint. The init script is written under the effective Gradle user home, including command-line `-g`/`--gradle-user-home` overrides.
 The adapter keeps push enabled unless you run it in read-only mode.
 
 If the repo already has build cache config in `settings.gradle(.kts)`, that still works. The adapter-owned init script just makes the local proxy turnkey for one command.
-
-For a long-lived endpoint:
-
-```bash
-boringcache cache-registry my-org/app registry-cache --port 5000
-./gradlew build --build-cache --no-daemon
-```
 
 ## Maven
 
@@ -230,16 +178,39 @@ command = ["mvn", "install", "-DskipTests", "--batch-mode", "-ntp"]
 boringcache maven
 ```
 
-`boringcache maven` starts the proxy and runs Maven.
-It injects the `maven.build.cache.remote.url` and `maven.build.cache.remote.save.enabled` properties automatically.
-If the repo does not already use the Maven build cache extension, add that first. The adapter owns the endpoint and save mode, but it does not bootstrap the extension itself.
+`boringcache maven` starts the local cache process and runs Maven.
+It injects the `maven.build.cache.remote.url` and `maven.build.cache.remote.save.enabled` properties automatically. When setup is absent, it also creates `.mvn/extensions.xml` for extension 1.2.3 and a marker-owned 1.2.0 build-cache config. Any existing build-cache extension declaration and user-owned cache config are preserved; when a version override is explicit, a mismatch is an error. The adapter refuses to splice into unrelated or unreadable user-owned XML.
 
-For a long-lived endpoint:
+## Xcode
+
+```toml
+workspace = "my-org/my-project"
+
+[proxy]
+metadata-hints = ["project=ios-app"]
+
+[adapters.xcode]
+tag = "xcode-cache"
+command = ["xcodebuild", "-workspace", "App.xcworkspace", "-scheme", "App", "build"]
+metadata-hints = ["tool=xcode", "lane=ci"]
+```
 
 ```bash
-boringcache cache-registry my-org/app registry-cache --port 5000
-mvn install -DskipTests --batch-mode -ntp -Dmaven.build.cache.remote.save.enabled=true
+boringcache xcode
+boringcache xcode -- xcodebuild -workspace App.xcworkspace -scheme App build
 ```
+
+The wrapper requires macOS and a supported Xcode installation. It finds
+Apple's toolchain CAS plugin, loads the BoringCache adapter shipped beside the
+CLI, creates stable per-tag CAS and DerivedData directories, starts the local
+bridge, and injects the compilation-cache settings. Xcode and the plugin never
+receive a workspace token.
+
+Xcode 26 reuse is scoped by absolute paths. Keep the checkout at the same real
+path across runners; use one explicit canonical checkout path when sharing
+between CI providers. Inspect `boringcache xcode --dry-run --json` for the
+Xcode build, resolved paths, path strategy, and `path_cohort` before comparing
+cache performance across lanes.
 
 ## sccache
 
@@ -261,19 +232,8 @@ sccache-key-prefix = "rust/ci"
 boringcache sccache
 ```
 
-The adapter sets `RUSTC_WRAPPER=sccache`, `SCCACHE_WEBDAV_ENDPOINT`, `SCCACHE_WEBDAV_KEY_PREFIX`, and `CARGO_INCREMENTAL=0` when the caller has not set it.
-After the wrapped command exits, it reads `sccache --show-stats`, prints a concise hit/miss summary, and records normalized native tool evidence with the run/session diagnostics when sccache reports stats.
-
-For a long-lived endpoint:
-
-```bash
-boringcache cache-registry my-org/app registry-cache --port 5000
-
-RUSTC_WRAPPER=sccache \
-SCCACHE_WEBDAV_ENDPOINT=http://127.0.0.1:5000/ \
-SCCACHE_WEBDAV_KEY_PREFIX=rust/ci \
-cargo build --release
-```
+The adapter sets `RUSTC_WRAPPER=sccache`, the WebDAV endpoint/prefix/read-write mode, and `SCCACHE_MULTILEVEL_CHAIN=webdav`, plus `CARGO_INCREMENTAL=0` when unset. It removes inherited alternate-backend selectors and WebDAV credentials so host or CI configuration cannot bypass the local proxy.
+Each invocation uses a dedicated sccache daemon port. After the wrapped command exits, the adapter reads stats on that port, records normalized native-tool evidence when available, and stops the dedicated daemon. Use supported sccache 0.16.0 or a newer version only after its adapter compatibility review passes.
 
 ## Go
 
@@ -288,12 +248,3 @@ boringcache go
 ```
 
 Use `boringcache go` for normal Go cache integration. The adapter sets `GOCACHEPROG` automatically for Go 1.24+.
-
-Advanced: manual `GOCACHEPROG` wiring for a long-lived endpoint:
-
-```bash
-boringcache cache-registry my-org/app registry-cache --port 5000
-
-GOCACHEPROG="boringcache go-cacheprog --endpoint http://127.0.0.1:5000" \
-go build ./...
-```

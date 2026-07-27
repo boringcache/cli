@@ -107,4 +107,11 @@ trap cleanup EXIT HUP INT TERM
 test_installer "${CLI_ROOT}/install.sh" "root-installer"
 test_installer "${CLI_ROOT}/install-web/install.sh" "web-installer"
 
+for installer in "${CLI_ROOT}/install.sh" "${CLI_ROOT}/install-web/install.sh"; do
+    grep -F 'libboringcache_xcode_cas-macos-universal.dylib' "${installer}" >/dev/null ||
+        fail "$(basename "${installer}") does not download the universal Xcode adapter"
+    grep -F 'libboringcache_xcode_cas.dylib' "${installer}" >/dev/null ||
+        fail "$(basename "${installer}") does not install the Xcode adapter beside the CLI"
+done
+
 printf 'installer trust tests passed\n'
