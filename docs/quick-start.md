@@ -11,26 +11,28 @@ boringcache onboard
 `boringcache onboard` is the default starting point.
 It authenticates the CLI, chooses a default workspace, and writes `.boringcache.toml` when it can so local runs, Docker builds, and CI can reuse the same cache names.
 
-After onboard, start with the shortest command that fits the tool:
+For restore-first laptop use, opt in with
+`boringcache config set read_only true`; add `--write` only to an invocation
+that should publish. Onboarding does not choose this policy for you.
+
+After onboard, use the plan it wrote. The command name is the cache adapter:
 
 ```bash
-# Archive mode (run/save/restore)
+# Archive entries inferred from the command or selected by profile
 boringcache run -- bundle install
 
-# Docker adapter from repo config
+# Native adapters use the same name everywhere
 boringcache docker
-
-# Same adapter without repo config
-boringcache docker --tag docker-cache -- docker buildx build .
-
-# Long-lived local proxy
-boringcache cache-registry my-org/app registry-cache --port 5000
+boringcache turbo
+boringcache nx
+boringcache bazel
+boringcache sccache
 ```
 
 Use archive mode commands (`run`, `save`, and `restore`) when you want to cache an explicit directory such as `vendor/bundle`, `node_modules`, or `dist`.
 Use adapter commands when the build tool already knows how to talk to a remote cache and BoringCache has a dedicated wrapper for it.
-Use `cache-registry` when the repo already has a checked-in local endpoint setup or another process should keep the proxy alive. `cache-registry` is the proxy. `run --proxy` and adapter commands temporarily start that proxy for one command and wait internally until it is ready.
-When `.boringcache.toml` stores the Docker command, `boringcache docker` is the short form. Use the longer version when you want to pass the Docker command inline.
+`.boringcache.toml` keeps repeated adapter commands and cache identity out of
+shell scripts.
 
 For repeated remote-cache commands, put the adapter setup in `.boringcache.toml` and keep the invocation short:
 
@@ -42,9 +44,8 @@ tag = "docker-cache"
 command = ["docker", "buildx", "build", "."]
 ```
 
-`command` can be an argv array like the example above or a shell-style string such as `command = "docker buildx build ."`.
-This is not general TOML templating.
-When the adapter starts a local proxy, command arguments can use `{PORT}`, `{ENDPOINT}`, and `{CACHE_REF}`.
+`command` can be an argv array like the example above or a shell-style string
+such as `command = "docker buildx build ."`.
 
 ```bash
 boringcache docker
@@ -52,7 +53,21 @@ boringcache docker
 
 The next docs to read are usually [Adapter commands](adapter-commands.md) and [Tool guides](tool-guides.md).
 
-If the repo uses GitHub Actions, the next step is usually the immutable
-[`boringcache/one`](https://github.com/boringcache/one) v1.13.99 distribution
-commit `b55458ec8a4165e3fd70b1a1645f518a2095ed02`.
+If the repo uses GitHub Actions, the next step is usually [`boringcache/one@9721d419d2c78c0780963d297eb3f81f24641a27`](https://github.com/boringcache/one).
 See [GitHub Actions](github-actions.md).
+
+## Security defaults
+
+- API credentials are sent only over HTTPS. Plain HTTP is accepted only when
+  `BORINGCACHE_API_URL` or the saved `api_url` names `localhost`, `127.0.0.0/8`,
+  or `::1` explicitly for local development.
+- Authenticated API requests do not follow redirects. Configure the final API
+  URL directly.
+- The official `https://api.boringcache.com` service requires a valid server
+  signature for cache hits automatically. Custom and self-hosted endpoints keep
+  compatibility warning behavior unless `--require-server-signature` or
+  `BORINGCACHE_REQUIRE_SERVER_SIGNATURE=1` is set.
+- `~/.boringcache/config.json` is replaced atomically and symlinked config
+  paths are refused. On Unix, the directory is `0700` and the file is `0600`.
+  On Windows, keep the user profile on a user-only ACL; the CLI still performs
+  atomic replacement and symlink checks, but does not rewrite Windows ACLs.

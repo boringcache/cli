@@ -170,10 +170,12 @@ install_binary() {
     
     # Map OS and architecture to actual binary names
     local binary_name=""
+    local xcode_plugin_name=""
     
     case "${os}-${arch}" in
         "darwin-amd64"|"darwin-arm64")
             binary_name="boringcache-macos-universal"
+            xcode_plugin_name="libboringcache_xcode_cas-macos-universal.dylib"
             ;;
         "linux-amd64")
             if [ -f /etc/alpine-release ]; then
@@ -210,6 +212,7 @@ install_binary() {
     # Create temporary directory
     local temp_dir=$(mktemp -d)
     local temp_file="${temp_dir}/${binary_name}"
+    local xcode_plugin_file=""
 
     if ! prepare_checksum_signature_verification; then
         rm -rf "${temp_dir}"
@@ -217,6 +220,10 @@ install_binary() {
     fi
     
     download_file "${download_url}" "${temp_file}"
+    if [ -n "${xcode_plugin_name}" ]; then
+        xcode_plugin_file="${temp_dir}/${xcode_plugin_name}"
+        download_file "${release_url}/${xcode_plugin_name}" "${xcode_plugin_file}"
+    fi
     download_file "${release_url}/SHA256SUMS" "${temp_dir}/SHA256SUMS"
     if [ "${VERIFY_CHECKSUM_SIGNATURE}" = "1" ]; then
         if ! download_file "${release_url}/SHA256SUMS.bundle" "${temp_dir}/SHA256SUMS.bundle"; then
@@ -233,6 +240,10 @@ install_binary() {
         print_error "Please check if the release exists at: ${download_url}"
         exit 1
     fi
+    if [ -n "${xcode_plugin_name}" ] && { [ ! -f "${xcode_plugin_file}" ] || [ ! -s "${xcode_plugin_file}" ]; }; then
+        print_error "Failed to download ${xcode_plugin_name}"
+        exit 1
+    fi
 
     if ! verify_checksum_signature "${temp_dir}"; then
         print_error "Checksum signature verification failed"
@@ -243,9 +254,16 @@ install_binary() {
         print_error "Checksum verification failed for ${binary_name}"
         exit 1
     fi
+    if [ -n "${xcode_plugin_name}" ] && ! verify_checksum "${temp_dir}" "${xcode_plugin_name}"; then
+        print_error "Checksum verification failed for ${xcode_plugin_name}"
+        exit 1
+    fi
     
     # Make binary executable
     chmod +x "${temp_file}"
+    if [ -n "${xcode_plugin_name}" ]; then
+        chmod +x "${xcode_plugin_file}"
+    fi
     
     # Determine install directory
     local install_dir
@@ -262,6 +280,7 @@ install_binary() {
     fi
     
     local final_binary="${install_dir}/${BINARY_NAME}"
+    local final_xcode_plugin="${install_dir}/libboringcache_xcode_cas.dylib"
     
     # Install the binary
     print_status "Installing to ${final_binary}..."
@@ -269,8 +288,14 @@ install_binary() {
     if [ "$install_dir" = "/usr/local/bin" ] && [ ! -w "/usr/local/bin" ]; then
         # Need sudo for /usr/local/bin
         sudo mv "${temp_file}" "${final_binary}"
+        if [ -n "${xcode_plugin_name}" ]; then
+            sudo mv "${xcode_plugin_file}" "${final_xcode_plugin}"
+        fi
     else
         mv "${temp_file}" "${final_binary}"
+        if [ -n "${xcode_plugin_name}" ]; then
+            mv "${xcode_plugin_file}" "${final_xcode_plugin}"
+        fi
     fi
     
     # Cleanup
@@ -278,6 +303,9 @@ install_binary() {
     
     print_success "BoringCache CLI installed successfully!"
     print_status "Binary location: ${final_binary}"
+    if [ -n "${xcode_plugin_name}" ]; then
+        print_status "Xcode adapter location: ${final_xcode_plugin}"
+    fi
     
     # Check if install directory is in PATH
     case ":$PATH:" in

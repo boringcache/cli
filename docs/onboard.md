@@ -43,6 +43,19 @@ boringcache onboard --email you@example.com --name "Jane Doe" --username janedoe
 With `--workspace --apply`, onboard writes or verifies the repo `workspace`
 setting even when the repo has CI files that do not need optimization.
 
+Onboard does not silently choose who may publish caches. It does not write a
+read-only policy into `.boringcache.toml`, and it does not infer one from
+whether the current process looks like CI. If this laptop should reuse caches
+without publishing by default, opt in separately with:
+
+```bash
+boringcache config set read_only true
+```
+
+That preference stays in the machine config. An intentional local publication
+uses `--write`; GitHub Actions derives its explicit read/write choice from the
+Action trust policy and token capability.
+
 `--github-secrets` uses the GitHub CLI to set `BORINGCACHE_RESTORE_TOKEN` and
 `BORINGCACHE_SAVE_TOKEN` without printing token values. If both secrets already
 exist, it leaves them alone; pass `--rotate-ci-tokens` to replace them.
@@ -61,12 +74,12 @@ boringcache onboard \
 ```
 
 That command keeps the same product path as interactive onboarding, but returns a
-bounded JSON report with `workspace`, `repo_config`, `github_secrets`,
-`optimize_results`, and `next_steps`.
+bounded JSON report with `schema_version`, `workspace`, `repo_config`,
+`github_secrets`, `optimize_results`, and `next_steps`.
 
 Use `--create-ci-tokens` only when another system must receive token values
 directly. Its JSON output includes the new restore/save token values, so do not
-write that output to public logs or commit it to the repo.
+write that output to CI logs or commit it to the repo.
 
 If onboard writes `.boringcache.toml`, later commands can use semantic entries and profiles instead of repeating raw `tag:path` pairs:
 
