@@ -49,7 +49,9 @@ Adapter modes use the same names as their CLI commands: `mode: docker`,
 `mode: bazel`, `mode: turbo`, `mode: nx`, and `mode: sccache`.
 
 When migrating `actions/cache`, run `boringcache onboard` first and commit the
-profile. Do not copy GitHub cache paths or keys into the Action.
+profile. Do not copy GitHub cache paths or keys into the Action. BoringCache
+starts its own cache history and does not translate `key`, `restore-keys`, or
+cache lookup outputs into a second compatibility model.
 
 If you already manage the tool-specific setup yourself and only want proxy lifecycle plus adapter env injection, the CLI now also supports direct adapter commands:
 
