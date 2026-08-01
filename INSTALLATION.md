@@ -7,8 +7,10 @@ Cloudflare (or any intermediary CDN) revalidates the script on each install.
 
 The installer always verifies every downloaded artifact against `SHA256SUMS`.
 On macOS it installs both the universal CLI and the universal Xcode CAS adapter
-beside it. When `cosign` is available it also verifies the signed checksum
-bundle automatically.
+beside it. Archive save and restore run inside the CLI through its Rust tar
+runtime; no separate tar executable or package-manager setup is required. When
+`cosign` is available it also verifies the signed checksum bundle
+automatically.
 For fail-closed Sigstore verification, install `cosign` first and run:
 
 ```bash

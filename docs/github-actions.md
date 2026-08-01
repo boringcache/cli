@@ -46,7 +46,8 @@ meant to be shared between local CLI runs and GitHub Actions for exactly this
 reason.
 
 Adapter modes use the same names as their CLI commands: `mode: docker`,
-`mode: bazel`, `mode: turbo`, `mode: nx`, and `mode: sccache`.
+`mode: buildkit`, `mode: bazel`, `mode: ccache`, `mode: go`, `mode: gradle`,
+`mode: maven`, `mode: nx`, `mode: sccache`, `mode: turbo`, and `mode: xcode`.
 
 When migrating `actions/cache`, run `boringcache onboard` first and commit the
 profile. Do not copy GitHub cache paths or keys into the Action. BoringCache

@@ -16,6 +16,7 @@ Supported adapter commands today:
 - `boringcache bazel`
 - `boringcache gradle`
 - `boringcache maven`
+- `boringcache ccache`
 - `boringcache sccache`
 - `boringcache go`
 - `boringcache buildkit`
@@ -128,6 +129,7 @@ These adapters inject the tool-specific settings for you:
 - `bazel`
 - `gradle`
 - `maven`
+- `ccache`
 - `sccache`
 - `go`
 - `xcode`

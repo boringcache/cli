@@ -181,6 +181,32 @@ boringcache maven
 `boringcache maven` starts the local cache process and runs Maven.
 It injects the `maven.build.cache.remote.url` and `maven.build.cache.remote.save.enabled` properties automatically. When setup is absent, it also creates `.mvn/extensions.xml` for extension 1.2.3 and a marker-owned 1.2.0 build-cache config. Any existing build-cache extension declaration and user-owned cache config are preserved; when a version override is explicit, a mismatch is an error. The adapter refuses to splice into unrelated or unreadable user-owned XML.
 
+## ccache
+
+```toml
+workspace = "my-org/my-project"
+
+[proxy]
+metadata-hints = ["project=cpp-app"]
+
+[adapters.ccache]
+tag = "cpp-cache"
+command = ["cmake", "--build", "build"]
+metadata-hints = ["tool=ccache", "lane=ci"]
+```
+
+```bash
+boringcache ccache
+boringcache ccache -- cmake --build build
+```
+
+Keep compiler-launcher selection in the project, such as
+`CMAKE_C_COMPILER_LAUNCHER=ccache` and
+`CMAKE_CXX_COMPILER_LAUNCHER=ccache`. The adapter supplies ccache's remote
+storage, remote-only mode, lifecycle, and native statistics; it does not
+rewrite `CC` or `CXX`. Use the same adapter name through `mode: ccache` in
+`boringcache/one`.
+
 ## Xcode
 
 ```toml
