@@ -53,7 +53,7 @@ boringcache docker
 
 The next docs to read are usually [Adapter commands](adapter-commands.md) and [Tool guides](tool-guides.md).
 
-If the repo uses GitHub Actions, the next step is usually [`boringcache/one@b1d1e466317cde2d78a86f8cb94347deebb501e9`](https://github.com/boringcache/one).
+If the repo uses GitHub Actions, the next step is usually [`boringcache/one@bf810e34331db84f9f11930e83b8813b5ad31ba1`](https://github.com/boringcache/one).
 See [GitHub Actions](github-actions.md).
 
 ## Security defaults
