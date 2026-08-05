@@ -14,6 +14,7 @@ Supported adapter commands today:
 - `boringcache nx`
 - `boringcache turbo`
 - `boringcache bazel`
+- `boringcache cargo`
 - `boringcache gradle`
 - `boringcache maven`
 - `boringcache ccache`
@@ -33,6 +34,7 @@ boringcache docker
 
 # Other adapters use the same shape
 boringcache bazel
+boringcache cargo build
 boringcache turbo
 boringcache sccache
 
@@ -127,6 +129,7 @@ These adapters inject the tool-specific settings for you:
 - `nx`
 - `turbo`
 - `bazel`
+- `cargo`
 - `gradle`
 - `maven`
 - `ccache`
@@ -135,6 +138,15 @@ These adapters inject the tool-specific settings for you:
 - `xcode`
 
 For Bazel, the adapter injects the remote-cache flags directly.
+For Cargo, one direct Cargo command owns dependency archives, typed target
+restore and source freshness, sccache, and synchronous publication. A command
+committed under `[adapters.cargo].command` lets `boringcache cargo` and Action
+mode `cargo` execute the same argv without workflow-owned cache policy.
+Repeating the command preserves populated Cargo directories and lets Cargo
+decide what is fresh; the CLI does not restore over that local state. Each
+invocation remains an explicit lifecycle, so changed multi-phase jobs should
+use one combined Cargo command or a job-wide sccache setup instead of publishing
+an intermediate target after every phase.
 For Docker, `--tool-cache TOOL:TAG` starts the selected tool proxy outside the
 build and lets managed BuildKit inject its session-only environment and config
 into every `RUN` step. BuildKit cannot see through package scripts, aliases,
@@ -213,6 +225,21 @@ contract as running that adapter directly: pass
 `[adapters.turbo].tag = "turbo-cache"` and pass `--tool-cache turbo`.
 BoringCache starts the Docker/OCI proxy under the Docker tag and one normal
 tool proxy for each requested tool tag.
+`--tool-cache-target` narrows injection to selected Bake targets or Compose
+services and requires `--tool-cache`.
+
+`--mount-cache` offloads BuildKit `RUN --mount=type=cache` directories (a Cargo
+target directory, package-manager stores) to the CAS between builds. It works
+for both `docker` and `buildkit`, and fails immediately on any other adapter.
+It is opt-in and workload-gated: it pays off on changed-lockfile or
+compile-heavy builds where it avoids more work than the archive costs, and can
+cost more than it saves on builds the layer cache already serves. The
+`BORINGCACHE_BUILDKIT_MOUNTCACHE_OFFLOADER=1` environment variable remains
+accepted for existing callers, but the flag is the product surface.
+
+`boringcache docker --dry-run --json` reports the resolved decision under
+`tool_cache` and `mount_cache` so a wrapper can see what was selected without
+parsing BuildKit exporter attributes.
 
 The managed builder applies every selected native contract throughout Docker
 build execution:

@@ -10,7 +10,7 @@ cd your-project
 boringcache onboard
 ```
 
-`boringcache onboard` authenticates the CLI, chooses a workspace, writes `.boringcache.toml` when it can, and lines up the same cache names across local runs, Docker builds, and GitHub Actions.
+`boringcache onboard` authenticates the CLI, chooses a workspace, writes `.boringcache.toml` when it can, and offers an opt-in workflow scan to line up the same cache names across local runs, Docker builds, and GitHub Actions. Press Enter to skip that phase, or use `--skip-workflows` (`-S`) to declare the same boundary up front.
 
 For restore-first laptop use, set `boringcache config set read_only true` once
 and add `--write` only when a local command should publish.
@@ -51,7 +51,7 @@ echo "$BORINGCACHE_RESTORE_TOKEN" | docker login registry.boringcache.com \
 docker pull registry.boringcache.com/my-org/my-workspace/web:latest
 ```
 
-If you are wiring GitHub Actions, use [`boringcache/one@bf810e34331db84f9f11930e83b8813b5ad31ba1`](https://github.com/boringcache/one) after onboard so CI can reuse the same repo config and trust model.
+If you are wiring GitHub Actions, use [`boringcache/one@09e053620cda4d3472f26a3ddd181144a108e2c2`](https://github.com/boringcache/one) after onboard so CI can reuse the same repo config and trust model.
 
 ## Docs
 

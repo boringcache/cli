@@ -34,6 +34,13 @@ The basic unit is `tag:path`:
 Tags are git-aware and platform-aware by default.
 Use `--no-git` to disable branch suffixing and `--no-platform` only when the cached directory is genuinely portable across operating systems and architectures.
 
+Pull-request restores use the trusted base/default candidates by default.
+An explicit write lifecycle also tries that pull request's previously published
+tag first, so rolling runs reuse their own prior output: `boringcache run
+--write` and Action `trust-policy: publish` select this behavior automatically.
+For a deliberately split lower-level lifecycle, pass `--include-pr-tag` to
+`restore` or `check`; the normal restore-only PR path remains base-only.
+
 ## Laptop read-only default
 
 If you want normal laptop commands to reuse shared caches without publishing,

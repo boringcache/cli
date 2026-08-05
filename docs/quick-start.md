@@ -9,7 +9,10 @@ boringcache onboard
 ```
 
 `boringcache onboard` is the default starting point.
-It authenticates the CLI, chooses a default workspace, and writes `.boringcache.toml` when it can so local runs, Docker builds, and CI can reuse the same cache names.
+It authenticates the CLI, chooses a default workspace, writes
+`.boringcache.toml` when it can, and offers an opt-in CI workflow scan so local
+runs, Docker builds, and CI can reuse the same cache names. Press Enter to skip
+that step, or pass `--skip-workflows`, to leave workflows alone.
 
 For restore-first laptop use, opt in with
 `boringcache config set read_only true`; add `--write` only to an invocation
@@ -53,7 +56,7 @@ boringcache docker
 
 The next docs to read are usually [Adapter commands](adapter-commands.md) and [Tool guides](tool-guides.md).
 
-If the repo uses GitHub Actions, the next step is usually [`boringcache/one@bf810e34331db84f9f11930e83b8813b5ad31ba1`](https://github.com/boringcache/one).
+If the repo uses GitHub Actions, the next step is usually [`boringcache/one@09e053620cda4d3472f26a3ddd181144a108e2c2`](https://github.com/boringcache/one).
 See [GitHub Actions](github-actions.md).
 
 ## Security defaults
