@@ -20,9 +20,35 @@ What it does:
 
 Interactive onboarding presents those steps in order. At the workflow step,
 press Enter (or answer `n`) to stop after repository setup. No workflow file is
-scanned, sent to AI assist, or changed when that step is skipped. GitHub secret setup is offered
+scanned or changed when that step is skipped. GitHub secret setup is offered
 only after a BoringCache GitHub Actions workflow already exists or an approved
 workflow proposal has been written, and it has its own prompt.
+
+Migration is deterministic and runs entirely on your machine. Workflow content
+is never uploaded. A file the deterministic pass cannot migrate safely is
+reported as unresolved rather than rewritten by guesswork:
+
+```
+! .buildkite/pipeline.yml could not be migrated automatically.
+    Buildkite integration needs a committed .boringcache.toml profile before
+    the CLI can wrap a build command safely
+
+  Ask your coding agent:
+    "Set up BoringCache for this repository"
+
+  Then verify with:
+    boringcache doctor
+```
+
+Your coding agent already has the repository, the package manifests, and
+whatever CI abstraction the project uses. It makes the edit; the CLI decides
+whether the result is correct. `boringcache doctor` reports a
+`workflow_contract` section that judges every BoringCache CI file in the
+repository against the reviewed Action contract, whoever wrote it, so an agent
+has something to converge against. In `--json` mode each unresolved file carries a
+stable `reason_code` (`unsupported_ci_type`, `custom_workflow_structure`,
+`needs_repo_profile`, `validation_failed`) plus a human-readable `detail`.
+Unresolved files are data, not failure: `onboard` still exits zero.
 
 Useful variants:
 
@@ -64,8 +90,7 @@ boringcache onboard --email you@example.com --name "Jane Doe" --username janedoe
 With `--workspace --apply`, onboard writes or verifies the repo `workspace`
 setting even when the repo has CI files that do not need optimization.
 With `--skip-workflows`, that repo setting is the only repository change:
-workflow discovery, deterministic optimization, AI assist, and workflow writes
-do not run.
+workflow discovery, deterministic optimization, and workflow writes do not run.
 
 `--dry-run` previews workflow proposals without writing repository files. It
 cannot be combined with `--apply`, workspace provisioning, CI token creation,

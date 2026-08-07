@@ -5,14 +5,14 @@ The preferred path is:
 1. install the CLI locally
 2. run `boringcache onboard`
 3. commit `.boringcache.toml` when it helps
-4. use [`boringcache/one@366e1aa37c271014d69aa6e1a12df57c472fdf5d`](https://github.com/boringcache/one) in GitHub Actions
+4. use [`boringcache/one@b372edd91cda127cb03c64967df35c3836d47f2a`](https://github.com/boringcache/one) in GitHub Actions
 
 That keeps CI and local runs on the same workspace, entries, and cache profiles.
 
 Example:
 
 ```yaml
-- uses: boringcache/one@366e1aa37c271014d69aa6e1a12df57c472fdf5d # v1.16.9
+- uses: boringcache/one@b372edd91cda127cb03c64967df35c3836d47f2a # v1.17.0
   with:
     trust-policy: auto
     setup: none
@@ -25,13 +25,13 @@ Example:
 
 The immutable ref and its `v1.16.9` comment identify the reviewed Action
 release, not the CLI binary version. The Action and CLI are released
-independently; this Action installs CLI `v1.16.6` by default, and its
+independently; this Action installs CLI `v1.17.0` by default, and its
 `cli-version` input is an explicit override.
 
-For proxy-backed modes, `boringcache/one@366e1aa37c271014d69aa6e1a12df57c472fdf5d` also accepts first-class `metadata-hints` so sessions and misses stay grouped by stable labels instead of per-run noise:
+For proxy-backed modes, `boringcache/one@b372edd91cda127cb03c64967df35c3836d47f2a` also accepts first-class `metadata-hints` so sessions and misses stay grouped by stable labels instead of per-run noise:
 
 ```yaml
-- uses: boringcache/one@366e1aa37c271014d69aa6e1a12df57c472fdf5d # v1.16.9
+- uses: boringcache/one@b372edd91cda127cb03c64967df35c3836d47f2a # v1.17.0
   with:
     trust-policy: auto
     setup: none
@@ -47,7 +47,7 @@ For proxy-backed modes, `boringcache/one@366e1aa37c271014d69aa6e1a12df57c472fdf5
 
 Keep those hints low-cardinality. Good values are `project=web`, `benchmark=grpc-bazel`, `tool=gradle`, `lane=ci`, or `workflow=build`. Avoid commit SHAs, run ids, timestamps, and cold/warm labels for normal sessions; BoringCache classifies new and recurring misses from cache target and lifecycle data.
 
-If the repo already defines `[proxy]` or adapter `metadata-hints` in `.boringcache.toml`, `boringcache/one@366e1aa37c271014d69aa6e1a12df57c472fdf5d` inherits them through the CLI dry-run plan. Prefer repo config for durable defaults and use the action input only when the workflow needs an explicit override.
+If the repo already defines `[proxy]` or adapter `metadata-hints` in `.boringcache.toml`, `boringcache/one@b372edd91cda127cb03c64967df35c3836d47f2a` inherits them through the CLI dry-run plan. Prefer repo config for durable defaults and use the action input only when the workflow needs an explicit override.
 The canonical repo-config starting points in [Tool guides](tool-guides.md) are
 meant to be shared between local CLI runs and GitHub Actions for exactly this
 reason.
@@ -96,7 +96,7 @@ You can still override a configured adapter from the workflow when needed:
     BORINGCACHE_SAVE_TOKEN: ${{ github.event_name != 'pull_request' && secrets.BORINGCACHE_SAVE_TOKEN || '' }}
 ```
 
-Use `boringcache/one@366e1aa37c271014d69aa6e1a12df57c472fdf5d` when you want the action to keep owning tool setup such as Bazel rc files, Maven or Gradle cache config, buildx setup, or container networking.
+Use `boringcache/one@b372edd91cda127cb03c64967df35c3836d47f2a` when you want the action to keep owning tool setup such as Bazel rc files, Maven or Gradle cache config, buildx setup, or container networking.
 When you run `boringcache docker` directly in GitHub Actions, the CLI derives the same branch/default/PR human tags from GitHub metadata that archive and proxy flows use. The action path passes provider-neutral metadata so Docker cache artifacts report the resolved human import/export tags and CI context.
 For Dockerfile `RUN` steps that invoke native remote-cache tools, use the
 Docker-specific action input with inline tags such as
