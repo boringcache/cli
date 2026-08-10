@@ -139,9 +139,15 @@ These adapters inject the tool-specific settings for you:
 
 For Bazel, the adapter injects the remote-cache flags directly.
 For Cargo, one direct Cargo command owns dependency archives, typed target
-restore and source freshness, sccache, and synchronous publication. A command
+restore and source freshness, an optional sccache layer, and synchronous publication. A command
 committed under `[adapters.cargo].command` lets `boringcache cargo` and Action
 mode `cargo` execute the same argv without workflow-owned cache policy.
+The default `[adapters.cargo]` plan uses `compiler-cache = "sccache"`; set
+`compiler-cache = "none"` when target/dependency caching should run without a
+compiler proxy. Put the shared compiler tag and optional key prefix under
+`[adapters.sccache]`. Standalone `boringcache sccache` and composed Cargo then
+resolve the same compiler-cache identity. Older plans with the tag on
+`[adapters.cargo]` remain compatible when `[adapters.sccache].tag` is absent.
 Repeating the command preserves populated Cargo directories and lets Cargo
 decide what is fresh; the CLI does not restore over that local state. Each
 invocation remains an explicit lifecycle, so changed multi-phase jobs should

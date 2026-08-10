@@ -9,7 +9,7 @@ The pattern is simple:
 3. use `boringcache <tool>`
 
 The snippets below are intended to be copy-pasteable `.boringcache.toml`
-starting points. They work for local CLI runs and for `boringcache/one@b372edd91cda127cb03c64967df35c3836d47f2a`
+starting points. They work for local CLI runs and for `boringcache/one@78e1fd3257bbdf27722c46b500a39b6626fc8d27`
 because the action asks the CLI for the same repo plan.
 
 Shared defaults for the examples:
