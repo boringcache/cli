@@ -54,12 +54,25 @@ reason.
 
 Adapter modes use the same names as their CLI commands: `mode: docker`,
 `mode: buildkit`, `mode: bazel`, `mode: ccache`, `mode: go`, `mode: gradle`,
-`mode: maven`, `mode: nx`, `mode: sccache`, `mode: turbo`, and `mode: xcode`.
+`mode: gha`, `mode: maven`, `mode: nix`, `mode: nx`, `mode: sccache`,
+`mode: turbo`, and `mode: xcode`.
 
-When migrating `actions/cache`, run `boringcache onboard` first and commit the
-profile. Do not copy GitHub cache paths or keys into the Action. BoringCache
-starts its own cache history and does not translate `key`, `restore-keys`, or
-cache lookup outputs into a second compatibility model.
+Existing `actions/cache` users have two deliberate paths:
+
+- Keep existing cache steps, keys, restore keys, and cache-enabled `setup-*`
+  behavior by placing a BoringCache One `mode: gha` step before them. The
+  Actions client keeps owning its provider identity while BoringCache replaces
+  the v2 cache service. This source-complete mode becomes a customer path with
+  the next reviewed CLI and Action release containing it; `v1.18.1` does not.
+- Move to the native BoringCache model by running `boringcache onboard`,
+  committing the generated profile, and selecting it with `mode: archive` and
+  `cache-profiles`. Do not copy GitHub paths or keys into BoringCache One; the
+  CLI plan owns the replacement identity and can be reused locally or in other
+  CI systems.
+
+Both paths start a new BoringCache history and do not import GitHub-hosted cache
+objects. Compatibility preserves the action-owned tar archive; native profiles
+provide BoringCache's semantic per-entry model.
 
 If you already manage the tool-specific setup yourself and only want proxy lifecycle plus adapter env injection, the CLI now also supports direct adapter commands:
 

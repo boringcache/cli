@@ -16,7 +16,9 @@ Supported adapter commands today:
 - `boringcache bazel`
 - `boringcache cargo`
 - `boringcache gradle`
+- `boringcache gha`
 - `boringcache maven`
+- `boringcache nix`
 - `boringcache ccache`
 - `boringcache sccache`
 - `boringcache go`
@@ -37,6 +39,11 @@ boringcache bazel
 boringcache cargo build
 boringcache turbo
 boringcache sccache
+
+# Serve Actions Cache v2 on loopback for a supervised job
+boringcache gha --workspace my-org/my-project \
+  --repository-id "$GITHUB_REPOSITORY_ID" --scope "$GITHUB_REF" \
+  --ready-file /tmp/boringcache-gha.json
 
 # Xcode compilation cache; the CLI supplies stable CAS and DerivedData paths
 boringcache xcode -- xcodebuild -workspace App.xcworkspace -scheme App build
@@ -132,10 +139,12 @@ These adapters inject the tool-specific settings for you:
 - `cargo`
 - `gradle`
 - `maven`
+- `nix`
 - `ccache`
 - `sccache`
 - `go`
 - `xcode`
+- `gha`
 
 For Bazel, the adapter injects the remote-cache flags directly.
 For Cargo, one direct Cargo command owns dependency archives, typed target
@@ -160,6 +169,50 @@ Makefiles, or compiler wrappers, so command-name matching would silently
 disable an explicitly selected cache. Plain
 `--tool-cache TOOL` is also accepted when
 `[adapters.<tool>].tag` is set in `.boringcache.toml`.
+
+### Automatic Docker builder reuse
+
+Every `boringcache docker` invocation automatically selects the same managed
+builder for the repository. Sequential Buildx, Bake, and Compose commands
+therefore share compatible local BuildKit layers without a setup step, a flag,
+or an always-run finalizer:
+
+```yaml
+- name: Build release targets
+  run: boringcache docker --tag images -- docker buildx bake --load api web
+
+- name: Build and start the integration stack
+  run: boringcache docker --tag integration -- docker compose up --build --detach --wait
+```
+
+The commands stay independent. BoringCache does not merge Bake targets with a
+later Compose build or rewrite the job into one Bake invocation; it selects the
+same managed builder for each command and keeps the normal upstream behavior,
+outputs, service lifecycle, and exit status. Classic build aliases, plain
+`docker buildx build`,
+multi-target `docker buildx bake`, and Compose `build`, `create --build`,
+`run --build`, `up --build`, and `watch` all use that builder through the same
+Docker adapter path.
+
+Ephemeral runners discard the builder with the runner. On a persistent Docker
+engine, the repository-scoped builder stays warm and BuildKit's worker GC
+manages its cache. BoringCache clears command-scoped traces, workers, and
+credentials after every invocation. An exclusive builder lease rejects
+overlapping commands with an actionable retry message because that runtime
+state belongs to one invocation at a time; ordinary sequential commands need
+no lifecycle management.
+
+Persistent builders retain BuildKit's normal mutable cache-mount state across
+commands. That includes writes completed before a later instruction fails;
+BoringCache does not add rollback semantics that upstream BuildKit does not
+provide. Remote cache-mount publication still completes only for successful
+exports.
+
+Docker documents that Buildx, Bake, and Compose can select a named builder;
+BoringCache uses that supported selection mechanism rather than changing the
+underlying command. See [Docker builders](https://docs.docker.com/build/builders/),
+[`docker buildx bake`](https://docs.docker.com/reference/cli/docker/buildx/bake/),
+and [`docker compose build`](https://docs.docker.com/reference/cli/docker/compose/build/).
 For BuildKit, the adapter injects `--import-cache` and `--export-cache` for `buildctl build`.
 For Turbo and Nx, the adapter generates a random per-proxy bearer credential,
 injects it only into the wrapped process, and rejects tokens from another proxy.
@@ -168,6 +221,7 @@ Dry-run JSON uses the non-secret `boringcache` preview placeholder because no
 proxy instance exists yet; it is never the runtime credential for a wrapped run.
 For Gradle, the adapter adds `--build-cache` plus a generated init script in the effective Gradle user home. Command-line `-g`/`--gradle-user-home` wins over `GRADLE_USER_HOME`, just as it does in Gradle.
 For Maven, the adapter injects the `maven.build.cache.*` endpoint/save properties and bootstraps extension 1.2.3 plus a marker-owned 1.2.0 cache config when those files are absent. Any existing build-cache extension declaration and user-owned cache config are preserved. Unrelated or unreadable extension XML, and an explicit requested-version mismatch, produce a setup error instead of a rewrite.
+For Nix, the adapter adds a per-invocation trusted HTTP substituter through `NIX_CONFIG` while preserving inherited settings privately at runtime (they are not copied into dry-run JSON). In write mode it installs a post-build hook that only queues `OUT_PATHS`; a background worker batches those paths through `nix copy` with zstd parallel compression and drains before proxy shutdown. Multi-user Nix requires the invoking user or one of its groups in `trusted-users`. Read-only mode omits the hook entirely, and neither mode sets global `require-sigs = false`. Default mode lets Nix fall back to local builds on transient cache errors; `--fail-on-cache-error` disables that fallback and makes hook admission or drain failures fail the invocation.
 For sccache, the adapter injects `RUSTC_WRAPPER`, the WebDAV endpoint/prefix/read-write mode, and `SCCACHE_MULTILEVEL_CHAIN=webdav`, plus `CARGO_INCREMENTAL=0` when unset. It removes inherited alternate-backend selectors and WebDAV credentials, starts the child on a dedicated daemon port, collects best-effort stats on that same port, and stops the daemon afterward. This lifecycle contract requires supported sccache 0.16.0 or a newer version that has passed the adapter review. Leave `sccache-key-prefix` unset unless you need a stable WebDAV sub-root.
 For Xcode, the adapter injects native compilation-cache settings, a stable CAS
 and DerivedData path, and a credential-free Unix-socket bridge to the normal
@@ -175,6 +229,11 @@ BoringCache proxy. A direct `xcodebuild` command gets `-derivedDataPath`
 automatically unless it already supplies one. Xcode version, build, path cohort,
 compilation actions, CAS objects, bytes, and publication failures are recorded
 as native evidence.
+For GHA, the adapter exposes the three Actions Cache v2 Twirp operations and a
+bounded Azure transfer façade on loopback. It writes a mode-0600 ready file
+containing the standard Actions cache environment. The caller owns the GitHub
+repository/ref context and service lifetime; `boringcache/one` supplies both in
+ordinary workflows.
 
 If a repo already has a stable checked-in cache config, that still works. Explicit tool flags and checked-in config stay user-owned.
 

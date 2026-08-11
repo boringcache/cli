@@ -181,6 +181,27 @@ boringcache maven
 `boringcache maven` starts the local cache process and runs Maven.
 It injects the `maven.build.cache.remote.url` and `maven.build.cache.remote.save.enabled` properties automatically. When setup is absent, it also creates `.mvn/extensions.xml` for extension 1.2.3 and a marker-owned 1.2.0 build-cache config. Any existing build-cache extension declaration and user-owned cache config are preserved; when a version override is explicit, a mismatch is an error. The adapter refuses to splice into unrelated or unreadable user-owned XML.
 
+## Nix
+
+```toml
+[adapters.nix]
+tag = "nix-cache"
+command = ["nix", "build"]
+```
+
+```bash
+boringcache nix
+boringcache nix -- nix build .#package
+```
+
+The adapter exposes the local proxy as a standard Nix HTTP binary cache. It
+uses `NIX_CONFIG` for a per-invocation trusted substituter, keeps negative
+narinfo caching disabled for the live session, and falls back to local builds
+on cache errors by default; `--fail-on-cache-error` disables that fallback. In write mode its post-build hook enqueues store paths to a
+background worker; `nix copy` performs closure-aware publication with zstd
+parallel compression outside the build loop. A multi-user daemon requires the
+runner user or one of its groups in `trusted-users`.
+
 ## ccache
 
 ```toml
@@ -259,7 +280,7 @@ boringcache sccache
 ```
 
 The adapter sets `RUSTC_WRAPPER=sccache`, the WebDAV endpoint/prefix/read-write mode, and `SCCACHE_MULTILEVEL_CHAIN=webdav`, plus `CARGO_INCREMENTAL=0` when unset. It removes inherited alternate-backend selectors and WebDAV credentials so host or CI configuration cannot bypass the local proxy.
-Each invocation uses a dedicated sccache daemon port. After the wrapped command exits, the adapter reads stats on that port, records normalized native-tool evidence when available, and stops the dedicated daemon. Use supported sccache 0.16.0 or a newer version only after its adapter compatibility review passes.
+Each invocation uses a dedicated sccache daemon port. After the wrapped command exits, the adapter reads stats on that port, records normalized native-tool evidence when available, and stops the dedicated daemon. Use the reviewed sccache 0.17.0 default; 0.16.0 remains the behavioral floor, and newer releases must pass the adapter compatibility review first.
 
 ## Go
 

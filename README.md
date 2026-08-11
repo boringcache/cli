@@ -27,24 +27,33 @@ boringcache run -- bundle install
 
 # Docker adapter from repo config
 boringcache docker
+# Nix HTTP binary cache
+boringcache nix -- nix build
 # Native Xcode compilation cache (macOS)
 boringcache xcode -- xcodebuild -workspace App.xcworkspace -scheme App build
 ```
+
+Sequential `boringcache docker` commands automatically reuse one managed
+builder for the repository across Buildx, Bake, and Compose. There is no setup
+or cleanup command, and every upstream Docker invocation keeps its normal
+targets, outputs, service lifecycle, and exit status.
 
 Use archive mode commands (`run`, `save`, and `restore`) when you are caching explicit directories.
 Use adapter commands when the build tool already speaks a remote-cache protocol and BoringCache has a dedicated wrapper for it.
 `.boringcache.toml` keeps repeated adapter commands and cache identity out of
 shell scripts.
 
-Image publication is opt-in and uses the same workspace CAS as the BuildKit
-cache. Configure a stable default with `publish-image = "web:latest"` under
-`[adapters.docker]`, or pass a dynamic tag with `--publish-image`. To pull from
-another machine, use a workspace restore token as the password. The hosted
-registry is pull-only in this release; publish through the BoringCache wrapper,
-not a direct `docker push`:
+Image publication is opt-in and uses separate Registry storage. Configure a
+stable build-and-publish default with `publish-image = "web:latest"` under
+`[adapters.docker]`, or pass a dynamic tag with `--publish-image`. If the image
+already exists locally, publish it without rebuilding through `docker push`.
+To pull from another machine, use a workspace restore token as the password.
+The hosted registry exposes pull routes; writes go through the verified local
+BoringCache proxy:
 
 ```bash
 boringcache docker --publish-image web:$GITHUB_SHA
+boringcache docker push local-image:tag --as web:$GITHUB_SHA
 
 echo "$BORINGCACHE_RESTORE_TOKEN" | docker login registry.boringcache.com \
   --username boringcache --password-stdin
