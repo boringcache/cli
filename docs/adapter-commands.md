@@ -284,14 +284,22 @@ For Docker and BuildKit, `--tag` is the cache tag all the way through: the proxy
 The CLI still applies the shared branch/default/PR restore ordering, but it expresses those candidates as human tags rather than Docker-specific ref aliases.
 The direct `buildkit` adapter uses the same OCI plan as Docker, but injects `buildctl build` flags as `--import-cache` and `--export-cache`.
 `--tool-cache` is Docker-only. Supported names are `turbo`, `nx`, `bazel`,
-`gradle`, `maven`, `sccache`, and `go`. Each requested tool uses the same tag
-contract as running that adapter directly: pass
+`gradle`, `maven`, `ccache`, `sccache`, and `go`. Each requested tool uses the
+same tag contract as running that adapter directly: pass
 `--tool-cache turbo:turbo-cache`, or set
 `[adapters.turbo].tag = "turbo-cache"` and pass `--tool-cache turbo`.
 BoringCache starts the Docker/OCI proxy under the Docker tag and one normal
 tool proxy for each requested tool tag.
 `--tool-cache-target` narrows injection to selected Bake targets or Compose
 services and requires `--tool-cache`.
+
+Every direct adapter has an explicit Docker composition decision in
+`config/cache-interface.yml`. Cargo is not a `--tool-cache` name: use
+`--mount-cache` for its target/registry directories and select `sccache` for
+compiler reuse. Nix keeps its daemon/store lifecycle, and Xcode requires the
+macOS toolchain, so neither is available through Docker tool-cache injection.
+A future adapter must record the same supported-or-unsupported decision; a
+supported adapter also needs a required cold/warm Docker E2E leg.
 
 `--mount-cache` offloads BuildKit `RUN --mount=type=cache` directories (a Cargo
 target directory, package-manager stores) to the CAS between builds. It works
@@ -318,6 +326,9 @@ build execution:
 - Maven receives `MAVEN_OPTS` and a read-only cache config. The project must
   still declare `maven-build-cache-extension` in `.mvn/extensions.xml` or its
   POM; BoringCache does not overwrite project source during a build.
+- ccache receives `CCACHE_REMOTE_STORAGE` and remote-only mode. The project
+  still owns compiler-launcher configuration; BoringCache does not rewrite
+  `CC`, `CXX`, or the build command.
 - Go receives `GOCACHEPROG` plus a standard-library-only helper source file.
   The target image's Go toolchain compiles that helper, avoiding host/container
   architecture mismatch.
@@ -333,7 +344,7 @@ adapters require a managed BuildKit image with tool-env plan v2 support.
 
 The earlier explicit shell-secret contract remains available for Dockerfiles
 that deliberately source it. It is an environment-only compatibility path for
-Turbo, Nx, and sccache:
+Turbo, Nx, ccache, and sccache:
 
 ```Dockerfile
 RUN --mount=type=secret,id=boringcache-tool-cache-env \
