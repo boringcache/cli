@@ -151,6 +151,17 @@ For Cargo, one direct Cargo command owns dependency archives, typed target
 restore and source freshness, an optional sccache layer, and synchronous publication. A command
 committed under `[adapters.cargo].command` lets `boringcache cargo` and Action
 mode `cargo` execute the same argv without workflow-owned cache policy.
+New Cargo plans cache downloaded crate archives, registry metadata, and bare
+Git databases independently. Cargo recreates the expanded `registry/src` and
+`git/checkouts` trees, which avoids transporting duplicate dependency sources
+and lets unchanged package archives reuse their local graph when only the
+registry index changes. The broader `cargo-registry` and `cargo-git` entries
+remain available for existing repo plans.
+These are ordinary built-ins rather than a separate Cargo-only configuration
+surface. `CARGO_HOME` relocates their default paths; `[entries.<name>]` can
+override `tag`, `path`, `path_env`, or `default_path`; and a profile or
+`--entry` can select the narrow entries, the compatibility entries, or a
+project-specific combination.
 The default `[adapters.cargo]` plan uses `compiler-cache = "sccache"`; set
 `compiler-cache = "none"` when target/dependency caching should run without a
 compiler proxy. Put the shared compiler tag and optional key prefix under
