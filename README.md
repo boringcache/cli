@@ -1,8 +1,13 @@
 # BoringCache CLI
 
-BoringCache is a shared build cache for CI, Docker builds, and local development.
+**One command between your build and shared cache.**
 
-If you are new here, start in the terminal:
+The BoringCache CLI keeps dependency state, compiler output, Docker build
+cache, and other finished work available across CI and local development. It
+owns the committed repo plan and the native adapters; your existing build tool
+still runs where it runs today.
+
+Start in the terminal:
 
 ```bash
 curl -sSL https://install.boringcache.com/install.sh | sh
