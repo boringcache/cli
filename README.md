@@ -3,11 +3,11 @@
 **One command between your build and shared cache.**
 
 The BoringCache CLI keeps dependency state, compiler output, Docker build
-cache, and other finished work available across CI and local development. It
-owns the committed repo plan and the native adapters; your existing build tool
-still runs where it runs today.
+cache, and other completed work available across CI and local development.
+Run the build tools you already use; BoringCache carries their reusable work
+between machines.
 
-Start in the terminal:
+## Install and onboard
 
 ```bash
 curl -sSL https://install.boringcache.com/install.sh | sh
@@ -15,66 +15,55 @@ cd your-project
 boringcache onboard
 ```
 
-`boringcache onboard` authenticates the CLI, chooses a workspace, writes `.boringcache.toml` when it can, and offers an opt-in workflow scan to line up the same cache names across local runs, Docker builds, and GitHub Actions. Press Enter to skip that phase, or use `--skip-workflows` (`-S`) to declare the same boundary up front.
+`boringcache onboard` signs in, selects a workspace, and writes
+`.boringcache.toml` when it can. Workflow scanning is an explicit checkpoint:
+press Enter to skip it, or run `boringcache onboard --skip-workflows` (`-S`) to
+guarantee no workflow scan or write.
 
-For restore-first laptop use, set `boringcache config set read_only true` once
-and add `--write` only when a local command should publish.
-
-If you want to start sign-in from the terminal by email, use `boringcache onboard --email you@example.com`. For a brand-new account, pass `--name` and `--username` too.
-
-Repo config can also keep the repeated command itself under `[adapters.<tool>]`.
-`command` accepts either an argv array or a shell-style string.
-After that, start with the shortest command that fits the tool:
+Start with the command that matches the cache your build already understands:
 
 ```bash
-# Archive mode (run/save/restore)
+# Explicit directories and dependency archives
 boringcache run -- bundle install
 
-# Docker adapter from repo config
+# Native BuildKit cache
 boringcache docker
-# Nix HTTP binary cache
-boringcache nix -- nix build
-# Native Xcode compilation cache (macOS)
+
+# Native Nix binary cache
+boringcache nix -- nix build .
+
+# Native Xcode compilation cache
 boringcache xcode -- xcodebuild -workspace App.xcworkspace -scheme App build
 ```
 
-Sequential `boringcache docker` commands automatically reuse one managed
-builder for the repository across Buildx, Bake, and Compose. There is no setup
-or cleanup command, and every upstream Docker invocation keeps its normal
-targets, outputs, service lifecycle, and exit status.
+Use archive mode for explicit directories. Use an adapter command when the
+tool already has a native remote-cache protocol. Keep repeated commands, cache
+identity, and stable labels in `.boringcache.toml` so local builds and CI use
+the same settings.
 
-Use archive mode commands (`run`, `save`, and `restore`) when you are caching explicit directories.
-Use adapter commands when the build tool already speaks a remote-cache protocol and BoringCache has a dedicated wrapper for it.
-`.boringcache.toml` keeps repeated adapter commands and cache identity out of
-shell scripts.
+## GitHub Actions
 
-Image publication is opt-in and uses separate Registry storage. Configure a
-stable build-and-publish default with `publish-image = "web:latest"` under
-`[adapters.docker]`, or pass a dynamic tag with `--publish-image`. If the image
-already exists locally, publish it without rebuilding through `docker push`.
-To pull from another machine, use a workspace restore token as the password.
-The hosted registry exposes pull routes; writes go through the verified local
-BoringCache proxy:
+After onboarding, pin the Action to a full commit in CI:
 
-```bash
-boringcache docker --publish-image web:$GITHUB_SHA
-boringcache docker push local-image:tag --as web:$GITHUB_SHA
-
-echo "$BORINGCACHE_RESTORE_TOKEN" | docker login registry.boringcache.com \
-  --username boringcache --password-stdin
-docker pull registry.boringcache.com/my-org/my-workspace/web:latest
+```yaml
+- uses: boringcache/one@71fdb67f0aa0afc1c4ac616c8c57d0d535f15bd9 # v1.19.2
+  with:
+    trust-policy: auto
+    setup: none
+    mode: archive
+    cache-profiles: ci
+  env:
+    BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
+    BORINGCACHE_SAVE_TOKEN: ${{ github.event_name != 'pull_request' && secrets.BORINGCACHE_SAVE_TOKEN || '' }}
 ```
 
-If you are wiring GitHub Actions, use [`boringcache/one@71fdb67f0aa0afc1c4ac616c8c57d0d535f15bd9`](https://github.com/boringcache/one) after onboard so CI can reuse the same repo config and trust model.
+Pull requests restore by default. Trusted jobs with save capability publish.
 
-## Docs
+## Guides
 
-- [Quick start](docs/quick-start.md)
-- [Onboard](docs/onboard.md)
-- [Archive mode](docs/archive-mode.md)
-- [Adapter commands](docs/adapter-commands.md)
-- [Tool guides](docs/tool-guides.md)
-- [GitHub Actions](docs/github-actions.md)
-- [Development](docs/development.md)
-- [Installation setup](INSTALLATION.md)
-- [Website docs](https://boringcache.com/docs)
+Set up BoringCache, choose the cache path for your build, and reuse it in CI:
+
+- [Get started](https://boringcache.com/docs)
+- [Adapter commands](https://boringcache.com/docs/adapters)
+- [GitHub Actions](https://boringcache.com/docs/github-actions)
+- [Installation details](INSTALLATION.md)
