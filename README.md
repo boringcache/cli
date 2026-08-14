@@ -65,7 +65,7 @@ echo "$BORINGCACHE_RESTORE_TOKEN" | docker login registry.boringcache.com \
 docker pull registry.boringcache.com/my-org/my-workspace/web:latest
 ```
 
-If you are wiring GitHub Actions, use [`boringcache/one@e24257b122813ad11d53b9ed024b474ca4946ad2`](https://github.com/boringcache/one) after onboard so CI can reuse the same repo config and trust model.
+If you are wiring GitHub Actions, use [`boringcache/one@71fdb67f0aa0afc1c4ac616c8c57d0d535f15bd9`](https://github.com/boringcache/one) after onboard so CI can reuse the same repo config and trust model.
 
 ## Docs
 
