@@ -46,7 +46,7 @@ the same settings.
 After onboarding, pin the Action to a full commit in CI:
 
 ```yaml
-- uses: boringcache/one@531a7c041f3b7bf1672ec1cf43832dd4783bd24e # v1.19.3
+- uses: boringcache/one@e740ae5b3075ad2fe0d7b1edd2ed41b3ba130dae # v1.19.4
   with:
     trust-policy: auto
     setup: none
