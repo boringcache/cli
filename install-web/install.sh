@@ -17,6 +17,7 @@ REPO="boringcache/cli"
 BINARY_NAME="boringcache"
 CHECKSUM_CERTIFICATE_IDENTITY_REGEXP='^https://github\.com/boringcache/monorepo/\.github/workflows/(cli-release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+|cli-release-checksums\.yml@refs/heads/main)$'
 CHECKSUM_CERTIFICATE_OIDC_ISSUER='https://token.actions.githubusercontent.com'
+COSIGN_MINIMUM_VERSION='3.1.3'
 VERIFY_CHECKSUM_SIGNATURE=0
 
 # Function to print colored output
@@ -73,7 +74,7 @@ get_latest_release() {
     
     # If API fails (e.g., private repo), fall back to known version
     # This should be updated when new versions are released
-    local fallback_version="v1.19.4"
+    local fallback_version="v1.19.5"
     
     print_warning "GitHub API unavailable, using fallback version: $fallback_version" >&2
     print_warning "This may not be the latest version. Check https://github.com/${repo}/releases manually." >&2
@@ -114,33 +115,86 @@ verify_checksum() {
     fi
 }
 
+installed_cosign_version() {
+    cosign version 2>/dev/null | awk '$1 == "GitVersion:" { sub(/^v/, "", $2); print $2; exit }'
+}
+
+cosign_version_is_supported() {
+    local version="$1"
+
+    awk -v version="${version}" -v minimum="${COSIGN_MINIMUM_VERSION}" '
+        BEGIN {
+            if (version !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) {
+                exit 1
+            }
+
+            split(version, actual, ".")
+            split(minimum, required, ".")
+
+            for (part = 1; part <= 3; part++) {
+                if (actual[part] > required[part]) {
+                    exit 0
+                }
+                if (actual[part] < required[part]) {
+                    exit 1
+                }
+            }
+
+            exit 0
+        }
+    '
+}
+
 prepare_checksum_signature_verification() {
+    local mode="${BORINGCACHE_VERIFY_SIGNATURE:-auto}"
+    local cosign_version=""
+
     VERIFY_CHECKSUM_SIGNATURE=0
 
-    case "${BORINGCACHE_VERIFY_SIGNATURE:-auto}" in
-        auto)
-            if command -v cosign >/dev/null 2>&1; then
-                VERIFY_CHECKSUM_SIGNATURE=1
-                print_status "cosign found; release signature verification is enabled."
-            else
-                print_warning "cosign not found; continuing with SHA-256 checksum verification."
-                print_warning "Install cosign and set BORINGCACHE_VERIFY_SIGNATURE=1 for fail-closed signature verification."
-            fi
-            ;;
-        1|true|required)
-            if ! command -v cosign >/dev/null 2>&1; then
-                print_error "BORINGCACHE_VERIFY_SIGNATURE=1 requires cosign in PATH."
-                return 1
-            fi
-            VERIFY_CHECKSUM_SIGNATURE=1
-            ;;
+    case "${mode}" in
         0|false|off)
+            return 0
+            ;;
+        auto|1|true|required)
             ;;
         *)
             print_error "BORINGCACHE_VERIFY_SIGNATURE must be auto, 1, or 0."
             return 1
             ;;
     esac
+
+    if ! command -v cosign >/dev/null 2>&1; then
+        case "${mode}" in
+            auto)
+                print_warning "cosign not found; continuing with SHA-256 checksum verification."
+                print_warning "Install cosign ${COSIGN_MINIMUM_VERSION} or newer and set BORINGCACHE_VERIFY_SIGNATURE=1 for fail-closed signature verification."
+                return 0
+                ;;
+            *)
+                print_error "BORINGCACHE_VERIFY_SIGNATURE=1 requires cosign ${COSIGN_MINIMUM_VERSION} or newer in PATH."
+                return 1
+                ;;
+        esac
+    fi
+
+    cosign_version=$(installed_cosign_version)
+    if ! cosign_version_is_supported "${cosign_version}"; then
+        if [ -n "${cosign_version}" ]; then
+            print_error "cosign ${cosign_version} is unsupported for BoringCache release signatures; cosign ${COSIGN_MINIMUM_VERSION} or newer is required."
+        else
+            print_error "Could not determine the installed cosign version; cosign ${COSIGN_MINIMUM_VERSION} or newer is required."
+        fi
+
+        if [ "${mode}" = "auto" ]; then
+            print_error "Upgrade cosign, or set BORINGCACHE_VERIFY_SIGNATURE=0 to explicitly use SHA-256 checksum verification only."
+        else
+            print_error "Upgrade cosign and retry strict signature verification."
+        fi
+        return 1
+    fi
+
+    VERIFY_CHECKSUM_SIGNATURE=1
+    print_status "cosign ${cosign_version} found; release signature verification is enabled."
 }
 
 verify_checksum_signature() {

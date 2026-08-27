@@ -7,6 +7,7 @@ CLI_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
 TEST_ROOT=$(mktemp -d)
 ORIGINAL_PATH=${PATH}
 EXPECTED_IDENTITY_REGEXP='^https://github\.com/boringcache/monorepo/\.github/workflows/(cli-release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+|cli-release-checksums\.yml@refs/heads/main)$'
+EXPECTED_MINIMUM_COSIGN_VERSION='3.1.3'
 
 cleanup() {
     rm -rf "${TEST_ROOT}"
@@ -45,6 +46,17 @@ test_installer() {
 
     [ "${CHECKSUM_CERTIFICATE_IDENTITY_REGEXP}" = "${EXPECTED_IDENTITY_REGEXP}" ] ||
         fail "${fixture_name} trusts an unexpected workflow identity"
+    [ "${COSIGN_MINIMUM_VERSION}" = "${EXPECTED_MINIMUM_COSIGN_VERSION}" ] ||
+        fail "${fixture_name} declares an unexpected minimum cosign version"
+    cosign_version_is_supported "${EXPECTED_MINIMUM_COSIGN_VERSION}" ||
+        fail "${fixture_name} rejects its minimum cosign version"
+    cosign_version_is_supported "4.0.0" ||
+        fail "${fixture_name} rejects a newer cosign major version"
+    cosign_version_is_supported "3.10.0" ||
+        fail "${fixture_name} compares cosign versions lexically"
+    if cosign_version_is_supported "3.1.2"; then
+        fail "${fixture_name} accepts a cosign version below its security floor"
+    fi
 
     printf 'release binary\n' > "${fixture_dir}/${binary_name}"
     write_checksum "${fixture_dir}" "${binary_name}"
@@ -76,16 +88,58 @@ test_installer() {
         fail "${fixture_name} allowed strict verification without cosign"
     fi
 
-    printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$@" > "${COSIGN_ARGS_FILE}"' > "${fake_bin}/cosign"
+    {
+        printf '%s\n' '#!/bin/sh'
+        printf '%s\n' 'if [ "${1:-}" = "version" ]; then'
+        printf '%s\n' '    printf "GitVersion:    %s\n" "${COSIGN_FAKE_VERSION}"'
+        printf '%s\n' '    exit 0'
+        printf '%s\n' 'fi'
+        printf '%s\n' 'printf "%s\n" "$@" > "${COSIGN_ARGS_FILE}"'
+    } > "${fake_bin}/cosign"
     chmod +x "${fake_bin}/cosign"
     PATH="${fake_bin}:${ORIGINAL_PATH}"
     COSIGN_ARGS_FILE="${cosign_args}"
+    COSIGN_FAKE_VERSION=v2.4.1
+    VERIFY_CHECKSUM_SIGNATURE=0
+    export PATH COSIGN_ARGS_FILE COSIGN_FAKE_VERSION VERIFY_CHECKSUM_SIGNATURE
+
+    if incompatible_output=$(
+        BORINGCACHE_VERIFY_SIGNATURE=auto
+        export BORINGCACHE_VERIFY_SIGNATURE
+        prepare_checksum_signature_verification 2>&1
+    ); then
+        fail "${fixture_name} allowed auto verification with an incompatible cosign"
+    fi
+    printf '%s\n' "${incompatible_output}" | grep -F \
+        "cosign 2.4.1 is unsupported for BoringCache release signatures; cosign ${EXPECTED_MINIMUM_COSIGN_VERSION} or newer is required." >/dev/null ||
+        fail "${fixture_name} did not explain the incompatible cosign version"
+    printf '%s\n' "${incompatible_output}" | grep -F \
+        'set BORINGCACHE_VERIFY_SIGNATURE=0 to explicitly use SHA-256 checksum verification only.' >/dev/null ||
+        fail "${fixture_name} did not make the auto-mode checksum opt-out explicit"
+
+    if (
+        BORINGCACHE_VERIFY_SIGNATURE=1
+        export BORINGCACHE_VERIFY_SIGNATURE
+        prepare_checksum_signature_verification >/dev/null 2>&1
+    ); then
+        fail "${fixture_name} allowed strict verification with an incompatible cosign"
+    fi
+
+    BORINGCACHE_VERIFY_SIGNATURE=0
+    VERIFY_CHECKSUM_SIGNATURE=1
+    export BORINGCACHE_VERIFY_SIGNATURE VERIFY_CHECKSUM_SIGNATURE
+    prepare_checksum_signature_verification ||
+        fail "${fixture_name} rejected an explicit checksum-only request"
+    [ "${VERIFY_CHECKSUM_SIGNATURE}" = "0" ] ||
+        fail "${fixture_name} enabled signatures for an explicit checksum-only request"
+
+    COSIGN_FAKE_VERSION="v${EXPECTED_MINIMUM_COSIGN_VERSION}"
     BORINGCACHE_VERIFY_SIGNATURE=1
     VERIFY_CHECKSUM_SIGNATURE=0
-    export PATH COSIGN_ARGS_FILE BORINGCACHE_VERIFY_SIGNATURE VERIFY_CHECKSUM_SIGNATURE
+    export COSIGN_FAKE_VERSION BORINGCACHE_VERIFY_SIGNATURE VERIFY_CHECKSUM_SIGNATURE
 
     prepare_checksum_signature_verification ||
-        fail "${fixture_name} did not enable strict verification with cosign present"
+        fail "${fixture_name} did not enable strict verification with supported cosign present"
     [ "${VERIFY_CHECKSUM_SIGNATURE}" = "1" ] ||
         fail "${fixture_name} did not record strict verification state"
 
@@ -98,7 +152,7 @@ test_installer() {
         fail "${fixture_name} did not pin the GitHub Actions OIDC issuer"
 
     PATH=${ORIGINAL_PATH}
-    unset COSIGN_ARGS_FILE BORINGCACHE_VERIFY_SIGNATURE
+    unset COSIGN_ARGS_FILE COSIGN_FAKE_VERSION BORINGCACHE_VERIFY_SIGNATURE
     export PATH
 }
 

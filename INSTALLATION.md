@@ -9,9 +9,14 @@ The installer always verifies every downloaded artifact against `SHA256SUMS`.
 On macOS it installs both the universal CLI and the universal Xcode CAS adapter
 beside it. Archive save and restore run inside the CLI through its Rust tar
 runtime; no separate tar executable or package-manager setup is required. When
-`cosign` is available it also verifies the signed checksum bundle
-automatically.
-For fail-closed Sigstore verification, install `cosign` first and run:
+`cosign` 3.1.3 or newer is available, the installer also verifies the signed
+checksum bundle automatically. If `auto` mode finds an older or unrecognized
+`cosign`, the installer stops and asks for an upgrade instead of silently
+falling back to checksum-only verification. Set
+`BORINGCACHE_VERIFY_SIGNATURE=0` only when you intend to opt out explicitly.
+
+For fail-closed Sigstore verification, install `cosign` 3.1.3 or newer first
+and run:
 
 ```bash
 curl -sSL https://install.boringcache.com/install.sh | BORINGCACHE_VERIFY_SIGNATURE=1 sh
@@ -133,8 +138,9 @@ installs `libboringcache_xcode_cas.dylib` in that same directory so
 - Downloads over HTTPS only
 - Provides warning about piping curl to shell
 - Verifies the downloaded binary against `SHA256SUMS`
-- Automatically verifies `SHA256SUMS.bundle` with Sigstore when `cosign` is
-  available; `BORINGCACHE_VERIFY_SIGNATURE=1` makes the signature mandatory
+- Automatically verifies `SHA256SUMS.bundle` with Sigstore when `cosign` 3.1.3
+  or newer is available; an installed older or unrecognized verifier stops
+  `auto` mode, and `BORINGCACHE_VERIFY_SIGNATURE=1` remains fail-closed
 - Accepts checksum signatures only from the monorepo CLI release workflow on a
   semantic-version tag or the checksum-repair workflow on `main`
 - Shows installation path and PATH information
