@@ -49,7 +49,6 @@ After onboarding, pin the Action to a full commit in CI:
 - uses: boringcache/one@aac19c43035c9d77cfc2573f663d35ea3fce2868 # v1.19.7
   with:
     trust-policy: auto
-    setup: none
     mode: archive
     cache-profiles: ci
   env:
@@ -67,3 +66,4 @@ Set up BoringCache, choose the cache path for your build, and reuse it in CI:
 - [Adapter commands](https://boringcache.com/docs/adapters)
 - [GitHub Actions](https://boringcache.com/docs/github-actions)
 - [Installation details](INSTALLATION.md)
+- [Release history](CHANGELOG.md)

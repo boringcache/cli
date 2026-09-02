@@ -36,6 +36,8 @@ jobs:
       - name: Check public trust files
         run: |
           test -s .github/SECURITY.md
+          test -s CHANGELOG.md
+          grep -Fq 'Keep a Changelog' CHANGELOG.md
           grep -Fq 'security@boringcache.com' .github/SECURITY.md
           if grep -R -n --exclude-dir=.git 'boringcache/one@v1' README.md INSTALLATION.md docs install-web; then
             echo 'Mutable boringcache/one references are not allowed in public guidance.' >&2
