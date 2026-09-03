@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.20.1] - 2026-09-03
+
+### Added
+
+- Let Docker and BuildKit repo plans own optional native tool-cache and
+  cache-mount composition used by local runs and the thin GitHub Action.
+
+### Fixed
+
+- Preserve managed Docker Cargo target reuse when an unchanged source tree is
+  materialized with newer mtimes.
+- Forward `SCCACHE_IDLE_TIMEOUT` into Docker-native sccache builds so long link
+  phases do not let the compiler-cache daemon exit early.
+
 ## [1.20.0] - 2026-09-02
 
 ### Added
@@ -66,7 +80,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.20.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.20.1...HEAD
+[1.20.1]: https://github.com/boringcache/cli/compare/v1.20.0...v1.20.1
 [1.20.0]: https://github.com/boringcache/cli/compare/v1.19.7...v1.20.0
 [1.19.7]: https://github.com/boringcache/cli/releases/tag/v1.19.7
 [1.19.6]: https://github.com/boringcache/cli/releases/tag/v1.19.6
