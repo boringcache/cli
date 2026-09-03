@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.20.2] - 2026-09-03
+
+### Changed
+
+- Checkpoint cumulative proxy diagnostics every five minutes while continuing
+  to deliver completed cache-operation rollups every 30 seconds, bounding
+  retained session state and repeated reporting work in long builds.
+
+### Fixed
+
+- Keep Windows archive monitor requests on bounded blocking connections so a
+  partially delivered local observation cannot prematurely stop unchanged-cache
+  reuse.
+- Route archive monitor failures through the configured diagnostic output so a
+  fail-closed reuse decision retains its actionable cause.
+- Preserve each cache-operation rollup's idempotency identity across delivery
+  retries so a transient reporting failure cannot duplicate its counters.
+
 ## [1.20.1] - 2026-09-03
 
 ### Added
@@ -80,7 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.20.1...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.20.2...HEAD
+[1.20.2]: https://github.com/boringcache/cli/compare/v1.20.1...v1.20.2
 [1.20.1]: https://github.com/boringcache/cli/compare/v1.20.0...v1.20.1
 [1.20.0]: https://github.com/boringcache/cli/compare/v1.19.7...v1.20.0
 [1.19.7]: https://github.com/boringcache/cli/releases/tag/v1.19.7
