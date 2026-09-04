@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.20.3] - 2026-09-04
+
+### Added
+
+- Enroll native BoringBuild workload identity with
+  `boringcache ci connect --oidc-provider boringbuild`, using the job's
+  controller-issued renewable assertion and browser-approved Workspace
+  selection without a stored BoringCache secret.
+- Acquire renewable CircleCI OIDC assertions with `--oidc-provider circleci`
+  through the in-job Environment CLI, BoringCache's audience, and CircleCI's
+  root issuer, without a CircleCI API token or stored BoringCache secret.
+- Use GitLab.com's job-scoped `BORINGCACHE_OIDC_TOKEN` directly with
+  `--oidc-provider gitlab`, binding immutable job namespace/project identity
+  while keeping merge-request and fork source jobs restore-only.
+
+### Changed
+
+- Keep native GitLab's private broker session for the bounded lifetime of its
+  job assertion, up to one hour, while continuing to issue five-minute product
+  capabilities and recheck live publication policy on every issuance. This
+  lets ordinary GitLab jobs run without exposing or replaying their OIDC token
+  and keeps existing providers compatible with released clients.
+
 ## [1.20.2] - 2026-09-03
 
 ### Changed
@@ -98,7 +121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.20.2...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.20.3...HEAD
+[1.20.3]: https://github.com/boringcache/cli/compare/v1.20.2...v1.20.3
 [1.20.2]: https://github.com/boringcache/cli/compare/v1.20.1...v1.20.2
 [1.20.1]: https://github.com/boringcache/cli/compare/v1.20.0...v1.20.1
 [1.20.0]: https://github.com/boringcache/cli/compare/v1.19.7...v1.20.0
