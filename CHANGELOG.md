@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.20.4] - 2026-09-06
+
+### Fixed
+
+- Accept server-issued workload capabilities across normal request latency by
+  clamping their local lifetime to the remaining parent session lifetime.
+- Start the Actions compatibility service in restore-only mode whenever the
+  brokered workload session is restore-only, so Workspace publication policy
+  narrows a job without failing runner readiness.
+- Explain when a valid CI workload is restore-only and direct users to a
+  trusted job or the Machine connection publication policy instead of showing
+  only a local broker 403 response.
+
 ## [1.20.3] - 2026-09-04
 
 ### Added
@@ -121,7 +134,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.20.3...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.20.4...HEAD
+[1.20.4]: https://github.com/boringcache/cli/compare/v1.20.3...v1.20.4
 [1.20.3]: https://github.com/boringcache/cli/compare/v1.20.2...v1.20.3
 [1.20.2]: https://github.com/boringcache/cli/compare/v1.20.1...v1.20.2
 [1.20.1]: https://github.com/boringcache/cli/compare/v1.20.0...v1.20.1
