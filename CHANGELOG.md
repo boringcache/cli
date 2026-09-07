@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.20.5] - 2026-09-07
+
+### Fixed
+
+- Ship the workload-capability lifetime correction in fully qualified Linux,
+  macOS, and Windows release binaries, so normal broker request latency does
+  not prevent native CI cache startup.
+
 ## [1.20.4] - 2026-09-06
 
 ### Fixed
@@ -134,7 +142,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.20.4...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.20.5...HEAD
+[1.20.5]: https://github.com/boringcache/cli/compare/v1.20.4...v1.20.5
 [1.20.4]: https://github.com/boringcache/cli/compare/v1.20.3...v1.20.4
 [1.20.3]: https://github.com/boringcache/cli/compare/v1.20.2...v1.20.3
 [1.20.2]: https://github.com/boringcache/cli/compare/v1.20.1...v1.20.2
