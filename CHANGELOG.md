@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep archive and CAS restore download concurrency steady across overlapping
+  transfers, while retaining immediate backoff when a transfer fails.
+- Record archive save and restore phase timings and available resource counters
+  so slow local processing can be distinguished from network transfer time.
 
 ## [1.20.5] - 2026-09-07
 
