@@ -12,9 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Ship the workload-capability lifetime correction in fully qualified Linux,
-  macOS, and Windows release binaries, so normal broker request latency does
-  not prevent native CI cache startup.
+- Keep native CI cache startup reliable across normal control-plane and broker
+  response latency by clamping each workload capability to the remaining
+  parent session lifetime.
 
 ## [1.20.4] - 2026-09-06
 
