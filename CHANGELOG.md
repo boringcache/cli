@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Publish Artifacts from OIDC jobs using authenticated workload provenance,
+  including providers whose job identity differs from the job name.
 - Report missing Docker cache references without implying the entire build has
   no cache, and explain cache startup waits and retries in plain language.
 - Refresh OIDC credentials inside Docker cache-mount workers throughout long
