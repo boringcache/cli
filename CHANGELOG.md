@@ -7,8 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [1.21.0] - 2026-09-08
+
+### Added
+
+- Configure archive exclusions with `exclude` in `.boringcache.toml` entries,
+  or add patterns with `--exclude-pattern` when an adapter such as Cargo saves
+  archive entries.
+
 ### Fixed
 
+- Report missing Docker cache references without implying the entire build has
+  no cache, and explain cache startup waits and retries in plain language.
+- Refresh OIDC credentials inside Docker cache-mount workers throughout long
+  builds, preserving restore-only permissions and normal cache publication.
+- Refresh product credentials on HTTP retries and use Registry-scoped OIDC
+  credentials for Docker image publication.
+- Share compiler cache Git and platform scoping between Cargo and sccache while
+  keeping Cargo archive scoping independent.
+- Bound captured-output draining after a command exits, so background processes
+  retaining its output pipes cannot leave the cache lifecycle waiting forever.
+- Update the embedded zstd library to 0.14.0 while retaining the existing
+  archive format and canonical cache identity.
 - Keep archive and CAS restore download concurrency steady across overlapping
   transfers, while retaining immediate backoff when a transfer fails.
 - Record archive save and restore phase timings and available resource counters
@@ -148,7 +169,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.20.5...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.21.0...HEAD
+[1.21.0]: https://github.com/boringcache/cli/compare/v1.20.5...v1.21.0
 [1.20.5]: https://github.com/boringcache/cli/compare/v1.20.4...v1.20.5
 [1.20.4]: https://github.com/boringcache/cli/compare/v1.20.3...v1.20.4
 [1.20.3]: https://github.com/boringcache/cli/compare/v1.20.2...v1.20.3

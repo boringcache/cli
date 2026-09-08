@@ -46,17 +46,23 @@ the same settings.
 After onboarding, pin the Action to a full commit in CI:
 
 ```yaml
-- uses: boringcache/one@c62af42c5c1e29388ceeea77b6a7f1db51f641e7 # v1.20.2
-  with:
-    trust-policy: auto
-    mode: archive
-    cache-profiles: ci
-  env:
-    BORINGCACHE_RESTORE_TOKEN: ${{ secrets.BORINGCACHE_RESTORE_TOKEN }}
-    BORINGCACHE_SAVE_TOKEN: ${{ github.event_name != 'pull_request' && secrets.BORINGCACHE_SAVE_TOKEN || '' }}
+permissions:
+  contents: read
+  id-token: write
+
+steps:
+  - uses: boringcache/one@e4ead12dabc993eba201c402a82e396166dade03 # v1.20.4
+    with:
+      trust-policy: auto
+      mode: archive
+      cache-profiles: ci
 ```
 
-Pull requests restore by default. Trusted jobs with save capability publish.
+After **Connect CI** approves the repository once, the Action starts a
+short-lived Machine connection automatically. Pull requests restore by default;
+trusted jobs publish when Workspace policy allows. On BoringBuild, the same step
+reuses the runner-provided connection. Scoped restore/save credentials remain an
+explicit fallback when workload identity is unavailable.
 
 ## Guides
 
