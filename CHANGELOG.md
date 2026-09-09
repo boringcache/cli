@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.30.0] - 2026-09-09
+
+### Changed
+
+- Update the managed Docker builder to BuildKit 0.33.0 with the BoringCache
+  backend, retaining an immutable image digest and existing cache behavior.
+
+### Fixed
+
+- Use Action 1.21.0 in generated GitHub Actions workflows.
+
 ## [1.21.0] - 2026-09-08
 
 ### Added
@@ -171,7 +182,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.21.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.30.0...HEAD
+[1.30.0]: https://github.com/boringcache/cli/compare/v1.21.0...v1.30.0
 [1.21.0]: https://github.com/boringcache/cli/compare/v1.20.5...v1.21.0
 [1.20.5]: https://github.com/boringcache/cli/compare/v1.20.4...v1.20.5
 [1.20.4]: https://github.com/boringcache/cli/compare/v1.20.3...v1.20.4
