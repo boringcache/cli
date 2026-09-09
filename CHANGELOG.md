@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.1] - 2026-09-09
+
+### Added
+
+- Configure managed Docker and BuildKit workers with a native `buildkitd.toml`.
+  The CLI discovers the nearest file within the project; `--buildkitd-config`
+  or an adapter's `buildkitd-config` repo setting selects another file.
+  Workers are recreated when settings or referenced registry certificates change.
+- Limit the managed BuildKit worker's CPU quota and CPU affinity with
+  `BORINGCACHE_MANAGED_BUILDKIT_CPUS` and
+  `BORINGCACHE_MANAGED_BUILDKIT_CPUSET_CPUS`.
+
+### Fixed
+
+- Use Action 1.30.0 in generated GitHub Actions workflows and workflow diagnostics.
+
 
 ## [1.30.0] - 2026-09-09
 
@@ -182,7 +198,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.30.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.30.1...HEAD
+[1.30.1]: https://github.com/boringcache/cli/compare/v1.30.0...v1.30.1
 [1.30.0]: https://github.com/boringcache/cli/compare/v1.21.0...v1.30.0
 [1.21.0]: https://github.com/boringcache/cli/compare/v1.20.5...v1.21.0
 [1.20.5]: https://github.com/boringcache/cli/compare/v1.20.4...v1.20.5
