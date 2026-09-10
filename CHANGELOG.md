@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Reuse archive graph decoder threads and zstd contexts across chunks to reduce
+  large archive restore materialization time.
+
+## [1.30.3] - 2026-09-10
+
+### Fixed
+
+- Align BuildKit smoke and end-to-end test defaults with the managed
+  `v0.33.0-bc.2` image.
 
 ## [1.30.2] - 2026-09-10
 
@@ -253,7 +264,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.30.2...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.30.3...HEAD
+[1.30.3]: https://github.com/boringcache/cli/compare/v1.30.2...v1.30.3
 [1.30.2]: https://github.com/boringcache/cli/compare/v1.30.1...v1.30.2
 [1.30.1]: https://github.com/boringcache/cli/compare/v1.30.0...v1.30.1
 [1.30.0]: https://github.com/boringcache/cli/compare/v1.21.0...v1.30.0
