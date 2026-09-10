@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [1.30.2] - 2026-09-10
+
+### Changed
+
+- Update the managed Docker builder to BuildKit `v0.33.0-bc.2`. Cache-mount
+  archives use stable, readable mount names across workers. Archives saved
+  under older mount names remain stored but are not selected by the new names.
+- Update mise in the runtime and build base images to `2026.9.4`.
+- Adapt automatic download and prefetch admission to live OS memory and I/O
+  pressure, including when fewer requests are needed than at startup. Range
+  downloads share the same admission policy.
+- Overlap archive verification and decoding with extraction. Adapt decoder
+  admission to measured delivery, live memory and I/O pressure within the CPU
+  and operator limits; join workers before cleanup when extraction stops.
+
+- Reuse Cargo target tags across package version, manifest, and lockfile changes.
+  Target tags retain the configured Git/platform scope; Cargo rebuilds affected
+  crates when their inputs or compiler change. Existing remote snapshots
+  with a graph suffix remain under their old tags and are not selected by the
+  new key. Populated local targets remain usable. No automatic target rotation
+  or pruning is added.
+- Honor `CARGO_INCREMENTAL=1` for Cargo target entries and preserve incremental
+  directories in archive saves when enabled. The default remains `0`; use
+  `compiler-cache = "none"` for incremental compilation. The rustc query cache
+  and obsolete BoringCache artifact receipt remain excluded.
+
+### Fixed
+
+- Use retained byte progress to adapt shared download admission after a slow-body
+  probe retries. A probe no longer independently halves capacity for unrelated
+  objects; transport failures and native resource pressure retain their backoff.
+
+- Use the same download recovery for archive chunks and proxy files. Retry
+  stalled response headers within bounded budgets, honor bounded server retry
+  delays, and refresh rejected cached URLs without restarting the retry budget.
+  Keep startup prefetch within that budget and use actual retries to adapt its
+  concurrency. After recovery opens a fresh connection, subsequent downloads
+  use its replacement pool. Print terminal transport causes without signed
+  storage URLs.
+
+- Retry slow archive and OCI chunk downloads even when the chunk or resumed
+  remainder is small. Check throughput within two seconds of collecting bytes,
+  keep completed downloads, and report recovered download retries accurately.
+- Recover slow live OCI reads and proxy file downloads, including slow resumed
+  tails and sequential fallback after range rescue fails. Use the shared
+  progress policy after every reopen and avoid repeating a failed range fan-out.
+  Preserve byte progress and let the final attempt finish while its idle
+  deadline and integrity checks remain active.
+
+- Preserve changed source timestamps after successful Cargo commands so repeated
+  `--skip-save` builds can reuse their local artifacts.
+- Compress and stage identical chunks only once within each archive save.
+- Use Action 1.30.1 in generated GitHub Actions workflows and workflow diagnostics.
+
 ## [1.30.1] - 2026-09-09
 
 ### Added
@@ -198,7 +253,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.30.1...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.30.2...HEAD
+[1.30.2]: https://github.com/boringcache/cli/compare/v1.30.1...v1.30.2
 [1.30.1]: https://github.com/boringcache/cli/compare/v1.30.0...v1.30.1
 [1.30.0]: https://github.com/boringcache/cli/compare/v1.21.0...v1.30.0
 [1.21.0]: https://github.com/boringcache/cli/compare/v1.20.5...v1.21.0
