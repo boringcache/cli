@@ -1,11 +1,13 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/images/boringcache-dark.svg">
+  <img src=".github/images/boringcache-light.svg" width="240" alt="BoringCache">
+</picture>
+
 # BoringCache CLI
 
-**One command between your build and shared cache.**
+Shared build cache for CI, Docker builds, coding agents, and local development.
 
-The BoringCache CLI keeps dependency state, compiler output, Docker build
-cache, and other completed work available across CI and local development.
-Run the build tools you already use; BoringCache carries their reusable work
-between machines.
+**Stop rebuilding. Start reusing.**
 
 ## Install and onboard
 
