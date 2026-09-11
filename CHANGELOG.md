@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [1.30.4] - 2026-09-10
+
 ### Fixed
 
 - Reuse archive graph decoder threads and zstd contexts across chunks to reduce
@@ -264,7 +267,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.30.3...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.30.4...HEAD
+[1.30.4]: https://github.com/boringcache/cli/compare/v1.30.3...v1.30.4
 [1.30.3]: https://github.com/boringcache/cli/compare/v1.30.2...v1.30.3
 [1.30.2]: https://github.com/boringcache/cli/compare/v1.30.1...v1.30.2
 [1.30.1]: https://github.com/boringcache/cli/compare/v1.30.0...v1.30.1
