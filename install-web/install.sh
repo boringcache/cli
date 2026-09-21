@@ -14,9 +14,15 @@ NC='\033[0m' # No Color
 
 # GitHub repository
 REPO="boringcache/cli"
+ARTIFACT_ORIGIN="https://artifacts.boringcache.com"
 BINARY_NAME="boringcache"
+KEYED_RELEASE_MINIMUM_VERSION='v1.31.0'
 CHECKSUM_CERTIFICATE_IDENTITY_REGEXP='^https://github\.com/boringcache/monorepo/\.github/workflows/(cli-release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+|cli-release-checksums\.yml@refs/heads/main)$'
 CHECKSUM_CERTIFICATE_OIDC_ISSUER='https://token.actions.githubusercontent.com'
+CHECKSUM_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEKaCEtUJN1OYbcoBzD9k8nma39YQG
+RXyLl5H1XoimZCWB+7Su1mFFFMPWS7nWPGcbxeB8F7nN5I3GUgRPWQ1FAw==
+-----END PUBLIC KEY-----'
 COSIGN_MINIMUM_VERSION='3.1.3'
 VERIFY_CHECKSUM_SIGNATURE=0
 
@@ -64,7 +70,8 @@ get_latest_release() {
     local repo="$1"
     
     # Try to get latest release from GitHub API
-    local response=$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null || true)
+    local response=$(curl -fsSL --connect-timeout 10 --max-time 20 --retry 2 --retry-max-time 30 \
+        "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null || true)
     
     # Check if API call was successful
     if echo "$response" | grep -q '"tag_name":'; then
@@ -74,7 +81,7 @@ get_latest_release() {
     
     # If API fails (e.g., private repo), fall back to known version
     # This should be updated when new versions are released
-    local fallback_version="v1.30.4"
+    local fallback_version="v1.31.0"
     
     print_warning "GitHub API unavailable, using fallback version: $fallback_version" >&2
     print_warning "This may not be the latest version. Check https://github.com/${repo}/releases manually." >&2
@@ -87,13 +94,85 @@ download_file() {
     local output="$2"
 
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "${url}" -o "${output}"
+        curl -fsSL --proto '=https' --proto-redir '=https' \
+            --connect-timeout 10 --max-time 120 \
+            --retry 3 --retry-delay 1 --retry-max-time 60 \
+            "${url}" -o "${output}"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "${url}" -O "${output}"
+        wget -q --https-only --timeout=30 --tries=3 "${url}" -O "${output}"
     else
         print_error "Neither curl nor wget found. Please install one of them."
         exit 1
     fi
+}
+
+release_signature_policy() {
+    local version="${1#v}"
+    local minimum="${KEYED_RELEASE_MINIMUM_VERSION#v}"
+
+    awk -v version="${version}" -v minimum="${minimum}" '
+        BEGIN {
+            if (version !~ /^[0-9]+\.[0-9]+\.[0-9]+$/ || minimum !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) {
+                exit 1
+            }
+
+            split(version, actual, ".")
+            split(minimum, required, ".")
+            for (part = 1; part <= 3; part++) {
+                if (actual[part] > required[part]) {
+                    print "keyed"
+                    exit 0
+                }
+                if (actual[part] < required[part]) {
+                    print "keyless"
+                    exit 0
+                }
+            }
+
+            print "keyed"
+        }
+    '
+}
+
+download_release_file() {
+    local version="$1"
+    local asset="$2"
+    local output="$3"
+    local temporary="${output}.part"
+    local canonical_url="${ARTIFACT_ORIGIN}/releases/cli/${version}/${asset}"
+    local github_url="https://github.com/${REPO}/releases/download/${version}/${asset}"
+    local signature_policy=""
+
+    if ! signature_policy=$(release_signature_policy "${version}"); then
+        print_error "Release version must use the vMAJOR.MINOR.PATCH format: ${version}" >&2
+        return 1
+    fi
+
+    rm -f "${temporary}"
+    if [ "${signature_policy}" = "keyless" ]; then
+        if download_file "${github_url}" "${temporary}"; then
+            mv "${temporary}" "${output}"
+            return 0
+        fi
+
+        rm -f "${temporary}"
+        return 1
+    fi
+
+    if download_file "${canonical_url}" "${temporary}"; then
+        mv "${temporary}" "${output}"
+        return 0
+    fi
+
+    rm -f "${temporary}"
+    print_warning "Canonical ${asset} download failed; using the GitHub mirror for ${version}." >&2
+    if download_file "${github_url}" "${temporary}"; then
+        mv "${temporary}" "${output}"
+        return 0
+    fi
+
+    rm -f "${temporary}"
+    return 1
 }
 
 verify_checksum() {
@@ -199,6 +278,9 @@ prepare_checksum_signature_verification() {
 
 verify_checksum_signature() {
     local temp_dir="$1"
+    local version="$2"
+    local public_key="${temp_dir}/release-cosign-v1.pub"
+    local signature_policy=""
 
     if [ "${VERIFY_CHECKSUM_SIGNATURE}" != "1" ]; then
         return 0
@@ -209,10 +291,24 @@ verify_checksum_signature() {
         return 1
     fi
 
+    if ! signature_policy=$(release_signature_policy "${version}"); then
+        print_error "Release version must use the vMAJOR.MINOR.PATCH format: ${version}"
+        return 1
+    fi
+
+    if [ "${signature_policy}" = "keyless" ]; then
+        cosign verify-blob \
+            --bundle "${temp_dir}/SHA256SUMS.bundle" \
+            --certificate-identity-regexp "${CHECKSUM_CERTIFICATE_IDENTITY_REGEXP}" \
+            --certificate-oidc-issuer "${CHECKSUM_CERTIFICATE_OIDC_ISSUER}" \
+            "${temp_dir}/SHA256SUMS" >/dev/null
+        return
+    fi
+
+    printf '%s\n' "${CHECKSUM_PUBLIC_KEY}" > "${public_key}"
     cosign verify-blob \
+        --key "${public_key}" \
         --bundle "${temp_dir}/SHA256SUMS.bundle" \
-        --certificate-identity-regexp "${CHECKSUM_CERTIFICATE_IDENTITY_REGEXP}" \
-        --certificate-oidc-issuer "${CHECKSUM_CERTIFICATE_OIDC_ISSUER}" \
         "${temp_dir}/SHA256SUMS" >/dev/null
 }
 
@@ -258,10 +354,7 @@ install_binary() {
             ;;
     esac
     
-    local release_url="https://github.com/${REPO}/releases/download/${version}"
-    local download_url="${release_url}/${binary_name}"
-    
-    print_status "Downloading ${binary_name} from ${download_url}..."
+    print_status "Downloading ${binary_name} for ${version}..."
     
     # Create temporary directory
     local temp_dir=$(mktemp -d)
@@ -273,14 +366,14 @@ install_binary() {
         exit 1
     fi
     
-    download_file "${download_url}" "${temp_file}"
+    download_release_file "${version}" "${binary_name}" "${temp_file}"
     if [ -n "${xcode_plugin_name}" ]; then
         xcode_plugin_file="${temp_dir}/${xcode_plugin_name}"
-        download_file "${release_url}/${xcode_plugin_name}" "${xcode_plugin_file}"
+        download_release_file "${version}" "${xcode_plugin_name}" "${xcode_plugin_file}"
     fi
-    download_file "${release_url}/SHA256SUMS" "${temp_dir}/SHA256SUMS"
+    download_release_file "${version}" "SHA256SUMS" "${temp_dir}/SHA256SUMS"
     if [ "${VERIFY_CHECKSUM_SIGNATURE}" = "1" ]; then
-        if ! download_file "${release_url}/SHA256SUMS.bundle" "${temp_dir}/SHA256SUMS.bundle"; then
+        if ! download_release_file "${version}" "SHA256SUMS.bundle" "${temp_dir}/SHA256SUMS.bundle"; then
             rm -f "${temp_dir}/SHA256SUMS.bundle"
             print_error "Signed checksum bundle is unavailable for ${version}."
             rm -rf "${temp_dir}"
@@ -291,7 +384,7 @@ install_binary() {
     # Check if download was successful
     if [ ! -f "${temp_file}" ] || [ ! -s "${temp_file}" ]; then
         print_error "Failed to download ${binary_name}"
-        print_error "Please check if the release exists at: ${download_url}"
+        print_error "Please check if ${version} exists on the BoringCache or GitHub release origin."
         exit 1
     fi
     if [ -n "${xcode_plugin_name}" ] && { [ ! -f "${xcode_plugin_file}" ] || [ ! -s "${xcode_plugin_file}" ]; }; then
@@ -299,7 +392,7 @@ install_binary() {
         exit 1
     fi
 
-    if ! verify_checksum_signature "${temp_dir}"; then
+    if ! verify_checksum_signature "${temp_dir}" "${version}"; then
         print_error "Checksum signature verification failed"
         exit 1
     fi

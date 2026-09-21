@@ -6,8 +6,14 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CLI_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
 TEST_ROOT=$(mktemp -d)
 ORIGINAL_PATH=${PATH}
-EXPECTED_IDENTITY_REGEXP='^https://github\.com/boringcache/monorepo/\.github/workflows/(cli-release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+|cli-release-checksums\.yml@refs/heads/main)$'
+EXPECTED_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEKaCEtUJN1OYbcoBzD9k8nma39YQG
+RXyLl5H1XoimZCWB+7Su1mFFFMPWS7nWPGcbxeB8F7nN5I3GUgRPWQ1FAw==
+-----END PUBLIC KEY-----'
 EXPECTED_MINIMUM_COSIGN_VERSION='3.1.3'
+EXPECTED_KEYED_RELEASE_MINIMUM_VERSION='v1.31.0'
+EXPECTED_CERTIFICATE_IDENTITY_REGEXP='^https://github\.com/boringcache/monorepo/\.github/workflows/(cli-release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+|cli-release-checksums\.yml@refs/heads/main)$'
+EXPECTED_CERTIFICATE_OIDC_ISSUER='https://token.actions.githubusercontent.com'
 
 cleanup() {
     rm -rf "${TEST_ROOT}"
@@ -44,10 +50,63 @@ test_installer() {
     # shellcheck source=/dev/null
     . "${installer}"
 
-    [ "${CHECKSUM_CERTIFICATE_IDENTITY_REGEXP}" = "${EXPECTED_IDENTITY_REGEXP}" ] ||
-        fail "${fixture_name} trusts an unexpected workflow identity"
+    download_log="${fixture_dir}/release-downloads"
+    downloaded_release="${fixture_dir}/downloaded-release"
+    download_file() {
+        printf '%s\n' "$1" >> "${download_log}"
+        case "$1" in
+            "${ARTIFACT_ORIGIN}"/*)
+                printf 'partial canonical download\n' > "$2"
+                return 22
+                ;;
+            *)
+                printf 'GitHub mirror bytes\n' > "$2"
+                ;;
+        esac
+    }
+    download_release_file v1.20.0 boringcache-linux-amd64 "${downloaded_release}" 2>/dev/null ||
+        fail "${fixture_name} did not use the historical GitHub release origin"
+    sed -n '1p' "${download_log}" | grep -Fx \
+        "https://github.com/boringcache/cli/releases/download/v1.20.0/boringcache-linux-amd64" >/dev/null ||
+        fail "${fixture_name} did not use the exact historical GitHub release"
+    [ "$(wc -l < "${download_log}" | tr -d ' ')" = "1" ] ||
+        fail "${fixture_name} tried the canonical origin for a historical release"
+    [ "$(cat "${downloaded_release}")" = "GitHub mirror bytes" ] ||
+        fail "${fixture_name} did not publish the completed historical download atomically"
+
+    : > "${download_log}"
+    download_release_file v1.31.0 boringcache-linux-amd64 "${downloaded_release}" 2>/dev/null ||
+        fail "${fixture_name} did not use the same-version GitHub mirror"
+    sed -n '1p' "${download_log}" | grep -Fx \
+        "${ARTIFACT_ORIGIN}/releases/cli/v1.31.0/boringcache-linux-amd64" >/dev/null ||
+        fail "${fixture_name} did not try the canonical release origin first"
+    sed -n '2p' "${download_log}" | grep -Fx \
+        "https://github.com/boringcache/cli/releases/download/v1.31.0/boringcache-linux-amd64" >/dev/null ||
+        fail "${fixture_name} did not use the exact-version GitHub mirror"
+    [ "$(cat "${downloaded_release}")" = "GitHub mirror bytes" ] ||
+        fail "${fixture_name} retained partial canonical bytes after mirror recovery"
+    [ ! -e "${downloaded_release}.part" ] ||
+        fail "${fixture_name} retained a partial download after success"
+    if download_release_file latest boringcache-linux-amd64 "${downloaded_release}" >/dev/null 2>&1; then
+        fail "${fixture_name} accepted a release version without an exact trust policy"
+    fi
+
+    [ "${CHECKSUM_PUBLIC_KEY}" = "${EXPECTED_PUBLIC_KEY}" ] ||
+        fail "${fixture_name} trusts an unexpected release key"
     [ "${COSIGN_MINIMUM_VERSION}" = "${EXPECTED_MINIMUM_COSIGN_VERSION}" ] ||
         fail "${fixture_name} declares an unexpected minimum cosign version"
+    [ "${KEYED_RELEASE_MINIMUM_VERSION}" = "${EXPECTED_KEYED_RELEASE_MINIMUM_VERSION}" ] ||
+        fail "${fixture_name} declares an unexpected keyed-release boundary"
+    [ "${CHECKSUM_CERTIFICATE_IDENTITY_REGEXP}" = "${EXPECTED_CERTIFICATE_IDENTITY_REGEXP}" ] ||
+        fail "${fixture_name} trusts an unexpected historical signing identity"
+    [ "${CHECKSUM_CERTIFICATE_OIDC_ISSUER}" = "${EXPECTED_CERTIFICATE_OIDC_ISSUER}" ] ||
+        fail "${fixture_name} trusts an unexpected historical OIDC issuer"
+    [ "$(release_signature_policy v1.30.9)" = "keyless" ] ||
+        fail "${fixture_name} does not preserve the historical keyless policy"
+    [ "$(release_signature_policy v1.31.0)" = "keyed" ] ||
+        fail "${fixture_name} does not activate the keyed policy at v1.31.0"
+    [ "$(release_signature_policy v2.0.0)" = "keyed" ] ||
+        fail "${fixture_name} allows a later release to downgrade to keyless verification"
     cosign_version_is_supported "${EXPECTED_MINIMUM_COSIGN_VERSION}" ||
         fail "${fixture_name} rejects its minimum cosign version"
     cosign_version_is_supported "4.0.0" ||
@@ -75,7 +134,7 @@ test_installer() {
 
     VERIFY_CHECKSUM_SIGNATURE=1
     rm -f "${fixture_dir}/SHA256SUMS.bundle"
-    if verify_checksum_signature "${fixture_dir}" >/dev/null 2>&1; then
+    if verify_checksum_signature "${fixture_dir}" v1.31.0 >/dev/null 2>&1; then
         fail "${fixture_name} accepted a missing signature bundle"
     fi
 
@@ -144,12 +203,35 @@ test_installer() {
         fail "${fixture_name} did not record strict verification state"
 
     printf 'signed bundle fixture\n' > "${fixture_dir}/SHA256SUMS.bundle"
-    verify_checksum_signature "${fixture_dir}" ||
+    verify_checksum_signature "${fixture_dir}" v1.31.0 ||
         fail "${fixture_name} rejected the strict signature fixture"
-    grep -Fx -- "${EXPECTED_IDENTITY_REGEXP}" "${cosign_args}" >/dev/null ||
-        fail "${fixture_name} did not pass the exact signer allowlist to cosign"
-    grep -Fx -- "${CHECKSUM_CERTIFICATE_OIDC_ISSUER}" "${cosign_args}" >/dev/null ||
-        fail "${fixture_name} did not pin the GitHub Actions OIDC issuer"
+    grep -Fx -- "--key" "${cosign_args}" >/dev/null ||
+        fail "${fixture_name} did not select the checked release key"
+    grep -Fx -- "${fixture_dir}/release-cosign-v1.pub" "${cosign_args}" >/dev/null ||
+        fail "${fixture_name} did not pass the checked release key to cosign"
+    [ "$(cat "${fixture_dir}/release-cosign-v1.pub")" = "${EXPECTED_PUBLIC_KEY}" ] ||
+        fail "${fixture_name} wrote an unexpected release key"
+    if grep -Fx -- "--certificate-identity-regexp" "${cosign_args}" >/dev/null; then
+        fail "${fixture_name} allowed keyed verification to fall back to a certificate identity"
+    fi
+
+    : > "${cosign_args}"
+    verify_checksum_signature "${fixture_dir}" v1.20.0 ||
+        fail "${fixture_name} rejected the historical keyless signature fixture"
+    grep -Fx -- "--certificate-identity-regexp" "${cosign_args}" >/dev/null ||
+        fail "${fixture_name} did not select the historical signing identity"
+    grep -Fx -- "${EXPECTED_CERTIFICATE_IDENTITY_REGEXP}" "${cosign_args}" >/dev/null ||
+        fail "${fixture_name} passed an unexpected historical signing identity"
+    grep -Fx -- "--certificate-oidc-issuer" "${cosign_args}" >/dev/null ||
+        fail "${fixture_name} did not select the historical OIDC issuer"
+    grep -Fx -- "${EXPECTED_CERTIFICATE_OIDC_ISSUER}" "${cosign_args}" >/dev/null ||
+        fail "${fixture_name} passed an unexpected historical OIDC issuer"
+    if grep -Fx -- "--key" "${cosign_args}" >/dev/null; then
+        fail "${fixture_name} applied the new release key to a historical release"
+    fi
+    if verify_checksum_signature "${fixture_dir}" latest >/dev/null 2>&1; then
+        fail "${fixture_name} verified a release version without an exact trust policy"
+    fi
 
     PATH=${ORIGINAL_PATH}
     unset COSIGN_ARGS_FILE COSIGN_FAKE_VERSION BORINGCACHE_VERIFY_SIGNATURE

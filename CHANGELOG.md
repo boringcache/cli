@@ -7,6 +7,122 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.31.0] - 2026-09-18
+
+### Added
+
+- Publish any single file at an immutable public path with
+  `boringcache artifact publish`. Publication works with managed or BYOC
+  storage and reuses Artifact workload identity, provider checksums, and signed
+  Artifact receipts. Static tokens require admin access. The command checks
+  public response headers after upload; `--verify-download` also downloads and
+  hashes the public object.
+- Address Docker and BuildKit cache mounts under their own namespace with
+  `--mount-namespace` (repo plan `mount-namespace`), so two jobs that need
+  independent image graphs can still share cache mounts: give each job its own
+  `--tag` and both the same namespace. A bare value covers every mount and
+  `MOUNT_ID=NAMESPACE` addresses one `--mount=type=cache` id, so a shared
+  registry can sit beside separate target directories. Mounts you do not name
+  keep the tag's identity. Requires `--mount-cache`.
+- Publish a shared cache-mount namespace without losing another job's files.
+  A job that finds the namespace published since its own restore merges the
+  published files it does not have, keeps its own copy of every shared path,
+  and commits against the snapshot it merged. A job that loses that race
+  merges again and retries instead of skipping its save. A publication the
+  server declines to promote fails the save rather than reporting success, and
+  the merge restore honors the same signed-cache-hit requirement as the job's
+  own restore. Deleted files are not propagated between jobs.
+- `boringcache cargo --phase restore` and `boringcache cargo --phase save` run
+  one cache phase around a job's own Cargo commands instead of wrapping a single
+  command. A phase runs no Cargo command and ignores `[adapters.cargo].command`,
+  so a job that runs several Cargo commands caches all of them. The restore
+  phase records whether the checkout was clean in a job-scoped document under
+  the system temporary directory, keyed by the target path, so the save phase
+  cannot publish a target restored into a dirty checkout that was later tidied
+  up. The record stays out of the target directory, so a restore miss leaves
+  the target empty for the retry. That record only withdraws publication; the
+  save phase still checks the checkout itself.
+  `--phase` is Cargo-only, rejects a command, and rejects
+  `--skip-restore`/`--skip-save`. A cache phase with no token reports the
+  missing token instead of trying to run an empty command.
+- `--phase-evidence-json` writes a `cache_phase_evidence.v1` document for a
+  cache phase: its duration, transferred and logical bytes, snapshot and
+  transfer durations, entry count, and whether the publish moved any bytes.
+  A publish that transferred nothing is reported as unchanged.
+
+### Changed
+
+- Download stable BoringCache release assets from
+  `artifacts.boringcache.com` first, with the exact GitHub release as a
+  same-version fallback. Installer downloads use bounded timeouts and retries.
+- `gha` takes its workspace from the approved workload binding when the broker
+  reports one, so a separately configured workspace cannot drift out of
+  agreement with the binding. An explicit `--workspace` remains valid for the
+  static token mode and as an override, and one that disagrees with the binding
+  refuses readiness instead of being attempted.
+- `gha` reports a backend refusal as a typed Twirp error naming the workspace
+  and the operation: 401 as `unauthenticated`, 403 as `permission_denied`, and
+  404 as `not_found`. Only transport failures and unexpected responses remain
+  `internal`. Cache actions previously saw a bare 500 with no cause.
+- `gha` makes one bounded workspace check at startup. A workspace the workload
+  capability cannot see now publishes a refusal to its ready file and exits,
+  so the supervisor can run the job without a cache instead of answering every
+  cache call with an error.
+- Record whether managed BuildKit step timing was reported, still pending, or
+  unavailable after the build command. Cache-session reports can distinguish
+  interrupted builds from builds with complete vertex timing.
+- Collect aggregate task outcomes for Turbo, Nx, and Gradle adapter commands
+  and attach them to cache-session summaries. Run reports separate remote or
+  build-cache hits, local hits, already-current tasks, skipped tasks, executed
+  tasks, and failures without storing task names or cache keys.
+- Add runner OS and architecture, CLI version, and post-build publication drain
+  duration to structured cache-session summaries so run reports can separate
+  environment and save work from the remaining workflow span.
+- Verify BoringCache-signed in-toto/DSSE publication receipts after Artifact
+  uploads and before Artifact restores. Older Artifacts without a receipt
+  remain usable with a warning, and JSON output reports the verification
+  result.
+- Update the managed ccache HTTP storage helper to `0.10`.
+- Update mise in the runtime and build base images to `2026.9.7`.
+- Update the managed Docker builder to BuildKit `v0.33.0-bc.4`. One
+  daemon-wide limit admits one to four cache-mount archive worker processes
+  from the BuildKit CPU budget and reports active, queued, peak, and wait
+  metrics.
+- A live OCI stream that fails to reopen and keeps its original response no
+  longer reports the reopen attempt's sleep and header wait as a peer pause,
+  so other proxy-session reads do not widen their slow-read windows for it.
+- Size adaptive buffers and concurrency from cgroup v2 memory limits and live
+  usage on Linux. Ancestor limits are included, and `memory.high` reduces new
+  allocation admission without being treated as the hard memory limit.
+- Keep OCI and KV demand, prefetch, sequential, and ranged storage reads within
+  one proxy-session request budget. Slow-read recovery now considers concurrent
+  peer throughput and pauses. Archive and CAS restores retain their separate
+  command-wide adaptive budget. OCI range rescue fans out to its configured
+  stream count under that session budget and no longer runs a per-rescue
+  byte-shaped adaptive limiter.
+- Download and unpack an archive cache in one phase instead of waiting for
+  every blob before extraction starts. Blobs are fetched in the order the tar
+  stream consumes them, each chunk is decoded as soon as its own blob lands,
+  and restore reports unpacked bytes with speed and ETA while the remaining
+  blobs arrive. Storage pressure produced by a restore's own extraction no
+  longer reduces that restore's download concurrency.
+
+### Fixed
+
+- Retry a transient brokered workload capability refresh with bounded backoff
+  instead of failing the publication. A single gateway or server error during a
+  long build no longer discards the whole build's cache export. A denied
+  capability is still reported immediately and is never retried.
+- Bound the first automatic eager-startup burst for large small-object caches,
+  wait for a reduced limit to take effect before reducing it again, and carry
+  Bazel's learned action-result limit into closure hydration.
+- Recover a stalled `artifact pull` by refreshing its signed download request
+  after repeated zero progress and restarting the verified representation from
+  byte zero when the refreshed range also stalls.
+- Write tracing diagnostics to stderr so `RUST_LOG` output does not corrupt
+  structured command output on stdout.
+- Apply and verify valid ad hoc code signatures after assembling the universal
+  macOS CLI and Xcode adapter release assets.
 
 ## [1.30.4] - 2026-09-10
 
@@ -267,7 +383,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.30.4...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.31.0...HEAD
+[1.31.0]: https://github.com/boringcache/cli/compare/v1.30.4...v1.31.0
 [1.30.4]: https://github.com/boringcache/cli/compare/v1.30.3...v1.30.4
 [1.30.3]: https://github.com/boringcache/cli/compare/v1.30.2...v1.30.3
 [1.30.2]: https://github.com/boringcache/cli/compare/v1.30.1...v1.30.2
