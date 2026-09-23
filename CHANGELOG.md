@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [1.32.0] - 2026-09-22
+
+### Added
+
+- Opt-in local Cargo target snapshots for empty worktrees, with independent files and a disk budget.
+- Accept provider-issued multipart receipts when a storage upload succeeds
+  without an ETag, enabling Azure Blob block uploads while preserving S3
+  completion behavior.
+
+### Fixed
+
+- A brokered Machine connection now supplies its approved workspace for archive,
+  Cargo, sccache, Docker, GHA compatibility, and direct commands. Conflicting
+  explicit workspaces fail. Local and static-token use keeps the repository
+  workspace. Older supervisors that cannot report the approved workspace
+  require an upgrade.
+- Keep macOS filesystem observation markers outside the source checkout so they
+  do not prevent Cargo target publication.
+- Prevent archive restores from hanging after a large blob downloads successfully
+  while later blobs fill the memory buffer. Early extraction errors also stop
+  waiting downloads and report the original error.
+- Cache prefetch and KV demand reads now share archive download concurrency policy. Recovered
+  slow-read retries retain their byte progress without independently halving
+  concurrency, and retained bytes enter throughput measurements only once.
+  Startup prefetch no longer collapses to one download because of an elevated
+  CPU load average; memory and I/O pressure still limit admission. Download
+  defaults and archive transfer planning also stop using CPU load history.
+
 ## [1.31.0] - 2026-09-18
 
 ### Added
@@ -383,7 +412,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.31.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.32.0...HEAD
+[1.32.0]: https://github.com/boringcache/cli/compare/v1.31.0...v1.32.0
 [1.31.0]: https://github.com/boringcache/cli/compare/v1.30.4...v1.31.0
 [1.30.4]: https://github.com/boringcache/cli/compare/v1.30.3...v1.30.4
 [1.30.3]: https://github.com/boringcache/cli/compare/v1.30.2...v1.30.3

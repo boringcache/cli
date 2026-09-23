@@ -87,6 +87,29 @@ test_installer() {
         fail "${fixture_name} retained partial canonical bytes after mirror recovery"
     [ ! -e "${downloaded_release}.part" ] ||
         fail "${fixture_name} retained a partial download after success"
+
+    download_file() {
+        printf '%s\n' "$1" >> "${download_log}"
+        case "$1" in
+            "${ARTIFACT_ORIGIN}"/*)
+                return 0
+                ;;
+            *)
+                printf 'GitHub mirror bytes\n' > "$2"
+                ;;
+        esac
+    }
+    : > "${download_log}"
+    rm -f "${downloaded_release}"
+    download_release_file v1.31.0 boringcache-linux-amd64 "${downloaded_release}" 2>/dev/null ||
+        fail "${fixture_name} did not recover from a canonical response that carried no release bytes"
+    sed -n '2p' "${download_log}" | grep -Fx \
+        "https://github.com/boringcache/cli/releases/download/v1.31.0/boringcache-linux-amd64" >/dev/null ||
+        fail "${fixture_name} did not use the mirror after a canonical response that carried no release bytes"
+    [ "$(cat "${downloaded_release}")" = "GitHub mirror bytes" ] ||
+        fail "${fixture_name} did not install the mirror bytes after an empty canonical response"
+    [ ! -e "${downloaded_release}.part" ] ||
+        fail "${fixture_name} retained a partial download after recovering from an empty response"
     if download_release_file latest boringcache-linux-amd64 "${downloaded_release}" >/dev/null 2>&1; then
         fail "${fixture_name} accepted a release version without an exact trust policy"
     fi

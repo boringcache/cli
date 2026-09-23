@@ -81,7 +81,7 @@ get_latest_release() {
     
     # If API fails (e.g., private repo), fall back to known version
     # This should be updated when new versions are released
-    local fallback_version="v1.31.0"
+    local fallback_version="v1.32.0"
     
     print_warning "GitHub API unavailable, using fallback version: $fallback_version" >&2
     print_warning "This may not be the latest version. Check https://github.com/${repo}/releases manually." >&2
@@ -134,6 +134,28 @@ release_signature_policy() {
     '
 }
 
+transfer_release_file() {
+    local url="$1"
+    local temporary="$2"
+    local output="$3"
+
+    rm -f "${temporary}"
+    if ! download_file "${url}" "${temporary}"; then
+        rm -f "${temporary}"
+        return 1
+    fi
+    if [ ! -s "${temporary}" ]; then
+        print_warning "The response for ${url} carried no release bytes." >&2
+        rm -f "${temporary}"
+        return 1
+    fi
+    if ! mv "${temporary}" "${output}"; then
+        rm -f "${temporary}"
+        return 1
+    fi
+    return 0
+}
+
 download_release_file() {
     local version="$1"
     local asset="$2"
@@ -148,31 +170,17 @@ download_release_file() {
         return 1
     fi
 
-    rm -f "${temporary}"
     if [ "${signature_policy}" = "keyless" ]; then
-        if download_file "${github_url}" "${temporary}"; then
-            mv "${temporary}" "${output}"
-            return 0
-        fi
-
-        rm -f "${temporary}"
-        return 1
+        transfer_release_file "${github_url}" "${temporary}" "${output}"
+        return $?
     fi
 
-    if download_file "${canonical_url}" "${temporary}"; then
-        mv "${temporary}" "${output}"
+    if transfer_release_file "${canonical_url}" "${temporary}" "${output}"; then
         return 0
     fi
 
-    rm -f "${temporary}"
     print_warning "Canonical ${asset} download failed; using the GitHub mirror for ${version}." >&2
-    if download_file "${github_url}" "${temporary}"; then
-        mv "${temporary}" "${output}"
-        return 0
-    fi
-
-    rm -f "${temporary}"
-    return 1
+    transfer_release_file "${github_url}" "${temporary}" "${output}"
 }
 
 verify_checksum() {
