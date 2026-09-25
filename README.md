@@ -53,7 +53,7 @@ permissions:
   id-token: write
 
 steps:
-  - uses: boringcache/one@9ca311f9b247835b3cc87639321c79bac8018145 # v1.31.0
+  - uses: boringcache/one@476c7df90bc1e7c2c4066aa7eb31cc057ef7f8d1 # v1.32.0
     with:
       trust-policy: auto
       mode: archive

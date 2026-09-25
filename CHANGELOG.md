@@ -8,11 +8,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.33.0] - 2026-09-25
+
+### Added
+
+- Verify customer-controlled Sigstore publisher attestations for Archive,
+  Archive Graph, and OCI cache entries. Repository policy selects exact GitHub
+  repository, workflow, ref, and event identities, including a reusable
+  workflow through `job-workflow-ref`; a protected SHA-256 pin authenticates the
+  policy bytes. Setting that pin requires the exact policy it names, so removing
+  `[trust]` from a checkout cannot turn verification off. A cache entry can carry
+  attestations from several authorized publishers, and restore accepts the entry
+  when any of them satisfies the policy. Publishing content that already carries
+  a trusted attestation reuses it instead of signing again, and publishing
+  content that carries none attests it even when the upload itself is skipped.
+  Rejected entries become cache misses by default, and strict policy can fail
+  the operation. Cryptographic work remains in a bounded external provider, so
+  the CLI adds no Sigstore or cloud KMS SDK. The policy also supports a
+  BoringBuild OIDC publisher whose signed token binds the exact subject kind
+  and digest, with a customer-pinned issuer key, forge origin, repository,
+  workflow, ref, and event. Protected remote compiler/KV reads, native
+  Artifacts, the GitHub Actions-compatible Cache and Artifact service, and
+  `boringcache docker pull` apply the same policy. Results created in the same
+  local proxy process remain reusable. `boringcache check` does not report
+  unverified remote KV rows as usable.
+
+### Fixed
+
+- Experimental archive selective reads honor format changes on unchanged saves
+  and run explicit full-read verification instead of republishing a pointer.
+  Files on other devices are read in full rather than trusted through the
+  selected root filesystem.
+
+- Restore enabled local Cargo target snapshots into empty targets even when the
+  selected profile contains only dependencies. These runs preserve populated
+  targets and do not capture snapshots or transfer remote target archives.
+
+- `boringcache cargo` and `boringcache sccache -- cargo …` preserve the caller's
+  `CARGO_TARGET_DIR`, including when it is absent. Target archive selection no
+  longer adds an absolute override to Cargo's environment. sccache includes
+  `CARGO_TARGET_DIR` in Rust cache keys, so Rust entries remain readable when
+  jobs select different Cargo cache layers. Existing keys written with an
+  automatically added target directory will need one new cache write.
+
 ## [1.32.0] - 2026-09-22
 
 ### Added
 
-- Opt-in local Cargo target snapshots for empty worktrees, with independent files and a disk budget.
+- Opt-in local Cargo target snapshots for empty worktrees, with independent
+  files and a disk budget.
+
 - Accept provider-issued multipart receipts when a storage upload succeeds
   without an ETag, enabling Azure Blob block uploads while preserving S3
   completion behavior.
@@ -412,7 +457,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.32.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.33.0...HEAD
+[1.33.0]: https://github.com/boringcache/cli/compare/v1.32.0...v1.33.0
 [1.32.0]: https://github.com/boringcache/cli/compare/v1.31.0...v1.32.0
 [1.31.0]: https://github.com/boringcache/cli/compare/v1.30.4...v1.31.0
 [1.30.4]: https://github.com/boringcache/cli/compare/v1.30.3...v1.30.4
