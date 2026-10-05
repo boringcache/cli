@@ -39,9 +39,10 @@ boringcache xcode -- xcodebuild -workspace App.xcworkspace -scheme App build
 ```
 
 Use archive mode for explicit directories. Use an adapter command when the
-tool already has a native remote-cache protocol. Keep repeated commands, cache
-identity, and stable labels in `.boringcache.toml` so local builds and CI use
-the same settings.
+tool already has a native remote-cache protocol. Each adapter command reads its
+cache tag from `[adapters.<adapter>]` in `.boringcache.toml`, so the commands
+stay short and local builds and CI use the same settings. Pass `--tag` to
+override the tag for one run.
 
 ## GitHub Actions
 

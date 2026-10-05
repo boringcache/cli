@@ -141,7 +141,7 @@ installs `libboringcache_xcode_cas.dylib` in that same directory so
 - Automatically verifies `SHA256SUMS.bundle` with Sigstore when `cosign` 3.1.3
   or newer is available; an installed older or unrecognized verifier stops
   `auto` mode, and `BORINGCACHE_VERIFY_SIGNATURE=1` remains fail-closed
-- Accepts checksum signatures only from the monorepo CLI release workflow on a
+- Accepts checksum signatures only from the CLI release workflow on a
   semantic-version tag or the checksum-repair workflow on `main`
 - Shows installation path and PATH information
 - Includes verification step after installation
