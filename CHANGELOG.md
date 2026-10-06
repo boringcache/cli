@@ -7,19 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.34.0] - 2026-10-04
+## [1.40.0] - 2026-10-06
 
 ### Added
 
-- Development-only: a checkpoint is now a working directory saved as one
-  version together with its agent notes under `.boringcache/memory`. Hidden
-  `checkpoint save`, `checkpoint status`, and `checkpoint restore` need no Git
-  or prepared environment; Git-listed files are saved when Git is present.
-  Hidden `claude` and `codex` commands continue a checkpoint in its directory
-  with shared plans, TODOs, and supported conversation messages, and save the
-  directory when the agent exits. Staged files are copied independently and
-  verified by their staged content digest. Git ignore rules survive a Git-free
-  restore, and symlink chains that escape the directory are rejected.
+- Add `runs list/show/explain/compare` with human output and versioned JSON for run evidence, suggested actions, and baseline comparisons.
+
+- Add managed native `bazel-reapi`, `moon`, `pants`, `buck2`, and `sbt` caching with shared REAPI setup, typed repo options, and cleanup. Keep `bazel` on HTTP and download top-level Bazel outputs by default.
 
 - Add Docker tool caches for `moon`, `pants`, `buck2`, `sbt`, and explicit
   `bazel-reapi`, with native configuration, command-scoped authentication,
@@ -38,40 +32,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy is removed.
 
 - Add an opt-in Linux OverlayFS backend for local Cargo snapshot restores, with private worktree writes, mount recovery and explicit local cleanup.
-- Record candidate REAPI RPC outcomes, bounded client-reported names, and
+
+- Record REAPI RPC outcomes, bounded client-reported names, and
   gRPC body bytes in the existing request-metrics JSONL output.
 
 ### Changed
 
-- Development-only `env run` verifies its cached snapshot and gives each command
-  a private writable copy. Command writes and `--fresh` no longer alter another
-  run's environment. Prepared checkpoint copies use no-follow source handles.
-
-- Development-only environment and checkpoint uploads identify their preparation
-  or checkpoint explicitly, so their storage and feature access do not depend
-  on human cache tag spelling. They work with Cache disabled.
 - Multipart CAS uploads use the server's planned part size, so a final partial
   part does not make earlier S3 parts smaller than the required minimum.
+
 - A cache save rejected because the cache storage allowance is full is reported
   once as `Skipped cache save for …`, publishes nothing, and keeps the command's
   exit status, including with `--fail-on-cache-error`. The previous version
-  stays available. Checkpoint and environment publication fail instead. The
-  proxy stops uploading a rejected batch and prints one summary at shutdown.
+  stays available. The proxy stops uploading a rejected batch and prints one summary at shutdown.
   HTTP 507 responses are no longer retried.
+
 - Cargo target pruning requires explicit `--message-format=json` output. Commands and plugins that emit a complete Cargo build stream can record usage without a command-name allowlist. Command arguments and output are preserved; missing or incomplete evidence skips pruning.
+
 - Managed Docker Cargo target mounts can record JSON through the worker-provided `BORINGCACHE_CARGO_MESSAGE_FILE` and prune before publication using the same local usage and budget rules.
 
-- Use managed BuildKit `v0.33.0-bc.5`, with containerd 2.3.6 and Go 1.26.8.
+- Use managed BuildKit `v0.33.1-bc.1` and buildctl 0.33.1, with containerd
+  2.3.6, Go 1.26.8, and the PCRE2 10.49 security fix.
+
 - Adapter commands keep their previous cache tag when no tag is configured,
   and print the resolved name with the setting to add to `.boringcache.toml`.
   Explicit configuration and `--tag` take precedence. Dry-run JSON includes
   `tag_source`; Cargo without a compiler cache needs no adapter tag.
+
 - `.boringcache.toml` rejects unrecognized keys with an `unknown field` error
   instead of ignoring them. Entry keys accept `path-env` and `default-path`
   like other kebab-case keys; `path_env` and `default_path` still work, and
   `audit --write` now writes the kebab-case spelling.
+
 - `BORINGCACHE_TELEMETRY_DISABLED=0` (or `false`, `no`, `off`) no longer
   disables telemetry. Any other value still disables it.
+
 - `boringcache config get token` prints a masked preview and the token source.
   Add `--reveal` to print the full token. `config get token --json` now
   requires `--reveal`; its output is unchanged when the flag is present.
@@ -80,6 +75,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Remove Kache and mbx Cargo compiler integrations and managed-tool installs.
+  Cargo target snapshots and sccache remain supported.
+
+- Remove the terminal `dashboard`. Use `status`, `runs`, and the focused inspection commands.
+
+- Remove the development-only environment, checkpoint, snapshot, agent-continuation
+  and remote execution commands. Cache, Artifacts and Registry remain supported.
+
 - Remove the `boringcache check --exact` flag. It had no effect: `check`
   already resolves only the effective scoped tag. BoringCache One releases
   before v1.20.0 pass it, so those releases need their default CLI or an
@@ -87,16 +90,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep workspace checkpoint payloads independent of agent-memory formats, and reject missing submodules and nested repositories before capture.
+- Allow concurrent sbt adapters to share global settings without file conflicts or applying another invocation’s cache configuration. Preserve Windows path separators when selecting global settings and plugins through `SBT_OPTS`.
 
-- Refuse checkpoint saves on Git inspection errors or unsupported nested repositories, and prevent source path substitutions from copying outside files.
+- Configure a local Docker build when onboarding finds a root Dockerfile,
+  including when the optional CI scan is skipped. Preserve existing commands.
+
+- Check token access before interactive onboarding uses a repository workspace;
+  leave repo configuration unchanged when access cannot be verified.
+
+- Identify unsupported GitHub cache paths and provide manual migration steps.
+
+- Identify write-only sessions as stored, explain Workspace selection in inspection reports, align `doctor` with project Workspace selection, and preserve session tool insights in JSON.
+
+- Allow a new conditional metadata update after a verified read of a remote
+  conflict winner, while rejecting stale comparisons and invalidating dependent
+  local writes. Unrelated metadata publications continue after a conflict.
+
 - Preserve Cargo outputs when a plugin emits multiple build streams in one invocation.
-- Run managed Docker commands with their message file and original exit status when pruning usage metadata cannot be read.
 
-- Hidden environment and remote plan commands preserve selected channels,
-  snapshots and checkpoints in their suggested commands. Remote tasks bind
-  their platform and project directory before allocation; nested checkpoints
-  apply to the same directory as task inputs and outputs.
+- Run managed Docker commands with their message file and original exit status when pruning usage metadata cannot be read.
 
 - Reserve reused cache blobs before publication so concurrent cleanup cannot
   remove them during upload. Rebuild an archive once if reused chunks disappear
@@ -117,36 +129,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restoring timestamps for `-Z build-std` targets. The first snapshot requires
   one additional rebuild. Backdated edits, symlinks, and failed source recording
   cannot preserve trusted target fingerprints.
-- Keep candidate checkpoint restores inside their original project directory,
-  reject protected file aliases, and preserve snapshot pins when switching
-  environments in a worktree.
-- Restore a candidate environment snapshot once when several runs on a machine
-  start together, and let an explicit `env run --channel` replace a snapshot
-  pin with that channel's head.
-- Point the channel at the existing candidate environment snapshot when
-  `env prepare` runs for inputs that were already prepared, instead of
-  preparing and uploading them again.
-- Report candidate environment lookups that fail for another reason, such as a
-  wrong workspace, instead of suggesting `env prepare`, and run `env run`
-  commands in the current directory.
+
 - Preserve Cargo fingerprints for MSVC executables and shared libraries whose
   output names have no hash, so target retention can prune stale dependencies.
+
 - Keep accepted CAS files visible while background publication moves them
   between local stores, including cancelled flushes. Bazel HTTP and candidate
   REAPI validation no longer reject an available output during spool cleanup.
+
 - Finish reading Docker image exports before closing their output pipe, so
   valid tar padding cannot cause a successful export to fail with SIGPIPE.
+
 - Reuse the HTTP proxy's warmed index, download URLs, local blobs, and
-  dependency checks for candidate REAPI reads. Bazel eager startup now also
+  dependency checks for REAPI reads. Bazel eager startup now also
   warms REAPI action results and their reachable CAS dependencies.
+
 - Use the HTTP proxy's local spool, background write-through, batched
-  publication, and shutdown settlement for candidate REAPI writes. Accepted
+  publication, and shutdown settlement for REAPI writes. Accepted
   writes are immediately readable through the same proxy. Uploads rejected by
   a full pending spool remain resumable.
-- Allow the candidate REAPI endpoint to write and resume uploads on Windows.
+
+- Allow the REAPI endpoint to write and resume uploads on Windows.
   Spool files now use write access so interrupted writes can be truncated
   before resuming at the committed offset.
-- Bound connection shutdown for the candidate REAPI cache endpoint with the
+
+- Bound connection shutdown for the REAPI cache endpoint with the
   proxy's five-second drain policy. Stalled client streams and backend requests
   are cancelled so queued cache publications can reach their shutdown phase.
 
@@ -599,8 +606,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.34.0...HEAD
-[1.34.0]: https://github.com/boringcache/cli/compare/v1.33.0...v1.34.0
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.40.0...HEAD
+[1.40.0]: https://github.com/boringcache/cli/compare/v1.33.0...v1.40.0
 [1.33.0]: https://github.com/boringcache/cli/compare/v1.32.0...v1.33.0
 [1.32.0]: https://github.com/boringcache/cli/compare/v1.31.0...v1.32.0
 [1.31.0]: https://github.com/boringcache/cli/compare/v1.30.4...v1.31.0
