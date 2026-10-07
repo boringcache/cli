@@ -7,7 +7,30 @@
 
 Shared build cache for CI, Docker builds, coding agents, and local development.
 
-**Stop rebuilding. Start reusing.**
+Reuse dependency downloads, compiler results, task outputs, and Docker layers
+across compatible builds. Run BoringCache on your laptop, in CI, or in a coding
+agent's environment so each machine can use work already completed elsewhere.
+
+## What you can reuse and keep
+
+| Product | What it does |
+|---|---|
+| [Cache](https://boringcache.com/build-cache) | Shares directory caches and native build results across CI and local development. Supported tools include Docker, Cargo, Bazel, Gradle, Nx, and Turborepo. |
+| [Artifacts](https://boringcache.com/docs/artifacts) | Keeps binaries, test reports, and release packages with retention you choose. Download an exact output by its immutable Artifact ID for testing or deployment. |
+| [Registry](https://boringcache.com/registry) | Stores private container images alongside your cache and build outputs. Push and pull with Docker or an OCI client, and pin deployments to an image digest. |
+
+Matching cache content is stored once within a workspace, so related builds can
+reuse existing data without uploading another full copy. Native integrations
+keep your build tool's rules for deciding which results are reusable.
+
+Trusted builds can publish shared cache. Pull requests and coding agents can
+use restore-only access to reuse it while keeping their new outputs local.
+Cache, Artifacts, and Registry include managed storage; see
+[plans and allowances](https://boringcache.com/pricing).
+
+Explore [recorded builds](https://boringcache.com/demo) to see cache hits and
+transfers, or [benchmarks](https://boringcache.com/benchmarks) for build-time and
+storage comparisons with their workloads and configurations.
 
 ## Install and onboard
 
@@ -46,7 +69,8 @@ override the tag for one run.
 
 ## GitHub Actions
 
-After onboarding, pin the Action to a full commit in CI:
+After onboarding, commit `.boringcache.toml` and pin the Action to a full commit
+in CI. Add this step after checkout and project toolchain setup:
 
 ```yaml
 permissions:
@@ -54,7 +78,7 @@ permissions:
   id-token: write
 
 steps:
-  - uses: boringcache/one@f0fb9b2d926a32b10c543e92093ba00c5a291b79 # v1.33.0
+  - uses: boringcache/one@696d081c557c070471a175d72aa67d27709a3f31 # v1.40.0
     with:
       trust-policy: auto
       mode: archive
@@ -64,8 +88,8 @@ steps:
 After **Connect CI** approves the repository once, the Action starts a
 short-lived Machine connection automatically. Pull requests restore by default;
 trusted jobs publish when Workspace policy allows. On BoringBuild, the same step
-reuses the runner-provided connection. Scoped restore/save credentials remain an
-explicit fallback when workload identity is unavailable.
+reuses the runner-provided connection. When workload identity is unavailable,
+configure scoped restore/save credentials explicitly.
 
 ## Guides
 
