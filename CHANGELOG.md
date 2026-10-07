@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [1.40.1] - 2026-10-07
+
+### Changed
+
+- Add native REAPI adapter help examples, read-only commands, and links to the
+  Bazel REAPI, Moon, Pants, Buck2, and sbt setup guides.
+
+### Fixed
+
+- Retry failed connections during OIDC workload-session exchange up to five
+  times with bounded backoff. Keep assertion delivery single-use and stop on
+  HTTP rejections or failures after sending the assertion. Preserve upstream
+  HTTP status when the local broker reports a rejected renewal.
+- Retry transient session-renewal failures with a fresh assertion each time,
+  honoring bounded backoff and `Retry-After` before the current session expires.
+- Select the managed pnpm store with pnpm 11 and 12 environment variables,
+  while retaining store selection for older versions.
+- Explain that an occupied restore target was preserved and requires an empty
+  target directory, without changing strict restore failure behavior.
+
 ## [1.40.0] - 2026-10-06
 
 ### Added
@@ -606,7 +627,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.40.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.40.1...HEAD
+[1.40.1]: https://github.com/boringcache/cli/compare/v1.40.0...v1.40.1
 [1.40.0]: https://github.com/boringcache/cli/compare/v1.33.0...v1.40.0
 [1.33.0]: https://github.com/boringcache/cli/compare/v1.32.0...v1.33.0
 [1.32.0]: https://github.com/boringcache/cli/compare/v1.31.0...v1.32.0
