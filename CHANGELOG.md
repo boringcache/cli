@@ -8,6 +8,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.40.2] - 2026-10-08
+
+### Added
+
+- Retain BuildKit CPU, I/O and memory admission counters, bounded body-spool
+  measurements, available-memory minimum and sampled daemon RSS when reported
+  by the managed image, including checkpoints from failed builds.
+- Record the archive process's peak resident memory in `archive_graph_phase.v1`
+  events and in the archive worker result.
+
+### Changed
+
+- Cargo target pruning no longer needs `--message-format=json`. A wrapped
+  command without a message format gets `--message-format=json-render-diagnostics`
+  after its subcommand when `cargo <command> --help` lists it (`cargo clippy`
+  uses the `cargo check` options). The CLI reads Cargo's JSON and does not print
+  it, so build output looks like a plain Cargo run. Aliases whose expansion is
+  all options qualify; aliases with `--` or positional arguments and external
+  plugins run unchanged and are not observed. An explicit JSON format still
+  forwards stdout unchanged. `cargo doc` records usage instead of warning.
+- Managed Docker Cargo target mounts no longer need
+  `--message-format=json | tee "$BORINGCACHE_CARGO_MESSAGE_FILE"`. While pruning
+  is enabled, the worker puts a `cargo` shim first on the RUN command's `PATH`,
+  adds the message format to eligible commands and keeps the JSON out of the
+  build log. A Cargo command in the step that is not observed and can use the
+  target keeps the target for that step. Cargo invoked by absolute path is not
+  seen. Steps with multiple target-using Cargo commands preserve the target,
+  including commands with an explicit JSON format. The explicit `tee` form
+  still works. A descendant keeping stdout open after Cargo exits stops
+  observation after five seconds and preserves Cargo's exit status.
+
+### Fixed
+
+- Include delivery mode, source and edge location in Docker storage read events
+  and verbose archive restore output when storage response headers provide them.
+- Forward application JSON output without waiting for a newline after Cargo
+  finishes building, and preserve procedural-macro JSON with an unknown
+  `reason` when the message format is added automatically.
+
+- Preserve Cargo build-script invalidation when ignored or generated directory
+  inputs change. Reuse initialized submodule sources and rebuild dirty ones,
+  including changes inside nested submodules that a parent `.gitmodules`
+  marks as ignored. Submodule enumeration works with Git releases before 2.36.
+  A checked-out submodule whose Git directory is missing stops the command
+  with the submodule path and the commands that repair it.
+- Verify standard-library sources against a snapshot taken before the first
+  successful build, allowing the first read-only warm build to reuse them.
+  Skip that snapshot when a restored target shows the previous build did not
+  compile the standard library.
+- Cache Cargo's separate build directory and recognize its build locks during
+  pruning. Cargo recreates final outputs from the restored intermediate files.
+- Report the absence of usage observation in Cargo cache phases and distinguish
+  completed archive restores from missing or failed phase evidence. Restore
+  phase entries name the planned tag as `resolved_tag`, including restores from
+  a fallback tag, and report `restore_result` as `restored`, `not-found`,
+  `failed` or `skipped`, with a `skip_reason` for skipped targets.
+  Resolution errors and uploads still pending after retries report `failed`;
+  failed restores cannot report an unchanged phase.
+  `--phase-evidence-json` also works for a wrapped command, which writes its
+  restore accounting before the command runs.
+- Measure cgroup v2 memory headroom by working set (`memory.current` minus
+  `inactive_file`). Clean page cache in a memory-limited container no longer
+  reduces download admission or archive concurrency.
+- Retain managed Docker cache-mount worker timeout reasons and the latest
+  worker failure in run summaries, including failures after the sample limit.
+- Count a managed Docker cache-mount save or restore as complete when its
+  worker reported success before being stopped during exit. Remove a failed
+  restore's partial files from the mount instead of building on them.
+- Let managed cache-mount manifest commits finish within their request and
+  retry budget. Remove worker temporary archives and restore staging after
+  forced stops, including stops after a successful save.
+- Reserve reused Docker cache blobs before acknowledging them to BuildKit. Keep
+  reused local bodies until publication and upload again when remote reuse is
+  unavailable.
+- Retry GitHub Actions and BoringBuild OIDC token requests that fail to
+  connect, time out, or return HTTP 408, 429 or a retryable 5xx response, up to
+  five attempts with bounded backoff and `Retry-After`. Other responses still
+  fail on the first attempt.
+- Retry a transient workload-session exchange at `ci run` startup with a fresh
+  assertion, as renewal already does. A stalled first exchange times out after
+  10 seconds so it can retry before the broker-readiness deadline. Startup stops
+  after 60 seconds and never falls back to static credentials.
+- Keep cache downloads at full width when Linux I/O pressure comes from other
+  work. Startup warmup after an archive restore no longer drops to one request
+  while writeback from that restore finishes. Downloads still slow down when
+  their own disk writes, including buffered flushes, stall or memory is low.
+- Start cache warmup for working sets of small and medium objects at 64
+  requests instead of 20. Bazel and REAPI warmups no longer inherit a lower
+  starting width from a small planning pass unless that pass slowed down.
+- Load the full cache index and the current working set concurrently when a
+  cache proxy warms up, so the first downloads start sooner. Empty caches,
+  failed index loads and fallback tags do not wait for an unused current
+  working-set request.
+
 ## [1.40.1] - 2026-10-07
 
 ### Changed
@@ -627,7 +721,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.40.1...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.40.2...HEAD
+[1.40.2]: https://github.com/boringcache/cli/compare/v1.40.1...v1.40.2
 [1.40.1]: https://github.com/boringcache/cli/compare/v1.40.0...v1.40.1
 [1.40.0]: https://github.com/boringcache/cli/compare/v1.33.0...v1.40.0
 [1.33.0]: https://github.com/boringcache/cli/compare/v1.32.0...v1.33.0
