@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.41.0] - 2026-10-09
+
+### Added
+
+- Opt-in Go source freshness for wrapped commands: set
+  `source-freshness = true` under `[adapters.go.options]` to preserve unchanged
+  tracked-input timestamps across checkouts at the same path. This can retain
+  Go test-result cache hits for tests reading repository files. Action setup
+  and Docker tool-cache injection require this option to remain disabled.
+
+### Fixed
+
+- sbt remote caching now stores and restores action outputs larger than 1 MB.
+  sbt sends them through ByteStream with resource names that start with `/`
+  when the instance name is empty; the REAPI endpoint rejected those names, so
+  sbt rebuilt the affected actions on every run.
+- Release unused glibc allocator pages before `run` and wrapped adapters start
+  their command, reducing memory retained after archive restores on GNU/Linux.
+- OCI download rates now include admission waits, response waits, retries, local writes and
+  verification. Session summaries and events distinguish elapsed download
+  rates from body-read wait rates and retain sub-millisecond timing.
+
 ## [1.40.2] - 2026-10-08
 
 ### Added
@@ -721,7 +743,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.40.2...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.41.0...HEAD
+[1.41.0]: https://github.com/boringcache/cli/compare/v1.40.2...v1.41.0
 [1.40.2]: https://github.com/boringcache/cli/compare/v1.40.1...v1.40.2
 [1.40.1]: https://github.com/boringcache/cli/compare/v1.40.0...v1.40.1
 [1.40.0]: https://github.com/boringcache/cli/compare/v1.33.0...v1.40.0
