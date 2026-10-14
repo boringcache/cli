@@ -7,6 +7,220 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.42.0] - 2026-10-14
+
+### Added
+
+- `boringcache docker sign` publishes OCI signatures with local cosign or Notation keys; `docker attach` publishes OCI attachments. Standard signing tools can discover and verify the signatures.
+- Shared Notation certificate publisher trust for Cache, compiler/KV, Artifacts and Registry, with pinned roots, signer identities and explicit offline revocation policy.
+- `boringcache docker tag` preserves exact image manifests, and `docker index` assembles published platform manifests within a repository.
+
+- Shared cosign local-key publisher trust for Cache, compiler/KV, Artifacts and Registry, with policy-pinned public keys and offline verification.
+
+- Docker tool-cache receipts report the local cache policy the CLI set up for
+  each tool as `local_cache`: `remote-only`, `ephemeral`, `tool-state` or
+  `local-copy`. The field does not reflect a setting in the build that
+  overrides it, such as `TURBO_FORCE`.
+- `boringcache docker login` lets stock Docker and buildx get BoringCache
+  Registry credentials. It installs `docker-credential-boringcache` next to the
+  CLI and registers it for the Registry host in Docker's `config.json`. Stock
+  Docker and buildx use these credentials to pull images; publish images with
+  `boringcache docker push`. Under a Machine connection each credential request
+  gets a new five-minute Registry capability with the session's grant. Without a
+  Machine connection the helper uses the save token, or the restore token when no save token is set. A broker
+  failure fails the request without falling back to a stored token. The helper
+  rejects `docker login` password storage and ignores `docker logout`.
+- `boringcache docker pull` names `boringcache docker login` when the Docker
+  pull it runs fails.
+
+- Cache session reports describe the machine: CPU model, available CPUs,
+  memory limit, disk size and free space of the working directory, and whether
+  GitHub hosts the runner. Reports also say when the CLI runs under emulation,
+  such as an x86_64 binary on an ARM host or Rosetta on macOS, and name Linux
+  guests of Apple's hypervisor `Apple virtual CPU`. On Linux they also include host CPU, disk and
+  pressure-stall activity between CLI start and the report. Hostnames and
+  environment values are not sent. The local session log now includes the same
+  runner and machine fields.
+- Track cache uploads and publications under one producer when the server
+  advertises lifecycle support. Saves and writable proxies renew ownership
+  for named unfinished operations independently of telemetry. Publication settles
+  temporary ownership atomically; retries return the original result after later
+  tag changes or process end. Expired work uses a new operation under the same
+  authenticated process. Archive merges use a new operation for each changed
+  snapshot; HTTP retries keep the same operation. Older servers continue using
+  the existing write protocol.
+
+- Eager startup predicts independent cache bodies from the last two completed
+  sessions and gives new writes one warm trial. The default learns across
+  runners when the server supports warm generations. Retention and on-demand
+  lookup remain independent; incomplete history uses the current-version set.
+
+- Cache session summaries report how each build used the blobs that proxy
+  startup selected, including blobs already in the local cache:
+  `startup_prefetch_used_blobs` and `_bytes` count startup
+  blobs the build read, `startup_prefetch_unused_blobs` and `_bytes` count the
+  rest, and `startup_prefetch_unplanned_blobs` and `_bytes` count blobs the
+  build read that startup did not select. `startup_prefetch_demand_waits`,
+  `startup_prefetch_demand_wait_ms` and `startup_prefetch_demand_max_wait_ms`
+  count reads that waited for a storage download. Startup downloads and
+  existence checks are not counted as reads. Bazel and REAPI action-cache hits
+  still keep every referenced output in the cache, but only the bodies the
+  proxy read are counted as used. Xcode is not covered: its startup copies
+  blobs into the Apple CAS store through the same reads as the build, so its
+  reads are reported as unplanned.
+
+### Changed
+
+- Reuse unchanged archive contents automatically when the server advertises v3;
+  remove `BORINGCACHE_ARCHIVE_SELECTIVE_READS`. Restores still reconstruct the
+  complete tree. Missing or unsupported local evidence uses a full read.
+  Jobs sharing v3 archive tags require CLI 1.33.0 or later.
+
+- `boringcache docker --tool-cache turbo` sets `TURBO_CACHE=remote:rw`
+  (`remote:r` when read-only) in Docker builds. Turbo 2.3.0 and later then
+  store task outputs only in BoringCache and no longer fill `.turbo/cache` or
+  a cache mount over it; earlier versions ignore the setting. A `--cache` flag
+  on the turbo command takes precedence. Turbo exits with "Cannot set `cache`
+  config and other cache options" when the command also uses the deprecated
+  `--no-cache`, `--remote-only` or `--remote-cache-read-only` flags, or sets
+  `TURBO_REMOTE_CACHE_READ_ONLY=true` in a build that can write; Turbo 2.3.0
+  also rejects `--force`, which 2.4.0 accepts. Remove `--remote-only` and replace the
+  other flags with `--cache`, for example `--cache=remote:r`. `boringcache
+  turbo` outside Docker is unchanged.
+- With the next managed BuildKit image, `boringcache docker --tool-cache nx`
+  and `--tool-cache maven` point the tool's local cache at a directory that
+  each `RUN` step gets empty and that BuildKit removes when the step ends, so
+  neither the image layer nor a cache mount keeps a second copy. With the
+  current managed image, Nx and Maven keep their own local cache and receipts
+  report `local-copy`. A cache location set in the directory where
+  `boringcache` runs keeps the tool's own directory: `cacheDirectory` in
+  `nx.json`, or `maven.build.cache.location` in `.mvn/maven.config` or
+  `.mvn/jvm.config`.
+- A `TURBO_CACHE` or `NX_CACHE_DIRECTORY` value the Dockerfile sets takes
+  precedence over the value `--tool-cache` injects when the build sources the
+  tool-cache env file without the managed BuildKit image, or uses the next
+  managed image. With the current managed image, the injected `TURBO_CACHE`
+  replaces a Dockerfile value.
+- Archive exclude patterns from `exclude` lists and `--exclude-pattern` use
+  `.gitignore`-style matching. `*` and `?` no longer match `/`, so `release/*`
+  matches only entries directly inside `release`. `**` matches any number of
+  directories, `[a-z]` and `[!a-z]` match one character, `\` makes the next
+  glob character literal, and `!pattern` includes again a path that an earlier
+  pattern left out; the last matching pattern decides. A directory pattern with
+  an inner slash, such as `vendor/generated/`, now matches only from the top of
+  the saved directory; write `**/vendor/generated/` to match it at any depth.
+  Root patterns such as `./build/` are case-sensitive on Windows too. A
+  malformed pattern stops the command before it runs. Command-line patterns
+  follow an entry's own patterns in order, so `--dry-run --json` lists a
+  repeated pattern twice. Built-in Cargo exclusions are applied after user
+  patterns, so `!` cannot include them again. Unlike Git, `?` and character
+  classes match Unicode characters, and only a segment of exactly `**`
+  spans directories. Named classes such as `[[:digit:]]` are rejected; use
+  `[0-9]` instead.
+- Local records of unchanged archive saves from earlier CLI versions do not
+  apply to the new matching rules. The first save of each archive entry on a
+  machine that kept those records packages the directory again.
+
+- Proxy startup no longer requests storage download URLs for blobs already in
+  the local cache, and sizes its download concurrency on the blobs it still has
+  to fetch. This applies to the current-version warmup, Bazel and REAPI
+  action-result planning, and Xcode warmup.
+- Eager startup can request a stalled storage download again. After every
+  missing startup blob has been scheduled, a blob up to 8 MiB whose request is
+  outstanding and has received no response headers or body bytes for one second
+  is requested a second time, and the first complete, verified copy is kept.
+  Waiting between retries does not count. Each startup wave allows one extra
+  request per 100 scheduled blobs, rounded up, with a maximum of 16. Startup
+  waits for the selected downloads to finish; incomplete warmup reports the
+  missing blobs and serves them on demand. Cache session summaries report
+  `startup_prefetch_hedges` and `startup_prefetch_hedge_wins`. Download records
+  in the observability log include admission, response-header, first-byte,
+  largest-gap and body times, and mark a second request with `hedge=1`.
+- Cargo target pruning observes external plugins on Unix. `boringcache cargo
+  fuzz build` and `boringcache cargo fuzz run` start the plugin with a temporary
+  `cargo` shim first on `PATH`, so each Cargo command the plugin runs gets
+  `--message-format=json-render-diagnostics` and its JSON stays out of the
+  plugin's output. Pruning combines the usage of every recorded command, such as
+  the `cargo build` and `cargo run` that `cargo fuzz run` starts. The target is
+  preserved when one of those commands fails, is still running when the plugin
+  exits, uses a non-JSON format or runs another plugin, when a command with its
+  own JSON format runs beside another Cargo command, and when the plugin starts
+  no Cargo command through `PATH`. A background Cargo command that starts
+  before pruning takes Cargo's build lock also preserves the target. Cargo
+  commands that a plugin starts through `$CARGO` or an absolute path are not
+  seen.
+- Managed Docker Cargo steps that run several Cargo commands with the added
+  message format combine their usage and prune instead of preserving the
+  target. A command with its own JSON format still preserves the target unless
+  it is the step's only target-using Cargo command.
+- Cargo target pruning recognizes the per-unit `build/<package>/<hash>/`
+  target layout that nightly Cargo uses by default, including profiles that
+  also contain classic `.fingerprint` and `deps` outputs. Nightly targets were
+  previously preserved without pruning.
+
+### Fixed
+
+- `boringcache docker push` now compresses layers that Docker exports
+  uncompressed. Docker Engine's classic image store, which GitHub-hosted
+  runners use, exports every layer uncompressed, so earlier pushes stored and
+  served the full uncompressed size. Layers are compressed with zstd while
+  the export is read and upload during the export once the image manifest
+  confirms them. In local tests capped at runner bandwidth, the PostHog image
+  stored 1.87 GB instead of 6.36 GB, pushed in 49–53 s instead of 109 s, and a
+  stock `docker pull` took 47 s instead of 80 s. Pulling zstd layers needs Docker Engine 23 or later,
+  containerd 1.5 or later, or a current Podman or CRI-O. Images pushed from a
+  daemon that exports compressed layers are unchanged.
+
+- Keep Xcode cache connection settings out of Swift compiler arguments so
+  fresh sessions and read-only restores can reuse project Swift compilation.
+
+- Add opt-in Xcode 27 compiler path mapping for equivalent builds in different
+  checkout and DerivedData directories. Xcode 26 still requires matching real
+  paths. Mapping changes runtime source-file literals to virtual paths; existing
+  behavior remains the default. Report the selected mapping strategy and the actual explicit build
+  directory in cache evidence.
+
+- Use managed BuildKit 0.33.1-bc.3, which prevents canceled uploads of image
+  metadata after cache export, fixes concurrent cache-key snapshots and updates
+  runtime security dependencies.
+
+- Accept compatible project-selected sccache, ccache and HTTP helper versions
+  in prerequisite checks instead of requiring the audited download pins.
+  Report the installed version, preserve supported floors, and enforce exact
+  explicit tool-version requests, including buildctl.
+
+- Docker session write totals now include cache layers that BuildKit uploads in
+  one request. Previously these sessions counted only the manifest, so a build
+  that stored gigabytes of layers reported kilobytes written.
+- Session summaries report layers and KV objects that the proxy uploads in the
+  background before publication. Docker layers appear under
+  `storage.writethrough` and `storage_writethrough_upload_bytes`; KV objects
+  under `kv_upload_writethrough_uploaded_blobs` and
+  `kv_upload_writethrough_uploaded_bytes`. The final KV flush reports
+  `kv_upload_uploaded_bytes`. Publication upload counters and durations are
+  unchanged.
+- KV write-through failures and storage-pressure skips report under
+  `kv_upload_writethrough_failure_*` and `kv_upload_writethrough_pressure_skip_*`
+  instead of the Docker `oci_engine_*` counters.
+- Saves and writable proxies continue using the existing write protocol when
+  producer admission is disabled after capability discovery, before a producer
+  has started. Writes already bound to a producer keep their ownership checks.
+- Cache operation renewal retries transient failures after 15 seconds instead
+  of waiting another five minutes, and restores the normal interval after success.
+
+- `ci run` no longer stops a long build when OIDC session renewal fails. Renewal
+  starts when half of each session's lifetime remains and retries temporary
+  provider and BoringCache failures until it succeeds, including after the
+  session expires. An expired session cannot issue new credentials. The wrapped
+  command keeps running; `ci run` reports when authentication became unavailable
+  and when it was restored, and exits with the command's status. Previously,
+  renewal began 30 s before a five-minute session expired, and two 503 responses from GitHub's
+  token endpoint stopped a 77-minute Docker build. No path falls back to a
+  static credential. On Unix, `ci run` preserves the 30-second shutdown deadline
+  after SIGINT or SIGTERM, including during session renewal and expiry.
+
+- Avoid repeated upload-progress warnings when progress output is disabled.
+  Upload errors and byte accounting are unchanged.
 
 ## [1.41.0] - 2026-10-09
 
@@ -743,7 +957,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.41.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.42.0...HEAD
+[1.42.0]: https://github.com/boringcache/cli/compare/v1.41.0...v1.42.0
 [1.41.0]: https://github.com/boringcache/cli/compare/v1.40.2...v1.41.0
 [1.40.2]: https://github.com/boringcache/cli/compare/v1.40.1...v1.40.2
 [1.40.1]: https://github.com/boringcache/cli/compare/v1.40.0...v1.40.1
