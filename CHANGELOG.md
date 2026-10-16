@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [1.42.1] - 2026-10-15
+
+### Changed
+
+- Successful cache operations are quiet by default across commands and adapters. Use `--verbose` for operation details on stderr or `RUST_LOG=boring_cache_cli=debug` for technical diagnostics. Requested reports, JSON, credentials, and wrapped program output remain available.
+- Cache failures remain visible when a build succeeds, with repeated proxy failures reported once per session. Successful credential renewal is debug-only.
+- Closing a pipe that receives command results exits quietly with status 141 instead of panicking.
+
 ## [1.42.0] - 2026-10-14
 
 ### Added
@@ -957,7 +966,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.42.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.42.1...HEAD
+[1.42.1]: https://github.com/boringcache/cli/compare/v1.42.0...v1.42.1
 [1.42.0]: https://github.com/boringcache/cli/compare/v1.41.0...v1.42.0
 [1.41.0]: https://github.com/boringcache/cli/compare/v1.40.2...v1.41.0
 [1.40.2]: https://github.com/boringcache/cli/compare/v1.40.1...v1.40.2
