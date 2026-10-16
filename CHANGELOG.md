@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.42.2] - 2026-10-16
+
+### Fixed
+
+- Archive saves recheck file metadata before reusing a restored graph, including changes made through hard links outside the cache directory.
+- Archive saves verify previous chunk digests when file metadata changes without changing the archive layout. Matching chunks avoid repeated chunking and compression. Filesystems without trusted per-file stat evidence, including Windows, retain layout records for this verification.
+- Archive restore timings include local reuse setup and expose its receipt, layout-index, and filesystem-monitor phases in JSONL diagnostics.
+- Docker cache exports reserve existing blobs correctly when cache producer tracking is enabled, avoiding unnecessary layer uploads. Manifest aliases publish with independent operation identities.
 
 ## [1.42.1] - 2026-10-15
 
@@ -966,7 +974,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.42.1...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.42.2...HEAD
+[1.42.2]: https://github.com/boringcache/cli/compare/v1.42.1...v1.42.2
 [1.42.1]: https://github.com/boringcache/cli/compare/v1.42.0...v1.42.1
 [1.42.0]: https://github.com/boringcache/cli/compare/v1.41.0...v1.42.0
 [1.41.0]: https://github.com/boringcache/cli/compare/v1.40.2...v1.41.0
