@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.43.2] - 2026-10-19
+
+### Changed
+
+- Docker cache-mount archive saves can find published or restored chunks through a new temporary mount path. Restored chunks remain reusable under a different tag, and corrupt local lookup records no longer prevent valid fallback reuse. File and digest verification remain required.
+- Docker startup reuses one Buildx builder inventory and bootstraps an existing managed builder once.
+
+### Fixed
+
+- Docker tool caches discard legacy output-cache mounts when their policy is remote-only or ephemeral. Local read/write mounts, dependency caches and required tool state keep their existing behavior.
+
 ## [1.43.1] - 2026-10-19
 
 ### Security
@@ -1001,7 +1012,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.43.1...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.43.2...HEAD
+[1.43.2]: https://github.com/boringcache/cli/compare/v1.43.1...v1.43.2
 [1.43.1]: https://github.com/boringcache/cli/compare/v1.43.0...v1.43.1
 [1.43.0]: https://github.com/boringcache/cli/compare/v1.42.2...v1.43.0
 [1.42.2]: https://github.com/boringcache/cli/compare/v1.42.1...v1.42.2
