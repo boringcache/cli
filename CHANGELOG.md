@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.43.1] - 2026-10-19
+
+### Security
+
+- Update rustls to 0.23.46 to include upstream TLS security fixes.
+
 ## [1.43.0] - 2026-10-18
 
 ### Added
@@ -995,7 +1001,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.43.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.43.1...HEAD
+[1.43.1]: https://github.com/boringcache/cli/compare/v1.43.0...v1.43.1
 [1.43.0]: https://github.com/boringcache/cli/compare/v1.42.2...v1.43.0
 [1.42.2]: https://github.com/boringcache/cli/compare/v1.42.1...v1.42.2
 [1.42.1]: https://github.com/boringcache/cli/compare/v1.42.0...v1.42.1
