@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [1.43.0] - 2026-10-18
+
+### Added
+
+- JSONL diagnostics record why each archive save could not republish its previous archive unchanged, with the previous and new snapshot identities, and how the time after a wrapped command exits divides between archive saves and proxy shutdown.
+
+### Changed
+
+- Saving a restored archive directory that the build left unchanged republishes the previous version after checking file metadata against the restore's record, without encoding the directory again. Restore now records trusted file evidence after the restored files' timestamps settle; previously every save after a restore processed the whole directory and published it again. Changed files, including writes through hard links outside the directory, still take the verified save path.
+- `boringcache cargo` stops warming compiler-cache objects from the previous build when that build published a new target directory version. The restored target already contains those outputs. Builds that cannot restore the target fetch the objects on demand.
+
+- Archive restores write files in parallel and set file modification times while writing, instead of in a second pass over the restored tree.
+- Archive restores build the local layout index in parallel and emit an `archive_extract` JSONL event with writer and wait timings.
+- Archive restores size their file queue and layout index work from available memory. The same pnpm restore completes in a 1-CPU, 512 MB container where 1.42.2 is killed; the layout index is skipped when memory is too low to build it.
+
+### Fixed
+
+- Archive saves that fail because the runner's disk or quota is full say so, name the temporary directory that holds new archive chunks and its free space, and point to `TMPDIR` (`TMP` on Windows) for a larger filesystem.
+- Startup warming includes objects that the previous build wrote under new cache keys, including bodies that were already stored under other keys. Reproducible Maven builds and similar tools no longer fetch those objects one at a time on the next build.
+
 ## [1.42.2] - 2026-10-16
 
 ### Fixed
@@ -974,7 +995,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.42.2...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.43.0...HEAD
+[1.43.0]: https://github.com/boringcache/cli/compare/v1.42.2...v1.43.0
 [1.42.2]: https://github.com/boringcache/cli/compare/v1.42.1...v1.42.2
 [1.42.1]: https://github.com/boringcache/cli/compare/v1.42.0...v1.42.1
 [1.42.0]: https://github.com/boringcache/cli/compare/v1.41.0...v1.42.0
