@@ -5,7 +5,7 @@
 
 # BoringCache CLI
 
-Shared build cache for CI, Docker builds, coding agents, and local development.
+Shared build cache, retained artifacts, and private OCI images for CI and local development.
 
 Reuse dependency downloads, compiler results, task outputs, and Docker layers
 across compatible builds. Run BoringCache on your laptop, in CI, or in a coding
@@ -78,7 +78,7 @@ permissions:
   id-token: write
 
 steps:
-  - uses: boringcache/one@fe49531f9cbc6e9a1abcfd6c05e139bb13d25caf # v1.43.1
+  - uses: boringcache/one@a7188a53f8bc4ffd2072cc5f2637dee04889d4a4 # v1.43.2
     with:
       trust-policy: auto
       mode: archive
@@ -98,5 +98,5 @@ Set up BoringCache, choose the cache path for your build, and reuse it in CI:
 - [Get started](https://boringcache.com/docs)
 - [Adapter commands](https://boringcache.com/docs/adapters)
 - [GitHub Actions](https://boringcache.com/docs/github-actions)
-- [Installation details](INSTALLATION.md)
+- [Installation details](https://boringcache.com/docs/installation)
 - [Release history](CHANGELOG.md)

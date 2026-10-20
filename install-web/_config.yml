@@ -1,6 +1,6 @@
 # GitHub Pages configuration for install.boringcache.com
 title: "BoringCache CLI Installation"
-description: "High-performance cache management CLI for CI/CD workflows"
+description: "Install the BoringCache CLI for shared build cache, artifacts, and private OCI images."
 
 # Serve install.sh at root
 defaults:
@@ -18,6 +18,9 @@ plugins:
 exclude:
   - README.md
   - INSTALLATION.md
+  - CHANGELOG.md
+  - LICENSE.md
+  - scripts
   - node_modules
   - vendor
   - .sass-cache

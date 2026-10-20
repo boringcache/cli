@@ -1,0 +1,29 @@
+# GitHub Pages configuration for install.boringcache.com
+title: "BoringCache CLI Installation"
+description: "Install the BoringCache CLI for shared build cache, artifacts, and private OCI images."
+
+# Serve install.sh at root
+defaults:
+  - scope:
+      path: "install.sh"
+    values:
+      layout: null
+      content_type: "text/plain"
+
+# Plugins
+plugins:
+  - jekyll-redirect-from
+
+# Exclude files from processing
+exclude:
+  - README.md
+  - INSTALLATION.md
+  - CHANGELOG.md
+  - LICENSE.md
+  - scripts
+  - node_modules
+  - vendor
+  - .sass-cache
+  - .jekyll-cache
+  - gemfiles
+  - .gitignore
