@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.43.3] - 2026-10-22
+
+### Changed
+
+- The managed Docker builder selects BuildKit 0.34.0-bc.1 with Go 1.27.3 and updated CA certificates. Managed buildctl installation selects 0.34.0.
+- Managed ccache installation selects 4.14.2, including upstream fixes for storage-helper credential logging, temporary-directory races and Windows file identity. The supported ccache floor remains 4.13.6.
+- Archive and Artifact compression use zstd-rs 0.14.3 with bundled libzstd 1.5.7.
+
+### Fixed
+
+- Missing-path diagnostics preserve filenames when a temporary directory contains `eyj`; JWT credentials and signed URLs remain redacted.
+- Archive restores in `run` and adapter commands record their reuse state under the entry's `exclude` patterns and `--exclude-pattern` values, the same exclusion list the following save uses. A save on a new runner after restoring an entry with exclusions now reuses unchanged chunks from the restored graph instead of rebuilding the whole archive with `no_published_reference`.
+- Archive saves on Unix stage new chunks under the user cache directory when `TMPDIR` is unset and the system temporary directory is a separate filesystem with less free space, such as a memory-backed `/tmp`. The user cache location must be outside the directory being saved; if it is unavailable, staging uses the system temporary directory. An explicit `TMPDIR` still decides the location. When staging fills, the error names the staging directory, the bytes of new chunks written and that filesystem's free and total space.
+- Cargo target pruning on Linux and macOS counts a hard-linked file once, so Cargo's uplifted binaries no longer count twice toward `target-budget`, and eviction counts only the bytes that removing the selected groups frees from the target. The over-budget warning splits preserved bytes into outputs in active use, groups without unchanged usage evidence and files outside recognized unit groups, and says when the outputs in active use alone exceed the budget. `boringcache prune cargo --json` adds `active_bytes`, `unproven_bytes` and `scope`.
+- Archive and native CAS saves now report a skipped publication when the server keeps a newer snapshot, instead of counting it as saved. `--force` can republish previously stored content while checking that another writer has not replaced the observed tag.
+- Archive saves qualify receipts for recently written files after rechecking their settled timestamps, allowing a later unchanged run to reuse the saved graph. Missing or ineligible receipts no longer trigger an unnecessary input-tree scan. Wrapped commands using `--skip-restore` now start native file observation before the server archive format is resolved.
+
+### Security
+
+- Reject the compromised eMudhra certificate chains, including cross-signed paths, and remove the affected trust roots from the bundled certificate store.
+
 ## [1.43.2] - 2026-10-19
 
 ### Changed
@@ -1012,7 +1033,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.43.2...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.43.3...HEAD
+[1.43.3]: https://github.com/boringcache/cli/compare/v1.43.2...v1.43.3
 [1.43.2]: https://github.com/boringcache/cli/compare/v1.43.1...v1.43.2
 [1.43.1]: https://github.com/boringcache/cli/compare/v1.43.0...v1.43.1
 [1.43.0]: https://github.com/boringcache/cli/compare/v1.42.2...v1.43.0
