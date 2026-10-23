@@ -5,7 +5,7 @@
 
 # BoringCache CLI
 
-Shared build cache, retained artifacts, and private OCI images for CI and local development.
+Shared build cache, retained artifacts, and private container images for CI and local development.
 
 Reuse dependency downloads, compiler results, task outputs, and Docker layers
 across compatible builds. Run BoringCache on your laptop, in CI, or in a coding
@@ -78,7 +78,7 @@ permissions:
   id-token: write
 
 steps:
-  - uses: boringcache/one@a7188a53f8bc4ffd2072cc5f2637dee04889d4a4 # v1.43.2
+  - uses: boringcache/one@e6adf88e3d4847192ed4cd0a8b7e746c5eb3cc30 # v1.43.3
     with:
       trust-policy: auto
       mode: archive

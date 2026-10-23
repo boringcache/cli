@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [1.44.0] - 2026-10-23
+
+### Added
+
+- `boringcache buildkit --runtime native` runs patched BuildKit directly on root Linux amd64 and arm64 hosts without Docker. It downloads verified binaries from the pinned managed image, isolates helper credentials per invocation, and supports layer, mount and tool caches. Explicit local `buildctl --addr` or `BUILDKIT_HOST` connects to a compatible external daemon for layer caching and image publication without changing its lifecycle.
+- Adapter dry-run JSON includes proxy and cache-check commands and a lookup-hit source. Cache-check JSON includes direct archive and KV hit results, and Cargo restore evidence reports `target_restore` and `cache_hit`.
+- `boringcache run --phase restore` and `boringcache run --phase save` run the restore and the save of a profile or entry list as separate steps without a command, for CI systems that restore before a job's commands and save after them. Both phases resolve the same entries, exclusions and tag scope, and a save phase after a restore phase republishes entries that did not change without re-encoding them. `--stage` stages the save instead of publishing it, `--lookup-only` checks availability in the restore phase without downloading, and `--phase-evidence-json` writes a JSON summary that includes `cache_hit`.
+- `boringcache restore` accepts repeatable `--exclude-pattern` values. Pass the patterns that the later `boringcache save` of the same entries uses, so that save can reuse what the restore wrote.
+- `boringcache run --dry-run --json` lists the supported archive phases in `archive_phases`.
+
+### Changed
+
+- Cache uploads no longer create or renew producer operations. Uploads and publication use the existing staging and receipt APIs.
+
+- Upload receipts echo the server-issued upload identity when available. Cache, Registry and Artifact uploads remain compatible with servers that omit it.
+- Cache and Registry blob receipts are committed while a batch uploads, within ten seconds of each finished blob, instead of after the last blob. When the server rejects a receipt because its upload permission expired or the object was replaced, the CLI stages the uncommitted blobs once more and uploads them again. Manifest, archive and Artifact uploads report that cause and ask to run the command again.
+
+- Docker image publication checks and reserves layers already stored in the destination Registry repository before requesting their bytes from BuildKit. Image updates such as `COPY --link` can reuse those layers without downloading them onto the publishing machine. Missing or unconfirmed Registry content still requires an upload, and publication remains strict. After a failed or timed-out Registry check, the remaining layers in that session upload without Registry checks.
+
+### Fixed
+
+- BuildKit cache-mount saves fail when the storage allowance prevents publication, instead of reporting an unpublished save as successful.
+- File uploads retry a stalled or persistently slow first attempt on a fresh connection, within the existing retry budget. Later uploads reuse the replacement connection pool. Multipart cancellation drops its body reader, and conditional publications retain their existing timeout and reconciliation.
+- Slow-download thresholds adjust as other downloads finish or start. Range recovery retains received bytes and the existing retry limit, while a stricter throughput threshold waits for a fresh sample before retrying.
+
+- Image publication after a cache hit uploads layers stored only in Cache instead of acknowledging a remote Cache mount that Registry cannot use.
+
+- Cache-proxy setup failures retain the selected BuildKit daemon. Requested image publication fails when its required cache credentials or proxy setup are unavailable.
+- On-demand adapter plans emit valid proxy arguments. Split archive phase evidence reports unsuccessful saves, withheld Cargo targets and missing credentials without claiming publication or a cache hit.
+
+- Cargo freshness records ignore files excluded from the target archive, including `.rustc_info.json`, so an unchanged fresh-runner restore/save can reuse the exact archive graph.
+- `boringcache cargo --phase save` reads the reuse state that `--phase restore` recorded, so archive entries that did not change since the restore are republished without re-encoding them.
+
 ## [1.43.3] - 2026-10-22
 
 ### Changed
@@ -1033,7 +1066,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.43.3...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.44.0...HEAD
+[1.44.0]: https://github.com/boringcache/cli/compare/v1.43.3...v1.44.0
 [1.43.3]: https://github.com/boringcache/cli/compare/v1.43.2...v1.43.3
 [1.43.2]: https://github.com/boringcache/cli/compare/v1.43.1...v1.43.2
 [1.43.1]: https://github.com/boringcache/cli/compare/v1.43.0...v1.43.1

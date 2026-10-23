@@ -1,6 +1,6 @@
 # GitHub Pages configuration for install.boringcache.com
 title: "BoringCache CLI Installation"
-description: "Install the BoringCache CLI for shared build cache, artifacts, and private OCI images."
+description: "Install the BoringCache CLI for shared build cache, artifacts, and private container images."
 
 # Serve install.sh at root
 defaults:
