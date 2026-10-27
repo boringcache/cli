@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.45.0] - 2026-10-27
+
+### Added
+
+- Docker and BuildKit remote targets can allocate ephemeral Namespace workers directly from the CLI. Configure machine size and region in `.boringcache.toml` and supply `NSC_TOKEN` locally or in CI. Provider credentials stay on the caller. Existing Runs show remote details through CLI sessions; existing SSH hosts remain caller-owned.
+- On servers that enable CLI sessions and immutable KV versions, tool-cache uploads stage during the build and publish a complete key-to-blob document at session completion. Readers can reuse keys from retained versions. Failed publication preserves the previous version, and older servers continue using the existing KV protocol.
+- `runs show` and `runs explain` display per-session cache preparation from compatible servers: the selection reason, available read/trial measurements and native Xcode or BuildKit evidence. Missing measurements stay unreported. Selected bytes are distinguished from transferred bytes. Reports retain native REAPI command names separately from telemetry tool names, and local session summaries carry the same session ID as the API.
+- Docker and BuildKit accept `--remote NAME` to build on an existing Linux server over SSH. The local buildctl or Buildx client connects to the remote daemon through a native BuildKit session, including contexts, secrets, SSH forwarding and local outputs. BoringCache does not create or delete these existing SSH servers. The worker runs native BuildKit, so Docker Engine is not required there. `--remote` without a name uses the only remote or the one with `default = true`. The CLI installs its own release on the worker on first use and verifies it against the release `SHA256SUMS`; a non-root SSH user needs passwordless sudo. Cache tags use the worker's platform. The worker keeps BuildKit state per workspace and cache tag between builds and uses fresh state while another build holds it. SSH uses the caller's OpenSSH configuration, shares one connection per build, forwards the worker's BuildKit socket over it, and accepts `identity-file` and `known-hosts-file`; the server must allow Unix socket forwarding.
+- A `[profiles.<name>]` entry in `.boringcache.toml` can set `command`, as a string split like shell words or as an argv array. `boringcache run --profile <name>` then restores the profile, runs that command and saves, without `-- <COMMAND>`. A command after `--` replaces it and `--phase` ignores it. An empty command is an error, and so is selecting two profiles that each set a command without passing one after `--`. Earlier CLIs reject a repo config that sets this field.
+- An `[entries.<name>]` table can set `no-platform = true` to save and restore that entry without the OS and architecture tag suffix. Use it for portable content such as crate or package sources, so CI, agent sandboxes and dev containers on different distros share one entry while toolchains and installed dependencies stay platform-scoped. `run --dry-run` prints `--no-platform` on the affected commands. Earlier CLIs reject a repo config that sets this field.
+
+### Changed
+
+- `boringcache run` and adapter commands no longer warn when a built-in entry's default directory does not exist, such as `~/.cargo/git` for a project without Git dependencies. `--verbose` still reports the skip. A missing path set by `path`, `path_env` or a manual `TAG:PATH` still warns, and `--fail-on-cache-error` still fails.
+- Cache saves report each failure on its own warning line. Entries that failed for the same reason share one line that names every tag.
+- `boringcache save` reads the server's features and the state of every tag it saves in one start request, instead of reading features, the previous version, its blobs and the tag pointer separately. With the publication change below, a save that uploads makes four API requests instead of seven for a new tag or nine for a changed one. An unchanged save makes one instead of six when the tag already names the same verified version and that version was used in the last hour; otherwise it makes three, publishing again to refresh the last use. These counts exclude the completion report sent when CLI sessions are enabled. Publication uses the tag version from the start request and retries once against the current version when another job published in between. Servers without the start request keep the previous requests.
+- When the server supports it, a CAS save sends its last blob receipts and its manifest receipt with the tag publication instead of committing them in two separate requests.
+- Whole-archive restores no longer send a HEAD request before downloading. Storage URLs are signed for GET, so S3-compatible storage rejected it with 403 on every restore. The archive size comes from the API, or from the existing ranged GET probe when the API has none, and the storage region and cache status come from the download response, as the restore report already did.
+
+### Fixed
+
+- Downloads can return to a previously progressing source when its fallback fails, within the existing retry budget. A digest mismatch after combining sources restarts the download before accepting it; a source that fails verification on its own is excluded for that download.
+- Nix no longer reuses cached narinfo across adapter sessions. Positive and negative narinfo cache lifetimes are both zero, so a later session checks the current cache metadata.
+- Immutable KV caches can reuse a healthy current version and publish fresh results when older history is damaged, without reading past possible deletions. Bazel action writes retain their CAS dependencies, HEAD probes do not publish versions, and required Xcode publication errors propagate at completion.
+- Immutable KV publication preserves learned warm sets and Cargo compiler-cache trial suppression. Warm hints follow the exact published version, and concurrent publication makes stale hints fall back to current-version warming.
+- OCI layer downloads keep delivering received bytes during parallel range recovery instead of waiting for each complete range. Slow storage can still limit download speed; retries, byte order and final digest verification are preserved.
+- Docker and BuildKit show preparation before starting a build. Remote builds report BuildKit-style stages, elapsed times and startup failure or cancellation. Cancellation prints an acknowledgement before stopping the command and cleaning up.
+
+- `boringcache ls` shows complete tags instead of cutting them at 21 bytes, which could split a multibyte tag.
+- Docker and BuildKit run evidence counts a step loaded from the cache once. A step that BuildKit reported to two status readers, once before its cache load finished and once after, counted as two steps, so build reports showed extra total and cached steps.
+- Docker and BuildKit run evidence reports the time spent pulling and extracting the layers of a step loaded from the cache, as `load_duration_ms` on that step and `loaded_count` and `load_duration_ms` in the totals. It needs a managed BuildKit image that emits `vertex_load` trace records; earlier images report no load time.
 
 ## [1.44.0] - 2026-10-23
 
@@ -1066,7 +1097,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.44.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.45.0...HEAD
+[1.45.0]: https://github.com/boringcache/cli/compare/v1.44.0...v1.45.0
 [1.44.0]: https://github.com/boringcache/cli/compare/v1.43.3...v1.44.0
 [1.43.3]: https://github.com/boringcache/cli/compare/v1.43.2...v1.43.3
 [1.43.2]: https://github.com/boringcache/cli/compare/v1.43.1...v1.43.2
