@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.46.0] - 2026-10-29
+
+### Added
+
+- Gradle task evidence includes bounded task names, durations, outcomes, and native execution-reason categories. Task times can overlap, and execution reasons do not establish a remote cache-miss cause.
+
+### Changed
+
+- Archive graph saves upload completed compressed chunks while preparing later chunks. Early and final storage uploads share one adaptive width per save command, up to 64 uploads or `BORINGCACHE_SAVE_MAX_CONCURRENCY`. The width starts at the CPU-based save width, grows while completed upload throughput rises and shrinks when it drops. It is also limited to the number of uploads the measured rate completes in about 3 seconds, and never below the starting width, so a capped link does not queue uploads until they are retried. Final reservation retries missing blobs before publication. Save metrics include early transfers; preparation and upload durations can overlap. Staging still retains all new chunks until the save finishes.
+
+### Fixed
+
+- Proxy runtime shutdown no longer emits a false runtime-stall error after a successful build.
+
+- BuildKit slowest-vertex rankings consider all observed vertices, including those beyond the retained-detail limit.
+
+- Local Cargo snapshot copy restores can run concurrently across worktrees without skipping a snapshot because another restore is reading it. Snapshot capture and eviction remain exclusive.
+
+- Tool-cache publication immediately refreshes its upload plan once after a rejected upload receipt, reusing blobs that another uploader has completed. Repeated conflicts retain pending writes and use the existing retry delay.
+
 ## [1.45.0] - 2026-10-27
 
 ### Added
@@ -1097,7 +1117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.45.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.46.0...HEAD
+[1.46.0]: https://github.com/boringcache/cli/compare/v1.45.0...v1.46.0
 [1.45.0]: https://github.com/boringcache/cli/compare/v1.44.0...v1.45.0
 [1.44.0]: https://github.com/boringcache/cli/compare/v1.43.3...v1.44.0
 [1.43.3]: https://github.com/boringcache/cli/compare/v1.43.2...v1.43.3
