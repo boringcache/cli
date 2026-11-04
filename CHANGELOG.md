@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.47.0] - 2026-11-04
+
+### Added
+
+- Saved Cargo targets record the Cargo home that built them. Cargo records each dependency by its absolute path under the Cargo home, so a target restored where that path differs rebuilds every dependency; the CLI now warns when that happens and names both paths. `boringcache cargo` keeps using the Cargo home Cargo would use. To share targets between machines, set `CARGO_HOME` to the same absolute path, such as `/usr/local/cargo`, before installing Rust.
+- `run --remote NAME` executes cache restore, a command and cache save on a named Linux remote. It transfers Git-tracked working-tree files, streams output and preserves the command's exit status. `--env NAME` forwards selected workload variables. Commands use existing SSH, Namespace or Daytona remotes and remove temporary source and HOME after completion.
+- Docker and BuildKit remotes can allocate ephemeral Daytona sandboxes with `provider = "daytona"`. Supply `DAYTONA_API_KEY` on the caller and configure CPU, memory, disk, region and a trusted gateway host key. Custom sizing needs no manual snapshot preparation; advanced profiles can select an image or an existing fixed snapshot. The CLI requests a hard expiry, creates temporary SSH access, and confirms sandbox deletion after completion, failure or handled cancellation. Provider credentials stay on the caller.
+- `boringcache run` checks declared outputs and records an execution receipt. `--output PATH` names a path the command must produce. `--receipt PATH` writes a JSON receipt with the operation key and its inputs, the source commit or working tree, the platform and executor, the command outcome and exit code, durations, cache entries, output digests and a `verdict`. `--explain` prints the key inputs before the command and the receipt summary after it. `--key-env NAME` adds a variable to the key; the receipt stores a digest of its value. A failing command keeps its exit code. When the command exits 0 but a declared output is missing or the receipt cannot be written, `run` exits 79 and `verdict.problems` lists each reason. After `run` or an adapter command forwards SIGINT or SIGTERM it never exits 0: a command that exits 0 after the signal makes it exit 130 or 143 and saves no cache unless `--save-on-failure` is set. Each `--output` must be a distinct path, and a receipt cannot be written inside a declared output. With `--remote`, declared outputs return from the worker and are placed only when they match the digests the worker recorded; any other output fails the run with 79. A receipt records what one run observed. It is not a signed attestation, and `run` always executes the command.
+
+### Changed
+
+- Runs records command outcomes without cache activity and shows execution results separately from cache health. `run --publish-results` retains the receipt, bounded logs and declared outputs as an Artifact; remote workers link to their caller.
+
+- `boringcache run` hashes operation-key inputs while cache entries restore and finishes the key before starting the command. Untracked files below cache entry paths are excluded from the key. With `--explain`, key inputs print after restore and before the command.
+- `boringcache run --explain` describes a cache entry that restored nothing by what happened to its path, such as `kept the existing files in vendor/bundle; no saved entry` or `no saved entry; vendor/bundle had no files`, instead of `not found`. A run configured not to save prints `Cache save: off for this run (read-only)` or `(--skip-save)`. The receipt records `target_had_files` for an entry that was not found and `cache.save_skip_reason`.
+
+- `boringcache ccache` checks for ccache 4.13.6 or newer and ccache-storage-http 0.8 or newer before it starts the proxy, as `boringcache system requirements ccache --check` and `mode: ccache` already did. Without a helper, ccache used its built-in HTTP storage, which ccache 4.14 deprecates.
+
+### Fixed
+
+- Gradle task reporting reads its output destination during execution, so a new report path does not invalidate the configuration cache. A task-report write failure warns without changing the build's exit status.
+- Remote `run` accepts commands with `--receipt`, `--output` or `--explain` when no cache entries are selected, matching local runs. Returned outputs preserve empty directories and unpack sparse files, including compiled binaries, without rejecting their archive entries.
+
+- The ccache prerequisite check looks for `ccache-storage-http` where ccache does: its `libexec_dirs`, the ccache executable's directory, then PATH. It previously checked only PATH, so it could reject a helper that ccache uses or accept one that ccache does not launch.
+- After a wrapped build, `boringcache ccache` stops the storage helper for that build's remote storage, including Linux installations with ccache symlinked onto PATH. The stop command previously ran without the build's `CCACHE_REMOTE_STORAGE`, so it left the helper running until the helper's idle timeout. ccache statistics and helper shutdown are each limited to 10 seconds.
+- Tool-cache reconciliation waits for this proxy's active write-through uploads before reserving the same blobs again. An upload that remains active after the bounded wait defers publication and keeps its pending bytes; failed uploads still use final reconciliation.
+- Cargo target pruning reuses the inventory collected for the completed build and avoids repeated size scans when no outputs are removed. JSONL evidence reports pruning time separately from the adapter shutdown tail.
+- Keep storage provisioning and verification guidance in CLI errors so a workspace awaiting storage is not reported as a generic service outage.
+- API requests that receive HTTP 501 Not Implemented fail without retries. A server returns 501 when it does not support the request, so retrying added about 3 seconds per request and never got a different result.
+- `--publish-image` removes `-t` and `--tag` from the Docker command and prints a warning. Buildx pushed those names as well, and a push the workspace could not accept failed the build. Remote builds remove them before connecting to the server.
+- Remote builds name the CLI version, not its release tag, when they install BoringCache on a server.
+- Large cache objects on slow storage connections no longer restart from the beginning. When a second fresh connection is also slower than the slow-download threshold, a verified download reads the rest of the object over parallel byte ranges; when ranges cannot be used, it lowers the threshold to a fifth of the rate its connections reach instead of reconnecting again. A proxy blob download that fails or is cancelled keeps the bytes it received, and the next read of that blob resumes from them. A proxy blob download fails only after 60 seconds without receiving bytes, instead of 60 seconds after it starts. Another request for the same KV or OCI blob waits while the first download is still receiving bytes, and sccache and ccache reads no longer time out while their blob download is still receiving bytes. A Bazel build with every action cached previously downloaded one 173 MB output from the beginning four times on a runner with 11–45 Mbps storage connections.
+- Parallel cache downloads keep a full byte sample when another range finishes and changes the connection's throughput threshold. A small range could otherwise retry after its next chunk even while making progress. Progress deadlines are unchanged.
+
 ## [1.46.0] - 2026-10-29
 
 ### Added
@@ -1117,7 +1151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.46.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.47.0...HEAD
+[1.47.0]: https://github.com/boringcache/cli/compare/v1.46.0...v1.47.0
 [1.46.0]: https://github.com/boringcache/cli/compare/v1.45.0...v1.46.0
 [1.45.0]: https://github.com/boringcache/cli/compare/v1.44.0...v1.45.0
 [1.44.0]: https://github.com/boringcache/cli/compare/v1.43.3...v1.44.0
