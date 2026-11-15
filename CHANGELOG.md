@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.48.2] - 2026-11-15
+
+### Added
+
+- Candidate AWS remotes allocate on-demand or one-time Spot workers through caller AWS CLI credentials, verify guest-generated SSH host keys and disable metadata before source transfer. Cleanup reconciles owned requests and instances; uncertain cleanup retains credential-free recovery information.
+- `runs units --session-id SESSION` lists recorded work for one cache session; `--kind cache_lookups` lists its keyed cache operations. Filters and cursor pagination read the existing session-units API with restore credentials. JSON retains the records, evidence state, collection limits and next cursor, with the selected workspace in `workspace.full_path`; missing timing stays absent. Pages without an evidence state fail explicitly.
+
+### Changed
+
+- Managed Docker and BuildKit builds use BuildKit 0.35.0-bc.1 with patched Go and Alpine runtime dependencies. The managed buildctl client is 0.35.0.
+- Managed ccache downloads select 4.14.3. The supported minimum remains 4.13.6.
+- Remote commands use ordinary host directories for source, HOME, scratch and the CLI, so host Docker bind mounts read transferred files. Source and HOME paths are configurable, existing attempt paths are refused, private directories use mode 0700, and failed directory creation removes its partial result. The candidate requires matching command protocol 6 callers and workers.
+- Fork source runs commands and Docker/BuildKit steps locally without BoringCache caching or image publication, regardless of provider credentials or write flags. Connected remote doctor checks refuse fork or unknown source provenance. Trusted `run --remote` attempts fall back locally when preparation fails before start authorization; `fallback = "fail"` stops instead. Once the caller attempts to authorize execution, a failed or disconnected attempt never runs locally again. Cancellation never triggers fallback.
+
+### Fixed
+
+- Cache proxy reads of a key whose flush is in progress no longer return 404 while the flushed body moves into the local read cache. Nix publication could read reference metadata during that interval, so `nix copy` could reject a path because a reference it had just uploaded was not valid.
+
+- Docker Nx builds use an owned cache directory inside the disposable scratch mount, so Nx 24.0.6 accepts the directory without disabling its trust checks.
+- AWS bootstrap scripts retain their declared interpreter. Remote command argument errors stop before local fallback can run the command. Commands and builds check configured worker files before allocating compute.
 
 ## [1.48.1] - 2026-11-15
 
@@ -1225,7 +1245,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.48.1...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.48.2...HEAD
+[1.48.2]: https://github.com/boringcache/cli/compare/v1.48.1...v1.48.2
 [1.48.1]: https://github.com/boringcache/cli/compare/v1.48.0...v1.48.1
 [1.48.0]: https://github.com/boringcache/cli/compare/v1.47.0...v1.48.0
 [1.47.0]: https://github.com/boringcache/cli/compare/v1.46.0...v1.47.0
