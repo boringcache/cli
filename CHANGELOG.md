@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [1.48.1] - 2026-11-15
+
+### Added
+
+- Archive restores read file timestamp metadata compressed with zstd. Archive saves write it compressed once the BoringCache API turns this on; the API keeps it off for now. On a 13,745-entry Cargo target the compressed metadata was a tenth of the uncompressed size, so a save whose timestamps changed uploads less. CLI 1.48.0 and earlier cannot restore entries saved with compressed metadata.
+- The proxy session summary reports `kv_demand_url_max_in_flight`, the most on-demand download-URL requests the proxy had in flight at once.
+
+### Changed
+
+- After an action-cache hit, Bazel, Buck2, Moon, Pants and sbt check that each output is in storage through the same adaptive download admission as on-demand reads, instead of at most 10 checks at once per proxy. Bazel checks as many outputs of one action at once as that admission allows, instead of 16.
+- When an on-demand read completes and every queued read fits within the admission's 128 MiB in-flight byte target, the proxy admits the whole queue, up to its ceiling, instead of widening by a quarter every half second. Large bodies and storage resource pressure still widen gradually, as does a queue whose width was cut after throughput fell, until throughput recovers.
+- The proxy sends up to 8 on-demand download-URL requests at once (one per CPU, or two per CPU on CI) instead of one. Reads that arrive while every request is in flight still share one batch.
+
+### Fixed
+
+- Cargo source files with the same timestamp now receive a stable order before native and Docker builds. This prevents build-script fingerprints from changing with directory order after a target restore. A target saved with older tied timestamps can rebuild once before a new save records the stable order.
+- Split Cargo restore/save phases no longer re-upload an unchanged target first saved from source files with matching timestamps.
+- Cargo target directories created by BoringCache now carry Cargo's cache-directory tag, so `cargo clean --target-dir` accepts them and backup tools can exclude them. Targets that already existed before the command retain their tags.
+- Bazel sessions read their spawns from Bazel's compact execution log. The adapter adds `--execution_log_compact_file` instead of `--execution_log_json_file` and `--noexecution_log_sort`, so Bazel no longer writes a JSON record with every input of every spawn when the build ends. With CLI 1.48.0, a build of the gRPC repository with 3,789 spawns took about 12 seconds to exit after Bazel printed "Build completed", against 2.7 seconds with CLI 1.47.0. The flag needs Bazel 7.4 or later; the adapter runs `bazel --version` with the command's environment and leaves the command unchanged when the version is older, cannot be read or takes more than 10 seconds to report, and the session reports the reason instead of spawns. A log larger than 256 MiB compressed or 1 GiB uncompressed is reported as too large, and a session lists at most 100,000 spawns.
+- Moon, Pants, Buck2, sbt and Bazel over REAPI accept nine metadata hints again. In 1.48.0 the client name counted as one more hint, so a command with nine failed with "Proxy metadata hints support up to 9 unique keys", and with fewer it could take the slot kept for the cache tag. The client name is now added after every hint 1.47.0 sent, only into a free slot, and gives that slot up to the cache tag.
+- Maven sessions run with `-fae`, `-ff`, `-fn` or Maven 4's `-fos` read the build cache report again. 1.48.0 read those options as `-f` with a file name and looked for the report in the wrong directory.
+- Go sessions no longer count the built-in `unsafe` package as a cache hit, and they list a link whose output was already current as up to date. Test runs and vet checks that ran no command are listed with an unknown outcome instead of skipped, because Go's action graph does not say whether they ran or came from Go's test cache.
+- Nix sessions no longer list NAR file transfers as cache lookups; narinfo lookups are still listed.
+- A session's lookup list is marked truncated when the proxy drops a keyed operation because its event queue is full. In 1.48.0 the list looked complete.
+
 ## [1.48.0] - 2026-11-13
 
 ### Added
@@ -1199,7 +1225,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve project-selected Maven extension versions when enabling Maven cache support.
 
-[Unreleased]: https://github.com/boringcache/cli/compare/v1.48.0...HEAD
+[Unreleased]: https://github.com/boringcache/cli/compare/v1.48.1...HEAD
+[1.48.1]: https://github.com/boringcache/cli/compare/v1.48.0...v1.48.1
 [1.48.0]: https://github.com/boringcache/cli/compare/v1.47.0...v1.48.0
 [1.47.0]: https://github.com/boringcache/cli/compare/v1.46.0...v1.47.0
 [1.46.0]: https://github.com/boringcache/cli/compare/v1.45.0...v1.46.0
